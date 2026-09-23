@@ -1,10 +1,30 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { DomainEvent, RuntimeEvent, ThreadActivityItem } from "@orquester/api/agent-chat";
+import {
+  ACTIVITY_RETENTION_LIMIT,
+  ACTIVITY_RETENTION_SLACK,
+  applyDomainEvent,
+  createEmptyThreadState,
+  decodeHistoryCursor,
+  encodeHistoryCursor,
+  foldThread,
+  type DomainEvent,
+  type RuntimeEvent,
+  type ThreadActivityItem,
+  type ThreadHistoryPage,
+  type ThreadItem
+} from "@orquester/api/agent-chat";
 
 import type { AppendableDomainEvent } from "../services.ts";
 import { isAgentChatCommandError } from "./errors.ts";
+import { applyEventsChunked, FOLD_CHUNK_SIZE } from "./fold-ops.ts";
+import { createFakeThreadIndex } from "./testing/fake-index.ts";
+import {
+  FOLD_SNAPSHOT_EVENT_INTERVAL,
+  FOLD_SNAPSHOT_MIN_INTERVAL_MS,
+  HISTORY_PAGE_ACTIVITIES
+} from "./orchestrator.ts";
 import { createTestHost, createScriptedAdapter, type TestHost } from "./testing/index.ts";
 
 let commandSeq = 0;
@@ -1862,6 +1882,869 @@ describe("orchestrator — runtime events", () => {
 
     host.adapter.close();
     await consumed;
+    await host.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Thread index and lazy boot (design 2026-09-23)
+// ---------------------------------------------------------------------------
+
+/** A realistic log: a created thread, three settled turns, some activity rows. */
+async function recordedLog(): Promise<DomainEvent[]> {
+  const host = createTestHost();
+  const threadId = await host.createThread();
+  for (const [index, turnId] of ["log-1", "log-2", "log-3"].entries()) {
+    await seedTurn(host, turnId, { checkpointTurnCount: index + 1 });
+    await openApproval(host, `log-req-${index}`);
+  }
+  await host.settle();
+  const events = [...(host.store.logs.get(threadId) ?? [])];
+  await host.stop();
+  return events;
+}
+
+describe("fold-ops — the chunked fold (design 2026-09-23, invariant 7)", () => {
+  it("is exactly the same reduction as a whole-log fold, at any chunk size", async () => {
+    const events = await recordedLog();
+    assert.ok(events.length > 10);
+    const expected = foldThread(events);
+    for (const chunkSize of [1, 3, 7, FOLD_CHUNK_SIZE]) {
+      const state = await applyEventsChunked(createEmptyThreadState(), events, { chunkSize });
+      assert.deepEqual(state, expected, `chunk size ${chunkSize}`);
+    }
+  });
+
+  it("continues from a state already folded part of the way", async () => {
+    const events = await recordedLog();
+    const cut = Math.floor(events.length / 2);
+    const head = foldThread(events.slice(0, cut));
+    const state = await applyEventsChunked(head, events.slice(cut), { chunkSize: 2 });
+    assert.deepEqual(state, foldThread(events));
+  });
+
+  it("yields to the event loop between chunks, and not before the first", async () => {
+    const events = await recordedLog();
+    let ticked = false;
+    setImmediate(() => {
+      ticked = true;
+    });
+    const sawTick: boolean[] = [];
+    await applyEventsChunked(createEmptyThreadState(), events.slice(0, 6), {
+      chunkSize: 2,
+      apply: (state, event) => {
+        sawTick.push(ticked);
+        return applyDomainEvent(state, event);
+      }
+    });
+    assert.deepEqual(sawTick.slice(0, 2), [false, false], "the first chunk runs straight away");
+    assert.equal(sawTick.at(-1), true, "a macrotask queued before the fold ran before it ended");
+  });
+
+  it("folds a log that fits in one chunk without a single yield", async () => {
+    const events = await recordedLog();
+    let applied = 0;
+    const pending = applyEventsChunked(createEmptyThreadState(), events, {
+      apply: (state, event) => {
+        applied += 1;
+        return applyDomainEvent(state, event);
+      }
+    });
+    assert.equal(applied, events.length, "every event was applied before the call returned");
+    await pending;
+  });
+
+  it("treats a chunk size that is not a positive number as the default", async () => {
+    const events = await recordedLog();
+    for (const chunkSize of [0, -3, Number.NaN]) {
+      let applied = 0;
+      const pending = applyEventsChunked(createEmptyThreadState(), events, {
+        chunkSize,
+        apply: (state, event) => {
+          applied += 1;
+          return applyDomainEvent(state, event);
+        }
+      });
+      assert.equal(applied, events.length, `chunk size ${chunkSize}`);
+      await pending;
+    }
+  });
+});
+
+/** `count` parent-visible activity rows for `turnId`, through the sink like ingestion. */
+async function bulkActivities(
+  host: TestHost,
+  turnId: string | null,
+  count: number,
+  threadId = "thread-1",
+  from = 0
+): Promise<void> {
+  const prefix = turnId ?? "turnless";
+  await host.orchestrator.ingestionSink(
+    threadId,
+    Array.from({ length: count }, (_unused, offset) => from + offset).map((index) =>
+      sinkEvent(host, threadId, `${prefix}-bulk-${index}`, "thread.activity-appended", {
+        activity: {
+          kind: "activity",
+          id: `${prefix}-bulk-${index}`,
+          tone: "info",
+          activityKind: "runtime.warning",
+          summary: `row ${index} of ${prefix}`,
+          payload: {},
+          turnId,
+          createdAt: host.clock.nowIso(),
+          updatedAt: host.clock.nowIso()
+        }
+      })
+    )
+  );
+}
+
+/** A settled compaction marker, as ingestion writes the `compact_boundary`. */
+async function compactionMarker(host: TestHost, id: string, threadId = "thread-1"): Promise<void> {
+  await host.orchestrator.ingestionSink(threadId, [
+    sinkEvent(host, threadId, id, "thread.activity-appended", {
+      activity: {
+        kind: "activity",
+        id,
+        tone: "info",
+        activityKind: "context-compaction",
+        summary: "Context compacted",
+        payload: { state: "compacted" },
+        turnId: null,
+        createdAt: host.clock.nowIso(),
+        updatedAt: host.clock.nowIso()
+      }
+    })
+  ]);
+}
+
+async function snapshotRead(host: TestHost, threadId = "thread-1") {
+  const read = await host.orchestrator.readThread(threadId);
+  assert.equal(read.kind, "snapshot");
+  if (read.kind !== "snapshot") throw new Error("unreachable");
+  return read.thread;
+}
+
+/** Record every `readEventsFrom` cursor the store is asked for. */
+function recordCursorReads(host: TestHost): Array<{ byteOffset: number; afterSeq: number }> {
+  const cursors: Array<{ byteOffset: number; afterSeq: number }> = [];
+  const readEventsFrom = host.store.readEventsFrom.bind(host.store);
+  host.store.readEventsFrom = async (threadId, input) => {
+    cursors.push({ ...input });
+    return readEventsFrom(threadId, input);
+  };
+  return cursors;
+}
+
+/** Three settled turns with some rows each; returns the store they live in. */
+async function threadWithHistory(): Promise<TestHost> {
+  const host = createTestHost();
+  const threadId = await host.createThread();
+  for (const [index, turnId] of ["h-1", "h-2", "h-3"].entries()) {
+    host.clock.advance(1_000);
+    await seedTurn(host, turnId, { checkpointTurnCount: index + 1 });
+    await bulkActivities(host, turnId, 3, threadId);
+  }
+  await host.settle();
+  return host;
+}
+
+describe("orchestrator — the fold snapshot (design 2026-09-23, A2)", () => {
+  it("folds only the log's tail on top of state.json, and reads the same as a whole-log fold", async () => {
+    const first = await threadWithHistory();
+    await first.stop();
+    const store = first.store;
+    const file = store.snapshots.get("thread-1");
+    assert.ok(file, "commit wrote a snapshot");
+    assert.ok(file.seq > 1);
+
+    const warm = createTestHost({ store });
+    const cursors = recordCursorReads(warm);
+    const fromSnapshot = await snapshotRead(warm);
+    assert.deepEqual(cursors, [{ byteOffset: file.logBytes, afterSeq: file.seq }]);
+    await warm.stop();
+
+    // The same thread, cold: the snapshot is a cache, and must change nothing.
+    store.snapshots.delete("thread-1");
+    const cold = createTestHost({ store });
+    const coldCursors = recordCursorReads(cold);
+    const fromLog = await snapshotRead(cold);
+    assert.deepEqual(coldCursors, [{ byteOffset: 0, afterSeq: 0 }]);
+    assert.deepEqual(fromSnapshot, fromLog);
+    await cold.stop();
+  });
+
+  it("serves what state.json holds when it matches the log", async () => {
+    const first = await threadWithHistory();
+    await first.stop();
+    const file = first.store.snapshots.get("thread-1");
+    assert.ok(file?.state.head);
+    // A title only the snapshot carries proves the snapshot, not the log, was folded.
+    first.store.snapshots.set("thread-1", {
+      ...file,
+      state: { ...file.state, head: { ...file.state.head, title: "only in state.json" } }
+    });
+    const next = createTestHost({ store: first.store });
+    assert.equal((await snapshotRead(next)).head.title, "only in state.json");
+    await next.stop();
+  });
+
+  it("discards a snapshot that no longer matches the log and folds the log from the top", async () => {
+    for (const plant of [
+      // Points at a line that does not carry `seq + 1`.
+      (file: NonNullable<ReturnType<FakeSnapshots["get"]>>) => ({ ...file, logBytes: 0 }),
+      // Claims more of the log than there is.
+      (file: NonNullable<ReturnType<FakeSnapshots["get"]>>) => ({
+        ...file,
+        logBytes: file.logBytes + 1_000_000
+      })
+    ]) {
+      const first = await threadWithHistory();
+      await first.stop();
+      const file = first.store.snapshots.get("thread-1");
+      assert.ok(file?.state.head);
+      first.store.snapshots.set(
+        "thread-1",
+        plant({ ...file, state: { ...file.state, head: { ...file.state.head, title: "stale" } } })
+      );
+      const next = createTestHost({ store: first.store });
+      const cursors = recordCursorReads(next);
+      const thread = await snapshotRead(next);
+      assert.equal(thread.head.title, "Test thread", "the log wins");
+      assert.deepEqual(cursors.at(-1), { byteOffset: 0, afterSeq: 0 });
+      assert.equal(thread.seq, first.store.logs.get("thread-1")!.length);
+      await next.stop();
+    }
+  });
+
+  it("discards a snapshot whose orchestrator extras are missing or malformed", async () => {
+    const first = await threadWithHistory();
+    await first.stop();
+    const file = first.store.snapshots.get("thread-1");
+    assert.ok(file?.state.head);
+    first.store.snapshots.set("thread-1", {
+      ...file,
+      extras: { revertedTo: "two", titleManual: true },
+      state: { ...file.state, head: { ...file.state.head, title: "stale" } }
+    });
+    const next = createTestHost({ store: first.store });
+    assert.equal((await snapshotRead(next)).head.title, "Test thread");
+    await next.stop();
+  });
+
+  it("writes state.json on every session transition, and in a long turn only past 200 events AND 30 s", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    const saved: number[] = [];
+    const save = host.store.saveFoldSnapshot.bind(host.store);
+    host.store.saveFoldSnapshot = async (input) => {
+      saved.push(input.seq);
+      return save(input);
+    };
+    const logLength = (): number => host.store.logs.get(threadId)!.length;
+
+    await bulkActivities(host, null, 150, threadId);
+    await bulkActivities(host, null, 60, threadId);
+    assert.deepEqual(saved, [], "210 rows within 30 s of the creation's snapshot write nothing");
+
+    host.clock.advance(FOLD_SNAPSHOT_MIN_INTERVAL_MS);
+    await bulkActivities(host, null, 1, threadId);
+    assert.deepEqual(saved, [logLength()], "past both gates, one write");
+
+    // A session transition writes at once, however recent the last write.
+    await seedTurn(host, "s-1");
+    await host.settle();
+    const sessionSets = host.store.logs
+      .get(threadId)!
+      .filter((event, index) => index >= saved[0]! && event.type === "thread.session-set").length;
+    assert.equal(saved.length, 1 + sessionSets);
+    const file = host.store.snapshots.get(threadId);
+    assert.equal(file?.seq, logLength());
+    assert.equal(file?.logBytes, await host.store.logLength(threadId));
+
+    // …and the in-turn gate is measured from that write.
+    await bulkActivities(host, "s-1", FOLD_SNAPSHOT_EVENT_INTERVAL, threadId);
+    assert.equal(saved.length, 1 + sessionSets, "200 events alone are not enough");
+    host.clock.advance(FOLD_SNAPSHOT_MIN_INTERVAL_MS);
+    await bulkActivities(host, "s-1", 1, threadId);
+    assert.equal(saved.at(-1), logLength());
+    await host.stop();
+  });
+
+  it("a snapshot that cannot be written never fails the command", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    host.store.saveFoldSnapshot = async () => {
+      throw new Error("disk is full");
+    };
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "hello" });
+    await host.settle();
+    assert.ok(typesOf(host).includes("thread.message-sent"));
+    assert.ok(host.logger.entries.some((entry) => entry.message.includes("fold snapshot")));
+    await host.stop();
+  });
+
+  it("carries the manual title and the revert guard as the log derives them", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.updateThread(threadId, { title: "Mine" });
+    // Written by the very commit that made the title manual.
+    assert.deepEqual(host.store.snapshots.get(threadId)?.extras, {
+      revertedTo: null,
+      titleManual: true
+    });
+    for (const [index, turnId] of ["g-1", "g-2", "g-3"].entries()) {
+      await seedTurn(host, turnId, { checkpointTurnCount: index + 1 });
+    }
+    await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 2 });
+    await host.settle();
+    assert.deepEqual(host.store.snapshots.get(threadId)?.extras, {
+      revertedTo: 2,
+      titleManual: true
+    });
+    await host.stop();
+
+    // A restart from that snapshot keeps both: a provider retitle does not win,
+    // and a late capture for a truncated turn is still dropped.
+    const next = createTestHost({ store: host.store });
+    const cursors = recordCursorReads(next);
+    await next.orchestrator.readThread(threadId);
+    assert.notDeepEqual(cursors[0], { byteOffset: 0, afterSeq: 0 }, "loaded from state.json");
+    assert.equal(next.orchestrator.threadContext(threadId)?.titleManual, true);
+    // The truncated turn has no ordinal any more; its late capture falls back
+    // to the service's own counter, which is past the target.
+    next.checkpoints.turnCount = 3;
+    const consumed = next.orchestrator.consume(next.adapter);
+    next.adapter.emit(turnBoundary(next, "turn.completed", "g-3"));
+    await until(() => next.checkpoints.turnEndRequests.length > 0);
+    await next.settle();
+    assert.deepEqual(capturedCounts(next, "g-3"), [3], "only the capture from before the revert");
+    assert.ok(
+      next.logger.entries.some((entry) => entry.message.includes("reverted turn")),
+      "the late capture was dropped by the guard"
+    );
+    next.adapter.close();
+    await consumed;
+    await next.stop();
+  });
+
+  it("a long cold fold leaves a snapshot behind, so the next load starts from it", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await bulkActivities(host, null, 250, threadId);
+    await host.settle();
+    await host.stop();
+    host.store.snapshots.delete(threadId);
+
+    const next = createTestHost({ store: host.store });
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    const file = host.store.snapshots.get(threadId);
+    assert.equal(file?.seq, host.store.logs.get(threadId)!.length);
+    await next.stop();
+  });
+});
+
+type FakeSnapshots = TestHost["store"]["snapshots"];
+
+function activityIds(items: readonly ThreadItem[]): string[] {
+  return items.filter((item) => item.kind === "activity").map((item) => item.id);
+}
+
+/** Every page below `before`, following each page's own cursor down. */
+async function walkHistory(
+  host: TestHost,
+  threadId: string,
+  before: string | null,
+  turns?: number
+): Promise<ThreadHistoryPage[]> {
+  const pages: ThreadHistoryPage[] = [];
+  let cursor = before;
+  while (cursor !== null) {
+    assert.ok(pages.length < 50, "paging terminates");
+    const page = await host.orchestrator.readHistory(threadId, {
+      before: cursor,
+      ...(turns !== undefined ? { turns } : {})
+    });
+    pages.push(page);
+    cursor = page.page.beforeCursor;
+  }
+  return pages;
+}
+
+/**
+ * The pages and the window between them hold every activity the log ever
+ * appended, no activity on two pages, and no message on two pages. A page may
+ * repeat only the window's OLDEST activities, only at the newest page's newest
+ * end, and at most a slack's worth: under batch retention the window holds up
+ * to `ACTIVITY_RETENTION_SLACK` rows past its positional boundary between trims
+ * (design 2026-09-23 fold performance), and the client renders such a row once.
+ */
+function assertLossless(
+  host: TestHost,
+  threadId: string,
+  window: readonly ThreadItem[],
+  pages: readonly ThreadHistoryPage[]
+): void {
+  const everyActivity = new Set(
+    host.store.logs
+      .get(threadId)!
+      .flatMap((event) =>
+        event.type === "thread.activity-appended" ? [event.payload.activity.id] : []
+      )
+  );
+  const windowActivities = activityIds(window);
+  const paged = pages.flatMap((page) => activityIds(page.items));
+  assert.equal(new Set(paged).size, paged.length, "no activity on two pages");
+  const inWindow = new Set(windowActivities);
+  const repeated = paged.filter((id) => inWindow.has(id));
+  assert.ok(repeated.length <= ACTIVITY_RETENTION_SLACK, "a page repeats at most a slack's worth of the window");
+  assert.deepEqual(repeated, windowActivities.slice(0, repeated.length), "only the window's oldest rows");
+  const newest = pages.length > 0 ? activityIds(pages[0]!.items) : [];
+  assert.deepEqual(
+    newest.slice(newest.length - repeated.length),
+    repeated,
+    "…and only at the newest page's newest end"
+  );
+  assert.deepEqual(new Set([...paged, ...windowActivities]), everyActivity, "nothing is lost");
+  const pagedMessages = pages.flatMap((page) =>
+    page.items.filter((item) => item.kind === "message").map((item) => item.id)
+  );
+  assert.equal(new Set(pagedMessages).size, pagedMessages.length, "no message on two pages");
+}
+
+/**
+ * Every page names the row it ends at: the first page the window's first row
+ * (the newest `ACTIVITY_RETENTION_LIMIT` parent rows' oldest), every older
+ * page the first row of the page above it — what the client needs to keep the
+ * timeline in log order (design 2026-09-23 fold performance, "Client").
+ */
+function assertPageEnds(window: readonly ThreadItem[], pages: readonly ThreadHistoryPage[]): void {
+  const parentRows = window.filter((item) => item.kind === "activity" && item.agentId === undefined);
+  const windowFirst = parentRows[parentRows.length - ACTIVITY_RETENTION_LIMIT];
+  assert.ok(windowFirst, "the window is full");
+  assert.equal(pages[0]?.page.endItemId, windowFirst.id, "the first page ends at the window");
+  for (let at = 1; at < pages.length; at += 1) {
+    assert.equal(
+      pages[at]!.page.endItemId,
+      pages[at - 1]!.items[0]?.id,
+      `page ${at} ends where page ${at - 1} begins`
+    );
+  }
+}
+
+describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
+  it("hands the index every committed event with the store's positions, after the append", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "hello" });
+    await host.settle();
+
+    const log = host.store.logs.get(threadId)!;
+    const observed = index.observed.filter((batch) => batch.threadId === threadId);
+    assert.deepEqual(
+      observed.flatMap((batch) => batch.events.map((event) => event.seq)),
+      log.map((event) => event.seq)
+    );
+    const read = await host.store.readEventsFrom(threadId, { byteOffset: 0, afterSeq: 0 });
+    assert.deepEqual(
+      observed.flatMap((batch) => batch.positions),
+      read.positions,
+      "the positions the store wrote each line at"
+    );
+    for (const batch of observed) {
+      assert.equal(batch.events.length, batch.positions.length);
+      assert.equal(batch.projectPath, "/work/project");
+      assert.equal(batch.title, "Test thread");
+    }
+    await host.stop();
+  });
+
+  it("an index that throws never fails the command whose events landed", async () => {
+    const index = createFakeThreadIndex();
+    index.observe = () => {
+      throw new Error("index is on fire");
+    };
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "hello" });
+    await host.settle();
+    assert.ok(typesOf(host, threadId).includes("thread.turn-start-requested"));
+    await host.stop();
+  });
+
+  it("drops a deleted thread's rows", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await host.orchestrator.deleteThread(threadId);
+    assert.deepEqual(index.deleted, [threadId]);
+    assert.equal(index.totalTurns(threadId), 0);
+    await host.stop();
+  });
+
+  it("offers older history exactly when the window has evicted an indexed activity", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await seedTurn(host, "f-1");
+    // Batch retention (design 2026-09-23 fold performance) lets the window grow
+    // past its limit before the first trim. As long as every row is still
+    // there, there is nothing older to offer, however many rows it holds.
+    const nothingOlder = {
+      indexed: true,
+      hasOlder: false,
+      beforeCursor: null,
+      oldestRetainedOrdinal: 1,
+      totalTurns: 1
+    };
+    await bulkActivities(host, "f-1", ACTIVITY_RETENTION_LIMIT, threadId);
+    let appended = ACTIVITY_RETENTION_LIMIT;
+    let evicted = await snapshotRead(host, threadId);
+    while (evicted.items.some((item) => item.id === "f-1-bulk-0")) {
+      assert.deepEqual(evicted.history, nothingOlder, `${appended} rows, none evicted`);
+      assert.ok(
+        appended <= ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK,
+        "the first trim comes within the slack"
+      );
+      await bulkActivities(host, "f-1", 1, threadId, appended);
+      appended += 1;
+      evicted = await snapshotRead(host, threadId);
+    }
+
+    // The first trim: history begins at the window's positional start, the
+    // oldest of its newest ACTIVITY_RETENTION_LIMIT parent rows.
+    const parentRows = evicted.items.filter(
+      (item) => item.kind === "activity" && item.agentId === undefined
+    );
+    const windowFirst = parentRows[parentRows.length - ACTIVITY_RETENTION_LIMIT];
+    const f1 = evicted.turns.find((turn) => turn.turnId === "f-1");
+    const windowStart = windowFirst ? index.itemPosition(threadId, windowFirst.id) : null;
+    assert.ok(f1 && windowStart);
+    assert.deepEqual(evicted.history, {
+      indexed: true,
+      hasOlder: true,
+      beforeCursor: encodeHistoryCursor({
+        threadId,
+        beforeAnchorAt: f1.requestedAt,
+        beforeTurnId: "f-1",
+        beforeSeq: windowStart.seq
+      }),
+      oldestRetainedOrdinal: 1,
+      totalTurns: 1
+    });
+    await host.stop();
+  });
+
+  it("stamps an unindexed snapshot `indexed: false`, and refuses history with INDEX_UNAVAILABLE", async () => {
+    for (const index of [undefined, createFakeThreadIndex({ available: false })]) {
+      const host = createTestHost(index ? { index } : {});
+      const threadId = await host.createThread();
+      await seedTurn(host, "u-1");
+      const thread = await snapshotRead(host, threadId);
+      assert.deepEqual(thread.history, {
+        indexed: false,
+        hasOlder: false,
+        beforeCursor: null,
+        oldestRetainedOrdinal: null,
+        totalTurns: 0
+      });
+      await assert.rejects(host.orchestrator.readHistory(threadId, {}), (error: unknown) => {
+        assert.ok(isAgentChatCommandError(error));
+        assert.equal(error.code, "INDEX_UNAVAILABLE");
+        assert.equal(error.status, 503);
+        return true;
+      });
+      await host.stop();
+    }
+  });
+
+  it("walks one monster turn back in blocks of 400 — contiguous, lossless, no row twice", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await seedTurn(host, "m-1", { settle: false });
+    await bulkActivities(host, "m-1", 1_500, threadId);
+    const thread = await snapshotRead(host, threadId);
+    assert.equal(thread.history?.hasOlder, true);
+
+    const pages = await walkHistory(host, threadId, thread.history?.beforeCursor ?? null);
+    assert.deepEqual(
+      pages.map((page) => activityIds(page.items).length),
+      [HISTORY_PAGE_ACTIVITIES, HISTORY_PAGE_ACTIVITIES, 200]
+    );
+    for (const page of pages) {
+      assert.deepEqual(page.turns.map((turn) => turn.turnId), ["m-1"], "turns describe the block");
+    }
+    assertLossless(host, threadId, thread.items, pages);
+    assertPageEnds(thread.items, pages);
+    // The oldest block reaches the log's start: the turn's own prompt.
+    assert.ok(pages.at(-1)!.items.some((item) => item.id === "user:m-1"));
+    assert.equal(pages.at(-1)!.page.beforeCursor, null);
+
+    // A malformed or foreign cursor is a first-page request.
+    for (const before of [
+      "not a cursor",
+      encodeHistoryCursor({ threadId: "other", beforeAnchorAt: "x", beforeTurnId: "y", beforeSeq: 3 })
+    ]) {
+      assert.deepEqual(await host.orchestrator.readHistory(threadId, { before }), pages[0]);
+    }
+    assert.deepEqual(await host.orchestrator.readHistory(threadId, {}), pages[0]);
+    await host.stop();
+  });
+
+  it("delivers a message streamed across a block boundary whole, on exactly one page", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await seedTurn(host, "c-1", { settle: false });
+    // 1 000 rows: the window keeps #500..#999, the first block is #100..#499,
+    // so its start (#100) falls inside the message streamed around it.
+    const chunk = (text: string, streaming = true) =>
+      host.orchestrator.ingestionSink(threadId, [
+        sinkEvent(host, threadId, `streamed:${text || "close"}`, "thread.message-sent", {
+          messageId: "streamed",
+          role: "assistant",
+          text,
+          streaming,
+          turnId: "c-1"
+        })
+      ]);
+    await bulkActivities(host, "c-1", 95, threadId);
+    await chunk("one ");
+    await bulkActivities(host, "c-1", 3, threadId, 95);
+    await chunk("two ");
+    await bulkActivities(host, "c-1", 5, threadId, 98);
+    await chunk("three ");
+    await bulkActivities(host, "c-1", 3, threadId, 103);
+    await chunk("", false);
+    await bulkActivities(host, "c-1", 894, threadId, 106);
+
+    const thread = await snapshotRead(host, threadId);
+    const pages = await walkHistory(host, threadId, thread.history?.beforeCursor ?? null);
+    const holding = pages.filter((page) => page.items.some((item) => item.id === "streamed"));
+    assert.equal(holding.length, 1, "on exactly one page");
+    const message = holding[0]!.items.find((item) => item.id === "streamed");
+    assert.equal(message?.kind === "message" ? message.text : null, "one two three ");
+    // That page grew back to the message's first chunk rather than cut it,
+    // and the page below it ends at that chunk.
+    assert.equal(activityIds(pages[0]!.items).length, HISTORY_PAGE_ACTIVITIES + 5);
+    assert.equal(pages[1]?.page.endItemId, "streamed");
+    assertLossless(host, threadId, thread.items, pages);
+    assertPageEnds(thread.items, pages);
+    await host.stop();
+  });
+
+  it("walks back across turn boundaries, and honours the `turns` soft cap", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    for (const turnId of ["t-1", "t-2", "t-3"]) {
+      host.clock.advance(1_000);
+      await seedTurn(host, turnId, { checkpointTurnCount: Number(turnId.slice(2)) });
+      await bulkActivities(host, turnId, 350, threadId);
+    }
+    const thread = await snapshotRead(host, threadId);
+    // The window holds t-2's last 150 rows and all of t-3's.
+    assert.equal(thread.history?.oldestRetainedOrdinal, 2);
+
+    const pages = await walkHistory(host, threadId, thread.history?.beforeCursor ?? null);
+    assert.deepEqual(
+      pages.map((page) => page.turns.map((turn) => [turn.turnId, turn.ordinal])),
+      [
+        [
+          ["t-1", 1],
+          ["t-2", 2]
+        ],
+        [["t-1", 1]]
+      ],
+      "a block spans the t-1/t-2 boundary"
+    );
+    assert.deepEqual(pages.map((page) => activityIds(page.items).length), [400, 150]);
+    assertLossless(host, threadId, thread.items, pages);
+    // The block is exactly the log between its bounds, folded.
+    const log = host.store.logs.get(threadId)!;
+    const firstIds = new Set(activityIds(pages[0]!.items));
+    const seqs = log
+      .filter(
+        (event) =>
+          event.type === "thread.activity-appended" && firstIds.has(event.payload.activity.id)
+      )
+      .map((event) => event.seq);
+    const windowStart = index.itemPosition(threadId, "t-2-bulk-200")!;
+    const slice = log.filter(
+      (event) => event.seq >= Math.min(...seqs) && event.seq < windowStart.seq
+    );
+    assert.deepEqual(pages[0]!.items, foldThread(slice).items);
+    // Each seeded turn's checkpoint lands ahead of its rows: t-2's inside the
+    // first block, t-1's inside the second.
+    assert.deepEqual(
+      pages.map((page) => page.checkpoints.map((checkpoint) => checkpoint.turnId)),
+      [["t-2"], ["t-1"]]
+    );
+
+    // One turn per block: the first stops at t-2's opening prompt.
+    const capped = await walkHistory(host, threadId, thread.history?.beforeCursor ?? null, 1);
+    assert.deepEqual(
+      capped.map((page) => page.turns.map((turn) => turn.turnId)),
+      [["t-2"], ["t-1"]]
+    );
+    assert.ok(capped[0]!.items.some((item) => item.id === "user:t-2"));
+    assert.deepEqual(capped.map((page) => activityIds(page.items).length), [200, 350]);
+    assertLossless(host, threadId, thread.items, capped);
+    await host.stop();
+  });
+
+  it("leaves a revert's cut out of the block that spans it", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    for (const [position, turnId] of ["v-1", "v-2", "v-3", "v-4"].entries()) {
+      host.clock.advance(1_000);
+      await seedTurn(host, turnId, { checkpointTurnCount: position + 1 });
+      await bulkActivities(host, turnId, 2, threadId);
+    }
+    await host.orchestrator.command(threadId, "revert", { commandId: cmd(), targetTurnCount: 2 });
+    await host.settle();
+    for (const turnId of ["n-3", "n-4"]) {
+      host.clock.advance(1_000);
+      await seedTurn(host, turnId);
+      await bulkActivities(host, turnId, 2, threadId);
+    }
+    const n4 = index.turnById(threadId, "n-4");
+    const n4Row = index.itemPosition(threadId, "n-4-bulk-0");
+    assert.ok(n4 && n4Row);
+    const page = await host.orchestrator.readHistory(threadId, {
+      before: encodeHistoryCursor({
+        threadId,
+        beforeAnchorAt: n4.requestedAt,
+        beforeTurnId: "n-4",
+        beforeSeq: n4Row.seq
+      })
+    });
+    assert.deepEqual(
+      page.turns.map((turn) => [turn.turnId, turn.ordinal]),
+      [
+        ["v-1", 1],
+        ["v-2", 2],
+        ["n-3", 3],
+        ["n-4", 4]
+      ]
+    );
+    const messages = page.items.filter((item) => item.kind === "message").map((item) => item.id);
+    assert.deepEqual(messages, ["user:v-1", "user:v-2", "user:n-3", "user:n-4"]);
+    assert.ok(!page.items.some((item) => item.id.startsWith("v-3") || item.id.startsWith("v-4")));
+    assert.equal(page.page.beforeCursor, null);
+    await host.stop();
+  });
+
+  it("an old row retention keeps out of order does not pull the boundary back", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await seedTurn(host, "k-1", { settle: false });
+    // A compaction marker is exempt from the window: it outlives the rows
+    // around it, and must not become where history begins.
+    await compactionMarker(host, "kept-marker", threadId);
+    await bulkActivities(host, "k-1", 600, threadId);
+    const thread = await snapshotRead(host, threadId);
+    assert.ok(thread.items.some((item) => item.id === "kept-marker"));
+    assert.ok(!thread.items.some((item) => item.id === "k-1-bulk-0"), "the window has evicted");
+    // The window's positional start — its newest 500 parent rows — whatever
+    // slack past them it still holds.
+    const windowStart = index.itemPosition(threadId, "k-1-bulk-100");
+    assert.ok(windowStart);
+    assert.equal(decodeHistoryCursor(thread.history!.beforeCursor!, threadId)?.beforeSeq, windowStart.seq);
+    const pages = await walkHistory(host, threadId, thread.history?.beforeCursor ?? null);
+    assert.deepEqual(pages.map((page) => activityIds(page.items).length), [101]);
+    assert.deepEqual(
+      pages[0]!.turns.map((turn) => turn.rewindable),
+      [false],
+      "the compaction lies after the turn's prompt"
+    );
+    await host.stop();
+  });
+
+  it("a cursor whose activity was rewritten since ends the block just past the one below it", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await seedTurn(host, "r-1", { settle: false });
+    await bulkActivities(host, "r-1", 10, threadId);
+    const r1 = index.turnById(threadId, "r-1");
+    const boundary = index.itemPosition(threadId, "r-1-bulk-5");
+    assert.ok(r1 && boundary);
+    const before = encodeHistoryCursor({
+      threadId,
+      beforeAnchorAt: r1.requestedAt,
+      beforeTurnId: "r-1",
+      beforeSeq: boundary.seq
+    });
+    // The same row, written again: its latest line moves on.
+    await bulkActivities(host, "r-1", 1, threadId, 5);
+    assert.equal(index.itemPositionBySeq(threadId, boundary.seq), null);
+    const page = await host.orchestrator.readHistory(threadId, { before });
+    assert.deepEqual(activityIds(page.items), [0, 1, 2, 3, 4].map((n) => `r-1-bulk-${n}`));
+    await host.stop();
+  });
+
+  it("an empty page when nothing is older", async () => {
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await seedTurn(host, "o-1");
+    await bulkActivities(host, "o-1", 3, threadId);
+    for (const query of [{}, { turns: 5 }]) {
+      assert.deepEqual(await host.orchestrator.readHistory(threadId, query), {
+        threadId,
+        turns: [],
+        items: [],
+        checkpoints: [],
+        page: { beforeCursor: null },
+        seq: host.store.logs.get(threadId)!.length
+      });
+    }
+    await host.stop();
+  });
+
+  it("searches through the index, and answers `indexed: false` without one", async () => {
+    const none = createTestHost();
+    assert.deepEqual(none.orchestrator.searchThreads({ q: "hello", limit: 5 }), {
+      query: "hello",
+      hits: [],
+      truncated: false,
+      indexed: false
+    });
+    await none.stop();
+
+    const index = createFakeThreadIndex();
+    const host = createTestHost({ index });
+    const hit = {
+      threadId: "thread-1",
+      projectPath: "/work/project",
+      title: "Test thread",
+      turnId: null,
+      ordinal: null,
+      kind: "message" as const,
+      id: "user:1",
+      role: "user" as const,
+      activityKind: null,
+      snippet: "«hello»",
+      at: host.clock.nowIso(),
+      seq: 2
+    };
+    index.searchHits = [hit, { ...hit, id: "user:2" }];
+    assert.deepEqual(host.orchestrator.searchThreads({ q: "hello", limit: 2, projectPath: "/work/project" }), {
+      query: "hello",
+      hits: index.searchHits,
+      truncated: true,
+      indexed: true
+    });
+    assert.deepEqual(index.searches, [{ q: "hello", limit: 2, projectPath: "/work/project" }]);
+    assert.deepEqual(host.orchestrator.searchThreads({ q: "   ", limit: 2 }).hits, []);
+    assert.equal(index.searches.length, 1, "a blank query never reaches the index");
     await host.stop();
   });
 });

@@ -23,6 +23,7 @@ import type {
 import type { DomainEvent } from "./domain-events.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
+  Checkpoint,
   LatestTurnSummary,
   ThreadItem,
   ThreadSessionStatus,
@@ -86,8 +87,120 @@ export const agentChatRoutes = {
   providers: "/api/agent/providers",
   providerRefresh: (adapterId: string): string =>
     `/api/agent/providers/${encodeURIComponent(adapterId)}/refresh`,
-  hostStop: "/api/agent-host/stop"
+  hostStop: "/api/agent-host/stop",
+
+  // Indexed history (design 2026-09-23 "thread index and lazy boot").
+  /**
+   * A page of turns OLDER than what the client holds, folded from the log by
+   * the host: `?before=<cursor>&turns=<n>`. No cursor means "the turns just
+   * below the retained window" (the snapshot's `history.beforeCursor`).
+   */
+  history: (sessionId: string): string => `${sessionBase(sessionId)}/history`,
+  /** Full-text search over every indexed thread on the host: `?q=&limit=&projectPath=`. */
+  search: "/api/agent/search"
 } as const;
+
+// ---------------------------------------------------------------------------
+// Indexed history and search (design 2026-09-23 "thread index and lazy boot")
+// ---------------------------------------------------------------------------
+
+/** Query string of `GET …/history`. */
+export interface ThreadHistoryQuery {
+  /** Opaque, from a previous page or the snapshot's `history.beforeCursor`. */
+  before?: string;
+  /** Turns per page, clamped to `[1, THREAD_HISTORY_MAX_TURNS]`. */
+  turns?: number;
+}
+
+export const THREAD_HISTORY_DEFAULT_TURNS = 20;
+export const THREAD_HISTORY_MAX_TURNS = 100;
+
+/** One turn of a history page, as the index knows it. Oldest first in a page. */
+export interface ThreadHistoryTurn {
+  turnId: string;
+  /** 1-based, by ORDER of started turns — the same count `/revert` uses. */
+  ordinal: number;
+  userMessageId: string | null;
+  requestedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  /**
+   * False when a compaction happened after this turn: rewinding to it would
+   * cross the compaction boundary, which the provider cannot honour (§5.5).
+   * The client withholds "rewind to here" on it, as it does inside the window.
+   */
+  rewindable: boolean;
+}
+
+/**
+ * `GET …/history`. `items`/`checkpoints` are the fold of exactly the events
+ * those turns span, slimmed like a snapshot (§5.6). A client merges them
+ * ABOVE what it holds and drops any item whose id it already has — the newest
+ * page and the retained window can overlap by a few rows, because retention
+ * evicts rows, not turns.
+ */
+export interface ThreadHistoryPage {
+  threadId: string;
+  turns: ThreadHistoryTurn[];
+  items: ThreadItem[];
+  checkpoints: Checkpoint[];
+  page: {
+    /** Cursor of the next older page, or null when this page reached turn 1. */
+    beforeCursor: string | null;
+    /**
+     * The id of the row at the page's upper boundary — the first row of the
+     * log the page does NOT hold: the window's first row for a page asked
+     * without a cursor, the previous page's first row otherwise (a message's
+     * first chunk when the boundary moved back to keep a message whole). The
+     * client places every window row written before it in the history section,
+     * so the timeline stays in log order when the page shares no row with the
+     * window (design 2026-09-23 fold performance, "Client"). Null when that
+     * line is not a row; absent from a host that predates the field.
+     */
+    endItemId?: string | null;
+  };
+  /** The thread's sequence the page was computed against. */
+  seq: number;
+}
+
+/** Query string of `GET /api/agent/search`. */
+export interface ThreadSearchQuery {
+  q: string;
+  /** Clamped to `[1, THREAD_SEARCH_MAX_RESULTS]`. */
+  limit?: number;
+  /** Restrict to one project root. */
+  projectPath?: string;
+}
+
+export const THREAD_SEARCH_MAX_RESULTS = 50;
+export const THREAD_SEARCH_MAX_QUERY_CHARS = 200;
+
+export interface ThreadSearchHit {
+  threadId: string;
+  projectPath: string;
+  title: string;
+  /** The turn the row belongs to; null for a turnless row. */
+  turnId: string | null;
+  ordinal: number | null;
+  kind: "message" | "activity";
+  /** Message id or activity id. */
+  id: string;
+  role: "user" | "assistant" | "reasoning" | null;
+  activityKind: string | null;
+  /** A short excerpt with the match highlighted by `«` and `»`. */
+  snippet: string;
+  at: string;
+  seq: number;
+}
+
+export interface ThreadSearchResponse {
+  query: string;
+  hits: ThreadSearchHit[];
+  /** More hits existed than `limit`. */
+  truncated: boolean;
+  /** False when the host has no usable index; `hits` is then empty. */
+  indexed: boolean;
+}
 
 /** The `name` accepted by `Transporter.agentChat.command(sessionId, name, body)`. */
 export type AgentChatCommandName =
@@ -305,7 +418,14 @@ export type AgentChatErrorCode =
   /** 409 — a turn is running or another compaction is in flight (§3.4). */
   | "COMPACTION_UNAVAILABLE"
   /** 503 — the host is restarting; the client retries the SAME `commandId`. */
-  | "HOST_UNAVAILABLE";
+  | "HOST_UNAVAILABLE"
+  /**
+   * 503 — the host has no usable thread index right now (driver missing, file
+   * being rebuilt). Only `GET …/history` answers it: `GET /api/agent/search`
+   * is never an error for "no index" — it answers 200 with `indexed:false`
+   * and no hits — and nothing about the live thread is affected.
+   */
+  | "INDEX_UNAVAILABLE";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -313,7 +433,8 @@ export const AGENT_CHAT_ERROR_CODES = [
   "COMMAND_ID_CONFLICT",
   "COMMAND_REJECTED",
   "COMPACTION_UNAVAILABLE",
-  "HOST_UNAVAILABLE"
+  "HOST_UNAVAILABLE",
+  "INDEX_UNAVAILABLE"
 ] as const satisfies readonly AgentChatErrorCode[];
 
 /** A failed command answers this, and it is not a transport error to swallow. */

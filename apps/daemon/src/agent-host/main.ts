@@ -27,6 +27,7 @@ import { delimiter, isAbsolute, join, resolve as resolvePath, sep } from "node:p
 
 import {
   agentChatDir,
+  agentChatIndexPath,
   agentChatThreadAttachmentsDir,
   agentHostSocketPath,
   agentHostTokenPath,
@@ -55,6 +56,11 @@ import {
 import { createCheckpointService } from "./checkpoints/index.ts";
 import type { AgentHostStopResponse } from "@orquester/api/agent-chat";
 import { newHostInstanceId } from "./host-protocol.ts";
+import {
+  createThreadIndex,
+  createUnavailableThreadIndex,
+  type ThreadIndex
+} from "./index/index.ts";
 import { createIngestion } from "./ingestion/index.ts";
 import { createFileLaunchConfigStore } from "./orchestration/launch-config.ts";
 import { createLivenessRegistry } from "./orchestration/liveness.ts";
@@ -276,7 +282,8 @@ export async function startAgentHost(
     clock,
     idGen: ids,
     homeDirs: [homeDir],
-    deleteThreadRefs: (input) => checkpoints.deleteThreadRefs(input)
+    deleteThreadRefs: (input) => checkpoints.deleteThreadRefs(input),
+    logger: { warn: (message, detail) => logger.warn(message, detail) }
   });
 
   /**
@@ -438,6 +445,14 @@ export async function startAgentHost(
     clock
   });
 
+  // ---- thread index (design 2026-09-23, C) --------------------------------
+  // A disposable cache of turn boundaries and full text, derived from the
+  // logs. The orchestrator is built with a stand-in the real file is plugged
+  // into only AFTER the gate (`openThreadIndex`): opening it runs SQLite's
+  // `quick_check` over every page, and that cost grows with the history it
+  // indexes — nothing new may block readiness (invariant 2).
+  const threadIndex = deferredThreadIndex();
+
   // ---- orchestration -----------------------------------------------------
   // The ingestion sink is late-bound: ingestion needs somewhere to deliver
   // translated events, and that somewhere is the orchestrator's own append
@@ -508,7 +523,8 @@ export async function startAgentHost(
     launchArgsForRefId: (refId) => refIds.get(refId)?.args ?? [],
     launchConfigs,
     clock,
-    ids
+    ids,
+    index: threadIndex
   });
   const host = orchestrator;
 
@@ -559,6 +575,66 @@ export async function startAgentHost(
 
   const consumers: Array<Promise<void>> = [];
 
+  /**
+   * Open the index file and start its catch-up — after the gate, never on the
+   * readiness path. A missing native driver or an unopenable file leaves the
+   * index unavailable (history 503, search `indexed: false`); it can never
+   * keep the host from serving.
+   */
+  const openThreadIndex = (): void => {
+    if (stopping) return;
+    try {
+      threadIndex.open(
+        createThreadIndex({ filePath: agentChatIndexPath(appdir), logger, clock })
+      );
+    } catch (error) {
+      logger.warn("agent-host: the thread index is unavailable", error);
+      return;
+    }
+    void catchUpThreadIndex(threadIndex).catch((error: unknown) => {
+      logger.warn("agent-host: the thread index catch-up failed", error);
+    });
+  };
+
+  /**
+   * Bring the index up to every log on disk, one thread at a time, AFTER the
+   * gate and never awaited by it (invariant 2): the index is written strictly
+   * after the log, so after a crash or a first boot it is behind, and each
+   * thread's catch-up reads only the tail past the index's own cursor. A
+   * thread that fails is logged and skipped — it is caught up by the next
+   * boot. A stop waits for at most one step of it: `ThreadIndex.stop()` ends
+   * the thread in flight at its next check (after its current read, or at its
+   * next chunk boundary), its cursor left behind the log for the next boot,
+   * and this loop ends at its next thread.
+   */
+  const catchUpThreadIndex = async (index: ThreadIndex): Promise<void> => {
+    if (!index.available) return;
+    let threadIds: string[];
+    try {
+      threadIds = await store.listThreads();
+    } catch (error) {
+      logger.warn("agent-host: the thread index catch-up could not list threads", error);
+      return;
+    }
+    for (const threadId of threadIds) {
+      if (stopping) return;
+      try {
+        const head = await store.loadHead(threadId);
+        if (head === null) continue;
+        await index.catchUp({
+          threadId,
+          projectPath: head.projectPath,
+          title: head.title,
+          logSeq: await store.lastSeq(threadId),
+          read: (cursor) => store.readEventsFrom(threadId, cursor)
+        });
+      } catch (error) {
+        if (stopping) return;
+        logger.warn(`agent-host: the thread index catch-up failed for ${threadId}`, error);
+      }
+    }
+  };
+
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
@@ -575,6 +651,17 @@ export async function startAgentHost(
     await host.stop().catch((error: unknown) => {
       logger.warn("agent-host: orchestrator stop failed", error);
     });
+    // After the orchestrator, whose last commits still feed it: `stop`
+    // applies every observe already queued, ends a catch-up in flight at its
+    // next check — after its current read, or at its next chunk boundary,
+    // its cursor left behind the log for the next boot's catch-up — and then
+    // closes the file. So one big thread's catch-up cannot hold a deploy's
+    // stop past the supervisor's exit bound.
+    try {
+      await threadIndex.stop();
+    } catch (error) {
+      logger.warn("agent-host: the thread index did not stop cleanly", error);
+    }
     // Last: the store's sweep timer and its open raw-log handles. The timer is
     // `unref`'d, so this is about a deterministic stop rather than about the
     // process exiting — a sweep must not start while the log writers close.
@@ -619,6 +706,10 @@ export async function startAgentHost(
     // *T3: `makeManagedServerProvider.ts:280-284` — the forced refresh is
     // forked by the provider at construction, not awaited by its builder.*
     snapshots.startBootRefresh();
+    // C: the index file opens on the NEXT turn of the loop, so the health
+    // answer the gate just released goes out first; then the catch-up, never
+    // awaited by anything.
+    setImmediate(openThreadIndex);
     logger.info(`agent-host ready on ${socketPath}`, {
       hostInstanceId,
       adapters: [...adapters.keys()]
@@ -636,6 +727,73 @@ export async function startAgentHost(
     server,
     ready,
     stop
+  };
+}
+
+/**
+ * The index handle the orchestrator is built with (design 2026-09-23, C):
+ * unavailable until the real index is `open`ed into it after the gate, then a
+ * pass-through. Before that an `observe` is dropped — the boot catch-up reads
+ * whatever it missed from the log, the index's only authority — while a
+ * `deleteThread` is remembered and replayed, because no catch-up ever visits a
+ * thread whose directory is gone.
+ */
+function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void } {
+  let target: ThreadIndex = createUnavailableThreadIndex();
+  let opened = false;
+  let closed = false;
+  const deletedBeforeOpen = new Set<string>();
+  return {
+    get available() {
+      return target.available;
+    },
+    open(index: ThreadIndex): void {
+      if (opened || closed) {
+        index.close();
+        return;
+      }
+      opened = true;
+      target = index;
+      for (const threadId of deletedBeforeOpen) {
+        index.deleteThread(threadId);
+      }
+      deletedBeforeOpen.clear();
+    },
+    observe: (input) => target.observe(input),
+    drain: () => target.drain(),
+    catchUp: (input) => target.catchUp(input),
+    deleteThread: (threadId) => {
+      if (!opened) {
+        deletedBeforeOpen.add(threadId);
+        return;
+      }
+      target.deleteThread(threadId);
+    },
+    cursor: (threadId) => target.cursor(threadId),
+    turnByOrdinal: (threadId, ordinal) => target.turnByOrdinal(threadId, ordinal),
+    turnById: (threadId, turnId) => target.turnById(threadId, turnId),
+    totalTurns: (threadId) => target.totalTurns(threadId),
+    turnsBefore: (threadId, input) => target.turnsBefore(threadId, input),
+    rewindable: (threadId, turn) => target.rewindable(threadId, turn),
+    itemPosition: (threadId, itemId) => target.itemPosition(threadId, itemId),
+    itemPositionBySeq: (threadId, seq) => target.itemPositionBySeq(threadId, seq),
+    hasItemsBefore: (threadId, seq) => target.hasItemsBefore(threadId, seq),
+    activitySeqBefore: (threadId, input) => target.activitySeqBefore(threadId, input),
+    turnsInSeqRange: (threadId, input) => target.turnsInSeqRange(threadId, input),
+    turnOfSeq: (threadId, seq) => target.turnOfSeq(threadId, seq),
+    eventPositionBySeq: (threadId, seq) => target.eventPositionBySeq(threadId, seq),
+    messageSpan: (threadId, messageId) => target.messageSpan(threadId, messageId),
+    messagesSpanning: (threadId, seq) => target.messagesSpanning(threadId, seq),
+    search: (input) => target.search(input),
+    stop: async (): Promise<void> => {
+      // Like `close`: an index opened after this is closed on arrival.
+      closed = true;
+      await target.stop();
+    },
+    close: (): void => {
+      closed = true;
+      target.close();
+    }
   };
 }
 

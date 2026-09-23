@@ -207,12 +207,18 @@ test("a torn trailing line is truncated on load, never fatal", async () => {
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   const tail = await reopened.readAll("t1");
   assert.deepEqual(tail.events.map((event) => event.seq), [1, 2]);
-  assert.equal(tail.truncated, true);
+  // The fragment was a batch that never completed: it is cut on load, so what
+  // is left reads whole.
+  assert.equal(tail.truncated, false);
   assert.equal(tail.seq, 2);
 
-  // And the next append lands at 3, not on top of the fragment.
+  // And the next append lands at 3, on a line of its own — not glued onto
+  // the fragment, where a full read would stop before it forever.
   const appended = await reopened.append({ threadId: "t1", events: [message("t1", "m2")] });
   assert.equal(appended.seq, 3);
+  const after = await reopened.readAll("t1");
+  assert.deepEqual(after.events.map((event) => event.seq), [1, 2, 3]);
+  assert.equal(after.truncated, false);
 });
 
 test("an event type from a NEWER host folds inertly and never truncates (R1-8, §8)", async () => {

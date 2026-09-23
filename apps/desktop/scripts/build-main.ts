@@ -15,7 +15,7 @@ const options: BuildOptions = {
   target: "node20",
   format: "cjs",
   sourcemap: true,
-  external: ["electron", "node-pty"],
+  external: ["electron", "node-pty", "better-sqlite3"],
   logLevel: "info",
   plugins: [
     {

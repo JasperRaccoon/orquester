@@ -18,6 +18,12 @@
  * compiler means identity preservation is the whole performance story, and a
  * deep equality here would cost more than the render it saves.
  *
+ * A timeline split into the loaded history and the retained window (design
+ * 2026-09-23) derives both parts here; `continuesBelow`, `activeTurnHeader`
+ * and `liveActivityAbove` put a running turn's live rows exactly where one
+ * whole timeline would — the live tail at the very end, the "Working…" header
+ * after the last prompt, whichever part holds it.
+ *
  * No React import.
  */
 
@@ -604,10 +610,50 @@ export interface TimelineRowsInput {
   liveAgentTaskIds?: ReadonlySet<string>;
   /** The client's own undispatched queue, rendered as ghost bubbles (§7.4). */
   queuedMessages?: readonly QueuedComposerMessage[];
+  /**
+   * The timeline goes on BELOW this projection's last row — this is the older
+   * history, and the retained window's rows follow it (design 2026-09-23). The
+   * live TAIL — the trailing live tool run, a live activity group, the
+   * "thinking" placeholder — belongs to the projection that ends the
+   * timeline, never to this one; a running turn's rows here still render
+   * live: unfolded, without the settled metadata row, an in-progress call as
+   * a live row.
+   *
+   * *Added with the history bridge.*
+   */
+  continuesBelow?: boolean;
+  /**
+   * Where the running turn's header — the `working` row, right after the
+   * timeline's LAST user message — goes when the timeline is split into the
+   * history and the window: after this projection's own last user message
+   * (`"here"`, the default: the only thing a whole timeline ever needs), in a
+   * projection above (`"above"`: every row here comes after that prompt), or
+   * in one below (`"below"`: no row here does).
+   *
+   * *Added with the history bridge.*
+   */
+  activeTurnHeader?: "here" | "above" | "below";
+  /**
+   * A projection above already renders a live activity row, so the live tail
+   * needs no "thinking" placeholder to show the turn is working.
+   *
+   * *Added with the history bridge.*
+   */
+  liveActivityAbove?: boolean;
 }
 
 export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineRow[] {
+  return deriveRowsDetailed(input).rows;
+}
+
+/** The rows, and whether any of them is a live activity row (`hasActivityRow`). */
+function deriveRowsDetailed(input: TimelineRowsInput): {
+  rows: AgentChatTimelineRow[];
+  hasActivityRow: boolean;
+} {
   const entries = input.timelineEntries;
+  const header = input.activeTurnHeader ?? "here";
+  const tailHere = input.continuesBelow !== true;
   const checkpoints = input.checkpoints ?? [];
   const checkpointByAssistantMessageId = new Map<string, Checkpoint>();
   const checkpointByTurnId = new Map<string, Checkpoint>();
@@ -637,7 +683,9 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
   const activeVisualResponseTurnIds = deriveActiveVisualResponseTurnIds({
     entries,
     unsettledTurnId,
-    isWorking: input.isWorking
+    // The rows after the timeline's last prompt are the live response; with
+    // that prompt below, no row here is.
+    isWorking: input.isWorking && header !== "below"
   });
   const foldsByAnchorEntryId = deriveTurnFolds({
     entries,
@@ -654,8 +702,11 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
     }
   }
 
+  // Where the running response starts: after the last prompt here, from the
+  // first row when that prompt is above (`lastUserMessageIndex` finds none
+  // here), and nowhere in these rows when it is below.
   let activeTurnHeaderIndex = entries.length;
-  if (input.isWorking) {
+  if (input.isWorking && header !== "below") {
     activeTurnHeaderIndex = lastUserMessageIndex(entries) + 1;
   }
   const entryBelongsToActiveTurn = (entry: TimelineEntry, index: number): boolean =>
@@ -668,9 +719,11 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
     entry.toolLifecycleStatus === "inProgress" &&
     entry.turnId === unsettledTurnId;
 
-  // The live tool run: the trailing streak of work entries in the active turn.
+  // The live tool run: the trailing streak of work entries in the active turn
+  // — at the timeline's end, so never in a projection the timeline continues
+  // below.
   const activeToolEntries: Array<Extract<TimelineEntry, { kind: "work" }>> = [];
-  for (let index = entries.length - 1; index >= activeTurnHeaderIndex; index -= 1) {
+  for (let index = entries.length - 1; tailHere && index >= activeTurnHeaderIndex; index -= 1) {
     const entry = entries[index]!;
     if (
       !entryBelongsToActiveTurn(entry, index) ||
@@ -775,7 +828,7 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
   for (let index = 0; index < entries.length; index += 1) {
     const timelineEntry = entries[index]!;
 
-    if (input.isWorking && index === activeTurnHeaderIndex) {
+    if (input.isWorking && header === "here" && index === activeTurnHeaderIndex) {
       appendWorkingRow();
     }
     if (timelineEntry.id === activeWorkPlacementEntryId) {
@@ -818,8 +871,11 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
       scannedActivityThrough = cursor - 1;
       // A run with no reasoning row is a plain tool group, not an activity group.
       if (groupEntries.some((entry) => entry.kind === "message")) {
+        // Live only at the timeline's end — this projection's end is not that
+        // when the timeline continues below it.
         const active =
           input.isWorking &&
+          tailHere &&
           activityTurnId === unsettledTurnId &&
           cursor === entries.length &&
           !latestToolFailed &&
@@ -1061,11 +1117,21 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
     }
   }
 
-  if (input.isWorking && !rows.some((row) => row.kind === "working") && activeTurnHeaderIndex === entries.length) {
+  if (
+    input.isWorking &&
+    header === "here" &&
+    !rows.some((row) => row.kind === "working") &&
+    activeTurnHeaderIndex === entries.length
+  ) {
     appendWorkingRow();
   }
-  // The turn is never represented by an empty timeline (§7.3).
-  if (input.isWorking && (!hasActivityRow || latestToolFailed)) {
+  // The turn is never represented by an empty timeline (§7.3) — a live row
+  // the history renders above counts, and the placeholder is the tail's.
+  if (
+    input.isWorking &&
+    tailHere &&
+    ((!hasActivityRow && input.liveActivityAbove !== true) || latestToolFailed)
+  ) {
     rows.push({
       kind: "thinking",
       id: LIVE_ACTIVITY_ROW_ID,
@@ -1084,7 +1150,7 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
       isNext: index === 0
     });
   });
-  return withMeta;
+  return { rows: withMeta, hasActivityRow };
 }
 
 /**
@@ -1218,12 +1284,20 @@ function attachTrailingToolGroupsToAssistant(
 export interface TimelineRowsProjection {
   readonly input: TimelineRowsInput;
   readonly rows: AgentChatTimelineRow[];
+  /**
+   * These rows include a live activity row — what a projection below reads
+   * as `liveActivityAbove`. Streamed text never changes it.
+   */
+  readonly hasActivityRow: boolean;
 }
 
 function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): boolean {
   return (
     left.isWorking === right.isWorking &&
     left.isCompacting === right.isCompacting &&
+    left.continuesBelow === right.continuesBelow &&
+    left.activeTurnHeader === right.activeTurnHeader &&
+    left.liveActivityAbove === right.liveActivityAbove &&
     left.activeTurnStartedAt === right.activeTurnStartedAt &&
     left.runningTurnId === right.runningTurnId &&
     left.supportsConversationRollback === right.supportsConversationRollback &&
@@ -1313,10 +1387,11 @@ export function deriveTimelineRowsWithState(
   input: TimelineRowsInput,
   previous: TimelineRowsProjection | null = null
 ): TimelineRowsProjection {
-  return {
-    input,
-    rows: (previous === null ? null : replaceStreamingMessageRows(input, previous)) ?? deriveTimelineRows(input)
-  };
+  const streamed = previous === null ? null : replaceStreamingMessageRows(input, previous);
+  if (streamed !== null && previous !== null) {
+    return { input, rows: streamed, hasActivityRow: previous.hasActivityRow };
+  }
+  return { input, ...deriveRowsDetailed(input) };
 }
 
 // ---------------------------------------------------------------------------

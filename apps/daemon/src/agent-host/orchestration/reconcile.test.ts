@@ -15,6 +15,7 @@ import {
   CONTINUATION_PROMPT,
   CONTINUATION_SEND_FAILED_MESSAGE
 } from "../host-protocol.ts";
+import { PENDING_TURN_GRACE_MS } from "./orchestrator.ts";
 import {
   createScriptedAdapter,
   createTestHost,
@@ -53,6 +54,239 @@ function sessionEvents(store: FakeThreadStore, threadId: string) {
       event.type === "thread.session-set"
   );
 }
+
+/**
+ * Count every read of a thread's LOG the store serves, per thread — the cost
+ * the lazy boot (design 2026-09-23, A1) exists to avoid. Installed on the
+ * store the next host is built on, before it is built.
+ */
+function countLogReads(store: FakeThreadStore): Map<string, number> {
+  const reads = new Map<string, number>();
+  const bump = (threadId: string): void => {
+    reads.set(threadId, (reads.get(threadId) ?? 0) + 1);
+  };
+  const readAll = store.readAll.bind(store);
+  store.readAll = async (threadId) => {
+    bump(threadId);
+    return readAll(threadId);
+  };
+  const readTail = store.readTail.bind(store);
+  store.readTail = async (threadId, afterSeq) => {
+    bump(threadId);
+    return readTail(threadId, afterSeq);
+  };
+  const readEventsFrom = store.readEventsFrom.bind(store);
+  store.readEventsFrom = async (threadId, input) => {
+    bump(threadId);
+    return readEventsFrom(threadId, input);
+  };
+  return reads;
+}
+
+/** A persisted event, as a host that died mid-command left it in the log. */
+function persisted<TType extends DomainEvent["type"]>(
+  threadId: string,
+  seq: number,
+  type: TType,
+  payload: Extract<DomainEvent, { type: TType }>["payload"],
+  occurredAt: string
+): DomainEvent {
+  return {
+    seq,
+    eventId: `persisted-${seq}`,
+    threadId,
+    type,
+    payload,
+    occurredAt,
+    commandId: null,
+    causationEventId: null,
+    metadata: {}
+  } as DomainEvent;
+}
+
+/**
+ * The host died between a `/turn`'s commit and its effect: the user's message
+ * and the pending turn row are in the log, the head never left `idle`.
+ */
+function appendStrandedTurn(store: FakeThreadStore, threadId: string, requestedAt: string): void {
+  const log = store.logs.get(threadId);
+  assert.ok(log, "the thread has a log");
+  log.push(
+    persisted(
+      threadId,
+      log.length + 1,
+      "thread.message-sent",
+      { messageId: "user:stranded", role: "user", text: "never sent", streaming: false, turnId: null },
+      requestedAt
+    )
+  );
+  log.push(
+    persisted(
+      threadId,
+      log.length + 1,
+      "thread.turn-start-requested",
+      { turnId: null, messageId: "user:stranded", interactionMode: "default" },
+      requestedAt
+    )
+  );
+}
+
+describe("reconcile — the lazy boot (design 2026-09-23, A1)", () => {
+  it("folds an orphaned thread at boot and never reads an idle one", async () => {
+    const first = createTestHost();
+    const orphan = await first.createThread({ threadId: "orphan" });
+    await first.orchestrator.command(orphan, "turn", { commandId: cmd(), input: "long job" });
+    const idle = await first.createThread({ threadId: "idle" });
+    await first.settle();
+    await first.stop();
+    assert.equal(headOf(first.store, orphan).session.status, "running");
+    assert.equal(headOf(first.store, idle).session.status, "idle");
+
+    const reads = countLogReads(first.store);
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    assert.ok((reads.get(orphan) ?? 0) > 0, "the orphaned thread is folded and settled at boot");
+    assert.equal(headOf(first.store, orphan).session.status, "error");
+    assert.equal(reads.get(idle) ?? 0, 0, "an idle thread's log is never read at boot");
+    assert.deepEqual(next.orchestrator.liveThreadIds(), []);
+    assert.deepEqual(next.orchestrator.activeTurnThreadIds(), []);
+
+    // …and it folds on first use, exactly as before.
+    const read = await next.orchestrator.readThread(idle);
+    assert.equal(read.kind, "snapshot");
+    assert.ok((reads.get(idle) ?? 0) > 0);
+    await next.stop();
+  });
+
+  it("settles a stale pending turn on the thread's first load after boot, never at boot", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.stop();
+    appendStrandedTurn(first.store, threadId, first.clock.nowIso());
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store });
+    // Well past §3.4's grace window: this send is never going to happen.
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(
+      first.store.logs.get(threadId)!.length,
+      logLength,
+      "boot appends nothing to a thread it did not fold"
+    );
+
+    // Two concurrent first reads: both see the thread already settled.
+    const [left, right] = await Promise.all([
+      next.orchestrator.readThread(threadId),
+      next.orchestrator.readThread(threadId)
+    ]);
+    for (const read of [left, right]) {
+      assert.equal(read.kind, "snapshot");
+      if (read.kind !== "snapshot") continue;
+      assert.equal(read.thread.turns.at(-1)?.state, "interrupted");
+      assert.equal(read.thread.head.session.status, "stopped");
+      const failure = read.thread.items.find(
+        (item) => item.kind === "activity" && item.activityKind === "provider.turn.start.failed"
+      );
+      assert.ok(failure, "the reason is on the timeline");
+    }
+    const settledLength = first.store.logs.get(threadId)!.length;
+    assert.ok(settledLength > logLength);
+
+    // Once: a later read settles nothing again.
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(first.store.logs.get(threadId)!.length, settledLength);
+    await next.stop();
+  });
+
+  it("leaves a pending turn inside the grace window alone on first load", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.stop();
+    appendStrandedTurn(first.store, threadId, first.clock.nowIso());
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store });
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    assert.equal(read.kind === "snapshot" ? read.thread.turns.at(-1)?.state : null, "pending");
+    assert.equal(first.store.logs.get(threadId)!.length, logLength);
+    await next.stop();
+  });
+
+  it("settles a stale pending turn before the first command on it runs", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.stop();
+    appendStrandedTurn(first.store, threadId, first.clock.nowIso());
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    await next.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "hello again" });
+    await next.settle();
+
+    const log = first.store.logs.get(threadId)!;
+    const stopped = log.findIndex(
+      (event) => event.type === "thread.session-set" && event.payload.session.status === "stopped"
+    );
+    const message = log.findIndex(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        event.payload.role === "user" &&
+        event.payload.text === "hello again"
+    );
+    assert.ok(stopped !== -1 && message !== -1);
+    assert.ok(stopped < message, "the stranded turn is settled before the new message lands");
+    assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 1);
+    await next.stop();
+  });
+
+  it("an intentional stop after a lazy boot never folds a thread it did not load", async () => {
+    const first = createTestHost({ continuationEnabled: () => true });
+    const idle = await first.createThread({ threadId: "idle" });
+    await first.stop();
+
+    const reads = countLogReads(first.store);
+    const next = createTestHost({ store: first.store, continuationEnabled: () => true });
+    await next.orchestrator.reconcile();
+    assert.deepEqual(await next.orchestrator.markThreadsForContinuation(), []);
+    assert.equal(reads.get(idle) ?? 0, 0);
+    await next.stop();
+  });
+
+  it("an intentional stop still marks a running thread the host serves", async () => {
+    const host = createTestHost({ continuationEnabled: () => true });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await host.settle();
+    await host.createThread({ threadId: "quiet" });
+    assert.deepEqual(await host.orchestrator.markThreadsForContinuation(), [threadId]);
+    await host.stop();
+  });
+
+  it("a thread whose head cannot be read is folded at boot rather than guessed", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    await first.stop();
+    // `meta.json` is gone; only the log can say the turn was running.
+    first.store.heads.delete(threadId);
+
+    const reads = countLogReads(first.store);
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.ok((reads.get(threadId) ?? 0) > 0);
+    assert.equal(headOf(first.store, threadId).session.status, "error");
+    await next.stop();
+  });
+});
 
 describe("reconcile (§3.3)", () => {
   it("settles an orphaned turn as an error when continuation is off", async () => {

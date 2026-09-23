@@ -21,11 +21,20 @@
  */
 
 import {
+  ACTIVITY_RETENTION_LIMIT,
+  AGENT_ACTIVITY_RETENTION_LIMIT,
+  AGENT_ACTIVITY_TOTAL_LIMIT,
   COMMANDS_ALLOWED_IN_ERROR_STATE,
   DEFAULT_RUNTIME_MODE,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
+  THREAD_HISTORY_DEFAULT_TURNS,
+  THREAD_HISTORY_MAX_TURNS,
+  THREAD_SEARCH_MAX_RESULTS,
+  decodeHistoryCursor,
+  deserializeFoldState,
+  encodeHistoryCursor,
   isHistoricalRuntimeEvent,
   SETTLED_TURN_STATES,
   slimActivityPayload,
@@ -36,6 +45,7 @@ import {
   type AgentChatSessionSummaryFields,
   type AttachmentRef,
   type DomainEvent,
+  type HistoryCursor,
   type InteractionMode,
   type ModelSelection,
   type PendingApproval,
@@ -49,8 +59,12 @@ import {
   type ThreadActivityItem,
   type ThreadFoldState,
   type ThreadHead,
+  type ThreadHistoryBounds,
+  type ThreadHistoryPage,
+  type ThreadHistoryTurn,
   type ThreadItem,
   type ThreadReadResponse,
+  type ThreadSearchResponse,
   type ThreadSessionState,
   type ThreadSessionStatus,
   type ThreadSnapshotPayload,
@@ -74,6 +88,7 @@ import {
 } from "../host-protocol.ts";
 import type {
   AppendableDomainEvent,
+  AppendResult,
   CaptureResult,
   CheckpointService,
   Ingestion,
@@ -85,6 +100,7 @@ import {
   CheckpointRefUnavailableError,
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
+import type { IndexedItemPosition, IndexedTurn, ThreadIndex } from "../index/index.ts";
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
@@ -99,7 +115,7 @@ import {
   replayRecordedRejection,
   threadNotFound
 } from "./errors.ts";
-import { DEFAULT_FOLD_OPS, type FoldOps } from "./fold-ops.ts";
+import { applyEventsChunked, DEFAULT_FOLD_OPS, type FoldOps } from "./fold-ops.ts";
 import {
   createMemoryLaunchConfigStore,
   launchConfigFromRequest,
@@ -228,6 +244,13 @@ export interface OrchestratorOptions {
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
   minimumVersions?: Readonly<Record<AgentAdapterId, string | null>>;
+  /**
+   * The host-wide thread index (design 2026-09-23, C): a disposable cache of
+   * turn boundaries and full text, fed from `commit` strictly after the log.
+   * Absent or `available: false`, history answers 503 `INDEX_UNAVAILABLE`,
+   * search answers `indexed: false`, and nothing else changes.
+   */
+  index?: ThreadIndex;
 }
 
 export interface ThreadSubscription {
@@ -271,6 +294,25 @@ interface ThreadRuntime {
    */
   binding: ProviderSessionBinding | null;
   eventsSinceHeadSave: number;
+  /**
+   * Events committed since the last fold snapshot (`state.json`) was written
+   * (design 2026-09-23, A2) — or folded at load on top of the one read back.
+   */
+  eventsSinceSnapshot: number;
+  /** When this runtime last wrote `state.json` (epoch ms); 0 until it has. */
+  lastSnapshotAt: number;
+  /**
+   * `revertedTo` and `titleManual` exactly as the LOG derives them, advanced
+   * inside `commit` with every batch. This — not the live pair below — is what
+   * a fold snapshot carries in `extras`: the live `revertedTo` is lifted by
+   * the runtime `turn.started` and armed only after the revert's append
+   * returns, and the live `titleManual` is set only after the rename commits,
+   * so a snapshot written inside the very commit that moved them would carry
+   * the old value and a restart would lose the manual title or the late-
+   * capture guard. A reload from snapshot + tail must equal a reload from the
+   * whole log, and this is the value the whole log gives.
+   */
+  logDerived: LogDerived;
   compacting: boolean;
   queuedTurns: QueuedTurn[];
   /**
@@ -318,7 +360,7 @@ interface ThreadRuntime {
    * begins: that turn is numbered `target + 1` (§5.5, turns count by order)
    * and would otherwise be dropped — and with it every turn after it, for the
    * life of the thread. A `turn.started` clears it (`consume`), and a host
-   * restart re-derives it the same way (`revertGuardFromLog`).
+   * restart re-derives it the same way (`advanceLogDerived`).
    */
   revertedTo: number | null;
   /**
@@ -332,12 +374,35 @@ interface ThreadRuntime {
 const HEAD_SAVE_EVENT_INTERVAL = 50;
 
 /**
+ * Inside a long turn a fold snapshot is written once at least this many
+ * events AND {@link FOLD_SNAPSHOT_MIN_INTERVAL_MS} have passed since the last
+ * one (design 2026-09-23, A2); every session transition writes one anyway.
+ */
+export const FOLD_SNAPSHOT_EVENT_INTERVAL = 200;
+
+/**
+ * The time half of the in-turn gate. Serializing a big thread's state blocks
+ * the loop for ~160 ms (a 22 MiB `state.json`, measured on real logs), so a
+ * subagent-heavy turn appending hundreds of events a minute must not write one
+ * every 200 events — that is a loop-stalling, disk-churning loop.
+ */
+export const FOLD_SNAPSHOT_MIN_INTERVAL_MS = 30_000;
+
+/** `ThreadRuntime.logDerived`: the two derivations a fold snapshot carries in `extras`. */
+interface LogDerived {
+  revertedTo: number | null;
+  titleManual: boolean;
+}
+
+const EMPTY_LOG_DERIVED: LogDerived = { revertedTo: null, titleManual: false };
+
+/**
  * §3.4's "bounded grace window" on a queued turn start. A `pending` turn older
  * than this on a host that is only now starting belongs to a send that never
  * happened; anything shorter would settle a turn that is merely slow to reach
  * the provider.
  */
-const PENDING_TURN_GRACE_MS = 5 * 60_000;
+export const PENDING_TURN_GRACE_MS = 5 * 60_000;
 
 
 /** Events that change `meta.json`'s own fields, so the head is rewritten. */
@@ -388,6 +453,17 @@ export interface Orchestrator {
   ): Promise<{ seq: number }>;
 
   readThread(threadId: string, afterSeq?: number): Promise<ThreadReadResponse>;
+  /**
+   * A page of turns OLDER than the retained window (design 2026-09-23, C):
+   * their turn rows from the index, their items folded from exactly the log
+   * bytes they span. Throws `INDEX_UNAVAILABLE` (503) without a usable index.
+   */
+  readHistory(
+    threadId: string,
+    query: { before?: string; turns?: number }
+  ): Promise<ThreadHistoryPage>;
+  /** Full-text search over every indexed thread; `indexed: false` without an index. */
+  searchThreads(query: { q: string; limit: number; projectPath?: string }): ThreadSearchResponse;
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
   readTurnDiff(
     threadId: string,
@@ -499,6 +575,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const providerThreadOwners = new Map<string, string>();
   /** In-flight `loadRuntime` calls, memoised so two never build two runtimes. */
   const loadingRuntimes = new Map<string, Promise<ThreadRuntime>>();
+  /**
+   * The lazy boot (design 2026-09-23, A1): threads the §3.3 reconcile judged
+   * NOT orphaned from `meta.json` alone, and therefore did not fold. The
+   * stale-pending-turn settle the reconcile used to run on every one of them
+   * at boot runs instead on the thread's first load, before anyone can see
+   * it (`loadRuntime`).
+   */
+  const bootSettlePending = new Set<string>();
   const gate: Deferred<void> = createDeferred<void>();
   const gateQueue = createSerialQueue();
   let gateOpen = false;
@@ -571,7 +655,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return inFlight;
     }
     const load = buildRuntime(threadId)
-      .then((runtime) => {
+      .then(async (runtime) => {
         // `deleteThread` evicts the in-flight entry as its last act, so an
         // entry that is no longer ours means the thread was deleted while this
         // read was in flight. Caching it now would resurrect a runtime whose
@@ -587,6 +671,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         if (loadingRuntimes.get(threadId) !== load) {
           return runtime;
         }
+        // A1: the boot-time settle this thread was spared, run BEFORE the
+        // runtime is published. Every concurrent caller awaits this same
+        // promise, so the first thing anyone can see of the thread — a read,
+        // a stream's snapshot, a command's decide — is already settled.
+        if (bootSettlePending.delete(threadId)) {
+          await settleOnFirstLoad(runtime);
+        }
         runtimes.set(threadId, runtime);
         return runtime;
       })
@@ -597,9 +688,152 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return load;
   };
 
-  const buildRuntime = async (threadId: string): Promise<ThreadRuntime> => {
+  /**
+   * One thread's fold state, off disk: `state.json` plus the log's tail when
+   * the snapshot still matches the log, the whole log otherwise (design
+   * 2026-09-23, A2). The log is the only authority — a snapshot that is
+   * missing, corrupt, another version, another thread's, or no longer a
+   * prefix of the log is discarded and the log is folded from the top. Either
+   * way the fold yields to the event loop every 500 events (invariant 7).
+   */
+  const foldFromDisk = async (
+    threadId: string
+  ): Promise<{
+    state: ThreadFoldState;
+    derived: LogDerived;
+    /** Events folded here — on top of the snapshot, or all of them. */
+    folded: number;
+    /** Byte length of the log the state covers; null when it is not known. */
+    logBytes: number | null;
+    truncated: boolean;
+  }> => {
+    const foldOnto = (state: ThreadFoldState, events: readonly DomainEvent[]) =>
+      applyEventsChunked(state, events, { apply: fold.apply });
+
+    const snapshot = await loadUsableSnapshot(threadId);
+    if (snapshot !== null) {
+      const tail = await store.readEventsFrom(threadId, {
+        byteOffset: snapshot.logBytes,
+        afterSeq: snapshot.seq
+      });
+      // A cut at the very line the snapshot points at, or a log that ends
+      // exactly there but on another sequence, is a log that is not the one
+      // the snapshot was taken of.
+      const stale =
+        tail.mismatch ||
+        (tail.truncated && tail.events.length === 0) ||
+        (tail.events.length === 0 && (await store.lastSeq(threadId)) !== snapshot.seq);
+      if (!stale) {
+        return {
+          state: await foldOnto(snapshot.state, tail.events),
+          derived: advanceLogDerived(snapshot.derived, tail.events),
+          folded: tail.events.length,
+          logBytes: tail.logBytes,
+          truncated: tail.truncated
+        };
+      }
+      logger.info("agent-host: the fold snapshot no longer matches the log; folding the log", {
+        threadId,
+        snapshotSeq: snapshot.seq
+      });
+    }
+
+    const whole = await store.readEventsFrom(threadId, { byteOffset: 0, afterSeq: 0 });
+    if (!whole.mismatch) {
+      return {
+        state: await foldOnto(fold.createEmpty(), whole.events),
+        derived: advanceLogDerived(EMPTY_LOG_DERIVED, whole.events),
+        folded: whole.events.length,
+        logBytes: whole.logBytes,
+        truncated: whole.truncated
+      };
+    }
+    // A log that does not open on seq 1 cannot be read by position at all; it
+    // is folded exactly as it always was, and never snapshotted.
     const tail = await store.readAll(threadId);
-    const state = fold.foldAll(tail.events);
+    return {
+      state: await foldOnto(fold.createEmpty(), tail.events),
+      derived: advanceLogDerived(EMPTY_LOG_DERIVED, tail.events),
+      folded: tail.events.length,
+      logBytes: null,
+      truncated: tail.truncated
+    };
+  };
+
+  /**
+   * `state.json`, validated beyond what the store checks: the state must
+   * deserialize field-wise, be this thread's, sit at the file's own `seq`, and
+   * carry the orchestrator's `extras`. Anything else is a cache miss, never an
+   * error — the log is folded instead.
+   */
+  const loadUsableSnapshot = async (
+    threadId: string
+  ): Promise<{ state: ThreadFoldState; seq: number; logBytes: number; derived: LogDerived } | null> => {
+    let file: Awaited<ReturnType<ThreadStore["loadFoldSnapshot"]>>;
+    try {
+      file = await store.loadFoldSnapshot(threadId);
+    } catch (error) {
+      logger.warn(`agent-host: failed to read the fold snapshot of ${threadId}`, error);
+      return null;
+    }
+    if (file === null) {
+      return null;
+    }
+    const state = deserializeFoldState(file.state);
+    const derived = parseLogDerived(file.extras);
+    if (
+      state === null ||
+      derived === null ||
+      state.seq !== file.seq ||
+      state.head?.id !== threadId ||
+      !Number.isSafeInteger(file.logBytes) ||
+      file.logBytes < 0
+    ) {
+      logger.info("agent-host: discarding an unusable fold snapshot", { threadId });
+      return null;
+    }
+    return { state, seq: file.seq, logBytes: file.logBytes, derived };
+  };
+
+  /**
+   * Write `state.json` for the runtime as it stands, off the command path:
+   * fire-and-forget on the store's own per-thread queue, a failure logged and
+   * nothing else. `logBytes` must be the log's length right after the last
+   * event `runtime.state` holds — the caller's append result, or the read it
+   * folded.
+   */
+  const writeFoldSnapshot = (runtime: ThreadRuntime, logBytes: number): void => {
+    runtime.eventsSinceSnapshot = 0;
+    // A deleted thread's directory is about to go, and a headless state is no
+    // thread at all.
+    if (runtime.deleted || runtime.state.head === null) {
+      return;
+    }
+    runtime.lastSnapshotAt = clock.now().getTime();
+    const failed = (error: unknown): void => {
+      logger.warn(`agent-host: failed to write the fold snapshot for ${runtime.id}`, error);
+    };
+    try {
+      void store
+        .saveFoldSnapshot({
+          threadId: runtime.id,
+          seq: runtime.state.seq,
+          logBytes,
+          state: runtime.state,
+          extras: {
+            revertedTo: runtime.logDerived.revertedTo,
+            titleManual: runtime.logDerived.titleManual
+          }
+        })
+        .catch(failed);
+    } catch (error) {
+      failed(error);
+    }
+  };
+
+  const buildRuntime = async (threadId: string): Promise<ThreadRuntime> => {
+    const loaded = await foldFromDisk(threadId);
+    const state = loaded.state;
     const persistedHead = await store.loadHead(threadId).catch(() => null);
     const binding = await store.loadBinding(threadId).catch(() => null);
     const launch = await launchConfigs.load(threadId).catch(() => null);
@@ -612,6 +846,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       continueAfterRestart: persistedHead?.continueAfterRestart,
       binding,
       eventsSinceHeadSave: 0,
+      eventsSinceSnapshot: loaded.folded,
+      // Nothing written yet by this runtime: the first write is never delayed.
+      lastSnapshotAt: 0,
+      logDerived: loaded.derived,
       compacting: false,
       queuedTurns: [],
     lastInteractionMode: "default",
@@ -625,16 +863,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       historyPending:
         (state.items ?? []).length === 0 &&
         (bindingResumeCursor(binding) ?? state.head?.session.resumeCursor) !== undefined,
-      revertedTo: revertGuardFromLog(tail.events),
-      titleManual: tail.events.some(
-        (event) =>
-          event.type === "thread.meta-updated" &&
-          event.payload.title !== undefined &&
-          event.commandId !== null
-      ),
+      // Both as the log leaves them (§5.1, §5.5): a restart re-derives them.
+      revertedTo: loaded.derived.revertedTo,
+      titleManual: loaded.derived.titleManual,
       checkpointsUnavailable: false,
       deleted: state.deleted
     };
+    // A long fold is paid once: the next load of this thread starts from here,
+    // even if it is never written to again — an idle open tab would otherwise
+    // be folded from the top on every host restart (the upgrade to snapshots
+    // starts with none at all). Never for a log cut at a malformed line.
+    if (
+      loaded.logBytes !== null &&
+      !loaded.truncated &&
+      loaded.folded >= FOLD_SNAPSHOT_EVENT_INTERVAL
+    ) {
+      writeFoldSnapshot(runtime, loaded.logBytes);
+    }
     return runtime;
   };
 
@@ -721,17 +966,57 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         runtime.deleted = true;
       }
     }
+    runtime.logDerived = advanceLogDerived(runtime.logDerived, result.events);
     runtime.eventsSinceHeadSave += result.events.length;
+    runtime.eventsSinceSnapshot += result.events.length;
+    observeIndex(runtime, result);
     publish(runtime, result.events);
     // Rewritten every 50 events and on every head-shaped change (§5.1). A
     // session transition always writes: the §3.3 reconcile reads `meta.json`
     // alone, so a head that lagged behind the log would make a live turn look
     // settled on the next boot.
     const headChanged = result.events.some((event) => HEAD_WRITING_EVENTS.has(event.type));
+    // A2: `state.json` on every session transition — the same head-shaped
+    // changes, a turn settling above all — so a restart right after a long
+    // turn folds almost nothing; inside a long turn only once both 200 events
+    // and 30 s have passed, because serializing a big state stalls the loop.
+    // Never awaited: the store writes it on the thread's own queue.
+    const snapshotDue =
+      headChanged ||
+      (runtime.eventsSinceSnapshot >= FOLD_SNAPSHOT_EVENT_INTERVAL &&
+        clock.now().getTime() - runtime.lastSnapshotAt >= FOLD_SNAPSHOT_MIN_INTERVAL_MS);
+    if (result.events.length > 0 && snapshotDue) {
+      writeFoldSnapshot(runtime, result.logBytes);
+    }
     if (runtime.eventsSinceHeadSave >= HEAD_SAVE_EVENT_INTERVAL || headChanged) {
       await saveHeadNow(runtime);
     }
     return result;
+  };
+
+  /**
+   * C: hand the index what just landed, with the byte positions the store
+   * wrote it at. Strictly after the append returned — the index is a cache of
+   * the log and may lag it after a crash, never lead it (invariant 4) — and
+   * never allowed to fail the command whose events are already on disk.
+   */
+  const observeIndex = (runtime: ThreadRuntime, result: AppendResult): void => {
+    const index = options.index;
+    const head = runtime.state.head;
+    if (index === undefined || head === null || result.events.length === 0) {
+      return;
+    }
+    try {
+      index.observe({
+        threadId: runtime.id,
+        projectPath: head.projectPath,
+        title: head.title,
+        events: result.events,
+        positions: result.positions
+      });
+    } catch (error) {
+      logger.warn(`agent-host: the thread index could not take ${runtime.id}'s events`, error);
+    }
   };
 
   /** Append outside a command (ingestion, provider failures, reconcile). */
@@ -2753,6 +3038,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       await store.deleteThread(threadId);
       runtime.deleted = true;
+      // The index's rows are a cache of a log that no longer exists (C). The
+      // `thread.deleted` above already reached it through `commit`; this is
+      // the idempotent backstop for a thread whose head could not be read.
+      try {
+        options.index?.deleteThread(threadId);
+      } catch (error) {
+        logger.warn(`agent-host: the thread index could not drop ${threadId}`, error);
+      }
       // The `thread.deleted` event above is the last frame every open stream
       // gets; detach them so a stream that outlives this call cannot be
       // published into, and free the per-thread ingestion state — nothing else
@@ -2774,27 +3067,313 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // §5.6's two snapshot-time drops are not applied on the write path, so the
     // read applies them: a superseded `tool.updated` and a stale
     // `context-window.updated` never reach a client that loads the thread cold.
-    const kept = new Set(
-      projectSnapshotActivities(
-        payload.items.filter((item): item is ThreadActivityItem => item.kind === "activity")
-      ).map((activity) => activity.id)
-    );
     // §5.6: the full payload is persisted and slimmed on the way to the wire.
     // This is the snapshot half of the choke point (`stream.ts` is the live
     // half); `GET …/items/:itemId` stays unslimmed and is what "load full
     // output" reads.
-    const items = payload.items
-      .filter((item) => item.kind !== "activity" || kept.has(item.id))
-      .map((item) => {
-        if (item.kind !== "activity") return item;
-        const slimmed = slimActivityPayload(item.payload);
-        return slimmed === item.payload ? item : { ...item, payload: slimmed };
-      });
+    const items = slimItemsForRead(payload.items);
     const head =
       runtime.continueAfterRestart === undefined
         ? payload.head
         : { ...payload.head, continueAfterRestart: runtime.continueAfterRestart };
-    return { ...payload, head, items };
+    return { ...payload, head, items, history: historyBoundsOf(runtime) };
+  };
+
+  /**
+   * C: where the retained window ends and the indexed history begins, stamped
+   * on every snapshot — the activity the window begins at (`windowBoundary`),
+   * and whether the index holds any activity older than it.
+   */
+  const historyBoundsOf = (runtime: ThreadRuntime): ThreadHistoryBounds => {
+    const index = options.index;
+    if (index === undefined || !index.available) {
+      return {
+        indexed: false,
+        hasOlder: false,
+        beforeCursor: null,
+        oldestRetainedOrdinal: null,
+        totalTurns: 0
+      };
+    }
+    try {
+      const totalTurns = index.totalTurns(runtime.id);
+      const boundary = windowBoundary(runtime.state, index, runtime.id);
+      const anchor = boundary === null ? null : anchorTurnOf(index, runtime.id, boundary.seq);
+      if (boundary === null || anchor === null) {
+        return {
+          indexed: true,
+          hasOlder: false,
+          beforeCursor: null,
+          oldestRetainedOrdinal: anchor?.ordinal ?? null,
+          totalTurns
+        };
+      }
+      const hasOlder = index.hasItemsBefore(runtime.id, boundary.seq);
+      return {
+        indexed: true,
+        hasOlder,
+        beforeCursor: hasOlder
+          ? encodeHistoryCursor(blockCursor(runtime.id, anchor, boundary.seq))
+          : null,
+        oldestRetainedOrdinal: anchor.ordinal,
+        totalTurns
+      };
+    } catch (error) {
+      logger.warn(`agent-host: the thread index could not bound ${runtime.id}'s history`, error);
+      return {
+        indexed: false,
+        hasOlder: false,
+        beforeCursor: null,
+        oldestRetainedOrdinal: null,
+        totalTurns: 0
+      };
+    }
+  };
+
+  const indexUnavailable = (): AgentChatCommandError =>
+    new AgentChatCommandError(
+      "INDEX_UNAVAILABLE",
+      "Older history is not available on this host right now."
+    );
+
+  /**
+   * One block of history (design 2026-09-23, C, "History page"): the
+   * `HISTORY_PAGE_ACTIVITIES` activities below the cursor — or below the
+   * retained window, for a request without a usable one — with everything the
+   * log holds between them, folded. Pages are blocks of the LOG, not of turns:
+   * a subagent fleet's single turn runs to thousands of events, and is walked
+   * in blocks like any other stretch. `turns` in the answer is information
+   * about the block; a turn can span two blocks.
+   */
+  const readHistory = async (
+    threadId: string,
+    query: { before?: string; turns?: number }
+  ): Promise<ThreadHistoryPage> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      requireHead(runtime);
+      const index = options.index;
+      if (index === undefined || !index.available) {
+        throw indexUnavailable();
+      }
+      const seq = runtime.state.seq;
+      const empty: ThreadHistoryPage = {
+        threadId,
+        turns: [],
+        items: [],
+        checkpoints: [],
+        page: { beforeCursor: null },
+        seq
+      };
+      let plan: HistoryBlock | null;
+      try {
+        plan = planHistoryBlock(runtime, index, query);
+      } catch (error) {
+        logger.warn(`agent-host: the thread index could not page ${threadId}`, error);
+        throw indexUnavailable();
+      }
+      if (plan === null) {
+        return empty;
+      }
+      const range = await store.readEventRange(threadId, {
+        fromByte: plan.fromByte,
+        toByte: plan.toByte
+      });
+      if (range.truncated) {
+        // Positions the log no longer honours: an index behind a rewritten
+        // log, or a line that does not decode. Nothing is served rather than
+        // a block with a hole in it; the catch-up re-derives the positions.
+        logger.warn("agent-host: a history block does not read back whole; serving none", {
+          threadId,
+          fromByte: plan.fromByte,
+          toByte: plan.toByte
+        });
+        return empty;
+      }
+      const events = eventsOutsideRevertCuts(range.events, plan.turns, plan.firstTurnSeq);
+      const state = await applyEventsChunked(fold.createEmpty(), events, { apply: fold.apply });
+      return {
+        threadId,
+        turns: plan.turns.map((turn) => historyTurnOf(index, threadId, turn)),
+        items: slimItemsForRead(state.items ?? []),
+        checkpoints: state.checkpoints ?? [],
+        page: {
+          beforeCursor: plan.beforeCursor,
+          endItemId: await rowAtSeq(threadId, index, plan.endSeq)
+        },
+        seq
+      };
+    });
+
+  /**
+   * The row whose line sits at `seq` — an activity's line or a message's
+   * chunk — read off the log itself, because the index positions lines, not
+   * rows. Null for any other line, and for a line the log no longer honours.
+   */
+  const rowAtSeq = async (
+    threadId: string,
+    index: ThreadIndex,
+    seq: number
+  ): Promise<string | null> => {
+    const position = index.eventPositionBySeq(threadId, seq);
+    if (position === null) return null;
+    const line = await store.readEventRange(threadId, {
+      fromByte: position.byteOffset,
+      toByte: position.byteOffset + position.byteLength
+    });
+    const event = line.truncated ? undefined : line.events[0];
+    if (event === undefined || event.seq !== seq) return null;
+    if (event.type === "thread.activity-appended") return event.payload.activity.id;
+    if (event.type === "thread.message-sent") return event.payload.messageId;
+    return null;
+  };
+
+  /**
+   * Where a block starts and ends, in seqs and in bytes, and the cursor of
+   * the block below it. Every boundary is a line start the index recorded —
+   * an activity's latest line, a message's first chunk, or the log's first
+   * byte — and never falls inside a streamed message, so consecutive blocks
+   * meet exactly: nothing is skipped, no message is split across two, and
+   * only an activity rewritten under the same id can repeat. Null when there
+   * is nothing below.
+   */
+  const planHistoryBlock = (
+    runtime: ThreadRuntime,
+    index: ThreadIndex,
+    query: { before?: string; turns?: number }
+  ): HistoryBlock | null => {
+    const threadId = runtime.id;
+    // The END — the request's cursor, else the snapshot's own (the window's
+    // boundary). A malformed, foreign or no-longer-known cursor is a first-
+    // page request.
+    const cursor =
+      query.before !== undefined && query.before.length > 0
+        ? decodeHistoryCursor(query.before, threadId)
+        : null;
+    let end = cursor === null ? null : endOfCursor(index, threadId, cursor);
+    if (end === null) {
+      const boundary = windowBoundary(runtime.state, index, threadId);
+      end = boundary === null ? null : { seq: boundary.seq, byteOffset: boundary.byteOffset };
+    }
+    if (end === null) {
+      return null;
+    }
+    // An end inside a streamed message moves to where the message began: the
+    // block above — or the window — holds it whole, so none of its chunks
+    // belong here.
+    const endSeq = outsideMessages(index, threadId, end.seq);
+    if (endSeq !== end.seq) {
+      const moved = index.eventPositionBySeq(threadId, endSeq);
+      if (moved === null) {
+        return null;
+      }
+      end = { seq: endSeq, byteOffset: moved.byteOffset };
+    }
+
+    // The START — HISTORY_PAGE_ACTIVITIES activities back...
+    let startSeq = index.activitySeqBefore(threadId, {
+      beforeSeq: end.seq,
+      count: HISTORY_PAGE_ACTIVITIES
+    });
+    if (startSeq === null) {
+      return null;
+    }
+    // ...but, as a soft cap, never before the start of the `turns`-th turn
+    // back, and never past the newest activity below the end: every block
+    // carries at least one activity, or paging could stall.
+    if (query.turns !== undefined) {
+      const cap = capTurnOf(index, threadId, end, clampHistoryTurns(query.turns));
+      if (cap !== null && cap.firstSeq > startSeq) {
+        const newest = index.activitySeqBefore(threadId, { beforeSeq: end.seq, count: 1 });
+        startSeq = newest !== null && cap.firstSeq > newest ? newest : cap.firstSeq;
+      }
+    }
+    // ...and never inside a streamed message: the block takes it whole.
+    startSeq = outsideMessages(index, threadId, startSeq);
+
+    // Bytes. The oldest block reaches back to the log's first byte, so the
+    // first prompt and anything before the first activity are served too.
+    const older = index.hasItemsBefore(threadId, startSeq);
+    let fromByte = 0;
+    if (older) {
+      const position = index.eventPositionBySeq(threadId, startSeq);
+      if (position === null) {
+        return null;
+      }
+      fromByte = position.byteOffset;
+    }
+    if (end.byteOffset <= fromByte) {
+      return null;
+    }
+
+    let beforeCursor: string | null = null;
+    if (older) {
+      const anchor = anchorTurnOf(index, threadId, startSeq);
+      beforeCursor =
+        anchor === null ? null : encodeHistoryCursor(blockCursor(threadId, anchor, startSeq));
+    }
+    return {
+      fromByte,
+      toByte: end.byteOffset,
+      endSeq: end.seq,
+      turns: index.turnsInSeqRange(threadId, { fromSeq: older ? startSeq : 0, toSeq: end.seq }),
+      firstTurnSeq: index.turnByOrdinal(threadId, 1)?.firstSeq ?? null,
+      beforeCursor
+    };
+  };
+
+  const historyTurnOf = (
+    index: ThreadIndex,
+    threadId: string,
+    turn: IndexedTurn
+  ): ThreadHistoryTurn => {
+    let rewindable = false;
+    try {
+      rewindable = index.rewindable(threadId, turn);
+    } catch (error) {
+      // Withheld, never offered: a rewind across a compaction is one the
+      // provider cannot honour (§5.5).
+      logger.warn(`agent-host: the thread index could not judge a rewind on ${threadId}`, error);
+    }
+    return {
+      turnId: turn.turnId,
+      ordinal: turn.ordinal,
+      userMessageId: turn.userMessageId,
+      requestedAt: turn.requestedAt,
+      startedAt: turn.startedAt,
+      completedAt: turn.completedAt,
+      rewindable
+    };
+  };
+
+  const searchThreads = (query: {
+    q: string;
+    limit: number;
+    projectPath?: string;
+  }): ThreadSearchResponse => {
+    const text = query.q;
+    const index = options.index;
+    if (index === undefined || !index.available) {
+      return { query: text, hits: [], truncated: false, indexed: false };
+    }
+    if (text.trim().length === 0) {
+      return { query: text, hits: [], truncated: false, indexed: true };
+    }
+    const limit = Math.min(
+      THREAD_SEARCH_MAX_RESULTS,
+      Math.max(1, Number.isFinite(query.limit) ? Math.floor(query.limit) : THREAD_SEARCH_MAX_RESULTS)
+    );
+    try {
+      const hits = index.search({
+        q: text,
+        limit,
+        ...(query.projectPath !== undefined ? { projectPath: query.projectPath } : {})
+      });
+      return { query: text, hits, truncated: hits.length >= limit, indexed: true };
+    } catch (error) {
+      logger.warn("agent-host: a thread search failed", error);
+      return { query: text, hits: [], truncated: false, indexed: false };
+    }
   };
 
   const readThread = async (threadId: string, afterSeq?: number): Promise<ThreadReadResponse> =>
@@ -3371,7 +3950,36 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const markThreadsForContinuation = async (): Promise<string[]> => {
     const marked: string[] = [];
+    // Only a thread that can be running is loaded. The lazy boot (A1) leaves
+    // every idle thread on disk, and loading all of them here would fold every
+    // log on disk inside the stop path — the cost the lazy boot took out of
+    // startup, moved to shutdown, where a deploy's drain-restart waits on it.
+    // So: every thread this host serves, every thread with a live provider
+    // session, and an unloaded thread only when its `meta.json` says a turn is
+    // running (a `/stop` that lands before the reconcile has run) or cannot
+    // be read at all — the same rule the reconcile applies.
+    const candidates = new Set<string>(runtimes.keys());
+    const liveSessions = new Set<string>();
+    for (const adapter of options.adapters.values()) {
+      for (const session of adapter.listSessions()) {
+        liveSessions.add(session.threadId);
+      }
+    }
     for (const threadId of await store.listThreads()) {
+      if (candidates.has(threadId)) continue;
+      if (liveSessions.has(threadId)) {
+        candidates.add(threadId);
+        continue;
+      }
+      const persistedHead = await store.loadHead(threadId).catch(() => null);
+      if (
+        persistedHead === null ||
+        (persistedHead.session.status === "running" && persistedHead.session.activeTurnId !== null)
+      ) {
+        candidates.add(threadId);
+      }
+    }
+    for (const threadId of candidates) {
       try {
         const runtime = await loadRuntime(threadId);
         const head = headOf(runtime);
@@ -3461,6 +4069,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     });
   };
 
+  /**
+   * A1: the settle a thread the reconcile did not fold is owed, on its first
+   * load. Best-effort, exactly as it was at boot — a failure is logged and the
+   * thread still loads, rather than a transient write error making it
+   * unreadable.
+   */
+  const settleOnFirstLoad = async (runtime: ThreadRuntime): Promise<void> => {
+    try {
+      await settleStalePendingTurns(runtime);
+    } catch (error) {
+      logger.warn(`agent-host: failed to settle ${runtime.id} on its first load`, error);
+    }
+  };
+
   const reconcile = async (): Promise<void> => {
     // Never blocks or fails host startup: every thread is handled and settled
     // individually, and a failure of the whole pass is logged (§3.3).
@@ -3488,6 +4110,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // Anything the host can see running is excluded first, so an adopted host
     // is not reconciled against itself.
     if (live.has(threadId)) return;
+    // A1 (design 2026-09-23): orphaned-or-not is decided from `meta.json`
+    // alone — `commit` rewrites it on every session transition for exactly
+    // this reader — and only an orphan is folded here. An idle thread is left
+    // on disk; the settle it is owed runs on its first load. A thread already
+    // in memory keeps the full path (it costs nothing), and a head that cannot
+    // be read decides nothing: that thread is folded, as every thread was.
+    if (!runtimes.has(threadId) && !loadingRuntimes.has(threadId)) {
+      const persistedHead = await store.loadHead(threadId).catch(() => null);
+      if (persistedHead !== null && !isOrphanedHead(persistedHead)) {
+        bootSettlePending.add(threadId);
+        return;
+      }
+    }
     const runtime = await loadRuntime(threadId);
     const head = headOf(runtime);
     if (!head) {
@@ -3497,12 +4132,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     const session = head.session;
     const marker = head.continueAfterRestart;
-    const prepared = marker?.prepared === true;
-    const orphaned =
-      session.status === "starting" ||
-      session.status === "running" ||
-      session.activeTurnId !== null ||
-      (session.status === "ready" && prepared);
+    const orphaned = isOrphanedHead(head);
     if (!orphaned) {
       // Threads without an active turn are not resumed eagerly; the first
       // `sendTurn` re-adopts them (lazy recovery, §4.1).
@@ -3649,6 +4279,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     deleteThread,
     command,
     readThread,
+    readHistory,
+    searchThreads,
     readItem,
     readTurnDiff,
     summary,
@@ -3726,28 +4358,345 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
 export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
 
 /**
- * `ThreadRuntime.revertedTo` as the log leaves it: the target of the last
- * `thread.reverted`, unless a turn started after it — the rule the live path
- * applies on `turn.started`, read off the `thread.session-set` that names a
- * running turn. Without the second half a host restart would re-arm a guard
- * the running host had already lifted, and drop the next capture of a turn
- * that is not a truncated one at all.
+ * §3.3's orphan predicate: a turn was in flight, or a continuation was
+ * prepared and never sent. One expression for both of its readers — the boot
+ * decision off `meta.json` (A1) and the full path off the folded head — so the
+ * two can never disagree on what "orphaned" means.
  */
-function revertGuardFromLog(events: readonly DomainEvent[]): number | null {
-  let target: number | null = null;
+function isOrphanedHead(head: ThreadHead): boolean {
+  const session = head.session;
+  return (
+    session.status === "starting" ||
+    session.status === "running" ||
+    session.activeTurnId !== null ||
+    (session.status === "ready" && head.continueAfterRestart?.prepared === true)
+  );
+}
+
+/**
+ * `ThreadRuntime.revertedTo` and `titleManual` as the log leaves them, advanced
+ * over `events` — the one derivation a cold fold, a snapshot's tail and every
+ * `commit` share, so a reload from `state.json` + tail equals a reload from the
+ * whole log.
+ *
+ * `revertedTo` is the target of the last `thread.reverted`, unless a turn
+ * started after it — the rule the live path applies on `turn.started`, read
+ * off the `thread.session-set` that names a running turn. Without the second
+ * half a host restart would re-arm a guard the running host had already
+ * lifted, and drop the next capture of a turn that is not a truncated one at
+ * all.
+ *
+ * `titleManual` is set by a `thread.meta-updated` that carries a title AND a
+ * `commandId` — the user's own rename (§5.1); a provider retitle is appended
+ * with `commandId: null`.
+ */
+function advanceLogDerived(from: LogDerived, events: readonly DomainEvent[]): LogDerived {
+  let { revertedTo, titleManual } = from;
   for (const event of events) {
     if (event.type === "thread.reverted") {
-      target = event.payload.turnCount;
+      revertedTo = event.payload.turnCount;
     } else if (
-      target !== null &&
+      revertedTo !== null &&
       event.type === "thread.session-set" &&
       event.payload.session.status === "running" &&
       event.payload.session.activeTurnId !== null
     ) {
-      target = null;
+      revertedTo = null;
+    } else if (
+      !titleManual &&
+      event.type === "thread.meta-updated" &&
+      event.payload.title !== undefined &&
+      event.commandId !== null
+    ) {
+      titleManual = true;
     }
   }
-  return target;
+  return revertedTo === from.revertedTo && titleManual === from.titleManual
+    ? from
+    : { revertedTo, titleManual };
+}
+
+/**
+ * A fold snapshot's `extras`, validated field-wise (it is read from disk):
+ * null unless both derivations are present and well-formed, in which case the
+ * snapshot is not used at all rather than half-trusted.
+ */
+function parseLogDerived(extras: unknown): LogDerived | null {
+  if (extras === null || typeof extras !== "object" || Array.isArray(extras)) {
+    return null;
+  }
+  const record = extras as Record<string, unknown>;
+  const { revertedTo, titleManual } = record;
+  if (typeof titleManual !== "boolean") {
+    return null;
+  }
+  if (
+    revertedTo !== null &&
+    !(typeof revertedTo === "number" && Number.isSafeInteger(revertedTo) && revertedTo >= 0)
+  ) {
+    return null;
+  }
+  return { revertedTo, titleManual };
+}
+
+/**
+ * §5.6's read-time projection of a timeline, shared by the snapshot and a
+ * history page: a superseded `tool.updated` and a stale
+ * `context-window.updated` are dropped, and every activity payload is slimmed
+ * on its way to the wire. `GET …/items/:itemId` stays unslimmed.
+ */
+function slimItemsForRead(items: readonly ThreadItem[]): ThreadItem[] {
+  const kept = new Set(
+    projectSnapshotActivities(
+      items.filter((item): item is ThreadActivityItem => item.kind === "activity")
+    ).map((activity) => activity.id)
+  );
+  return items
+    .filter((item) => item.kind !== "activity" || kept.has(item.id))
+    .map((item) => {
+      if (item.kind !== "activity") return item;
+      const slimmed = slimActivityPayload(item.payload);
+      return slimmed === item.payload ? item : { ...item, payload: slimmed };
+    });
+}
+
+/**
+ * Activities per history block (design 2026-09-23, C, "History page") — below
+ * the fold's 500-row window, so folding a block never evicts one of its rows.
+ */
+export const HISTORY_PAGE_ACTIVITIES = 400;
+
+/** One planned history block (`planHistoryBlock`). */
+interface HistoryBlock {
+  fromByte: number;
+  toByte: number;
+  /** The seq of the line at `toByte`: the first line the block does not hold. */
+  endSeq: number;
+  /** The turns whose ranges meet the block, in ordinal order. */
+  turns: IndexedTurn[];
+  /** The first turn's opening seq: what lies before it is the thread's preamble, not a revert's cut. */
+  firstTurnSeq: number | null;
+  beforeCursor: string | null;
+}
+
+/**
+ * The activity the retained window begins at — where the history below it
+ * starts — as the index positions it; null when the index knows none.
+ *
+ * Not simply the oldest activity the fold holds: retention keeps a few rows
+ * out of age order (an agent's launch and end, a compaction marker, an open
+ * question), and it evicts per class — the parent timeline's 500 rows, each
+ * agent's own 200, 2 000 across agents. An anchor kept from the first turn
+ * would put the boundary there, and every block would start below it while
+ * the rows evicted after it were never served; a fleet whose agents lost
+ * their early rows while the parent's few rows survived would read as having
+ * nothing older at all. So each FULL class's window is found where retention
+ * would find it — its last `limit` rows — and the boundary is the newest of
+ * their first rows: everything evicted lies below it.
+ *
+ * Only once the fold has evicted an activity at all (`state.evicted`). Under
+ * batch retention (design 2026-09-23 fold performance) a class grows to its
+ * limit + slack before a trim, so "at least `limit` rows" no longer means
+ * "lost rows": a thread holding 501–550 parent rows that never trimmed would
+ * report older history and serve a first page the window already shows.
+ * After a trim the positional windows stay right, just conservative: a class
+ * holding up to its slack past its limit puts its boundary at or after the
+ * true cut, so the first page may repeat that many of the window's oldest
+ * rows, which the client renders once. With nothing evicted, the oldest
+ * activity the index knows is the boundary.
+ */
+function windowBoundary(
+  state: ThreadFoldState,
+  index: ThreadIndex,
+  threadId: string
+): IndexedItemPosition | null {
+  const activities = state.activities ?? [];
+  const parentRows: ThreadActivityItem[] = [];
+  const agentRows: ThreadActivityItem[] = [];
+  const rowsByAgent = new Map<string, ThreadActivityItem[]>();
+  for (const activity of activities) {
+    const owner =
+      typeof activity.agentId === "string" && activity.agentId.length > 0 ? activity.agentId : null;
+    if (owner === null) {
+      parentRows.push(activity);
+      continue;
+    }
+    agentRows.push(activity);
+    const rows = rowsByAgent.get(owner);
+    if (rows) rows.push(activity);
+    else rowsByAgent.set(owner, [activity]);
+  }
+  const windows: ThreadActivityItem[][] = [];
+  const addWindow = (rows: readonly ThreadActivityItem[], limit: number): void => {
+    if (rows.length >= limit) windows.push(rows.slice(rows.length - limit));
+  };
+  if (state.evicted?.activities === true) {
+    addWindow(parentRows, ACTIVITY_RETENTION_LIMIT);
+    for (const rows of rowsByAgent.values()) {
+      addWindow(rows, AGENT_ACTIVITY_RETENTION_LIMIT);
+    }
+    // The ceiling across every agent keeps the newest rows by time — compared
+    // as plain strings, exactly as the fold's trim orders them.
+    addWindow(
+      [...agentRows].sort((left, right) =>
+        left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0
+      ),
+      AGENT_ACTIVITY_TOTAL_LIMIT
+    );
+  }
+
+  const firstKnown = (rows: readonly ThreadActivityItem[]): IndexedItemPosition | null => {
+    for (const activity of rows) {
+      const position = index.itemPosition(threadId, activity.id);
+      if (position !== null) return position;
+    }
+    return null;
+  };
+  if (windows.length === 0) {
+    return firstKnown(activities);
+  }
+  let boundary: IndexedItemPosition | null = null;
+  for (const window of windows) {
+    const position = firstKnown(window);
+    if (position !== null && (boundary === null || position.seq > boundary.seq)) {
+      boundary = position;
+    }
+  }
+  return boundary;
+}
+
+/**
+ * The turn a block boundary is named after in a cursor: the one whose range
+ * holds `seq`, or the first turn for a row older than every turn. Its id and
+ * anchor are information once the cursor carries `beforeSeq`.
+ */
+function anchorTurnOf(index: ThreadIndex, threadId: string, seq: number): IndexedTurn | null {
+  return index.turnOfSeq(threadId, seq) ?? index.turnByOrdinal(threadId, 1);
+}
+
+/** The cursor of the block that ends just below the activity line at `seq`. */
+function blockCursor(threadId: string, turn: IndexedTurn, seq: number): HistoryCursor {
+  return {
+    threadId,
+    beforeAnchorAt: turn.requestedAt,
+    beforeTurnId: turn.turnId,
+    beforeSeq: seq
+  };
+}
+
+/**
+ * Where a cursor's block ends: just below the line it names (`beforeSeq` — an
+ * activity's line or a message's first chunk), or at the start of the turn it
+ * names. Null when the cursor names nothing the index still knows — a first-
+ * page request, then.
+ *
+ * A `beforeSeq` goes stale when its activity is rewritten under the same id
+ * (the index follows its latest line): the block then ends just past the
+ * activity below it, so at most that gap's non-activity rows go unserved —
+ * never an activity, and never a row twice.
+ */
+function endOfCursor(
+  index: ThreadIndex,
+  threadId: string,
+  cursor: HistoryCursor
+): { seq: number; byteOffset: number } | null {
+  if (cursor.beforeSeq !== undefined) {
+    const position = index.eventPositionBySeq(threadId, cursor.beforeSeq);
+    if (position !== null) {
+      return { seq: position.seq, byteOffset: position.byteOffset };
+    }
+    const below = index.activitySeqBefore(threadId, { beforeSeq: cursor.beforeSeq, count: 1 });
+    const belowAt = below === null ? null : index.itemPositionBySeq(threadId, below);
+    // Nothing below it at all: the block is empty, not the first page again.
+    return belowAt === null
+      ? { seq: cursor.beforeSeq, byteOffset: 0 }
+      : { seq: cursor.beforeSeq, byteOffset: belowAt.byteOffset + belowAt.byteLength };
+  }
+  const turn = index.turnById(threadId, cursor.beforeTurnId);
+  return turn === null ? null : { seq: turn.firstSeq, byteOffset: turn.firstByte };
+}
+
+/**
+ * `seq`, moved back past every streamed message it would split: a message
+ * whose first chunk lies below `seq` and whose later chunks do not. Moving to
+ * such a message's first chunk may land inside an older one, so it repeats —
+ * bounded, since each step only moves back.
+ */
+function outsideMessages(index: ThreadIndex, threadId: string, seq: number): number {
+  let bound = seq;
+  for (let round = 0; round < 8; round += 1) {
+    const spanning = index.messagesSpanning(threadId, bound);
+    if (spanning.length === 0) {
+      return bound;
+    }
+    const earliest = Math.min(...spanning.map((message) => message.firstSeq));
+    if (earliest >= bound) {
+      return bound;
+    }
+    bound = earliest;
+  }
+  return bound;
+}
+
+/**
+ * The `turns` soft cap: the turn a block ending at `end` may reach back to —
+ * the `turns`-th started turn back, counting the end's own turn when the end
+ * falls inside it. Null when the thread has fewer turns than that.
+ */
+function capTurnOf(
+  index: ThreadIndex,
+  threadId: string,
+  end: { seq: number },
+  turns: number
+): IndexedTurn | null {
+  const endTurn = index.turnOfSeq(threadId, end.seq);
+  if (endTurn === null) {
+    return null;
+  }
+  const ordinal = endTurn.ordinal - turns + (end.seq > endTurn.firstSeq ? 1 : 0);
+  return ordinal >= 1 ? index.turnByOrdinal(threadId, ordinal) : null;
+}
+
+/**
+ * A block's events without a revert's cut: the index's turn ranges tile the
+ * log except where a revert removed turns — those turns' lines and the
+ * `thread.reverted` itself belong to no turn — so only events inside some
+ * turn's `[firstSeq, lastSeq]`, or before the first turn (the thread's
+ * preamble), are folded. Folding the cut would bring back the removed turns
+ * and apply a `turnCount` counted from the thread's first turn, not the
+ * block's. `turns` are the block's own, in ordinal order.
+ */
+function eventsOutsideRevertCuts(
+  events: readonly DomainEvent[],
+  turns: readonly IndexedTurn[],
+  firstTurnSeq: number | null
+): DomainEvent[] {
+  if (firstTurnSeq === null) {
+    return [...events];
+  }
+  const kept: DomainEvent[] = [];
+  let turn = 0;
+  for (const event of events) {
+    if (event.seq < firstTurnSeq) {
+      kept.push(event);
+      continue;
+    }
+    while (turn < turns.length && event.seq > turns[turn]!.lastSeq) {
+      turn += 1;
+    }
+    if (turn < turns.length && event.seq >= turns[turn]!.firstSeq) {
+      kept.push(event);
+    }
+  }
+  return kept;
+}
+
+/** `turns` of a history request: an integer in `[1, THREAD_HISTORY_MAX_TURNS]`. */
+function clampHistoryTurns(turns: number | undefined): number {
+  if (typeof turns !== "number" || !Number.isFinite(turns)) {
+    return THREAD_HISTORY_DEFAULT_TURNS;
+  }
+  return Math.min(THREAD_HISTORY_MAX_TURNS, Math.max(1, Math.floor(turns)));
 }
 
 /**

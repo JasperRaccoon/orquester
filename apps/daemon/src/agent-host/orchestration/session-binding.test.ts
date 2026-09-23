@@ -47,6 +47,10 @@ function stripCursorFromEventSourcedState(store: FakeThreadStore, threadId: stri
       return { ...event, payload: { ...event.payload, session: rest } } as DomainEvent;
     })
   );
+  // The fold snapshot (`state.json`) is a cache of the log: on a real disk the
+  // shortened lines move every byte offset and the store discards it; the
+  // fake's fixed-width positions do not, so the fixture drops it explicitly.
+  store.snapshots.delete(threadId);
 }
 
 /** A thread that ran one turn, so a cursor has been learned. */

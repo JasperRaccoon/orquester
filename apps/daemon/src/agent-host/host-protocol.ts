@@ -121,6 +121,12 @@ export const agentHostRoutes = {
   providerRefresh: (adapterId: string): string =>
     `/providers/${encodeURIComponent(adapterId)}/refresh`,
 
+  // Indexed history and search (design 2026-09-23 "thread index and lazy boot").
+  /** `GET ?before=<cursor>&turns=<n>` → `ThreadHistoryPage`, or 503 `INDEX_UNAVAILABLE`. */
+  history: (threadId: string): string => `${thread(threadId)}/history`,
+  /** `GET ?q=&limit=&projectPath=` → `ThreadSearchResponse`. */
+  search: "/search",
+
 
   /**
    * The intentional stop of §3.3: write every continuation marker for a

@@ -16,10 +16,12 @@ import type {
   CheckpointStatus,
   CommandReceipt,
   DomainEvent,
+  FoldSnapshotFile,
   ProviderSessionBinding,
   ProviderSessionBindingPatch,
   ProviderSnapshot,
   RuntimeEvent,
+  ThreadFoldState,
   ThreadHead,
   AgentAdapterId
 } from "@orquester/api/agent-chat";
@@ -40,11 +42,44 @@ export type { Clock, IdGen };
 type OmitSeq<T> = T extends unknown ? Omit<T, "seq"> : never;
 export type AppendableDomainEvent = OmitSeq<DomainEvent>;
 
+/**
+ * Where one event's line sits in `events.ndjson`: `byteOffset` is the file's
+ * length before the line, `byteLength` the line's UTF-8 bytes INCLUDING its
+ * newline — so the next line starts at `byteOffset + byteLength`. Bytes, never
+ * characters: a history page is read back by byte range.
+ */
+export interface EventPosition {
+  seq: number;
+  byteOffset: number;
+  byteLength: number;
+}
+
 export interface AppendResult {
   /** The sequence the last appended event landed at. */
   seq: number;
   /** The events as persisted, with their sequences stamped. */
   events: DomainEvent[];
+  /** positions[i] describes events[i]'s line in events.ndjson. */
+  positions: EventPosition[];
+  /** Byte length of events.ndjson right after this append. */
+  logBytes: number;
+}
+
+export interface EventsFromResult {
+  events: DomainEvent[];
+  positions: EventPosition[];
+  /** The log was cut at a malformed line (same meaning as ThreadTail.truncated). */
+  truncated: boolean;
+  /** Highest seq decoded. */
+  seq: number;
+  /** Byte length of the log consumed (offset just past the last decoded line). */
+  logBytes: number;
+  /**
+   * True when the log at `byteOffset` does not start with seq `afterSeq + 1`
+   * (or is shorter than `byteOffset`): the caller's cursor is stale and it must
+   * re-read from byte 0. `events` is then empty.
+   */
+  mismatch: boolean;
 }
 
 export interface ThreadTail {
@@ -93,6 +128,45 @@ export interface ThreadStore {
 
   /** The whole log, for a cold fold. Truncates at a malformed line. */
   readAll(threadId: string): Promise<ThreadTail>;
+
+  /**
+   * The log from a recorded cursor — a fold snapshot's or the index's — to
+   * its end, with every event's position. The line at `byteOffset` must carry
+   * `afterSeq + 1`; anything else answers `mismatch` and the caller re-reads
+   * from byte 0.
+   */
+  readEventsFrom(
+    threadId: string,
+    input: { byteOffset: number; afterSeq: number }
+  ): Promise<EventsFromResult>;
+
+  /** Events whose lines lie in [fromByte, toByte). Both are line boundaries the index recorded. */
+  readEventRange(
+    threadId: string,
+    input: { fromByte: number; toByte: number }
+  ): Promise<{ events: DomainEvent[]; truncated: boolean }>;
+
+  /** entry.seq after ensureLoaded — meta.json + the log's last line, no fold. */
+  lastSeq(threadId: string): Promise<number>;
+
+  /** Current byte length of events.ndjson (0 when absent). */
+  logLength(threadId: string): Promise<number>;
+
+  /**
+   * `state.json`, the fold snapshot (A2). A cache of the log, never an
+   * authority: parsed and validated; null when missing/corrupt/other
+   * version/other thread. Never throws.
+   */
+  loadFoldSnapshot(threadId: string): Promise<FoldSnapshotFile | null>;
+
+  /** Atomic (tmp + rename), 0600, on the thread's write queue. */
+  saveFoldSnapshot(input: {
+    threadId: string;
+    seq: number;
+    logBytes: number;
+    state: ThreadFoldState;
+    extras?: Record<string, unknown>;
+  }): Promise<void>;
 
   /** `meta.json`, or null when the thread does not exist or does not parse. */
   loadHead(threadId: string): Promise<ThreadHead | null>;

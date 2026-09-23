@@ -264,6 +264,89 @@ describe("commands", () => {
   });
 });
 
+describe("indexed history and search (design 2026-09-23 §C)", () => {
+  it("asks for an older page by cursor and turn count", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const page = {
+      threadId: "s 1",
+      turns: [],
+      items: [],
+      checkpoints: [],
+      page: { beforeCursor: null },
+      seq: 9
+    };
+    transporter.responses.push({ status: 200, ok: true, data: page });
+
+    const answer = await transport.readHistory("s 1", { before: "cur-1", turns: 20 });
+
+    assert.deepEqual(answer, page);
+    assert.equal(transporter.requests[0]?.method, "GET");
+    assert.equal(transporter.requests[0]?.path, "/api/sessions/s%201/history");
+    assert.deepEqual(transporter.requests[0]?.query, { before: "cur-1", turns: 20 });
+  });
+
+  it("omits the cursor for the first page below the window", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push({ status: 200, ok: true, data: {} });
+
+    await transport.readHistory("s1", { turns: 5 });
+
+    assert.deepEqual(transporter.requests[0]?.query, { turns: 5 });
+  });
+
+  it("searches every thread with the query, the limit and an optional project", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const response = { query: "formatBytes", hits: [], truncated: false, indexed: true };
+    transporter.responses.push({ status: 200, ok: true, data: response });
+    transporter.responses.push({ status: 200, ok: true, data: response });
+
+    assert.deepEqual(await transport.search({ q: "formatBytes", limit: 20 }), response);
+    await transport.search({ q: "x", projectPath: "/w/p" });
+
+    assert.equal(transporter.requests[0]?.method, "GET");
+    assert.equal(transporter.requests[0]?.path, "/api/agent/search");
+    assert.deepEqual(transporter.requests[0]?.query, { q: "formatBytes", limit: 20 });
+    assert.deepEqual(transporter.requests[1]?.query, { q: "x", projectPath: "/w/p" });
+  });
+
+  it("forwards the abort signal on both reads", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const controller = new AbortController();
+
+    await transport.readHistory("s1", {}, controller.signal);
+    await transport.search({ q: "x" }, controller.signal);
+
+    assert.equal(transporter.requests[0]?.signal, controller.signal);
+    assert.equal(transporter.requests[1]?.signal, controller.signal);
+  });
+
+  it("maps INDEX_UNAVAILABLE to a typed, non-retryable error", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const envelope = { error: { code: "INDEX_UNAVAILABLE", message: "index is rebuilding" } };
+    transporter.responses.push({ status: 503, ok: false, data: envelope });
+    transporter.responses.push({ status: 503, ok: false, data: envelope });
+
+    for (const run of [
+      () => transport.readHistory("s1", {}),
+      () => transport.search({ q: "x" })
+    ]) {
+      await assert.rejects(run, (error: unknown) => {
+        assert.ok(error instanceof AgentChatCommandError);
+        assert.equal(error.status, 503);
+        assert.equal(error.code, "INDEX_UNAVAILABLE");
+        assert.equal(error.message, "index is rebuilding");
+        assert.equal(error.retryable, false);
+        return true;
+      });
+    }
+  });
+});
+
 describe("attachments", () => {
   it("carries a chat upload's server-minted AttachmentRef verbatim (the host answers the ref itself)", () => {
     const fromHost = {

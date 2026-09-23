@@ -54,6 +54,12 @@ function fakeTransport(): {
     async readItem() {
       throw new Error("unused");
     },
+    async readHistory() {
+      throw new Error("unused");
+    },
+    async search() {
+      throw new Error("unused");
+    },
     async turnDiff() {
       throw new Error("unused");
     },

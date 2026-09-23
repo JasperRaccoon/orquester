@@ -14,6 +14,12 @@
  * narrow optimistic rule (tab-local reorder/rename) lives in the app store, not
  * here.
  *
+ * **Older history rides the slice too** (design 2026-09-23): the pages the
+ * user paged in, and the bridge of rows the window evicted since, projected
+ * above the window's own rows (`history.logic.ts`). The bridge is the one part
+ * that grows on its own, so this is where its cap is held and where a bridge
+ * past it asks for fresh bounds.
+ *
  * No React import — `hooks.ts` is the only React file in this package.
  */
 
@@ -22,6 +28,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   ACTIVE_SUBAGENT_STATUSES,
   DEFAULT_INTERACTION_MODE,
+  THREAD_HISTORY_DEFAULT_TURNS,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
   type ApprovalDecision,
@@ -40,6 +47,8 @@ import {
 import type {
   ActivePlanState,
   AgentChatActions,
+  AgentChatHistoryState,
+  AgentChatRevealRequest,
   AgentChatThreadSlice,
   AgentChatTimelineRow,
   DisclosureState,
@@ -58,6 +67,32 @@ import {
   type ThreadTimelineProjection
 } from "./entries.logic";
 import {
+  canLoadOlderHistory,
+  collectHistoryItems,
+  EMPTY_HISTORY_ITEMS,
+  EMPTY_HISTORY_ROWS,
+  EMPTY_LIVE_SPLIT,
+  hasSettledCompaction,
+  HISTORY_REVEAL_PAGE_CAP,
+  HISTORY_ROW_CAP,
+  historyErrorMessage,
+  historyWithinCap,
+  historyWithPage,
+  isStartedTurn,
+  liveTurnIdsOf,
+  mergeTimelineRows,
+  nextHistoryCursor,
+  planReveal,
+  projectHistoryRows,
+  rowIdForTurn,
+  splitLiveItems,
+  userMessageIdForTurn,
+  withoutOrphanBridge,
+  type HistoryItemsState,
+  type HistoryRowsState,
+  type LiveSplit
+} from "./history.logic";
+import {
   deriveActivePlanState,
   findLatestProposedPlan,
   hasActionableProposedPlan
@@ -68,11 +103,13 @@ import {
   latestTurnSettled,
   needsResync,
   patchSlice,
+  withConnection,
   type AgentChatReducerState
 } from "./reducer.logic";
 import {
   computeStableRows,
   deriveTimelineRowsWithState,
+  deriveUnsettledTurnId,
   EMPTY_STABLE_ROWS,
   type StableRowsState,
   type TimelineRowsProjection
@@ -128,6 +165,12 @@ export interface ThreadStoreDeps {
   hostUnavailableRetries?: number;
   /** Injected in tests; production uses `setTimeout`. */
   delay?: (ms: number) => Promise<void>;
+  /**
+   * The most rows the history's pages and bridge may hold together
+   * ({@link HISTORY_ROW_CAP}). Injected in tests, which cannot stream twenty
+   * thousand evictions to reach the real one.
+   */
+  historyRowCap?: number;
 }
 
 function defaultId(): string {
@@ -187,6 +230,12 @@ export interface AgentChatThreadState {
   draft: ComposerDraft;
   /** True while an interrupt is in flight; the Stop button reads "Stopping…". */
   stopping: boolean;
+  /**
+   * The turn the timeline should bring on screen (the command palette's
+   * search hit), until it acknowledges the nonce. Never retained: a remount
+   * must not replay a scroll the user has already been given.
+   */
+  reveal: AgentChatRevealRequest | null;
   actions: AgentChatActions;
 }
 
@@ -196,6 +245,40 @@ interface InternalState extends AgentChatThreadState {
   timeline: ThreadTimelineProjection;
   rowsProjection: TimelineRowsProjection | null;
   stableRows: StableRowsState;
+  /**
+   * Every loaded history page's items and the bridge as one list, memoised
+   * by the `pages` and `bridge` arrays (design 2026-09-23 "Client", and fold
+   * performance "Client — the history bridge").
+   */
+  historyItems: HistoryItemsState;
+  /**
+   * The window's items split against the history: an item a page or the
+   * bridge also holds renders at the HISTORY's position with the window's
+   * content, and so does every window item before the window cut; all of
+   * them leave the window's own rows. Untouched while nothing is loaded.
+   */
+  liveSplit: LiveSplit;
+  /**
+   * The layer-1 projection the window's ROWS are built from: `timeline`
+   * itself while the window shares nothing with a page, else the same
+   * projection over `liveSplit.rowItems`. Everything else the window derives
+   * (the context meter, plans, the compaction phase, the queue's boundary)
+   * still reads the whole `timeline`.
+   */
+  rowTimeline: ThreadTimelineProjection;
+  /**
+   * The loaded history's rows, projected together and memoised (design
+   * 2026-09-23 "Client"). Kept beside the window's own layers rather than
+   * inside them, so the window's streaming fast path is exactly what it is
+   * without history.
+   */
+  historyRows: HistoryRowsState;
+  /**
+   * What `rows` was merged from. The merge is redone only when either side
+   * moved, so an update that touches neither (a flag, a draft) never hands
+   * the timeline a new array.
+   */
+  rowsSource: { history: HistoryRowsState; live: readonly AgentChatTimelineRow[] };
   /**
    * The three `Set`-valued row inputs, cached against the arrays they are
    * built from.
@@ -240,6 +323,12 @@ export interface RetainedThreadState {
   rowsProjection: TimelineRowsProjection | null;
   stableRows: StableRowsState;
   derivedSets: InternalState["derivedSets"];
+  /** The history's cached layers — a remount paints them without re-deriving. */
+  historyItems?: HistoryItemsState;
+  liveSplit?: LiveSplit;
+  rowTimeline?: ThreadTimelineProjection;
+  historyRows?: HistoryRowsState;
+  rowsSource?: InternalState["rowsSource"];
   rows: AgentChatTimelineRow[];
   isCompacting: boolean;
   activePlan: ActivePlanState | null;
@@ -274,7 +363,11 @@ export function retainedThreadCount(): number {
  * `onOpen` takes it to `connecting` as on a cold start.
  *
  * The error banner is cleared with it: it described a command posted by a
- * generation that no longer exists.
+ * generation that no longer exists. So is a history load's spinner, for the
+ * same reason — the `GET …/history` that set it belonged to that generation
+ * and will never settle this one; the loaded pages themselves are kept, and
+ * so is their bridge — only a bridge begun for a FIRST page that will now
+ * never land goes (`withoutOrphanBridge`).
  *
  * *T3: `packages/client-runtime/src/state/threads.ts:161-176`
  * (`cachedThreadState`).*
@@ -283,7 +376,10 @@ export function cachedThreadState(retained: RetainedThreadState): RetainedThread
   const slice = retained.reducer.slice;
   const connection =
     slice.connection === "synchronized" && slice.head !== null ? "synchronized" : "idle";
-  const reducer = patchSlice(retained.reducer, { connection, errorBanner: null });
+  const history = slice.history.loading
+    ? withoutOrphanBridge({ ...slice.history, loading: false })
+    : slice.history;
+  const reducer = patchSlice(retained.reducer, { connection, errorBanner: null, history });
   return reducer === retained.reducer ? retained : { ...retained, reducer };
 }
 
@@ -297,6 +393,11 @@ function retainableFrom(state: InternalState): RetainedThread<RetainedThreadStat
       rowsProjection: state.rowsProjection,
       stableRows: state.stableRows,
       derivedSets: state.derivedSets,
+      historyItems: state.historyItems,
+      liveSplit: state.liveSplit,
+      rowTimeline: state.rowTimeline,
+      historyRows: state.historyRows,
+      rowsSource: state.rowsSource,
       rows: state.rows,
       isCompacting: state.isCompacting,
       activePlan: state.activePlan,
@@ -330,6 +431,13 @@ const REWIND_IN_PROGRESS = "A rewind is already in progress.";
 const REWIND_TIMED_OUT =
   "The rewind is taking too long; the thread will update when the host finishes.";
 
+/**
+ * How long a reveal waits for the thread's stream to synchronize before it
+ * plans against whatever snapshot there is. The palette opens the tab first,
+ * so a cold thread is usually mid-connect when the reveal starts.
+ */
+export const REVEAL_SYNC_TIMEOUT_MS = 10_000;
+
 type RewindProgress =
   | { kind: "pending" }
   | { kind: "rewound" }
@@ -337,6 +445,14 @@ type RewindProgress =
 
 function isRevertFailure(item: ThreadItem): item is ThreadActivityItem {
   return item.kind === "activity" && item.activityKind === REVERT_FAILED_ACTIVITY_KIND;
+}
+
+/** Whether a loaded history page, or the bridge, still holds `messageId`. */
+function inLoadedHistory(history: AgentChatHistoryState, messageId: string): boolean {
+  return (
+    history.bridge.some((item) => item.id === messageId) ||
+    history.pages.some((page) => page.items.some((item) => item.id === messageId))
+  );
 }
 
 /** Every rewind failure already on the thread — only a NEW one answers ours. */
@@ -368,9 +484,11 @@ function revertFailureReason(activity: ThreadActivityItem): string {
 function rewindProgress(
   entries: readonly ThreadItem[],
   messageId: string,
-  knownFailureIds: ReadonlySet<string>
+  knownFailureIds: ReadonlySet<string>,
+  /** The message is still on a loaded history page or the bridge (design 2026-09-23). */
+  inHistory = false
 ): RewindProgress {
-  let messagePresent = false;
+  let messagePresent = inHistory;
   let failure: ThreadActivityItem | null = null;
   for (const item of entries) {
     if (item.kind === "message") {
@@ -465,33 +583,83 @@ function project(state: InternalState): InternalState {
     state = { ...state, derivedSets: cachedSets };
   }
   const sets = cachedSets;
+  // An item a loaded history page or the bridge also holds renders at the
+  // history's position (design 2026-09-23 "Client"), and so does every window
+  // item before the window cut, so the window's rows are built from what the
+  // window alone holds after it. With nothing loaded none of this runs: the
+  // window's rows read `timeline` exactly as they always did.
+  const historyItems = collectHistoryItems(
+    state.historyItems,
+    slice.history.pages,
+    slice.history.bridge
+  );
+  const liveSplit =
+    historyItems.ids.size === 0
+      ? EMPTY_LIVE_SPLIT
+      : splitLiveItems(state.liveSplit, slice.entries, historyItems, slice.history.windowCut);
+  const rowTimeline =
+    historyItems.ids.size === 0 || liveSplit.rowItems === slice.entries
+      ? timeline
+      : deriveTimelineEntriesFromItems(liveSplit.rowItems, state.rowTimeline);
   const runningTurnId = slice.head?.session.activeTurnId ?? null;
   const latestTurn = slice.turns.at(-1) ?? null;
+  const latestTurnSummary = latestTurn
+    ? {
+        turnId: latestTurn.turnId,
+        state: latestTurn.state,
+        startedAt: latestTurn.startedAt,
+        completedAt: latestTurn.completedAt
+      }
+    : null;
+  const isWorking =
+    slice.sessionStatus === "running" ||
+    slice.turnStatus === "running" ||
+    slice.turnStatus === "pending";
+  const activeTurnStartedAt = latestTurn?.startedAt ?? latestTurn?.requestedAt ?? null;
   const isCompacting = isCompactingThread({
     activities: timeline.activities,
     sessionStatus: slice.sessionStatus,
     turnStatus: slice.turnStatus
   });
+  // The timeline's last prompt sits in the history — a running turn so long
+  // its early rows went there — when the window's own rows hold none: the
+  // turn's "Working…" header then follows that prompt up there.
+  const activeTurnHeaderInHistory =
+    historyItems.ids.size > 0 &&
+    !liveSplit.rowsHavePrompt &&
+    (historyItems.hasPrompt || liveSplit.sharedHavePrompt);
+  // The loaded history pages and the bridge sit ABOVE the window (design
+  // 2026-09-23 "Client"): projected together through the same row derivation,
+  // and merged in with the window winning any id both project. With nothing
+  // loaded both calls hand their input straight back. A running turn's rows
+  // up there render live, exactly as the window renders that turn.
+  const historyRows = projectHistoryRows(state.historyRows, {
+    history: historyItems,
+    sharedLive: liveSplit.shared,
+    expandedTurnIds: sets.expandedTurnIds,
+    expandedWorkGroupIds: sets.expandedGroupIds,
+    turns: slice.turns,
+    supportsConversationRollback: supportsRollback ?? false,
+    // The window's OWN rows: a compaction marker the pages hold too is theirs
+    // to gate, by position, like any other history row.
+    liveCompacted: historyItems.ids.size > 0 && hasSettledCompaction(rowTimeline.workEntries),
+    unsettledTurnId: deriveUnsettledTurnId(latestTurnSummary, runningTurnId),
+    isWorking,
+    isCompacting,
+    activeTurnStartedAt,
+    activeTurnHeaderHere: activeTurnHeaderInHistory,
+    liveAgentTaskIds: sets.liveAgentTaskIds
+  });
   const rowsProjection = deriveTimelineRowsWithState(
     {
-      timelineEntries: timeline.entries,
-      latestTurn: latestTurn
-        ? {
-            turnId: latestTurn.turnId,
-            state: latestTurn.state,
-            startedAt: latestTurn.startedAt,
-            completedAt: latestTurn.completedAt
-          }
-        : null,
+      timelineEntries: rowTimeline.entries,
+      latestTurn: latestTurnSummary,
       runningTurnId,
       expandedTurnIds: sets.expandedTurnIds,
       expandedWorkGroupIds: sets.expandedGroupIds,
-      isWorking:
-        slice.sessionStatus === "running" ||
-        slice.turnStatus === "running" ||
-        slice.turnStatus === "pending",
+      isWorking,
       isCompacting,
-      activeTurnStartedAt: latestTurn?.startedAt ?? latestTurn?.requestedAt ?? null,
+      activeTurnStartedAt,
       checkpoints: slice.checkpoints,
       // "Rewind to here" is numbered by turn order (§5.5). The fold keeps this
       // array's identity across streamed tokens, so the fast path survives.
@@ -502,11 +670,21 @@ function project(state: InternalState): InternalState {
       // snapshot has not loaded means withheld, never offered-and-failing.
       supportsConversationRollback: supportsRollback ?? false,
       liveAgentTaskIds: sets.liveAgentTaskIds,
-      queuedMessages: state.queue.messages
+      queuedMessages: state.queue.messages,
+      // Split with the history above: where the running turn's header went,
+      // and whether a live row up there already shows the turn working.
+      activeTurnHeader: activeTurnHeaderInHistory ? "above" : "here",
+      liveActivityAbove: historyRows.hasActivityRow
     },
     state.rowsProjection
   );
   const stableRows = computeStableRows(rowsProjection.rows, state.stableRows);
+  const rowsSource =
+    state.rowsSource.history === historyRows && state.rowsSource.live === stableRows.result
+      ? state.rowsSource
+      : { history: historyRows, live: stableRows.result };
+  const rows =
+    rowsSource === state.rowsSource ? state.rows : mergeTimelineRows(historyRows, stableRows.result);
   const activities = timeline.activities;
   const activePlan = deriveActivePlanState(activities, latestTurn?.turnId ?? null);
   // The proposal the composer acts on. Recomputed here rather than in the view
@@ -525,6 +703,11 @@ function project(state: InternalState): InternalState {
     timeline === state.timeline &&
     rowsProjection === state.rowsProjection &&
     stableRows === state.stableRows &&
+    historyItems === state.historyItems &&
+    liveSplit === state.liveSplit &&
+    rowTimeline === state.rowTimeline &&
+    historyRows === state.historyRows &&
+    rows === state.rows &&
     activePlan === state.activePlan &&
     isCompacting === state.isCompacting &&
     cachedSets === state.derivedSets &&
@@ -537,7 +720,12 @@ function project(state: InternalState): InternalState {
     timeline,
     rowsProjection,
     stableRows,
-    rows: stableRows.result,
+    historyItems,
+    liveSplit,
+    rowTimeline,
+    historyRows,
+    rowsSource,
+    rows,
     isCompacting,
     // `deriveActivePlanState` rebuilds its object each call; keep the previous
     // one when nothing about it moved, so the composer's checklist does not
@@ -594,6 +782,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   const now = deps.now ?? (() => new Date().toISOString());
   const delay = deps.delay ?? defaultDelay;
   const maxRetries = deps.hostUnavailableRetries ?? 3;
+  const historyRowCap = deps.historyRowCap ?? HISTORY_ROW_CAP;
   const positions = timelinePositionStore();
 
   // §6.5/§7.2: take the retained snapshot (removing it — this generation is
@@ -609,6 +798,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   let sending = false;
   /** Decided inside a zustand updater, acted on after `set` returns (Q2-9). */
   let resyncWanted = false;
+  /**
+   * The history's bridge outgrew its cap and everything loaded was dropped
+   * (`historyWithinCap`): fresh bounds are wanted. Decided and acted on as
+   * `resyncWanted` is, through `resyncHistory`.
+   */
+  let historyResyncWanted = false;
+  /** The one `GET …/history` in flight; overlapping loads share it. */
+  let historyInFlight: Promise<void> | null = null;
+  /** Mints each reveal request's nonce, so an acknowledgement names exactly one. */
+  let revealNonce = 0;
   let unsubscribeProviders: (() => void) | null = null;
   /**
    * Told when this generation is destroyed. A wait on the stream — the rewind
@@ -821,8 +1020,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             reject(failure);
           }
         };
-        const evaluate = (entries: readonly ThreadItem[]): void => {
-          const progress = rewindProgress(entries, messageId, knownFailureIds);
+        // A prompt only a loaded history page or the bridge holds is present
+        // until the revert drops them (`historyAfterRevert`), exactly as a
+        // window prompt is until the fold drops it.
+        const evaluate = (slice: AgentChatThreadSlice): void => {
+          const progress = rewindProgress(
+            slice.entries,
+            messageId,
+            knownFailureIds,
+            inLoadedHistory(slice.history, messageId)
+          );
           if (progress.kind === "rewound") {
             finish(null);
           } else if (progress.kind === "failed") {
@@ -834,17 +1041,74 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           finish(null);
           return;
         }
-        evaluate(get().slice.entries);
+        evaluate(get().slice);
         if (settled) {
           return;
         }
         unsubscribe = storeApi.subscribe((state, previous) => {
-          if (state.slice.entries !== previous.slice.entries) {
-            evaluate(state.slice.entries);
+          if (
+            state.slice.entries !== previous.slice.entries ||
+            state.slice.history.pages !== previous.slice.history.pages ||
+            state.slice.history.bridge !== previous.slice.history.bridge
+          ) {
+            evaluate(state.slice);
           }
         });
         destroyListeners.add(onDestroy);
         timer = setTimeout(() => finish(new Error(REWIND_TIMED_OUT)), REWIND_TIMEOUT_MS);
+        timer.unref?.();
+      });
+
+    /** Replace the slice's history. */
+    const patchHistory = (
+      mutate: (history: AgentChatHistoryState) => AgentChatHistoryState
+    ): void => {
+      update((state) => {
+        const history = mutate(state.slice.history);
+        if (history === state.slice.history) {
+          return state;
+        }
+        const reducer = patchSlice(state.reducer, { history });
+        return { ...state, reducer, slice: reducer.slice };
+      });
+    };
+
+    /**
+     * Resolve once the stream is live, so a reveal plans against the thread as
+     * it is — a warm remount paints a retained fold that may predate the very
+     * turn it was asked to show. Past {@link REVEAL_SYNC_TIMEOUT_MS} it goes
+     * ahead on whatever snapshot there is (`false` with none); a destroyed
+     * generation answers `false` at once.
+     */
+    const waitForSynchronized = (): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        if (closed) {
+          resolve(false);
+          return;
+        }
+        if (get().slice.connection === "synchronized") {
+          resolve(true);
+          return;
+        }
+        let settled = false;
+        const finish = (ready: boolean): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          unsubscribe();
+          destroyListeners.delete(onDestroy);
+          clearTimeout(timer);
+          resolve(ready);
+        };
+        const onDestroy = (): void => finish(false);
+        const unsubscribe = storeApi.subscribe((state) => {
+          if (state.slice.connection === "synchronized") {
+            finish(true);
+          }
+        });
+        destroyListeners.add(onDestroy);
+        const timer = setTimeout(() => finish(get().slice.head !== null), REVEAL_SYNC_TIMEOUT_MS);
         timer.unref?.();
       });
 
@@ -934,10 +1198,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           throw new Error(REWIND_IN_PROGRESS);
         }
         const entries = get().slice.entries;
-        const target = entries.find(
-          (item): item is ThreadMessageItem =>
-            item.kind === "message" && item.role === "user" && item.id === input.messageId
-        );
+        const isTarget = (item: ThreadItem): item is ThreadMessageItem =>
+          item.kind === "message" && item.role === "user" && item.id === input.messageId;
+        // A rewind from a history row (design 2026-09-23 "Client") names a
+        // prompt the window no longer holds; the bridge or a page still does.
+        const { history } = get().slice;
+        const target =
+          entries.find(isTarget) ??
+          history.bridge.find(isTarget) ??
+          history.pages.flatMap((page) => page.items).find(isTarget);
         if (target === undefined) {
           throw new Error(REWIND_TARGET_UNAVAILABLE);
         }
@@ -1190,10 +1459,138 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         for (const event of response.events) {
           applyStreamFrame({ kind: "event", seq: event.seq, event });
         }
+      },
+
+      loadOlderHistory() {
+        if (historyInFlight !== null) {
+          return historyInFlight;
+        }
+        const asked = get().slice.history;
+        if (closed || !canLoadOlderHistory(asked)) {
+          return Promise.resolve();
+        }
+        // Without a cursor once the window has evicted since its snapshot
+        // (`windowEvicted`): that snapshot's cursor no longer meets it.
+        const before = nextHistoryCursor(asked);
+        // From here until the page lands, what the window evicts goes onto
+        // the bridge (`historyAfterEvent` reads `loading`): the page ends
+        // where the window stood when it was asked for.
+        patchHistory((history) => (history.loading ? history : { ...history, loading: true }));
+        // What the page is asked against. A snapshot (or a rewind into a page
+        // or the bridge, or the cap) replaces `pages` with a fresh array and a
+        // snapshot mints new bounds, so a page that lands after either
+        // belongs to a log this thread no longer shows as it did: it is
+        // dropped, never merged — and a bridge begun for it, with nothing
+        // loaded to join, goes too (`withoutOrphanBridge`).
+        const superseded = (history: AgentChatHistoryState): boolean =>
+          history.pages !== asked.pages || history.bounds !== asked.bounds;
+        const run = (async (): Promise<void> => {
+          try {
+            const page = await deps.transport.readHistory(sessionId, {
+              ...(before === undefined ? {} : { before }),
+              turns: THREAD_HISTORY_DEFAULT_TURNS
+            });
+            if (closed) {
+              return;
+            }
+            // The page's end cuts the window where it lies, so the window's
+            // rows below it render with the history, in their place.
+            const windowItems = get().slice.entries;
+            patchHistory((history) =>
+              superseded(history)
+                ? withoutOrphanBridge({ ...history, loading: false })
+                : { ...historyWithPage(history, page, windowItems), loading: false, error: null }
+            );
+          } catch (error) {
+            if (closed) {
+              return;
+            }
+            // Recorded in words on the history row — never the thread's error
+            // banner: the live thread is fine, only the index is not.
+            patchHistory((history) =>
+              withoutOrphanBridge(
+                superseded(history)
+                  ? { ...history, loading: false }
+                  : { ...history, loading: false, error: historyErrorMessage(error) }
+              )
+            );
+          }
+        })().finally(() => {
+          // Released in a `.finally` on the returned promise — always a later
+          // microtask — never inside the body: a transport that throws before
+          // its first `await` would otherwise clear the latch BEFORE the
+          // assignment below, which would then pin a settled promise and
+          // silently refuse every later load.
+          historyInFlight = null;
+        });
+        historyInFlight = run;
+        return run;
+      },
+
+      async revealTurn(turnId) {
+        if (!(await waitForSynchronized())) {
+          return false;
+        }
+        // One look per page the cap allows, plus the look after the last one.
+        for (let look = 0; look <= HISTORY_REVEAL_PAGE_CAP; look += 1) {
+          if (closed) {
+            return false;
+          }
+          const state = get();
+          const { slice } = state;
+          // The fold keeps every turn (retention evicts rows, never turns), so
+          // a turn it does not know was reverted away: no page can hold it.
+          if (!isStartedTurn(slice.turns, turnId)) {
+            return false;
+          }
+          const plan = planReveal(turnId, {
+            liveTurnIds: liveTurnIdsOf(slice.entries, slice.turns),
+            // A turn the window evicted into the bridge is on screen too.
+            bridgeTurnIds: liveTurnIdsOf(slice.history.bridge, slice.turns),
+            pages: slice.history.pages,
+            hasOlder: canLoadOlderHistory(slice.history)
+          });
+          if (plan === "absent") {
+            return false;
+          }
+          if (plan === "present") {
+            const rowId = rowIdForTurn(
+              state.rows,
+              turnId,
+              userMessageIdForTurn(turnId, slice.turns, slice.history.pages)
+            );
+            if (rowId === null) {
+              return false;
+            }
+            revealNonce += 1;
+            const reveal: AgentChatRevealRequest = { turnId, rowId, nonce: revealNonce };
+            update((current) => ({ ...current, reveal }));
+            return true;
+          }
+          await actions.loadOlderHistory();
+          if (get().slice.history.error !== null) {
+            return false;
+          }
+        }
+        return false;
+      },
+
+      acknowledgeReveal(nonce) {
+        update((state) => (state.reveal?.nonce === nonce ? { ...state, reveal: null } : state));
       }
     };
 
-    const applyStreamFrame: (frame: Parameters<typeof applyFrame>[1]) => void = (frame) => {
+    const applyStreamFrame = (
+      frame: Parameters<typeof applyFrame>[1],
+      options: {
+        /**
+         * Keep the connection state the frame would reset: a re-read's
+         * snapshot rides beside a live stream, and no `synchronized` frame
+         * follows it to take the thread out of "connecting" again.
+         */
+        keepConnection?: boolean;
+      } = {}
+    ): void => {
       // §7.7: when an open chat tab's stream delivers `thread.turn-diff-completed`
       // the client refreshes the git tab for that project. No new bus event is
       // introduced for it (§6.4) — the thread stream already knows.
@@ -1203,14 +1600,31 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           nudgeProjectGit(projectPath);
         }
       }
+      const historyBefore = get().slice.history;
       update((state) => {
         // §6.3/§8: a different host instance id means re-read, not resume.
         // Decided inside the updater, performed after `set` returns: a zustand
         // updater must be pure, or a replay double-fires the read (Q2-9).
         resyncWanted ||= needsResync(state.reducer.hostInstanceId, frame);
-        const reducer = applyFrame(state.reducer, frame);
+        let reducer = applyFrame(state.reducer, frame);
         if (reducer === state.reducer) {
           return state;
+        }
+        if (options.keepConnection === true) {
+          reducer = withConnection(reducer, state.slice.connection);
+        }
+        // The bridge is the one part of the history that grows without the
+        // user asking, so it is where the cap is held (design 2026-09-23 fold
+        // performance, "Client"): the oldest pages go first, and a bridge that
+        // no longer fits takes everything with it, for fresh bounds — asked
+        // for after `set` returns, like the resync above.
+        const history = reducer.slice.history;
+        if (history.bridge.length > state.slice.history.bridge.length) {
+          const capped = historyWithinCap(history, historyRowCap);
+          if (capped.history !== history) {
+            reducer = patchSlice(reducer, { history: capped.history });
+          }
+          historyResyncWanted ||= capped.resync;
         }
         // A `snapshot` replaces loaded history, so every projection cached
         // against the old one is invalidated by the epoch rather than trusted
@@ -1224,19 +1638,46 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             timeline: EMPTY_TIMELINE_PROJECTION,
             rowsProjection: null,
             stableRows: EMPTY_STABLE_ROWS,
+            historyItems: EMPTY_HISTORY_ITEMS,
+            liveSplit: EMPTY_LIVE_SPLIT,
+            rowTimeline: EMPTY_TIMELINE_PROJECTION,
+            historyRows: EMPTY_HISTORY_ROWS,
             derivedSets: null
           };
         }
         return { ...state, reducer, slice: reducer.slice };
       });
+      // A snapshot replaces the rows wholesale, and a rewind or the cap can
+      // drop pages and bridge rows: an unhandled reveal whose row went with
+      // them is dropped, or it would fire whenever that row reappeared — long
+      // after anyone asked.
+      const revealed = get().reveal;
+      const historyAfter = get().slice.history;
+      if (
+        revealed !== null &&
+        (frame.kind === "snapshot" ||
+          (frame.kind === "event" && frame.event.type === "thread.reverted") ||
+          historyAfter.pages.length < historyBefore.pages.length ||
+          historyAfter.bridge.length < historyBefore.bridge.length) &&
+        !get().rows.some((row) => row.id === revealed.rowId)
+      ) {
+        set({ reveal: null });
+      }
       if (resyncWanted) {
         resyncWanted = false;
+        // The re-read below brings fresh history bounds as well.
+        historyResyncWanted = false;
         // A changed host instance id means re-read, not resume; the transport's
         // own sequence floor is reset with it so a host that restarted its
         // sequence space lower cannot have its live frames suppressed (Q2-8).
         stream?.resetCursor();
         void actions.refresh().catch(() => {
           /* the stream's own reconnect will try again */
+        });
+      } else if (historyResyncWanted) {
+        historyResyncWanted = false;
+        void resyncHistory().catch(() => {
+          /* the next load asks without a cursor anyway (`nextHistoryCursor`) */
         });
       }
       // The Stop button reads "Stopping…" until `backgroundLiveness` clears,
@@ -1251,6 +1692,29 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         set({ stopping: false });
       }
       driveQueue();
+    };
+
+    /**
+     * The history's re-read (design 2026-09-23 fold performance, "Client"):
+     * once the cap dropped everything loaded, fresh bounds — and in them a
+     * "load older" cursor for the window as it now stands — come from a fresh
+     * snapshot.
+     *
+     * The store's resync path, minus what only a changed host needs. The host
+     * is the same one, so the stream's sequence floor stays where it is. And
+     * the read rides beside a live stream: a snapshot older than what that
+     * stream has folded since would roll those events back for good (the
+     * stream never sends them again), so it is refused — the next load then
+     * asks without a cursor, which the host answers for the window as it
+     * stands anyway (`nextHistoryCursor`). An applied one keeps the stream's
+     * connection state.
+     */
+    const resyncHistory = async (): Promise<void> => {
+      const response = await deps.transport.read(sessionId);
+      if (closed || response.kind !== "snapshot" || response.thread.seq < get().reducer.fold.seq) {
+        return;
+      }
+      applyStreamFrame({ kind: "snapshot", thread: response.thread }, { keepConnection: true });
     };
 
     /**
@@ -1368,6 +1832,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       rowsProjection: warm?.rowsProjection ?? null,
       stableRows: warm?.stableRows ?? EMPTY_STABLE_ROWS,
       derivedSets: warm?.derivedSets ?? null,
+      historyItems: warm?.historyItems ?? EMPTY_HISTORY_ITEMS,
+      liveSplit: warm?.liveSplit ?? EMPTY_LIVE_SPLIT,
+      rowTimeline: warm?.rowTimeline ?? EMPTY_TIMELINE_PROJECTION,
+      historyRows: warm?.historyRows ?? EMPTY_HISTORY_ROWS,
+      rowsSource: warm?.rowsSource ?? {
+        history: warm?.historyRows ?? EMPTY_HISTORY_ROWS,
+        live: (warm?.stableRows ?? EMPTY_STABLE_ROWS).result
+      },
       rows: warm?.rows ?? [],
       isCompacting: warm?.isCompacting ?? false,
       activePlan: warm?.activePlan ?? null,
@@ -1376,6 +1848,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       reverting: false,
       draft: readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT,
       stopping: false,
+      reveal: null,
       actions
     };
   });
