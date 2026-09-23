@@ -117,18 +117,21 @@ test("the trimmed query, the limit and the resolved project path reach the searc
 test("a blank or over-long query and an unknown project are refused before anything is searched; the longest query is sent whole", async (t) => {
   const { api } = await projectApi(t);
   api.on("GET", agentChatRoutes.search, { status: 200, body: answer([]) });
-  // THREAD_SEARCH_MAX_QUERY_CHARS counts UTF-16 code units after trimming: 101 emoji are 202 of them.
-  for (const query of ["", "   \n\t", "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), "😀".repeat(101)]) {
-    await assert.rejects(tool.run({ query, limit: 20 }, ctx(api)), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.length < 200, `${query.length} code units`);
+  // THREAD_SEARCH_MAX_QUERY_CHARS counts code points after trimming, as the host and the daemon clamp the query.
+  for (const query of ["", "   \n\t", "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1)]) {
+    await assert.rejects(tool.run({ query, limit: 20 }, ctx(api)), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.length < 200, `${Array.from(query).length} code points`);
   }
   await assert.rejects(tool.run({ query: "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), limit: 20 }, ctx(api)), (e: { message: string }) => /201 characters; the limit is 200/.test(e.message));
+  await assert.rejects(tool.run({ query: "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 1), limit: 20 }, ctx(api)), (e: { message: string }) => /201 characters; the limit is 200/.test(e.message), "an emoji is one character");
   await assert.rejects(tool.run({ query: "build", project: "acme/nope", limit: 20 }, ctx(api)), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
   // An empty project is refused, never read as "every project" — list_sessions' rule.
   await assert.rejects(tool.run({ query: "build", project: "", limit: 20 }, ctx(api)), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
   assert.equal(searchCalls(api).length, 0, "nothing was searched");
+  // The longest query, and 101 emoji — 202 UTF-16 units, 101 code points — are sent whole, never clipped.
   const longest = "x".repeat(THREAD_SEARCH_MAX_QUERY_CHARS);
-  await tool.run({ query: `  ${longest}\n`, limit: 20 }, ctx(api));
-  assert.equal(searchCalls(api)[0]!.query!.q, longest, "never clipped");
+  const emoji = "😀".repeat(101);
+  for (const query of [longest, emoji, "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS)]) await tool.run({ query: `  ${query}\n`, limit: 20 }, ctx(api));
+  assert.deepEqual(searchCalls(api).map((c) => c.query!.q), [longest, emoji, "😀".repeat(THREAD_SEARCH_MAX_QUERY_CHARS)]);
 });
 
 test("a result over the byte cap keeps the best hits: titles and snippets capped, the lowest-ranked dropped from the end", async () => {

@@ -32,7 +32,11 @@ export interface TranscriptOptions {
 }
 export interface TranscriptResult {
   entries: TranscriptEntry[]; turnCount: number;
-  /** The started turns before the range: `beforeTurn` = the range's first turn reads the ones just before it. */
+  /**
+   * The started turns before the first turn this result delivers: the range's `start − 1`, or, when the shed dropped
+   * rows, `coveredTurns[0] − 1`. `beforeTurn: olderTurns + 1` then reads the turns just before those — a turn whose
+   * rows the shed dropped included — so paging back never skips a turn, and always moves back.
+   */
   olderTurns: number;
   coveredTurns: [number, number] | null;
   /** The first and last turn of the range that could not be read whole — only when some could not. */
@@ -68,6 +72,7 @@ export const SUBAGENT_TEXT_CHARS = 200;
 
 type P = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+const asRecord = (v: unknown): P | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as P) : undefined);
 /** `text` cut to at most `max` code points, the last of them a "…" when anything was cut. */
 const capped = (text: string, max: number): string => (capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text);
 const subagentTitle = (title: string | null | undefined): string | null => (title == null ? null : capped(title, SUBAGENT_TEXT_CHARS));
@@ -349,9 +354,8 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   ordered.forEach((t, i) => turnIndex.set(t.turnId, i + 1));
   const turnIdOf = itemTurnId(ordered);
   const turnCount = ordered.length;
-  // 2. The range read, [start, end]; the turns before it are the caller's to page back to.
+  // 2. The range read, [start, end]; the turns before it are the caller's to page back to (`olderTurns`, below).
   const { start, end } = transcriptRange(turnCount, opts.turns, opts.beforeTurn);
-  const olderTurns = start - 1;
   const roster = new Map(snap.roster.map((r) => [r.id, r]));
   const latestPlan = proposedPlan(opts.windowItems ?? snap.items);
   const actionablePlan = latestPlan?.actionable ? latestPlan.item.id : null;
@@ -400,11 +404,15 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         if (str(p.title)) t.title = str(p.title)!;
         if (str(p.status)) t.status = str(p.status)!;
         if (a.activityKind === "tool.denied") t.status = "declined";
-        if (str(p.command)) t.command = str(p.command);
+        // The payload's command, else its data's, as the GUI's row reads it (Grok's rides only in `data`).
+        const command = str(p.command) ?? str(asRecord(p.data)?.command);
+        if (command) t.command = command;
         // A command's detail is what the GUI's row shows (`commandDisplayDetail`): the provider's, or the output its
         // data carries where that detail is empty, repeats the title or only echoes the command. An activity that
         // gives none — an echo with no output yet — leaves the detail an earlier one gave, as the GUI's row keeps it.
-        const detail = p.itemType === "command_execution" ? commandDisplayDetail(p) : str(p.detail);
+        // Never the start's: the GUI drops `tool.started`, and Grok's first frame carries no ACP `kind`, so its echo of
+        // the command would read as a detail and outlive a completion with no output.
+        const detail = p.itemType !== "command_execution" ? str(p.detail) : a.activityKind === "tool.started" ? undefined : commandDisplayDetail(p);
         if (detail) t.detail = detail;
         if (Array.isArray(p.changedFiles)) t.changedFiles = p.changedFiles.filter((f): f is string => typeof f === "string");
         continue;
@@ -475,15 +483,22 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const agents = opts.agentId ? [] : snap.roster.map(rosterView);
   const unavailable = opts.unavailable;
   // One shape for the result and for its frame, so what is measured is what is returned.
-  const shaped = (list: TranscriptEntry[], subagents: RosterRow[], covered: [number, number] | null, truncated: boolean, subagentsTruncated: boolean): TranscriptResult => ({
+  const shaped = (list: TranscriptEntry[], subagents: RosterRow[], covered: [number, number] | null, olderTurns: number, truncated: boolean, subagentsTruncated: boolean): TranscriptResult => ({
     entries: list, turnCount, olderTurns, coveredTurns: covered, ...(unavailable ? { unavailableTurns: unavailable.turns } : {}), truncated, subagents, ...(subagentsTruncated ? { subagentsTruncated: true } : {})
   });
-  const result = (list: TranscriptEntry[], subagents: RosterRow[], truncated: boolean, subagentsTruncated: boolean): TranscriptResult => shaped(list, subagents, coveredOf(list), truncated, subagentsTruncated);
+  // `olderTurns` counts back from the first turn delivered. A shed drops whole rows oldest first, so once it has dropped
+  // any, the range's first turns may have none left: counting from `start` would page past them, and the caller would
+  // never be shown them. From `coveredTurns[0]` the next read takes them in.
+  const result = (list: TranscriptEntry[], subagents: RosterRow[], truncated: boolean, subagentsTruncated: boolean): TranscriptResult => {
+    const covered = coveredOf(list);
+    const dropped = list.length < entries.length;
+    return shaped(list, subagents, covered, dropped && covered ? covered[0] - 1 : start - 1, truncated, subagentsTruncated);
+  };
   // The frame is the result with both lists empty. A result whose frame, entries (E) and subagent list (R) fit
   // maxChars comes back whole: nothing shed, no flags, and so no hint — but for the sentence about unavailable turns,
   // whose field it must leave room for. Only a shed one keeps TRANSCRIPT_HINT_BYTES free, plus that sentence and the
   // space the caller joins the two with.
-  const frame = (covered: [number, number] | null, truncated: boolean, subagentsTruncated: boolean): number => jsonByteSize(shaped([], [], covered, truncated, subagentsTruncated));
+  const frame = (covered: [number, number] | null, olderTurns: number, truncated: boolean, subagentsTruncated: boolean): number => jsonByteSize(shaped([], [], covered, olderTurns, truncated, subagentsTruncated));
   const said = unavailable ? jsonTextBytes(unavailable.hint) : 0;
   const budget = opts.maxChars - TRANSCRIPT_HINT_BYTES - (unavailable ? said + 1 : 0);
   const sizedEntries = sized(entries);
@@ -491,13 +506,14 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const entryBytes = contentBytes(sizedEntries.reduce((sum, r) => sum + r.bytes, 0), sizedEntries.length);
   const agentBytes = contentBytes(sizedAgents.reduce((sum, a) => sum + a.bytes, 0), sizedAgents.length);
   const wholeHint = unavailable ? HINT_FIELD_BYTES + said : 0;
-  if (frame(coveredOf(entries), false, false) + entryBytes + agentBytes + wholeHint <= opts.maxChars) return result(entries, agents, false, false);
-  // Over it (§7.6 and its fix-round rulings), in the widest frame: the subagent list takes what the entries do not
-  // need and never less than ROSTER_SHARE of the room when it needs it; the entries get exactly what it leaves.
+  if (frame(coveredOf(entries), start - 1, false, false) + entryBytes + agentBytes + wholeHint <= opts.maxChars) return result(entries, agents, false, false);
+  // Over it (§7.6 and its fix-round rulings), in the widest frame — `coveredTurns` and `olderTurns` at their most digits,
+  // as neither is known before the shed: the subagent list takes what the entries do not need and never less than
+  // ROSTER_SHARE of the room when it needs it; the entries get exactly what it leaves.
   const widest: [number, number] | null = turnCount > 0 ? [turnCount, turnCount] : null;
-  const room = budget - frame(widest, true, true);
+  const room = budget - frame(widest, turnCount, true, true);
   let listed = fitRoster(sizedAgents, Math.max(Math.floor(room * ROSTER_SHARE), room - entryBytes));
-  const fitted = fitEntries(sizedEntries, budget - frame(widest, true, listed.trimmed) - listed.bytes);
+  const fitted = fitEntries(sizedEntries, budget - frame(widest, turnCount, true, listed.trimmed) - listed.bytes);
   // What the entries leave unused goes back to the roster: one more pass over that room. It can only re-add rows,
   // the last dropped first (live ones, newest first), since the entries never used more than the first pass left.
   // The first pass's `room − E` term is kept as ruled but has been redundant since this pass: on a shed result it

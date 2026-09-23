@@ -1,4 +1,4 @@
-import { agentChatRoutes, decodeHistoryCursor, encodeHistoryCursor, startedTurns, THREAD_HISTORY_MAX_TURNS, type Checkpoint, type StartedTurn, type ThreadHistoryPage, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, decodeHistoryCursor, encodeHistoryCursor, startedTurns, THREAD_HISTORY_MAX_TURNS, type Checkpoint, type StartedTurn, type ThreadActivityItem, type ThreadHistoryBounds, type ThreadHistoryPage, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "./daemon-api.ts";
 import { itemTurnId } from "./transcript.ts";
 
@@ -12,7 +12,10 @@ export const HISTORY_PAGES_PER_READ = 5;
 /** The turns of a read's range that could not be read whole, first and last, and why. */
 export interface HistoryUnavailable {
   turns: [number, number];
-  /** `unavailable`: the host has no usable thread index, or a page read failed. `limit`: HISTORY_PAGES_PER_READ ran out. */
+  /**
+   * `unavailable`: the host has no usable thread index, its index has not caught up with this thread yet, or a page
+   * read failed. `limit`: HISTORY_PAGES_PER_READ ran out.
+   */
   reason: "unavailable" | "limit";
 }
 
@@ -28,26 +31,38 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  * The snapshot read_transcript builds the turns `[start, end]` from: the retained window, plus the pages of older
  * history the range needs, read from the host's thread index through the daemon's own history route. It pages only
  * when the range reaches the window's oldest turn (which may be partial) and the index holds older rows. The first page
- * ends where turn `end + 1` begins when that turn is older than the window — turn records are never evicted, so the
- * snapshot names it — else at the window's boundary; each next page ends where the one before began (its
- * `beforeCursor`), until turn `start` is whole, the thread's start is reached, or HISTORY_PAGES_PER_READ pages were read.
- * Nothing here throws for a page: a read that fails for any reason ends the walk, and the turns left unread are
- * reported beside the rows that were read. A host that predates `history` is read as it always was: the window alone.
+ * ends where turn `end + 1` begins when the range ends before the window's oldest turn — turn records are never
+ * evicted, so the snapshot names it — else at the window's boundary; each next page ends where the one before began
+ * (its `beforeCursor`), until turn `start` is whole, the thread's start is reached, or HISTORY_PAGES_PER_READ pages were
+ * read. Nothing here throws for a page: a read that fails for any reason ends the walk, and the turns left unread are
+ * reported beside the rows that were read. Two more cases are reported the same way: the turns an index that has not
+ * caught up with this thread cannot page yet (`behindIndex`), and — the safety net — any turn of the range still
+ * without a row once the walk is done (`missingTurns`), because a host answers an empty page with a null cursor where it
+ * could not plan a block or read one back whole, which the walk alone takes for "the thread's first turn reached". A
+ * host that predates `history` is read as it always was: the window alone.
  */
 export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: ThreadSnapshotPayload, range: { start: number; end: number }): Promise<OlderHistory> {
   const { start, end } = range;
   const bounds = snap.history;
   if (!bounds || end < start) return { snapshot: snap, unavailable: null };
   const ordered = startedTurns(snap.turns);
-  if (bounds.indexed === false) return { snapshot: snap, unavailable: missingFromWindow(snap, ordered, range) };
+  if (bounds.indexed === false) return { snapshot: snap, unavailable: missingTurns(snap, ordered, range) };
+  if (bounds.indexed !== true) return { snapshot: snap, unavailable: null };
+  if (bounds.hasOlder !== true) return { snapshot: snap, unavailable: behindIndex(snap, ordered, bounds, range) };
   const oldest = bounds.oldestRetainedOrdinal;
-  if (bounds.indexed !== true || bounds.hasOlder !== true || typeof oldest !== "number" || start > oldest) return { snapshot: snap, unavailable: null };
-  const after = end + 1 < oldest ? ordered[end] : undefined; // turn end + 1
+  if (typeof oldest !== "number" || start > oldest) return { snapshot: snap, unavailable: null };
+  // Turn end + 1, when the range ends before the window's oldest turn: the first page ends where it begins. Up to the
+  // window's oldest turn itself — none of that turn is in the range, so its evicted rows are not waded through first.
+  const after = end < oldest ? ordered[end] : undefined;
   let before = after ? encodeHistoryCursor({ threadId: sessionId, beforeAnchorAt: after.requestedAt, beforeTurnId: after.turnId }) : undefined;
   // The first turn read whole, and every later one of the range with it: below turn end + 1, none of the range yet;
   // from the window, the turn after its oldest, which may be partial.
   let wholeFrom = after ? end + 1 : oldest + 1;
-  const turns = String(Math.min(end - start + 1, THREAD_HISTORY_MAX_TURNS));
+  // The soft cap reaches ONE turn below `start`: the host puts `beforeSeq` in every cursor it mints, so a page capped at
+  // turn start's own first line names turn start with it, and the stop rule reads one more page to see it whole. Capped
+  // at turn start − 1, the page's cursor names that turn instead, and a range the 400-activity block holds is read in
+  // one page. From turn 1 it asks for more turns than there are below: no cap, and the walk ends on a null cursor.
+  const turns = String(Math.min(wholeFrom - start + 1, THREAD_HISTORY_MAX_TURNS));
   const pages: ThreadHistoryPage[] = [];
   let failed = false;
   while (wholeFrom > start && pages.length < HISTORY_PAGES_PER_READ) {
@@ -61,8 +76,54 @@ export async function readOlderHistory(api: DaemonApi, sessionId: string, snap: 
     wholeFrom = Math.min(wholeFrom, reached);
     before = cursor;
   }
-  const unavailable: HistoryUnavailable | null = wholeFrom > start ? { turns: [start, Math.min(end, wholeFrom - 1)], reason: failed ? "unavailable" : "limit" } : null;
-  return { snapshot: mergeHistoryPages(snap, pages), unavailable };
+  const merged = mergeHistoryPages(snap, pages);
+  const unavailable: HistoryUnavailable | null = wholeFrom > start ? { turns: [start, Math.min(end, wholeFrom - 1)], reason: failed ? "unavailable" : "limit" } : missingTurns(merged, ordered, range);
+  return { snapshot: merged, unavailable };
+}
+
+/**
+ * The range's turns a host whose index has not caught up with this thread cannot page yet — it knows fewer turns than
+ * the thread has, as every thread on the first start after an index rebuild does until its catch-up reaches it. Such
+ * an index cannot place the window's rows, so its `hasOlder: false` means "unknown", not "nothing older", and the turns
+ * up to the window's oldest one — `oldestRetainedOrdinal`, else the turn of the window's oldest activity row
+ * (`windowOldestTurn`), which may be partial — are named. Null when the index knows every turn: then `hasOlder: false`
+ * is the host's word that the window holds everything.
+ */
+function behindIndex(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], bounds: ThreadHistoryBounds, { start, end }: { start: number; end: number }): HistoryUnavailable | null {
+  if (typeof bounds.totalTurns !== "number" || bounds.totalTurns >= ordered.length) return null;
+  const oldest = typeof bounds.oldestRetainedOrdinal === "number" ? bounds.oldestRetainedOrdinal : windowOldestTurn(snap, ordered);
+  return oldest !== null && start <= oldest ? { turns: [start, Math.min(end, oldest)], reason: "unavailable" } : null;
+}
+
+/**
+ * A row retention keeps whatever its age (`activitiesToDrop`, packages/api fold.ts), so it says nothing about where the
+ * window begins: a subagent's own row (each agent keeps a window of its own), an agent's launch or end
+ * (`agentKind: "agent"`), a compaction marker, and an async question (`responseMode: "message"`), kept while open.
+ */
+function keptWhateverItsAge(activity: ThreadActivityItem): boolean {
+  const payload = isRecord(activity.payload) ? activity.payload : {};
+  if (typeof activity.agentId === "string" && activity.agentId.length > 0) return true;
+  if ((activity.activityKind === "task.started" || activity.activityKind === "task.completed") && payload.agentKind === "agent") return true;
+  if (activity.activityKind === "context-compaction") return true;
+  return activity.activityKind === "user-input.requested" && payload.responseMode === "message";
+}
+
+/**
+ * The turn of the window's oldest activity row — where the window begins, as far as the snapshot alone can tell. The
+ * rows retention keeps whatever their age are passed over (`keptWhateverItsAge`): a thread's first agent launch or an
+ * early compaction marker would otherwise name an early turn and hide every partial one after it. Else the oldest
+ * activity row of any kind; null when the window holds none. A row with no turn is placed by its time, as the
+ * transcript places it: in the last turn requested at or before it, turn 1 when it is older than every turn.
+ */
+function windowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[]): number | null {
+  const activities = snap.items.filter((item): item is ThreadActivityItem => item.kind === "activity");
+  const oldest = activities.find((a) => !keptWhateverItsAge(a)) ?? activities[0];
+  if (!oldest) return null;
+  const own = oldest.turnId ? ordered.findIndex((t) => t.turnId === oldest.turnId) : -1;
+  if (own !== -1) return own + 1;
+  let requested = 0;
+  while (requested < ordered.length && ordered[requested]!.requestedAt <= oldest.createdAt) requested += 1;
+  return Math.max(1, requested);
 }
 
 /**
@@ -111,10 +172,12 @@ function asPage(body: unknown): ThreadHistoryPage | null {
 }
 
 /**
- * The turns of the range without a single row in the window, first and last, for a host with no usable index: those
- * aged out of the window whole, and nothing can read them back.
+ * The span of the range's turns without a single row in `snap`, from the first such turn to the last (a turn between
+ * them that has rows is inside the span too). For a host with no usable index, `snap` is the window: those turns aged
+ * out of it whole, and nothing can read them back. After a walk, it is the window with the pages merged: a turn still
+ * without a row was not read, whatever the pages said.
  */
-function missingFromWindow(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], { start, end }: { start: number; end: number }): HistoryUnavailable | null {
+function missingTurns(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], { start, end }: { start: number; end: number }): HistoryUnavailable | null {
   const turnIdOf = itemTurnId(ordered);
   const present = new Set<string>();
   for (const item of snap.items) {
@@ -164,9 +227,18 @@ export function mergeHistoryPages(snap: ThreadSnapshotPayload, pages: readonly P
   };
 }
 
-/** The sentence read_transcript's hint opens with when turns of its range could not be read whole (tools/messages.ts). */
-export function unavailableHint({ turns: [from, to], reason }: HistoryUnavailable): string {
+/**
+ * The sentence read_transcript's hint opens with when turns of its range could not be read whole (tools/messages.ts);
+ * `end` is the range's last turn. Past the page limit, the call that reads the turns left always ends before this
+ * one's end, so following the hints never asks for the same range twice. When the walk never got out of turn `end`,
+ * that turn alone is more than one call reads — asking for it again would read the same pages — so the hint says its
+ * latest rows are what there is, and names the call for the turns before it.
+ */
+export function unavailableHint({ turns: [from, to], reason }: HistoryUnavailable, end: number): string {
   const which = from === to ? `Turn ${from}` : `Turns ${from}–${to}`;
   if (reason === "unavailable") return `${which} could not be read whole: older turns are unavailable on this host right now. Try again later.`;
-  return `${which} could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read ${from === to ? "it" : "them"} with beforeTurn: ${to + 1}, turns: ${to - from + 1}.`;
+  if (to < end) return `${which} could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read ${from === to ? "it" : "them"} with beforeTurn: ${to + 1}, turns: ${to - from + 1}.`;
+  const large = `Turn ${to} is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned.`;
+  if (from === to) return large;
+  return `${large} Read ${to - from === 1 ? `turn ${from}` : `turns ${from}–${to - 1}`} with beforeTurn: ${to}, turns: ${to - from}.`;
 }

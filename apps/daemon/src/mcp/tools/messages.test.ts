@@ -658,8 +658,9 @@ const readArgs = (over: Record<string, unknown> = {}) => ({ sessionId: "c1", tur
 test("read_transcript pages older turns from the host's index: a 3-turn window over a 10-turn thread, turns 5, reads turns 6 to 10", async (t) => {
   const th = history(10, 8);
   const h = await harness([chatSummary()], th.snap); t.after(h.close);
-  // The page ends at the window's boundary and begins inside turn 5: turn 6 is whole.
-  h.api.on("GET", agentChatRoutes.history("c1"), ({ query }) => { assert.deepEqual(query, { turns: "5" }); return th.page(th.rowsOf(5, 7), th.cursorIn(5)); });
+  // The page ends at the window's boundary, inside turn 8, and its soft cap reaches turn 5, one below the range: it
+  // begins inside turn 5, so turn 6 is whole.
+  h.api.on("GET", agentChatRoutes.history("c1"), ({ query }) => { assert.deepEqual(query, { turns: "4" }); return th.page(th.rowsOf(5, 7), th.cursorIn(5)); });
   const r = await tool("read_transcript").run(readArgs({ turns: 5 }), h.ctx);
   assert.deepEqual((r.entries as { turn: number; text: string }[]).map((e) => [e.turn, e.text]), [6, 7, 8, 9, 10].flatMap((n) => [[n, `ask ${n}`], [n, `reply ${n}`]]), "turns 6 and 7 from the page, 8 to 10 from the window; turn 5 left out");
   assert.deepEqual([r.turnCount, r.olderTurns, r.coveredTurns, r.truncated], [10, 5, [6, 10], false]);
@@ -693,7 +694,7 @@ test("read_transcript: beforeTurn below the window asks for the page that ends w
   const th = history(10, 8);
   const h = await harness([chatSummary()], th.snap); t.after(h.close);
   h.api.on("GET", agentChatRoutes.history("c1"), ({ query }) => {
-    assert.equal(query!.turns, "2");
+    assert.equal(query!.turns, "3", "turns 4 down to 2, one below the range");
     return th.page(th.rowsOf(3, 4), th.cursorIn(2));
   });
   const r = await tool("read_transcript").run(readArgs({ beforeTurn: 5, turns: 2 }), h.ctx);
@@ -716,6 +717,26 @@ test("read_transcript: turns it could not read whole are named with a hint, neve
   assert.equal(historyCalls(h).length, 1 + HISTORY_PAGES_PER_READ);
   assert.deepEqual([limited.olderTurns, limited.coveredTurns, limited.unavailableTurns], [0, [3, 10], [1, 3]]);
   assert.equal(limited.hint, `Turns 1–3 could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read them with beforeTurn: 4, turns: 3.`);
+});
+
+test("read_transcript while the host's index has not caught up with the thread: the turns up to the window's oldest are named, and a turn larger than one call says so", async (t) => {
+  const th = history(10, 8);
+  // The window's rows: a tool call in each of its turns, where the window's oldest activity row says it begins.
+  const call = (n: number) => activity("tool.completed", { itemType: "command_execution", toolUseId: `call-${n}`, title: "pnpm test", status: "completed" }, { turnId: `t${n}`, tone: "tool", createdAt: th.rowsOf(n, n)[0]!.createdAt });
+  const fresh = snapshot({ ...th.snap, items: [call(8), ...th.snap.items, call(9), call(10)], history: { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 } });
+  const h = await harness([chatSummary()], fresh); t.after(h.close);
+  const r = await tool("read_transcript").run(readArgs({ turns: 5 }), h.ctx);
+  assert.equal(historyCalls(h).length, 0, "nothing to page yet");
+  assert.deepEqual([r.olderTurns, r.coveredTurns, r.unavailableTurns], [5, [8, 10], [6, 8]]);
+  assert.equal(r.hint, "Turns 6–8 could not be read whole: older turns are unavailable on this host right now. Try again later.");
+  // Caught up, with turn 7 more than five pages long: each page ends a little further inside it.
+  const h2 = await harness([chatSummary()], th.snap); t.after(h2.close);
+  let seq = 100;
+  h2.api.on("GET", agentChatRoutes.history("c1"), () => th.page([], encodeHistoryCursor({ threadId: "c1", beforeAnchorAt: th.snap.turns[6]!.requestedAt, beforeTurnId: "t7", beforeSeq: (seq -= 10) })));
+  const large = await tool("read_transcript").run(readArgs({ beforeTurn: 8, turns: 3 }), h2.ctx);
+  assert.equal(historyCalls(h2).length, HISTORY_PAGES_PER_READ);
+  assert.deepEqual([large.unavailableTurns, large.olderTurns], [[5, 7], 4]);
+  assert.equal(large.hint, `Turn 7 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned. Read turns 5–6 with beforeTurn: 7, turns: 2.`);
 });
 
 test("read_transcript: with turns named unavailable, the answer — its hint, and the shed hint after it — still fits maxChars", async (t) => {

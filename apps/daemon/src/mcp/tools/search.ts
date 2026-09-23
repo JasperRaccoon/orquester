@@ -95,7 +95,9 @@ const searchSessions = defineTool({
     const query = args.query.trim();
     if (!query) throw new ToolError("INVALID_ARGUMENT", "The query is empty: pass the words to search for.");
     // Refused, never clipped: the host would cut a longer query silently and answer for words the caller did not send.
-    if (query.length > THREAD_SEARCH_MAX_QUERY_CHARS) throw new ToolError("INVALID_ARGUMENT", `The query is ${query.length} characters; the limit is ${THREAD_SEARCH_MAX_QUERY_CHARS}.`);
+    // Counted in code points, as the host and the daemon clamp it: an emoji is one character, not two.
+    const length = Array.from(query).length;
+    if (length > THREAD_SEARCH_MAX_QUERY_CHARS) throw new ToolError("INVALID_ARGUMENT", `The query is ${length} characters; the limit is ${THREAD_SEARCH_MAX_QUERY_CHARS}.`);
     // `!== undefined`, as list_sessions tests it: an empty project is refused by resolveProject, never "every project".
     const projectPath = args.project !== undefined ? (await resolveProject(api, args.project)).path : undefined;
     const res = await api.request("GET", agentChatRoutes.search, { query: { q: query, limit: String(args.limit), ...(projectPath !== undefined ? { projectPath } : {}) } });
