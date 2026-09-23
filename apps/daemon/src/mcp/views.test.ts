@@ -68,6 +68,7 @@ test("pending views: advertised decisions win over the default four; a message-m
   const snap = snapshot({ pending: { approvals: [{ requestId: "r2", requestKind: "permission", createdAt: stamp(1), options: [{ decision: "accept", label: "Allow once" }, { decision: "decline", label: "Deny", warning: "w" }] }],
     userInputs: [{ requestId: "q2", createdAt: stamp(2), dismissible: true, responseMode: "message", questions: [{ id: "x", header: "H", question: "X?", options: [], multiSelect: true, allowCustomAnswer: true }] }] } });
   assert.deepEqual(pendingApprovalViews(snap)[0].decisions, [{ decision: "accept", label: "Allow once" }, { decision: "decline", label: "Deny", warning: "w" }]);
+  assert.deepEqual(pendingApprovalViews(snapshot({ pending: { approvals: [{ requestId: "r3", requestKind: "command", createdAt: stamp(3), options: [] }], userInputs: [] } }))[0].decisions.map((x) => x.decision), ["accept", "acceptForSession", "decline", "cancel"]);
   const q = pendingQuestionViews(snap)[0];
   assert.equal(q.responseMode, "message"); assert.equal(q.dismissible, true); assert.equal(q.questions[0].multiSelect, true);
 });
@@ -108,11 +109,11 @@ test("buildViewContext reads registry, accounts and providers and tolerates a fa
   assert.equal(c.workspacesDir, "/w");
 });
 
-test("supports.rollback follows the AdapterCapabilities contract: absent means true, false means false, no snapshot means false", () => {
+test("supports.rollback is offered only on an explicit true: an absent flag and no provider snapshot read false", () => {
   const caps = { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } } as const;
   const withCaps = (c: typeof caps & { supportsConversationRollback?: boolean }): ViewContext => ({ ...ctx, capabilitiesByAdapter: new Map([["claude", c]]) });
-  assert.equal(sessionDetail(chatSummary(), snapshot(), withCaps(caps)).chat.supports.rollback, true);
-  assert.equal(sessionDetail(chatSummary(), snapshot(), withCaps({ ...caps, supportsConversationRollback: false })).chat.supports.rollback, false);
+  assert.equal(sessionDetail(chatSummary(), snapshot(), withCaps(caps)).chat.supports.rollback, false);
+  assert.equal(sessionDetail(chatSummary(), snapshot(), withCaps({ ...caps, supportsConversationRollback: true })).chat.supports.rollback, true);
   assert.equal(sessionDetail(chatSummary(), snapshot(), { ...ctx, capabilitiesByAdapter: new Map() }).chat.supports.rollback, false);
 });
 

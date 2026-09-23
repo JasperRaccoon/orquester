@@ -3,6 +3,7 @@ import { agentChatRoutes, SETTLED_TURN_STATES as TURN_SETTLED_STATES, startedTur
 import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, AgentProvidersResponse, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, Turn, UserInputQuestion } from "@orquester/api/agent-chat";
 import { resolveChatActivity, type ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 import { projectNamesFor, type ProjectRef } from "./addressing.ts";
+import { supportsFrom } from "./agents.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { readThread, requireChatSession } from "./reads.ts";
 import { capText } from "./result.ts";
@@ -108,7 +109,7 @@ export function pendingApprovalViews(snap: ThreadSnapshotPayload): PendingApprov
     const args = (raw?.payload as { args?: { toolName?: unknown; input?: unknown } } | undefined)?.args;
     const view: PendingApprovalView = {
       requestId: a.requestId, kind: a.requestKind, createdAt: a.createdAt,
-      decisions: (a.options ?? DEFAULT_APPROVAL_DECISIONS).map((o) => ({ decision: o.decision, label: o.label, ...(o.warning ? { warning: o.warning } : {}) }))
+      decisions: (a.options?.length ? a.options : DEFAULT_APPROVAL_DECISIONS).map((o) => ({ decision: o.decision, label: o.label, ...(o.warning ? { warning: o.warning } : {}) }))
     };
     if (a.detail) view.detail = capText(a.detail, 4096).text;
     if (a.appName) view.appName = a.appName;
@@ -214,8 +215,7 @@ export function sessionDetail(s: SessionSummary, snap: ThreadSnapshotPayload, ct
     model: head.modelSelection.model, options: optionsObject(head.modelSelection.options), runtimeMode: head.runtimeMode, home: head.home,
     // Turns are numbered by START ORDER (turns.ts), never by the sparse checkpoint list — this is the number revert_session/get_turn_diff speak in.
     activeTurnId: head.session.activeTurnId, turnCount: startedTurns(snap.turns).length, continueAfterRestart: head.continueAfterRestart !== undefined,
-    // An absent `supportsConversationRollback` means true (AdapterCapabilities), as the GUI reads it.
-    supports: { planMode: caps?.showPlanModeToggle ?? false, rollback: caps !== undefined && caps.supportsConversationRollback !== false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false }
+    supports: supportsFrom(caps)
   };
   const label = head.accountId ? ctx.accountLabelById.get(head.accountId) : "System";
   if (label) chat.accountLabel = label;

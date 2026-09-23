@@ -1,5 +1,5 @@
 import { proxyLaunchModels, type AgentAccountsResponse, type CliProxyStatus, type RegistryEntry, type RegistryResponse } from "@orquester/api";
-import { agentChatRoutes, DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AgentAdapterId, type AgentProvidersResponse, type ModelSelection, type ProviderModel, type ProviderSnapshot, type RuntimeMode } from "@orquester/api/agent-chat";
+import { agentChatRoutes, DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AdapterCapabilities, type AgentAdapterId, type AgentProvidersResponse, type ModelSelection, type ProviderModel, type ProviderSnapshot, type RuntimeMode } from "@orquester/api/agent-chat";
 import { proxyAccountFamily } from "../agent-chat/service.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
@@ -13,6 +13,11 @@ export interface AgentView { id: string; name: string; adapter: AgentAdapterId; 
 
 export function isProxyAgent(refId: string): boolean {
   return proxyAccountFamily(refId) !== null;
+}
+
+/** The capability flags list_agents and get_session both report. No snapshot, or an absent flag, reads false. */
+export function supportsFrom(caps: AdapterCapabilities | undefined): { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean } {
+  return { planMode: caps?.showPlanModeToggle ?? false, rollback: caps?.supportsConversationRollback ?? false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false };
 }
 
 function modelView(m: ProviderModel): AgentModelView {
@@ -65,9 +70,8 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
       id: entry.id, name: entry.name, adapter, enabled: entry.enabled, installed: snapshot?.installed ?? false, version: entry.version ?? snapshot?.version ?? null,
       status: snapshot?.status ?? "unknown", auth: snapshot ? { status: snapshot.auth.status, ...(snapshot.auth.label ? { label: snapshot.auth.label } : {}), ...(snapshot.auth.email ? { email: snapshot.auth.email } : {}) } : { status: "unknown" },
       models, effortOptionId: EFFORT_OPTION_IDS[adapter], runtimeModes: RUNTIME_MODES, defaultRuntimeMode: DEFAULT_RUNTIME_MODE,
-      // An absent `supportsConversationRollback` means true (AdapterCapabilities), as the GUI reads it.
-      supports: { planMode: caps?.showPlanModeToggle ?? false, rollback: caps !== undefined && caps.supportsConversationRollback !== false, compaction: caps?.compaction !== undefined, backgroundTasks: caps?.supportsBackgroundTasks ?? false, contextWindow: caps?.reportsContextWindow ?? false },
-      accounts: [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: false }, ...familyAccounts.map((a) => ({ id: a.id, label: a.label, email: a.email, plan: a.plan, needsReauth: a.needsReauth, isDefault: a.id === defaultAccountId }))],
+      supports: { ...supportsFrom(caps), contextWindow: caps?.reportsContextWindow ?? false },
+      accounts: [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: defaultAccountId === "system" }, ...familyAccounts.map((a) => ({ id: a.id, label: a.label, email: a.email, plan: a.plan, needsReauth: a.needsReauth, isDefault: a.id === defaultAccountId }))],
       defaultAccountId
     };
     if (snapshot?.message) view.message = snapshot.message;
@@ -84,7 +88,8 @@ export function findAgent(agents: readonly AgentView[], refId: string): AgentVie
 export interface ResolvedSelection { model: string; options: { id: string; value: string | boolean }[] }
 
 export function resolveModelSelection(agent: AgentView, input: { model?: string; options?: Record<string, string | boolean>; current?: ModelSelection }): ResolvedSelection {
-  const model = input.model ?? input.current?.model ?? agent.models.find((m) => m.isDefault)?.slug ?? agent.models[0]?.slug;
+  // `||`, not `??`: an empty model is "none" (the daemon's spelling of "the provider's own default"), so it never wins.
+  const model = input.model || input.current?.model || agent.models.find((m) => m.isDefault)?.slug || agent.models[0]?.slug;
   if (!model) throw new ToolError("INVALID_ARGUMENT", `Still loading ${agent.id}'s models — retry in a moment (list_agents).`);
   const modelView = agent.models.find((m) => m.slug === model);
   if (agent.models.length && !modelView) {
@@ -94,8 +99,10 @@ export function resolveModelSelection(agent: AgentView, input: { model?: string;
   const known = new Set(descriptors.map((d) => d.id));
   const merged = new Map<string, string | boolean>();
   for (const o of input.current?.options ?? []) {
-    // Same model: everything survives. New model: only options it advertises.
-    if (input.current?.model === model || known.has(o.id)) merged.set(o.id, o.value);
+    // Same model: everything survives. New model: only an option it advertises, with a value it accepts.
+    const d = descriptors.find((x) => x.id === o.id);
+    const accepted = d !== undefined && (d.type === "boolean" ? typeof o.value === "boolean" : (d.values ?? []).some((v) => v.id === o.value));
+    if (input.current?.model === model || accepted) merged.set(o.id, o.value);
   }
   for (const [rawId, rawValue] of Object.entries(input.options ?? {})) {
     const id = rawId === "effort" && !known.has("effort") ? agent.effortOptionId : rawId;

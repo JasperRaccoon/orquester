@@ -49,6 +49,7 @@ test("loadAgents lists only chat-capable entries with models, options, accounts 
   assert.equal(claude.defaultAccountId, "acc-1");
   const grok = agents[2];
   assert.equal(grok.enabled, false); assert.equal(grok.installed, false); assert.equal(grok.effortOptionId, "reasoningEffort"); assert.equal(grok.defaultAccountId, "system");
+  assert.deepEqual(grok.accounts, [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: true }]);
   assert.equal((await loadAgents(api(), { includeLegacyModels: true }))[0].models.length, 3);
 });
 
@@ -100,9 +101,28 @@ test("validateAccountId accepts system and family accounts, refuses the rest wit
   assert.throws(() => validateAccountId(agents[1], "acc-3"), (e: { message: string }) => /seeded/.test(e.message));
 });
 
-test("supports.rollback follows the AdapterCapabilities contract: an absent flag means true, false means false", async () => {
+test("supports.rollback is offered only on an explicit true: an absent flag reads false", async () => {
   const caps = { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } };
   const withCaps = (capabilities: Record<string, unknown>) => api().on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h1", providers: [{ ...providers.providers[0], capabilities }] } });
-  assert.equal((await loadAgents(withCaps(caps)))[0].supports.rollback, true);
-  assert.equal((await loadAgents(withCaps({ ...caps, supportsConversationRollback: false })))[0].supports.rollback, false);
+  assert.equal((await loadAgents(withCaps(caps)))[0].supports.rollback, false);
+  assert.equal((await loadAgents(withCaps({ ...caps, supportsConversationRollback: true })))[0].supports.rollback, true);
+});
+
+test("an empty model never wins: an empty current or input model resolves like an omitted one, and its options are validated", async () => {
+  const claude = (await loadAgents(api()))[0];
+  assert.deepEqual(resolveModelSelection(claude, { options: { effort: "high" }, current: { model: "", options: [] } }), { model: "default", options: [{ id: "effort", value: "high" }] });
+  assert.throws(() => resolveModelSelection(claude, { options: { effort: "ultra" }, current: { model: "", options: [] } }), (e: { message: string }) => /medium, high/.test(e.message));
+  assert.deepEqual(resolveModelSelection(claude, { model: "" }), resolveModelSelection(claude, {}));
+  assert.deepEqual(resolveModelSelection(claude, { model: "", current: { model: "haiku" } }), { model: "haiku", options: [] });
+});
+
+test("a model switch carries an option only when the new model advertises it and accepts the carried value", async () => {
+  const claude = (await loadAgents(api()))[0];
+  const effort = (ids: string[]) => ({ id: "effort", label: "Effort", type: "select" as const, values: ids.map((id) => ({ id, label: id })) });
+  const agent: AgentView = { ...claude, models: [
+    { slug: "opus", name: "Opus", isDefault: true, options: [effort(["low", "medium", "high", "max"])] },
+    { slug: "sonnet", name: "Sonnet", isDefault: false, options: [effort(["low", "medium", "high"]), { id: "thinking", label: "Thinking", type: "boolean" }] }
+  ] };
+  assert.deepEqual(resolveModelSelection(agent, { model: "sonnet", current: { model: "opus", options: [{ id: "effort", value: "max" }, { id: "thinking", value: true }] } }), { model: "sonnet", options: [{ id: "thinking", value: true }] });
+  assert.deepEqual(resolveModelSelection(agent, { model: "sonnet", current: { model: "opus", options: [{ id: "effort", value: "high" }, { id: "thinking", value: "on" }] } }), { model: "sonnet", options: [{ id: "effort", value: "high" }] });
 });
