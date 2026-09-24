@@ -84,9 +84,11 @@ const ADAPTER_ID: AgentAdapterId = "grok";
  *
  * `goals` (goals §4.5): `/goal …` is forwarded and the CLI parses it; the goal
  * runs inside the one turn that set it, so the provider never starts a turn by
- * itself; and `/goal status|pause|resume|clear` are prompts that queue behind
- * a running goal turn (fixtures README observation 19), which is why the chip
- * offers resume and clear only.
+ * itself; and `/goal status|pause|resume|clear` are prompts like any other.
+ * Grok would queue a second prompt behind the running one (fixtures README
+ * observation 19), but a steer cancels the running prompt first — the whole
+ * goal run, which Grok then reports paused — so the chip offers only resume
+ * and clear, and nothing while a turn runs.
  */
 export const GROK_CAPABILITIES: AdapterCapabilities = {
   sessionModelSwitch: "in-session",

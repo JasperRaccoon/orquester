@@ -16,11 +16,11 @@ const roomOf = (r: TranscriptResult, maxChars: number): number => maxChars - TRA
 const contentOf = (rows: readonly unknown[]): number => Buffer.byteLength(JSON.stringify(rows), "utf8") - 2;
 /** The subagent list's cap once a result is over: what the unshed entries (`e` bytes) leave, never less than its share. */
 const rosterCap = (room: number, e: number): number => Math.max(Math.floor(room * ROSTER_SHARE), room - e);
-/** The row a shed never drops: the latest turn's final reply (never a commentary row), else that turn's newest row. */
+/** The row a shed never drops: the latest turn's final reply, else that turn's last commentary row, else its newest row. */
 const sparedOf = (entries: readonly TranscriptEntry[]): TranscriptEntry | undefined => {
   const turns = entries.flatMap((e) => (e.turn === null ? [] : [e.turn]));
-  const own = entries.filter((e) => e.turn === (turns.length ? Math.max(...turns) : null));
-  return [...own].reverse().find((e) => e.kind === "assistant" && !e.commentary) ?? own.at(-1);
+  const own = [...entries.filter((e) => e.turn === (turns.length ? Math.max(...turns) : null))].reverse();
+  return own.find((e) => e.kind === "assistant" && !e.commentary) ?? own.find((e) => e.kind === "assistant") ?? own[0];
 };
 const hasRow = (r: TranscriptResult, row: TranscriptEntry): boolean => r.entries.some((e) => e.createdAt === row.createdAt && e.kind === row.kind);
 /** The roster row a second pass would bring back next: the last one dropped (live rows drop last, the newest last). */
@@ -565,7 +565,8 @@ test("a randomized probe (fixed seed): whole when it fits, else within the reser
     assert.equal(JSON.stringify(transcriptEntries(snap, { turns: window, include: ALL, maxChars: snug })), JSON.stringify(whole), `${where}: whole at maxChars ${snug}`);
     const tight = transcriptEntries(snap, { turns: window, include: ALL, maxChars: wholeSize - 1 });
     assert.ok(tight.truncated && budgetSize(tight) <= wholeSize - 1 - TRANSCRIPT_HINT_BYTES, `${where}: trimmed at maxChars ${wholeSize - 1}`);
-    // The spared row — the latest turn's final reply, else its newest row — always stays (a minimal row always fits here).
+    // The spared row — the latest turn's final reply, else its last commentary, else its newest row — always stays (a
+    // minimal row always fits here).
     const spared = sparedOf(whole.entries)!;
     assert.ok(hasRow(r, spared), `${where}: the spared row stays`);
     const present = r.entries.flatMap((e) => (e.turn === null ? [] : [e.turn]));
@@ -1080,19 +1081,43 @@ test("a commentary message is an assistant row marked commentary: true; the turn
   assert.ok(!("commentary" in assistant[1]!) && !("commentary" in assistant[2]!), "no commentary field on an answer");
 });
 
-test("a commentary row is never the spared reply: a running turn's shed keeps its newest row instead", () => {
-  // The turn is still at work: narration, then a call with a long command, and no answer yet.
+test("a turn with no answer is spared on its last commentary row, as the GUI ends such a turn: the shed keeps the narration, cut to fit, over the newer tool row", () => {
+  // The turn is still at work (or was interrupted there): narration, then a call with a long command, and no answer.
+  const narration = `I'll run the migration now. ${"Checking the schema first. ".repeat(60)}`;
   const items = [
     message("user", "Run the migration and report.", { turnId: "t1" }),
-    message("assistant", `I'll run the migration now. ${"Checking the schema first. ".repeat(60)}`, { turnId: "t1", messageKind: "commentary" }),
+    message("assistant", narration, { turnId: "t1", messageKind: "commentary" }),
     activity("tool.started", { itemType: "command_execution", toolUseId: "m", title: "Migrate", status: "inProgress", command: `pnpm migrate ${"--table t ".repeat(150)}` }, { turnId: "t1", tone: "tool" })
   ];
   const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
   assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  assert.deepEqual(r.entries.map((e) => e.kind), ["tool"], "the newest row stays, cut to fit; the narration goes");
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.commentary]), [["assistant", true]], "the narration stays, cut to fit; the tool row goes");
+  assert.ok(r.entries[0]!.text!.endsWith("…") && narration.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the narration");
   // With an answer, the answer is the spared row as before.
   const answered = transcriptEntries(snapshot({ items: [...items, message("assistant", "Migrated 12 tables.", { turnId: "t1", messageKind: "answer" })] }), { turns: 5, include: ALL, maxChars: 2_000 });
   assert.ok(answered.entries.some((e) => e.kind === "assistant" && e.text === "Migrated 12 tables."), "the answer stays");
+  assert.ok(!answered.entries.some((e) => e.commentary), "and the narration goes before it");
+});
+
+test("the spared commentary is the latest turn's LAST: an earlier one, a newer tool row and an older turn's answer all go before it", () => {
+  // Turn 1 answered; turn 2, the latest, narrated twice and was interrupted in a call, never answering.
+  const first = `Two tests fail on empty lines. ${"Reading the tokenizer. ".repeat(40)}`;
+  const last = `Fixing the tokenizer next. ${"It drops a trailing newline. ".repeat(60)}`; // alone over the budget: cut to fit
+  const items = [
+    message("user", "Why does the parser fail?", { turnId: "t1" }), message("assistant", "It skips empty lines.", { turnId: "t1" }),
+    message("user", "Fix it.", { turnId: "t2" }),
+    message("assistant", first, { turnId: "t2", messageKind: "commentary" }),
+    activity("tool.completed", { itemType: "command_execution", toolUseId: "p", title: "pnpm test", status: "completed", command: "pnpm test", detail: "2 failed" }, { turnId: "t2", tone: "tool" }),
+    message("assistant", last, { turnId: "t2", messageKind: "commentary" }),
+    activity("tool.started", { itemType: "command_execution", toolUseId: "l", title: "pnpm lint", status: "inProgress", command: "pnpm lint" }, { turnId: "t2", tone: "tool" })
+  ];
+  const turns = [turn(), turn({ turnId: "t2", turnCount: 2, state: "interrupted", requestedAt: items[2]!.createdAt, startedAt: items[2]!.createdAt, completedAt: items.at(-1)!.createdAt })];
+  const snap = snapshot({ items, turns });
+  assert.equal(sparedOf(transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 }).entries)?.text, last);
+  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(r.truncated && budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `trimmed within the budget (${budgetSize(r)})`);
+  assert.deepEqual(r.entries.map((e) => [e.turn, e.kind, e.commentary]), [[2, "assistant", true]], "every other row goes, the newest one included");
+  assert.ok(r.entries[0]!.text!.endsWith("…") && last.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the LAST narration");
 });
 
 test("compaction rows follow the shared rule: no state is settled, the legacy marker counts, a subagent's own stays out of the parent view", () => {

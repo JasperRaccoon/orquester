@@ -168,7 +168,7 @@ test("the context meter's percentUsed is clamped to 100, as the GUI's ring is; t
   assert.equal(sessionDetail(chatSummary(), at, ctx).chat.contextWindow?.percentUsed, 100);
 });
 
-test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) is left out, as the GUI never takes it for the answer", () => {
+test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) is left out while the turn has an answer", () => {
   const codex = snapshot({ items: [
     message("user", "fix the parser", { turnId: "t1" }),
     message("assistant", "I'll look at the failing test first.", { turnId: "t1", messageKind: "commentary" }),
@@ -179,9 +179,22 @@ test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) 
   // Without a phase (Claude, an older Codex) every assistant message of the turn is its answer, as before.
   const claude = snapshot({ items: [message("assistant", "Looking.", { turnId: "t1" }), message("assistant", "Done.", { turnId: "t1" })] });
   assert.equal(lastReply(claude)?.text, "Looking.\n\nDone.");
-  // A turn cut before its answer said nothing that answers: its narration is not passed off as a reply.
-  const cut = snapshot({ turns: [turn({ state: "interrupted" })], items: [message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" })] });
-  assert.equal(lastReply(cut)?.text, "");
+});
+
+test("a turn with no answer at all ends on its last commentary, as the GUI's timeline does; a subagent's commentary never counts", () => {
+  // Interrupted before its answer (and every Codex goal turn the goal-aware Stop paused, then interrupted).
+  const cut = snapshot({ turns: [turn({ state: "interrupted" })], items: [
+    message("user", "fix the parser", { turnId: "t1" }),
+    message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" }),
+    message("assistant", "Two tests fail on empty lines; fixing the tokenizer next.", { turnId: "t1", messageKind: "commentary" })
+  ] });
+  assert.deepEqual(lastReply(cut), { turnId: "t1", text: "Two tests fail on empty lines; fixing the tokenizer next.", truncated: false, completedAt: stamp(1) }, "the last commentary alone, never the narration joined");
+  // A subagent narrates inside the parent's turn: its commentary is its own, never the parent's last word.
+  const sub = (text: string) => message("assistant", text, { turnId: "t1", messageKind: "commentary", agentId: "task-9" });
+  assert.equal(lastReply(snapshot({ items: [message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" }), sub("Reading the tokenizer.")] }))?.text, "I'll start with the tests.");
+  assert.equal(lastReply(snapshot({ items: [message("user", "fix the parser", { turnId: "t1" }), sub("Reading the tokenizer.")] }))?.text, "", "only a subagent spoke");
+  // An answer, however short, wins over any amount of narration.
+  assert.equal(lastReply(snapshot({ items: [message("assistant", "Fixed.", { turnId: "t1" }), message("assistant", "Checking once more.", { turnId: "t1", messageKind: "commentary" })] }))?.text, "Fixed.");
 });
 
 // ---- Final fix wave F2 (M3): one rule decides whether a plan is actionable, judged on the snapshot. ----

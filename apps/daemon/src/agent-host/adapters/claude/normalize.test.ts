@@ -29,6 +29,15 @@ import {
   replayClaudeFixture,
   sdkMessageTag
 } from "./fixtures.ts";
+import { createIngestion } from "../../ingestion/index.ts";
+import {
+  FakeClock,
+  FakeTimers,
+  RecordingLiveness,
+  RecordingSink,
+  counterIdGen,
+  settle
+} from "../../ingestion/test-harness.ts";
 
 function allOf<T extends RuntimeEvent["type"]>(
   events: readonly RuntimeEvent[],
@@ -907,6 +916,454 @@ describe("claude normaliser — every API message of a turn keeps its own assist
       [...items.deltasByItem.values()],
       ["First.", "Second."],
       "no text is re-emitted from a snapshot and none is merged"
+    );
+  });
+});
+
+describe("claude normaliser — a turn the CLI starts itself keeps its opening message in place", () => {
+  // The CLI starts a turn on its own when a background task or subagent
+  // finishes. Its first API message streams BEFORE the complete `assistant`
+  // frame that opens the synthetic turn, and the CLI emits every per-block
+  // `assistant` frame before that block's `content_block_stop` (fixture 07).
+  // Live thread 19976137, turn f83776c1 (seq 38664/38963): the opening
+  // paragraph streamed as one item, its per-block frame minted a second one,
+  // and `result` flushed that one BELOW the final summary — where the timeline
+  // took it for the turn's answer and folded the real answer away.
+  type Frame = Record<string, unknown>;
+  type Block =
+    | { type: "thinking"; thinking: string }
+    | { type: "text"; text: string }
+    | { type: "tool_use"; id: string };
+
+  const stream = (event: Frame): Frame => ({
+    type: "stream_event",
+    event,
+    uuid: "u",
+    session_id: "s",
+    parent_tool_use_id: null
+  });
+  const blockFrame = (messageId: string, block: Frame): Frame => ({
+    type: "assistant",
+    uuid: `uuid-${messageId}`,
+    session_id: "s",
+    parent_tool_use_id: null,
+    message: { id: messageId, role: "assistant", model: "claude-opus-5", content: [block], stop_reason: null }
+  });
+
+  /** One API message in the CLI's own order: each per-block frame BEFORE its block's stop. */
+  function apiMessage(messageId: string, blocks: Block[]): Frame[] {
+    const frames: Frame[] = [
+      stream({ type: "message_start", message: { id: messageId, role: "assistant", content: [], usage: {} } })
+    ];
+    blocks.forEach((block, index) => {
+      if (block.type === "thinking") {
+        frames.push(
+          stream({ type: "content_block_start", index, content_block: { type: "thinking", thinking: "" } }),
+          stream({ type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: block.thinking } }),
+          blockFrame(messageId, { type: "thinking", thinking: block.thinking, signature: "sig" }),
+          stream({ type: "content_block_stop", index })
+        );
+      } else if (block.type === "text") {
+        const half = Math.ceil(block.text.length / 2);
+        frames.push(
+          stream({ type: "content_block_start", index, content_block: { type: "text", text: "" } }),
+          stream({ type: "content_block_delta", index, delta: { type: "text_delta", text: block.text.slice(0, half) } }),
+          stream({ type: "content_block_delta", index, delta: { type: "text_delta", text: block.text.slice(half) } }),
+          blockFrame(messageId, { type: "text", text: block.text }),
+          stream({ type: "content_block_stop", index })
+        );
+      } else {
+        frames.push(
+          stream({
+            type: "content_block_start",
+            index,
+            content_block: { type: "tool_use", id: block.id, name: "Bash", input: {} }
+          }),
+          stream({
+            type: "content_block_delta",
+            index,
+            delta: { type: "input_json_delta", partial_json: '{"command":"git status"}' }
+          }),
+          blockFrame(messageId, { type: "tool_use", id: block.id, name: "Bash", input: { command: "git status" } }),
+          stream({ type: "content_block_stop", index })
+        );
+      }
+    });
+    frames.push(
+      stream({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } }),
+      stream({ type: "message_stop" })
+    );
+    return frames;
+  }
+  const toolResult = (toolUseId: string): Frame => ({
+    type: "user",
+    uuid: "u",
+    session_id: "s",
+    parent_tool_use_id: null,
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: toolUseId, content: "clean", is_error: false }]
+    }
+  });
+  const result = (): Frame => ({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "Goal tracking is built.",
+    stop_reason: "end_turn",
+    num_turns: 2,
+    duration_ms: 1000,
+    duration_api_ms: 900,
+    total_cost_usd: 0,
+    permission_denials: [],
+    usage: { input_tokens: 10, output_tokens: 10 },
+    modelUsage: {},
+    uuid: "u",
+    session_id: "s"
+  });
+
+  /** The incident's turn: open with a paragraph and a tool call, then the final summary. */
+  function openingTurn(opening: Block[]): Frame[] {
+    return [
+      ...apiMessage("msg_open", [...opening, { type: "tool_use", id: "toolu_1" }]),
+      toolResult("toolu_1"),
+      ...apiMessage("msg_final", [
+        { type: "thinking", thinking: "Write it up." },
+        { type: "text", text: "Goal tracking is built." }
+      ])
+    ];
+  }
+
+  function feedAll(normalizer: ClaudeNormalizer, frames: readonly Frame[]): RuntimeEvent[] {
+    return frames.flatMap((frame) => normalizer.handleMessage(frame as unknown as SDKMessage));
+  }
+
+  function newNormalizer(): ClaudeNormalizer {
+    return new ClaudeNormalizer({ threadId: "t", clock: fixedClock(), ids: countingIds() });
+  }
+
+  function isAssistantItem(event: RuntimeEvent, type: "item.started" | "item.completed"): boolean {
+    return (
+      event.type === type &&
+      (event.payload as { itemType?: string }).itemType === "assistant_message"
+    );
+  }
+
+  function assistantText(events: readonly RuntimeEvent[]): Array<[string, string]> {
+    const byItem = new Map<string, string>();
+    for (const event of events) {
+      if (
+        event.type === "content.delta" &&
+        (event.payload as { streamKind?: string }).streamKind === "assistant_text"
+      ) {
+        const key = event.itemId ?? "";
+        byItem.set(key, `${byItem.get(key) ?? ""}${(event.payload as { delta: string }).delta}`);
+      }
+    }
+    return [...byItem.entries()];
+  }
+
+  function thinking(events: readonly RuntimeEvent[]): Array<[string, string | undefined]> {
+    return events
+      .filter(
+        (event) =>
+          event.type === "content.delta" &&
+          (event.payload as { streamKind?: string }).streamKind === "reasoning_summary_text"
+      )
+      .map((event) => [(event.payload as { delta: string }).delta, event.turnId]);
+  }
+
+  it("an opening message that thinks first is ONE item, closed in place, and keeps its thinking", () => {
+    const normalizer = newNormalizer();
+    const before = feedAll(
+      normalizer,
+      openingTurn([
+        { type: "thinking", thinking: "Round 5 is clean." },
+        { type: "text", text: "All checks are now clean." }
+      ])
+    );
+    const atResult = feedAll(normalizer, [result()]);
+    const all = [...before, ...atResult];
+
+    const turnIds = [...new Set(all.filter((event) => event.type === "turn.started").map((e) => e.turnId))];
+    assert.equal(turnIds.length, 1, "one synthetic turn");
+    const started = all.filter((event) => isAssistantItem(event, "item.started")).map((e) => e.itemId);
+    assert.equal(started.length, 2, "one item per text block: the per-block frame joins its streamed block");
+    assert.deepEqual(
+      assistantText(all).map(([, text]) => text),
+      ["All checks are now clean.", "Goal tracking is built."],
+      "each text once, in the order it was said"
+    );
+    assert.deepEqual(
+      before.filter((event) => isAssistantItem(event, "item.completed")).map((e) => e.itemId),
+      started,
+      "both items close at their own content_block_stop, before `result`"
+    );
+    assert.deepEqual(
+      atResult.filter((event) => event.type === "content.delta" || isAssistantItem(event, "item.started")),
+      [],
+      "`result` settles the turn; it never carries text"
+    );
+    assert.deepEqual(
+      thinking(all),
+      [
+        ["Round 5 is clean.", turnIds[0]],
+        ["Write it up.", turnIds[0]]
+      ],
+      "the thinking that streamed before the turn opened reaches it"
+    );
+  });
+
+  it("an opening message with no thinking is closed in place, not held back to `result`", () => {
+    // Every delta of a text-first opening block arrives before the frame that
+    // opens the turn. Its snapshot-only item used to wait for `result` and
+    // surfaced after the final summary — one copy, but out of order.
+    const normalizer = newNormalizer();
+    const all = feedAll(normalizer, [
+      ...openingTurn([{ type: "text", text: "Task 7 is done; launching its review." }]),
+      result()
+    ]);
+
+    const started = all.filter((event) => isAssistantItem(event, "item.started")).map((e) => e.itemId);
+    assert.equal(started.length, 2);
+    assert.deepEqual(
+      assistantText(all).map(([, text]) => text),
+      ["Task 7 is done; launching its review.", "Goal tracking is built."]
+    );
+    const openingClosedAt = all.findIndex(
+      (event) => isAssistantItem(event, "item.completed") && event.itemId === started[0]
+    );
+    const finalOpenedAt = all.findIndex(
+      (event) => isAssistantItem(event, "item.started") && event.itemId === started[1]
+    );
+    assert.ok(
+      openingClosedAt !== -1 && openingClosedAt < finalOpenedAt,
+      "the opening item closes before the final message starts"
+    );
+  });
+
+  it("a user turn that opens mid-message adopts the message streaming so far", () => {
+    // `sendTurn` can land while the CLI's own message is still thinking: the
+    // rest of that message then streams inside the user's turn, and the part
+    // that streamed before it must join it rather than split from it.
+    const normalizer = newNormalizer();
+    const frames = apiMessage("msg_open", [
+      { type: "thinking", thinking: "Round 5 is clean." },
+      { type: "text", text: "All checks are now clean." }
+    ]);
+    const cut = frames.findIndex((frame) => frame.type === "assistant");
+    const all = [
+      ...feedAll(normalizer, frames.slice(0, cut)),
+      ...normalizer.beginTurn({ turnId: "turn-user" }),
+      ...feedAll(normalizer, frames.slice(cut)),
+      ...feedAll(normalizer, [result()])
+    ];
+
+    assert.deepEqual(
+      assistantText(all).map(([, text]) => text),
+      ["All checks are now clean."]
+    );
+    assert.equal(all.filter((event) => isAssistantItem(event, "item.started")).length, 1);
+    assert.deepEqual(thinking(all), [["Round 5 is clean.", "turn-user"]]);
+  });
+
+  /** Where `apiMessage` splits a text block between its two deltas. */
+  const halves = (text: string): [string, string] => {
+    const half = Math.ceil(text.length / 2);
+    return [text.slice(0, half), text.slice(half)];
+  };
+  /** Just past the FIRST delta of block `index`: that block is mid-stream. */
+  const midBlock = (frames: readonly Frame[], index: number): number =>
+    frames.findIndex((frame) => {
+      const event = frame.event as { type?: string; index?: number } | undefined;
+      return event?.type === "content_block_delta" && event.index === index;
+    }) + 1;
+
+  it("a user turn that auto-closes a synthetic turn mid-message keeps that message's join", () => {
+    // `sendTurn` settles a stale synthetic turn and opens the user's while the
+    // CLI's own message is still streaming: the rest of that message streams
+    // into the user's turn. A fresh turn used to start with no stream join at
+    // all, so the block's per-block frame minted a twin that `result` flushed
+    // below the user's answer (code review of this fix, 2026-09-24).
+    const normalizer = newNormalizer();
+    const frames = apiMessage("msg_open", [
+      { type: "text", text: "Opening." },
+      { type: "text", text: "Second paragraph." }
+    ]);
+    const cut = midBlock(frames, 1);
+    const all = [
+      ...feedAll(normalizer, frames.slice(0, cut)),
+      ...normalizer.completeTurn("completed"),
+      ...normalizer.beginTurn({ turnId: "turn-user" }),
+      ...feedAll(normalizer, [
+        ...frames.slice(cut),
+        ...apiMessage("msg_final", [{ type: "text", text: "Final answer." }])
+      ])
+    ];
+    const atResult = feedAll(normalizer, [result()]);
+
+    const [head, tail] = halves("Second paragraph.");
+    assert.deepEqual(
+      assistantText([...all, ...atResult]).map(([, text]) => text),
+      ["Opening.", head, tail, "Final answer."],
+      "the block splits at the turn boundary, and nothing is said twice"
+    );
+    assert.deepEqual(
+      atResult.filter((event) => event.type === "content.delta" || isAssistantItem(event, "item.started")),
+      [],
+      "`result` carries no text"
+    );
+  });
+
+  it("a turn that begins while a synthetic turn is open settles that turn first, never overwrites it", () => {
+    // `sendTurn` looks for a stale synthetic turn BEFORE its awaits (model,
+    // mode, skill discovery); the CLI can open one during them. Overwritten,
+    // that turn never settled and its open items never closed.
+    const normalizer = newNormalizer();
+    const frames = apiMessage("msg_open", [
+      { type: "thinking", thinking: "hmm" },
+      { type: "text", text: "Background task finished." }
+    ]);
+    const cut = midBlock(frames, 1);
+    const before = feedAll(normalizer, frames.slice(0, cut));
+    const syntheticTurnId = before.find((event) => event.type === "turn.started")?.turnId;
+    assert.ok(syntheticTurnId !== undefined, "the per-block frame opened a synthetic turn");
+    const all = [
+      ...before,
+      ...normalizer.beginTurn({ turnId: "turn-user" }),
+      ...feedAll(normalizer, [
+        ...frames.slice(cut),
+        ...apiMessage("msg_final", [{ type: "text", text: "Answer to the user." }]),
+        result()
+      ])
+    ];
+
+    const settledAt = all.findIndex(
+      (event) => event.type === "turn.completed" && event.turnId === syntheticTurnId
+    );
+    const userOpenedAt = all.findIndex(
+      (event) => event.type === "turn.started" && event.turnId === "turn-user"
+    );
+    assert.ok(settledAt !== -1 && settledAt < userOpenedAt, "the synthetic turn settles before the user's opens");
+    const started = all.filter((event) => isAssistantItem(event, "item.started")).map((e) => e.itemId);
+    const completed = all.filter((event) => isAssistantItem(event, "item.completed")).map((e) => e.itemId);
+    assert.deepEqual([...completed].sort(), [...started].sort(), "no assistant item is left open");
+    const [head, tail] = halves("Background task finished.");
+    assert.deepEqual(
+      assistantText(all).map(([, text]) => text),
+      [head, tail, "Answer to the user."]
+    );
+  });
+
+  it("a held message keeps every delta, however long its first block streams", () => {
+    // The first block streams in full before the frame that opens the turn;
+    // Opus can think for thousands of deltas, and a tool's input streams as
+    // deltas too. None of it may be lost to a frame cap.
+    const normalizer = newNormalizer();
+    const thinkingDeltas = Array.from({ length: 12_000 }, (_, n) => `t${n} `);
+    const inputChunks = Array.from({ length: 12_000 }, () => " ");
+    const frames: Frame[] = [
+      stream({ type: "message_start", message: { id: "msg_long", role: "assistant", content: [], usage: {} } }),
+      stream({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }),
+      ...thinkingDeltas.map((thinking) =>
+        stream({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking } })
+      ),
+      stream({ type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig" } }),
+      blockFrame("msg_long", { type: "thinking", thinking: thinkingDeltas.join(""), signature: "sig" }),
+      stream({ type: "content_block_stop", index: 0 }),
+      stream({
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "tool_use", id: "toolu_long", name: "Bash", input: {} }
+      }),
+      stream({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"command":' } }),
+      ...inputChunks.map((partial_json) =>
+        stream({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json } })
+      ),
+      stream({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '"ls"}' } }),
+      blockFrame("msg_long", { type: "tool_use", id: "toolu_long", name: "Bash", input: { command: "ls" } }),
+      stream({ type: "content_block_stop", index: 1 })
+    ];
+    const all = feedAll(normalizer, frames);
+
+    assert.equal(
+      thinking(all).map(([delta]) => delta).join(""),
+      thinkingDeltas.join(""),
+      "every thinking delta reaches the turn, in order"
+    );
+    const toolRows = all.filter(
+      (event) => (event.type === "item.started" || event.type === "item.updated") && event.itemId === "toolu_long"
+    );
+    assert.deepEqual(
+      (toolRows.at(-1)?.payload as { data?: { input?: unknown } } | undefined)?.data?.input,
+      { command: "ls" },
+      "the tool keeps its streamed input"
+    );
+  });
+
+  it("a message that ended before any turn opened is never replayed into a later turn", () => {
+    for (const end of ["message_stop", "result"] as const) {
+      const normalizer = newNormalizer();
+      const stale: Frame[] = [
+        stream({ type: "message_start", message: { id: "msg_stale", role: "assistant", content: [], usage: {} } }),
+        stream({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+        stream({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Stale." } }),
+        end === "message_stop" ? stream({ type: "message_stop" }) : result()
+      ];
+      const all = [
+        ...feedAll(normalizer, stale),
+        ...normalizer.beginTurn({ turnId: "turn-user" }),
+        ...feedAll(normalizer, [...apiMessage("msg_fresh", [{ type: "text", text: "Fresh." }]), result()])
+      ];
+      assert.deepEqual(
+        assistantText(all).map(([, text]) => text),
+        ["Fresh."],
+        `a message closed by ${end} stays out of the next turn`
+      );
+    }
+  });
+
+  it("through ingestion, the incident's turn is one message per text block, the answer last", async () => {
+    const clock = new FakeClock("2026-09-24T15:07:42.000Z");
+    const timers = new FakeTimers(clock);
+    const sink = new RecordingSink();
+    const ingestion = createIngestion({
+      sink: sink.sink,
+      liveness: new RecordingLiveness(),
+      clock,
+      idGen: counterIdGen("d"),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      slim: (payload: unknown) => payload
+    });
+    const normalizer = new ClaudeNormalizer({ threadId: "t", clock, ids: countingIds() });
+    const frames = [
+      ...openingTurn([
+        { type: "thinking", thinking: "Round 5 is clean." },
+        { type: "text", text: "All checks are now clean." }
+      ]),
+      result()
+    ];
+    for (const frame of frames) {
+      clock.advance(30);
+      for (const event of normalizer.handleMessage(frame as unknown as SDKMessage)) {
+        await ingestion.ingest(event);
+      }
+      await settle();
+    }
+    timers.advance(1000);
+    await ingestion.drain();
+    await settle();
+
+    const texts = new Map<string, string>();
+    for (const event of sink.messages()) {
+      if (event.payload.role !== "assistant") continue;
+      texts.set(event.payload.messageId, `${texts.get(event.payload.messageId) ?? ""}${event.payload.text}`);
+    }
+    assert.deepEqual(
+      [...texts.values()],
+      ["All checks are now clean.", "Goal tracking is built."],
+      "no message id repeats the opening paragraph, and the summary is the turn's last message"
     );
   });
 });

@@ -169,6 +169,17 @@ interface ThreadState {
   /** turnId → every message id the turn has opened. */
   turnMessageIds: Map<string, Set<string>>;
   /**
+   * turnId → the assistant message ids that reached the log WITH TEXT during
+   * that live turn. Unlike `projected` it survives `finalizeMessage`: a prompt
+   * can close a message before its `item.completed` arrives (OpenCode flushes a
+   * text part's closing snapshot after the tool call that follows it), and the
+   * completion's `detail` then stood in as if nothing had streamed — the bubble
+   * printed its text twice. T3 asks its projection the same question
+   * (`ProviderRuntimeIngestion.ts`: fallback only onto a missing or empty
+   * message). Dropped with its turn in `finalizeTurn` (Q1 #9).
+   */
+  turnDeliveredMessageIds: Map<string, Set<string>>;
+  /**
    * messageId → the subagent that owns it (§7.6). Every
    * `thread.message-sent` for that message — the streaming flushes, the
    * completion with the buffered text and the empty `streaming:false` close —
@@ -308,6 +319,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       toolOutput: undefined as unknown as DeltaBufferSet,
       segments: new Map(),
       turnMessageIds: new Map(),
+      turnDeliveredMessageIds: new Map(),
       messageAgent: new Map(),
       projected: new Set(),
       messageTurn: new Map(),
@@ -549,6 +561,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const turnId = state.messageTurn.get(flush.key) ?? null;
     const agentId = state.messageAgent.get(flush.key);
     state.projected.add(flush.key);
+    noteDelivered(state, turnId, flush.key);
     emit(
       state,
       threadId,
@@ -714,6 +727,19 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.turnMessageIds.set(turnId, turnMessages);
   }
 
+  /**
+   * An assistant message of a live turn reached the log with text. Kept past
+   * `finalizeMessage` on purpose — see `turnDeliveredMessageIds`.
+   */
+  function noteDelivered(state: ThreadState, turnId: string | null, messageId: string): void {
+    if (turnId === null || messageRoleOf(messageId) !== "assistant") {
+      return;
+    }
+    const delivered = state.turnDeliveredMessageIds.get(turnId) ?? new Set<string>();
+    delivered.add(messageId);
+    state.turnDeliveredMessageIds.set(turnId, delivered);
+  }
+
   function forgetMessage(state: ThreadState, turnId: string | null, messageId: string): void {
     state.messageTurn.delete(messageId);
     state.messageAgent.delete(messageId);
@@ -826,6 +852,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const kindFields = messageKindFields(state, messageId, role);
     if (hasRenderableText(text)) {
       state.projected.add(messageId);
+      noteDelivered(state, turnId, messageId);
       emit(
         state,
         threadId,
@@ -899,6 +926,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         forgetMessage(state, turnId, messageId);
       }
     }
+    state.turnDeliveredMessageIds.delete(turnId);
   }
 
   // -------------------------------------------------------------------------
@@ -1768,7 +1796,14 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const text = historicalItemText(
       assistantPhase(event.payload).detailIsMarker ? { data: event.payload.data } : event.payload
     );
-    const streamed = state.projected.has(messageId) || state.messages.has(messageId);
+    // `projected` forgets a message the moment a prompt finalises it, so the
+    // turn's own delivered record is asked too: a completion arriving after a
+    // prompt closed its message must write nothing — the prompt already sent
+    // the close — rather than append its text a second time.
+    const streamed =
+      state.projected.has(messageId) ||
+      state.messages.has(messageId) ||
+      (state.turnDeliveredMessageIds.get(turnId)?.has(messageId) ?? false);
     if (active === null && !streamed && !hasRenderableText(text)) {
       // Nothing to complete: no stream ever opened and the completion is empty.
       return;
@@ -1863,6 +1898,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state.toolOutput.clear();
     state.segments.clear();
     state.turnMessageIds.clear();
+    state.turnDeliveredMessageIds.clear();
     state.messageAgent.clear();
     state.projected.clear();
     state.messageTurn.clear();

@@ -283,6 +283,7 @@ export function computeMessageDurationStart(
 /** *T3: `MessagesTimeline.logic.ts:509-533`.* */
 function deriveTerminalAssistantMessageIds(entries: readonly TimelineEntry[]): Set<string> {
   const lastByResponseKey = new Map<string, string>();
+  const lastCommentaryByResponseKey = new Map<string, string>();
   let nullTurnIndex = 0;
   for (const entry of entries) {
     if (entry.kind !== "message") {
@@ -293,15 +294,25 @@ function deriveTerminalAssistantMessageIds(entries: readonly TimelineEntry[]): S
       nullTurnIndex += 1;
       continue;
     }
-    // Commentary is never the turn's answer, so it can never be the terminal
-    // message whose metadata row closes the response.
-    if (message.role !== "assistant" || isCommentaryAssistantMessage(message)) {
+    if (message.role !== "assistant") {
       continue;
     }
-    lastByResponseKey.set(
-      message.turnId ? `turn:${message.turnId}` : `unkeyed:${nullTurnIndex}`,
-      message.id
-    );
+    const responseKey = message.turnId ? `turn:${message.turnId}` : `unkeyed:${nullTurnIndex}`;
+    // Commentary is not the turn's answer while the turn has one, so it
+    // cannot be the terminal message whose metadata row closes the response.
+    if (isCommentaryAssistantMessage(message)) {
+      lastCommentaryByResponseKey.set(responseKey, message.id);
+      continue;
+    }
+    lastByResponseKey.set(responseKey, message.id);
+  }
+  // A turn with no final answer at all (interrupted, or ended on a tool) ends
+  // on its last commentary, as in T3. With no terminal message the fold hid
+  // every word of the turn behind "Worked for".
+  for (const [responseKey, messageId] of lastCommentaryByResponseKey) {
+    if (!lastByResponseKey.has(responseKey)) {
+      lastByResponseKey.set(responseKey, messageId);
+    }
   }
   return new Set(lastByResponseKey.values());
 }

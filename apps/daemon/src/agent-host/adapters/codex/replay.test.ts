@@ -14,6 +14,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
+import type { DomainEvent, RuntimeEvent, ThreadMessageItem } from "@orquester/api/agent-chat";
+import { foldThread } from "@orquester/api/agent-chat";
+
+import { createIngestion } from "../../ingestion/index.ts";
+import {
+  FakeClock,
+  FakeTimers,
+  RecordingLiveness,
+  RecordingSink,
+  counterIdGen,
+  settle
+} from "../../ingestion/test-harness.ts";
 import {
   SERVER_NOTIFICATION_METHODS,
   SERVER_REQUEST_METHODS
@@ -431,6 +443,189 @@ describe("codex replay — 05 request_user_input", () => {
     assert.equal(typeof question.isOther, "boolean");
     assert.equal(typeof question.isSecret, "boolean");
     assert.equal(typeof params.isBlocking, "boolean");
+  });
+});
+
+/**
+ * Fixture 05's abandoned attempt (fixtures README obs. 19): a `commentary`
+ * agentMessage that streams 27 deltas, stops mid-sentence and never gets an
+ * `item/completed`. Codex's own rollout for the session does not contain it.
+ */
+const ABANDONED_MESSAGE_ID = "msg_0d0d102f2f46ad5c016ab0a4422a1087d287b60bfd06c10b98";
+/** The agentMessage that restates it 2.8 s later, in the same turn, and completes. */
+const REGENERATED_MESSAGE_ID = "msg_0d0d102f2f46ad5c016ab0a44574f887d28d6b2840b954d7ce";
+
+/**
+ * Every item the abandoned-message close fired on in one capture: an
+ * `item.completed` produced while handling an `item/started`, which is the
+ * only way a frame about one item can close ANOTHER.
+ */
+function abandonedMessageCloses(name: string): string[] {
+  const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
+  const closed: string[] = [];
+  for (const notification of inbound(readFixture(name)).notifications) {
+    const drafts = normaliser.notification(notification.method as never, notification.params);
+    if (notification.method !== "item/started") {
+      continue;
+    }
+    for (const draft of drafts) {
+      if (draft.type === "item.completed") {
+        closed.push(String(draft.itemId));
+      }
+    }
+  }
+  return closed;
+}
+
+/**
+ * Each agentMessage of a capture, in start order, with the text the provider
+ * gave it: its completion's `item.text`, or — for one that never completed —
+ * what it streamed.
+ */
+function agentMessageTexts(lines: readonly FixtureLine[]): Map<string, string> {
+  const texts = new Map<string, { streamed: string; completed?: string }>();
+  for (const line of lines) {
+    if (line.dir !== "recv" || typeof line.frame !== "object" || line.frame === null) {
+      continue;
+    }
+    const frame = line.frame as Frame;
+    if (frame.method === "item/started" || frame.method === "item/completed") {
+      const item = (frame.params as { item: { type: string; id: string; text?: string } }).item;
+      if (item.type !== "agentMessage") {
+        continue;
+      }
+      const entry = texts.get(item.id) ?? { streamed: "" };
+      if (frame.method === "item/completed") {
+        entry.completed = item.text;
+      }
+      texts.set(item.id, entry);
+    } else if (frame.method === "item/agentMessage/delta") {
+      const params = frame.params as { itemId: string; delta: string };
+      const entry = texts.get(params.itemId) ?? { streamed: "" };
+      entry.streamed += params.delta;
+      texts.set(params.itemId, entry);
+    }
+  }
+  return new Map([...texts].map(([id, entry]) => [id, entry.completed ?? entry.streamed]));
+}
+
+/** A capture with one item's `phase` rewritten on both of its lifecycle frames. */
+function withPhase(lines: readonly FixtureLine[], itemId: string, phase: string): FixtureLine[] {
+  return lines.map((line) => {
+    const frame = line.frame as Frame | null;
+    if (
+      line.dir !== "recv" ||
+      (frame?.method !== "item/started" && frame?.method !== "item/completed")
+    ) {
+      return line;
+    }
+    const params = frame.params as { item: { id: string } };
+    if (params.item.id !== itemId) {
+      return line;
+    }
+    return { ...line, frame: { ...frame, params: { ...params, item: { ...params.item, phase } } } };
+  });
+}
+
+/**
+ * Drive a capture through the REAL normaliser and the REAL ingestion, on the
+ * capture's own clock so the 250 ms batching (§5.6) behaves as it did live,
+ * then fold the log with the shared reducer the client applies (§5.1).
+ *
+ * Server→client requests are the session's to answer and are skipped: none of
+ * 05's falls inside the window its abandoned message streams in, so the
+ * notifications alone reproduce what the timeline received.
+ */
+async function foldedAssistantMessages(
+  lines: readonly FixtureLine[]
+): Promise<ThreadMessageItem[]> {
+  const clock = new FakeClock("2026-09-21T03:27:44.000Z");
+  const timers = new FakeTimers(clock);
+  const sink = new RecordingSink();
+  const ingestion = createIngestion({
+    sink: sink.sink,
+    liveness: new RecordingLiveness(),
+    clock,
+    idGen: counterIdGen("d"),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer
+  });
+  const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
+  let elapsed = 0;
+  let sequence = 0;
+  for (const line of lines) {
+    if (line.dir !== "recv" || typeof line.frame !== "object" || line.frame === null) {
+      continue;
+    }
+    const frame = line.frame as Frame;
+    if (frame.method === undefined || (frame.id !== undefined && frame.id !== null)) {
+      continue;
+    }
+    timers.advance(Math.max(0, line.t - elapsed));
+    elapsed = Math.max(elapsed, line.t);
+    for (const draft of normaliser.notification(frame.method as never, frame.params)) {
+      await ingestion.ingest({
+        ...draft,
+        eventId: `r${++sequence}`,
+        threadId: "t",
+        createdAt: clock.nowIso()
+      } as RuntimeEvent);
+    }
+    await settle();
+  }
+  timers.advance(1_000);
+  await ingestion.drain();
+  await settle();
+  const folded = foldThread(
+    sink.events().map((event, index) => ({ ...event, seq: index + 1 }) as DomainEvent)
+  );
+  return folded.items.filter(
+    (item): item is ThreadMessageItem => item.kind === "message" && item.role === "assistant"
+  );
+}
+
+describe("codex replay — 05 an abandoned agentMessage (fixtures README obs. 19)", () => {
+  const lines = readFixture("05-tool-request-user-input.ndjson");
+
+  it("closes the abandoned message when the next item of its turn starts — nowhere else in the corpus", () => {
+    // The close must never split a real message: across every capture it may
+    // fire on exactly one item, the attempt 05 abandons.
+    const fired: Record<string, string[]> = {};
+    for (const name of fixtureNames()) {
+      const closed = abandonedMessageCloses(name);
+      if (closed.length > 0) {
+        fired[name] = closed;
+      }
+    }
+    assert.deepEqual(fired, { "05-tool-request-user-input.ndjson": [ABANDONED_MESSAGE_ID] });
+  });
+
+  it("through ingestion and the fold, every agentMessage item is its own message — nothing glued", async () => {
+    const expected = [...agentMessageTexts(lines)].map(([itemId, text]) => [
+      `assistant:${itemId}`,
+      text
+    ]);
+    assert.equal(expected.length, 3, "05 carries three agentMessage items");
+    const messages = await foldedAssistantMessages(lines);
+    assert.deepEqual(
+      messages.map((message) => [message.id, message.text]),
+      expected,
+      "the restatement must not be appended to the attempt it replaces"
+    );
+  });
+
+  it("a regenerated FINAL answer keeps its own phase; the abandoned attempt stays commentary", async () => {
+    const messages = await foldedAssistantMessages(
+      withPhase(lines, REGENERATED_MESSAGE_ID, "final_answer")
+    );
+    const kinds = new Map(messages.map((message) => [message.id, message.messageKind]));
+    assert.equal(kinds.get(`assistant:${REGENERATED_MESSAGE_ID}`), "answer");
+    assert.equal(kinds.get(`assistant:${ABANDONED_MESSAGE_ID}`), "commentary");
+    assert.equal(
+      messages.at(-1)?.id,
+      `assistant:${REGENERATED_MESSAGE_ID}`,
+      "the answer is the turn's last assistant message, where the client looks for it"
+    );
   });
 });
 

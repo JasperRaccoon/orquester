@@ -624,3 +624,115 @@ describe("goal rows (goals §8.4)", () => {
     assert.equal(failed?.goal, undefined);
   });
 });
+
+describe("a re-emitted assistant message in an old log (§7.3)", () => {
+  // Hosts before the pre-turn-stream fix flushed a CLI-started Claude turn's
+  // opening paragraph AGAIN at `result`, under a new message id (live thread
+  // 19976137, seq 38664/38963). `events.ndjson` is never rewritten, so those
+  // logs keep the copy.
+  const opening = "All checks are now clean. I'll close out the ledger.";
+  // Only a Claude thread can hold such a copy, so only a Claude projection asks
+  // for the repair; the store sets it from the thread head's adapter.
+  const repair = { dropRepeatedAssistantMessages: true } as const;
+
+  it("drops the turn's last message when it repeats the turn's opening one, word for word", () => {
+    const items = [
+      message("user", "go"),
+      message("assistant", opening, { turnId: "t1", id: "m-open" }),
+      activity("tool.completed", { itemType: "command_execution", command: "ls" }, { turnId: "t1" }),
+      message("assistant", "Goal tracking is built.", { turnId: "t1", id: "m-final" }),
+      message("assistant", opening, { turnId: "t1", id: "m-copy" })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m1", "m-open", "m-final"],
+      "the first occurrence stays where it was said; the copy is gone"
+    );
+  });
+
+  it("keeps the same words in another turn, and a repeat that is still streaming", () => {
+    const items = [
+      message("assistant", "Done.", { turnId: "t1", id: "m-a" }),
+      message("assistant", "Done.", { turnId: "t2", id: "m-b" }),
+      message("assistant", "Done.", { turnId: "t2", id: "m-c", streaming: true })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-a", "m-b", "m-c"]
+    );
+  });
+
+  it("drops only a copy of the turn's OPENING message, at its end: a goal run's rounds may end on the same words", () => {
+    // A Claude goal run is one turn of many rounds; two of them can end "All checks pass." Dropping
+    // the later one would make the round before it the turn's answer. Only the opening paragraph was
+    // ever re-emitted, and its copy still goes.
+    const items = [
+      message("assistant", "Working through the failing checks.", { turnId: "t1", id: "m-open" }),
+      message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-1" }),
+      activity("goal.updated", { goal: { objective: "Make CI green", status: "active", rounds: 1 }, change: "checked" }, { turnId: "t1" }),
+      message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-2" }),
+      message("assistant", "Working through the failing checks.", { turnId: "t1", id: "m-copy" })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-open", "m-round-1", "m-round-2"]
+    );
+  });
+
+  it("a repeat of the opening that is not the turn's last message is the agent's own words, and stays", () => {
+    // The copy was flushed at `result`: nothing of its turn ever follows it. A view that starts
+    // mid-turn compares with its own first message, so a repeat there must also be the last.
+    const items = [
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-first-in-view" }),
+      activity("tool.completed", { itemType: "command_execution", command: "npm test" }, { turnId: "t1" }),
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-again" }),
+      message("assistant", "All green: 212 passing.", { turnId: "t1", id: "m-answer" }),
+      message("assistant", "Running the tests again.", { turnId: "t2", id: "m-next-turn" }),
+      message("assistant", "Running the tests again.", { turnId: "t2", id: "m-streaming", streaming: true })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-first-in-view", "m-again", "m-answer", "m-next-turn", "m-streaming"],
+      "a repeat followed by more of its turn stays, and so does one whose turn is still streaming"
+    );
+  });
+
+  it("leaves every other provider's repeats alone: only a Claude log holds re-emitted copies", () => {
+    // Codex narration can legitimately say "Running the tests again." twice in
+    // one turn; nothing ever re-emitted a Codex, OpenCode or Grok message.
+    const items = [
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-a" }),
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-b" })
+    ];
+    assert.deepEqual(splitThreadItems(items).messages.map((row) => row.id), ["m-a", "m-b"]);
+    assert.deepEqual(
+      deriveTimelineEntriesFromItems(items, null).messages.map((row) => row.id),
+      ["m-a", "m-b"]
+    );
+  });
+
+  it("a projection that starts repairing is rebuilt, not served from the unrepaired memo", () => {
+    const items = [
+      message("assistant", "Done.", { turnId: "t1", id: "m-a" }),
+      message("assistant", "Done.", { turnId: "t1", id: "m-b" })
+    ];
+    const plain = deriveTimelineEntriesFromItems(items, null);
+    const repaired = deriveTimelineEntriesFromItems(items, plain, repair);
+    assert.deepEqual(repaired.messages.map((row) => row.id), ["m-a"]);
+  });
+
+  it("compares one author's messages only: a subagent saying the parent's words is not a copy", () => {
+    const items = [
+      message("assistant", "Reading the brief.", { turnId: "t1", id: "m-parent" }),
+      message("assistant", "Reading the brief.", { turnId: "t1", id: "m-child", agentId: "ag1" })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-parent"]
+    );
+    assert.deepEqual(
+      splitThreadItems(itemsForAgent(items, "ag1"), "ag1", repair).messages.map((row) => row.id),
+      ["m-child"]
+    );
+  });
+});

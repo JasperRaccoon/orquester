@@ -69,7 +69,7 @@ export const NO_GOAL_SUMMARY = "No goal is set.";
 /**
  * The `/goal resume` answer for a goal that reached its token budget. Codex
  * would keep it `budgetLimited` without a word — a set to `active` at or over
- * the budget lands `budgetLimited` again (fixtures README observation 19) — so
+ * the budget lands `budgetLimited` again (fixtures README observation 20) — so
  * nothing is sent.
  */
 export const GOAL_BUDGET_REACHED_SUMMARY =

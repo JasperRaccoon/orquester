@@ -150,7 +150,7 @@ export function resolveChatActivity(fields: AgentChatSessionSummaryFields): Chat
   }
   // A failed turn does not by itself end a continuing goal: continuation is
   // the provider's, at every turn's end — interrupted ones included (Codex
-  // fixtures README, observation 19) — so what ends it is the goal's own
+  // fixtures README, observation 20) — so what ends it is the goal's own
   // status. A provider that stops its goal says so in a goal update, which
   // ends `continuing`, and this rung then shows the failure. An errored
   // session likewise, while the host still reports the goal continuing: that

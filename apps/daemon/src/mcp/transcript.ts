@@ -3,7 +3,10 @@ import { capText } from "./result.ts";
 
 export type TranscriptInclude = "reasoning" | "tools" | "activity";
 export interface TranscriptEntry { turn: number | null; turnId: string | null; kind: "user" | "assistant" | "reasoning" | "tool" | "approval" | "question" | "subagent" | "plan" | "changes" | "compaction" | "error" | "warning" | "info"; createdAt: string; agentId?: string; text?: string;
-  /** On an assistant row only: the provider marked it narration between tool calls (Codex's commentary), never the turn's answer. */
+  /**
+   * On an assistant row only: the provider marked it narration between tool calls (Codex's commentary), never the
+   * turn's answer while the turn has one; a turn with none ends on its last commentary, as the GUI's timeline does.
+   */
   commentary?: true;
   attachments?: { name: string; type: string }[]; tool?: { type: string; title: string; status: string; command?: string; detail?: string; changedFiles?: string[] };
   /**
@@ -264,19 +267,23 @@ function cutRow(entry: TranscriptEntry, need: number): { row: TranscriptEntry; s
 }
 
 /**
- * The row a shed never drops: the latest turn's final assistant reply, else that turn's newest row. A commentary row
- * is narration, never the reply (the GUI never takes it for the turn's answer).
+ * The row a shed never drops: the latest turn's final assistant reply, else that turn's last commentary row, else that
+ * turn's newest row. Commentary is narration, not the reply, while the turn has one; a turn with none — interrupted,
+ * ended on a tool — ends on its last commentary, as the GUI's timeline does (`deriveTerminalAssistantMessageIds`).
  */
 function sparedIndex(rows: readonly TranscriptEntry[]): number {
   let latest: number | null = null;
   for (const e of rows) if (e.turn !== null && (latest === null || e.turn > latest)) latest = e.turn;
+  let commentary = -1;
   let newest = -1;
   for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (rows[i]!.turn !== latest) continue;
-    if (rows[i]!.kind === "assistant" && !rows[i]!.commentary) return i;
+    const e = rows[i]!;
+    if (e.turn !== latest) continue;
+    if (e.kind === "assistant" && !e.commentary) return i;
+    if (e.kind === "assistant" && commentary < 0) commentary = i;
     if (newest < 0) newest = i;
   }
-  return newest;
+  return commentary >= 0 ? commentary : newest;
 }
 
 /** The turns the rows present belong to, first and last; null when none belongs to one. */

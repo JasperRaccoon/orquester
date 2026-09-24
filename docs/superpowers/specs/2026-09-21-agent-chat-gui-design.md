@@ -1185,6 +1185,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   (auto-opened by background assistant output between prompts) is auto-closed first so it cannot
   block the user's next turn.
   *T3: `apps/server/src/provider/Layers/ClaudeAdapter.ts:5153-5162`*
+  *Built: the synthetic turn still opens on the first complete parent `assistant` frame, as in T3,
+  but that frame arrives only after its message has streamed a whole block: the parent message
+  that starts streaming with no turn open is held and replayed into whichever turn opens next — the
+  synthetic one, or a `sendTurn` that lands mid-message. Dropped, it cost the `message_start` join
+  key: the opening paragraph streamed under one item, its per-block frame minted a second, and
+  `result` flushed that one below the final summary (live thread 19976137; see AGENTS.md). For
+  the same reason the join is scoped to the message, not the turn — a message outlives the stale
+  synthetic turn `sendTurn` settles under it — and a turn that begins while a synthetic one is
+  still open (it can open during `sendTurn`'s own awaits) settles it rather than overwriting it.*
 - **Compaction** is the slash command `/compact`, sent as an ordinary turn and awaited to a
   terminal turn state (§4.1's `compaction` capability). `thread.state.changed {compacted,
   beforeTokens, afterTokens}` comes from the SDK's `compact_boundary` system message.
@@ -3403,7 +3412,15 @@ once the retained window has evicted a visible row, and pages the turns below it
 thread index (`GET …/history`; design `2026-09-23-thread-index-and-lazy-boot-design.md`)
 (`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
 assistant message between tool calls, in both live and replayed turns. The phase remains metadata
-so commentary cannot become the turn's terminal answer.*
+so commentary cannot become the turn's terminal answer while the turn has one; a turn with no final
+answer at all (interrupted, or ended on a tool) ends on its last commentary, as in T3, instead of
+folding every word behind "Worked for". In a Claude thread, a turn's last assistant message, when
+it is finished and repeats the turn's first finished one of the same author word for word, is
+dropped as a re-emission: hosts before the Claude pre-turn-stream fix (§4.5, Claude *Steering*)
+wrote the opening paragraph of a CLI-started turn a second time at `result`, and `events.ndjson`
+keeps it (`splitThreadItems`). No other provider ever re-emitted a message, and Codex narration may
+legitimately repeat itself; nor is any other repeat dropped, because a long Claude turn — a goal run
+is one turn of many rounds — can repeat itself or end two rounds on the same words.*
 
 *Built: the compaction marker also carries the provider's own **summary** and reveals it behind a
 "Show summary" / "Hide summary" toggle on the hairline itself, collapsed by default (the CLI's

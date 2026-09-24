@@ -285,7 +285,7 @@ test("a continuing goal also covers both race fallbacks", () => {
 
 test("a failed TURN alone does not end a continuing goal — the goal's own status does", () => {
   // Continuation is the provider's, at every turn's end (Codex fixtures
-  // README, observation 19). A provider that stops its goal reports it in a
+  // README, observation 20). A provider that stops its goal reports it in a
   // goal update; until then the goal continues, and the failure surfaces the
   // moment `continuing` ends.
   const failed = turn("failed", "2026-09-21T00:01:00.000Z");

@@ -42,6 +42,12 @@ const baseInput = (
 const entriesFrom = (items: Parameters<typeof deriveTimelineEntriesFromItems>[0]) =>
   deriveTimelineEntriesFromItems(items, EMPTY_TIMELINE_PROJECTION).entries;
 
+/** As the store projects a Claude thread: with the re-emitted-copy repair on. */
+const claudeEntriesFrom = (items: Parameters<typeof deriveTimelineEntriesFromItems>[0]) =>
+  deriveTimelineEntriesFromItems(items, EMPTY_TIMELINE_PROJECTION, {
+    dropRepeatedAssistantMessages: true
+  }).entries;
+
 const kinds = (rows: readonly AgentChatTimelineRow[]) => rows.map((row) => row.kind);
 
 /** A fold turn row: started once the provider minted its id, pending before. */
@@ -1294,5 +1300,84 @@ describe("goal marker rows", () => {
     ]) {
       assert.equal(isRowUnchanged(row, { ...row, ...patch }), false, JSON.stringify(patch));
     }
+  });
+});
+
+describe("a settled turn always shows the text it ended on", () => {
+  const settled = (turnId: string) => ({
+    latestTurn: { turnId, state: "completed" as const, startedAt: stamp(1), completedAt: stamp(9) }
+  });
+  /** The message rows left in view, and which one closes the response. */
+  const visible = (rows: readonly AgentChatTimelineRow[]) => ({
+    texts: rows.flatMap((row) => (row.kind === "message" ? [row.message.text] : [])),
+    answer: rows.flatMap((row) =>
+      (row.kind === "message" && row.showAssistantMeta) || row.kind === "assistant-meta"
+        ? [row.message.text]
+        : []
+    )
+  });
+
+  it("an old log's re-emitted opening paragraph neither hides nor replaces the real answer", () => {
+    // The owner's screenshot: "Worked for 3m 53s", then the progress line
+    // "All checks are now clean…", with the summary folded away inside
+    // (live thread 19976137, seq 38664/38963).
+    const opening = "All checks are now clean. I'll close out the ledger.";
+    const rows = deriveTimelineRows(
+      baseInput(
+        claudeEntriesFrom([
+          message("user", "go", { createdAt: stamp(1) }),
+          message("assistant", opening, { turnId: "t1", createdAt: stamp(2) }),
+          activity("tool.completed", { itemType: "command_execution", command: "git status" }, {
+            turnId: "t1",
+            createdAt: stamp(3)
+          }),
+          message("assistant", "Goal tracking is built. How do you want to land this?", {
+            turnId: "t1",
+            createdAt: stamp(4)
+          }),
+          message("assistant", opening, { turnId: "t1", createdAt: stamp(5) }),
+          activity("checkpoint.captured", {}, { turnId: "t1", createdAt: stamp(6), tone: "info" })
+        ]),
+        settled("t1")
+      )
+    );
+    assert.ok(rows.some((row) => row.kind === "turn-fold"), "the work still folds");
+    assert.deepEqual(visible(rows), {
+      texts: ["go", "Goal tracking is built. How do you want to land this?"],
+      answer: ["Goal tracking is built. How do you want to land this?"]
+    });
+  });
+
+  it("a turn whose every message is commentary still shows its last one", () => {
+    // Codex marks each message `commentary` or `final_answer`; a turn can end
+    // with no final answer at all (interrupted, or ended on a tool). Picking
+    // no answer folded every word of it behind "Worked for".
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(1) }),
+          message("assistant", "Checking the repo first.", {
+            turnId: "t1",
+            createdAt: stamp(2),
+            messageKind: "commentary"
+          }),
+          activity("tool.completed", { itemType: "command_execution", command: "ls" }, {
+            turnId: "t1",
+            createdAt: stamp(3)
+          }),
+          message("assistant", "The fix is in and the tests pass.", {
+            turnId: "t1",
+            createdAt: stamp(4),
+            messageKind: "commentary"
+          })
+        ]),
+        settled("t1")
+      )
+    );
+    assert.ok(rows.some((row) => row.kind === "turn-fold"), "the work still folds");
+    assert.deepEqual(visible(rows), {
+      texts: ["go", "The fix is in and the tests pass."],
+      answer: ["The fix is in and the tests pass."]
+    });
   });
 });

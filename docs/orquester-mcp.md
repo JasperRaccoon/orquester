@@ -356,8 +356,10 @@ SubagentView        = { id, kind, agentKind: "agent" | "background", title /* �
 ```
 
 `lastReply` is the main agent's answer: its assistant messages in that turn, joined, with Codex's
-commentary (its running "I'll do X next" narration, which the GUI shows as narration, never as the
-answer) left out.
+commentary (its running "I'll do X next" narration, which the GUI shows as narration, not as the
+answer) left out — unless the turn has no other message at all (interrupted, ended on a tool, a
+Codex goal turn ended by Stop): then it is the turn's last commentary, which is where the GUI's
+turn ends too.
 `contextWindow.percentUsed` stops at 100, like the GUI's ring; `usedTokens` stays as reported.
 `plan.actionable` is judged on the thread itself — the latest plan, until a message implements it —
 so it is right at once, while `chat.planReady` and `reason: "plan-ready"`, the tab strip's values,
@@ -619,7 +621,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   is running, the message **steers** it (as Enter does mid-turn in the GUI) and `turnId` is that
   turn's. `wait: false` returns `outcome: "sent"` with the receipt. `wait: true` blocks as §8
   describes and returns the `outcome`; once the turn has settled, `reply` — the main agent's answer
-  (Codex's commentary narration left out) from the turn this message started or steered, never an
+  (Codex's commentary narration left out while the turn has anything else — see `lastReply`) from
+  the turn this message started or steered, never an
   earlier turn's but for one rare race (§8) — at most 16 384 characters, fewer when the result would
   pass the cap (cut by bytes, on a character boundary), `replyTruncated: true` when cut, and
   `read_transcript` has the rest; and `pending` while a question or an approval is open. When
@@ -802,8 +805,9 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   - A hook that failed is an `error` row ("Hook failed") and one cancelled a `warning` row ("Hook
     cancelled"); a hook's start, its progress and a successful run are not rows.
   - An `assistant` row with `commentary: true` is narration between tool calls (Codex's
-    commentary), never the turn's answer: `lastReply` and `send_message`'s `reply` leave it out,
-    and it is not the "final reply" a shed always keeps.
+    commentary), not the turn's answer while the turn has one: `lastReply` and `send_message`'s
+    `reply` leave it out, and it is not the "final reply" a shed always keeps. A turn with no other
+    message ends on its last commentary, as in the GUI: that is its answer and the row a shed keeps.
   - A `compaction` row's `state` is `compacting` (still running), `compacted` or
     `compaction-failed`. An old log's marker — one with no state, or the older
     `thread.state.changed` spelling — reads `compacted`, as the GUI shows it. A subagent compacting
@@ -812,7 +816,7 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
 ```
 TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt, agentId?, …by kind:
   "user"         text, attachments?: [{ name, type }]
-  "assistant"    text, commentary?: true              /* narration between tool calls, never the answer */
+  "assistant"    text, commentary?: true              /* narration between tool calls, not the answer while the turn has one */
   "reasoning"    text                                                       (include "reasoning")
   "tool"         tool: { type, title, status, command?, detail?, changedFiles? }, outputItemId?
                                                   (include "tools"; one entry per tool call, its latest state;

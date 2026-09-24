@@ -281,11 +281,16 @@ export function latestSettledTurn(turns: readonly Turn[]): Turn | null {
 
 /**
  * The main agent's answer in a turn: its assistant messages, joined. A message the provider marked as commentary
- * (Codex's `phase`, carried as `messageKind`) is the running "I'll do X next" narration, not the answer — the GUI
- * shows it as narration and never as the turn's answer (`isCommentaryAssistantMessage`), and it is left out here too.
+ * (Codex's `phase`, carried as `messageKind`) is the running "I'll do X next" narration, not the answer, while the turn
+ * has one (`isCommentaryAssistantMessage`). A turn with none — interrupted, ended on a tool, a Codex goal turn the Stop
+ * paused then interrupted — ends on its last commentary, as the GUI's timeline does (`deriveTerminalAssistantMessageIds`).
  */
 export function assistantTextForTurn(items: readonly ThreadItem[], turnId: string): string {
-  return items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId && i.messageKind !== "commentary").map((i) => i.text).filter(Boolean).join("\n\n");
+  const own = items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId);
+  const answer = own.filter((i) => i.messageKind !== "commentary").map((i) => i.text).filter(Boolean).join("\n\n");
+  if (answer) return answer;
+  for (let i = own.length - 1; i >= 0; i -= 1) if (own[i]!.messageKind === "commentary") return own[i]!.text;
+  return "";
 }
 
 export function lastReply(snap: ThreadSnapshotPayload): SessionDetail["lastReply"] | null {

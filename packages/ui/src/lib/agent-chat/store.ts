@@ -547,7 +547,12 @@ function deriveBackgroundLiveness(
 }
 
 function project(state: InternalState): InternalState {
-  const timeline0 = deriveTimelineEntriesFromItems(state.slice.entries, state.timeline);
+  // Only a Claude log can hold the re-emitted opening paragraphs older hosts
+  // wrote (`reEmittedAssistantCopies`); nothing else is second-guessed. The
+  // window, its row timeline and the history pages all ask the same way.
+  const repair =
+    state.slice.head?.adapter === "claude" ? ({ dropRepeatedAssistantMessages: true } as const) : undefined;
+  const timeline0 = deriveTimelineEntriesFromItems(state.slice.entries, state.timeline, repair);
   const contextWindowEntry = latestContextWindowActivity(timeline0.activities);
   const backgroundLiveness = deriveBackgroundLiveness(state.slice.roster);
   const contextWindow = contextWindowEntry?.usage ?? null;
@@ -608,7 +613,7 @@ function project(state: InternalState): InternalState {
   const rowTimeline =
     historyItems.ids.size === 0 || liveSplit.rowItems === slice.entries
       ? timeline
-      : deriveTimelineEntriesFromItems(liveSplit.rowItems, state.rowTimeline);
+      : deriveTimelineEntriesFromItems(liveSplit.rowItems, state.rowTimeline, repair);
   const runningTurnId = slice.head?.session.activeTurnId ?? null;
   const latestTurn = slice.turns.at(-1) ?? null;
   const latestTurnSummary = latestTurn
@@ -656,7 +661,8 @@ function project(state: InternalState): InternalState {
     isCompacting,
     activeTurnStartedAt,
     activeTurnHeaderHere: activeTurnHeaderInHistory,
-    liveAgentTaskIds: sets.liveAgentTaskIds
+    liveAgentTaskIds: sets.liveAgentTaskIds,
+    dropRepeatedAssistantMessages: repair !== undefined
   });
   const rowsProjection = deriveTimelineRowsWithState(
     {

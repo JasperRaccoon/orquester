@@ -8,6 +8,12 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
+import {
+  applyDomainEvent,
+  createEmptyThreadState,
+  type DomainEvent
+} from "@orquester/api/agent-chat";
+
 import type { AppendableDomainEvent } from "../services.ts";
 import { BATCH_INTERVAL_MS, BATCH_MAX_CHARS, createIngestion, type IngestionOptions } from "./index.ts";
 import {
@@ -56,6 +62,39 @@ function messageTexts(sink: RecordingSink): { id: string; text: string; streamin
       text: event.payload.text,
       streaming: event.payload.streaming
     }));
+}
+
+/** One message's text as the REAL fold renders it — the bubble the user reads. */
+function foldedMessageText(sink: RecordingSink, messageId: string): string | undefined {
+  const created: DomainEvent = {
+    seq: 1,
+    eventId: "created",
+    threadId: "t1",
+    occurredAt: "2026-09-21T09:59:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    metadata: {},
+    type: "thread.created",
+    payload: {
+      projectPath: "/w/p",
+      cwd: "/w/p",
+      title: "New thread",
+      adapter: "opencode",
+      refId: "opencode",
+      accountId: "acc1",
+      home: "system",
+      modelSelection: { model: "openrouter/model" },
+      runtimeMode: "approval-required"
+    }
+  };
+  let state = applyDomainEvent(createEmptyThreadState(), created);
+  let seq = 1;
+  for (const event of sink.events()) {
+    seq += 1;
+    state = applyDomainEvent(state, { ...event, seq } as DomainEvent);
+  }
+  const item = state.items.find((candidate) => candidate.id === messageId);
+  return item?.kind === "message" ? item.text : undefined;
 }
 
 function activityOfKind(
@@ -474,6 +513,92 @@ describe("mandatory flush points (§5.6)", () => {
       0,
       "a message-mode question does not block the provider, so it must not force a flush"
     );
+  });
+
+  it("a completion NEVER re-sends text that a prompt already closed", async () => {
+    // A prompt can land between a text block's last delta and its completion:
+    // OpenCode on OpenRouter flushes a text part's closing snapshot AFTER the
+    // tool call that follows it, so the tool's ask arrives first (fixture 05's
+    // pre-tool block). The prompt finalises the message; the completion's
+    // whole-message `detail` must not then be appended as if nothing had
+    // streamed — the bubble printed its text twice.
+    const text = "Let me check the build first.";
+    const pauses = [
+      runtimeEvent(
+        "request.opened",
+        { requestType: "command_execution_approval", dismissible: false },
+        { turnId: "turn-1", requestId: "req-1" }
+      ),
+      runtimeEvent(
+        "user-input.requested",
+        { questions: [], dismissible: false },
+        { turnId: "turn-1", requestId: "req-2" }
+      )
+    ];
+    for (const pause of pauses) {
+      const { ingestion, sink } = harness();
+      const turn = { turnId: "turn-1", itemId: "item-1" };
+      await ingestion.ingest(
+        runtimeEvent("content.delta", { streamKind: "assistant_text", delta: text }, turn)
+      );
+      await ingestion.ingest(pause);
+      await ingestion.ingest(
+        runtimeEvent("item.completed", { itemType: "assistant_message", detail: text }, turn)
+      );
+      await ingestion.ingest(
+        runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+      );
+      await ingestion.drain();
+      assert.equal(
+        foldedMessageText(sink, "assistant:item-1"),
+        text,
+        `${pause.type}: the folded bubble holds the text exactly once`
+      );
+      assert.deepEqual(
+        messageTexts(sink),
+        [
+          { id: "assistant:item-1", text, streaming: true },
+          { id: "assistant:item-1", text: "", streaming: false }
+        ],
+        `${pause.type}: the prompt already sent the close, so the completion writes nothing`
+      );
+    }
+  });
+
+  it("the prompt-closed record is per turn: another turn's snapshot still stands in", async () => {
+    const { ingestion, sink } = harness();
+    const item = { itemId: "item-1" };
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "turn one" }, {
+        ...item,
+        turnId: "turn-1"
+      })
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "request.opened",
+        { requestType: "command_execution_approval", dismissible: false },
+        { turnId: "turn-1", requestId: "req-1" }
+      )
+    );
+    await ingestion.ingest(
+      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
+    );
+    await ingestion.drain();
+    sink.reset();
+    // Same item id, a LATER turn, and no deltas: the snapshot is that turn's
+    // only text, so it must still stand in.
+    await ingestion.ingest(
+      runtimeEvent("item.completed", { itemType: "assistant_message", detail: "turn two" }, {
+        ...item,
+        turnId: "turn-2"
+      })
+    );
+    await ingestion.drain();
+    assert.deepEqual(messageTexts(sink), [
+      { id: "assistant:item-1", text: "turn two", streaming: true },
+      { id: "assistant:item-1", text: "", streaming: false }
+    ]);
   });
 
   it("a tool item.started closes the active reasoning segment", async () => {

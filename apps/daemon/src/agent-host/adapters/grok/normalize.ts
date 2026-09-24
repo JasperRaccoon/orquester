@@ -211,6 +211,8 @@ export class GrokNormalizer {
   private readonly runtimeId: string;
   private nextSegmentIndex = 0;
   private activeAssistantItemId: string | undefined;
+  /** The `_meta.promptId` of the chunk that opened the active segment, when it named one. */
+  private activeAssistantPromptId: string | undefined;
   private assistantUpdatesOpen = false;
 
   /**
@@ -351,12 +353,28 @@ export class GrokNormalizer {
     return this.permissionDenied;
   }
 
-  /** A new turn begins: open the assistant stream and drop the plan fallback. */
-  beginTurn(): void {
+  /**
+   * A prompt is dispatched: open the assistant stream, and make sure the next
+   * prompt's text cannot land in the bubble a previous prompt left open.
+   *
+   * That is what a STEER needs: it reuses the running turn, and ACP's
+   * `agent_message_chunk` names no message. Left open, the steered reply
+   * streamed into the cancelled prompt's bubble, which keeps its first
+   * position, so the answer sat ABOVE the user's steer. A segment opened by a
+   * chunk that named its prompt stays open here: the next prompt's first chunk
+   * closes it (`contentDelta`), so a chunk the cancelled prompt flushes after
+   * the cancel still joins its own bubble. One with no prompt id to compare is
+   * closed now, as T3 closes the active segment on every dispatch
+   * (`AcpSessionRuntime.ts:1033-1034`). Returns the text-less `item.completed`
+   * for the session to emit — empty when nothing was closed.
+   */
+  beginTurn(): RuntimeEvent[] {
+    const closed = this.activeAssistantPromptId === undefined ? this.closeAssistantSegment() : [];
     this.assistantUpdatesOpen = true;
     this.permissionDenied = false;
     this.retryAttempt = undefined;
     this.resetTurnUsage();
+    return closed;
   }
 
   /**
@@ -535,25 +553,38 @@ export class GrokNormalizer {
     }
 
     const events: RuntimeEvent[] = [];
+    // Every chunk names the prompt that produced it (fixtures README 19), and
+    // one prompt's text is one bubble: a chunk from another prompt — the
+    // steered one, after a cancel — closes the bubble before it opens its own.
+    const promptId = promptIdOf(params._meta);
+    if (
+      this.activeAssistantItemId !== undefined &&
+      promptId !== undefined &&
+      this.activeAssistantPromptId !== undefined &&
+      promptId !== this.activeAssistantPromptId
+    ) {
+      events.push(...this.closeAssistantSegment());
+    }
     if (this.activeAssistantItemId === undefined && content.text.trim().length === 0) {
       // Whitespace never OPENS a segment (it would produce an empty bubble for
       // a provider that flushes a trailing newline) but is kept inside one.
-      return [];
+      return events;
     }
-    const itemId = this.ensureAssistantSegment(events);
+    const itemId = this.ensureAssistantSegment(events, promptId);
     events.push(
       this.eventWithItem("content.delta", { streamKind, delta: content.text }, itemId, raw)
     );
     return events;
   }
 
-  private ensureAssistantSegment(events: RuntimeEvent[]): string {
+  private ensureAssistantSegment(events: RuntimeEvent[], promptId?: string): string {
     if (this.activeAssistantItemId !== undefined) {
       return this.activeAssistantItemId;
     }
     const itemId = `assistant:${this.runtimeId}:segment:${this.nextSegmentIndex}`;
     this.nextSegmentIndex += 1;
     this.activeAssistantItemId = itemId;
+    this.activeAssistantPromptId = promptId;
     events.push(
       this.eventWithItem("item.started", { itemType: "assistant_message", status: "inProgress" }, itemId)
     );
@@ -566,6 +597,7 @@ export class GrokNormalizer {
       return [];
     }
     this.activeAssistantItemId = undefined;
+    this.activeAssistantPromptId = undefined;
     return [
       this.eventWithItem("item.completed", { itemType: "assistant_message", status: "completed" }, itemId)
     ];

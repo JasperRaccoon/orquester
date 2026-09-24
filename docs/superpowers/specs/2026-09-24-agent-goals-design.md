@@ -770,7 +770,11 @@ block ⇒ absent).
   - `clear`: always for Codex; for Claude and Grok only when no turn is running — sends
     `/goal clear`.
   - Provider-command adapters (`command: "provider"`) show no action while a turn is running
-    (their prompts queue behind it).
+    (amended 2026-09-24: not because their prompts queue — a `/goal …` typed while the turn runs is
+    an ordinary message, which under the default steer setting steers the turn, and on Grok a
+    steer cancels the running prompt, the whole goal run with it, which Grok then reports paused;
+    only under the "queue" setting does it wait for the turn. An action offered then would do the
+    same, so none is.)
   Actions send through the composer's own send path (`sendExternalText`) — its guards, the
   thread's mode and model, `/turn` — so they appear as the user's message and go through
   `decide("turn")`, with the draft left untouched. Not the exact submit path (amended

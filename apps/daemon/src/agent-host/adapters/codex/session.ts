@@ -1081,7 +1081,7 @@ export class CodexSession {
    * `thread/goal/updated` follows and says the same — while a notification
    * queued before the set can trail the reply, so a goal read off the reply
    * would be overwritten by an older state for a moment, a `paused` → `resumed`
-   * → `paused` flicker (fixtures README observation 19).
+   * → `paused` flicker (fixtures README observation 20).
    */
   private async setGoal(
     peer: CodexPeer,
@@ -1094,7 +1094,7 @@ export class CodexSession {
   /**
    * A status-only set, answered `false` when Codex refuses it for want of a
    * goal — "cannot update goal for thread …: no goal exists" (fixtures README
-   * observation 19) — so `pause`/`resume` answer `No goal is set.` like every
+   * observation 20) — so `pause`/`resume` answer `No goal is set.` like every
    * other command rather than an error row quoting the provider.
    *
    * No notification follows a refusal, so it is the only word that the

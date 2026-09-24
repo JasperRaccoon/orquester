@@ -1194,6 +1194,12 @@ export interface HistoryRowsInput extends HistoryLiveInput {
    * every history row is before it, so none may offer a rewind (§5.5).
    */
   liveCompacted: boolean;
+  /**
+   * A Claude thread: drop the re-emitted assistant copies older hosts wrote
+   * (`SplitThreadItemsOptions`) — the pages are where they live. Set by the
+   * store exactly as it sets it for the window.
+   */
+  dropRepeatedAssistantMessages?: boolean;
 }
 
 /**
@@ -1314,6 +1320,7 @@ export function projectHistoryRows(
   }
   const rewindOffered = input.supportsConversationRollback && !input.liveCompacted;
   const live = liveInputOf(input, previous.live);
+  const dropsRepeats = input.dropRepeatedAssistantMessages === true;
   const sameItemsInput =
     previous.history === input.history && previous.sharedLive === input.sharedLive;
   if (
@@ -1322,7 +1329,8 @@ export function projectHistoryRows(
     previous.expandedWorkGroupIds === input.expandedWorkGroupIds &&
     previous.foldTurns === input.turns &&
     previous.rewindOffered === rewindOffered &&
-    previous.live === live
+    previous.live === live &&
+    (previous.timeline.dropsRepeatedAssistantMessages === true) === dropsRepeats
   ) {
     return previous;
   }
@@ -1333,7 +1341,11 @@ export function projectHistoryRows(
   // turn and that the timeline goes on below: a running turn's rows here
   // render live, while the live tail — the trailing run, the placeholder — is
   // left to the window, which ends the timeline.
-  const timeline = deriveTimelineEntriesFromItems(items, previous.timeline);
+  const timeline = deriveTimelineEntriesFromItems(
+    items,
+    previous.timeline,
+    dropsRepeats ? { dropRepeatedAssistantMessages: true } : undefined
+  );
   const rowsProjection = deriveTimelineRowsWithState(
     {
       timelineEntries: timeline.entries,

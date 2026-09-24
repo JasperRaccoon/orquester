@@ -376,6 +376,60 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   CLI's complete per-block `assistant` frames carry the stream's `message_start` id, which is how
   a snapshot finds its streamed block. `inFlightTools` is keyed by index only because a tool block
   is deleted the moment its result arrives.
+- **A turn the CLI starts by itself streams before the turn exists.** When a background task or
+  subagent finishes, the CLI answers on its own. The new message's `message_start` and its whole
+  first block stream first; only then does the per-block `assistant` frame arrive that opens the
+  synthetic turn. Every stream handler needs an open turn, so those frames used to be dropped,
+  and with them the `message_start` id that `textBlockKey` joins on:
+  - the text streamed as `?:<index>`;
+  - its per-block frame minted a snapshot-only twin under `<message.id>:0`;
+  - `completeTurn` flushed the twin at `result`, BELOW the final summary, where the client took it
+    for the turn's answer and folded the real one away.
+
+  That was live thread 19976137 (seq 38664/38963): 160 of 288 CLI-started turns across three
+  threads, and none of the user-started ones. A text-first opening message had no twin, but still
+  surfaced only at `result`, and every such turn lost its opening thinking.
+
+  The fix (all in `adapters/claude/normalize.ts` unless noted):
+  - A parent message that starts streaming with no turn open is held (`preTurnStream`).
+    `beginTurn` replays it into whichever turn opens next: the synthetic one, or a `sendTurn` that
+    lands mid-message.
+  - Consecutive deltas of one block are merged while held, so the hold grows with the message's
+    content, never with its frame count, and loses nothing: no thinking, no tool input.
+  - The held message is dropped at `message_stop`, at a turn-less `result` and in
+    `closeLiveTasks`.
+  - The stream join (`streamMessageId`, `streamedBlocks`, `snapshotBlockCursor`) is scoped to the
+    MESSAGE, not the turn. A message can outlive the turn it started in: `sendTurn` settles a
+    stale synthetic turn and opens the user's while the CLI's own message is still streaming.
+    The block streaming at that moment SPLITS by design: its first part closes with the settled
+    synthetic turn, and the rest opens in the user's turn. A test pins this, so don't "fix" it
+    back into one item: under a turn-scoped join that was exactly the twin.
+  - `beginTurn` settles a synthetic turn that is still open rather than overwriting it. The CLI
+    can open one during `sendTurn`'s own awaits.
+  - `events.ndjson` keeps the old copies, so for Claude threads only, the client's
+    `splitThreadItems` drops a turn's LAST assistant message when it is finished and repeats the
+    turn's FIRST finished one, same author, word for word (`reEmittedAssistantCopies`) — exactly
+    where the copy sits and what it copies. It is opted in from the thread head's adapter in
+    `store.ts`; Codex narration may legitimately repeat itself, and so may a long Claude turn — a
+    goal run is one turn of many rounds, which can end two rounds on the same words — so no other
+    repeat is dropped.
+- **A completion's `detail` stands in only for a message that delivered no text this turn.**
+  Ingestion keeps `turnDeliveredMessageIds` past `finalizeMessage` because a prompt
+  (`request.opened`, `user-input.requested`) closes an open message before its provider
+  `item.completed` arrives. OpenCode flushes a text part's closing snapshot after the tool call
+  that follows it, and that `detail` used to be appended to the closed bubble a second time. This
+  is T3's "fallback only onto a missing or empty message".
+- **One message per provider item, even when the provider abandons one.** Codex can stream part of
+  an `agentMessage`, drop that attempt without an `item/completed`, and restate it as a new item.
+  The normaliser closes the abandoned message when the next item of its turn starts
+  (`closeAbandonedMessages`; fixtures README observation 19). Otherwise ingestion glued the
+  restatement onto it, under the abandoned id and its `commentary` phase, and the turn's answer
+  folded away. Grok's ACP chunks name no message at all, but every chunk carries its
+  `_meta.promptId`. The normaliser closes the open segment when a chunk names a different prompt,
+  so after a steer the cancelled prompt's late chunks still join its own bubble, and the steered
+  reply opens a new one. A segment with no prompt id falls back to T3's close at the steered
+  prompt's dispatch. Left open, the steered reply was glued into the cancelled prompt's bubble,
+  above the user's steer.
 - **Registry `args` are the terminal launcher's flags and never reach a chat launch** — permissions
   come only from `runtimeMode`, `full-access` = `bypassPermissions`; effort only from the model
   selection. (`buildRefIdIndex` in `agent-host/main.ts` carries a row's adapter and bins, never its
