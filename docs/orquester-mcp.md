@@ -730,13 +730,12 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       is listed in `subagents` and its rows are in its own drill-in (`read_transcript` with its
       `agentId`), as in the GUI.
     - In a drill-in, a command with no row of the call in the range (e.g. retention evicted its
-      start: it keeps the opening row of a call still running, but only of the 16 most recently
-      active in each window) is still an entry, built from its latest chunk in the range:
-      `tool.type` `command_execution` and `outputItemId` that chunk. Title, command and status come
-      from its rows elsewhere in the view — else the title is the chunk's own, "Tool output", and
-      the status `inProgress`. The parent view builds no entry from chunks alone: a subagent's
-      command result can stream into the parent's rows with no agent id (Claude's does), and it is
-      the subagent's call.
+      start: it keeps running calls' opening rows, 16 at most behind each window's cut)
+      is still an entry, built from its latest chunk in the range: `tool.type` `command_execution`
+      and `outputItemId` that chunk. Title, command and status come from its rows elsewhere in the
+      view — else the title is the chunk's own, "Tool output", and the status `inProgress`. The
+      parent view builds no entry from chunks alone: a subagent's command result can stream into the
+      parent's rows with no agent id (Claude's does), and it is the subagent's call.
 
     The snapshot keeps only an allow-list of each call's provider data, so most finished calls
     that carry any have an id. A row without one has nothing more the snapshot knows of.

@@ -217,40 +217,48 @@ checked against it, and through JSON at every split point in `fold.determinism-l
 ### Follow-up: the opening row of running work (`FOLD_SNAPSHOT_VERSION` 3 → 4)
 
 A long command writes one `tool.output` row per ingestion flush, each with a fresh id and in its
-call's own class, so B's trim dropped the call's opening row — its title and command — on its
-550th chunk in the parent's window, on its 250th in an agent's, and under the ceiling after 2 200
-rows of other agents; and a running background shell's `task.started` (a parent row, no anchor)
-aged out after 550 parent rows, which took the shell off the roster while it ran (plan
+call's own class, so B's trim dropped the call's opening row — its title and command — on its 550th
+chunk in the parent's window, on its 250th in an agent's, and under the ceiling after 2 200 rows of
+other agents; and a running background shell's `task.started` (a parent row, no anchor) aged out
+after 550 parent rows, which took the shell off the roster while it ran (plan
 `2026-09-24-subagent-output-long-calls-and-composer-sends.md`, Task 3). The trim now keeps the
 opening rows of running work (`packages/api/src/agent-chat/open-work.ts`, `openWorkOf`): a call's
 first `tool.started`/`tool.updated` that no `tool.completed`/`tool.denied` has closed, and a
 background task's first `task.started` that is no agent's, with no `task.completed`. Open units —
 calls and tasks together — are ranked by their last activity (a call's newest `tool.*` row, its
-chunks included; a task's newest `task.*` row or row it owns), the one opened later first on a tie;
-each window keeps the openings of its first `OPEN_WORK_RETENTION_LIMIT` (16), and the ceiling
-across agents those of the first `OPEN_WORK_TOTAL_RETENTION_LIMIT` (64) agent-owned ones. Ranked
-by activity, not by opening, because a crash leaves calls open for good, and ranked by opening
-those crowded a command still printing out of the cap.
+chunks included; a task's newest `task.*` row or row it owns), the one opened later first on a tie.
+Each cut ranks only the openings it would drop: a window keeps the first `OPEN_WORK_RETENTION_LIMIT`
+(16) of those behind its newest rows — an opening among those rows survives anyway and takes no
+slot, so a burst of calls in flight cannot push out a quiet shell's start — and the ceiling across
+agents the first `OPEN_WORK_TOTAL_RETENTION_LIMIT` (64) of the openings that survived their own
+window, so none of its slots goes to one an agent's own cap already dropped. Ranked by activity, not
+by opening, because a crash leaves calls open for good, and ranked by opening those crowded a
+command still printing out of the cap.
 
 It works exactly like the open-question exemption: it lives in `activitiesToDrop` alone, and a kept
 row still counts in its class, so the classes, the counters, the trigger, the caches, `trimWindow`,
 the roster engine and the host's `windowBoundary` are unchanged. Both caps sit below their slacks,
-so every trim still frees at least its slack minus the cap and none runs per event; the walk runs
-inside a trim only. A kept row is older than the positional cut, so `windowBoundary` stays at or
-after the true cut and a history page may repeat the row (every reader dedupes by id); once its
-work ends the next trim drops it, onto the history bridge out of log order, as an answered question
-goes. The MCP's snapshot-only history fallback (`apps/daemon/src/mcp/history.ts`:
-`keptWhateverItsAge`, `agentWindowOldestTurn`) passes over every open opening as a row kept
-whatever its age. A state folded by version 3 may lack the opening row of work still running, and
-trimmed at other steps, so `FOLD_SNAPSHOT_VERSION` went to 4: each log is re-folded once, as for 3.
+so a trim frees at least its slack minus the cap — in the parent's window, minus the old open
+questions too, which count and are kept as well (B's worst case) — and the walk runs inside a trim
+only. A kept row is older than the positional cut, so `windowBoundary` stays at or after the true
+cut and a history page may repeat the row (every reader dedupes by id); once its work ends the next
+trim drops it, onto the history bridge out of log order, as an answered question goes. The MCP's
+snapshot-only history fallback (`apps/daemon/src/mcp/history.ts`: `keptWhateverItsAge`,
+`agentWindowOldestTurn`) passes over every open opening as a row kept whatever its age. A state
+folded by version 3 may lack the opening row of work still running, and trimmed at other steps, so
+`FOLD_SNAPSHOT_VERSION` went to 4: each log is re-folded once, as for 3.
 
 Checked against the reference model in `fold.retention.test.ts` — it gained the rule, written
-independently — over a long-call log and a ceiling-shaped one, through JSON at every split point
-in `fold.determinism-open-work.test.ts`, and for the caches and the roster at every step in
-`fold.caches.test.ts`. Cost, on a loaded 12-core dev host (best of 5 per process, median of six
-processes): fleet, 39 777 events, 1 440 → 1 539 ms (+7 %); long-call, 39 817 events,
-1 542 → 1 758 ms (+14 %); ceiling-shaped long-call, 31 157 events, 973 → 1 093 ms (+12 %). The
-added work is one `openWorkOf` walk per trim, about 0.5 ms over a 2 600-row window.
+independently — over a long-call log and a ceiling-shaped one, through JSON at every split point in
+`fold.determinism-open-work.test.ts`, and for the caches and the roster at every step in
+`fold.caches.test.ts`. Cost, on a loaded 12-core dev host (best of 5 per process, the median of five
+processes): fleet, 39 777 events, 1 446 → 1 621 ms (+12 %, CPU +11 %); long-call, 39 817 events,
+1 499 → 2 071 ms (+38 %, CPU +42 %); ceiling-shaped long-call, 31 157 events, 990 → 1 118 ms (+13 %,
+CPU +17 %). Two things add up: one `openWorkOf` walk per trim, about 0.5 ms over a 2 600-row window;
+and more trims wherever old openings fill a cap, since such a trim frees about its slack minus the
+cap rather than its slack (fleet 108 → 145 trims, long-call 299 → 428, ceiling 110 → 122). These
+logs write a call no row ever closes with every fourth parent row, so the cap behind the parent's
+cut is always full; a real thread leaves a handful of calls open at most, and its trims barely move.
 
 ## Ownership (parallel implementation)
 

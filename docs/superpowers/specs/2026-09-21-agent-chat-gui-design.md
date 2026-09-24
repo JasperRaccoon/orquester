@@ -2277,13 +2277,14 @@ in the §3.3 reconcile before the gate opens (`agent-host/main.ts`).*
 *Built (2026-09-24, the opening row of running work): retention also keeps, whatever its age, the
 opening row of work still running — a call's first `tool.started`/`tool.updated` that no
 `tool.completed`/`tool.denied` has closed, a background task's `task.started` with no
-`task.completed` (`packages/api/src/agent-chat/open-work.ts`) — for the 16 most recently active
-units per window and the 64 among the agents' under the ceiling across them
-(`OPEN_WORK_RETENTION_LIMIT`, `OPEN_WORK_TOTAL_RETENTION_LIMIT`), ranked by last activity, a
-command's output chunks included. A long command's own chunks, each a row of its call's class,
-evicted its start — the title and the command — on chunk 550, and a running shell's start aged out
-after 550 parent rows and took the shell off the roster. The row counts in its class as an open
-question does, so the batch trigger is unchanged. `FOLD_SNAPSHOT_VERSION` went to 4.*
+`task.completed` (`packages/api/src/agent-chat/open-work.ts`) — for the 16 most recently active of
+those each window's cut would drop, and under the ceiling across agents for the 64 most recently
+active of the agents' openings that survived their own window (`OPEN_WORK_RETENTION_LIMIT`,
+`OPEN_WORK_TOTAL_RETENTION_LIMIT`), ranked by last activity, a command's output chunks included. A
+long command's own chunks, each a row of its call's class, evicted its start — the title and the
+command — on chunk 550, and a running shell's start aged out after 550 parent rows and took the
+shell off the roster. The row counts in its class as an open question does, so the batch trigger is
+unchanged. `FOLD_SNAPSHOT_VERSION` went to 4.*
 
 A thread directory that fails to parse marks that thread `error` with the parse message; it
 never affects other threads or host startup. A malformed line inside `events.ndjson` truncates the
