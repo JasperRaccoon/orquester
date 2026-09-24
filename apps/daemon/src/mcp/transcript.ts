@@ -415,6 +415,16 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     const inheritedOwner = unstampedChunkOwner(snap.items);
     const ownerOf = (item: ThreadItem): string | undefined => item.agentId || inheritedOwner(item);
     const inScope = (item: ThreadItem): boolean => (opts.agentId ? ownerOf(item) === opts.agentId : !ownerOf(item) || isAgentAnchor(item));
+    // A call's start with neither a turn nor an owner is no entry while the view holds no other lifecycle row of its
+    // call, as the GUI's timeline drops it (`startIsCallRow`, packages/ui entries.logic.ts): a Claude parent call can
+    // start before the synthetic turn its own message opens, and every later row of the call carries that turn, so such
+    // a start alone is what a rewind of that turn left behind — never a running call. The calls with another row:
+    const continuedCalls = new Set<string>();
+    for (const item of snap.items) {
+      if (item.kind !== "activity" || item.activityKind === "tool.started" || !TOOL_KINDS.has(item.activityKind) || !inScope(item)) continue;
+      const callId = str(asRecord(item.payload)?.toolUseId);
+      if (callId) continuedCalls.add(callId);
+    }
     const inTurns = (item: ThreadItem): boolean => {
       const id = turnIdOf(item);
       return id ? selected.has(id) : item.createdAt >= earliest && (beyond === null || item.createdAt < beyond);
@@ -475,6 +485,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       if (TOOL_KINDS.has(a.activityKind)) {
         if (!opts.include.has("tools")) continue;
         const key = str(p.toolUseId) ?? a.id;
+        if (a.activityKind === "tool.started" && !a.turnId && !isAgentOwnedActivity(a) && !continuedCalls.has(key)) continue;
         let e = tools.get(key);
         if (!e) { e = base(a, "tool"); e.tool = { type: str(p.itemType) ?? "tool", title: str(p.title) ?? a.summary, status: str(p.status) ?? "inProgress" }; tools.set(key, e); entries.push(e); }
         const t = e.tool!;
@@ -488,17 +499,19 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         // A command's detail is what the GUI's row shows (`commandDisplayDetail`): the provider's, or the output its
         // data carries where that detail is empty, repeats the title or only echoes the command. An activity that
         // gives none — an echo with no output yet — leaves the detail an earlier one gave, as the GUI's row keeps it.
-        // Never the start's: the GUI drops `tool.started`, and Grok's first frame carries no ACP `kind`, so its echo of
-        // the command would read as a detail and outlive a completion with no output.
+        // Never the start's: the GUI shows a start only while no other lifecycle row of its call is in its input — the
+        // next one replaces it whole — while here a detail outlives a later row that gives none; and Grok's first frame
+        // carries no ACP `kind`, so its echo of the command would read as a detail and outlive a completion with no
+        // output.
         const detail = p.itemType !== "command_execution" ? str(p.detail) : a.activityKind === "tool.started" ? undefined : commandDisplayDetail(p);
         if (detail) t.detail = detail;
         if (Array.isArray(p.changedFiles)) t.changedFiles = p.changedFiles.filter((f): f is string => typeof f === "string");
         // Where the whole of what the read cut lives (`truncated`, the slimmer's promise, §5.6): the latest cut row of
         // those the host stores whole — the completion or a denial, the row the GUI's "Load full output" reads. Never
-        // the start, which the GUI does not show, nor an update: ingestion stores a `tool.updated` already cut, so its
-        // item holds nothing its row does not (the GUI's button on a running call reads that same preview back). The
-        // denial half is forward-compatible: a denial carries no `data` today and is never cut on the wire, so it
-        // names no id until one carries more than the read can show.
+        // the start, where the read cut the call's input and no output, nor an update: ingestion stores a `tool.updated`
+        // already cut, so its item holds nothing its row does not (the GUI's button on a running call reads that same
+        // preview back). The denial half is forward-compatible: a denial carries no `data` today and is never cut on
+        // the wire, so it names no id until one carries more than the read can show.
         if (p.truncated === true && (a.activityKind === "tool.completed" || a.activityKind === "tool.denied")) e.outputItemId = a.id;
         if (str(p.toolUseId) && p.itemType === "command_execution") latestCommandRow.set(key, a.id);
         continue;
@@ -563,16 +576,23 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         if (e.outputItemId === undefined && rowId !== undefined) e.outputItemId = rowId;
         continue;
       }
-      // No row of the call in the range: an entry of its own, built from its latest chunk there — a long-running
-      // background shell's start is the first row its own chunks evict from its agent's 200-row window. In a drill-in
-      // only: there every chunk in scope is its agent's own, while the parent's scope can still hold a subagent's — an
-      // older log's unstamped one (Claude wrote a subagent's Bash result with no agent id, fixture claude/07) whose
-      // call's rows are gone, so no owner can be read for it — which is no parent entry.
+      // No row of the call in the range: an entry of its own, built from its latest chunk there. Retention keeps a
+      // running call's opening row, within a cap (packages/api `openWorkOf`, OPEN_WORK_RETENTION_LIMIT), so this is
+      // mostly a call whose rows lie in other turns of the view — a background shell outlives the turn that launched
+      // it — or one whose opening row is past the cap. In a drill-in only: a Claude subagent's chunks carry its id
+      // now, but a log a host wrote before that stamp holds unstamped ones (fixture claude/07), and once such a call's
+      // rows are gone no owner can be read for its chunk (`unstampedChunkOwner`) — the parent's scope can hold a
+      // subagent's output, which is no parent entry. A parent call's entry rides its opening row.
       const chunk = latestChunk.get(callId);
       if (!opts.agentId || chunk === undefined || !opts.include.has("tools")) continue;
       const facts = callFacts.get(callId) ?? {};
+      // Its title: its rows' in the view; else, for a background task — one command — its roster row's (the shell's
+      // description, or the command itself); else its command; else the chunk's own ("Tool output"). An agent's roster
+      // row names none of the calls it runs.
+      const task = roster.get(opts.agentId);
+      const taskTitle = task?.agentKind === "background" ? subagentTitle(nonBlank(task.title)) : null;
       const entry = base(chunk, "tool");
-      entry.tool = { type: "command_execution", title: facts.title ?? chunk.summary, status: facts.ended ?? "inProgress", ...(facts.command ? { command: facts.command } : {}) };
+      entry.tool = { type: "command_execution", title: facts.title ?? taskTitle ?? facts.command ?? chunk.summary, status: facts.ended ?? "inProgress", ...(facts.command ? { command: facts.command } : {}) };
       entry.outputItemId = chunk.id;
       entries.push(entry);
     }

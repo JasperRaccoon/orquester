@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, commandOutputText, slimActivityPayload, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt, commandOutputText, foldThread, slimActivityPayload, toThreadSnapshot, type DomainEvent, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
 import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
 import { mergeHistoryPages } from "./history.ts";
 import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, transcriptRange, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
@@ -855,7 +855,8 @@ test("a Grok-shaped command whose detail repeats the command shows its output, a
     data: { toolUseId: "call-1", kind: "execute", command: "echo hi", rawInput: { command: "echo hi" }, ...output }
   }, { turnId: "t1", tone: "tool" });
   const printed = (text: string) => ({ rawOutput: { type: "Bash", output_for_prompt: text, exit_code: 0 }, content: [{ type: "content", content: { type: "text", text } }] });
-  // The start only echoes the command: no detail (the GUI drops the start; the title and command say what runs).
+  // The start only echoes the command: no detail (the title and command say what runs; the GUI's next row replaces the
+  // start whole).
   assert.deepEqual(toolRow([started]), { type: "command_execution", title: "run_terminal_command", status: "inProgress", command: "echo hi" });
   assert.deepEqual(toolRow([started, call("tool.completed", "completed", printed("hi\n"))]),
     { type: "command_execution", title: "Execute `echo hi`", status: "completed", command: "echo hi", detail: "hi" });
@@ -924,7 +925,7 @@ test("without streamed output, outputItemId is never an update: ingestion stores
   assert.equal(toolEntry([row("tool.started", "inProgress"), stored, completed]).outputItemId, completed.id);
 });
 
-test("without streamed output, outputItemId is never a call's start, which the GUI does not show; a denial the read cut is offered", () => {
+test("without streamed output, outputItemId is never a call's start, where the read cut its input, not its output; a denial the read cut is offered", () => {
   // Grok's first frame, as the normaliser writes it (fixture grok/03b): its data is cut to the allow-list on the wire.
   const started = activity("tool.started", {
     itemType: "command_execution", toolUseId: "call-1", title: "run_terminal_command", status: "inProgress", detail: "echo hi",
@@ -959,6 +960,34 @@ test("a call that streamed output offers its latest row as outputItemId, where n
   // The chunk rows themselves never become entries.
   const read = transcriptEntries(snapshot({ items: [started, chunk("a\n"), chunk("b\n")] }), { turns: 5, include: ALL, maxChars: 100_000 });
   assert.deepEqual(read.entries.map((e) => e.kind), ["tool"]);
+});
+
+test("through the real fold, a running command keeps its entry past 1 200 of its own chunks: its title, command and outputItemId", () => {
+  // A Codex command that streams: one `tool.output` row per flush of its output, each a row of the parent's window.
+  // Its start used to go on chunk 550 — the parent view then had no entry at all, so no id to read the output with.
+  let seq = 0;
+  const event = (type: DomainEvent["type"], payload: unknown): DomainEvent => {
+    seq += 1;
+    return { seq, eventId: `e${seq}`, threadId: "c1", type, payload, occurredAt: stamp(seq), commandId: null, causationEventId: null, metadata: {} } as DomainEvent;
+  };
+  const row = (id: string, activityKind: string, payload: Record<string, unknown>): DomainEvent => {
+    const at = stamp(seq + 1);
+    return event("thread.activity-appended", { activity: { kind: "activity", id, tone: "tool", activityKind, summary: activityKind === "tool.output" ? "Tool output" : "npm test", payload: { toolUseId: "call-1", ...payload }, turnId: "t1", createdAt: at, updatedAt: at } });
+  };
+  const events = [
+    event("thread.created", { projectPath: "/w/acme/api", cwd: "/w/acme/api", title: "Codex", adapter: "codex", refId: "codex", accountId: "", home: "system", modelSelection: { model: "gpt-5" }, runtimeMode: "full-access" }),
+    event("thread.message-sent", { messageId: "u1", role: "user", text: "run the tests", streaming: false, turnId: null }),
+    event("thread.turn-start-requested", { turnId: null, messageId: "u1", interactionMode: "default" }),
+    event("thread.session-set", { session: { status: "running", activeTurnId: "t1" } }),
+    row("start-1", "tool.started", { itemType: "command_execution", title: "npm test", status: "inProgress", data: { command: "npm test", cwd: "/w/acme/api" } }),
+    ...Array.from({ length: 1_200 }, (_, n) => row(`chunk-${n}`, "tool.output", { streamKind: "command_output", delta: `test ${n} passed\n` }))
+  ];
+  const snap = toThreadSnapshot(foldThread(events));
+  assert.equal(snap.items.some((item) => item.id === "chunk-0"), false, "retention trimmed the call's own output");
+  // Served as every read serves it (§5.6 slimming).
+  const read = { ...snap, items: snap.items.map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item)) };
+  const tools = transcriptEntries(read, { turns: 5, include: ALL, maxChars: 100_000 }).entries.filter((e) => e.kind === "tool");
+  assert.deepEqual(tools.map((e) => [e.tool, e.outputItemId]), [[{ type: "command_execution", title: "npm test", status: "inProgress", command: "npm test" }, "start-1"]]);
 });
 
 test("a background shell's row, in its own drill-in, offers outputItemId — its chunks count wherever its turn range ends", () => {
@@ -999,7 +1028,8 @@ test("only a command's streamed output counts: a file change streaming its resul
 });
 
 test("in a drill-in, a command whose rows retention dropped is an entry built from its latest chunk in the range", () => {
-  // A background shell that printed past its agent's 200-row window: its start aged out, its latest chunks are left.
+  // A background shell whose rows are gone from the view — its opening row past the cap retention keeps running work's
+  // within — so only its latest chunks are left; no roster row names it here.
   const chunk = (n: number, turnId: string, streamKind = "command_output") =>
     activity("tool.output", { toolUseId: "bgshell:task-1", streamKind, delta: `line ${n}\n` }, { turnId, agentId: "task-1", tone: "tool", summary: "Tool output", createdAt: stamp(10 + n), updatedAt: stamp(10 + n) });
   const turns = [turn({ turnId: "t1", requestedAt: stamp(1) }), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(20) })];
@@ -1019,6 +1049,25 @@ test("in a drill-in, a command whose rows retention dropped is an entry built fr
   assert.equal(read({ include: new Set(["activity"] as const) }).entries.some((e) => e.kind === "tool"), false);
   const edits = [chunk(1, "t1", "file_change_output")];
   assert.equal(transcriptEntries(snapshot({ turns, items: edits }), { turns: 5, agentId: "task-1", include: ALL, maxChars: 100_000 }).entries.length, 0);
+});
+
+test("a background task's chunk-built entry is titled from its roster row; a subagent's roster row names none of its calls", () => {
+  // A dev server whose opening row is gone from the view (past the retention cap on running work): its chunks alone.
+  const turns = [turn({ turnId: "t1", requestedAt: stamp(1) }), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(10) })];
+  const chunk = (n: number) => activity("tool.output", { toolUseId: "bgshell:task-1", streamKind: "command_output", delta: `request ${n} served\n` }, { turnId: "t2", agentId: "task-1", tone: "tool", summary: "Tool output", createdAt: stamp(10 + n), updatedAt: stamp(10 + n) });
+  const row = (agentKind: "background" | "agent", title: string) => ({ id: "task-1", kind: "subagent", agentKind, title, status: "running" }) as never;
+  const titleOf = (roster: never[], extra: ThreadItem[] = []) =>
+    transcriptEntries(snapshot({ turns, items: [...extra, chunk(1), chunk(2)], roster }), { turns: 1, agentId: "task-1", include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!.tool!.title;
+  // A background task is one command: its roster row — the shell's description, or the command itself — names it.
+  assert.equal(titleOf([row("background", "npm run dev")]), "npm run dev");
+  // A subagent runs many calls, and its row names none of them.
+  assert.equal(titleOf([row("agent", "Explore the repo")]), "Tool output");
+  assert.equal(titleOf([]), "Tool output");
+  // A row of the call elsewhere in the view still says more: its title first, then the roster's, then its command.
+  const earlier = (payload: Record<string, unknown>) => activity("tool.started", { toolUseId: "bgshell:task-1", itemType: "command_execution", status: "inProgress", ...payload }, { turnId: "t1", agentId: "task-1", tone: "tool", createdAt: stamp(2), updatedAt: stamp(2) });
+  assert.equal(titleOf([row("background", "npm run dev")], [earlier({ title: "Background shell", data: { command: "npm run dev -- --port 3000" } })]), "Background shell");
+  assert.equal(titleOf([row("background", "npm run dev")], [earlier({ data: { command: "npm run dev -- --port 3000" } })]), "npm run dev");
+  assert.equal(titleOf([row("agent", "Explore the repo")], [earlier({ data: { command: "npm run dev -- --port 3000" } })]), "npm run dev -- --port 3000");
 });
 
 test("a chunk-built entry takes the call's title, command and end from its rows in the view, outside the range", () => {
@@ -1071,6 +1120,24 @@ test("the parent view builds no entry from a chunk alone, stamped or not", () =>
     assert.equal(read(items), false, String(chunkAgentId));
     assert.equal(read([items[0]!, chunk]), false, `${chunkAgentId}: nor once the subagent's rows are gone`);
   }
+});
+
+test("a start with neither a turn nor an owner is no entry alone — the GUI's rule: a rewind cut the turn its later rows rode", () => {
+  // A Claude parent call can start before the synthetic turn its own message opens: its start is turnless, and every
+  // later row of the call carries that turn — which a rewind removes, leaving the start behind.
+  const call = (activityKind: string, status: string, turnId: string | null, over: Record<string, unknown> = {}) =>
+    activity(activityKind, { itemType: "command_execution", toolUseId: "call-1", title: "Command run", status, data: { command: "ls" }, ...over }, { turnId, tone: "tool" });
+  const prompt = message("user", "look around", { turnId: "t1", id: "u1" });
+  const tools = (items: ThreadItem[], agentId?: string) =>
+    transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000, ...(agentId ? { agentId } : {}) }).entries.filter((e) => e.kind === "tool");
+  assert.deepEqual(tools([prompt, call("tool.started", "inProgress", null)]), [], "alone, it is no running call");
+  // With a later row of the call in the view it is the call's entry, as before.
+  assert.deepEqual(tools([prompt, call("tool.started", "inProgress", null), call("tool.completed", "completed", "t1")]).map((e) => e.tool!.status), ["completed"]);
+  // A keyed start in a turn is a running call's entry, and so is one with an owner: an agent's call started while no
+  // parent turn was open.
+  assert.deepEqual(tools([prompt, call("tool.started", "inProgress", "t1")]).map((e) => e.tool!.status), ["inProgress"]);
+  const owned = activity("tool.started", { itemType: "command_execution", toolUseId: "call-2", title: "Command run", status: "inProgress", agentId: "agent-a" }, { turnId: null, agentId: "agent-a", tone: "tool" });
+  assert.deepEqual(tools([prompt, owned], "agent-a").map((e) => [e.tool!.status, e.agentId]), [["inProgress", "agent-a"]]);
 });
 
 test("hooks: a failed completion is an error row, a cancelled one a warning row; starts, progress and successes are no row", () => {
