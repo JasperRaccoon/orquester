@@ -797,8 +797,9 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
     2. **The call's streamed output**, when the item is a command's — a `command_execution` row,
        or a chunk of a command's output — and the call streamed any: output that is in no item's
        data at all — a Claude background shell's, a command's output while it runs — joined by the
-       agent host from the chunks it arrived in, in order
-       (`GET /api/sessions/:id/items/:itemId/output`). A file change is never read this way:
+       agent host from the chunks it arrived in, in order, and handed over a window at a time
+       (`GET /api/sessions/:id/items/:itemId/output?offset=&maxBytes=`: the window this call asks
+       for, which the host cuts from a join it keeps and extends as the call prints). A file change is never read this way:
        Claude streams an Edit's or a Write's result text too, and its payload — the edit itself —
        is what the GUI shows for it. `running: true` says the call has not
        completed, so `text` is its output so far: read again later for the rest. It only ever
@@ -815,9 +816,11 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
     comes back this way.)
 
   Right after a deploy, the agent host may still be the one from before it (it is replaced once no
-  turn and no background work is running), and it cannot join streamed output: the item answers
-  as above without step 2 — usually its payload — and never an error. Read again once the host has
-  been replaced.
+  turn and no background work is running). One from before the join cannot join streamed output:
+  the item answers as above without step 2 — usually its payload — and never an error; read again
+  once the host has been replaced. One that joins but predates windows answers the whole join
+  whatever window is asked for, and this tool windows it itself: the pages are the same, byte for
+  byte, only slower to come.
 
   It pages by byte offset, as `read_file` does. `totalBytes` is the text's size in UTF-8 bytes, and
   `nextOffset` is present while more remains: read again with `offset` set to it, never
@@ -830,8 +833,11 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   it is refused with `INVALID_ARGUMENT` naming `totalBytes`. An item the host does not have is
   `NOT_FOUND`: `No item "<id>" in this session: it is gone, or it never existed. Item ids come from
   read_transcript — a tool row's outputItemId.` Every call reads the item afresh, and a streamed
-  output's chunks too (the host reads both back from the thread's log), so page with large windows
-  rather than many small ones.
+  output's window too, but neither reads the thread's log whole again: the host keeps each item's
+  newest write and each call's joined output in memory, and extends them by what the log gained
+  since — the first page of a long thread's output costs a read of its log, every later one a few
+  milliseconds, and only the window asked for crosses to the daemon. (A message still folds the
+  thread's log for its text on every page, as the GUI's viewer does.)
 
 ```jsonc
 // The transcript shows a test run's first line — and where the whole of it is.
@@ -1336,6 +1342,8 @@ still not for polling loops.
 | `NOT_FOUND` (`No todo list with id …`) | The list was deleted, or the id is mistyped — `list_todos` shows the ids. |
 | `NOT_FOUND` (`No item … in this session`) | `read_tool_output` was given an id the session's host does not have: take a tool row's `outputItemId` from `read_transcript` for the same `sessionId`. |
 | `read_tool_output` answers `kind: "payload"` for a background shell or a running command | The agent host is still the one from before a deploy, which cannot join streamed output: it is replaced once no turn and no background work is running. Read again then. |
+| `read_tool_output`'s first page of a long thread's output is slow; later pages are quick | Expected: the host reads the thread's log once to find the item and join the call's output, then keeps both and extends them by what the log gained. A host restart (a deploy), or ten minutes without a read, starts that over. Every page is slow while the host is still the one from before windows — see the row above. |
+| `INTERNAL` (`Expected a window of a tool call's streamed output.`) | The host answered a window its own rules could not have cut (out of place, wider than asked, past the output's end). Nothing was returned; read again, and report it with the session and item ids if it persists. |
 | `HOST_UNAVAILABLE` | The agent host is restarting (for example after a deploy). A command has already been retried three times — try again shortly. |
 | `search_sessions` answers `indexed: false` | The agent host has no usable thread index right now: its SQLite driver did not load or the index file could not be opened (the host's log says which), or the host is stopping or being replaced (a deploy). Try again later; `read_transcript` still reads each session. |
 | `send_message` ends in `timeout` and `read_transcript` shows "Attachment rejected" | The host refused an attachment when starting the turn, so the turn never started. Check the file against §9. |
