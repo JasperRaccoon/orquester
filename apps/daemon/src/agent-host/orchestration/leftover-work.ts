@@ -58,14 +58,13 @@
  *   that the closer does not write itself): a Codex `patchUpdated` update is
  *   stored as `data: {}` beside them, and a closer that copied the data alone
  *   listed no files — the GUI's row and the MCP's entry read them there.
- *   **Except a call
- *   no row of the window anchors** ({@link anchorsCall}: every row of it
- *   turnless and ownerless) — what a rewind leaves of a woken Claude parent's
- *   call, its start and early input update, or a woken call no turn ever
- *   adopted. No view shows it (`@orquester/api`'s `call-anchor.ts`, the rule
- *   the GUI and the MCP hide it by), and a closer would anchor it: the call
- *   would come back as a failed row after any host start. It stays open in
- *   the fold, under the open-work caps like any unit.
+ *   **Except a call no row of the window anchors** ({@link anchorsCall}:
+ *   every row of it turnless and ownerless) — what a rewind leaves of a woken
+ *   Claude parent's call, its start and early input update, or a woken call
+ *   no turn ever adopted. No view shows it (`@orquester/api`'s
+ *   `call-anchor.ts`, the rule the GUI and the MCP hide it by), and a closer
+ *   would anchor it: the call would come back as a failed row after any host
+ *   start. It stays open in the fold, under the open-work caps like any unit.
  * - **Every task the roster shows active** — `pending`, `running`, `waiting`,
  *   the statuses the fold's session-death rule interrupts, any agent kind —
  *   gets a `task.completed {status: "stopped"}`. `idle` is left alone, as that
@@ -489,11 +488,13 @@ interface AgentRows {
  * keeps or drops it with that start (`reduceReverted`) — owner, tone and
  * summary; its newest row's linkage (without the status and error that row
  * reported), as a closer carries it, so the roster's title does not move
- * back; the launch id in place of any call a later row named. It is stamped
- * with the roster's own `updatedAt` for the agent, which the `task.started`
- * arm writes back unchanged: stamped with the load's time, a thread of more
- * than `ROSTER_LIMIT` agents would rank every legacy one newest among the
- * settled rows, and the cap would drop the agents that really are.
+ * back; the launch id in place of any call a later row named. Its
+ * `createdAt`/`updatedAt` are the roster's own `updatedAt` for the agent,
+ * which the `task.started` arm writes back unchanged (the event carrying it is
+ * stamped with the load's time, like every row a first load appends): with
+ * the load's time on the row, a thread of more than `ROSTER_LIMIT` agents
+ * would rank every legacy one newest among the settled rows, and the cap
+ * would drop the agents that really are.
  *
  * Once per agent: the row names a launch id, so the next load finds none.
  * Pure — `nextId` asked once per row.
@@ -533,7 +534,12 @@ export function legacyLaunchStarts(
   for (const [taskId, agent] of agents) {
     if (agent.launched) continue;
     // The task's own fold, alone: one task is never capped, and every arm of
-    // the roster reads its own task only, so this is its row in the roster.
+    // the roster fold reads its own task only. Its roster row can differ by
+    // the cross-task post-passes (`rosterFromEngine`): the session-death rule,
+    // which a fold without `sessionLive` never applies, and the workflow
+    // cascade, which settles a member of a settled `local_workflow`
+    // coordinator — a Claude task type; OpenCode and Codex tasks are
+    // `subagent`, so neither moves a row this function reads.
     const [folded] = foldSubagentActivities(agent.rows);
     if (folded === undefined || folded.agentKind !== "agent" || !TERMINAL_SUBAGENT_STATUSES.has(folded.status)) {
       continue;

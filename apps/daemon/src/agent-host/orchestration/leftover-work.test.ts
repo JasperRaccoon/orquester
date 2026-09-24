@@ -19,6 +19,7 @@ import {
   foldSubagentActivities,
   foldThread,
   openWorkOf,
+  ROSTER_LIMIT,
   slimActivityPayload,
   toThreadSnapshot,
   type DomainEvent,
@@ -491,6 +492,47 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.ok(closer?.kind === "activity");
     assert.deepEqual((closer.payload as Record<string, unknown>).changedFiles, files);
     assert.equal(read.items.some((item) => item.id === "f-update"), false, "the update is superseded");
+    const [entry] = transcriptEntries(read, {
+      turns: 5,
+      include: new Set(["tools"] as const),
+      maxChars: 100_000
+    }).entries.filter((candidate) => candidate.kind === "tool");
+    assert.deepEqual([entry?.tool?.status, entry?.tool?.changedFiles], ["failed", files], "the MCP's entry lists them");
+  });
+
+  it("names a crash-closed file change's files when only its closer can: its opening row gone from the window", () => {
+    // Retention dropped the start (past the open-work caps): the window holds
+    // the stored update alone, and a snapshot read drops that too once the
+    // closer supersedes it — the closer is all the GUI and the MCP read.
+    const files = ["/work/project/a.ts"];
+    const state = foldOf([
+      ...turn("turn-1"),
+      asStored("f-update", "tool.updated", {
+        itemType: "file_change",
+        toolUseId: "call-patch",
+        status: "inProgress",
+        data: {
+          threadId: "codex-thread",
+          turnId: "turn-1",
+          itemId: "call-patch",
+          changes: [{ path: files[0], kind: { type: "add" }, diff: "a\n" }]
+        }
+      })
+    ]);
+    const [closing] = closingsOf(state);
+    assert.deepEqual((activityOf(closing).payload as Record<string, unknown>).changedFiles, files);
+    const read = wireRead(applied(state, [closing!]));
+    assert.deepEqual(
+      read.items.filter((item) => item.kind === "activity").map((item) => item.id),
+      [closing!.activity.id],
+      "the closer is the call's only row in the read"
+    );
+    const [entry] = transcriptEntries(read, {
+      turns: 5,
+      include: new Set(["tools"] as const),
+      maxChars: 100_000
+    }).entries.filter((candidate) => candidate.kind === "tool");
+    assert.deepEqual([entry?.tool?.status, entry?.tool?.changedFiles], ["failed", files], "the MCP's entry lists them");
   });
 
   it("leaves alone an open call no row of the window anchors — the woken call a rewind left — and closes one a row anchors", () => {
@@ -1107,6 +1149,48 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
       const state = foldAs(adapter, [...turn("turn-1"), ...legacyOpenCodeChild("task-1", "turn-1")]);
       assert.deepEqual(launchesOf(state), [], adapter);
     }
+  });
+
+  it("keeps the rows a capped roster lists: stamped with the roster's own `updatedAt`, never the load's time", () => {
+    // More settled agents than the roster lists: its cap keeps the newest
+    // `ROSTER_LIMIT` by `updatedAt`, ties in roster order.
+    const count = ROSTER_LIMIT + 5;
+    const stamp = (ms: number): Partial<ThreadActivityItem> => {
+      const at = new Date(Date.parse(AT) + ms).toISOString();
+      return { createdAt: at, updatedAt: at };
+    };
+    const events: Unsequenced[] = [...turn("turn-1")];
+    for (let i = 0; i < count; i += 1) {
+      const id = `ses_${String(i).padStart(3, "0")}`;
+      events.push(
+        row(`start:${id}`, "task.started", { taskId: id, taskType: "subagent", agentKind: "agent", agentId: id }, {
+          turnId: "turn-1",
+          agentId: id,
+          ...stamp(i * 10_000)
+        }),
+        row(`done:${id}`, "task.completed", {
+          taskId: id,
+          status: "completed",
+          taskType: "subagent",
+          agentKind: "agent",
+          agentId: id,
+          title: `Agent ${i}`
+        }, { turnId: "turn-1", agentId: id, ...stamp(i * 10_000 + 5_000) })
+      );
+    }
+    const state = foldAs("opencode", events);
+    const listed = (from: ThreadFoldState) => foldSubagentActivities(from.activities).map((agent) => agent.id);
+    const before = listed(state);
+    assert.equal(before.length, ROSTER_LIMIT);
+    assert.equal(before.includes("ses_000"), false, "the oldest settled agents are the ones past the cap");
+
+    const launches = launchesOf(state);
+    assert.equal(launches.length, count, "every one of them gets its launch named");
+    assert.deepEqual(listed(appliedRows(state, launches)), before, "the same rows, in the same order");
+    // Stamped with the load's time, every legacy agent reads newest — all of
+    // them tied — and the cap keeps the oldest ones instead.
+    const atLoad = launches.map((launch) => ({ ...launch, createdAt: NOW, updatedAt: NOW }));
+    assert.notDeepEqual(listed(appliedRows(state, atLoad)), before);
   });
 
   it("gives each agent one, once: a second pass finds nothing", () => {
