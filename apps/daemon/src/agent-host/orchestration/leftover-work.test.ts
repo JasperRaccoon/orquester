@@ -442,6 +442,48 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     );
   });
 
+  it("keeps a crash-closed file change's files: its latest lifecycle row's changedFiles ride the closer", () => {
+    // Codex names the patch whole on its start; every `item/fileChange/patchUpdated`
+    // is an update, stored slimmed (`maybeSlim`): its data projected to `{}`, its
+    // files promoted to the top-level `changedFiles` the GUI and the MCP read.
+    const changes = [
+      { path: "/work/project/a.ts", kind: { type: "update", move_path: null }, diff: "@@ -1 +1 @@\n-a\n+b\n" },
+      { path: "/work/project/b.ts", kind: { type: "add" }, diff: "b\n" }
+    ];
+    const state = foldOf([
+      ...turn("turn-1"),
+      row("f-start", "tool.started", {
+        itemType: "file_change",
+        toolUseId: "call-patch",
+        status: "inProgress",
+        title: "Edit a.ts, b.ts",
+        data: { changes }
+      }, { turnId: "turn-1", status: "inProgress" }),
+      asStored("f-update", "tool.updated", {
+        itemType: "file_change",
+        toolUseId: "call-patch",
+        status: "inProgress",
+        data: { threadId: "codex-thread", turnId: "turn-1", itemId: "call-patch", changes }
+      })
+    ]);
+    const files = ["/work/project/a.ts", "/work/project/b.ts"];
+    const stored = state.activities.find((activity) => activity.id === "f-update")!.payload as Record<string, unknown>;
+    assert.deepEqual([stored.data, stored.changedFiles], [{}, files], "the update as ingestion stores it");
+
+    const [closing] = closingsOf(state);
+    const payload = activityOf(closing).payload as Record<string, unknown>;
+    assert.deepEqual(payload.changedFiles, files, "the closer lists the files");
+    assert.equal("truncated" in payload, false, "its data holds no cut output: no Load full output");
+
+    // The row the GUI shows once the closer supersedes the update, and the MCP's
+    // last word on the call: a snapshot read keeps the files on it.
+    const read = wireRead(applied(state, [closing!]));
+    const closer = read.items.find((item) => item.id === closing!.activity.id);
+    assert.ok(closer?.kind === "activity");
+    assert.deepEqual((closer.payload as Record<string, unknown>).changedFiles, files);
+    assert.equal(read.items.some((item) => item.id === "f-update"), false, "the update is superseded");
+  });
+
   it("leaves alone an open call no row of the window anchors — the woken call a rewind left — and closes one a row anchors", () => {
     // A woken Claude parent streams its call before the synthetic turn its own
     // message opens: its start and an early input update carry no turn and no

@@ -49,7 +49,13 @@
  *   it offered "Load full output" and an MCP `outputItemId` that read the same
  *   row back — while an output preview (Grok's `rawOutput`) never passes for
  *   the whole output: the opening row's whole data rides instead, and the cut
- *   copy rides marked only when no row holds whole data. **Except a call
+ *   copy rides marked only when no row holds whole data. So do the files the
+ *   latest row names at its top level (`changedFiles`, the slimmer's promotion
+ *   out of the data, the one top-level field a stored lifecycle row carries
+ *   that the closer does not write itself): a Codex `patchUpdated` update is
+ *   stored as `data: {}` beside them, and a closer that copied the data alone
+ *   listed no files — the GUI's row and the MCP's entry read them there.
+ *   **Except a call
  *   no row of the window anchors** ({@link anchorsCall}: every row of it
  *   turnless and ownerless) — what a rewind leaves of a woken Claude parent's
  *   call, its start and early input update, or a woken call no turn ever
@@ -275,6 +281,18 @@ function closerData(
   return { data: source.data, truncated: true };
 }
 
+/**
+ * The files a lifecycle row names at its top level — the slimmer's promotion
+ * out of its data (`slimActivityPayload`), which is all a stored update keeps
+ * of a patch: a Codex `patchUpdated` update is `data: {}` and `changedFiles`.
+ * Undefined when the row names none.
+ */
+function changedFilesOf(payload: Record<string, unknown>): string[] | undefined {
+  if (!Array.isArray(payload.changedFiles)) return undefined;
+  const files = payload.changedFiles.filter((file): file is string => typeof file === "string");
+  return files.length > 0 ? files : undefined;
+}
+
 /** `item.completed`'s row, as ingestion writes one, for a call nothing will complete. */
 function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityItem {
   const latest = call.latestLifecycle;
@@ -283,6 +301,11 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
   const itemType = nonBlank(payload.itemType) ?? nonBlank(opening.itemType);
   const title = nonBlank(payload.title) ?? nonBlank(opening.title);
   const { data, truncated } = closerData(payload, opening);
+  // The one top-level field a stored lifecycle row carries beyond what this
+  // row writes itself (`ItemLifecyclePayload` has no other): the GUI's row
+  // and the MCP's entry read a call's files there, and the data beside them
+  // is `{}` once an update was slimmed.
+  const changedFiles = changedFilesOf(payload);
   const owner = ownerOf(latest);
   const parentToolUseId = presentId(latest.parentToolUseId) ?? presentId(payload.parentToolUseId);
   return {
@@ -298,6 +321,7 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
       ...(title !== undefined ? { title } : {}),
       detail: LEFTOVER_CALL_DETAIL,
       ...(data !== undefined ? { data } : {}),
+      ...(changedFiles !== undefined ? { changedFiles } : {}),
       ...(truncated ? { truncated: true } : {}),
       ...(owner !== undefined ? { agentId: owner } : {}),
       ...(parentToolUseId !== undefined ? { parentToolUseId } : {})
