@@ -1018,6 +1018,44 @@ test("a second call on a LIVE child is not a relaunch, and its end does not sett
   assert.equal(ends[0]?.payload.toolUseId, "call_resume", "the run keeps its launching call");
 });
 
+test("once a relaunched run settled, a late frame of ANY earlier call is stale", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work]);
+  // A second call while the child works: handed to its running job.
+  const extend = resumeFrames("call_extend");
+  feed(run, [extend.pending, extend.running]);
+  feed(run, [...resume.settle, resume.completed]);
+  const child = run.state.childAgents.get(CHILD_SESSION_ID);
+  assert.equal(child?.completed, true, "the relaunched run settled");
+
+  // Late live frames of the capture's own launching call (line 147), and of
+  // the call handed over while the child worked: a settled child and a live
+  // part, but neither call is new.
+  const late = feed(run, [...childFixtureFrames([147]), extend.running]).flat();
+  assert.deepEqual(taskRows(late), []);
+  assert.equal(child?.toolUseId, "call_resume", "the run keeps the call that launched it");
+  assert.equal(child?.completed, true);
+});
+
+test("a child's title change is a progress row; a re-stated title is not (observation 19)", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work]);
+
+  // The capture's `session.updated` for the child (line 143), retitled.
+  const retitled = childFixtureFrames([143], {
+    "list files (@explore subagent)": "list hidden files (@explore subagent)"
+  });
+  const changed = eventsOfType(feed(run, retitled).flat(), "task.progress");
+  assert.equal(changed.length, 1);
+  assert.equal(changed[0]?.payload.summary, "list hidden files (@explore subagent)");
+  assert.equal(changed[0]?.payload.title, "list hidden files (@explore subagent)");
+  assert.deepEqual(taskRows(feed(run, retitled).flat()), [], "re-stated, it is not a change");
+});
+
 test("a relaunched child is closed `stopped` when the session goes down (§3.1)", () => {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-resume";

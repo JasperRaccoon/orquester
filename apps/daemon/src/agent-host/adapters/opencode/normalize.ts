@@ -1027,18 +1027,21 @@ function linkChildFromTaskPart(
   }
   addRelatedSession(state, childId);
 
-  // A call that is not the one this child's run was launched by. On a SETTLED
-  // child a live part is a relaunch: the run reopens under the new call, and
-  // the tail below emits its start — whose changed `toolUseId` is what reopens
-  // a terminal roster row — before any row of the new run. Anything else is
-  // not this run's — a stale frame of an earlier call, or a second call on a
-  // child that is still working, which 1.18.32 hands to the running job and
-  // answers at once — and emits no task row, so it can never end the run.
+  // A call that is not the one this child's run was launched by. A live part
+  // of a call never seen before, on a SETTLED child, is a relaunch: the run
+  // reopens under the new call, and the tail below emits its start — whose
+  // changed `toolUseId` is what reopens a terminal roster row — before any row
+  // of the new run. Anything else is not this run's — a stale frame of an
+  // earlier call, or a second call on a child that is still working, which
+  // 1.18.32 hands to the running job and answers at once — and emits no task
+  // row, so it can never end the run.
   const known = state.childAgents.get(childId);
   if (known !== undefined && known.toolUseId !== undefined && known.toolUseId !== part.callID) {
     const live = part.state.status === "pending" || part.state.status === "running";
     const settled = known.completed || known.lastStatus === "idle";
-    if (!live || !settled) {
+    const earlier = known.seenCallIds?.has(part.callID) === true;
+    rememberCall(known, part.callID);
+    if (!live || !settled || earlier) {
       return;
     }
     known.toolUseId = part.callID;
@@ -1064,6 +1067,7 @@ function linkChildFromTaskPart(
     // A grandchild's parent is the intermediate agent, not the thread.
     ...(parentSessionId !== state.openCodeSessionId ? { parentAgentId: parentSessionId } : {})
   });
+  rememberCall(agent, part.callID);
 
   if (part.state.status === "completed") {
     // A call run in the BACKGROUND (`metadata.background: true`) completes at
@@ -1078,6 +1082,11 @@ function linkChildFromTaskPart(
     return;
   }
   emitTaskProgress(state, agent, raw, out, { status: "running" });
+}
+
+/** Record a `task` call that named `agent` (`OpenCodeChildAgent.seenCallIds`). */
+function rememberCall(agent: OpenCodeChildAgent, callId: string): void {
+  (agent.seenCallIds ??= new Set<string>()).add(callId);
 }
 
 /**
@@ -1106,6 +1115,8 @@ function demuxChild(
           : undefined
         : undefined;
       const title = info.title?.trim();
+      // Read before `ensureChildAgent`, which writes the new title.
+      const previousTitle = state.childAgents.get(childSessionId)?.title;
       const agent = ensureChildAgent(state, childSessionId, {
         ...(parentID !== undefined ? { parentSessionId: parentID } : {}),
         ...(title !== undefined && title.length > 0 ? { title } : {}),
@@ -1123,9 +1134,15 @@ function demuxChild(
         return;
       }
       // `session.updated` re-states an unchanged title on every recompute
-      // (observation 25), so only a real change is worth a progress row.
-      if (title !== undefined && title.length > 0 && title !== agent.title) {
-        agent.title = title;
+      // (observation 25), so only a real change of a title already known is
+      // worth a progress row. The comparison used to read the title
+      // `ensureChildAgent` had just written, and no change ever showed.
+      if (
+        title !== undefined &&
+        title.length > 0 &&
+        previousTitle !== undefined &&
+        title !== previousTitle
+      ) {
         emitTaskProgress(state, agent, raw, out, { summary: title });
       }
       return;

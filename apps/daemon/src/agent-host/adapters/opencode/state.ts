@@ -269,8 +269,17 @@ export interface OpenCodeChildAgent {
   role?: string;
   /** `"<providerID>/<modelID>"`, from the parent tool part's metadata. */
   model?: string;
-  /** The parent `task` tool call this child belongs to. */
+  /**
+   * The parent `task` call that launched the child's CURRENT run — a `task_id`
+   * resume relaunches it under a new one (`linkChildFromTaskPart`).
+   */
   toolUseId?: string;
+  /**
+   * Every `task` call that has named this child: its launches, and calls it
+   * was handed while it worked. A later frame of any of them is stale — only
+   * a call never seen before can relaunch the child.
+   */
+  seenCallIds?: Set<string>;
   /** Set when this child was itself launched from another child. */
   parentAgentId?: string;
   lastToolName?: string;
