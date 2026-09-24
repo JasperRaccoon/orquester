@@ -383,6 +383,43 @@ interface TurnFold {
   createdAt: string;
   hiddenEntryIds: ReadonlySet<string>;
   label: string;
+  /** How its rows time it; null when its turn's own start and completion do. */
+  clock: TurnFoldClock | null;
+}
+
+/**
+ * What the "Worked for …" of a fold its rows time reads: from `from` (its
+ * prompt, else its first row) to the later of its terminal answer's last
+ * write and its last row's end. The answer and the last row are named by
+ * their POSITION in the timeline entries — a streamed token moves neither
+ * (the fast path requires every entry to keep its place and its id) — so the
+ * streamed-text fast path re-reads the label without walking the turn again.
+ */
+export interface TurnFoldClock {
+  readonly from: string;
+  /** The terminal answer's position, if the turn has one. */
+  readonly terminalAt: number | null;
+  /** The turn's last row's position. */
+  readonly lastAt: number;
+  /** The turn is the latest one, and the user stopped it. */
+  readonly interrupted: boolean;
+}
+
+function foldLabel(durationMs: number | null, interrupted: boolean): string {
+  const duration = durationMs !== null ? formatWorkDuration(durationMs) : null;
+  if (interrupted) {
+    return duration ? `You stopped after ${duration}` : "You stopped this response";
+  }
+  return duration ? `Worked for ${duration}` : "Worked";
+}
+
+/** The label `clock` reads off `entries` — the ones it was taken from, or the fast path's. */
+function foldClockLabel(clock: TurnFoldClock, entries: readonly TimelineEntry[]): string {
+  const last = entries[clock.lastAt]!;
+  const lastEnd = last.kind === "message" ? last.message.updatedAt : last.createdAt;
+  const terminal = clock.terminalAt === null ? undefined : entries[clock.terminalAt];
+  const terminalEnd = terminal?.kind === "message" ? terminal.message.updatedAt : null;
+  return foldLabel(elapsedMs(clock.from, maxIso(terminalEnd, lastEnd) ?? lastEnd), clock.interrupted);
 }
 
 /**
@@ -399,7 +436,10 @@ interface TurnFold {
  * timed by its rows: from its prompt to the later of its answer's last write
  * and its last row. The drill-in passes none on purpose: a background agent
  * works long past the parent turn its rows ride, and its fold keeps the span
- * of the agent's own rows (`drill-in.logic.ts`).
+ * of the agent's own rows (`drill-in.logic.ts`). Such a fold keeps its
+ * {@link TurnFoldClock}: its last row may be a thinking block still being
+ * written — a thinking block never holds a fold open — and the streamed-text
+ * fast path moves its label with every token.
  *
  * *T3: `MessagesTimeline.logic.ts:627-803`; differs: T3 times every turn but
  * the latest by its rows.*
@@ -417,6 +457,9 @@ function deriveTurnFolds(input: {
   interface TurnGroup {
     entries: TimelineEntry[];
     terminalEntry: Extract<TimelineEntry, { kind: "message" }> | null;
+    /** Positions in `input.entries`: the terminal answer's, the last row's. */
+    terminalAt: number | null;
+    lastAt: number;
     hasStreamingMessage: boolean;
     startBoundary: string | null;
   }
@@ -430,7 +473,7 @@ function deriveTurnFolds(input: {
     }
   }
 
-  for (const entry of input.entries) {
+  for (const [position, entry] of input.entries.entries()) {
     if (entry.kind === "message" && entry.message.role === "user") {
       pendingUserBoundary = entry.message.createdAt;
       continue;
@@ -444,6 +487,8 @@ function deriveTurnFolds(input: {
       group = {
         entries: [],
         terminalEntry: null,
+        terminalAt: null,
+        lastAt: position,
         hasStreamingMessage: false,
         startBoundary: pendingUserBoundary
       };
@@ -451,9 +496,11 @@ function deriveTurnFolds(input: {
       groups.set(turnId, group);
     }
     group.entries.push(entry);
+    group.lastAt = position;
     if (entry.kind === "message") {
       if (input.terminalAssistantMessageIds.has(entry.message.id)) {
         group.terminalEntry = entry;
+        group.terminalAt = position;
       }
       // An answer keeps its turn unfolded only while it can still be written
       // (`isStreaming`): one a dead host left keeps its flag for good and
@@ -518,41 +565,40 @@ function deriveTurnFolds(input: {
 
     const firstEntry = group.entries[0];
     const firstHidden = group.entries.find((entry) => hiddenEntryIds.has(entry.id));
-    const lastEntry = group.entries.at(-1);
-    if (!firstEntry || !firstHidden || !lastEntry) {
+    if (!firstEntry || !firstHidden) {
       continue;
     }
     const isLatestInterruptedTurn =
       input.latestTurn?.turnId === turnId && input.latestTurn.state === "interrupted";
-    const lastEntryEnd = lastEntry.kind === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
     const turnRow = turnRows.get(turnId);
     const ownDurationMs =
       turnRow !== undefined && isSettledTurnState(turnRow.state)
         ? elapsedMs(turnRow.startedAt, turnRow.completedAt)
         : null;
-    const durationMs =
-      ownDurationMs ??
-      (input.latestTurn?.turnId === turnId && input.latestTurn.startedAt && input.latestTurn.completedAt
-        ? elapsedMs(input.latestTurn.startedAt, input.latestTurn.completedAt)
-        : elapsedMs(
-            group.startBoundary ?? firstEntry.createdAt,
-            maxIso(group.terminalEntry?.message.updatedAt ?? null, lastEntryEnd) ?? lastEntryEnd
-          ));
-    const duration = durationMs !== null ? formatWorkDuration(durationMs) : null;
-    const label = isLatestInterruptedTurn
-      ? duration
-        ? `You stopped after ${duration}`
-        : "You stopped this response"
-      : duration
-        ? `Worked for ${duration}`
-        : "Worked";
+    const latestTurn = input.latestTurn?.turnId === turnId ? input.latestTurn : null;
+    let clock: TurnFoldClock | null = null;
+    let label: string;
+    if (ownDurationMs !== null) {
+      label = foldLabel(ownDurationMs, isLatestInterruptedTurn);
+    } else if (latestTurn?.startedAt && latestTurn.completedAt) {
+      label = foldLabel(elapsedMs(latestTurn.startedAt, latestTurn.completedAt), isLatestInterruptedTurn);
+    } else {
+      clock = {
+        from: group.startBoundary ?? firstEntry.createdAt,
+        terminalAt: group.terminalAt,
+        lastAt: group.lastAt,
+        interrupted: isLatestInterruptedTurn
+      };
+      label = foldClockLabel(clock, input.entries);
+    }
 
     folds.set(firstHidden.id, {
       turnId,
       anchorEntryId: firstHidden.id,
       createdAt: firstHidden.createdAt,
       hiddenEntryIds,
-      label
+      label,
+      clock
     });
   }
   return folds;
@@ -724,10 +770,14 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
   return deriveRowsDetailed(input).rows;
 }
 
-/** The rows, and whether any of them is a live activity row (`hasActivityRow`). */
+/**
+ * The rows, whether any of them is a live activity row (`hasActivityRow`),
+ * and the clocks of the folds they time by their rows (`foldClocks`).
+ */
 function deriveRowsDetailed(input: TimelineRowsInput): {
   rows: AgentChatTimelineRow[];
   hasActivityRow: boolean;
+  foldClocks: ReadonlyMap<string, TurnFoldClock>;
 } {
   const entries = input.timelineEntries;
   const header = input.activeTurnHeader ?? "here";
@@ -778,11 +828,15 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     isStreaming
   });
   const collapsedEntryIds = new Set<string>();
+  const foldClocks = new Map<string, TurnFoldClock>();
   for (const fold of foldsByAnchorEntryId.values()) {
     if (!input.expandedTurnIds?.has(fold.turnId)) {
       for (const entryId of fold.hiddenEntryIds) {
         collapsedEntryIds.add(entryId);
       }
+    }
+    if (fold.clock !== null) {
+      foldClocks.set(fold.turnId, fold.clock);
     }
   }
 
@@ -1242,7 +1296,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       isNext: index === 0
     });
   });
-  return { rows: withMeta, hasActivityRow };
+  return { rows: withMeta, hasActivityRow, foldClocks };
 }
 
 /**
@@ -1366,6 +1420,12 @@ export interface TimelineRowsProjection {
    * as `liveActivityAbove`. Streamed text never changes it.
    */
   readonly hasActivityRow: boolean;
+  /**
+   * The clocks of the folds these rows time by their rows, by turn id: what
+   * the streamed-text fast path re-reads a fold's label by. Streamed text
+   * never changes which folds there are, nor where their rows sit.
+   */
+  readonly foldClocks: ReadonlyMap<string, TurnFoldClock>;
 }
 
 function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): boolean {
@@ -1398,7 +1458,9 @@ function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): b
 }
 
 /**
- * Reuse rows when the only change is streamed text.
+ * Reuse rows when the only change is streamed text. A fold whose clock reads
+ * the last write a token moved takes its new label ({@link TurnFoldClock}),
+ * so these rows are the ones a rebuild would derive.
  *
  * *T3: `MessagesTimeline.logic.ts:1477-1538`.*
  */
@@ -1413,6 +1475,8 @@ function replaceStreamingMessageRows(
     return null;
   }
   const replacements = new Map<ThreadMessageItem, ThreadMessageItem>();
+  // The folds whose clock reads a message a token moved, by turn id.
+  let movedFolds: Map<string, TurnFoldClock> | null = null;
   for (const [index, entry] of input.timelineEntries.entries()) {
     const previousEntry = previous.input.timelineEntries[index]!;
     if (entry === previousEntry) {
@@ -1440,20 +1504,32 @@ function replaceStreamingMessageRows(
     // A turnless message joins no fold and keeps the fast path, as does one
     // that reads as streaming — a streaming answer holds its turn unfolded; a
     // streaming thinking block does not, and a fold it ends (in a drill-in,
-    // where no turn is unfolded as running) keeps its label until the next
-    // row, as it always did.
-    if (
-      entry.message.turnId !== null &&
-      !isMessageStreaming(entry.message, input.messageStreaming ?? NOTHING_STREAMS)
-    ) {
+    // where no turn is unfolded as running) is relabelled below, off its
+    // clock, so its "Worked for …" follows the tokens.
+    const turnId = entry.message.turnId;
+    if (turnId !== null && !isMessageStreaming(entry.message, input.messageStreaming ?? NOTHING_STREAMS)) {
       return null;
     }
     replacements.set(previousEntry.message, entry.message);
+    if (turnId !== null) {
+      const clock = previous.foldClocks.get(turnId);
+      if (clock !== undefined && (clock.lastAt === index || clock.terminalAt === index)) {
+        (movedFolds ??= new Map()).set(turnId, clock);
+      }
+    }
   }
   if (replacements.size === 0) {
     return previous.rows;
   }
+  let labels: Map<string, string> | null = null;
+  for (const [turnId, clock] of movedFolds ?? []) {
+    (labels ??= new Map()).set(turnId, foldClockLabel(clock, input.timelineEntries));
+  }
   return previous.rows.map((row) => {
+    if (row.kind === "turn-fold") {
+      const label = labels?.get(row.turnId);
+      return label === undefined || label === row.label ? row : { ...row, label };
+    }
     if (row.kind === "activity-group") {
       // A reasoning message inside a group is carried as a derived entry; the
       // cache is keyed on the message, so a replacement rebuilds only that one.
@@ -1483,7 +1559,7 @@ export function deriveTimelineRowsWithState(
 ): TimelineRowsProjection {
   const streamed = previous === null ? null : replaceStreamingMessageRows(input, previous);
   if (streamed !== null && previous !== null) {
-    return { input, rows: streamed, hasActivityRow: previous.hasActivityRow };
+    return { input, rows: streamed, hasActivityRow: previous.hasActivityRow, foldClocks: previous.foldClocks };
   }
   return { input, ...deriveRowsDetailed(input) };
 }

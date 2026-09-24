@@ -1367,6 +1367,55 @@ describe("a message's liveness is the rule's, never its bare flag (isMessageStre
     assert.deepEqual(label(secondRows.rows), ["Worked for 8.0s"], "never the fast path's stale label");
   });
 
+  it("a token of a thinking block that ends a folded turn keeps the fast path and moves the fold's label", () => {
+    // The drill-in's shape: no turn unfolded as running and no turn rows, so a fold is timed by its rows.
+    // `t0` settled with its answer; in `t1` a build ran and a thought is still being written, the fold's last row.
+    const context = running("t1");
+    const before = [
+      activity(
+        "tool.completed",
+        { itemType: "command_execution", toolUseId: "call-0", title: "ls", command: "ls", status: "completed" },
+        { id: "ls", turnId: "t0", createdAt: stamp(1) }
+      ),
+      message("assistant", "Listed the files.", { id: "listed", turnId: "t0", createdAt: stamp(3) }),
+      activity(
+        "tool.completed",
+        { itemType: "command_execution", toolUseId: "call-1", title: "npm run build", command: "npm run build", status: "completed" },
+        { id: "build", turnId: "t1", createdAt: stamp(5) }
+      )
+    ];
+    const thought = message("reasoning", "The build", { id: "think", turnId: "t1", streaming: true, createdAt: stamp(6) });
+    const labels = (rows: readonly AgentChatTimelineRow[]) =>
+      rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, row.label]] : []));
+
+    const firstEntries = deriveTimelineEntriesFromItems([...before, thought], EMPTY_TIMELINE_PROJECTION);
+    const first = deriveTimelineRowsWithState(baseInput(firstEntries.entries, { messageStreaming: context }));
+    assert.deepEqual(labels(first.rows), [
+      ["t0", "Worked for 2.0s"],
+      ["t1", "Worked for 1.0s"]
+    ]);
+
+    let entries = firstEntries;
+    let previous = first;
+    for (const [at, text, reads] of [
+      [11, "The build passed", "Worked for 6.0s"],
+      [40, "The build passed; now the tests", "Worked for 35s"]
+    ] as const) {
+      entries = deriveTimelineEntriesFromItems([...before, { ...thought, text, updatedAt: stamp(at) }], entries);
+      const next = deriveTimelineRowsWithState(baseInput(entries.entries, { messageStreaming: context }), previous);
+      assert.equal(
+        messageRow(next.rows, "listed"),
+        messageRow(previous.rows, "listed"),
+        "the fast path took the token: a row it did not touch is the same object"
+      );
+      assert.deepEqual(labels(next.rows), [
+        ["t0", "Worked for 2.0s"],
+        ["t1", reads]
+      ]);
+      previous = next;
+    }
+  });
+
   it("isRowUnchanged sees a message row's liveness", () => {
     const row = messageRow(
       deriveTimelineRows(baseInput(entriesFrom(items()), { ...t2Running, messageStreaming: running("t2") })),
