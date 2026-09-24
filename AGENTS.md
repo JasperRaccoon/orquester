@@ -723,7 +723,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `tool.completed {status: "failed"}` with detail "Stopped when the agent host restarted." and its
   latest lifecycle row's item type, title, turn, owner, parent call and data (a completion carries
   a call's final state — the snapshot read drops every `tool.updated` a later completion
-  supersedes) — except a call no row of the window anchors (`anchorsCall`,
+  supersedes), the data with its row's `truncated` when that row was stored cut (an update is, §5.6:
+  unmarked, its preview read as the call's whole output in `read_tool_output`, and the GUI offered
+  no "Load full output") — except a call no row of the window anchors (`anchorsCall`,
   `packages/api/src/agent-chat/call-anchor.ts`: every row of it turnless and ownerless — what a
   rewind leaves of a woken Claude parent's call, rule (6) below), which no view shows and which a
   closer would bring back as a failed row after every host start; then for every task the roster shows `pending`/`running`/`waiting` (any agent kind —

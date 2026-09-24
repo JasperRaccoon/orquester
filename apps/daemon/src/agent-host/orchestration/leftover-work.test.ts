@@ -230,6 +230,59 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.equal(LEFTOVER_CALL_DETAIL, "Stopped when the agent host restarted.");
   });
 
+  it("says the data it copies is cut when the row it copies it from was stored cut", () => {
+    // Ingestion stores a `tool.updated` already slimmed (§5.6): a Grok command's
+    // update carries its output as a one-line `rawOutput` preview, `truncated`.
+    const cutUpdate = {
+      itemType: "command_execution",
+      status: "inProgress",
+      title: "Run npm test",
+      data: { command: "npm test", rawOutput: { content: "PASS a.test.ts" } },
+      truncated: true
+    };
+    const state = foldOf([
+      row("g-start", "tool.started", { itemType: "command_execution", toolUseId: "call-grok", title: "Run npm test" }, {
+        turnId: "turn-1"
+      }),
+      row("g-update", "tool.updated", { ...cutUpdate, toolUseId: "call-grok" }, { turnId: "turn-1" }),
+      // The data comes from the opening row when the latest has none: its marker with it.
+      row("o-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "call-opening",
+        title: "Bash",
+        data: { toolName: "Bash", input: { command: "npm run build" } },
+        truncated: true
+      }, { turnId: "turn-1" }),
+      row("o-update", "tool.updated", { itemType: "command_execution", toolUseId: "call-opening", title: "Bash" }, {
+        turnId: "turn-1"
+      }),
+      // Whole data says nothing — and a cut row whose data is not the one copied neither.
+      row("w-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "call-whole",
+        title: "Bash",
+        data: { toolName: "Bash", input: {} },
+        truncated: true
+      }, { turnId: "turn-1" }),
+      row("w-update", "tool.updated", {
+        itemType: "command_execution",
+        toolUseId: "call-whole",
+        title: "Bash",
+        data: { toolName: "Bash", input: { command: "ls" } }
+      }, { turnId: "turn-1" })
+    ]);
+    const payloads = closingsOf(state).map((closing) => closing.activity.payload as Record<string, unknown>);
+    assert.deepEqual(
+      payloads.map((payload) => [payload.toolUseId, payload.data, payload.truncated]),
+      [
+        ["call-grok", cutUpdate.data, true],
+        ["call-opening", { toolName: "Bash", input: { command: "npm run build" } }, true],
+        ["call-whole", { toolName: "Bash", input: { command: "ls" } }, undefined]
+      ]
+    );
+    assert.equal("truncated" in payloads[2]!, false, "no marker at all on whole data");
+  });
+
   it("leaves alone an open call no row of the window anchors — the woken call a rewind left — and closes one a row anchors", () => {
     // A woken Claude parent streams its call before the synthetic turn its own
     // message opens: its start and an early input update carry no turn and no

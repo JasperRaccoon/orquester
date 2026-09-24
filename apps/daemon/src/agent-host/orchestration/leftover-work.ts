@@ -42,7 +42,12 @@
  *   call reads open again. The data rides along because a completion carries
  *   a call's final state: the snapshot read drops every `tool.updated` a later
  *   completion supersedes (`dropSupersededToolUpdatedActivities`), so a closer
- *   without it would take a call's input off every cold load. **Except a call
+ *   without it would take a call's input off every cold load. So does the
+ *   `truncated` of the row it came from: ingestion stores a `tool.updated`
+ *   already slimmed (§5.6), and a closer carrying its preview unmarked would
+ *   pass it off as the call's whole output — the MCP's `read_tool_output`
+ *   answers a command's output from a completion's data unless it is cut, and
+ *   the GUI offers "Load full output" only on a cut row. **Except a call
  *   no row of the window anchors** ({@link anchorsCall}: every row of it
  *   turnless and ownerless) — what a rewind leaves of a woken Claude parent's
  *   call, its start and early input update, or a woken call no turn ever
@@ -240,7 +245,13 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
   const opening = asRecord(call.opening.payload) ?? {};
   const itemType = nonBlank(payload.itemType) ?? nonBlank(opening.itemType);
   const title = nonBlank(payload.title) ?? nonBlank(opening.title);
-  const data = payload.data ?? opening.data;
+  // The latest row's data, else the opening row's — with that row's own word
+  // on whether it is whole: ingestion stores a `tool.updated` already slimmed
+  // (§5.6, `truncated`), so its data may be a preview, and a completion that
+  // does not say so claims it is the call's whole output.
+  const source = payload.data !== undefined && payload.data !== null ? payload : opening;
+  const data = source.data;
+  const truncated = data !== undefined && source.truncated === true;
   const owner = ownerOf(latest);
   const parentToolUseId = presentId(latest.parentToolUseId) ?? presentId(payload.parentToolUseId);
   return {
@@ -256,6 +267,7 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
       ...(title !== undefined ? { title } : {}),
       detail: LEFTOVER_CALL_DETAIL,
       ...(data !== undefined ? { data } : {}),
+      ...(truncated ? { truncated: true } : {}),
       ...(owner !== undefined ? { agentId: owner } : {}),
       ...(parentToolUseId !== undefined ? { parentToolUseId } : {})
     },
