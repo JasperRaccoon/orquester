@@ -523,11 +523,12 @@ the composer and `send_message` until the user stops the session (§7.4), the fo
 call's opening row (retention's open-work rule, §5.1), and a roster row with no terminal row reads
 running again once a session is live (§7.6). So a thread's first load in a host lifetime — the
 `bootSettlePending` settle above, and an orphan's reconcile after the stale-`pending` settle and
-before its turn is settled or continued — appends the rows that teardown would have written, for
-the rows in the folded window: first, for every request still pending but a message-mode question,
-what ingestion writes for the teardown's `request.resolved {decision: "cancel"}` or
-`user-input.resolved {answers: {}}`, on the request's turn and owner (a message-mode question stays
-pending: it parked no request and accepts a later message, §6.2); a `tool.completed {status:
+before its turn is settled or continued — appends the rows that close them, for the rows in the
+folded window: first, for every request still pending but a message-mode question,
+the host's own cancellation — the rows a Stop writes ("Request cancelled", "Question cancelled", on
+the head's running turn), never a provider's "resolved"/"submitted", which would say someone
+answered (a message-mode question stays pending, where a Stop would cancel it too: it parked no
+request and accepts a later message, §6.2); a `tool.completed {status:
 "failed"}` reading "Stopped when the agent host restarted." for every open call, on its latest
 lifecycle row's item type, title, turn, owner and data; a `task.completed {status: "stopped"}` for
 every roster task still `pending`, `running` or `waiting`, on its start's owner and turn — `idle`

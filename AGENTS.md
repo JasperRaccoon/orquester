@@ -710,14 +710,16 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   no process can answer blocks the composer ("Answer the request above first.") and the MCP's
   `send_message` until the user stops the session, the fold keeps a running call's opening row
   (`open-work.ts`, within its caps), and a roster row with no terminal row reads running again the
-  moment a session is live. So a thread's **first load in a host lifetime** appends the rows that
-  teardown would have written (`closeLeftoverWork` in `orchestrator.ts`; the rows are derived from
-  the folded window alone by `leftoverWorkClosings`, `orchestration/leftover-work.ts`), first for
-  every request the fold shows pending but a message-mode question: ingestion's rows for the
-  teardown's `request.resolved {decision: "cancel"}` (an approval) and `user-input.resolved
-  {answers: {}}` (a structured question), on the request's own turn and owner, which close it for
-  good (`closedRequestIds`) — a message-mode question (`responseMode: "message"`) stays pending,
-  since it parked no request and a later user message answers it; then for every open call a
+  moment a session is live. So a thread's **first load in a host lifetime** closes what that
+  teardown would have closed (`closeLeftoverWork` in `orchestrator.ts`; the rows are derived from
+  the folded window alone by `leftoverWorkClosings`, `orchestration/leftover-work.ts`): first every
+  request the fold shows pending but a message-mode question, cancelled with the host's own Stop
+  rows (`settlePendingRequests`, one builder: `cancelledRequestActivity` in `events.ts` — "Request
+  cancelled" `approval.resolved {decision: "cancel"}` / "Question cancelled" `user-input.resolved`,
+  on the turn the head says is running), which close it for good (`closedRequestIds`), never the
+  provider's "resolved"/"submitted" rows, which would say someone answered; a message-mode question
+  (`responseMode: "message"`) stays pending, where a Stop would cancel it too, since it parked no
+  request and a later user message answers it; then for every open call a
   `tool.completed {status: "failed"}` with detail "Stopped when the agent host restarted." and its
   latest lifecycle row's item type, title, turn, owner, parent call and data (a completion carries
   a call's final state — the snapshot read drops every `tool.updated` a later completion
