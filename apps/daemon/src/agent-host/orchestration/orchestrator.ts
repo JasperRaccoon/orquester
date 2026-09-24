@@ -3547,14 +3547,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
       requireHead(runtime);
+      const inFold = (runtime.state.items ?? []).find((item) => item.id === itemId);
+      // A message the resident fold still holds is answered from it: the fold
+      // merges a message's deltas exactly as the store's whole-log fold does
+      // (the snapshot's own invariant: snapshot + tail folds to the whole log),
+      // and it slims nothing — only a read's activities are slimmed (§5.6).
+      // The store would scan the log to learn the id is a message, then read
+      // and fold the whole log for its body.
+      if (inFold?.kind === "message") {
+        return inFold;
+      }
       // Retention drops the oldest 500 activities from the fold, and a
       // `tool.updated` row is persisted already slimmed while its
       // `tool.completed` carries the full payload — so the LOG, read
       // backwards, is the authoritative answer, not the projection (§5.6).
+      // So is it for a message retention dropped from the fold.
       if (store.readItem) {
         return store.readItem(threadId, itemId);
       }
-      const inFold = (runtime.state.items ?? []).find((item) => item.id === itemId);
       if (inFold) {
         return inFold;
       }
