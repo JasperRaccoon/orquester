@@ -1063,6 +1063,8 @@ test("a background task's chunk-built entry is titled from its roster row; a sub
   // A subagent runs many calls, and its row names none of them.
   assert.equal(titleOf([row("agent", "Explore the repo")]), "Tool output");
   assert.equal(titleOf([]), "Tool output");
+  // The roster titles a task with its own id when nothing else named it: that names nothing.
+  assert.equal(titleOf([row("background", "task-1")]), "Tool output");
   // A row of the call elsewhere in the view still says more: its title first, then the roster's, then its command.
   const earlier = (payload: Record<string, unknown>) => activity("tool.started", { toolUseId: "bgshell:task-1", itemType: "command_execution", status: "inProgress", ...payload }, { turnId: "t1", agentId: "task-1", tone: "tool", createdAt: stamp(2), updatedAt: stamp(2) });
   assert.equal(titleOf([row("background", "npm run dev")], [earlier({ title: "Background shell", data: { command: "npm run dev -- --port 3000" } })]), "Background shell");
@@ -1122,22 +1124,29 @@ test("the parent view builds no entry from a chunk alone, stamped or not", () =>
   }
 });
 
-test("a start with neither a turn nor an owner is no entry alone — the GUI's rule: a rewind cut the turn its later rows rode", () => {
-  // A Claude parent call can start before the synthetic turn its own message opens: its start is turnless, and every
-  // later row of the call carries that turn — which a rewind removes, leaving the start behind.
+test("a call whose rows are all turnless, ownerless and unclosed is no entry — what a rewind of the turn they preceded left", () => {
+  // A woken Claude parent streams a call before the synthetic turn its own message opens: the call's start and an early
+  // input update go out turnless, and only its rows after the turn opened carry it — which a rewind removes, leaving
+  // the turnless ones behind. The GUI hides them (the start superseded, the in-progress update a neutral row).
   const call = (activityKind: string, status: string, turnId: string | null, over: Record<string, unknown> = {}) =>
-    activity(activityKind, { itemType: "command_execution", toolUseId: "call-1", title: "Command run", status, data: { command: "ls" }, ...over }, { turnId, tone: "tool" });
+    activity(activityKind, { itemType: "command_execution", toolUseId: "call-1", title: "Command run", status, data: { command: "cat out.txt" }, ...over }, { turnId, tone: "tool" });
   const prompt = message("user", "look around", { turnId: "t1", id: "u1" });
   const tools = (items: ThreadItem[], agentId?: string) =>
     transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000, ...(agentId ? { agentId } : {}) }).entries.filter((e) => e.kind === "tool");
-  assert.deepEqual(tools([prompt, call("tool.started", "inProgress", null)]), [], "alone, it is no running call");
-  // With a later row of the call in the view it is the call's entry, as before.
-  assert.deepEqual(tools([prompt, call("tool.started", "inProgress", null), call("tool.completed", "completed", "t1")]).map((e) => e.tool!.status), ["completed"]);
-  // A keyed start in a turn is a running call's entry, and so is one with an owner: an agent's call started while no
-  // parent turn was open.
+  const start = call("tool.started", "inProgress", null);
+  const early = call("tool.updated", "inProgress", null);
+  assert.deepEqual(tools([prompt, start]), [], "the start alone is no running call");
+  assert.deepEqual(tools([prompt, start, early]), [], "nor with its early input update");
+  assert.deepEqual(tools([prompt, early]), [], "nor the update alone");
+  // A row of the call that carries a turn, or closes it, makes it the call's entry, as before.
+  assert.deepEqual(tools([prompt, start, early, call("tool.updated", "inProgress", "t1")]).map((e) => e.tool!.status), ["inProgress"]);
+  assert.deepEqual(tools([prompt, start, early, call("tool.completed", "completed", "t1")]).map((e) => e.tool!.status), ["completed"]);
+  assert.deepEqual(tools([prompt, start, call("tool.completed", "completed", null)]).map((e) => e.tool!.status), ["completed"], "a close is enough");
+  // A keyed start in a turn is a running call's entry, and so is a call with an owner: a subagent's call started while
+  // no parent turn was open is turnless for its whole life.
   assert.deepEqual(tools([prompt, call("tool.started", "inProgress", "t1")]).map((e) => e.tool!.status), ["inProgress"]);
-  const owned = activity("tool.started", { itemType: "command_execution", toolUseId: "call-2", title: "Command run", status: "inProgress", agentId: "agent-a" }, { turnId: null, agentId: "agent-a", tone: "tool" });
-  assert.deepEqual(tools([prompt, owned], "agent-a").map((e) => [e.tool!.status, e.agentId]), [["inProgress", "agent-a"]]);
+  const owned = (activityKind: string) => activity(activityKind, { itemType: "command_execution", toolUseId: "call-2", title: "Command run", status: "inProgress", agentId: "agent-a" }, { turnId: null, agentId: "agent-a", tone: "tool" });
+  assert.deepEqual(tools([prompt, owned("tool.started"), owned("tool.updated")], "agent-a").map((e) => [e.tool!.status, e.agentId]), [["inProgress", "agent-a"]]);
 });
 
 test("hooks: a failed completion is an error row, a cancelled one a warning row; starts, progress and successes are no row", () => {

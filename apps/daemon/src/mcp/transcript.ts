@@ -415,15 +415,17 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     const inheritedOwner = unstampedChunkOwner(snap.items);
     const ownerOf = (item: ThreadItem): string | undefined => item.agentId || inheritedOwner(item);
     const inScope = (item: ThreadItem): boolean => (opts.agentId ? ownerOf(item) === opts.agentId : !ownerOf(item) || isAgentAnchor(item));
-    // A call's start with neither a turn nor an owner is no entry while the view holds no other lifecycle row of its
-    // call, as the GUI's timeline drops it (`startIsCallRow`, packages/ui entries.logic.ts): a Claude parent call can
-    // start before the synthetic turn its own message opens, and every later row of the call carries that turn, so such
-    // a start alone is what a rewind of that turn left behind — never a running call. The calls with another row:
-    const continuedCalls = new Set<string>();
+    // A call whose rows in the view are all turnless, ownerless and unclosed is no entry, as the GUI's timeline shows it
+    // none: a Claude parent call can start before the synthetic turn its own message opens, and what it emits before
+    // that turn opens — its start and any early input update — stays turnless; only its rows after that carry the turn.
+    // A rewind of that turn leaves the turnless rows as all there is of the call, and the GUI hides them (the start as
+    // superseded, `startIsCallRow` in packages/ui entries.logic.ts; an update still in progress as a neutral row) — no
+    // running call. The calls a row of the view anchors — by its turn, its owner, or as the call's close:
+    const anchoredCalls = new Set<string>();
     for (const item of snap.items) {
-      if (item.kind !== "activity" || item.activityKind === "tool.started" || !TOOL_KINDS.has(item.activityKind) || !inScope(item)) continue;
-      const callId = str(asRecord(item.payload)?.toolUseId);
-      if (callId) continuedCalls.add(callId);
+      if (item.kind !== "activity" || (item.activityKind !== "tool.output" && !TOOL_KINDS.has(item.activityKind)) || !inScope(item)) continue;
+      if (!item.turnId && !isAgentOwnedActivity(item) && item.activityKind !== "tool.completed" && item.activityKind !== "tool.denied") continue;
+      anchoredCalls.add(str(asRecord(item.payload)?.toolUseId) ?? item.id);
     }
     const inTurns = (item: ThreadItem): boolean => {
       const id = turnIdOf(item);
@@ -485,7 +487,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       if (TOOL_KINDS.has(a.activityKind)) {
         if (!opts.include.has("tools")) continue;
         const key = str(p.toolUseId) ?? a.id;
-        if (a.activityKind === "tool.started" && !a.turnId && !isAgentOwnedActivity(a) && !continuedCalls.has(key)) continue;
+        if (!anchoredCalls.has(key)) continue;
         let e = tools.get(key);
         if (!e) { e = base(a, "tool"); e.tool = { type: str(p.itemType) ?? "tool", title: str(p.title) ?? a.summary, status: str(p.status) ?? "inProgress" }; tools.set(key, e); entries.push(e); }
         const t = e.tool!;
@@ -587,10 +589,11 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       if (!opts.agentId || chunk === undefined || !opts.include.has("tools")) continue;
       const facts = callFacts.get(callId) ?? {};
       // Its title: its rows' in the view; else, for a background task — one command — its roster row's (the shell's
-      // description, or the command itself); else its command; else the chunk's own ("Tool output"). An agent's roster
-      // row names none of the calls it runs.
+      // description, or the command itself; never the task's own id, the roster's fallback when nothing named it);
+      // else its command; else the chunk's own ("Tool output"). An agent's roster row names none of the calls it runs.
       const task = roster.get(opts.agentId);
-      const taskTitle = task?.agentKind === "background" ? subagentTitle(nonBlank(task.title)) : null;
+      const rosterTitle = nonBlank(task?.title)?.trim();
+      const taskTitle = task?.agentKind === "background" && rosterTitle !== task.id ? subagentTitle(rosterTitle) : null;
       const entry = base(chunk, "tool");
       entry.tool = { type: "command_execution", title: facts.title ?? taskTitle ?? facts.command ?? chunk.summary, status: facts.ended ?? "inProgress", ...(facts.command ? { command: facts.command } : {}) };
       entry.outputItemId = chunk.id;
