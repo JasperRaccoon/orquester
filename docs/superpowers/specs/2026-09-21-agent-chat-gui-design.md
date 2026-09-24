@@ -3230,12 +3230,12 @@ cold-start path. The in-flight command flags (`reverting`, `stopping`), the requ
 decision in flight (`respondingRequestIds`) and the thread-level error banner are dropped with the
 generation that owned them — a command still in flight settles into that generation, never into the
 next (§7.4 names the two that must not be lost with it: a turn and an answer retry past the teardown,
-and a queued send failing there is held by the live generation); the queue, drafts, disclosures and
-scroll position survive. Every write is guarded by an **owner token** minted per live generation, so a
-teardown that lands after a newer store has claimed the same thread cannot clobber the newer
-cache. The alternative first shipped here — holding the live stream open for fifteen minutes per
-recently-viewed tab — bought the same instant repaint at the cost of one live connection and one
-live fold per tab, and is gone.
+and a queued send failing there is held by the live generation, which sends nothing queued behind it
+until it settles); the queue, drafts, disclosures and scroll position survive. Every write is guarded
+by an **owner token** minted per live generation, so a teardown that lands after a newer store has
+claimed the same thread cannot clobber the newer cache. The alternative first shipped here —
+holding the live stream open for fifteen minutes per recently-viewed tab — bought the same instant
+repaint at the cost of one live connection and one live fold per tab, and is gone.
 *T3: `packages/client-runtime/src/state/threadRetention.ts:1-3` — `THREAD_SNAPSHOT_IDLE_TTL_MS = 5 * 60_000`, "keep recent thread snapshots for back navigation; live subscriptions end when the last detail consumer leaves"; `packages/client-runtime/src/state/threads.ts:917-950` — the resume family at that idle TTL beside the state family at `setIdleTTL(0)`, and `Stream.concat(Stream.succeed(cachedThreadState(resume.snapshot.state)), live)`; `:161-176` — `cachedThreadState` keeping a retained "live" status; `:186-228` — the cached sequence seeding `afterSequence`; `:188-189, 228, 255, 274, 293, 418` — the owner guard.*
 
 ### 7.3 Timeline
@@ -3607,6 +3607,38 @@ the thread's live slice or storage, never over its own stale copy (`updateThread
 request ids with an answer in flight do not ride the retained snapshot (`cachedThreadState`), so a
 settled answer never leaves its card locked.*
 
+*Built: **a reload never loses or duplicates a message, and queued sends keep their order.** A
+reload used to take everything in flight with it: `submit` had already cleared the draft, the send
+registry and the queue lived in memory, and a message came back only if its post had reached the
+host. Now the thread store keeps every composer send (a turn or a steer), from before its first post
+until it settles, and its queue as it stands, in the tab's **outbox** (`composer-outbox.ts`, in
+`sessionStorage`: a reload of the tab resumes it, another tab never replays it), each message with
+its `commandId` — a queued message's is minted when it is queued and carried by every post of it.
+Every entry names the page that holds it, and the thread's first store after a reload adopts what
+the previous page left for its thread (`adoptOutboxLeftovers`): a send posted less than
+`OUTBOX_REPLAY_MAX_AGE_MS` (ten minutes) ago is re-posted under the SAME `commandId` — the host's
+receipt answers one that had landed with the seq it recorded, and one that had not goes out now —
+with the thread reading "Sending" meanwhile, a queued one holding the queue. The bound is the
+receipts': they are a ring of the host's last 500 commands, every thread's together, and a re-post
+the host no longer recognises would be a second turn; ten minutes is far past a reload of a post
+(which gives up within about 1¾ minutes) and far short of 500 commands on a single user's host. An
+older send is not re-posted, and one the host refuses comes back the same way: a composer send to the
+draft through the failed-send restore (the composer that shows the thread, else the thread's draft),
+with a notice saying why; a queued send held at the front of its queue, with a banner, under a new
+`commandId` — the user's next send of it is a new command, as for any failed queued send. An
+Implement's prompt never comes back: the plan is still there to implement (`generatedPrompt`, told
+by `sendComposerTurn`). The queue comes back as it was, in order, behind any queued send still on its
+way, and a generation that starts with nothing retained (its snapshot expired) starts its queue from
+the outbox too. Loads validate field-wise with a fallback. After a reload the web client lands on
+Recent Projects, so a thread's leftovers are picked up when it is opened again: within the ten
+minutes they go out, later they are back in the draft. **Queued sends are serialised across store
+generations** by a per-thread marker beside the send registry (`beginQueuedSend` in
+`composer-sends.ts`, the drive loop's in-flight latch): the generation a project switch tore down may
+still be posting the head of the queue when the thread's next generation reaches a boundary, and
+that one used to send the next message at once — landing it first, or overtaking the head when that
+failed and was held at the front. It now waits; when the head settles the queue proceeds in order — a
+delivered one lets the next go, a failed one is held at the front before its settle is heard.*
+
 *Built: **a draft keeps every file that comes back to it, and holds the send over the eight.** A
 failed send's chips come back ahead of the ones staged while it was in flight, a Stop returns every
 queued message, a rewind returns its message: each file was part of a message once, so none is
@@ -3638,6 +3670,12 @@ up, or Stop is followed by a queued message starting a new turn; a failed send i
 front with `holdUntilUserAction` so nothing overtakes it; and nothing flushes while an approval or a
 question is pending.
 *T3: `apps/web/src/queuedMessageStore.ts:15-36` — `QueuedComposerMessage` and `queuedAfterToolActivityId`; `:70-71` — "a queued message is a live intent, not a draft worth persisting"; `:84-107` — `take` re-anchors the remainder; `:40-45, 141-152` — `drainGeneration`; `:128-140` — `holdAtFront`; `:188-197` — `isQueuedMessageDue` (hold → never; connecting → never; not running → immediately; running → when a later tool activity has landed); `apps/web/src/components/ChatView.tsx:8604-8642` — the drive loop and its pending-request gates; `docs/user/composer.md:31-48` — the user-facing contract ("It goes out on its own when the agent finishes its next tool call, or when the turn ends. … Stop returns every queued message to the composer.")*
+
+*Built: "held in memory only" stops at the page. The queue is still never persisted as a draft, but
+the tab's outbox keeps it (the reload paragraph above), so a reload brings it back as queued, in
+order, and a store generation created after the retained snapshot expired no longer starts with an
+empty queue. Guard 2 holds across generations too: the drive loop's latch is the thread's
+(`beginQueuedSend`), not the generation's.*
 
 **Steer versus queue is one setting with a per-message inversion.** A plain send follows the
 preference; holding the mod key with Enter does the opposite for that one message. A separate
