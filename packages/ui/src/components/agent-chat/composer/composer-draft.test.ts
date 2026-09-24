@@ -6,11 +6,15 @@ import type { AttachmentRef } from "@orquester/api/agent-chat";
 import {
   composerDraftToPersist,
   createDraftPersistScheduler,
+  draftAfterReturn,
   loadComposerDraft,
   persistableAttachmentRefs,
+  persistedDraftAfterReturn,
+  persistedDraftAfterSend,
   persistedDraftsEqual
 } from "./composer-draft";
 import type { StagedAttachment } from "./ComposerAttachments";
+import { attachmentCountBlockSend } from "./composer-submission";
 import type { ComposerDraft } from "../../../lib/agent-chat/composer.logic";
 
 const ref = (id: string): AttachmentRef => ({
@@ -102,18 +106,138 @@ describe("loading a persisted draft back into the composer", () => {
     assert.equal(chip.ref?.id, "i1");
   });
 
-  it("applies the same budget and de-duplication a live staging does", () => {
+  it("keeps every file a restore wrote, over the eight, de-duplicated — the send gate holds the rest", () => {
+    // A failed send's files and the ones staged while it was in flight, or two
+    // queued messages a Stop returned: each was a message of its own, and a
+    // load that kept the first eight dropped the others without a word.
     const many = Array.from({ length: 10 }, (_, index) => ref(`a${index}`));
     const loaded = loadComposerDraft({
       text: "",
       attachments: [...many, ref("a0")],
       context: []
     });
-    assert.equal(loaded.attachments.length, 8, "eight per message, the same bound as a live drop");
     assert.deepEqual(
       loaded.attachments.map((entry) => entry.ref?.id),
-      ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
+      ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"]
     );
+    assert.equal(
+      attachmentCountBlockSend(loaded.attachments),
+      "A message can carry 8 attachments — remove 2 before sending."
+    );
+  });
+
+  it("a failed send over a full persisted draft comes back whole on the next mount", () => {
+    const persisted: ComposerDraft = {
+      text: "typed since",
+      attachments: ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"].map(ref),
+      context: []
+    };
+    const sent = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"].map((id) => staged(id, { key: `picked:${id}` }));
+    const next = persistedDraftAfterSend({
+      outcome: { kind: "failed", text: "the message", notice: "Could not send the message." },
+      sent,
+      persisted
+    });
+    assert.equal(next?.attachments.length, 16);
+    const loaded = loadComposerDraft(next!);
+    assert.equal(loaded.attachments.length, 16, "nothing is dropped on the way back in");
+    assert.equal(
+      attachmentCountBlockSend(loaded.attachments),
+      "A message can carry 8 attachments — remove 8 before sending."
+    );
+  });
+});
+
+describe("a message coming back behind the draft (§7.4)", () => {
+  const withPath = (id: string, sizeBytes = 12): AttachmentRef => ({
+    type: "file",
+    id,
+    name: `${id}.txt`,
+    mimeType: "text/plain",
+    sizeBytes,
+    path: `/w/p/.att/${id}.txt`
+  });
+
+  it("into a full tray: every returned file is staged, and the draft is held at the send gate", () => {
+    // The composer refuses a NEW pick at eight; a file coming back it never
+    // refuses for the count — it was part of a message once.
+    const tray = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"].map((id) => staged(id));
+    const back = ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"].map((id) => withPath(id));
+    const next = draftAfterReturn({
+      draft: { text: "mine", attachments: tray },
+      message: { text: "queued", attachments: back }
+    });
+    assert.deepEqual(
+      next.attachments.map((chip) => chip.ref?.id),
+      ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"]
+    );
+    assert.equal(next.attachments.every((chip) => chip.status === "ready"), true);
+    assert.equal(next.text, "mine\n\nqueued");
+    assert.deepEqual(next.unstaged, []);
+    assert.equal(
+      attachmentCountBlockSend(next.attachments),
+      "A message can carry 8 attachments — remove 8 before sending."
+    );
+  });
+
+  it("keeps naming its own images: a returned [Image #1] never names the draft's image", () => {
+    const own = staged("own", { mimeType: "image/png", ref: imageRef("own") });
+    const next = draftAfterReturn({
+      draft: { text: "[Image #1] is mine", attachments: [own] },
+      message: { text: "queued: look at [Image #1]", attachments: [imageRef("q1")] }
+    });
+    assert.equal(next.text, "[Image #1] is mine\n\nqueued: look at [Image #2]");
+    assert.deepEqual(next.attachments.map((chip) => chip.ref?.id), ["own", "q1"]);
+  });
+
+  it("a file a bound still refuses leaves the message as its chip's X would take it, and is handed back for its path", () => {
+    const vector: AttachmentRef = {
+      type: "image",
+      id: "vector",
+      name: "diagram.svg",
+      mimeType: "image/svg+xml",
+      sizeBytes: 12,
+      path: "/w/p/.att/diagram.svg"
+    };
+    const huge = withPath("huge", 60 * 1024 * 1024);
+    const unnamed = withPath("unnamed", 60 * 1024 * 1024);
+    const next = draftAfterReturn({
+      draft: { text: "", attachments: [] },
+      message: {
+        text: "the diagram [Image #1] and the shot [Image #2], see /w/p/.att/huge.txt",
+        attachments: [vector, imageRef("shot"), huge, unnamed]
+      }
+    });
+    assert.equal(next.text, "the diagram and the shot [Image #1], see /w/p/.att/huge.txt");
+    assert.deepEqual(next.attachments.map((chip) => chip.ref?.id), ["shot"]);
+    assert.deepEqual(
+      next.unstaged.map((entry) => entry.id),
+      ["vector", "unnamed"],
+      "a refused file whose path the text already names is written there already"
+    );
+  });
+});
+
+describe("a message coming back to a draft no composer shows (§7.4)", () => {
+  it("merges behind the persisted draft, keeping every file and its context", () => {
+    const persisted: ComposerDraft = {
+      text: "[Image #1] typed since",
+      attachments: [imageRef("mine"), ...["m2", "m3", "m4", "m5", "m6", "m7", "m8"].map(ref)],
+      context: [{ kind: "file", label: "src/a.ts" }]
+    };
+    const message: ComposerDraft = {
+      text: "the queued one, see [Image #1]",
+      attachments: [imageRef("q1"), ...["q2", "q3", "q4", "q5", "q6", "q7", "q8"].map(ref)],
+      context: [{ kind: "file", label: "src/b.ts" }]
+    };
+    const next = persistedDraftAfterReturn({ persisted, message });
+    assert.equal(next.text, "[Image #1] typed since\n\nthe queued one, see [Image #2]");
+    assert.equal(next.attachments.length, 16);
+    assert.deepEqual(next.context, [
+      { kind: "file", label: "src/a.ts" },
+      { kind: "file", label: "src/b.ts" }
+    ]);
+    assert.equal(loadComposerDraft(next).attachments.length, 16, "and the next mount loads all of them");
   });
 });
 

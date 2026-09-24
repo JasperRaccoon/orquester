@@ -42,6 +42,7 @@ import {
   stageComposerAttachment
 } from "./composer/composer-bridge";
 import { rewindPickerEnabled } from "./composer/RewindControl";
+import { useComposerSending } from "./composer/use-composer-sending";
 import {
   createEscapeSequence,
   deriveRewindTargets,
@@ -411,9 +412,15 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       paintOnly || !canRevert ? NO_REWIND_TARGETS : deriveRewindTargets(displayed.rows, slice.turns),
     [canRevert, displayed.rows, paintOnly, slice.turns]
   );
+  // A composer send of this thread still on its way (§7.4) — whichever
+  // composer sent it, one a project switch unmounted included. The row
+  // button, the picker, Esc Esc and the account chip all read this one
+  // registry, so they can never disagree with the composer's "Sending".
+  const sending = useComposerSending(sessionId);
   // The row button waits while a turn runs (the host refuses a rewind mid-
-  // turn) or a revert is already rewriting the history it points at (§7.5).
-  const revertBusy = !paintOnly && (turnActive || reverting);
+  // turn), a revert is already rewriting the history it points at (§7.5), or
+  // a send is on its way — a turn about to start against that history.
+  const revertBusy = !paintOnly && (turnActive || reverting || sending);
   // The picker's own gate, shared with its button and the composer's Esc Esc,
   // so the shell's double press never "opens" a picker that is disabled.
   const rewindAvailable =
@@ -422,7 +429,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       targetCount: rewindTargets.length,
       isTurnActive: turnActive,
       reverting,
-      hasPendingRequest: pending.totalCount > 0
+      hasPendingRequest: pending.totalCount > 0,
+      isSending: sending
     });
   const rewindTo = React.useCallback(
     (input: { messageId: string; targetTurnCount: number }) =>
@@ -598,7 +606,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       queuedCount: slice.queue.length,
       reverting,
       connection: slice.connection,
-      backgroundLive: session.backgroundLiveness != null
+      backgroundLive: session.backgroundLiveness != null,
+      isSending: sending
     });
   const latestCheckpoint = slice.checkpoints.length
     ? slice.checkpoints[slice.checkpoints.length - 1]

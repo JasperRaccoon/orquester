@@ -4,12 +4,16 @@
  * shows by the time it settles.
  *
  * `submit` empties the draft, and its persisted copy, before the send goes
- * out, and the send settles whenever its transport answers: after a project
- * switch unmounted the composer, or after the composer was handed another
- * thread. What a failure gives back (`draftAfterSend`) must reach that
+ * out, and the send settles whenever its transport answers — by then a
+ * project switch may have unmounted the composer that sent it. (A composer
+ * handed another thread mid-send is defensive only: each chat tab owns its
+ * composer, keyed by the session id, so `sessionId` never changes under a
+ * mounted one.) What a failure gives back (`draftAfterSend`) must reach that
  * thread's draft and no other, and it must reach the copy that will be shown:
  * the live draft of the composer showing the thread when one does, else the
- * persisted draft the next one loads (`failedSendRestoreTarget`).
+ * persisted draft the next one loads (`failedSendRestoreTarget`). Every file
+ * it carried comes back, over the eight or not: the send gate holds a draft
+ * over them, and the next mount loads it whole.
  *
  * Component-free so it can be tested: the component hands in the two things
  * only it knows — the thread its live draft holds, and its own live restore.
@@ -27,8 +31,9 @@ import {
 
 /**
  * Put a send that did not go out back into its own thread's draft, and say
- * where it went. A composer that turns it away — one that no longer shows the
- * thread — sends it on to the thread's persisted draft rather than losing it.
+ * where it went. A composer that turns it away — defensively, one that no
+ * longer shows the thread — sends it on to the thread's persisted draft rather
+ * than losing it.
  */
 export function restoreFailedSendDraft(input: {
   /** The thread the message was sent from. */

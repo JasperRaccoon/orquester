@@ -4,15 +4,23 @@ import { after, afterEach, beforeEach, describe, it, mock } from "node:test";
 import type {
   AgentChatCommandName,
   AgentChatStreamFrame,
+  AttachmentRef,
   Turn
 } from "@orquester/api/agent-chat";
 
+import { registerComposerHandle } from "../../components/agent-chat/composer/composer-bridge";
+import { draftAfterReturn, loadComposerDraft } from "../../components/agent-chat/composer/composer-draft";
+import type { StagedAttachment } from "../../components/agent-chat/composer/ComposerAttachments";
+import { attachmentCountBlockSend } from "../../components/agent-chat/composer/composer-submission";
 import {
+  COMMAND_ATTEMPT_TIMEOUT_MS,
   createThreadStore,
+  releaseThreadStore,
   resetDismissedErrorBanners,
   resetThreadStores,
   retainThreadStore,
   REWIND_TIMEOUT_MS,
+  THREAD_STORE_DISPOSE_GRACE_MS,
   updateThreadDraft,
   type AgentChatThreadState,
   type ThreadStore
@@ -827,5 +835,308 @@ describe("the persisted composer draft", () => {
       updateThreadDraft("A", () => null);
       assert.equal(backing[DRAFTS_KEY], before);
     });
+  });
+});
+
+/**
+ * A send outlives the store generation that posted it (§7.4). A project
+ * switch lets go of the thread's slice, which is destroyed 2 s later while its
+ * post keeps retrying; the user may be back on the thread by the time it
+ * settles. Whatever it settles to lands in the thread as the user now sees it
+ * — never lost in the destroyed generation, never locking the new one — and
+ * no attempt can keep a thread "Sending" forever.
+ */
+describe("a send outlives its store generation", () => {
+  const DRAFTS_KEY = "orquester:agent-chat-drafts";
+  let backing: Record<string, string> = {};
+  const persisted = (): Record<string, { text: string; attachments: AttachmentRef[] }> =>
+    JSON.parse(backing[DRAFTS_KEY] ?? "{}");
+
+  interface Attempt {
+    name: string;
+    body: Record<string, unknown>;
+    signal: AbortSignal | undefined;
+    answer(): void;
+    fail(error: unknown): void;
+  }
+
+  /** A transport whose every command attempt answers only when the test says so. */
+  function gatedTransport(): { transport: AgentChatTransport; attempts: Attempt[] } {
+    const attempts: Attempt[] = [];
+    const transport: AgentChatTransport = {
+      ...fakeTransport().transport,
+      command(_sessionId, name, body, signal) {
+        return new Promise((resolve, reject) => {
+          attempts.push({
+            name,
+            body: body as unknown as Record<string, unknown>,
+            signal,
+            answer: () => resolve({ seq: attempts.length }),
+            fail: reject
+          });
+        });
+      }
+    };
+    return { transport, attempts };
+  }
+
+  const ids = (): (() => string) => {
+    let n = 0;
+    return () => `id${++n}`;
+  };
+  const restarting = () => new AgentChatCommandError(503, "HOST_UNAVAILABLE", "The agent host is restarting.");
+  const file = (id: string): AttachmentRef => ({ type: "file", id, name: `${id}.txt`, sizeBytes: 12 });
+  const eight = (prefix: string): AttachmentRef[] =>
+    Array.from({ length: 8 }, (_, index) => file(`${prefix}${index + 1}`));
+  const queued = (text: string, attachments: AttachmentRef[] = []) => ({
+    text,
+    attachments,
+    context: [],
+    interactionMode: "default" as const,
+    queuedAfterToolActivityId: null,
+    holdUntilUserAction: false
+  });
+
+  /** What a project switch does to a thread's slice: let go of it, and let the grace pass. */
+  function tearDown(sessionId: string): void {
+    releaseThreadStore(sessionId);
+    mock.timers.tick(THREAD_STORE_DISPOSE_GRACE_MS);
+  }
+
+  beforeEach(() => {
+    backing = {};
+    (globalThis as unknown as { localStorage: unknown }).localStorage = {
+      getItem: (key: string) => backing[key] ?? null,
+      setItem: (key: string, value: string) => {
+        backing[key] = value;
+      },
+      removeItem: (key: string) => {
+        delete backing[key];
+      }
+    };
+    mock.timers.enable({ apis: ["setTimeout"] });
+  });
+
+  afterEach(() => {
+    resetThreadStores();
+    mock.timers.reset();
+    delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+  });
+
+  it("a turn or an answer whose generation was destroyed mid-retry keeps retrying with the SAME commandId", async () => {
+    // A lost response of either may be one the host already accepted: giving
+    // up turned it into a "failed" send the user resent as a duplicate. The
+    // receipt makes the retry free.
+    const { transport, attempts } = gatedTransport();
+    const store = createThreadStore("A", { transport, delay: async () => {}, newId: ids() });
+    await flush();
+    const sending = store.getState().actions.sendTurn({ text: "deploy the fix" });
+    const answering = store.getState().actions.answerQuestion({ requestId: "r1", answers: { q: "yes" } });
+    await settle();
+    (store as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({ retain: false });
+
+    attempts[0]!.fail(restarting());
+    attempts[1]!.fail(restarting());
+    await settle();
+    const posts = (name: string) => attempts.filter((attempt) => attempt.name === name);
+    assert.deepEqual(posts("turn").map((attempt) => attempt.body.commandId), ["id1", "id1"]);
+    assert.deepEqual(posts("answer").map((attempt) => attempt.body.commandId), ["id2", "id2"]);
+    posts("turn")[1]!.answer();
+    posts("answer")[1]!.answer();
+    await sending;
+    await answering;
+
+    // Anything else stops with its generation, as it always did.
+    const other = gatedTransport();
+    const gone = createThreadStore("B", { transport: other.transport, delay: async () => {}, newId: ids() });
+    await flush();
+    const compacting = gone.getState().actions.compact();
+    await settle();
+    (gone as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({ retain: false });
+    other.attempts[0]!.fail(restarting());
+    await assert.rejects(compacting);
+    assert.equal(other.attempts.length, 1);
+  });
+
+  it("an attempt that never answers times out and is retried with the SAME commandId, so no send reads Sending forever", async () => {
+    // Past the daemon's own 20 s host timeout, which answers a hung host with
+    // a 503 first: this bounds what the daemon cannot, a half-open connection.
+    assert.equal(COMMAND_ATTEMPT_TIMEOUT_MS, 25_000);
+    const { transport, attempts } = gatedTransport();
+    const store = createThreadStore("A", { transport, delay: async () => {}, newId: ids() });
+    await flush();
+    const sending = store.getState().actions.sendTurn({ text: "deploy the fix" });
+    await settle();
+    assert.equal(attempts.length, 1);
+
+    mock.timers.tick(COMMAND_ATTEMPT_TIMEOUT_MS - 1);
+    await settle();
+    assert.equal(attempts.length, 1, "not before its deadline");
+    mock.timers.tick(1);
+    await settle();
+    assert.equal(attempts[0]!.signal?.aborted, true, "the stuck request is aborted, not left open");
+    assert.equal(attempts.length, 2, "a timed-out attempt is a lost response: retried");
+    assert.equal(attempts[1]!.body.commandId, attempts[0]!.body.commandId);
+    attempts[1]!.answer();
+    await sending;
+
+    // One that never answers at all fails once its retries are spent: the
+    // composer's "Sending" is bounded by the retry budget.
+    const silent = gatedTransport();
+    const stuck = createThreadStore("B", { transport: silent.transport, delay: async () => {}, newId: ids() });
+    await flush();
+    const failing = assert.rejects(stuck.getState().actions.sendTurn({ text: "again" }));
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await settle();
+      mock.timers.tick(COMMAND_ATTEMPT_TIMEOUT_MS);
+    }
+    await failing;
+    assert.equal(silent.attempts.length, 4);
+    assert.equal(new Set(silent.attempts.map((attempt) => attempt.body.commandId)).size, 1);
+  });
+
+  it("a queued send that fails after its generation was destroyed is held at the front of the thread's live generation", async () => {
+    const { transport, attempts } = gatedTransport();
+    const deps = { transport, delay: async () => {} };
+    const first = retainThreadStore("Q", deps);
+    await flush();
+    first.getState().actions.queueMessage(queued("queued follow-up", [file("f1")]));
+    const sending = first.getState().actions.sendQueuedNow(first.getState().slice.queue[0]!.id);
+    await settle();
+    assert.equal(attempts.length, 1);
+
+    tearDown("Q");
+    const second = retainThreadStore("Q", deps);
+    assert.notEqual(second, first, "the user came back to a new generation");
+    assert.equal(second.getState().slice.queue.length, 0, "the message had left the queue before the teardown");
+
+    attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await assert.rejects(sending);
+    assert.deepEqual(
+      second.getState().slice.queue.map((message) => [
+        message.text,
+        message.holdUntilUserAction,
+        message.attachments.map((attachment) => attachment.id)
+      ]),
+      [["queued follow-up", true, ["f1"]]],
+      "held at the front of the queue the user sees, not of the destroyed one"
+    );
+  });
+
+  it("with no live generation, a queued send that fails after the teardown goes back to the persisted draft", async () => {
+    backing[DRAFTS_KEY] = JSON.stringify({ Q: { text: "typed since", attachments: [], context: [] } });
+    const { transport, attempts } = gatedTransport();
+    const deps = { transport, delay: async () => {} };
+    const first = retainThreadStore("Q", deps);
+    await flush();
+    first.getState().actions.queueMessage(queued("queued follow-up", [file("f1")]));
+    const sending = first.getState().actions.sendQueuedNow(first.getState().slice.queue[0]!.id);
+    await settle();
+
+    tearDown("Q");
+    attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await assert.rejects(sending);
+    assert.equal(persisted().Q?.text, "typed since\n\nqueued follow-up");
+    assert.deepEqual(persisted().Q?.attachments.map((attachment) => attachment.id), ["f1"]);
+  });
+
+  it("an answer in flight across a teardown never locks the next generation's card", async () => {
+    const { transport, attempts } = gatedTransport();
+    const deps = { transport, delay: async () => {} };
+    const first = retainThreadStore("R", deps);
+    await flush();
+    const answering = first.getState().actions.answerQuestion({ requestId: "r1", answers: { q: "yes" } });
+    await settle();
+    assert.deepEqual(first.getState().slice.respondingRequestIds, ["r1"]);
+
+    tearDown("R");
+    const second = retainThreadStore("R", deps);
+    assert.deepEqual(
+      second.getState().slice.respondingRequestIds,
+      [],
+      "an answer in flight belongs to the generation that posted it"
+    );
+    attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "stale"));
+    await assert.rejects(answering);
+    assert.deepEqual(second.getState().slice.respondingRequestIds, []);
+  });
+
+  it("with no composer mounted, a Stop returning two full queued messages keeps all sixteen files for the next mount", async () => {
+    const { api } = await store("Q");
+    api.getState().actions.queueMessage(queued("first", eight("s")));
+    api.getState().actions.queueMessage(queued("second", eight("m")));
+    await api.getState().actions.interrupt();
+
+    const stored = persisted().Q!;
+    assert.equal(stored.text, "first\n\nsecond");
+    assert.equal(stored.attachments.length, 16);
+    const loaded = loadComposerDraft({ ...stored, context: [] });
+    assert.equal(loaded.attachments.length, 16, "the next mount loads every one of them");
+    assert.equal(
+      attachmentCountBlockSend(loaded.attachments),
+      "A message can carry 8 attachments — remove 8 before sending."
+    );
+  });
+
+  /** A mounted composer whose live draft is `live`, merging a returned message the way the real one does. */
+  function mountComposer(sessionId: string, live: { text: string; attachments: StagedAttachment[] }) {
+    const inserted: string[] = [];
+    const unregister = registerComposerHandle(sessionId, {
+      insertText: (text) => void inserted.push(text),
+      // A NEW pick into a full tray is refused; a returned file never comes this way.
+      stageAttachment: () => false,
+      returnMessage: (message) => {
+        const next = draftAfterReturn({ draft: live, message });
+        live.text = next.text;
+        live.attachments = next.attachments;
+        return next.unstaged;
+      },
+      focusAtEnd: () => {},
+      openControl: () => {},
+      restoreFailedSend: () => false
+    });
+    return { live, inserted, unregister };
+  }
+
+  it("with a composer mounted, every returned file is staged as returning, and nothing is parked behind it", async () => {
+    const { api, state } = await store("R");
+    const tray = loadComposerDraft({ text: "", attachments: eight("t"), context: [] }).attachments;
+    const composer = mountComposer("R", { text: "mine", attachments: tray });
+    try {
+      api.getState().actions.queueMessage(queued("queued", eight("q")));
+      api.getState().actions.returnQueuedToComposer(state().slice.queue[0]!.id);
+
+      assert.equal(composer.live.attachments.length, 16, "the eight never refuse a file coming back");
+      assert.equal(composer.live.text, "mine\n\nqueued");
+      assert.deepEqual(composer.inserted, [], "nothing refused, so nothing written as a path");
+      assert.deepEqual(state().draft.attachments, [], "nothing parked where the composer's next save drops it");
+      assert.equal(state().draft.text, "");
+    } finally {
+      composer.unregister();
+    }
+  });
+
+  it("a file the composer still refuses is written into its draft as its path, never parked behind it", async () => {
+    const { api, state } = await store("R");
+    const vector: AttachmentRef = {
+      type: "image",
+      id: "vector",
+      name: "diagram.svg",
+      mimeType: "image/svg+xml",
+      sizeBytes: 12,
+      path: "/w/p/.att/diagram.svg"
+    };
+    const composer = mountComposer("R", { text: "", attachments: [] });
+    try {
+      api.getState().actions.queueMessage(queued("see [Image #1]", [vector]));
+      api.getState().actions.returnQueuedToComposer(state().slice.queue[0]!.id);
+
+      assert.equal(composer.live.text, "see", "its placeholder names nothing now");
+      assert.deepEqual(composer.live.attachments, []);
+      assert.deepEqual(composer.inserted, ["/w/p/.att/diagram.svg"], "the bridge's fallback: a path the user can see");
+      assert.deepEqual(state().draft.attachments, []);
+    } finally {
+      composer.unregister();
+    }
   });
 });

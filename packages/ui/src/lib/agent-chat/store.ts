@@ -3,10 +3,12 @@
  *
  * **A zustand slice per open thread, created on tab open and dropped on tab
  * close.** Closed tabs keep nothing; the tab strip reads only
- * `SessionSummary`. The slices are held in a refcounted registry so one
- * `AgentChatView` instance can serve every chat tab in a project (§7.1) and a
- * tab switch never tears down the thread the user is switching *from* until
- * the next snapshot lands.
+ * `SessionSummary`. The slices are held in a refcounted registry: each chat
+ * tab owns its `AgentChatView` (the placement note there — `MainView` mounts
+ * one per tab and only hides the inactive ones), every consumer of a thread
+ * shares its one slice and stream, and a slice its last consumer let go of — a
+ * project switch unmounts the whole tab set — lingers for a short grace before
+ * it is torn down.
  *
  * **Server-authoritative, cursor-ordered** (§6.6): every mutation is a command
  * answered with `{seq}`; sends, approvals, answers and interrupts have **no**
@@ -131,11 +133,12 @@ import {
   type QueueState
 } from "./queue.logic";
 import {
-  composerHandle,
   insertComposerText,
-  stageComposerAttachment
+  returnComposerMessage
 } from "../../components/agent-chat/composer/composer-bridge";
+import { persistedDraftAfterReturn } from "../../components/agent-chat/composer/composer-draft";
 import { nudgeProjectGit } from "../../components/git/git-watch";
+import { composerTextForDelivery } from "../composer-inbox";
 import {
   disclosureSets,
   EMPTY_DISCLOSURE_STATE,
@@ -319,10 +322,13 @@ export type ThreadStore = StoreApi<AgentChatThreadState>;
  * projection layer built from it.
  *
  * Deliberately *not* here: `actions` (they close over a dead store), the
- * in-flight command flags `reverting`/`stopping` (a command of the destroyed
- * generation can never settle), and the composer draft (already persisted, and
- * read back on construction). Those are the fields T3's `cachedThreadState`
- * normalises away for the same reason.
+ * in-flight command flags `reverting`/`stopping` (an in-flight command's
+ * settle lands in the destroyed generation, never in the next one; the
+ * composer's own send state lives in `composer-sends.ts`, outside every
+ * generation), and the composer draft (already persisted, and read back on
+ * construction). Those are the fields T3's `cachedThreadState` normalises away
+ * for the same reason — and so, on the slice itself, is the one in-flight set
+ * that rides it, `respondingRequestIds` (see {@link cachedThreadState}).
  */
 export interface RetainedThreadState {
   reducer: AgentChatReducerState;
@@ -375,7 +381,10 @@ export function retainedThreadCount(): number {
  * same reason — the `GET …/history` that set it belonged to that generation
  * and will never settle this one; the loaded pages themselves are kept, and
  * so is their bridge — only a bridge begun for a FIRST page that will now
- * never land goes (`withoutOrphanBridge`).
+ * never land goes (`withoutOrphanBridge`). And so are the requests with a
+ * decision or an answer in flight (`respondingRequestIds`): that command's
+ * `finally` clears them in the generation that posted it, never in this one,
+ * so carried over they would lock the request's card here for good.
  *
  * *T3: `packages/client-runtime/src/state/threads.ts:161-176`
  * (`cachedThreadState`).*
@@ -387,7 +396,12 @@ export function cachedThreadState(retained: RetainedThreadState): RetainedThread
   const history = slice.history.loading
     ? withoutOrphanBridge({ ...slice.history, loading: false })
     : slice.history;
-  const reducer = patchSlice(retained.reducer, { connection, errorBanner: null, history });
+  const reducer = patchSlice(retained.reducer, {
+    connection,
+    errorBanner: null,
+    history,
+    ...(slice.respondingRequestIds.length > 0 ? { respondingRequestIds: [] } : {})
+  });
   return reducer === retained.reducer ? retained : { ...retained, reducer };
 }
 
@@ -788,8 +802,76 @@ function samePlan(left: ActivePlanState | null, right: ActivePlanState | null): 
 }
 
 // ---------------------------------------------------------------------------
+// Commands (§6.2, §6.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long one attempt of a command may go unanswered before it is aborted
+ * and retried with the SAME `commandId` (§6.6). Longer than the daemon's own
+ * 20 s socket-idle timeout to the host (`HOST_REQUEST_TIMEOUT_MS`), which
+ * answers a hung host with a 503 first: this bounds what the daemon cannot —
+ * a connection that went half-open between the browser and the daemon — so
+ * no send can hold its thread "Sending" for longer than its retry budget.
+ */
+export const COMMAND_ATTEMPT_TIMEOUT_MS = 25_000;
+
+const COMMAND_TIMED_OUT = "The agent host did not answer in time.";
+
+/**
+ * The commands whose retries outlive their store generation (§7.4). A turn
+ * and an answer are the user's own words, and a lost response of either may
+ * be one the host already accepted: giving up when the tab's slice was torn
+ * down — 2 s after a project switch unmounted it — turned it into a failed
+ * send the user sent again, a duplicate turn. The receipt makes the retry
+ * free whether or not anyone still shows the thread.
+ */
+const RETRIED_PAST_TEARDOWN: ReadonlySet<AgentChatCommandName> = new Set<AgentChatCommandName>([
+  "turn",
+  "answer"
+]);
+
+/**
+ * One attempt of a command, bounded by {@link COMMAND_ATTEMPT_TIMEOUT_MS}:
+ * past it the request is aborted and the attempt fails as a lost response
+ * (status 0, retryable). Raced rather than left to the signal alone, so a
+ * transport that ignores the abort is bounded too.
+ */
+function attemptCommand(run: (signal: AbortSignal) => Promise<unknown>): Promise<unknown> {
+  const controller = new AbortController();
+  return new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new AgentChatCommandError(0, "HOST_UNAVAILABLE", COMMAND_TIMED_OUT));
+    }, COMMAND_ATTEMPT_TIMEOUT_MS);
+    timer.unref?.();
+    // Whichever settles first wins; the other is a no-op on a settled promise.
+    try {
+      Promise.resolve(run(controller.signal)).then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        }
+      );
+    } catch (error) {
+      // A transport that throws before its first `await` fails the attempt the same way.
+      clearTimeout(timer);
+      reject(error);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The store
 // ---------------------------------------------------------------------------
+
+/** A generation's hook for the thread's other generations (§7.4) — see `holdQueuedMessageInThread`. */
+type HoldingThreadStore = ThreadStore & {
+  holdQueuedAtFront?: (message: QueuedComposerMessage) => void;
+};
 
 export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): ThreadStore {
   const newId = deps.newId ?? defaultId;
@@ -847,8 +929,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
     /**
      * §6.2: `commandId` is minted by the client and is the idempotency key. A
-     * 503 `HOST_UNAVAILABLE` is retried with the **same** id, which the receipt
-     * makes free; anything else is surfaced.
+     * 503 `HOST_UNAVAILABLE`, and an attempt left unanswered for
+     * {@link COMMAND_ATTEMPT_TIMEOUT_MS}, is retried with the **same** id,
+     * which the receipt makes free; anything else is surfaced. A turn or an
+     * answer keeps retrying after this generation is torn down
+     * ({@link RETRIED_PAST_TEARDOWN}).
      */
     const command = async <TName extends AgentChatCommandName>(
       name: TName,
@@ -856,7 +941,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       commandId = newId()
     ): Promise<void> => {
       const payload = { ...body, commandId } as AgentChatCommandBodies[TName];
-      await withCommandRetries(() => deps.transport.command(sessionId, name, payload));
+      await withCommandRetries(
+        (signal) => deps.transport.command(sessionId, name, payload, signal),
+        { outlivesGeneration: RETRIED_PAST_TEARDOWN.has(name) }
+      );
     };
 
     /**
@@ -864,22 +952,31 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * account switch — which posts to a daemon-owned route rather than a §6.2
      * command path but carries the same `commandId` and the same envelope, so
      * it must retry on the same rules. `run` is re-invoked with the SAME body,
-     * never a re-minted id.
+     * never a re-minted id, and each attempt with its own abort signal.
      */
-    const withCommandRetries = async (run: () => Promise<unknown>): Promise<void> => {
+    const withCommandRetries = async (
+      run: (signal: AbortSignal) => Promise<unknown>,
+      options: { outlivesGeneration?: boolean } = {}
+    ): Promise<void> => {
       for (let attempt = 0; ; attempt += 1) {
         try {
-          await run();
+          await attemptCommand(run);
           return;
         } catch (error) {
           // §6.6: an in-flight command whose response was lost is retried with
           // the SAME `commandId`, which the receipt makes free. That covers a
-          // 503 `HOST_UNAVAILABLE` and any transport-level throw — including
-          // one from a custom `Transporter.agentChat()` that does not wrap its
-          // failures. Only a decoded, non-retryable error envelope stops here.
+          // 503 `HOST_UNAVAILABLE`, an attempt that timed out, and any
+          // transport-level throw — including one from a custom
+          // `Transporter.agentChat()` that does not wrap its failures. Only a
+          // decoded, non-retryable error envelope stops here — and a torn-down
+          // generation, for every command but a turn or an answer (§7.4).
           const retryable =
             error instanceof AgentChatCommandError ? error.retryable : true;
-          if (retryable && attempt < maxRetries && !closed) {
+          if (
+            retryable &&
+            attempt < maxRetries &&
+            (!closed || options.outlivesGeneration === true)
+          ) {
             await delay(Math.min(4_000, 250 * 2 ** attempt));
             continue;
           }
@@ -955,49 +1052,59 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     };
 
     /**
-     * Return a message's content to the composer.
+     * Return a message's content to the composer (§7.4): a queued message
+     * returned, the queue a Stop drained, a rewound message, a queued send
+     * that lost the race with an interrupt.
      *
      * **There is one visible draft, and a mounted composer owns it.** When a
-     * composer is mounted for this session (W13's `composer-bridge` handle) the
-     * text goes straight into it at the caret, and the composer's own
-     * `saveDraft` persists it from there; with no composer mounted the text
-     * merges into the persisted draft below, where the next mount loads it. A
-     * queued message returned by an interrupt while the user is on another
-     * tab must not be lost, and two live drafts would disagree.
+     * composer is mounted for this session the whole message goes to it
+     * through W13's `composer-bridge` (`returnMessage`): merged behind its live
+     * draft, every file staged as a returning chip — never refused for the
+     * count; the send gate holds a draft over the eight — and its
+     * `[Image #N]` following its own images, never naming one of the
+     * composer's (`draftAfterReturn`, the merge a failed send makes the other
+     * way round). A file it still refuses (a type or a size it never stages)
+     * comes back into its draft as the path the user can see — the bridge's
+     * documented fallback — and nothing is parked in this store's draft behind
+     * it: the composer saves its own whole draft back, so anything left here
+     * was invisible until its next mount and overwritten by its next save
+     * (fix-wave R7-5). With no composer mounted the same merge runs over the
+     * persisted draft (`persistedDraftAfterReturn`), every file kept, where
+     * the next mount loads it. A queued message returned by an interrupt while
+     * the user is on another tab must not be lost, and two live drafts would
+     * disagree.
      */
     const appendToDraft = (message: QueuedComposerMessage): void => {
-      const handle = composerHandle(sessionId);
-      if (handle) {
-        insertComposerText(sessionId, message.text, "append");
-        // Attachments go back as CHIPS, not into the persisted draft
-        // (fix-wave R7-5). A mounted composer owns the draft and saves its own
-        // whole draft back, so anything parked here behind its back is invisible
-        // until its next mount and is overwritten by its next save: the file the
-        // user queued would seem to vanish between Stop and the next send. Only
-        // what the composer REFUSES (the attachment budget, the turn's size
-        // bounds) falls back here — it is not in the tray either way, and on a
-        // thread whose composer is closed the next mount finds it.
-        const refused = message.attachments.filter(
-          (attachment) => !stageComposerAttachment(sessionId, attachment)
-        );
-        if (refused.length > 0 || message.context.length > 0) {
-          const draft = get().draft;
-          setDraft({
-            text: draft.text,
-            attachments: [...draft.attachments, ...refused],
-            context: [...draft.context, ...message.context]
-          });
+      const returned: ComposerDraft = {
+        text: message.text,
+        attachments: message.attachments,
+        context: message.context
+      };
+      const unstaged = returnComposerMessage(sessionId, returned);
+      if (unstaged !== null) {
+        if (unstaged.length > 0) {
+          insertComposerText(
+            sessionId,
+            composerTextForDelivery({ text: "", attachments: unstaged }),
+            "append"
+          );
         }
         return;
       }
-      const draft = get().draft;
-      const text = draft.text.trim().length === 0 ? message.text : `${draft.text.trimEnd()}\n\n${message.text}`;
-      setDraft({
-        text,
-        attachments: [...draft.attachments, ...message.attachments],
-        context: [...draft.context, ...message.context]
+      setDraft(persistedDraftAfterReturn({ persisted: get().draft, message: returned }));
+    };
+
+    /** Guard 2's hold (§7.4): the failed message goes back to the FRONT, held for the user. */
+    const holdQueuedAtFront = (message: QueuedComposerMessage): void => {
+      update((state) => {
+        const queue = holdAtFront(state.queue, message);
+        const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
+        return { ...state, queue, reducer, slice: reducer.slice };
       });
     };
+    // Reachable by the thread's other generations: a queued send that fails
+    // after this one's successor took over is held here (`holdQueuedMessageInThread`).
+    (storeApi as unknown as HoldingThreadStore).holdQueuedAtFront = holdQueuedAtFront;
 
     /**
      * Settle once the host has answered a `/revert`: resolve when `messageId`
@@ -1300,8 +1407,8 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // the tab's as `session.updated`, so a refusal leaves the chip exactly
         // where it was.
         const commandId = newId();
-        await withCommandRetries(() =>
-          deps.transport.switchAccount(sessionId, { commandId, accountId: input.accountId })
+        await withCommandRetries((signal) =>
+          deps.transport.switchAccount(sessionId, { commandId, accountId: input.accountId }, signal)
         );
       },
 
@@ -1378,12 +1485,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           });
         } catch (error) {
           // Guard 2: a failed send is re-inserted at the FRONT with
-          // `holdUntilUserAction`, so nothing overtakes it (§7.4).
-          update((state) => {
-            const queue = holdAtFront(state.queue, message);
-            const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
-            return { ...state, queue, reducer, slice: reducer.slice };
-          });
+          // `holdUntilUserAction`, so nothing overtakes it (§7.4) — in the
+          // queue the user sees. Its turn keeps retrying after this generation
+          // is torn down, so this may be a destroyed one, whose queue nobody
+          // will ever show again: the thread's live generation holds it, or,
+          // with none, its persisted draft takes it.
+          if (closed) {
+            holdQueuedMessageInThread(sessionId, message);
+          } else {
+            holdQueuedAtFront(message);
+          }
           throw error;
         }
       },
@@ -1951,12 +2062,17 @@ const registry = new Map<string, RegistryEntry>();
 /**
  * How long an unreferenced slice lingers before its stream is closed.
  *
- * Two reasons it is not zero. §7.1: one `AgentChatView` serves every chat tab
- * in a project, and the outgoing thread's rows keep painting until the next
- * thread's snapshot lands — tearing its stream down on the same tick would
- * make a tab switch flash. And React's StrictMode mounts, unmounts and
- * re-mounts an effect in development; a zero grace would close and re-open
- * every stream on every mount.
+ * Two reasons it is not zero. §7.1's paint hold: a view handed another thread
+ * keeps painting the outgoing thread's rows until the next thread's snapshot
+ * lands, and tearing its stream down on the same tick would flash — a
+ * defensive case, since each chat tab owns its `AgentChatView` (the placement
+ * note there). And React's StrictMode mounts, unmounts and re-mounts an effect
+ * in development; a zero grace would close and re-open every stream on every
+ * mount. What a torn-down generation still had in flight settles into it, not
+ * into its successor: a turn or an answer retries past the teardown, the
+ * composer's own "Sending" lives in `composer-sends.ts`, and a queued send
+ * that fails there is held by the thread's live generation
+ * (`holdQueuedMessageInThread`).
  */
 // A short grace, because the LIVE subscription is the expensive half and T3
 // gives it TTL 0 — released as soon as its last consumer leaves. What makes a
@@ -2072,6 +2188,24 @@ export function updateThreadDraft(
   }
   const next = change(readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT);
   if (next !== null) persistDraft(sessionId, next);
+}
+
+/**
+ * Hold a queued message whose send failed after the generation that sent it
+ * was torn down (§7.4) — its turn retries past the teardown — where the user
+ * will see it: at the front of the thread's live generation's queue, held for
+ * the user's action like any failed queued send, or, with no slice of the
+ * thread open, merged into the persisted draft the next one seeds from. Never
+ * in the destroyed queue: the next generation was seeded from a snapshot taken
+ * after the message had already left it, so nobody would show it again.
+ */
+function holdQueuedMessageInThread(sessionId: string, message: QueuedComposerMessage): void {
+  const live = registry.get(sessionId)?.store as HoldingThreadStore | undefined;
+  if (live?.holdQueuedAtFront) {
+    live.holdQueuedAtFront(message);
+    return;
+  }
+  updateThreadDraft(sessionId, (draft) => persistedDraftAfterReturn({ persisted: draft, message }));
 }
 
 /** Test seam: drop every slice immediately, retained snapshots included. */

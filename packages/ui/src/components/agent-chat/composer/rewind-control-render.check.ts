@@ -76,9 +76,10 @@ interface BusyFlags {
   isTurnActive: boolean;
   reverting: boolean;
   hasPendingRequest: boolean;
+  isSending: boolean;
 }
 
-const IDLE: BusyFlags = { isTurnActive: false, reverting: false, hasPendingRequest: false };
+const IDLE: BusyFlags = { isTurnActive: false, reverting: false, hasPendingRequest: false, isSending: false };
 
 // The HTML attribute, not the `disabled:` Tailwind variants in the class list.
 const DISABLED_ATTR = /\sdisabled=""/;
@@ -111,7 +112,8 @@ assert.ok(!DISABLED_ATTR.test(idle), "idle ⇒ the picker opens");
 const busyCases: Array<[string, Partial<BusyFlags>]> = [
   ["a running turn — the host refuses a rewind mid-turn", { isTurnActive: true }],
   ["a revert already in flight", { reverting: true }],
-  ["a request docked above the composer", { hasPendingRequest: true }]
+  ["a request docked above the composer", { hasPendingRequest: true }],
+  ["a send still on its way — its turn would start against the cut history", { isSending: true }]
 ];
 for (const [why, flags] of busyCases) {
   const busy = render(
