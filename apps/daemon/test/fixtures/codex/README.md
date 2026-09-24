@@ -676,9 +676,10 @@ message that starts nothing. The normaliser (`normalise.ts`) therefore:
 - at a child's own `turn/started` with no turn in progress — when the child settled a run before
   (its `turn/completed` or `thread/closed`, a `subAgentActivity` `completed`/`interrupted`, or a
   Stop) or this session never saw it launched (a resume after a host restart) — starts it again
-  under `codex-run:<turn id>`, before the turn's progress row, and counts it towards the parent
-  turn's `hasSubagents`: the roster fold reopens a settled agent only on a start naming a different
-  launch id, and the progress row, replaced in place at its first position, reopens nothing;
+  under `codex-run:<turn id>`, before the turn's progress row: the roster fold reopens a settled
+  agent only on a start naming a different launch id, and the progress row, replaced in place at
+  its first position, reopens nothing. When this session saw the launch, the child's path also
+  counts towards the re-engaging parent turn's `hasSubagents`;
 - writes `interacted` as a progress row with no status, so it never makes the agent live.
 
 Which calls raise `interacted`, when `completed` fires relative to the child's own
