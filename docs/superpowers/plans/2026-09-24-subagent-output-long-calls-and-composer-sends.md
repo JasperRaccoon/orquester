@@ -99,6 +99,7 @@ prototypes next to each); where a report and this plan differ, **this plan decid
   `open-work.ts`, MCP `history.ts`; Task 6: host store/route, proxy, wire, MCP `tools/output.ts`; Task 7: UI composer
   + thread store). Shared docs (`AGENTS.md`, the specs, the guide) and `ingestion/fold-integration.test.ts` are merged
   by hand if git cannot.
+- **Wave 3, after Task 5 merged:** Task 8 (added after Task 4's review) — it edits the GUI readers Task 5 edits.
 - **Wave 2, from main after wave 1 merged:** Tasks 4 and 5 — both consume Task 3's `open-work.ts`, and Task 5 edits
   what Task 2 edits in `entries.logic.ts` and `transcript.ts`.
 
@@ -358,7 +359,10 @@ orphaned threads").
   2. every roster task still `running`/`pending` (any agent kind; `idle` is left alone, as the fold's session-death
      rule leaves it): `task.completed {status: "stopped"}` with its linkage — a background shell's item closes before
      its task, the adapters' ordering;
-  3. every message still `streaming: true`: settled with its text unchanged, the way ingestion finalizes one.
+  3. *(Amended after review — see Task 8.)* No message is written to. Settling a stuck `streaming: true` message
+     with a `thread.message-sent` at the log's end moves its span in the thread index to that line, and history
+     planning then pulls a page's end back to the message's first chunk: thousands of recent rows became
+     unreachable from "Load older". A stuck flag is read as settled instead (Task 8).
 - Best-effort, like `settleOnFirstLoad`: a failure is logged and the thread still loads. A second load appends
   nothing.
 
@@ -388,7 +392,10 @@ orphaned threads").
 **Design (decided):**
 - **G-1:** a keyed `tool.started` stays its call's row while the derivation input holds no other lifecycle row of the
   call (`tool.updated`, `tool.completed`, `tool.denied`); an unkeyed start, or the start of a call that has another
-  lifecycle row, is dropped as today. (After Task 4 an open call is running; pages, bridge and window of one call
+  lifecycle row, is dropped as today. A start with neither a turn nor an owner (`agentId`) is also dropped as today
+  (added after Task 2's review): a turnless PARENT start exists only when a Claude parent call starts before the turn
+  its own message opens (its later rows carry that turn), so alone it is never a running call, and a rewind that cut
+  its turn must not resurface it. (After Task 4 an open call is running; pages, bridge and window of one call
   are derived together, so the closing row is always in the same input as the start.)
 - **G-2:** one definition, `isStreamedOutputEntry(entry)` (`sourceActivityKind === "tool.output"`), that
   `row-chrome.ts`'s `isToolOutputRow` re-exports; a chunk entry whose call has a non-chunk entry in the same list never
@@ -398,6 +405,10 @@ orphaned threads").
 - **G-3:** orphan chunks of one call join into ONE row (the first carries the joined text; nothing is lost);
   `backgroundShellRows(items, agentId, fallbackTitle?)` titles the shell's row from the roster row (`AgentDrillIn`
   passes `agent?.title`) when no lifecycle frame of the shell is left.
+- **M-1b (added after Task 2's review):** the MCP transcript mirrors G-1's exception — a `tool.started` with neither a
+  turn nor an owner, whose call has no other lifecycle row in the view, builds no entry.
+- **Docs (added after Task 3's review):** the comment in `mcp/transcript.ts` on why the parent view builds no entry
+  from chunks, and the MCP v2 spec's "Fix round 1" note, say what is true after Tasks 2-3.
 - **M-2:** a chunk-built drill-in entry is titled `facts.title ?? <the drill-in's roster row title, when its
   agentKind is "background"> ?? facts.command ?? chunk.summary`; a subagent's roster title is never used (it names
   none of its calls). The parent view still builds no entry from chunks alone (Task 3 keeps the opener).
@@ -533,4 +544,36 @@ string | null` in `composer-submission.ts`.
   (`composer-draft.test.ts` ~105-117).
 - [ ] Verify the two HEAD reproductions flip (`repro-duplicate.mts`, `repro-cap.mts` in `/tmp/fix7/scratch-E/`, run
   against your worktree as the report describes) and say so in the report.
+- [ ] Commit.
+
+### Task 8: a stuck streaming flag reads as settled
+
+*(Added after Task 4's review.)* A message can keep `streaming: true` in the log forever: turnless subagent messages
+before Task 2 (5 479 in one live thread), and any message a dead host left mid-stream. Settling them in the log breaks
+history paging (Task 4's review), so every reader decides instead.
+
+**Files:**
+- Create: `packages/api/src/agent-chat/message-liveness.ts` (+ test), exported from `@orquester/api/agent-chat`
+- Modify: every reader of a message's `streaming` flag that renders or reports liveness — the GUI's timeline, drill-in
+  and history derivations and message rows (the "Thinking" shimmer, the live cursor, a turn fold kept open), and the
+  MCP transcript if it reports streaming (+ their tests)
+- Docs: `AGENTS.md` (the gotcha on a running state and a dead host), a `*Built:*` note in the GUI spec.
+
+**Interfaces:** Produces `messageStreamingContext(state)` → `{ sessionLive, activeTurnId, activeAgentIds }` and
+`isMessageStreaming(message, context): boolean`.
+
+**Design (decided):**
+- A message reads as streaming iff its flag says so AND the session is live (the notion the roster fold's
+  session-death pass uses) AND either its `turnId` is the thread's running turn or its owner (`agentId`) is an agent the
+  roster shows active (running, pending or waiting). Otherwise it reads as settled.
+- Pure and read-side: no fold change (`FOLD_SNAPSHOT_VERSION` unchanged), no index change, no log write.
+- Every GUI and MCP reader that shows liveness goes through it; the fold keeps the flag as the log wrote it.
+
+**Tests (write first):**
+- [ ] `message-liveness.test.ts`: a turnless agent message whose agent completed reads settled, one whose agent runs
+  reads streaming; a parent message of a completed turn reads settled, of the running turn streaming; nothing reads
+  streaming while the session is not live.
+- [ ] GUI: a drill-in over an old log with a stuck turnless agent message shows no "Thinking" shimmer and keeps no fold
+  open; a live one still streams.
+- [ ] MCP (if it reports streaming): the same.
 - [ ] Commit.
