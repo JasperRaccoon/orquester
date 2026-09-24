@@ -261,8 +261,16 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   }
   // A chunk of a command's streamed output: the call's whole output is the
   // host's join of such chunks (`streamedOutput`). A file change streams its
-  // result text too, which is no command's output.
-  if (outputChunk !== undefined && toolUseId && isCommandOutputChunk(payload)) {
+  // result text too, which is no command's output. A Claude background
+  // shell's lifecycle rows say so with no chunk in view: its output only ever
+  // streams (`isBackgroundShellCall`).
+  if (
+    toolUseId &&
+    ((outputChunk !== undefined && isCommandOutputChunk(payload)) ||
+      (CALL_LIFECYCLE_KINDS.has(activity.activityKind) &&
+        isBackgroundShellCall(toolUseId) &&
+        payload?.itemType !== "file_change"))
+  ) {
     entry.streamedOutput = true;
   }
   // Promoted by §5.1 so the presentation layer can nest a hook run or a
@@ -318,10 +326,13 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     }
   }
 
-  // Gates the row's "Load full output": the rest is behind
-  // `GET …/items/:itemId` (§5.6, §6.3). Never a start's: what the read cut
-  // there is the call's input, not its output — the MCP names no start as a
-  // call's `outputItemId` for the same reason.
+  // Gates the row's ITEM read ("Load full output" where §5.6 cut the payload):
+  // the rest is behind `GET …/items/:itemId` (§5.6, §6.3). Never a start's:
+  // what the read cut there is the call's input, not its output — the MCP
+  // names no start as a call's `outputItemId` for a cut payload either. A
+  // start of a command whose output streamed does offer "Load full output",
+  // through `streamedOutput`: it reads the call's join, never the start's item
+  // (the GUI spec's §6.3 note on `GET …/items/:itemId/output`).
   if (payload?.truncated === true && activity.activityKind !== "tool.started") {
     entry.truncated = true;
   }
@@ -609,6 +620,24 @@ function isCommandOutputChunk(payload: Record<string, unknown> | null): boolean 
   return payload?.streamKind === "command_output";
 }
 
+/**
+ * The call id a Claude background shell's rows carry: the adapter names the
+ * shell's own item `bgshell:<taskId>` (`backgroundShellItemId`,
+ * `apps/daemon/src/agent-host/adapters/claude/normalize.ts`), and every
+ * lifecycle row of it has that `toolUseId`. Such a call's output only ever
+ * streams — the CLI writes it to a file the session tails into
+ * `command_output` chunks, and its rows carry at most the command and an exit
+ * code — so its rows say it streamed even with none of its chunks in view: in
+ * a busy fleet the cross-agent ceiling can evict every chunk of a quiet shell
+ * while retention keeps its start (open work). A shell that printed nothing
+ * answers an empty join, and the viewer falls back to the item read.
+ */
+const BACKGROUND_SHELL_CALL_PREFIX = "bgshell:";
+
+function isBackgroundShellCall(callId: string): boolean {
+  return callId.startsWith(BACKGROUND_SHELL_CALL_PREFIX);
+}
+
 const streamedCallRowByActivity = new WeakMap<ThreadActivityItem, DerivedWorkLogEntry>();
 
 /**
@@ -626,11 +655,16 @@ const streamedCallRowByActivity = new WeakMap<ThreadActivityItem, DerivedWorkLog
  * returns the same object.
  */
 function streamedCallRow(activity: ThreadActivityItem): DerivedWorkLogEntry {
+  const base = derivedWorkLogEntry(activity);
+  // A background shell's row says so on its own (`isBackgroundShellCall`).
+  if (base.streamedOutput === true) {
+    return base;
+  }
   const cached = streamedCallRowByActivity.get(activity);
   if (cached) {
     return cached;
   }
-  const entry: DerivedWorkLogEntry = { ...derivedWorkLogEntry(activity), streamedOutput: true };
+  const entry: DerivedWorkLogEntry = { ...base, streamedOutput: true };
   streamedCallRowByActivity.set(activity, entry);
   return entry;
 }

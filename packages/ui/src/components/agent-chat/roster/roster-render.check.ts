@@ -514,6 +514,22 @@ assert.ok(
   "and the whole of what it printed is a read away: the shell's window keeps 200 rows, the host's join all of it"
 );
 
+// A quiet shell in a busy fleet: the cross-agent ceiling evicted every chunk it printed, retention kept its start.
+const quietShellDrillIn = render(
+  createElement(AgentDrillIn, {
+    sessionId: "s1",
+    agentId: "task-bg-1",
+    agent: shell(),
+    roster: [shell()],
+    rows: backgroundShellRows([shellItems[0]!], "task-bg-1"),
+    onBack: () => {}
+  })
+);
+assert.ok(
+  quietShellDrillIn.includes("Load full output"),
+  "a quiet shell's whole output is a read away with none of its chunks in view"
+);
+
 // Nothing printed yet: the copy is a shell's, not a subagent's.
 const silentShell = render(
   createElement(AgentDrillIn, {

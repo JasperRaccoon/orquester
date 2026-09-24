@@ -603,6 +603,35 @@ describe("a call that streamed a command's output: its whole output is the host'
     assert.equal(second, first);
   });
 
+  it("a Claude background shell's rows say so with no chunk in view: its output only ever streams", () => {
+    // In a busy fleet the cross-agent ceiling can evict every chunk a quiet shell printed while retention keeps its
+    // start (open work). Its whole output is still the host's join — or, the join empty, the item read.
+    const own = { agentId: "task-1", turnId: "t1" };
+    const shellRow = (activityKind: string, extra: Record<string, unknown>) =>
+      activity(
+        activityKind,
+        {
+          itemType: "command_execution",
+          toolUseId: "bgshell:task-1",
+          title: "Background shell",
+          agentId: "task-1",
+          data: { toolName: "Bash", input: { command: "npm run dev" } },
+          ...extra
+        },
+        own
+      );
+    const start = shellRow("tool.started", { status: "running" });
+    const completion = shellRow("tool.completed", { status: "completed" });
+    assert.equal(workLogEntryFromActivity(start).streamedOutput, true);
+    assert.equal(workLogEntryFromActivity(completion).streamedOutput, true);
+    assert.deepEqual(
+      deriveWorkLogEntries([start], { ownerAgentId: "task-1" }).map((entry) => entry.streamedOutput),
+      [true]
+    );
+    // Only the shell's own call: a provider-named command with no chunk in view says nothing.
+    assert.equal(workLogEntryFromActivity(commandRow("tool.started")).streamedOutput, undefined);
+  });
+
   it("in an agent's drill-in too: its own call's rows and chunks", () => {
     const own = { agentId: "ag1", turnId: "t1" };
     const completion = activity(

@@ -131,6 +131,13 @@ test("the row says its output streamed, running or settled: the whole of it is t
   assert.equal(settled[0]?.id, "started", "the read names the row's own item, which names the call");
 });
 
+test("a quiet shell whose every chunk aged out still offers the whole of its output", () => {
+  // A busy fleet's cross-agent ceiling evicts the chunks; retention keeps the start of running work.
+  const entries = rendered([started()]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]?.streamedOutput, true);
+});
+
 test("the row keeps the first frame's id, so a streaming row cannot close itself", () => {
   const live = backgroundShellRows([started(), output("one\n", "o1")], TASK);
   const settled = backgroundShellRows(

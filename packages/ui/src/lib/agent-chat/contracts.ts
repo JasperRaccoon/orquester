@@ -257,9 +257,11 @@ export interface WorkLogEntry {
    * expanded row offers "load full output" whether or not its own payload
    * was cut, and the viewer reads that join. Set on those chunks, on every
    * lifecycle row of a call whose chunks the derivation input holds
-   * (`entries.logic.ts`), and on the row `joinLifecycleDetails` puts the
-   * output on. Never on a file change's: its chunks are the tool's result
-   * text, no command's output (the MCP's `read_tool_output` rule).
+   * (`entries.logic.ts`) — a Claude background shell's (`bgshell:`) with none
+   * of them in view, since its output only ever streams — and on the row
+   * `joinLifecycleDetails` puts the output on. Never on a file change's: its
+   * chunks are the tool's result text, no command's output (the MCP's
+   * `read_tool_output` rule).
    */
   streamedOutput?: boolean;
   /** Grouping key for subagent lifecycle rows — one row per agent. */
