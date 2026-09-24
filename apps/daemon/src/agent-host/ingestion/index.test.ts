@@ -1793,4 +1793,114 @@ describe("agent-owned message segments (§5.1, §7.6)", () => {
       .filter((event) => !event.payload.streaming && event.payload.agentId === "task-1");
     assert.equal(closes.length, 1, "no agent row is left streaming after its turn ended");
   });
+
+  /**
+   * A background subagent reports between parent turns (Claude CLI 2.1.280
+   * runs agents in the background by default): its nested blocks arrive with
+   * NO turn. No turn end will ever close them, so each must settle on its own
+   * completion — one live thread held 5 479 of them still "Thinking".
+   */
+  async function turnlessNestedBlock(
+    ingestion: ReturnType<typeof createIngestion>,
+    input: {
+      itemType: "assistant_message" | "reasoning";
+      streamKind: "assistant_text" | "reasoning_summary_text";
+      itemId: string;
+      text: string;
+    }
+  ): Promise<void> {
+    const envelope = { itemId: input.itemId, agentId: "task-1" };
+    await ingestion.ingest(
+      runtimeEvent("item.started", { itemType: input.itemType, status: "inProgress" }, envelope)
+    );
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: input.streamKind, delta: input.text }, envelope)
+    );
+    await ingestion.ingest(
+      runtimeEvent("item.completed", { itemType: input.itemType, status: "completed" }, envelope)
+    );
+  }
+
+  for (const [itemType, streamKind, messageId] of [
+    ["assistant_message", "assistant_text", "assistant:agent:task-1:a-msg"],
+    ["reasoning", "reasoning_summary_text", "reasoning:summary:agent:task-1:a-msg"]
+  ] as const) {
+    it(`a turnless agent ${itemType} settles on its own item.completed`, async () => {
+      const { ingestion, sink } = harness();
+      await turnlessNestedBlock(ingestion, {
+        itemType,
+        streamKind,
+        itemId: "a-msg",
+        text: "Surveyed the packages"
+      });
+      await settle();
+      assert.deepEqual(
+        sink.messages().map((event) => [
+          event.payload.messageId,
+          event.payload.text,
+          event.payload.streaming,
+          event.payload.turnId,
+          event.payload.agentId
+        ]),
+        [
+          [messageId, "Surveyed the packages", true, null, "task-1"],
+          [messageId, "", false, null, "task-1"]
+        ],
+        "the block is written and closed, owned and turnless"
+      );
+      // Settled means forgotten: a session exit has nothing left to close.
+      await ingestion.ingest(runtimeEvent("session.exited", { exitKind: "graceful", recoverable: true }));
+      await settle();
+      assert.equal(sink.messages().length, 2);
+    });
+  }
+
+  it("a turnless completion settles only the message its own deltas opened", async () => {
+    const { ingestion, sink } = harness();
+    // A completion whose item streamed nothing, with nothing to stand in: no row.
+    await ingestion.ingest(
+      runtimeEvent("item.completed", { itemType: "assistant_message", status: "completed" }, {
+        itemId: "never-streamed",
+        agentId: "task-1"
+      })
+    );
+    // A turnless block of ANOTHER item stays open until its own completion.
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "still going" }, {
+        itemId: "other",
+        agentId: "task-1"
+      })
+    );
+    await ingestion.drain();
+    assert.deepEqual(
+      sink.messages().map((event) => [event.payload.messageId, event.payload.streaming]),
+      [["assistant:agent:task-1:other", true]]
+    );
+  });
+
+  it("a turnless owned command output is a turnless owned tool.output row (lock)", async () => {
+    const { ingestion, sink } = harness();
+    const call = { itemId: "toolu_Y", agentId: "task-1" };
+    await ingestion.ingest(
+      runtimeEvent("content.delta", { streamKind: "command_output", delta: "a.txt\n" }, call)
+    );
+    await ingestion.ingest(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "command_execution", status: "completed", title: "Bash", agentId: "task-1" },
+        call
+      )
+    );
+    await settle();
+    const [row, ...rest] = activityOfKind(sink, "tool.output");
+    assert.deepEqual(rest, []);
+    assert.ok(row);
+    assert.equal(row.payload.activity.turnId, null);
+    assert.equal(row.payload.activity.agentId, "task-1");
+    assert.deepEqual(row.payload.activity.payload, {
+      toolUseId: "toolu_Y",
+      streamKind: "command_output",
+      delta: "a.txt\n"
+    });
+  });
 });

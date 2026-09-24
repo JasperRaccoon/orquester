@@ -1221,6 +1221,13 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         handleAssistantCompletion(threadId, state, event, now, eventTurnId);
       }
     }
+    if (
+      event.type === "item.completed" &&
+      eventTurnId === null &&
+      (event.payload.itemType === "reasoning" || event.payload.itemType === "assistant_message")
+    ) {
+      handleTurnlessCompletion(threadId, state, event, now);
+    }
 
     // --- proposals --------------------------------------------------------
     if (event.type === "turn.proposed.delta") {
@@ -1787,6 +1794,55 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       finalizeMessage(threadId, state, messageId, turnId, close);
     }
     state.segments.delete(segmentKey(turnId, "assistant", owner));
+  }
+
+  /**
+   * A TURNLESS completion closes the turnless message its own deltas opened —
+   * the id `handleContentDelta` minted for it with no turn
+   * (`segmentMessageId(…, 0, …)`; for reasoning, its `summary:` or `raw:`
+   * stream). With no turn there is no segment and no turn end to close it,
+   * and a background subagent reports exactly there: Claude CLI 2.1.280 runs
+   * agents in the background by default, and their words read "Thinking"
+   * until a session stop — or for good, once a host restart forgot the
+   * buffer (one live thread: 5 479 such messages). The completion's text
+   * stands in only if nothing streamed, as in a turn; a completion that opened
+   * no message still writes nothing.
+   */
+  function handleTurnlessCompletion(
+    threadId: string,
+    state: ThreadState,
+    event: Extract<RuntimeEvent, { type: "item.completed" }>,
+    now: string
+  ): void {
+    const reasoning = event.payload.itemType === "reasoning";
+    const messageIds = reasoning
+      ? [
+          segmentMessageId(
+            reasoningSegmentBaseKeyFromEvent(event, "reasoning_summary_text"),
+            0,
+            "reasoning"
+          ),
+          segmentMessageId(reasoningSegmentBaseKeyFromEvent(event, "reasoning_text"), 0, "reasoning")
+        ]
+      : [segmentMessageId(segmentBaseKeyFromEvent(event), 0, "assistant")];
+    const text = reasoning
+      ? event.payload.detail
+      : historicalItemText(
+          assistantPhase(event.payload).detailIsMarker ? { data: event.payload.data } : event.payload
+        );
+    for (const messageId of messageIds) {
+      // Turnless only: the same id inside a turn is that turn's segment, and
+      // the turn's own close paths own it.
+      if (!state.messageTurn.has(messageId) || state.messageTurn.get(messageId) !== null) {
+        continue;
+      }
+      const streamed = state.projected.has(messageId) || state.messages.has(messageId);
+      finalizeMessage(threadId, state, messageId, null, {
+        cause: event,
+        occurredAt: now,
+        ...(!streamed && hasRenderableText(text) ? { fallbackText: text } : {})
+      });
+    }
   }
 
   function handleProviderDiff(
