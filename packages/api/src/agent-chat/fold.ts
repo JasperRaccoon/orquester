@@ -126,9 +126,12 @@ export const MESSAGE_RETENTION_SLACK = 200;
  * agents; and a background shell's `task.started`, a parent row, aged out
  * after 550 parent rows and took the shell off the roster while it ran.
  *
- * Capped, because a crash can leave work open for good; ranked by last
- * activity, a stream's chunks included, because ranked by their opening the
- * calls a crash left open crowded a command still printing out of the cap.
+ * Capped, because work can read open with nothing running it: what a dead
+ * host left open, until the thread's first load on a new host closes it (the
+ * agent host's `closeLeftoverWork`), and a finished call the list shows open
+ * again (`open-work.ts`); ranked by last activity, a stream's chunks included,
+ * because ranked by their opening the calls a crash left open crowded a
+ * command still printing out of the cap.
  * Both caps sit below their slacks (50, 50, 200). A kept row still counts in
  * its class, as an open question does, so a trim frees at least its slack
  * minus the cap — and, in the parent's window, minus the old open message-mode

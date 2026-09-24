@@ -2,21 +2,40 @@
  * §3.3 reconcile, asserted headlessly (spec §9: "tested headlessly, not only by
  * restarting a real daemon"). Every restart flavour is driven through a
  * scripted adapter and a temporary in-memory store; the assertions are on the
- * resulting head and on which continuation call the adapter received.
+ * resulting head and on which continuation call the adapter received — and on
+ * what a thread's first load closes of the work a dead process left open (one
+ * of those on the real store, for what reaches the disk).
  */
 
 import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 
-import type { DomainEvent } from "@orquester/api/agent-chat";
+import {
+  derivePendingRequests,
+  foldSubagentActivities,
+  openWorkOf,
+  type DomainEvent,
+  type ThreadActivityItem,
+  type ThreadHistoryPage,
+  type ThreadItem
+} from "@orquester/api/agent-chat";
 
 import {
   CONTINUATION_FAILED_MESSAGE,
   CONTINUATION_PROMPT,
   CONTINUATION_SEND_FAILED_MESSAGE
 } from "../host-protocol.ts";
+import { createThreadIndex, type ThreadIndex } from "../index/index.ts";
+import { MAX_LATE_REFERENCE_BYTES } from "../index/indexer.ts";
+import type { AppendableDomainEvent } from "../services.ts";
+import { createThreadStore } from "../store/index.ts";
+import { LEFTOVER_CALL_DETAIL } from "./leftover-work.ts";
 import { PENDING_TURN_GRACE_MS } from "./orchestrator.ts";
 import {
+  createRecordingLogger,
   createScriptedAdapter,
   createTestHost,
   type FakeThreadStore,
@@ -129,6 +148,225 @@ function appendStrandedTurn(store: FakeThreadStore, threadId: string, requestedA
       requestedAt
     )
   );
+}
+
+let sinkSeq = 0;
+/** An event as ingestion hands it to the sink: the store assigns the seq. */
+function sunk<TType extends DomainEvent["type"]>(
+  threadId: string,
+  type: TType,
+  payload: Extract<DomainEvent, { type: TType }>["payload"]
+): AppendableDomainEvent {
+  sinkSeq += 1;
+  return {
+    eventId: `sunk-${sinkSeq}`,
+    threadId,
+    type,
+    payload,
+    occurredAt: "2026-09-24T10:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    metadata: {}
+  } as AppendableDomainEvent;
+}
+
+function sunkRow(
+  threadId: string,
+  id: string,
+  activityKind: string,
+  payload: Record<string, unknown>,
+  over: Partial<ThreadActivityItem> = {}
+): AppendableDomainEvent {
+  return sunk(threadId, "thread.activity-appended", {
+    activity: {
+      kind: "activity",
+      id,
+      tone: activityKind.startsWith("tool.") ? "tool" : "info",
+      activityKind,
+      summary: activityKind,
+      payload,
+      turnId: null,
+      createdAt: "2026-09-24T10:00:00.000Z",
+      updatedAt: "2026-09-24T10:00:00.000Z",
+      ...over
+    }
+  });
+}
+
+/**
+ * What a provider process had running when its host died, as ingestion wrote
+ * it: a parent call, a background shell (its task, then its item), a subagent
+ * working between parent turns with a call of its own and words still
+ * streaming, and a Codex-style child whose turn finished — `idle`, resumable.
+ */
+function leftoverRows(threadId: string): AppendableDomainEvent[] {
+  return [
+    sunkRow(threadId, "parent-start", "tool.started", {
+      itemType: "command_execution",
+      toolUseId: "toolu_parent",
+      status: "inProgress",
+      title: "Bash",
+      data: { toolName: "Bash", input: {} }
+    }, { turnId: "turn-1", status: "inProgress" }),
+    sunkRow(threadId, "parent-update", "tool.updated", {
+      itemType: "command_execution",
+      toolUseId: "toolu_parent",
+      status: "inProgress",
+      title: "Bash",
+      data: { toolName: "Bash", input: { command: "npm test" } }
+    }, { turnId: "turn-1", status: "inProgress" }),
+    sunkRow(threadId, "shell-task", "task.started", {
+      taskId: "shell-1",
+      detail: "npm run dev",
+      agentKind: "background",
+      taskType: "local_bash",
+      title: "npm run dev",
+      toolUseId: "toolu_shell"
+    }, { turnId: "turn-1" }),
+    sunkRow(threadId, "shell-item", "tool.started", {
+      itemType: "command_execution",
+      toolUseId: "bgshell:shell-1",
+      status: "inProgress",
+      title: "Background shell",
+      agentId: "shell-1",
+      data: { toolName: "Bash", input: { command: "npm run dev" }, background: true }
+    }, { turnId: "turn-1", agentId: "shell-1", status: "inProgress" }),
+    sunkRow(threadId, "shell-chunk", "tool.output", {
+      toolUseId: "bgshell:shell-1",
+      streamKind: "command_output",
+      delta: "ready on :5173\n"
+    }, { agentId: "shell-1" }),
+    sunkRow(threadId, "agent-task", "task.started", {
+      taskId: "agent-1",
+      detail: "Explore the repo",
+      agentKind: "agent",
+      taskType: "local_agent",
+      title: "Explore the repo",
+      toolUseId: "toolu_launch"
+    }, { turnId: "turn-1" }),
+    sunkRow(threadId, "agent-call", "tool.started", {
+      itemType: "command_execution",
+      toolUseId: "toolu_agent_call",
+      status: "inProgress",
+      title: "Bash",
+      agentId: "agent-1",
+      parentToolUseId: "toolu_launch",
+      data: { toolName: "Bash", input: { command: "rg TODO" } }
+    }, { agentId: "agent-1", parentToolUseId: "toolu_launch", status: "inProgress" }),
+    sunkRow(threadId, "codex-task", "task.started", {
+      taskId: "codex-child",
+      detail: "agent codex-child",
+      agentKind: "agent",
+      title: "Reviewer",
+      toolUseId: "codex-run:t1"
+    }, { turnId: "turn-1" }),
+    sunkRow(threadId, "codex-idle", "task.updated", { taskId: "codex-child", status: "idle", agentKind: "agent" }),
+    sunk(threadId, "thread.message-sent", {
+      messageId: "assistant:agent-1:m1",
+      role: "assistant",
+      text: "Looking at the tests",
+      streaming: true,
+      turnId: null,
+      agentId: "agent-1"
+    }),
+    // The subagent asks between parent turns: an approval and a structured
+    // question the dead process can never answer…
+    sunkRow(threadId, "agent-approval", "approval.requested", {
+      requestId: "req-approval",
+      requestKind: "command",
+      requestType: "command_execution_approval",
+      dismissible: false,
+      detail: "rm -rf build"
+    }, { tone: "approval", agentId: "agent-1" }),
+    sunkRow(threadId, "agent-question", "user-input.requested", {
+      requestId: "req-question",
+      questions: [PICK],
+      dismissible: false
+    }, { agentId: "agent-1" }),
+    // …and an async question, which a later user message answers.
+    sunkRow(threadId, "async-question", "user-input.requested", {
+      requestId: "req-async",
+      questions: [PICK],
+      dismissible: true,
+      responseMode: "message"
+    }, { turnId: "turn-1" })
+  ];
+}
+
+/** A structured question with one option. */
+const PICK = { id: "q1", header: "Pick", question: "Which one?", options: [{ label: "A", description: "a" }] };
+
+/**
+ * The closings `leftoverRows` owes, in the order a first load appends them —
+ * the parked requests first, as a teardown settles them, but never the async
+ * question; and no message: one still streaming is left as the log has it.
+ */
+const LEFTOVER_CLOSINGS = [
+  ["approval.resolved", "req-approval"],
+  ["user-input.resolved", "req-question"],
+  ["tool.completed", "toolu_parent"],
+  ["tool.completed", "bgshell:shell-1"],
+  ["tool.completed", "toolu_agent_call"],
+  // The shell's item before its task, as the adapters close one.
+  ["task.completed", "shell-1"],
+  ["task.completed", "agent-1"]
+];
+
+/**
+ * Each closing an event appended: its row kind and the unit it ends. A
+ * message's `streaming: false` is listed too, so one written by mistake shows.
+ */
+function closingsIn(events: readonly DomainEvent[]): string[][] {
+  const closings: string[][] = [];
+  for (const event of events) {
+    if (event.type === "thread.message-sent" && !event.payload.streaming) {
+      closings.push(["message", event.payload.messageId]);
+    }
+    if (event.type !== "thread.activity-appended") continue;
+    const { activity } = event.payload;
+    const payload = activity.payload as Record<string, unknown>;
+    if (activity.activityKind === "tool.completed") {
+      closings.push([activity.activityKind, String(payload.toolUseId)]);
+    } else if (activity.activityKind === "task.completed") {
+      closings.push([activity.activityKind, String(payload.taskId)]);
+    } else if (
+      activity.activityKind === "approval.resolved" ||
+      activity.activityKind === "user-input.resolved"
+    ) {
+      closings.push([activity.activityKind, String(payload.requestId)]);
+    }
+  }
+  return closings;
+}
+
+/**
+ * "Open ⇒ running", read as every reader reads it once a session is live
+ * again: no open call, no open background task, no active roster row, no
+ * request but the async question — and the idle child still idle. A message
+ * still streaming is left as the log has it.
+ */
+function assertNothingRunning(items: readonly ThreadItem[]): void {
+  const activities = items.filter((item): item is ThreadActivityItem => item.kind === "activity");
+  assert.deepEqual(openWorkOf(activities), { calls: [], tasks: [] });
+  const pending = derivePendingRequests(activities);
+  assert.deepEqual(
+    [...pending.approvals, ...pending.userInputs].map((request) => request.requestId),
+    ["req-async"]
+  );
+  assert.deepEqual(
+    foldSubagentActivities(activities, { sessionLive: true }).map((row) => [row.id, row.status]),
+    [
+      ["shell-1", "interrupted"],
+      ["agent-1", "interrupted"],
+      ["codex-child", "idle"]
+    ]
+  );
+}
+
+/** The items of a whole-thread read, which is always a snapshot. */
+function snapshotItems(read: Awaited<ReturnType<TestHost["orchestrator"]["readThread"]>>): ThreadItem[] {
+  assert.equal(read.kind, "snapshot");
+  return read.kind === "snapshot" ? read.thread.items : [];
 }
 
 describe("reconcile — the lazy boot (design 2026-09-23, A1)", () => {
@@ -644,6 +882,639 @@ describe("reconcile (§3.3)", () => {
     await next.settle();
     assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
     assert.equal(headOf(store, threadId).session.status, "error");
+    await next.stop();
+  });
+});
+
+describe("reconcile — a host start closes what a dead process left open", () => {
+  /** A thread whose last host died with `leftoverRows` running, its head idle. */
+  async function idleThreadWithLeftovers(): Promise<{ store: FakeThreadStore; threadId: string; logLength: number }> {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.ingestionSink(threadId, leftoverRows(threadId));
+    await first.settle();
+    await first.stop();
+    // Not orphaned by `meta.json`: background work outlives the turn that
+    // launched it, so a host can die under it with the head at rest.
+    assert.equal(isOrphaned(headOf(first.store, threadId)), false);
+    return { store: first.store, threadId, logLength: first.store.logs.get(threadId)!.length };
+  }
+
+  const isOrphaned = (head: ReturnType<typeof headOf>): boolean =>
+    head.session.status === "running" || head.session.activeTurnId !== null;
+
+  it("a thread's first load closes every open call and active task the fold shows — an idle child and a streaming message untouched", async () => {
+    const { store, threadId, logLength } = await idleThreadWithLeftovers();
+
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength, "boot appends nothing to a thread it did not fold");
+
+    const read = await next.orchestrator.readThread(threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(closingsIn(appended), LEFTOVER_CLOSINGS);
+    assert.equal(appended.length, LEFTOVER_CLOSINGS.length, "nothing else is written");
+    const calls = appended.flatMap((event) =>
+      event.type === "thread.activity-appended" && event.payload.activity.activityKind === "tool.completed"
+        ? [event.payload.activity]
+        : []
+    );
+    for (const call of calls) {
+      const payload = call.payload as Record<string, unknown>;
+      assert.equal(payload.status, "failed");
+      assert.equal(payload.detail, LEFTOVER_CALL_DETAIL);
+    }
+    // Each closer in the window of the row that opened its call.
+    assert.deepEqual(
+      calls.map((call) => [call.turnId, call.agentId ?? null]),
+      [
+        ["turn-1", null],
+        ["turn-1", "shell-1"],
+        [null, "agent-1"]
+      ]
+    );
+    // A task's stop rides its start's turn, though no turn is running now.
+    assert.deepEqual(
+      appended.flatMap((event) =>
+        event.type === "thread.activity-appended" && event.payload.activity.activityKind === "task.completed"
+          ? [event.payload.activity.turnId]
+          : []
+      ),
+      ["turn-1", "turn-1"]
+    );
+
+    // The first reader's snapshot already has nothing running.
+    const items = snapshotItems(read);
+    assertNothingRunning(items);
+    // Nothing was written for the message: it is left streaming, as the log has it.
+    const message = items.find((item) => item.id === "assistant:agent-1:m1");
+    assert.deepEqual(
+      message?.kind === "message" ? [message.text, message.streaming] : null,
+      ["Looking at the tests", true]
+    );
+    await next.stop();
+  });
+
+  it("cancels a dead host's parked requests on a thread at rest — a background subagent's — and keeps the async question", async () => {
+    const { store, threadId, logLength } = await idleThreadWithLeftovers();
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    const resolutionsIn = (events: readonly DomainEvent[]) =>
+      events.flatMap((event) =>
+        event.type === "thread.activity-appended" && event.payload.activity.activityKind.endsWith(".resolved")
+          ? [{ activity: event.payload.activity, metadata: event.metadata }]
+          : []
+      );
+    const resolutions = resolutionsIn(store.logs.get(threadId)!.slice(logLength));
+    // The host's own cancellation — "Request cancelled", "Question cancelled",
+    // on the turn a Stop would use (none: the thread is at rest), the envelope
+    // naming the request. Nobody answered, and no row says anyone did.
+    assert.deepEqual(resolutions, [
+      {
+        activity: {
+          kind: "activity",
+          id: "settle-cancel:req-approval",
+          tone: "info",
+          activityKind: "approval.resolved",
+          summary: "Request cancelled",
+          payload: { requestId: "req-approval", decision: "cancel" },
+          turnId: null,
+          createdAt: next.clock.nowIso(),
+          updatedAt: next.clock.nowIso()
+        },
+        metadata: { requestId: "req-approval" }
+      },
+      {
+        activity: {
+          kind: "activity",
+          id: "settle-cancel:req-question",
+          tone: "info",
+          activityKind: "user-input.resolved",
+          summary: "Question cancelled",
+          payload: { requestId: "req-question" },
+          turnId: null,
+          createdAt: next.clock.nowIso(),
+          updatedAt: next.clock.nowIso()
+        },
+        metadata: { requestId: "req-question" }
+      }
+    ]);
+    // The first reader's card list: the async question alone, still answerable by a message.
+    assert.equal(read.kind, "snapshot");
+    if (read.kind !== "snapshot") return;
+    assert.deepEqual(read.thread.pending.approvals, []);
+    assert.deepEqual(
+      read.thread.pending.userInputs.map((question) => [question.requestId, question.responseMode]),
+      [["req-async", "message"]]
+    );
+
+    // Row for row what the Stop path writes for the same requests on a live
+    // thread — which cancels the async question as well; the first load must not.
+    const twin = await next.createThread({ threadId: "twin" });
+    await next.orchestrator.ingestionSink(twin, leftoverRows(twin));
+    await next.settle();
+    const before = store.logs.get(twin)!.length;
+    await next.orchestrator.command(twin, "session/stop", { commandId: cmd() });
+    await next.settle();
+    const stopped = resolutionsIn(store.logs.get(twin)!.slice(before));
+    assert.deepEqual(
+      stopped.filter(({ activity }) => (activity.payload as { requestId: string }).requestId !== "req-async"),
+      resolutions
+    );
+    assert.equal(stopped.length, 3, "Stop cancels the async question too");
+    await next.stop();
+  });
+
+  it("a second load appends nothing", async () => {
+    const { store, threadId, logLength } = await idleThreadWithLeftovers();
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await next.stop();
+    const settled = store.logs.get(threadId)!.length;
+    assert.equal(settled, logLength + LEFTOVER_CLOSINGS.length);
+
+    // Later reads in the same host lifetime, then a whole new host.
+    const third = createTestHost({ store });
+    await third.orchestrator.reconcile();
+    const read = await third.orchestrator.readThread(threadId);
+    await third.orchestrator.readThread(threadId);
+    await third.settle();
+    assert.equal(store.logs.get(threadId)!.length, settled);
+    assertNothingRunning(snapshotItems(read));
+    await third.stop();
+  });
+
+  it("the orphaned-thread reconcile closes them too, before it settles the turn", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    await first.orchestrator.ingestionSink(threadId, leftoverRows(threadId));
+    await first.settle();
+    await first.stop();
+    assert.equal(headOf(first.store, threadId).session.status, "running");
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(closingsIn(appended), LEFTOVER_CLOSINGS);
+    const settledAt = appended.findIndex(
+      (event) => event.type === "thread.session-set" && event.payload.session.status === "error"
+    );
+    assert.ok(settledAt !== -1, "the orphaned turn was settled");
+    assert.deepEqual(closingsIn(appended.slice(0, settledAt)), LEFTOVER_CLOSINGS, "all of it before the settle");
+    // A task's row rides the turn the head said was running, as a teardown's does.
+    const stopped = appended.flatMap((event) =>
+      event.type === "thread.activity-appended" && event.payload.activity.activityKind === "task.completed"
+        ? [event.payload.activity.turnId]
+        : []
+    );
+    assert.deepEqual(stopped, ["turn-1", "turn-1"]);
+    assert.equal(headOf(first.store, threadId).session.status, "error");
+
+    assertNothingRunning(snapshotItems(await next.orchestrator.readThread(threadId)));
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(first.store.logs.get(threadId)!.length, logLength + appended.length);
+    await next.stop();
+  });
+
+  it("closes them ahead of a continuation as well: the new process owns none of them", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    await first.orchestrator.ingestionSink(threadId, leftoverRows(threadId));
+    await first.settle();
+    await first.stop();
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => true });
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(closingsIn(appended), LEFTOVER_CLOSINGS);
+    const preparedAt = appended.findIndex(
+      (event) => event.type === "thread.session-set" && event.payload.session.status === "starting"
+    );
+    assert.ok(preparedAt !== -1, "the continuation was prepared");
+    assert.deepEqual(closingsIn(appended.slice(0, preparedAt)), LEFTOVER_CLOSINGS, "all of it before the prepare");
+    assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 1);
+    await next.stop();
+  });
+
+  it("never touches a thread an adapter still lists as live", async () => {
+    // The reconcile's own exclusion: an adopted host is not reconciled against itself.
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    await first.orchestrator.ingestionSink(threadId, leftoverRows(threadId));
+    await first.settle();
+    const logLength = first.store.logs.get(threadId)!.length;
+    const surviving = createScriptedAdapter({ id: "claude" });
+    await surviving.startSession({
+      threadId,
+      cwd: "/work/project",
+      home: { kind: "account", path: "/tmp/home/acc1" },
+      modelSelection: { model: "test-model" },
+      runtimeMode: "approval-required"
+    });
+    const next = createTestHost({
+      store: first.store,
+      adapters: { claude: surviving },
+      continuationEnabled: () => true
+    });
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(first.store.logs.get(threadId)!.length, logLength);
+    await first.stop();
+    await next.stop();
+  });
+
+  it("never closes anything on a first load that finds the thread live", async () => {
+    const { store, threadId, logLength } = await idleThreadWithLeftovers();
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    // A session came up for the thread between the boot and its first load:
+    // whatever it runs is its own to settle.
+    await next.adapter.startSession({
+      threadId,
+      cwd: "/work/project",
+      home: { kind: "account", path: "/tmp/home/acc1" },
+      modelSelection: { model: "test-model" },
+      runtimeMode: "approval-required"
+    });
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength);
+    await next.stop();
+  });
+
+  it("a closing that cannot be appended is logged, and the thread still loads", async () => {
+    const { store, threadId, logLength } = await idleThreadWithLeftovers();
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    const append = store.append.bind(store);
+    store.append = async (input) => {
+      if (input.threadId === threadId) {
+        throw new Error("disk is full");
+      }
+      return append(input);
+    };
+    const read = await next.orchestrator.readThread(threadId);
+    store.append = append;
+    assert.equal(read.kind, "snapshot");
+    assert.equal(store.logs.get(threadId)!.length, logLength);
+    assert.ok(
+      next.logger.entries.some(
+        (entry) => entry.level === "warn" && entry.message.includes(threadId) && entry.message.includes("left")
+      ),
+      "the failure is logged"
+    );
+    await next.stop();
+  });
+
+  it("a thread whose head cannot be read is folded at boot, and closed there", async () => {
+    const { store, threadId, logLength } = await idleThreadWithLeftovers();
+    // `meta.json` is gone: the reconcile folds the log to decide, finds the
+    // thread at rest, and that fold is its first load.
+    store.heads.delete(threadId);
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.deepEqual(closingsIn(store.logs.get(threadId)!.slice(logLength)), LEFTOVER_CLOSINGS);
+    await next.stop();
+  });
+
+  it("a fold snapshot taken at the load, before the closings, still reads nothing running on the next", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    // Enough history that the next host's cold load writes `state.json` (A2)
+    // — BEFORE its closings, which then ride the log's tail.
+    const filler = Array.from({ length: 220 }, (_, i) =>
+      sunk(threadId, "thread.message-sent", {
+        messageId: `user:${i}`,
+        role: "user",
+        text: `message ${i}`,
+        streaming: false,
+        turnId: null
+      })
+    );
+    await first.orchestrator.ingestionSink(threadId, [...filler, ...leftoverRows(threadId)]);
+    await first.settle();
+    await first.stop();
+    first.store.snapshots.delete(threadId);
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store });
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await next.stop();
+    const snapshot = first.store.snapshots.get(threadId);
+    assert.ok(snapshot !== undefined && snapshot.seq === logLength, "the load's snapshot predates the closings");
+    assert.equal(first.store.logs.get(threadId)!.length, logLength + LEFTOVER_CLOSINGS.length);
+
+    const third = createTestHost({ store: first.store });
+    await third.orchestrator.reconcile();
+    const read = await third.orchestrator.readThread(threadId);
+    await third.settle();
+    assert.equal(first.store.logs.get(threadId)!.length, logLength + LEFTOVER_CLOSINGS.length);
+    assertNothingRunning(snapshotItems(read));
+    await third.stop();
+  });
+
+  it("on the real store: the closings reach the log on disk, and the next host finds nothing left", async (t) => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-leftovers-"));
+    const stores: Array<ReturnType<typeof createThreadStore>> = [];
+    const openStore = () => {
+      const store = createThreadStore({ rootDir, sweepIntervalMs: 0 });
+      stores.push(store);
+      return store;
+    };
+    t.after(async () => {
+      for (const store of stores) store.close();
+      await fs.rm(rootDir, { recursive: true, force: true });
+    });
+
+    const first = createTestHost({ store: openStore() });
+    const threadId = await first.createThread();
+    await first.orchestrator.ingestionSink(threadId, leftoverRows(threadId));
+    await first.settle();
+    await first.stop();
+    const before = (await first.store.readAll(threadId)).events.length;
+
+    const next = createTestHost({ store: openStore() });
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await next.stop();
+    assertNothingRunning(snapshotItems(read));
+    const onDisk = (await next.store.readAll(threadId)).events;
+    assert.deepEqual(closingsIn(onDisk.slice(before)), LEFTOVER_CLOSINGS);
+
+    const third = createTestHost({ store: openStore() });
+    await third.orchestrator.reconcile();
+    await third.orchestrator.readThread(threadId);
+    await third.settle();
+    await third.stop();
+    assert.equal((await third.store.readAll(threadId)).events.length, onDisk.length);
+  });
+
+  it("closes every running task, even more than the roster lists at once", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    const fleet = 105;
+    await first.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: fleet }, (_, i) =>
+        sunkRow(threadId, `fleet-${i}`, "task.started", {
+          taskId: `fleet-${i}`,
+          agentKind: "agent",
+          taskType: "local_agent",
+          title: `Agent ${i}`,
+          toolUseId: `toolu_fleet_${i}`
+        })
+      )
+    );
+    await first.settle();
+    await first.stop();
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store });
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    assert.equal(closingsIn(appended).length, fleet);
+    assert.deepEqual(
+      new Set(closingsIn(appended).map(([, taskId]) => taskId)),
+      new Set(Array.from({ length: fleet }, (_, i) => `fleet-${i}`))
+    );
+    const activities = snapshotItems(read).filter((item): item is ThreadActivityItem => item.kind === "activity");
+    assert.deepEqual(
+      foldSubagentActivities(activities, { sessionLive: true }).filter((row) => row.status === "running"),
+      []
+    );
+    await next.stop();
+
+    const third = createTestHost({ store: first.store });
+    await third.orchestrator.reconcile();
+    await third.orchestrator.readThread(threadId);
+    await third.settle();
+    assert.equal(first.store.logs.get(threadId)!.length, logLength + fleet, "a second load appends nothing");
+    await third.stop();
+  });
+});
+
+describe("reconcile — Load older after a first load closed an old turn's leftovers", () => {
+  /** A real thread index in a temp dir: the message spans and late references are its own rules. */
+  async function realIndex(t: { after(fn: () => unknown): void }): Promise<ThreadIndex> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-leftover-history-"));
+    const index = createThreadIndex({ filePath: path.join(dir, "index.sqlite"), logger: createRecordingLogger() });
+    t.after(async () => {
+      index.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    return index;
+  }
+
+  /** One sink call per event, as `seedTurn` feeds a turn: the pending-turn rule reads each on its own. */
+  async function sinkEach(host: TestHost, threadId: string, events: AppendableDomainEvent[]): Promise<void> {
+    for (const event of events) {
+      await host.orchestrator.ingestionSink(threadId, [event]);
+    }
+  }
+
+  const startTurn = (host: TestHost, threadId: string, turnId: string): Promise<void> =>
+    sinkEach(host, threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: `user:${turnId}`,
+        role: "user",
+        text: `prompt for ${turnId}`,
+        streaming: false,
+        turnId: null
+      }),
+      sunk(threadId, "thread.turn-start-requested", {
+        turnId: null,
+        messageId: `user:${turnId}`,
+        interactionMode: "default"
+      }),
+      sunk(threadId, "thread.session-set", { session: { status: "running", activeTurnId: turnId } })
+    ]);
+
+  const settleTurn = (host: TestHost, threadId: string): Promise<void> =>
+    sinkEach(host, threadId, [
+      sunk(threadId, "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
+
+  const parentRows = (host: TestHost, threadId: string, turnId: string, count: number): Promise<void> =>
+    host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: count }, (_, i) => sunkRow(threadId, `${turnId}-row-${i}`, "runtime.warning", {}, { turnId }))
+    );
+
+  /**
+   * A thread whose host died long after an OLD turn opened a call it never
+   * closed and a subagent's words it never settled: o-1 left both, then o-2
+   * (`o2Rows` parent rows) and o-3 filled the window past its limit — the fold
+   * keeps the open call's opening row whatever its age (`open-work.ts`).
+   */
+  async function oldLeftovers(t: { after(fn: () => unknown): void }, o2Rows: number) {
+    const index = await realIndex(t);
+    const first = createTestHost({ index });
+    const threadId = await first.createThread();
+    await startTurn(first, threadId, "o-1");
+    await first.orchestrator.ingestionSink(threadId, [
+      sunkRow(threadId, "old-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "toolu_old",
+        status: "inProgress",
+        title: "Bash",
+        data: { toolName: "Bash", input: {} }
+      }, { turnId: "o-1", status: "inProgress" }),
+      sunkRow(threadId, "old-update", "tool.updated", {
+        itemType: "command_execution",
+        toolUseId: "toolu_old",
+        status: "inProgress",
+        title: "Bash",
+        data: { toolName: "Bash", input: { command: "npm run build" } }
+      }, { turnId: "o-1", status: "inProgress" }),
+      sunk(threadId, "thread.message-sent", {
+        messageId: "assistant:agent-old:m1",
+        role: "assistant",
+        text: "Still looking",
+        streaming: true,
+        turnId: null,
+        agentId: "agent-old"
+      })
+    ]);
+    await parentRows(first, threadId, "o-1", 40);
+    await settleTurn(first, threadId);
+    for (const [turnId, count] of [
+      ["o-2", o2Rows],
+      ["o-3", 300]
+    ] as const) {
+      await startTurn(first, threadId, turnId);
+      await parentRows(first, threadId, turnId, count);
+      await settleTurn(first, threadId);
+    }
+    await first.settle();
+    await index.drain();
+    await first.stop();
+    const store = first.store;
+    return { store, index, threadId, logLength: store.logs.get(threadId)!.length };
+  }
+
+  /** Every page below `before`, each page's own cursor followed down. */
+  async function walkHistory(host: TestHost, threadId: string, before: string | null): Promise<ThreadHistoryPage[]> {
+    const pages: ThreadHistoryPage[] = [];
+    let cursor = before;
+    while (cursor !== null) {
+      assert.ok(pages.length < 50, "paging terminates");
+      const page = await host.orchestrator.readHistory(threadId, { before: cursor });
+      pages.push(page);
+      cursor = page.page.beforeCursor;
+    }
+    return pages;
+  }
+
+  /**
+   * "Load older" loses no row: every activity and message the log ever wrote is
+   * in the window or on a page, and no activity is on two pages. (A row the
+   * window keeps out of age order — the call's opening row — may be on a page
+   * too; readers dedupe by id.)
+   */
+  function assertNothingLost(
+    store: FakeThreadStore,
+    threadId: string,
+    window: readonly ThreadItem[],
+    pages: readonly ThreadHistoryPage[]
+  ): void {
+    const everyRow = new Set(
+      store.logs.get(threadId)!.flatMap((event) =>
+        event.type === "thread.activity-appended"
+          ? [event.payload.activity.id]
+          : event.type === "thread.message-sent"
+            ? [event.payload.messageId]
+            : []
+      )
+    );
+    const paged = pages.flatMap((page) => page.items.filter((item) => item.kind === "activity").map((item) => item.id));
+    assert.equal(new Set(paged).size, paged.length, "no activity on two pages");
+    const shown = new Set([...window, ...pages.flatMap((page) => page.items)].map((item) => item.id));
+    assert.deepEqual([...everyRow].filter((id) => !shown.has(id)), [], "nothing is lost");
+  }
+
+  /** The first load, then the snapshot a client reads once the index has taken the closer. */
+  async function firstLoad(store: FakeThreadStore, index: ThreadIndex, threadId: string) {
+    const next = createTestHost({ store, index });
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await index.drain();
+    const read = await next.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    if (read.kind !== "snapshot") throw new Error("unreachable");
+    assert.equal(read.thread.history?.hasOlder, true, "the window has evicted: there is history to page");
+    return { next, window: read.thread.items, before: read.thread.history?.beforeCursor ?? null };
+  }
+
+  it("a small thread: the closer stretches the old turn over itself, within the bound, and no row is lost", async (t) => {
+    const { store, index, threadId, logLength } = await oldLeftovers(t, 300);
+    const { next, window, before } = await firstLoad(store, index, threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(closingsIn(appended), [["tool.completed", "toolu_old"]]);
+    assert.equal(appended.length, 1, "the call's closer, and nothing for the message");
+
+    // The closer names o-1 less than MAX_LATE_REFERENCE_BYTES past o-2's start,
+    // so the index's late-reference rule grows o-1's range over it
+    // (`extendReferenced`), overlapping o-2 and o-3…
+    const closer = appended[0]!;
+    const closerAt = store.logs.get(threadId)!.length - 1;
+    const o1 = index.turnById(threadId, "o-1");
+    const o2 = index.turnById(threadId, "o-2");
+    assert.ok(o1 && o2);
+    assert.ok((closerAt + 1) * 1000 - o2.firstByte <= MAX_LATE_REFERENCE_BYTES, "a small thread");
+    assert.equal(o1.lastSeq, closer.seq, "stretched over the closer");
+
+    // …and "Load older" still serves every row once.
+    const pages = await walkHistory(next, threadId, before);
+    assert.ok(pages.length >= 1);
+    assertNothingLost(store, threadId, window, pages);
+    await next.stop();
+  });
+
+  it("a big thread: the closer never stretches the old turn past the bound, and no row is lost", async (t) => {
+    const { store, index, threadId, logLength } = await oldLeftovers(t, 2_200);
+    const o1Before = index.turnById(threadId, "o-1");
+    const o2 = index.turnById(threadId, "o-2");
+    assert.ok(o1Before && o2);
+    assert.equal(o1Before.endByte, o2.firstByte, "o-1 ends where o-2 begins");
+    const { next, window, before } = await firstLoad(store, index, threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(closingsIn(appended), [["tool.completed", "toolu_old"]]);
+    assert.equal(appended.length, 1);
+
+    // More than MAX_LATE_REFERENCE_BYTES of log past o-2's start: the closer
+    // names o-1, and o-1's range does not move.
+    const closerAt = store.logs.get(threadId)!.length - 1;
+    assert.ok((closerAt + 1) * 1000 - o2.firstByte > MAX_LATE_REFERENCE_BYTES, "a big thread");
+    assert.deepEqual(index.turnById(threadId, "o-1"), o1Before);
+
+    const pages = await walkHistory(next, threadId, before);
+    assert.ok(pages.length >= 1);
+    assertNothingLost(store, threadId, window, pages);
     await next.stop();
   });
 });
