@@ -936,10 +936,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   "a subagent's own work, covered by its owner" and dropped it: a dev server left running in the
   background never read "monitoring" and never held a deploy's drain. An `agentId` names an owner
   only when it is not the row's own `taskId` (`orchestration/liveness.ts`) — Claude stamps only a
-  real owner and Codex/OpenCode type every row `subagent`, so neither reads differently — and a Grok
-  shell is a watch loop like any other, bounded by the registry's TTL and turn-boundary sweep. No
-  frame reporting a shell's end is mapped: the one capture was stopped 22 s into its `sleep 25`, and
-  the `x.ai/task_completed` the CLI names has no captured shape (fixtures README observation 29).
+  real owner and Codex/OpenCode type every live row `subagent` (Codex's typeless Stop/exit closer is
+  terminal either way), so none reads differently — and a Grok shell is a watch loop like any other,
+  bounded by the registry's TTL and turn-boundary sweep. No frame reporting a shell's end is mapped:
+  the one capture was stopped 22 s into its `sleep 25`, and the `x.ai/task_completed` the CLI names
+  has no captured shape (fixtures README observation 29).
   (2) The `spawn_subagent` call is the one thing about a subagent a client observably gets (the
   CLI's docs and binary; nothing captured — observation 36): its first frame starts a
   `taskType: "subagent"` task under the call's id, stamped with itself, `toolUseId` = the call (its

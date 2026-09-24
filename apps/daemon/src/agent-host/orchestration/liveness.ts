@@ -196,8 +196,9 @@ export function createLivenessRegistry(
     // Grok shell — a dev server left running neither read "monitoring" nor
     // held a deploy's drain. Such a row is the task's own, classified below
     // like any other: a shell is a watch loop, bounded by the TTL. Claude
-    // stamps only a real owner, and Codex and OpenCode type every row
-    // `subagent`, so neither reads differently.
+    // stamps only a real owner, and Codex and OpenCode type every live row
+    // `subagent` (Codex's Stop/exit closer carries no type, but it is terminal
+    // either way), so none of them reads differently.
     if (
       input.agentId !== undefined &&
       input.agentId.trim().length > 0 &&
