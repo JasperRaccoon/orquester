@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  derivePendingRequests,
   foldSubagentActivities,
   openWorkOf,
   type DomainEvent,
@@ -267,15 +268,42 @@ function leftoverRows(threadId: string): AppendableDomainEvent[] {
       streaming: true,
       turnId: null,
       agentId: "agent-1"
-    })
+    }),
+    // The subagent asks between parent turns: an approval and a structured
+    // question the dead process can never answer…
+    sunkRow(threadId, "agent-approval", "approval.requested", {
+      requestId: "req-approval",
+      requestKind: "command",
+      requestType: "command_execution_approval",
+      dismissible: false,
+      detail: "rm -rf build"
+    }, { tone: "approval", agentId: "agent-1" }),
+    sunkRow(threadId, "agent-question", "user-input.requested", {
+      requestId: "req-question",
+      questions: [PICK],
+      dismissible: false
+    }, { agentId: "agent-1" }),
+    // …and an async question, which a later user message answers.
+    sunkRow(threadId, "async-question", "user-input.requested", {
+      requestId: "req-async",
+      questions: [PICK],
+      dismissible: true,
+      responseMode: "message"
+    }, { turnId: "turn-1" })
   ];
 }
 
+/** A structured question with one option. */
+const PICK = { id: "q1", header: "Pick", question: "Which one?", options: [{ label: "A", description: "a" }] };
+
 /**
  * The closings `leftoverRows` owes, in the order a first load appends them —
- * and no message: one still streaming is left as the log has it.
+ * the parked requests first, as a teardown settles them, but never the async
+ * question; and no message: one still streaming is left as the log has it.
  */
 const LEFTOVER_CLOSINGS = [
+  ["approval.resolved", "req-approval"],
+  ["user-input.resolved", "req-question"],
   ["tool.completed", "toolu_parent"],
   ["tool.completed", "bgshell:shell-1"],
   ["tool.completed", "toolu_agent_call"],
@@ -301,6 +329,11 @@ function closingsIn(events: readonly DomainEvent[]): string[][] {
       closings.push([activity.activityKind, String(payload.toolUseId)]);
     } else if (activity.activityKind === "task.completed") {
       closings.push([activity.activityKind, String(payload.taskId)]);
+    } else if (
+      activity.activityKind === "approval.resolved" ||
+      activity.activityKind === "user-input.resolved"
+    ) {
+      closings.push([activity.activityKind, String(payload.requestId)]);
     }
   }
   return closings;
@@ -308,12 +341,18 @@ function closingsIn(events: readonly DomainEvent[]): string[][] {
 
 /**
  * "Open ⇒ running", read as every reader reads it once a session is live
- * again: no open call, no open background task, no active roster row — and the
- * idle child still idle. A message still streaming is left as the log has it.
+ * again: no open call, no open background task, no active roster row, no
+ * request but the async question — and the idle child still idle. A message
+ * still streaming is left as the log has it.
  */
 function assertNothingRunning(items: readonly ThreadItem[]): void {
   const activities = items.filter((item): item is ThreadActivityItem => item.kind === "activity");
   assert.deepEqual(openWorkOf(activities), { calls: [], tasks: [] });
+  const pending = derivePendingRequests(activities);
+  assert.deepEqual(
+    [...pending.approvals, ...pending.userInputs].map((request) => request.requestId),
+    ["req-async"]
+  );
   assert.deepEqual(
     foldSubagentActivities(activities, { sessionLive: true }).map((row) => [row.id, row.status]),
     [
@@ -913,6 +952,52 @@ describe("reconcile — a host start closes what a dead process left open", () =
     assert.deepEqual(
       message?.kind === "message" ? [message.text, message.streaming] : null,
       ["Looking at the tests", true]
+    );
+    await next.stop();
+  });
+
+  it("fails a dead host's parked requests on a thread at rest — a background subagent's — and keeps the async question", async () => {
+    const { store, threadId, logLength } = await idleThreadWithLeftovers();
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    const resolutions = appended.flatMap((event) =>
+      event.type === "thread.activity-appended" && event.payload.activity.activityKind.endsWith(".resolved")
+        ? [{ activity: event.payload.activity, metadata: event.metadata }]
+        : []
+    );
+    // The teardown's own decision: the approval cancelled, the question answered with nothing,
+    // each on its request's owner, the envelope naming the request.
+    assert.deepEqual(
+      resolutions.map(({ activity, metadata }) => [
+        activity.activityKind,
+        activity.payload,
+        activity.agentId,
+        metadata.requestId
+      ]),
+      [
+        [
+          "approval.resolved",
+          {
+            requestId: "req-approval",
+            requestKind: "command",
+            requestType: "command_execution_approval",
+            decision: "cancel"
+          },
+          "agent-1",
+          "req-approval"
+        ],
+        ["user-input.resolved", { requestId: "req-question", answers: {} }, "agent-1", "req-question"]
+      ]
+    );
+    // The first reader's card list: the async question alone, still answerable by a message.
+    assert.equal(read.kind, "snapshot");
+    if (read.kind !== "snapshot") return;
+    assert.deepEqual(read.thread.pending.approvals, []);
+    assert.deepEqual(
+      read.thread.pending.userInputs.map((question) => [question.requestId, question.responseMode]),
+      [["req-async", "message"]]
     );
     await next.stop();
   });

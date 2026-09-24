@@ -2,23 +2,35 @@
  * Agent host — what a dead process left running, and the rows that close it
  * (spec §3.1 "a running state never outlives its process", §3.3).
  *
- * An adapter settles its own work when its session ends cleanly: Claude's
+ * An adapter settles its own work when its session ends cleanly: it fails
+ * every parked request first (Claude's `cancelPendingRequests`, Codex's
+ * `failPendingRequests`, Grok's and OpenCode's settle), then Claude's
  * `closeLiveTasks` fails every call a subagent still has open and stops every
- * live task, a background shell's item before its task; Codex's
+ * live task, a background shell's item before its task, and Codex's
  * `closeOpenItems` fails every open item. A host that is killed — a crash, an
- * OOM, a deploy's hard stop — runs none of that, and the log keeps the calls
- * and tasks that process owned open for good. The fold keeps their opening
- * rows while they read open (`open-work.ts`, within its caps), and a roster row
- * with no terminal row reads running again the moment a session is live. So
- * the orchestrator appends, on a thread's first load in a host lifetime, the
- * rows its last process never wrote (`closeLeftoverWork` in
- * `orchestrator.ts`); this module derives them from the folded window alone —
- * reading the log past it is the cost the lazy boot exists to avoid. The fold
- * keeps the opening rows of open work within its caps, so what a crash left
- * open is normally in the window; a call whose opening row the window no
- * longer holds is not closed, and an older history page still shows it as it
- * was.
+ * OOM, a deploy's hard stop — runs none of that, and the log keeps the
+ * requests, calls and tasks that process owned open for good. A card nobody can
+ * answer blocks the composer ("Answer the request above first") and the MCP's
+ * `send_message`; the fold keeps a call's opening row while it reads open
+ * (`open-work.ts`, within its caps); a roster row with no terminal row reads
+ * running again the moment a session is live. So the orchestrator appends, on
+ * a thread's first load in a host lifetime, the rows its last process never
+ * wrote (`closeLeftoverWork` in `orchestrator.ts`); this module derives them
+ * from the folded window alone — reading the log past it is the cost the lazy
+ * boot exists to avoid. The fold keeps the opening rows of open work within
+ * its caps, so what a crash left open is normally in the window; a call whose
+ * opening row the window no longer holds is not closed, and an older history
+ * page still shows it as it was.
  *
+ * - **Every request the fold shows pending but a message-mode question** —
+ *   every approval, every structured question — is failed the way every
+ *   adapter's teardown fails one: ingestion's rows for its
+ *   `request.resolved {decision: "cancel"}` and `user-input.resolved
+ *   {answers: {}}`, on the request's own turn and owner, first. The fold then
+ *   closes it for good (`closedRequestIds`), and its card with it. A
+ *   message-mode question (`responseMode: "message"`) stays pending: it
+ *   parked no request, may outlive its turn by design, and a later user
+ *   message answers it.
  * - **Every open call** ({@link openWorkOf}) gets a `tool.completed`, `failed`
  *   as both adapters' teardown writes it, with {@link LEFTOVER_CALL_DETAIL}.
  *   Item type, title, turn, owner, parent call and data are its latest
@@ -38,8 +50,8 @@
  *   anchor retention never drops, like its start), its start's owner, and its
  *   start's turn — a rewind keeps or drops a row by its turn (`reduceReverted`),
  *   so a closer on any other turn could go with a rewind that keeps the start,
- *   and the agent would read running again. Calls come first, so a background
- *   shell's item closes before its task, as the adapters order it.
+ *   and the agent would read running again. Calls come before tasks, so a
+ *   background shell's item closes before its task, as the adapters order it.
  *
  * **A message still `streaming: true` is left as the log has it.** Every
  * `thread.message-sent` moves the message's span in the thread index to its
@@ -72,16 +84,24 @@ import {
   type ThreadFoldState
 } from "@orquester/api/agent-chat";
 
-import { taskLinkageActivityFields } from "../ingestion/activities.ts";
+import {
+  requestKindFromCanonicalRequestType,
+  taskLinkageActivityFields
+} from "../ingestion/activities.ts";
 
 /** The detail a call a dead process left open is closed with. */
 export const LEFTOVER_CALL_DETAIL = "Stopped when the agent host restarted.";
 
 /** One row that ends one unit of leftover work: a `thread.activity-appended` payload's activity. */
 export interface LeftoverClosing {
-  /** `call:<toolUseId>` or `task:<taskId>` — one per unit, so a caller can skip what it closed. */
+  /**
+   * `request:<requestId>`, `call:<toolUseId>` or `task:<taskId>` — one per
+   * unit, so a caller can skip what it closed.
+   */
   readonly key: string;
   readonly activity: ThreadActivityItem;
+  /** The request a resolution closes: its event's `metadata.requestId`, as the host's own settle writes it. */
+  readonly requestId?: string;
 }
 
 export interface LeftoverWorkInput {
@@ -103,19 +123,47 @@ const TASK_ROW_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The rows that close what `state` shows running: the open calls, then the
- * active tasks. `[]` when nothing is.
+ * The rows that close what `state` shows running: the parked requests, then
+ * the open calls, then the active tasks. `[]` when nothing is.
  *
  * The roster lists at most `ROSTER_LIMIT` rows, live ones first, so a thread
  * with more running tasks than that shows the rest only once these are
  * closed: fold these rows on and ask again, with {@link LeftoverWorkInput.closed}.
  */
 export function leftoverWorkClosings(
-  state: Pick<ThreadFoldState, "activities">,
+  state: Pick<ThreadFoldState, "activities" | "pending">,
   input: LeftoverWorkInput
 ): LeftoverClosing[] {
   const closed = input.closed ?? NOTHING_CLOSED;
   const closings: LeftoverClosing[] = [];
+
+  // First, as Claude's and Grok's teardown settle them before anything else.
+  const parked: ParkedRequest[] = [
+    ...(state.pending?.approvals ?? []).map((approval) => ({
+      requestId: approval.requestId,
+      kind: "approval" as const,
+      turnId: null
+    })),
+    ...(state.pending?.userInputs ?? [])
+      .filter((question) => question.responseMode !== "message")
+      .map((question) => ({
+        requestId: question.requestId,
+        kind: "question" as const,
+        turnId: question.turnId ?? null
+      }))
+  ];
+  if (parked.length > 0) {
+    const requestRows = requestRowsOf(state.activities);
+    for (const request of parked) {
+      const key = `request:${request.requestId}`;
+      if (closed.has(key)) continue;
+      closings.push({
+        key,
+        requestId: request.requestId,
+        activity: requestCloser(request, requestRows.get(request.requestId), input)
+      });
+    }
+  }
 
   for (const call of openWorkOf(state.activities).calls) {
     const key = `call:${call.toolUseId}`;
@@ -195,6 +243,73 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
     status: "failed",
     createdAt: input.now,
     updatedAt: input.now
+  };
+}
+
+/** A request the fold shows pending that no process of this host can answer. */
+interface ParkedRequest {
+  readonly requestId: string;
+  readonly kind: "approval" | "question";
+  /** The pending entry's own turn: a question carries it, an approval does not. */
+  readonly turnId: string | null;
+}
+
+const REQUEST_ROW_KINDS: ReadonlySet<string> = new Set(["approval.requested", "user-input.requested"]);
+
+/** Each request's latest `*.requested` row — the one the fold's pending entry is read from. One pass. */
+function requestRowsOf(activities: readonly ThreadActivityItem[]): Map<string, ThreadActivityItem> {
+  const rows = new Map<string, ThreadActivityItem>();
+  for (const activity of activities) {
+    if (!REQUEST_ROW_KINDS.has(activity.activityKind)) continue;
+    const requestId = presentId(asRecord(activity.payload)?.requestId);
+    if (requestId !== undefined) rows.set(requestId, activity);
+  }
+  return rows;
+}
+
+/**
+ * What ingestion writes for the adapters' teardown of a parked request —
+ * every adapter emits `request.resolved {decision: "cancel"}` for an approval
+ * and `user-input.resolved {answers: {}}` for a question — on the request's
+ * own turn and owner, so the resolution sits where the request does. The fold
+ * then closes the request for good (`closedRequestIds`), and its card with it.
+ */
+function requestCloser(
+  request: ParkedRequest,
+  row: ThreadActivityItem | undefined,
+  input: LeftoverWorkInput
+): ThreadActivityItem {
+  const owner = row === undefined ? undefined : ownerOf(row);
+  const envelope = {
+    kind: "activity" as const,
+    id: input.nextId(),
+    turnId: row?.turnId ?? request.turnId,
+    ...(owner !== undefined ? { agentId: owner } : {}),
+    createdAt: input.now,
+    updatedAt: input.now
+  };
+  if (request.kind === "question") {
+    return {
+      ...envelope,
+      tone: "info",
+      activityKind: "user-input.resolved",
+      summary: "User input submitted",
+      payload: { requestId: request.requestId, answers: {} }
+    };
+  }
+  const requestType = nonBlank(asRecord(row?.payload)?.requestType);
+  const requestKind = requestKindFromCanonicalRequestType(requestType);
+  return {
+    ...envelope,
+    tone: "approval",
+    activityKind: "approval.resolved",
+    summary: "Approval resolved",
+    payload: {
+      requestId: request.requestId,
+      ...(requestKind !== undefined ? { requestKind } : {}),
+      ...(requestType !== undefined ? { requestType } : {}),
+      decision: "cancel"
+    }
   };
 }
 

@@ -4240,18 +4240,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   /**
    * §3.1 "a running state never outlives its process", for a process that
    * never got to say so. A host killed under a turn, a background shell or a
-   * subagent fleet leaves their calls and tasks open in the log for good — the
-   * adapters' own teardown (Claude's `closeLiveTasks`, Codex's
-   * `closeOpenItems`) never ran — and a reader shows them running again the
-   * moment a session is live. On a thread's first load in a host lifetime no
-   * provider process of this host can own any of it yet, so the call and task
-   * rows that teardown would have written are appended here, through the one
-   * write path, before anyone can read the thread — inside `loadRuntime`
-   * before the runtime is published, or in the reconcile behind the readiness
-   * gate, before an orphaned turn is settled or continued (`leftover-work.ts`
-   * derives them from the folded window, and says why a message still
-   * streaming is left as it is). Never for a thread an adapter lists as live:
-   * what a live session runs is its own.
+   * subagent fleet leaves its parked requests, calls and tasks open in the log
+   * for good — the adapters' own teardown (Claude's `cancelPendingRequests`
+   * and `closeLiveTasks`, Codex's `failPendingRequests` and `closeOpenItems`)
+   * never ran — and a reader shows them waiting or running again: a card no
+   * process can answer blocks the composer, a task reads running the moment a
+   * session is live. On a thread's first load in a host lifetime no provider
+   * process of this host can own any of it yet, so the rows that teardown would
+   * have written are appended here, through the one write path, before anyone
+   * can read the thread — inside `loadRuntime` before the runtime is
+   * published, or in the reconcile behind the readiness gate, before an
+   * orphaned turn is settled or continued (`leftover-work.ts` derives them
+   * from the folded window, and says why a message-mode question and a
+   * message still streaming are left as they are). Never for a thread an
+   * adapter lists as live: what a live session runs is its own.
    *
    * In passes, because the roster lists at most `ROSTER_LIMIT` rows, live
    * ones first — past that many running tasks the rest come into view only
@@ -4279,7 +4281,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               runtime.id,
               "thread.activity-appended",
               { activity: closing.activity },
-              { occurredAt }
+              {
+                occurredAt,
+                ...(closing.requestId !== undefined
+                  ? { metadata: { requestId: closing.requestId } }
+                  : {})
+              }
             )
           )
         );

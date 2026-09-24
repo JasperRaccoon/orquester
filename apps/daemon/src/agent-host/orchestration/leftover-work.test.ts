@@ -1,8 +1,9 @@
 /**
  * What a host start closes of the work a dead process left open
- * (`leftover-work.ts`): which calls, tasks and messages the folded window
- * still shows running, and the rows that end each one — shaped as the
- * adapters' own teardown writes them, in the class of the row that opened it.
+ * (`leftover-work.ts`): which requests, calls and tasks the folded window
+ * still shows pending or running, and the rows that end each one — shaped as
+ * the adapters' own teardown writes them, in the class of the row that opened
+ * it — and what it leaves: a message-mode question, a message still streaming.
  * The first load and the orphaned-thread reconcile that append them are
  * `reconcile.test.ts`'s.
  */
@@ -465,6 +466,97 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
         ["assistant:parent", true]
       ]
     );
+  });
+
+  it("fails every parked request but a message-mode question, first, as the adapters' teardown does", () => {
+    const question = { id: "q1", header: "Pick", question: "Which one?", options: [{ label: "A", description: "a" }] };
+    const state = foldOf([
+      row("t-start", "task.started", { taskId: "agent-1", agentKind: "agent", title: "Explorer" }),
+      row("c-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }, {
+        agentId: "agent-1"
+      }),
+      // A background subagent's approval and question, raised between parent turns.
+      row("approval", "approval.requested", {
+        requestId: "req-approval",
+        requestKind: "command",
+        requestType: "command_execution_approval",
+        dismissible: false,
+        detail: "rm -rf build"
+      }, { tone: "approval", agentId: "agent-1" }),
+      row("question", "user-input.requested", { requestId: "req-question", questions: [question], dismissible: false }, {
+        agentId: "agent-1",
+        turnId: "turn-1"
+      }),
+      // An async question may outlive its turn and still take a later message.
+      row("async", "user-input.requested", {
+        requestId: "req-async",
+        questions: [question],
+        dismissible: true,
+        responseMode: "message"
+      }),
+      // Settled already: no closing.
+      row("done", "approval.requested", {
+        requestId: "req-done",
+        requestKind: "command",
+        requestType: "command_execution_approval",
+        dismissible: false
+      }, { tone: "approval" }),
+      row("done-resolved", "approval.resolved", {
+        requestId: "req-done",
+        requestType: "command_execution_approval",
+        decision: "accept"
+      }, { tone: "approval" })
+    ]);
+    assert.deepEqual(state.pending.approvals.map((entry) => entry.requestId), ["req-approval"]);
+
+    const closings = closingsOf(state);
+    // Settled before anything else, as Claude's and Grok's teardown settle them.
+    assert.deepEqual(closings.map((closing) => closing.key), [
+      "request:req-approval",
+      "request:req-question",
+      "call:toolu_1",
+      "task:agent-1"
+    ]);
+    // What ingestion writes for the teardown's `request.resolved {decision: "cancel"}`…
+    assert.deepEqual(activityOf(closings[0]), {
+      kind: "activity",
+      id: "closing-1",
+      tone: "approval",
+      activityKind: "approval.resolved",
+      summary: "Approval resolved",
+      payload: {
+        requestId: "req-approval",
+        requestKind: "command",
+        requestType: "command_execution_approval",
+        decision: "cancel"
+      },
+      turnId: null,
+      agentId: "agent-1",
+      createdAt: NOW,
+      updatedAt: NOW
+    });
+    // …and for its `user-input.resolved {answers: {}}`, on the request's own turn and owner.
+    assert.deepEqual(activityOf(closings[1]), {
+      kind: "activity",
+      id: "closing-2",
+      tone: "info",
+      activityKind: "user-input.resolved",
+      summary: "User input submitted",
+      payload: { requestId: "req-question", answers: {} },
+      turnId: "turn-1",
+      agentId: "agent-1",
+      createdAt: NOW,
+      updatedAt: NOW
+    });
+    assert.deepEqual(
+      closings.map((closing) => closing.requestId),
+      ["req-approval", "req-question", undefined, undefined],
+      "the envelope's metadata names the request, as the host's own settle does"
+    );
+
+    const after = applied(state, closings);
+    assert.deepEqual(after.pending.approvals, []);
+    assert.deepEqual(after.pending.userInputs.map((entry) => entry.requestId), ["req-async"]);
   });
 
   it("skips what a caller already closed, and finds nothing in a thread with nothing open", () => {
