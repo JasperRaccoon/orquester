@@ -188,10 +188,12 @@ function windowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly Started
  * an end naming the agent in `taskId` that is not stamped with the agent's own id (a nested Claude agent's end is
  * stamped with its owner's), when it is the agent's last task row (`isTaskRowOf`) — a Claude subagent that resumes
  * launches again with a new `task.started`, so a run after that end would show as a later launch. An end stamped with
- * the agent's own id (Codex, OpenCode, Grok) bounds nothing, because of a gap in those adapters: they write a child's
- * launch and end once, and a child resumed after its end keeps writing rows under its id with no new launch
- * (OpenCode's `task` tool resumes a child session; Codex's `interacted` after `completed` writes only
- * `task.progress`), so rows can follow that end. Null when nothing is there to go by.
+ * the agent's own id (Codex, OpenCode, Grok) bounds nothing. Codex and OpenCode now launch a child again too when it is
+ * re-engaged after its end (the relaunch contract, AGENTS.md "Agent rows must survive resumes and retention"), but a
+ * log written before that holds children resumed after their end that kept writing rows under their id with no new
+ * launch (OpenCode's `task` tool resumed a child session; Codex's `interacted` after `completed` wrote only
+ * `task.progress`), and a snapshot cannot tell the two apart — so rows can still follow that end, and the floor stays.
+ * Null when nothing is there to go by.
  */
 function agentWindowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[], agentId: string): number | null {
   let own: ThreadActivityItem | undefined;

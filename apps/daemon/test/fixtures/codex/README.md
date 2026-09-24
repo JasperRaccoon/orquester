@@ -652,3 +652,37 @@ Points for the adapter:
 - **`configWarning` and `remoteControl/status/changed` arrive before you ask for anything** — both
   land between `initialize` and the first request, so a client that only starts listening after
   `thread/start` will miss them.
+
+## 19. A collab child works again only when its own thread starts a turn — read from the CLI, not captured
+
+**Not captured.** No file in this set spawns a collab child. This is read from the generated
+bindings (`_generated/protocol/v2/`, 0.154.0) and from the tool descriptions the installed
+**0.155.1** gives the model, for the relaunch contract (plan
+`2026-09-24-subagent-output-long-calls-and-composer-sends`, Task 1).
+
+- The parent records `subAgentActivity {id, kind, agentThreadId, agentPath}` items, `kind` one of
+  `started | interacted | interrupted | completed`; the bindings say nothing about when each fires.
+- A finished agent stays addressable. `close_agent`: *"Completed agents remain open and count
+  toward the concurrency limit until closed."* `resume_agent`: *"Resume a previously closed agent by
+  id so it can receive send_input and wait_agent calls."* `followup_task`: *"… trigger a turn if it
+  is idle."* And v2 `send_message`: *"The message will be delivered promptly. Does not trigger a new
+  turn."*
+
+So an agent works again only when its OWN thread starts a turn, and an `interacted` record may be a
+message that starts nothing. The normaliser (`normalise.ts`) therefore:
+
+- starts the task at `subAgentActivity started` under `toolUseId: "codex-launch:<item id>"`, and
+  keeps the record's path and name for later starts;
+- at a child's own `turn/started` with no turn in progress — when the child settled a run before
+  (its `turn/completed` or `thread/closed`, a `subAgentActivity` `completed`/`interrupted`, or a
+  Stop) or this session never saw it launched (a resume after a host restart) — starts it again
+  under `codex-run:<turn id>`, before the turn's progress row, and counts it towards the parent
+  turn's `hasSubagents`: the roster fold reopens a settled agent only on a start naming a different
+  launch id, and the progress row, replaced in place at its first position, reopens nothing;
+- writes `interacted` as a progress row with no status, so it never makes the agent live.
+
+Which calls raise `interacted`, when `completed` fires relative to the child's own
+`turn/completed`, and how `subAgentActivity` is ordered against the child's own notifications are
+unverified; a capture of `spawn_agent` → `wait_agent` → `followup_task` would settle all three.
+Nothing guards the last one: a `completed` record that arrived after the child's next turn had
+started would still write its `task.completed`, and settle the new run.

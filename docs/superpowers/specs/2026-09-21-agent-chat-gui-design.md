@@ -3603,6 +3603,21 @@ and the roster is
 capped, evicting live rows last and newest-settled first, without reshuffling rows that stay visible.
 *T3: `packages/client-runtime/src/state/subagentRuntime.ts:22-30` — `RuntimeSubagentStatus`, the same eight values as `RuntimeTaskStatus`; `:426-433` — `TASK_COMPLETED_STATUS`, `stopped` → `interrupted`; `:89-105` — the terminal and active sets; `:59-88` — `RuntimeSubagent`; `:318-397` — `fillMetadata`, "never downgrades known values to null"; `:659-669` — the `sessionLive === false` → `interrupted` derivation and its review finding; `:671-681` — `ROSTER_LIMIT = 100` with the live → idle → newest-settled ranking; `:847-848` — "Updates and the >100-agent retention ranking must never reshuffle rows that remain visible"; `apps/web/src/components/AgentsPanel.tsx:32-40` — "In-flight states all present as Working"*
 
+*Built: **a re-engaged agent reopens only on a new launch.** The fold reopens a terminal row on a
+`task.started` whose `toolUseId` differs from the previous start's — an unchanged one is a late
+delivery, T3's guard — and an `idle` row on any start; that was Claude's resume, which relaunches
+a subagent under its old task id with a new tool call. Every adapter that surfaces agents now
+keeps the same contract (AGENTS.md, "Agent rows must survive resumes and retention"): an agent's
+first start carries a launch id, and re-engaging it starts it again under a new one, before any
+row of the new run. OpenCode's launch id is the parent `task` part's `callID` — a `task` call
+with `task_id` resumes the child under a new call; Codex's is `codex-launch:<item id>` at the
+launch record, then `codex-run:<turn id>` at a settled child's own next turn. The start is the one
+row of a run retention never drops: a status row would reopen the agent only until its window
+dropped that row, and the old end would read again mid-run. An agent first launched before
+2026-09-24 carries no launch id, and a relaunch from a terminal state does not reopen it
+(`packages/api/src/agent-chat/roster.ts`, `adapters/opencode/normalize.ts`,
+`adapters/codex/normalise.ts`).*
+
 Background tasks (`agentKind: "background"`) list in the same roster with a distinct icon, and a
 **live background row is never collapsed behind "N more" and never fades**: it outlives the turn
 that started it, so it stays on screen until it ends or is stopped.
