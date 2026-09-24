@@ -114,3 +114,32 @@ export function fullOutputNotes(output: FullOutput): string[] {
   }
   return notes;
 }
+
+/** The viewer's reads, one at a time ({@link createViewerReads}). */
+export interface ViewerReads {
+  /** Retire the read in flight, if any, and start one: its signal. */
+  begin(): AbortSignal;
+  /** Retire the read in flight, if any: the viewer closed. */
+  retire(): void;
+}
+
+/**
+ * One read at a time for a viewer the user can close or reopen while a read
+ * is in flight. A retired read's answer is dropped — never painted over what
+ * the user looks at now, nor reopening a viewer they closed — and a streamed
+ * output, read window by window, stops asking for the next window.
+ */
+export function createViewerReads(): ViewerReads {
+  let current: AbortController | null = null;
+  return {
+    begin() {
+      current?.abort();
+      current = new AbortController();
+      return current.signal;
+    },
+    retire() {
+      current?.abort();
+      current = null;
+    }
+  };
+}

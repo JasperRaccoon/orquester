@@ -5,7 +5,13 @@ import type { ThreadItemOutputResponse, ThreadItemResponse } from "@orquester/ap
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { WorkLogEntry } from "./contracts";
 import { deriveWorkLogEntries } from "./entries.logic";
-import { fullOutputNotes, fullOutputSourceOf, readFullOutput, type FullOutputReads } from "./full-output";
+import {
+  createViewerReads,
+  fullOutputNotes,
+  fullOutputSourceOf,
+  readFullOutput,
+  type FullOutputReads
+} from "./full-output";
 import { activity, resetBuilders } from "./test-helpers";
 
 beforeEach(() => {
@@ -125,5 +131,19 @@ describe("the full-output viewer's read", () => {
     const viewer = reads({ streamedOutput: async () => Promise.reject(new Error("The agent host is restarting.")) });
     await assert.rejects(() => readFullOutput(viewer, "a1", "streamed"), /restarting/);
     assert.deepEqual(viewer.asked, ["output a1"]);
+  });
+});
+
+describe("the viewer's reads, one at a time", () => {
+  it("a new read retires the one before it, and closing the viewer retires the last", () => {
+    const viewer = createViewerReads();
+    const first = viewer.begin();
+    const second = viewer.begin();
+    assert.equal(first.aborted, true, "its answer is dropped, and its next window never asked for");
+    assert.equal(second.aborted, false);
+    viewer.retire();
+    assert.equal(second.aborted, true, "a closed viewer is never reopened by a late answer");
+    viewer.retire();
+    assert.equal(viewer.begin().aborted, false, "and the next read starts afresh");
   });
 });

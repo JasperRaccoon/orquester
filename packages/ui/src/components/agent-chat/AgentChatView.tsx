@@ -51,6 +51,7 @@ import {
 } from "../../lib/agent-chat/rewind.logic";
 import { cn } from "../../lib/cn";
 import {
+  createViewerReads,
   fullOutputNotes,
   readFullOutput,
   type FullOutputSource
@@ -647,25 +648,18 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // slice is deliberate — a 200 KB unslimmed payload is something the user
   // asked to look at once, not thread state every later render pays for.
   const [viewer, setViewer] = React.useState<ChatViewerState | null>(null);
-  // The viewer's read in flight. Opening another, or closing the viewer,
-  // retires it: its answer is dropped rather than painted over what the user
-  // looks at now — or reopening a viewer they closed — and a streamed output,
-  // read window by window, stops asking for the next one.
-  const viewerRead = React.useRef<AbortController | null>(null);
-  const beginViewerRead = React.useCallback((): AbortSignal => {
-    viewerRead.current?.abort();
-    const controller = new AbortController();
-    viewerRead.current = controller;
-    return controller.signal;
-  }, []);
+  // One read at a time (`createViewerReads`): opening another, or closing the
+  // viewer, retires the one in flight, whose answer is then dropped rather
+  // than painted over what the user looks at now — or reopening a viewer they
+  // closed — and a streamed output stops asking for its next window.
+  const [viewerReads] = React.useState(createViewerReads);
   const closeViewer = React.useCallback(() => {
-    viewerRead.current?.abort();
-    viewerRead.current = null;
+    viewerReads.retire();
     setViewer(null);
-  }, []);
+  }, [viewerReads]);
   const openTurnDiff = React.useCallback(
     (turnCount: number) => {
-      const signal = beginViewerRead();
+      const signal = viewerReads.begin();
       setViewer({ kind: "diff", title: `Turn ${turnCount}`, loading: true });
       void api
         .agentChatTurnDiff(sessionId, turnCount)
@@ -688,11 +682,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           });
         });
     },
-    [api, beginViewerRead, sessionId]
+    [api, sessionId, viewerReads]
   );
   const loadFullOutput = React.useCallback(
     (itemId: string, source?: FullOutputSource) => {
-      const signal = beginViewerRead();
+      const signal = viewerReads.begin();
       setViewer({ kind: "output", title: "Full output", loading: true });
       void readFullOutput(
         {
@@ -722,13 +716,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           });
         });
     },
-    [api, beginViewerRead, sessionId]
+    [api, sessionId, viewerReads]
   );
   // A viewer belongs to the thread that opened it; its read, to the view.
   React.useEffect(() => {
     closeViewer();
-    return () => viewerRead.current?.abort();
-  }, [closeViewer, sessionId]);
+    return () => viewerReads.retire();
+  }, [closeViewer, sessionId, viewerReads]);
 
   /**
    * Click-through from a changed-file row to the file browser.
