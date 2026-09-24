@@ -4,10 +4,12 @@
  * scripted adapter and a temporary in-memory store; the assertions are on the
  * resulting head and on which continuation call the adapter received — and on
  * what a thread's first load closes of the work a dead process left open (one
- * of those on the real store, for what reaches the disk). The late rows those
- * closings write stretch an old turn's range in the thread index, and so does
- * a background agent's late completion: the "Load older" walks over a real
- * index are here, a rewind that keeps such a turn among them.
+ * of those on the real store, for what reaches the disk), and when a turn
+ * that process was running ends (its last write, never the restart). The
+ * late rows those closings write stretch an old turn's range in the thread
+ * index, and so does a background agent's late completion: the "Load older"
+ * walks over a real index are here, a rewind that keeps such a turn among
+ * them.
  */
 
 import assert from "node:assert/strict";
@@ -194,6 +196,28 @@ function sunkRow(
       ...over
     }
   });
+}
+
+/** `event` written at `at` — its envelope, and its row when it carries one — as a host whose clock read `at` wrote it. */
+function writtenAt(event: AppendableDomainEvent, at: string): AppendableDomainEvent {
+  if (event.type !== "thread.activity-appended") {
+    return { ...event, occurredAt: at } as AppendableDomainEvent;
+  }
+  return {
+    ...event,
+    occurredAt: at,
+    payload: { ...event.payload, activity: { ...event.payload.activity, createdAt: at, updatedAt: at } }
+  } as AppendableDomainEvent;
+}
+
+/** Every step of the log in time order: no line is stamped before the line above it. */
+function assertTimesNeverGoBack(events: readonly DomainEvent[]): void {
+  const back = events.flatMap((event, index) =>
+    index > 0 && Date.parse(event.occurredAt) < Date.parse(events[index - 1]!.occurredAt)
+      ? [`seq ${event.seq} (${event.type}) at ${event.occurredAt} after ${events[index - 1]!.occurredAt}`]
+      : []
+  );
+  assert.deepEqual(back, [], "the log's times never go back");
 }
 
 /**
@@ -1051,7 +1075,7 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await third.stop();
   });
 
-  it("the orphaned-thread reconcile closes them too, before it settles the turn", async () => {
+  it("the orphaned-thread reconcile closes them too, once it has settled the turn at the time its process last wrote", async () => {
     const first = createTestHost();
     const threadId = await first.createThread();
     await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
@@ -1061,6 +1085,7 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await first.stop();
     assert.equal(headOf(first.store, threadId).session.status, "running");
     const logLength = first.store.logs.get(threadId)!.length;
+    const lastWrite = first.store.logs.get(threadId)!.at(-1)!.occurredAt;
 
     const next = createTestHost({ store: first.store, continuationEnabled: () => false });
     await next.orchestrator.reconcile();
@@ -1071,15 +1096,23 @@ describe("reconcile — a host start closes what a dead process left open", () =
     const settledAt = appended.findIndex(
       (event) => event.type === "thread.session-set" && event.payload.session.status === "error"
     );
-    assert.ok(settledAt !== -1, "the orphaned turn was settled");
-    assert.deepEqual(closingsIn(appended.slice(0, settledAt)), LEFTOVER_CLOSINGS, "all of it before the settle");
-    // A task's row rides the turn the head said was running, as a teardown's does.
-    const stopped = appended.flatMap((event) =>
-      event.type === "thread.activity-appended" && event.payload.activity.activityKind === "task.completed"
-        ? [event.payload.activity.turnId]
-        : []
-    );
-    assert.deepEqual(stopped, ["turn-1", "turn-1"]);
+    // The turn ended when its process died: the reconcile's first row, stamped
+    // with the time of the last line that process wrote…
+    assert.equal(settledAt, 0, "the orphaned turn is settled first");
+    assert.equal(appended[0]!.occurredAt, lastWrite);
+    // …and what the host found it left open is noticed after it.
+    assert.deepEqual(closingsIn(appended.slice(settledAt + 1)), LEFTOVER_CLOSINGS, "all of it after the settle");
+    // A parked request's cancellation still rides the turn the head said was
+    // running, as a Stop's does, though the settle came first; a task's stop
+    // rides its start's turn, as a teardown's does.
+    const turnsOf = (kinds: readonly string[]) =>
+      appended.flatMap((event) =>
+        event.type === "thread.activity-appended" && kinds.includes(event.payload.activity.activityKind)
+          ? [event.payload.activity.turnId]
+          : []
+      );
+    assert.deepEqual(turnsOf(["approval.resolved", "user-input.resolved"]), ["turn-1", "turn-1"]);
+    assert.deepEqual(turnsOf(["task.completed"]), ["turn-1", "turn-1"]);
     assert.equal(headOf(first.store, threadId).session.status, "error");
 
     assertNothingRunning(snapshotItems(await next.orchestrator.readThread(threadId)));
@@ -1317,6 +1350,138 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await third.settle();
     assert.equal(first.store.logs.get(threadId)!.length, logLength + fleet, "a second load appends nothing");
     await third.stop();
+  });
+});
+
+describe("reconcile — a crash-settled turn ends when its process died", () => {
+  /**
+   * A turn that worked `workedMs` and then lost its host mid-call: the call's
+   * start is the last line the process wrote. Returns that line's time.
+   */
+  async function orphanedAfter(host: TestHost, threadId: string, workedMs: number): Promise<string> {
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await host.settle();
+    host.clock.advance(workedMs);
+    const lastWrite = host.clock.nowIso();
+    await host.orchestrator.ingestionSink(threadId, [
+      writtenAt(
+        sunkRow(threadId, "call-start", "tool.started", {
+          itemType: "command_execution",
+          toolUseId: "toolu_build",
+          status: "inProgress",
+          title: "Bash",
+          data: { toolName: "Bash", input: { command: "npm run build" } }
+        }, { turnId: "turn-1", status: "inProgress" }),
+        lastWrite
+      )
+    ]);
+    await host.settle();
+    return lastWrite;
+  }
+
+  const turnOf = (read: Awaited<ReturnType<TestHost["orchestrator"]["readThread"]>>, turnId: string | null) => {
+    assert.equal(read.kind, "snapshot");
+    const turn = read.kind === "snapshot" ? read.thread.turns.find((candidate) => candidate.turnId === turnId) : undefined;
+    assert.ok(turn, `turn ${turnId}`);
+    return turn;
+  };
+
+  it("settles an orphaned turn at the time its process last wrote: its duration is its own, not the downtime's", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    const lastWrite = await orphanedAfter(first, threadId, 90_000);
+    await first.stop();
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    // The host comes back an hour later.
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.set(Date.parse(lastWrite) + 3_600_000);
+    const restart = next.clock.nowIso();
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const turn = turnOf(await next.orchestrator.readThread(threadId), "turn-1");
+    assert.deepEqual([turn.state, turn.completedAt], ["failed", lastWrite]);
+    assert.equal(Date.parse(turn.completedAt!) - Date.parse(turn.startedAt!), 90_000, "90 s of work, not the hour it lay dead");
+
+    // The settle alone is backdated, to the line before it; what the host
+    // noticed at the restart — the error, the call it left open — says when.
+    const log = first.store.logs.get(threadId)!;
+    const appended = log.slice(logLength);
+    assert.deepEqual(
+      appended.map((event) => [
+        event.type === "thread.activity-appended" ? event.payload.activity.activityKind : event.type,
+        event.occurredAt
+      ]),
+      [
+        ["thread.session-set", lastWrite],
+        ["runtime.error", restart],
+        ["tool.completed", restart]
+      ]
+    );
+    assertTimesNeverGoBack(log);
+    await next.stop();
+  });
+
+  it("an orphan with a stale pending turn behind it: both turns end when the process last wrote", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await orphanedAfter(first, threadId, 30_000);
+    await first.stop();
+    // A second message landed while the turn ran, and its send never happened.
+    first.clock.advance(5_000);
+    const lastWrite = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, lastWrite);
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.set(Date.parse(lastWrite) + PENDING_TURN_GRACE_MS + 3_600_000);
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const read = await next.orchestrator.readThread(threadId);
+    assert.deepEqual(
+      [turnOf(read, "turn-1").completedAt, turnOf(read, null).completedAt],
+      [lastWrite, lastWrite]
+    );
+    const log = first.store.logs.get(threadId)!;
+    assert.deepEqual(
+      [log[logLength]!.type, log[logLength]!.occurredAt],
+      ["thread.session-set", lastWrite],
+      "the settle is the reconcile's first row"
+    );
+    assertTimesNeverGoBack(log);
+    await next.stop();
+  });
+
+  it("a stale pending turn a first load settles ends when its process last wrote, and its notice says when it was noticed", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.stop();
+    const requestedAt = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, requestedAt);
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+
+    const turn = turnOf(read, null);
+    assert.deepEqual([turn.state, turn.completedAt], ["interrupted", requestedAt]);
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(
+      appended.map((event) => [
+        event.type === "thread.activity-appended" ? event.payload.activity.activityKind : event.type,
+        event.occurredAt
+      ]),
+      [
+        ["thread.session-set", requestedAt],
+        ["provider.turn.start.failed", next.clock.nowIso()]
+      ]
+    );
+    await next.stop();
   });
 });
 

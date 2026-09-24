@@ -859,6 +859,29 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.deepEqual(after.pending.userInputs.map((entry) => entry.requestId), ["req-async"]);
   });
 
+  it("cancels on the turn the caller names when it settled the turn first — the one the head said was running", () => {
+    const state = foldOf([
+      ...turn("turn-7"),
+      row("approval", "approval.requested", {
+        requestId: "req-1",
+        requestKind: "command",
+        requestType: "command_execution_approval",
+        dismissible: false
+      }, { tone: "approval", turnId: "turn-7" }),
+      // The orphaned-thread reconcile settles the turn before it closes anything.
+      event("thread.session-set", { session: { status: "error", activeTurnId: null } })
+    ]);
+    const cancelled = (runningTurnId?: string | null) =>
+      leftoverWorkClosings(state, {
+        now: NOW,
+        nextId: () => "unused",
+        ...(runningTurnId !== undefined ? { runningTurnId } : {})
+      }).map((closing) => closing.activity.turnId);
+    assert.deepEqual(cancelled("turn-7"), ["turn-7"]);
+    // Named nothing, the head decides: no turn is running any more.
+    assert.deepEqual(cancelled(), [null]);
+  });
+
   it("skips what a caller already closed, and finds nothing in a thread with nothing open", () => {
     const state = foldOf([
       row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }, {

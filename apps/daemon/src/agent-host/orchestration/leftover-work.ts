@@ -26,7 +26,10 @@
  *   every approval, every structured question — is cancelled first, the way
  *   the host cancels one itself on a Stop: `settlePendingRequests`' own row
  *   ("Request cancelled", "Question cancelled", `cancelledRequestActivity` in
- *   `events.ts`) on the turn the head says is running, never the provider's
+ *   `events.ts`) on the turn the head says is running — or said, when the
+ *   caller settled that turn first ({@link LeftoverWorkInput.runningTurnId}:
+ *   the orphaned-thread reconcile ends it at the time its process last wrote,
+ *   before anything is closed) — never the provider's
  *   "resolved"/"submitted" rows the adapters' teardown leads to, which would
  *   say someone answered. The fold then closes it for good
  *   (`closedRequestIds`), and its card with it. A message-mode question
@@ -137,6 +140,14 @@ export interface LeftoverWorkInput {
   readonly nextId: () => string;
   /** Keys of units already closed: a later pass skips them. */
   readonly closed?: ReadonlySet<string>;
+  /**
+   * The turn a Stop would cancel a parked request in: the one the head said
+   * was running before the caller wrote anything. The head's own when absent;
+   * a caller that settles the turn first — the orphaned-thread reconcile, which
+   * ends the turn at the time its process last wrote — names the turn it
+   * settled.
+   */
+  readonly runningTurnId?: string | null;
 }
 
 const NOTHING_CLOSED: ReadonlySet<string> = new Set();
@@ -174,8 +185,10 @@ export function leftoverWorkClosings(
       .filter((question) => question.responseMode !== "message")
       .map((question) => ({ requestId: question.requestId, kind: "question" as const }))
   ];
-  // The turn a Stop cancels its requests in: the one the head says is running.
-  const turnId = state.head?.session.activeTurnId ?? null;
+  // The turn a Stop cancels its requests in: the one the head says is running
+  // — or said, before a caller that settled it first.
+  const turnId =
+    input.runningTurnId !== undefined ? input.runningTurnId : (state.head?.session.activeTurnId ?? null);
   for (const request of parked) {
     const key = `request:${request.requestId}`;
     if (closed.has(key)) continue;
