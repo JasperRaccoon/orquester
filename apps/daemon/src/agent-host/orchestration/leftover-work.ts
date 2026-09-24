@@ -82,10 +82,11 @@
  * may be an old one, and the index then grows that turn's range over it — the
  * late-reference rule, bounded at `MAX_LATE_REFERENCE_BYTES` past the next
  * turn's start (`extendReferenced` in `index/indexer.ts`), which pages over
- * without losing a row. As with every late reference, a later rewind that
- * keeps that turn and drops the ones after it brings the dropped turns' rows
- * inside the stretch back onto a history page: the revert-cut filter
- * (`eventsOutsideRevertCuts`) keeps whatever lies in a surviving turn's range.
+ * without losing a row. A later rewind that keeps that turn and drops the ones
+ * after it clips the range at its cut (`clipAtCut`), as it clips every
+ * surviving range: no history page serves the dropped turns' rows, and the
+ * closer, past the cut, leaves the history with them — the fold keeps it by
+ * its turn, and the window shows it while retention does.
  *
  * Pure: no clock, no ids, no I/O of its own — the caller hands in both.
  */

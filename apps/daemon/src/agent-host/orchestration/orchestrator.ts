@@ -4885,9 +4885,10 @@ function capTurnOf(
 /**
  * A block's events without a revert's cut: the index's turn ranges tile the
  * log except where a revert removed turns — those turns' lines and the
- * `thread.reverted` itself belong to no turn — so only events inside some
- * turn's `[firstSeq, lastSeq]`, or before the first turn (the thread's
- * preamble), are folded. Folding the cut would bring back the removed turns
+ * `thread.reverted` itself belong to no turn, a surviving range ending where
+ * the first removed turn began (`clipAtCut` in `index/indexer.ts`) — so only
+ * events inside some turn's `[firstSeq, lastSeq]`, or before the first turn
+ * (the thread's preamble), are folded. Folding the cut would bring back the removed turns
  * and apply a `turnCount` counted from the thread's first turn, not the
  * block's. `turns` are the block's own, in ordinal order.
  */

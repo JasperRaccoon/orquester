@@ -569,7 +569,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   survive an index rebuild and a revert; a malformed or foreign one is a first-page request. A page
   never splits a streamed message (`messagesSpanning` moves both boundaries back to the message's
   first chunk), and a revert's cut (the removed turns' lines and the `thread.reverted` itself) is
-  never folded into a page. The window boundary behind `hasOlder` is the newest first row of any
+  never folded into a page — not even inside a surviving turn's range. A late event naming a turn
+  grows its range up to `MAX_LATE_REFERENCE_BYTES` past the next turn's start (`extendReferenced`:
+  a turn-end capture, a first-load closer, every row of a call a background agent started in it and
+  finished later — the Claude normaliser stamps a call's rows with the turn it started in), so a
+  rewind that kept such a turn left it reaching into the turns it removed, and "Load older" served
+  their rows again. A revert now clips every surviving range at its cut, the first removed turn's
+  first line (`clipAtCut` in `index/indexer.ts`, `INDEX_SCHEMA_VERSION` 4). The late rows past the cut
+  leave the history with them, as their item positions and search rows leave the index at the
+  revert; the fold keeps them by their turn (`reduceReverted`), and the window shows them while
+  retention does. A deploy of the bump deletes a version-3 `index.sqlite` and rebuilds it once, in
+  the background, by the boot catch-up (one thread at a time, never on the readiness path): until a
+  thread's catch-up reaches it, it offers nothing older and search misses it — and a tab snapshotted
+  before then, until its next snapshot. The window boundary behind `hasOlder` is the newest first row of any
   FULL retention class (the parent's 500, an agent's 200, the 2 000 across agents —
   `windowBoundary`), never simply the oldest activity the fold holds: anchors, open
   questions and the opening rows of running work survive out of age order, and a fleet
@@ -748,10 +760,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   passes that skip what an earlier one closed, because the roster lists 100 rows, live first. A
   second load finds nothing to close. A closer on an old turn is a late reference: the index grows
   that turn's range over it, within `MAX_LATE_REFERENCE_BYTES` of the next turn's start
-  (`extendReferenced`), and "Load older" still serves every row — but, as with every late reference,
-  a later rewind that keeps that turn and drops the ones after it brings the dropped turns' rows
-  inside the stretch back on a history page (the revert-cut filter keeps whatever lies in a
-  surviving turn's range). On the owner's host (2026-09-24) the three big threads' first loads
+  (`extendReferenced`), and "Load older" still serves every row; a later rewind that keeps that turn
+  and drops the ones after it clips the range at its cut, as it clips every surviving range (the
+  history-pages gotcha), and the closer leaves the history with the dropped turns. On the owner's host (2026-09-24) the three big threads' first loads
   would append 1–9 rows each (their live work at the time; no request was pending) and leave the
   270–1 800 messages still flagged streaming in each window as they are. **Their readers decide
   instead, by one rule:** a message reads as streaming only by `isMessageStreaming`
