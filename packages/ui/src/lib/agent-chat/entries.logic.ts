@@ -418,10 +418,12 @@ export function isAgentInternalActivity(activity: ThreadActivityItem): boolean {
 
 /**
  * Claude wrote a subagent's command and file-change output with no agent id
- * while every other row of the call carried one (fixture claude/07; the
- * adapter stamps the chunk now). Read as it stands, such a chunk is the
- * PARENT's: a stray "Tool output" row in the parent timeline, and nothing in
- * the agent's drill-in. So, on the read side only — the fold, its retention
+ * while every other row of the call carried one (fixture claude/07); the
+ * adapter stamps the chunk now, but a log keeps what a host from before that
+ * wrote, and an older host surviving a deploy writes such chunks until its
+ * drain-restart. Read as it stands, such a chunk is the PARENT's: a stray
+ * "Tool output" row in the parent timeline, and nothing in the agent's
+ * drill-in. So, on the read side only — the fold, its retention
  * and the history bridge keep mirroring the log — an UNSTAMPED `tool.output`
  * row inherits the owner of its call's lifecycle rows (`tool.started`,
  * `tool.updated`, `tool.completed`, `tool.denied` of the same `toolUseId`
@@ -566,7 +568,9 @@ export function deriveWorkLogEntries(
     }
   }
 
-  // Older logs: read only once an unstamped output chunk is met.
+  // For an older log's unstamped chunk (see `callOwnersOf`). Built at the
+  // first unstamped chunk — and the parent's own command output is unstamped
+  // too, so that is nearly every thread: one more pass over the input.
   let callOwners: Map<string, string> | undefined;
 
   const derived: DerivedWorkLogEntry[] = [];
@@ -888,6 +892,8 @@ export function splitThreadItems(
  * own too (see `callOwnersOf`).
  */
 export function itemsForAgent(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
+  // Built at the first unstamped chunk; the parent's own output is one, so
+  // nearly always.
   let callOwners: Map<string, string> | undefined;
   return items.filter((item) => {
     if (item.agentId === agentId) {

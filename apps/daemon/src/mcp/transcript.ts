@@ -349,12 +349,15 @@ export function transcriptRange(turnCount: number, turns: number, beforeTurn?: n
 const CALL_LIFECYCLE_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
 
 /**
- * The owner an older log's UNSTAMPED output chunk takes: Claude wrote a subagent's command and file-change output with
- * no agent id while every other row of the call carried one (fixture claude/07; the adapter stamps the chunk now), so
- * as it stands the chunk reads as the parent's. It takes the owner of its call's lifecycle rows — `tool.started`,
- * `tool.updated`, `tool.completed`, `tool.denied` of the same `toolUseId` with a non-blank `agentId` — in the same
- * snapshot, as the GUI's drill-in reads it (`callOwnersOf`, packages/ui entries.logic.ts). Undefined for any other item,
- * and for a chunk whose call has no owned row there. The owners are read once, when the first such chunk is met.
+ * The owner an older log's UNSTAMPED output chunk takes. Claude wrote a subagent's command and file-change output with
+ * no agent id while every other row of the call carried one (fixture claude/07); the adapter stamps the chunk now, but
+ * a log keeps what a host from before that wrote, and an older host surviving a deploy writes such chunks until its
+ * drain-restart. As it stands, such a chunk reads as the parent's. It takes the owner of its call's lifecycle rows —
+ * `tool.started`, `tool.updated`, `tool.completed`, `tool.denied` of the same `toolUseId` with a non-blank `agentId` —
+ * in the same snapshot, as the GUI's drill-in reads it (`callOwnersOf`, packages/ui entries.logic.ts). Undefined for any
+ * other item, and for a chunk whose call has no owned row there. The owners are read once per read, at the first
+ * unstamped chunk — and the parent's own command output is unstamped too, so that is nearly every read: one more pass
+ * over the snapshot.
  */
 function unstampedChunkOwner(items: readonly ThreadItem[]): (item: ThreadItem) => string | undefined {
   let owners: Map<string, string> | undefined;

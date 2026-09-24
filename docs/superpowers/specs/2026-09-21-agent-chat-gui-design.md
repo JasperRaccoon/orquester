@@ -3658,8 +3658,9 @@ own scroller to have a layout box. Several surfaces could trip on this, not just
 normaliser gives a call's output chunk (`tool.output`) the owner — and the turn — its `item.*` rows
 carry: a subagent's `tool_result` names only `parent_tool_use_id` (Claude fixtures README observation
 22), and the unstamped chunk rendered as a stray "Tool output" row in the parent timeline while the
-drill-in never showed the output. A log written before that stamp is read by the call, on the client
-only (the fold, its retention and the history bridge still mirror the log): an unstamped chunk takes
+drill-in never showed the output. A log a host wrote before that stamp — an older host surviving a
+deploy writes such chunks until its drain-restart — is read by the call, on the client only (the
+fold, its retention and the history bridge still mirror the log): an unstamped chunk takes
 the owner of its call's lifecycle rows in the same derivation input — `callOwnersOf` in
 `lib/agent-chat/entries.logic.ts`, through which `itemsForAgent` includes it in its owner's drill-in
 and `deriveWorkLogEntries` leaves it out of every other view. A chunk whose call has no owned row in

@@ -708,12 +708,17 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `claude/07`, fixtures README observation 22). Every event of a call now carries the call's owner
   and rides `ToolInFlight.turnId`, the turn active when the call STARTED (absent between parent
   turns), never the one active when the event is emitted — one call, one `tool:<turn>:<id>` key.
-  A log written before the stamp is read by the call, on the read side only (no fold change, no
-  version bump): an unstamped `tool.output` takes the owner of its call's lifecycle rows in the same
-  derivation input — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's
-  drill-in, `deriveWorkLogEntries` keeps it out of every other view) and `unstampedChunkOwner` in
-  `mcp/transcript.ts`. One whose call's rows are gone stays the parent's; the fold, its retention
-  and the history bridge keep mirroring the log.
+  The one late assignment: a parent call streamed before its synthetic turn opens — a woken
+  parent's stream precedes the complete frame that opens the turn — adopts that turn as it opens
+  (`handleAssistantMessage`), so the turn's fold holds it and a rewind to before the turn removes
+  it (`reduceReverted` keeps turnless rows); its start row stays turnless. A log a host wrote before
+  the stamp — an older host surviving a deploy writes such chunks until its drain-restart — is read
+  by the call, on the read side only (no fold change, no version bump): an unstamped `tool.output`
+  takes the owner of its call's lifecycle rows in the same derivation input — `callOwnersOf` in
+  `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in, `deriveWorkLogEntries` keeps
+  it out of every other view) and `unstampedChunkOwner` in `mcp/transcript.ts`. One whose call's
+  rows are gone stays the parent's; the fold, its retention and the history bridge keep mirroring
+  the log.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
@@ -750,13 +755,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   subagent still has open: teardown runs it before `completeTurn`, and between parent turns there
   is no turn to complete). A foreground agent (`is_backgrounded` false or absent — fixture 07,
   older CLIs) keeps the settle at the parent's turn end. Nested frames never open a turn and the
-  output chunk has no turn guard, so a call that starts between parent turns is turnless for its
-  whole life. (2) Ingestion closes a turnless `assistant_message`/`reasoning` message on its own
-  `item.completed` (`handleTurnlessCompletion`, the ids `handleContentDelta` mints with no turn):
-  nothing else closed it but a session stop — after a host restart, nothing at all — and one live
-  thread held 5 479 agent messages still "Thinking". (3) A `tool_progress` heartbeat belongs to its
-  call (`toolProgressEvent`): no nested frame on 2.1.280 carries `task_id`, so owning it by
-  `task_id` dropped every subagent heartbeat; `task_id` counts only for a surfaced subagent.
+  output chunk has no turn guard, so a subagent's call that starts between parent turns is
+  turnless for its whole life. (2) Ingestion closes a turnless `assistant_message`/`reasoning`
+  message on its own `item.completed` (`handleTurnlessCompletion`, the ids `handleContentDelta`
+  mints with no turn): nothing else closed it but a session stop — after a host restart, nothing
+  at all — and one live thread held 5 479 agent messages still "Thinking". (3) A `tool_progress`
+  heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
+  `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
+  a surfaced subagent.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
