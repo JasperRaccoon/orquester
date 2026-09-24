@@ -363,3 +363,37 @@ describe("a drill-in's 'Worked for …' follows a streaming thinking block", () 
     assert.equal(next.rows, first.rows, "the agent's words are not the parent's: none of its rows moves");
   });
 });
+
+describe("a drill-in holds its disclosure sets only while their members stay the same", () => {
+  it("expanding one group in place of another re-derives the rows", () => {
+    // Two activity groups, one per turn, each opened by a thought of the agent's.
+    const items: ThreadItem[] = [
+      message("reasoning", "Looking", { id: "th0", agentId: "a1", turnId: "t0", createdAt: stamp(1) }),
+      activity(
+        "tool.completed",
+        { itemType: "command_execution", toolUseId: "call-0", title: "ls", command: "ls", status: "completed" },
+        { id: "ls", agentId: "a1", turnId: "t0", createdAt: stamp(2) }
+      ),
+      message("reasoning", "Building", { id: "th1", agentId: "a1", turnId: "t1", createdAt: stamp(3) }),
+      activity(
+        "tool.completed",
+        { itemType: "command_execution", toolUseId: "call-1", title: "make", command: "make", status: "completed" },
+        { id: "make", agentId: "a1", turnId: "t1", createdAt: stamp(4) }
+      )
+    ];
+    const expandedGroups = (projection: AgentDrillInProjection): string[] =>
+      projection.stable.result.flatMap((row) => (row.kind === "activity-group" && row.expanded ? [row.groupId] : []));
+    const project = (previous: AgentDrillInProjection, expandedGroupIds: string[]): AgentDrillInProjection =>
+      projectAgentDrillIn(previous, {
+        items,
+        agentId: "a1",
+        messageStreaming: NOTHING_STREAMS,
+        disclosures: { expandedGroupIds, expandedTurnIds: [] }
+      });
+
+    const first = project(EMPTY_AGENT_DRILL_IN, ["activity-group:th0"]);
+    assert.deepEqual(expandedGroups(first), ["activity-group:th0"]);
+    const swapped = project(first, ["activity-group:th1"]);
+    assert.deepEqual(expandedGroups(swapped), ["activity-group:th1"], "as many groups open, but another one");
+  });
+});
