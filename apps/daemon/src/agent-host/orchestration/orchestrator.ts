@@ -4604,14 +4604,15 @@ interface HistoryBlock {
  *
  * Not simply the oldest activity the fold holds: retention keeps a few rows
  * out of age order (an agent's launch and end, a compaction marker, an open
- * question), and it evicts per class — the parent timeline's 500 rows, each
- * agent's own 200, 2 000 across agents. An anchor kept from the first turn
- * would put the boundary there, and every block would start below it while
- * the rows evicted after it were never served; a fleet whose agents lost
- * their early rows while the parent's few rows survived would read as having
- * nothing older at all. So each FULL class's window is found where retention
- * would find it — its last `limit` rows — and the boundary is the newest of
- * their first rows: everything evicted lies below it.
+ * question, the opening row of work still running), and it evicts per class —
+ * the parent timeline's 500 rows, each agent's own 200, 2 000 across agents.
+ * An anchor kept from the first turn would put the boundary there, and every
+ * block would start below it while the rows evicted after it were never
+ * served; a fleet whose agents lost their early rows while the parent's few
+ * rows survived would read as having nothing older at all. So each FULL
+ * class's window is found where retention would find it — its last `limit`
+ * rows — and the boundary is the newest of their first rows: everything
+ * evicted lies below it.
  *
  * Only once the fold has evicted an activity at all (`state.evicted`). Under
  * batch retention (design 2026-09-23 fold performance) a class grows to its

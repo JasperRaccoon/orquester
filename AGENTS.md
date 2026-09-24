@@ -502,7 +502,18 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   today's rules at the exact limits to every class in one pass. The trigger reads the state alone —
   never "rows since the last trim" — so a snapshot folded forward still equals the whole-log fold;
   today's gate (`activities.length > 500`) still keeps a history page of ≤ 400 activities lossless;
-  the cross-agent ceiling sorts `createdAt` with plain `<`, not `localeCompare`. `state.evicted`
+  the cross-agent ceiling sorts `createdAt` with plain `<`, not `localeCompare`. Since
+  `FOLD_SNAPSHOT_VERSION` 4 every trim also keeps the **opening row of running work**
+  (`open-work.ts`, `openWorkOf`: a call's first `tool.started`/`tool.updated` that no
+  `tool.completed`/`tool.denied` has closed, a background task's non-agent `task.started` with no
+  `task.completed`) — a long command's own `tool.output` chunks used to evict its start on chunk 550
+  (chunk 250 in an agent's window, and under the ceiling), and a running shell's `task.started`
+  after 550 parent rows, which took the shell off the roster. It is capped and ranked by last
+  activity, chunks included (`OPEN_WORK_RETENTION_LIMIT` 16 per window,
+  `OPEN_WORK_TOTAL_RETENTION_LIMIT` 64 under the ceiling), because a crash leaves work open for
+  good and those dangling openings must not crowd out a command still printing; a kept row still
+  counts in its class, as an open question does, so each trim frees at least its slack minus the
+  cap and none runs per event; and the walk runs inside a trim only. `state.evicted`
   (serialized, never cleared) records that retention has dropped something, and `windowBoundary`
   considers the activity classes only then — otherwise a thread holding 501–550 parent rows that
   never trimmed would offer a first page of rows the window already shows. Its positional windows
@@ -534,9 +545,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   first chunk), and a revert's cut (the removed turns' lines and the `thread.reverted` itself) is
   never folded into a page. The window boundary behind `hasOlder` is the newest first row of any
   FULL retention class (the parent's 500, an agent's 200, the 2 000 across agents —
-  `windowBoundary`), never simply the oldest activity the fold holds: anchors and open questions
-  survive out of age order, and a fleet whose agents lost their early rows would read as having
-  nothing older. The client projects rows over the CONCATENATION of every loaded page (memoised by
+  `windowBoundary`), never simply the oldest activity the fold holds: anchors, open questions and
+  the opening rows of running work survive out of age order, and a fleet whose agents lost their
+  early rows would read as having nothing older. The client projects rows over the CONCATENATION
+  of every loaded page (memoised by
   the pages array — per page, a turn a boundary splits would open its group twice), dedupes by item
   id, and renders an item the live window also holds once, at the page's older position with the
   window's newer content (`packages/ui/src/lib/agent-chat/history.logic.ts`). **The bridge**: while a
@@ -722,7 +734,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   signal that must never be correlated with the edges — closing a task on its absence wrote a
   "Task stopped" row just before the real completion, and the roster fold keeps the first terminal
   status, so a clean shell read as interrupted forever. The level may still name unknown tasks and
-  clear liveness, but it is not a roster event (fixtures README observation 18).
+  clear liveness, but it is not a roster event (fixtures README observation 18). **A running shell
+  keeps its start and its roster row:** its `task.started` (a parent row, no anchor) and its
+  `bgshell:` call's opening row are the opening rows of running work, which retention keeps
+  whatever their age (`OPEN_WORK_RETENTION_LIMIT`, `FOLD_SNAPSHOT_VERSION` 4) — before that the
+  start aged out after 550 parent rows and the shell left the roster while it ran, and a
+  trickling shell's own output evicted its call's opening row (title, command) after 250 chunks.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
