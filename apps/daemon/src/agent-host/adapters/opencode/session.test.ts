@@ -363,6 +363,43 @@ function typesOf(events: RuntimeEvent[]): string[] {
   return events.map((event) => event.type);
 }
 
+/**
+ * A subagent announcing itself in the order 1.18.5 emits it (fixture 12, lines
+ * 141-142): the child's own `session.created`, then the parent's `task` part
+ * going `running` and naming it — the frame whose `task.started` carries the
+ * launching call.
+ */
+function announceChild(fake: FakeOpenCode, parentSessionId: string, title: string): void {
+  fake.push({
+    type: "session.created",
+    properties: {
+      sessionID: "ses_child",
+      info: { id: "ses_child", parentID: parentSessionId, title }
+    }
+  });
+  fake.push({
+    type: "message.part.updated",
+    properties: {
+      sessionID: parentSessionId,
+      part: {
+        id: "prt_task",
+        messageID: "msg_task",
+        sessionID: parentSessionId,
+        type: "tool",
+        tool: "task",
+        callID: "call_task",
+        state: {
+          status: "running",
+          title,
+          input: { subagent_type: "explore", description: title, prompt: title },
+          metadata: { parentSessionId, sessionId: "ses_child" },
+          time: { start: 1 }
+        }
+      }
+    }
+  });
+}
+
 /** Drive the frames a normal turn produces, in the order 1.18.5 emits them. */
 function driveTurn(
   fake: FakeOpenCode,
@@ -1438,13 +1475,7 @@ test("a live subagent is closed `stopped` before session.exited", async () => {
     interactionMode: "default"
   });
   // The child announces itself with a parentID this thread owns.
-  harness.fake.push({
-    type: "session.created",
-    properties: {
-      sessionID: "ses_child",
-      info: { id: "ses_child", parentID: sessionId, title: "digging (@explore subagent)" }
-    }
-  });
+  announceChild(harness.fake, sessionId, "digging (@explore subagent)");
   const started = await waitFor(harness, "task.started");
   assert.equal(started.payload.taskId, "ses_child");
   assert.equal(session.hasLiveSubagents(), true);
@@ -1473,13 +1504,7 @@ test("interrupting a turn closes its subagents too", async () => {
     attachments: [],
     interactionMode: "default"
   });
-  harness.fake.push({
-    type: "session.created",
-    properties: {
-      sessionID: "ses_child",
-      info: { id: "ses_child", parentID: sessionId, title: "digging (@explore subagent)" }
-    }
-  });
+  announceChild(harness.fake, sessionId, "digging (@explore subagent)");
   await waitFor(harness, "task.started");
 
   await session.interruptTurn(turn.turnId);
@@ -1508,13 +1533,7 @@ test("§6.2: an interrupt with NO active turn still stops all background work", 
   });
   const messageId = (harness.fake.find("POST", "/prompt_async")?.body as { messageID: string })
     .messageID;
-  harness.fake.push({
-    type: "session.created",
-    properties: {
-      sessionID: "ses_child",
-      info: { id: "ses_child", parentID: sessionId, title: "watching (@explore subagent)" }
-    }
-  });
+  announceChild(harness.fake, sessionId, "watching (@explore subagent)");
   await waitFor(harness, "task.started");
 
   // The turn settles on its own; the subagent keeps running.

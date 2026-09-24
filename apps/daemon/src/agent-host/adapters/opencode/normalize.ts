@@ -842,7 +842,11 @@ function ensureChildAgent(
     if (seed.model !== undefined) {
       existing.model = seed.model;
     }
-    if (seed.toolUseId !== undefined) {
+    // The launching call is set once, by the first part naming this child. A
+    // later call is a relaunch, which `linkChildFromTaskPart` re-points
+    // explicitly, or not this run's at all (a stale frame, a second call on a
+    // live child) — adopting it here named the wrong call on every later row.
+    if (seed.toolUseId !== undefined && existing.toolUseId === undefined) {
       existing.toolUseId = seed.toolUseId;
     }
     if (seed.parentAgentId !== undefined) {
@@ -866,7 +870,10 @@ function ensureChildAgent(
   return created;
 }
 
-/** `task.started` once per child; every later row is progress/updated. */
+/**
+ * `task.started` once per RUN — a relaunch (`linkChildFromTaskPart`) resets
+ * `started` — and every later row of the run is progress or an update.
+ */
 function emitTaskStarted(
   state: OpenCodeSessionState,
   agent: OpenCodeChildAgent,
@@ -998,7 +1005,14 @@ export function hasLiveChildAgents(state: OpenCodeSessionState): boolean {
  * `state.metadata.sessionId` names the child, `state.input.subagent_type` its
  * role, `state.input.description` its label and `callID` the tool call it
  * belongs to. The **pending** frame carries none of that — only `running` and
- * later do — so this enriches rather than creates.
+ * later do. Its `running` frame is also where a child's run STARTS: the
+ * child's own `session.created` comes just before it and emits nothing, so the
+ * start carries the launching call — the id the roster fold needs to tell a
+ * later relaunch from a late delivery.
+ *
+ * A `task` call with `task_id` resumes a child: it re-prompts the existing
+ * session with no `session.created`, and its `running` frame names that child
+ * under a NEW call (fixtures README observation 26).
  */
 function linkChildFromTaskPart(
   state: OpenCodeSessionState,
@@ -1012,6 +1026,26 @@ function linkChildFromTaskPart(
     return;
   }
   addRelatedSession(state, childId);
+
+  // A call that is not the one this child's run was launched by. On a SETTLED
+  // child a live part is a relaunch: the run reopens under the new call, and
+  // the tail below emits its start — whose changed `toolUseId` is what reopens
+  // a terminal roster row — before any row of the new run. Anything else is
+  // not this run's — a stale frame of an earlier call, or a second call on a
+  // child that is still working, which 1.18.32 hands to the running job and
+  // answers at once — and emits no task row, so it can never end the run.
+  const known = state.childAgents.get(childId);
+  if (known !== undefined && known.toolUseId !== undefined && known.toolUseId !== part.callID) {
+    const live = part.state.status === "pending" || part.state.status === "running";
+    const settled = known.completed || known.lastStatus === "idle";
+    if (!live || !settled) {
+      return;
+    }
+    known.toolUseId = part.callID;
+    known.started = false;
+    known.completed = false;
+    known.lastStatus = undefined;
+  }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;
   const model = isRecord(metadata?.model) ? metadata.model : undefined;
@@ -1032,7 +1066,11 @@ function linkChildFromTaskPart(
   });
 
   if (part.state.status === "completed") {
-    emitTaskCompleted(state, agent, "completed", raw, out, part.state.output);
+    // A call run in the BACKGROUND (`metadata.background: true`) completes at
+    // once while the child works on; the child's own `session.idle` settles it.
+    if (metadata?.background !== true) {
+      emitTaskCompleted(state, agent, "completed", raw, out, part.state.output);
+    }
     return;
   }
   if (part.state.status === "error") {
@@ -1077,7 +1115,11 @@ function demuxChild(
           : {})
       });
       if (event.type === "session.created") {
-        emitTaskStarted(state, agent, raw, out);
+        // No start yet: the parent's `task` part names this child in the
+        // `running` frame that follows (fixture 12, lines 141-142), and the
+        // start it emits carries the launching call. A child no part ever
+        // names — a missed frame, a grandchild — still gets its start, without
+        // that call, from whichever of its rows comes first.
         return;
       }
       // `session.updated` re-states an unchanged title on every recompute

@@ -25,6 +25,7 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import {
   closeLiveChildAgents,
   normalizeOpenCodeEvent,
+  type NormalizeContext,
   type NormalizerSignal
 } from "./normalize.ts";
 import {
@@ -35,7 +36,11 @@ import {
 } from "./protocol.ts";
 import type { ProviderListResponse } from "./routes.ts";
 import { modelContextLimits } from "./snapshot.ts";
-import { createSessionState, makeTurnTokenUsageAccumulator } from "./state.ts";
+import {
+  createSessionState,
+  makeTurnTokenUsageAccumulator,
+  type OpenCodeSessionState
+} from "./state.ts";
 
 const FIXTURE_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -91,6 +96,9 @@ interface Replay {
   events: RuntimeEvent[];
   signals: NormalizerSignal[];
   types: string[];
+  /** What the capture left behind, so a test can feed frames that follow it. */
+  state: OpenCodeSessionState;
+  ctx: NormalizeContext;
 }
 
 /**
@@ -168,7 +176,15 @@ function replay(
     }
   }
 
-  return { events, signals, types: events.map((event) => event.type) };
+  return { events, signals, types: events.map((event) => event.type), state, ctx };
+}
+
+/**
+ * Feed frames on after a replay, on its state and its id counter. One list per
+ * frame, so a test can say WHICH frame emitted an event.
+ */
+function feed(replayed: Replay, frames: readonly OpenCodeRawEvent[]): RuntimeEvent[][] {
+  return frames.map((frame) => normalizeOpenCodeEvent(replayed.state, frame, replayed.ctx).events);
 }
 
 /** Narrow a fold's output to one arm of the union, so payloads typecheck. */
@@ -577,6 +593,112 @@ function replayChildParent(): Replay {
   return replay(CHILD_FIXTURE, { sessionId: parent });
 }
 
+/**
+ * Fixture 12's frames by their 1-based line in the capture, with every id in
+ * `renames` swapped: the shapes stay verbatim 1.18.5, only the correlation
+ * handles are new.
+ */
+function childFixtureFrames(
+  lines: readonly number[],
+  renames: Readonly<Record<string, string>> = {}
+): OpenCodeRawEvent[] {
+  const records = readFixture(CHILD_FIXTURE);
+  return lines.map((line) => {
+    const record = records[line - 1];
+    assert.equal(record?.kind, "sse", `line ${line} is an SSE frame`);
+    let text = JSON.stringify(record.data);
+    for (const [from, to] of Object.entries(renames)) {
+      text = text.replaceAll(from, to);
+    }
+    const raw = asRawEvent(JSON.parse(text));
+    assert.ok(raw !== null, `line ${line} decodes`);
+    return raw;
+  });
+}
+
+/** The capture's launching call: the parent's `task` part for the child. */
+const CHILD_LAUNCH_CALL = "call_107260";
+
+/**
+ * A `task_id` resume of fixture 12's child, as opencode's `TaskTool` runs one
+ * (read from 1.18.32's source, not captured — fixtures README observation 26):
+ * **no** `session.created`, because the tool re-prompts the session `task_id`
+ * names rather than creating one, and a new `task` part whose `running` frame
+ * names that child before the child's own frames begin. Cloned from the
+ * capture's lines 140/142/180 (the part), 148 and 156-160 (busy, then one
+ * `bash` call) and 177-179 (the settle), with every call, part and message id
+ * new.
+ */
+function resumeFrames(callId: string): {
+  pending: OpenCodeRawEvent;
+  running: OpenCodeRawEvent;
+  /** Busy, then a `bash` call's pending → running → completed. */
+  work: OpenCodeRawEvent[];
+  /** Busy → idle, then `session.idle`: the child's own settle. */
+  settle: OpenCodeRawEvent[];
+  completed: OpenCodeRawEvent;
+} {
+  const renames = {
+    [CHILD_LAUNCH_CALL]: callId,
+    prt_0c202c25e001GFB7AW0OKeLoLz: `prt_${callId}`,
+    msg_0c202b215001elzGd6pT1U41EE: `msg_parent_${callId}`,
+    call_174911: `call_bash_${callId}`,
+    prt_0c202c732001AGeN2DzE72amve: `prt_bash_${callId}`,
+    msg_0c202c2b2001xGlEiTF0IJjyd6: `msg_child_${callId}`
+  };
+  const [pending, running, completed] = childFixtureFrames([140, 142, 180], renames);
+  assert.ok(pending && running && completed);
+  return {
+    pending,
+    running,
+    work: childFixtureFrames([148, 156, 157, 158, 159, 160], renames),
+    settle: childFixtureFrames([177, 178, 179], renames),
+    completed
+  };
+}
+
+/**
+ * A `task` part frame as 1.18.32 reports a call it runs in the BACKGROUND
+ * (read from its `TaskTool` source): `metadata.background: true`, and on the
+ * `completed` frame — which arrives at once, while the child works on — a
+ * `jobId` and an output whose `state` is still `running`.
+ */
+function inBackground(
+  frame: OpenCodeRawEvent,
+  summary = "Background task started"
+): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: Record<string, unknown> } };
+  };
+  const state = copy.properties.part.state;
+  const metadata = state.metadata as Record<string, unknown>;
+  const childId = String(metadata.sessionId);
+  const done = state.status === "completed";
+  state.metadata = { ...metadata, background: true, ...(done ? { jobId: childId } : {}) };
+  if (done) {
+    state.output = [
+      `<task id="${childId}" state="running">`,
+      `<summary>${summary}</summary>`,
+      "<task_result>",
+      "The task is still working in the background.",
+      "</task_result>",
+      "</task>"
+    ].join("\n");
+  }
+  return copy;
+}
+
+/** The task rows among `events`, as `type:status` (status only where set). */
+function taskRows(events: readonly RuntimeEvent[]): string[] {
+  return events
+    .filter((event) => event.type.startsWith("task."))
+    .map((event) => {
+      const status = (event.payload as { status?: string }).status;
+      return status === undefined ? event.type : `${event.type}:${status}`;
+    });
+}
+
 test("12: every emitted event belongs to this thread", () => {
   const { events } = replayChildParent();
   for (const event of events) {
@@ -599,6 +721,16 @@ test("12: a child session becomes a roster task, started once and completed once
   assert.equal(start?.payload.taskType, "subagent");
   assert.equal(completed[0]?.payload.status, "completed");
   assert.equal(completed[0]?.payload.taskId, CHILD_SESSION_ID);
+});
+
+test("12: the child's first task.started names the call that launched it", () => {
+  // The roster fold reopens a settled agent only on a start naming a
+  // DIFFERENT call than the previous start did, and both must name one: a
+  // first start without its call would leave every later resume of this
+  // child reading `completed` while it works.
+  const started = eventsOfType(replayChildParent().events, "task.started");
+  assert.equal(started.length, 1);
+  assert.equal(started[0]?.payload.toolUseId, CHILD_LAUNCH_CALL);
 });
 
 test("12: every task row repeats the whole linkage, and never stamps agentKind", () => {
@@ -782,13 +914,147 @@ test("a live child is closed `stopped` when the session goes down (§3.1)", () =
   assert.equal(state.childAgents.get("ses_child")?.completed, false);
 
   const closing = closeLiveChildAgents(state, ctx, "host is shutting down");
-  assert.equal(closing.length, 1);
-  const [event] = closing;
-  assert.equal(event?.type, "task.completed");
+  const closed = eventsOfType(closing, "task.completed");
+  assert.equal(closed.length, 1);
+  const [event] = closed;
   assert.equal(event?.payload.status, "stopped");
   assert.equal(event?.payload.taskId, "ses_child");
   // Idempotent: a second sweep has nothing left to close.
   assert.deepEqual(closeLiveChildAgents(state, ctx), []);
+});
+
+// ---------------------------------------------------------------------------
+// A child resumed with `task_id` launches again (fixtures README obs. 26)
+// ---------------------------------------------------------------------------
+
+test("a `task_id` resume of a settled child launches it again, and its own idle settles it", () => {
+  const run = replayChildParent();
+  const child = run.state.childAgents.get(CHILD_SESSION_ID);
+  assert.equal(child?.completed, true, "the capture's run settled");
+  // The runtime opens the parent's next turn on its prompt.
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  const frames = [
+    resume.pending,
+    resume.running,
+    ...resume.work,
+    ...resume.settle,
+    resume.completed
+  ];
+  const perFrame = feed(run, frames);
+  const events = perFrame.flat();
+
+  const started = eventsOfType(events, "task.started");
+  assert.equal(started.length, 1, "exactly one new start");
+  const [start] = started;
+  assert.equal(start?.payload.taskId, CHILD_SESSION_ID);
+  assert.equal(start?.payload.toolUseId, "call_resume", "naming the new call");
+  assert.equal(
+    events.find((event) => event.agentId === CHILD_SESSION_ID),
+    start,
+    "before any row of the run the child owns"
+  );
+  assert.ok(
+    start !== undefined && perFrame[frames.indexOf(resume.running)]?.includes(start),
+    "emitted by the part that names the child"
+  );
+
+  const rows = taskRows(events);
+  assert.equal(rows[0], "task.started");
+  assert.deepEqual(
+    rows.filter((row) => row.startsWith("task.updated")),
+    ["task.updated:running", "task.updated:idle"]
+  );
+  assert.equal(rows.at(-1), "task.completed:completed");
+  const idle = resume.settle.at(-1);
+  assert.ok(idle !== undefined);
+  assert.deepEqual(
+    taskRows(perFrame[frames.indexOf(idle)] ?? []),
+    ["task.completed:completed"],
+    "settled by the child's own session.idle"
+  );
+  assert.deepEqual(taskRows(perFrame.at(-1) ?? []), [], "the part's own end adds no second end");
+  for (const event of events) {
+    if (event.type.startsWith("task.")) {
+      assert.equal((event.payload as { toolUseId?: string }).toolUseId, "call_resume", event.type);
+    }
+  }
+});
+
+test("after a relaunch, a stale part of the previous call is neither a run nor its end", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work]);
+
+  // The capture's own frames of the call that launched the FIRST run.
+  const stale = feed(run, childFixtureFrames([147, 180])).flat();
+  assert.deepEqual(taskRows(stale), []);
+
+  const ends = eventsOfType(feed(run, resume.settle).flat(), "task.completed");
+  assert.equal(ends.length, 1, "the relaunched run is still live, and its own idle settles it");
+  assert.equal(ends[0]?.payload.toolUseId, "call_resume", "under the call that launched it");
+});
+
+test("a second call on a LIVE child is not a relaunch, and its end does not settle it", () => {
+  // 1.18.32's `TaskTool` hands a call naming a child that is still working to
+  // the child's running job ("Background task updated") and answers at once.
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work]);
+
+  const extend = resumeFrames("call_extend");
+  const extra = feed(run, [
+    extend.pending,
+    extend.running,
+    inBackground(extend.completed, "Background task updated")
+  ]).flat();
+  assert.deepEqual(taskRows(extra), []);
+  assert.equal(run.state.childAgents.get(CHILD_SESSION_ID)?.completed, false, "still working");
+
+  const ends = eventsOfType(feed(run, resume.settle).flat(), "task.completed");
+  assert.equal(ends.length, 1);
+  assert.equal(ends[0]?.payload.toolUseId, "call_resume", "the run keeps its launching call");
+});
+
+test("a relaunched child is closed `stopped` when the session goes down (§3.1)", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work]);
+
+  const closing = closeLiveChildAgents(run.state, run.ctx, "host is shutting down");
+  assert.deepEqual(taskRows(closing), ["task.completed:stopped"]);
+  assert.equal(eventsOfType(closing, "task.completed")[0]?.payload.toolUseId, "call_resume");
+  assert.deepEqual(closeLiveChildAgents(run.state, run.ctx), []);
+});
+
+test("a task part answered in the background does not settle the child it launched", () => {
+  // `background: true` (OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS) ends the
+  // part at once, while the child works on: the child's own idle settles it.
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  const renames = {
+    [CHILD_SESSION_ID]: "ses_background_child",
+    [CHILD_LAUNCH_CALL]: "call_background",
+    prt_0c202c25e001GFB7AW0OKeLoLz: "prt_background",
+    msg_0c202b215001elzGd6pT1U41EE: "msg_background"
+  };
+  const [pending, created, running, completed] = childFixtureFrames([140, 141, 142, 180], renames);
+  assert.ok(pending && created && running && completed);
+  const launch = feed(run, [
+    pending,
+    created,
+    inBackground(running),
+    inBackground(completed)
+  ]).flat();
+  assert.deepEqual(taskRows(launch), ["task.started", "task.progress:running"]);
+  assert.equal(eventsOfType(launch, "task.started")[0]?.payload.toolUseId, "call_background");
+  assert.equal(run.state.childAgents.get("ses_background_child")?.completed, false);
+
+  const idle = feed(run, childFixtureFrames([179], renames)).flat();
+  assert.deepEqual(taskRows(idle), ["task.completed:completed"]);
 });
 
 test("a co-tenant session that is NOT a child of this thread is still dropped", () => {
