@@ -88,6 +88,36 @@ export function makeActivity(input: {
   };
 }
 
+/**
+ * The row the host writes for a pending request it cancels itself, the
+ * provider having answered nothing: on `/interrupt` and `/session/stop`
+ * (`settlePendingRequests` in `orchestrator.ts`), and on a thread's first load
+ * for what a dead process left parked (`leftover-work.ts`). "Request
+ * cancelled" / "Question cancelled" — never the provider's "resolved" or
+ * "submitted", which would say someone answered. Its id is the request's own,
+ * prefixed, and the resolution kind closes the request in the fold for good
+ * (`closedRequestIds`).
+ */
+export function cancelledRequestActivity(input: {
+  requestId: string;
+  kind: "approval" | "question";
+  turnId: string | null;
+  createdAt: string;
+}): ThreadActivityItem {
+  const approval = input.kind === "approval";
+  return makeActivity({
+    id: `settle-cancel:${input.requestId}`,
+    tone: "info",
+    activityKind: approval ? "approval.resolved" : "user-input.resolved",
+    summary: approval ? "Request cancelled" : "Question cancelled",
+    payload: approval
+      ? { requestId: input.requestId, decision: "cancel" }
+      : { requestId: input.requestId },
+    turnId: input.turnId,
+    createdAt: input.createdAt
+  });
+}
+
 /** Flatten an unknown throwable into the one-line detail an activity carries. */
 export function describeFailure(error: unknown): string {
   if (error instanceof Error) {

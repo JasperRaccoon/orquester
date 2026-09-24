@@ -23,14 +23,16 @@
  * page still shows it as it was.
  *
  * - **Every request the fold shows pending but a message-mode question** —
- *   every approval, every structured question — is failed the way every
- *   adapter's teardown fails one: ingestion's rows for its
- *   `request.resolved {decision: "cancel"}` and `user-input.resolved
- *   {answers: {}}`, on the request's own turn and owner, first. The fold then
- *   closes it for good (`closedRequestIds`), and its card with it. A
- *   message-mode question (`responseMode: "message"`) stays pending: it
- *   parked no request, may outlive its turn by design, and a later user
- *   message answers it.
+ *   every approval, every structured question — is cancelled first, the way
+ *   the host cancels one itself on a Stop: `settlePendingRequests`' own row
+ *   ("Request cancelled", "Question cancelled", `cancelledRequestActivity` in
+ *   `events.ts`) on the turn the head says is running, never the provider's
+ *   "resolved"/"submitted" rows the adapters' teardown leads to, which would
+ *   say someone answered. The fold then closes it for good
+ *   (`closedRequestIds`), and its card with it. A message-mode question
+ *   (`responseMode: "message"`) stays pending, where a Stop would cancel it
+ *   too: it parked no request, may outlive its turn by design, and a later
+ *   user message answers it.
  * - **Every open call** ({@link openWorkOf}) gets a `tool.completed`, `failed`
  *   as both adapters' teardown writes it, with {@link LEFTOVER_CALL_DETAIL}.
  *   Item type, title, turn, owner, parent call and data are its latest
@@ -84,10 +86,8 @@ import {
   type ThreadFoldState
 } from "@orquester/api/agent-chat";
 
-import {
-  requestKindFromCanonicalRequestType,
-  taskLinkageActivityFields
-} from "../ingestion/activities.ts";
+import { taskLinkageActivityFields } from "../ingestion/activities.ts";
+import { cancelledRequestActivity } from "./events.ts";
 
 /** The detail a call a dead process left open is closed with. */
 export const LEFTOVER_CALL_DETAIL = "Stopped when the agent host restarted.";
@@ -131,38 +131,33 @@ const TASK_ROW_KINDS: ReadonlySet<string> = new Set([
  * closed: fold these rows on and ask again, with {@link LeftoverWorkInput.closed}.
  */
 export function leftoverWorkClosings(
-  state: Pick<ThreadFoldState, "activities" | "pending">,
+  state: Pick<ThreadFoldState, "head" | "activities" | "pending">,
   input: LeftoverWorkInput
 ): LeftoverClosing[] {
   const closed = input.closed ?? NOTHING_CLOSED;
   const closings: LeftoverClosing[] = [];
 
-  // First, as Claude's and Grok's teardown settle them before anything else.
+  // First, as a teardown settles them before anything else; approvals, then
+  // questions, as `settlePendingRequests` lists them.
   const parked: ParkedRequest[] = [
     ...(state.pending?.approvals ?? []).map((approval) => ({
       requestId: approval.requestId,
-      kind: "approval" as const,
-      turnId: null
+      kind: "approval" as const
     })),
     ...(state.pending?.userInputs ?? [])
       .filter((question) => question.responseMode !== "message")
-      .map((question) => ({
-        requestId: question.requestId,
-        kind: "question" as const,
-        turnId: question.turnId ?? null
-      }))
+      .map((question) => ({ requestId: question.requestId, kind: "question" as const }))
   ];
-  if (parked.length > 0) {
-    const requestRows = requestRowsOf(state.activities);
-    for (const request of parked) {
-      const key = `request:${request.requestId}`;
-      if (closed.has(key)) continue;
-      closings.push({
-        key,
-        requestId: request.requestId,
-        activity: requestCloser(request, requestRows.get(request.requestId), input)
-      });
-    }
+  // The turn a Stop cancels its requests in: the one the head says is running.
+  const turnId = state.head?.session.activeTurnId ?? null;
+  for (const request of parked) {
+    const key = `request:${request.requestId}`;
+    if (closed.has(key)) continue;
+    closings.push({
+      key,
+      requestId: request.requestId,
+      activity: cancelledRequestActivity({ ...request, turnId, createdAt: input.now })
+    });
   }
 
   for (const call of openWorkOf(state.activities).calls) {
@@ -250,67 +245,6 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
 interface ParkedRequest {
   readonly requestId: string;
   readonly kind: "approval" | "question";
-  /** The pending entry's own turn: a question carries it, an approval does not. */
-  readonly turnId: string | null;
-}
-
-const REQUEST_ROW_KINDS: ReadonlySet<string> = new Set(["approval.requested", "user-input.requested"]);
-
-/** Each request's latest `*.requested` row — the one the fold's pending entry is read from. One pass. */
-function requestRowsOf(activities: readonly ThreadActivityItem[]): Map<string, ThreadActivityItem> {
-  const rows = new Map<string, ThreadActivityItem>();
-  for (const activity of activities) {
-    if (!REQUEST_ROW_KINDS.has(activity.activityKind)) continue;
-    const requestId = presentId(asRecord(activity.payload)?.requestId);
-    if (requestId !== undefined) rows.set(requestId, activity);
-  }
-  return rows;
-}
-
-/**
- * What ingestion writes for the adapters' teardown of a parked request —
- * every adapter emits `request.resolved {decision: "cancel"}` for an approval
- * and `user-input.resolved {answers: {}}` for a question — on the request's
- * own turn and owner, so the resolution sits where the request does. The fold
- * then closes the request for good (`closedRequestIds`), and its card with it.
- */
-function requestCloser(
-  request: ParkedRequest,
-  row: ThreadActivityItem | undefined,
-  input: LeftoverWorkInput
-): ThreadActivityItem {
-  const owner = row === undefined ? undefined : ownerOf(row);
-  const envelope = {
-    kind: "activity" as const,
-    id: input.nextId(),
-    turnId: row?.turnId ?? request.turnId,
-    ...(owner !== undefined ? { agentId: owner } : {}),
-    createdAt: input.now,
-    updatedAt: input.now
-  };
-  if (request.kind === "question") {
-    return {
-      ...envelope,
-      tone: "info",
-      activityKind: "user-input.resolved",
-      summary: "User input submitted",
-      payload: { requestId: request.requestId, answers: {} }
-    };
-  }
-  const requestType = nonBlank(asRecord(row?.payload)?.requestType);
-  const requestKind = requestKindFromCanonicalRequestType(requestType);
-  return {
-    ...envelope,
-    tone: "approval",
-    activityKind: "approval.resolved",
-    summary: "Approval resolved",
-    payload: {
-      requestId: request.requestId,
-      ...(requestKind !== undefined ? { requestKind } : {}),
-      ...(requestType !== undefined ? { requestType } : {}),
-      decision: "cancel"
-    }
-  };
 }
 
 interface TaskRows {

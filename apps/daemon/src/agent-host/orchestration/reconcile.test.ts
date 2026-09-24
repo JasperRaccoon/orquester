@@ -956,41 +956,51 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await next.stop();
   });
 
-  it("fails a dead host's parked requests on a thread at rest — a background subagent's — and keeps the async question", async () => {
+  it("cancels a dead host's parked requests on a thread at rest — a background subagent's — and keeps the async question", async () => {
     const { store, threadId, logLength } = await idleThreadWithLeftovers();
     const next = createTestHost({ store });
     await next.orchestrator.reconcile();
     const read = await next.orchestrator.readThread(threadId);
-    const appended = store.logs.get(threadId)!.slice(logLength);
-    const resolutions = appended.flatMap((event) =>
-      event.type === "thread.activity-appended" && event.payload.activity.activityKind.endsWith(".resolved")
-        ? [{ activity: event.payload.activity, metadata: event.metadata }]
-        : []
-    );
-    // The teardown's own decision: the approval cancelled, the question answered with nothing,
-    // each on its request's owner, the envelope naming the request.
-    assert.deepEqual(
-      resolutions.map(({ activity, metadata }) => [
-        activity.activityKind,
-        activity.payload,
-        activity.agentId,
-        metadata.requestId
-      ]),
-      [
-        [
-          "approval.resolved",
-          {
-            requestId: "req-approval",
-            requestKind: "command",
-            requestType: "command_execution_approval",
-            decision: "cancel"
-          },
-          "agent-1",
-          "req-approval"
-        ],
-        ["user-input.resolved", { requestId: "req-question", answers: {} }, "agent-1", "req-question"]
-      ]
-    );
+    const resolutionsIn = (events: readonly DomainEvent[]) =>
+      events.flatMap((event) =>
+        event.type === "thread.activity-appended" && event.payload.activity.activityKind.endsWith(".resolved")
+          ? [{ activity: event.payload.activity, metadata: event.metadata }]
+          : []
+      );
+    const resolutions = resolutionsIn(store.logs.get(threadId)!.slice(logLength));
+    // The host's own cancellation — "Request cancelled", "Question cancelled",
+    // on the turn a Stop would use (none: the thread is at rest), the envelope
+    // naming the request. Nobody answered, and no row says anyone did.
+    assert.deepEqual(resolutions, [
+      {
+        activity: {
+          kind: "activity",
+          id: "settle-cancel:req-approval",
+          tone: "info",
+          activityKind: "approval.resolved",
+          summary: "Request cancelled",
+          payload: { requestId: "req-approval", decision: "cancel" },
+          turnId: null,
+          createdAt: next.clock.nowIso(),
+          updatedAt: next.clock.nowIso()
+        },
+        metadata: { requestId: "req-approval" }
+      },
+      {
+        activity: {
+          kind: "activity",
+          id: "settle-cancel:req-question",
+          tone: "info",
+          activityKind: "user-input.resolved",
+          summary: "Question cancelled",
+          payload: { requestId: "req-question" },
+          turnId: null,
+          createdAt: next.clock.nowIso(),
+          updatedAt: next.clock.nowIso()
+        },
+        metadata: { requestId: "req-question" }
+      }
+    ]);
     // The first reader's card list: the async question alone, still answerable by a message.
     assert.equal(read.kind, "snapshot");
     if (read.kind !== "snapshot") return;
@@ -999,6 +1009,21 @@ describe("reconcile — a host start closes what a dead process left open", () =
       read.thread.pending.userInputs.map((question) => [question.requestId, question.responseMode]),
       [["req-async", "message"]]
     );
+
+    // Row for row what the Stop path writes for the same requests on a live
+    // thread — which cancels the async question as well; the first load must not.
+    const twin = await next.createThread({ threadId: "twin" });
+    await next.orchestrator.ingestionSink(twin, leftoverRows(twin));
+    await next.settle();
+    const before = store.logs.get(twin)!.length;
+    await next.orchestrator.command(twin, "session/stop", { commandId: cmd() });
+    await next.settle();
+    const stopped = resolutionsIn(store.logs.get(twin)!.slice(before));
+    assert.deepEqual(
+      stopped.filter(({ activity }) => (activity.payload as { requestId: string }).requestId !== "req-async"),
+      resolutions
+    );
+    assert.equal(stopped.length, 3, "Stop cancels the async question too");
     await next.stop();
   });
 

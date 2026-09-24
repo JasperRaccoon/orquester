@@ -122,7 +122,13 @@ import { joinToolOutput, toolOutputWindow } from "../store/tool-output.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { attachedFileLine } from "../adapters/attachment-lines.ts";
-import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
+import {
+  cancelledRequestActivity,
+  createEventBuilder,
+  describeFailure,
+  makeActivity,
+  type BuildEvent
+} from "./events.ts";
 import {
   AgentChatCommandError,
   commandRejected,
@@ -1430,47 +1436,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const head = headOf(runtime);
     const adapter = head ? options.adapters.get(head.adapter) : undefined;
     const createdAt = clock.nowIso();
-    const events: AppendableDomainEvent[] = [];
-    for (const approval of approvals) {
-      events.push(
-        buildEvent(
-          runtime.id,
-          "thread.activity-appended",
-          {
-            activity: makeActivity({
-              id: `settle-cancel:${approval.requestId}`,
-              tone: "info",
-              activityKind: "approval.resolved",
-              summary: "Request cancelled",
-              payload: { requestId: approval.requestId, decision: "cancel" },
-              turnId: currentSession(runtime).activeTurnId,
-              createdAt
-            })
-          },
-          { occurredAt: createdAt, metadata: { requestId: approval.requestId } }
-        )
+    const turnId = currentSession(runtime).activeTurnId;
+    const cancelled = (requestId: string, kind: "approval" | "question"): AppendableDomainEvent =>
+      buildEvent(
+        runtime.id,
+        "thread.activity-appended",
+        { activity: cancelledRequestActivity({ requestId, kind, turnId, createdAt }) },
+        { occurredAt: createdAt, metadata: { requestId } }
       );
-    }
-    for (const question of userInputs) {
-      events.push(
-        buildEvent(
-          runtime.id,
-          "thread.activity-appended",
-          {
-            activity: makeActivity({
-              id: `settle-cancel:${question.requestId}`,
-              tone: "info",
-              activityKind: "user-input.resolved",
-              summary: "Question cancelled",
-              payload: { requestId: question.requestId },
-              turnId: currentSession(runtime).activeTurnId,
-              createdAt
-            })
-          },
-          { occurredAt: createdAt, metadata: { requestId: question.requestId } }
-        )
-      );
-    }
+    const events: AppendableDomainEvent[] = [
+      ...approvals.map((approval) => cancelled(approval.requestId, "approval")),
+      ...userInputs.map((question) => cancelled(question.requestId, "question"))
+    ];
     await append(runtime, events);
     if (!adapter) return;
     for (const approval of approvals) {
@@ -4246,14 +4223,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * never ran — and a reader shows them waiting or running again: a card no
    * process can answer blocks the composer, a task reads running the moment a
    * session is live. On a thread's first load in a host lifetime no provider
-   * process of this host can own any of it yet, so the rows that teardown would
-   * have written are appended here, through the one write path, before anyone
-   * can read the thread — inside `loadRuntime` before the runtime is
-   * published, or in the reconcile behind the readiness gate, before an
-   * orphaned turn is settled or continued (`leftover-work.ts` derives them
-   * from the folded window, and says why a message-mode question and a
-   * message still streaming are left as they are). Never for a thread an
-   * adapter lists as live: what a live session runs is its own.
+   * process of this host can own any of it yet, so the rows that close it are
+   * appended here — for a request the host's own cancellation, the rows a Stop
+   * writes (`settlePendingRequests`); for a call or a task what that teardown
+   * would have written — through the one write path, before anyone can read
+   * the thread: inside `loadRuntime` before the runtime is published, or in the
+   * reconcile behind the readiness gate, before an orphaned turn is settled or
+   * continued (`leftover-work.ts` derives them from the folded window, and
+   * says why a message-mode question and a message still streaming are left as
+   * they are). Never for a thread an adapter lists as live: what a live
+   * session runs is its own.
    *
    * In passes, because the roster lists at most `ROSTER_LIMIT` rows, live
    * ones first — past that many running tasks the rest come into view only

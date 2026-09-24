@@ -468,9 +468,11 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     );
   });
 
-  it("fails every parked request but a message-mode question, first, as the adapters' teardown does", () => {
+  it("cancels every parked request but a message-mode question, first, as the host's own settle does", () => {
     const question = { id: "q1", header: "Pick", question: "Which one?", options: [{ label: "A", description: "a" }] };
     const state = foldOf([
+      // The turn a Stop would cancel them in: the one the head says is running.
+      event("thread.session-set", { session: { status: "running", activeTurnId: "turn-5" } }),
       row("t-start", "task.started", { taskId: "agent-1", agentKind: "agent", title: "Explorer" }),
       row("c-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }, {
         agentId: "agent-1"
@@ -510,41 +512,34 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.deepEqual(state.pending.approvals.map((entry) => entry.requestId), ["req-approval"]);
 
     const closings = closingsOf(state);
-    // Settled before anything else, as Claude's and Grok's teardown settle them.
+    // Settled before anything else, as a teardown settles them.
     assert.deepEqual(closings.map((closing) => closing.key), [
       "request:req-approval",
       "request:req-question",
       "call:toolu_1",
       "task:agent-1"
     ]);
-    // What ingestion writes for the teardown's `request.resolved {decision: "cancel"}`…
+    // The host's own cancellation (`settlePendingRequests`, the Stop path's
+    // rows): nobody answered, so nothing says anyone did.
     assert.deepEqual(activityOf(closings[0]), {
       kind: "activity",
-      id: "closing-1",
-      tone: "approval",
+      id: "settle-cancel:req-approval",
+      tone: "info",
       activityKind: "approval.resolved",
-      summary: "Approval resolved",
-      payload: {
-        requestId: "req-approval",
-        requestKind: "command",
-        requestType: "command_execution_approval",
-        decision: "cancel"
-      },
-      turnId: null,
-      agentId: "agent-1",
+      summary: "Request cancelled",
+      payload: { requestId: "req-approval", decision: "cancel" },
+      turnId: "turn-5",
       createdAt: NOW,
       updatedAt: NOW
     });
-    // …and for its `user-input.resolved {answers: {}}`, on the request's own turn and owner.
     assert.deepEqual(activityOf(closings[1]), {
       kind: "activity",
-      id: "closing-2",
+      id: "settle-cancel:req-question",
       tone: "info",
       activityKind: "user-input.resolved",
-      summary: "User input submitted",
-      payload: { requestId: "req-question", answers: {} },
-      turnId: "turn-1",
-      agentId: "agent-1",
+      summary: "Question cancelled",
+      payload: { requestId: "req-question" },
+      turnId: "turn-5",
       createdAt: NOW,
       updatedAt: NOW
     });
