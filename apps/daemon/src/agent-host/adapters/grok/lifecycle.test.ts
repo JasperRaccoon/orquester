@@ -26,6 +26,15 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
+import { createIngestion } from "../../ingestion/index.ts";
+import {
+  FakeClock,
+  FakeTimers,
+  RecordingLiveness,
+  RecordingSink,
+  counterIdGen,
+  settle
+} from "../../ingestion/test-harness.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { createGrokAdapter, GROK_CAPABILITIES, isBlockedGrokCommand } from "./index.ts";
 import { parseGrokResumeCursor } from "./session.ts";
@@ -727,6 +736,127 @@ test("a steer settles the turn from the STEERED prompt, not the cancelled one", 
     "exactly one terminal row"
   );
   assert.equal(r.events.filter((event) => event.type === "turn.started").length, 1);
+  await r.dispose();
+});
+
+test("a steer closes the cancelled prompt's bubble: the steered reply is a new assistant item", async () => {
+  // ACP's `agent_message_chunk` names no message, so the normaliser's segment
+  // is the only thing that tells two prompts' text apart. A steer re-opened
+  // the stream without closing that segment, so the steered reply streamed
+  // into the bubble the cancelled prompt was writing — one "oneDONE" message,
+  // which keeps its first position and so rendered ABOVE the user's steer.
+  // T3 closes the active segment on every prompt dispatch
+  // (`AcpSessionRuntime.ts:1033-1034`).
+  const r = await rig({ scenario: "steer" });
+  await start(r);
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "count to twenty",
+    attachments: [],
+    interactionMode: "default"
+  });
+  const before = (await r.waitFor(
+    (event) => event.type === "content.delta" && event.payload.delta === "one",
+    "the first prompt streaming"
+  )) as Extract<RuntimeEvent, { type: "content.delta" }>;
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "stop and say DONE",
+    attachments: [],
+    interactionMode: "default"
+  });
+  const after = (await r.waitFor(
+    (event) => event.type === "content.delta" && event.payload.delta === "DONE",
+    "the steered prompt streaming"
+  )) as Extract<RuntimeEvent, { type: "content.delta" }>;
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.drain();
+
+  assert.ok(before.itemId !== undefined && after.itemId !== undefined, "both deltas name their item");
+  assert.notEqual(after.itemId, before.itemId, "the steered reply opens a new assistant segment");
+  const closedAt = r.events.findIndex(
+    (event) =>
+      event.type === "item.completed" &&
+      event.payload.itemType === "assistant_message" &&
+      event.itemId === before.itemId
+  );
+  assert.ok(closedAt !== -1, "the cancelled prompt's bubble is completed");
+  assert.ok(
+    closedAt < r.events.indexOf(after),
+    "the cancelled prompt's bubble is completed BEFORE the steered reply streams"
+  );
+
+  // Through ingestion: two messages in arrival order, never one "oneDONE".
+  const clock = new FakeClock("2026-09-24T12:00:00.000Z");
+  const timers = new FakeTimers(clock);
+  const sink = new RecordingSink();
+  const ingestion = createIngestion({
+    sink: sink.sink,
+    liveness: new RecordingLiveness(),
+    clock,
+    idGen: counterIdGen("d"),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer
+  });
+  for (const event of r.events) {
+    clock.advance(30);
+    await ingestion.ingest(event);
+  }
+  timers.advance(1000);
+  await ingestion.drain();
+  await settle();
+  const texts = new Map<string, string>();
+  for (const event of sink.messages()) {
+    if (event.payload.role !== "assistant") continue;
+    texts.set(event.payload.messageId, `${texts.get(event.payload.messageId) ?? ""}${event.payload.text}`);
+  }
+  assert.deepEqual(
+    [...texts.values()],
+    ["one", "DONE"],
+    "the steered reply is its own message, after the cancelled prompt's"
+  );
+  await r.dispose();
+});
+
+test("a chunk the cancelled prompt sends after the steer stays in ITS bubble, never the steered reply's", async () => {
+  // The cancelled prompt may flush a last chunk after `session/cancel`, and
+  // on an unchanged model and mode nothing waits between the cancel and the
+  // steered prompt's dispatch, so no dispatch-time boundary can keep it out
+  // of the next bubble. Its `_meta.promptId` can: every chunk carries the
+  // prompt that produced it (fixtures README 19; 08 shows two distinct ids).
+  const r = await rig({ scenario: "steer-tail" });
+  await start(r);
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "count to twenty",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor(
+    (event) => event.type === "content.delta" && event.payload.delta === "one",
+    "the first prompt streaming"
+  );
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "stop and say DONE",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.drain();
+
+  const textByItem = new Map<string, string>();
+  for (const event of r.events) {
+    if (event.type === "content.delta" && event.payload.streamKind === "assistant_text") {
+      const key = event.itemId ?? "";
+      textByItem.set(key, `${textByItem.get(key) ?? ""}${event.payload.delta}`);
+    }
+  }
+  assert.deepEqual(
+    [...textByItem.values()],
+    ["one two", "DONE"],
+    "the tail joins the cancelled prompt's bubble; the steered reply is its own"
+  );
   await r.dispose();
 });
 

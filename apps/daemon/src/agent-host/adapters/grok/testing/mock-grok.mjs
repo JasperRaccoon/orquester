@@ -178,6 +178,7 @@ function handle(frame) {
 }
 
 let cancelled = false;
+let firstPromptAnswered = false;
 let pendingPermissionId = null;
 let permissionAnswer = null;
 
@@ -291,7 +292,7 @@ async function runPrompt(id, params) {
     return;
   }
 
-  if (scenario === "steer") {
+  if (scenario === "steer" || scenario === "steer-tail") {
     if (promptSeq === 1) {
       notify("session/update", {
         sessionId,
@@ -301,6 +302,15 @@ async function runPrompt(id, params) {
       // Answers only once the client cancels — exactly what
       // `05-cancel-with-pending-permission.ndjson` records.
       await waitFor(() => cancelled);
+      if (scenario === "steer-tail") {
+        // ACP lets a cancelled prompt flush what it already produced before it
+        // answers `cancelled`; the chunk still carries ITS OWN promptId.
+        notify("session/update", {
+          sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: " two" } },
+          _meta: { totalTokens: 1705, promptId }
+        });
+      }
       notify("_x.ai/session/prompt_complete", {
         sessionId,
         promptId,
@@ -308,7 +318,14 @@ async function runPrompt(id, params) {
         cancellationCategory: "MidTurnAbort"
       });
       result(id, { stopReason: "cancelled", _meta: { sessionId, promptId } });
+      firstPromptAnswered = true;
       return;
+    }
+    if (scenario === "steer-tail") {
+      // The real CLI queues a prompt behind the running one (fixtures README
+      // 19, capture 08): nothing of the steered prompt streams until the
+      // cancelled prompt has answered.
+      await waitFor(() => firstPromptAnswered);
     }
     notify("session/update", {
       sessionId,

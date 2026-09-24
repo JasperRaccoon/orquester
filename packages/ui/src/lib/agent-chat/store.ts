@@ -421,7 +421,13 @@ function deriveBackgroundLiveness(
 }
 
 function project(state: InternalState): InternalState {
-  const timeline0 = deriveTimelineEntriesFromItems(state.slice.entries, state.timeline);
+  // Only a Claude log can hold the re-emitted opening paragraphs older hosts
+  // wrote (`isRepeatedAssistantMessage`); nothing else is second-guessed.
+  const timeline0 = deriveTimelineEntriesFromItems(
+    state.slice.entries,
+    state.timeline,
+    state.slice.head?.adapter === "claude" ? { dropRepeatedAssistantMessages: true } : undefined
+  );
   const contextWindowEntry = latestContextWindowActivity(timeline0.activities);
   const backgroundLiveness = deriveBackgroundLiveness(state.slice.roster);
   const contextWindow = contextWindowEntry?.usage ?? null;

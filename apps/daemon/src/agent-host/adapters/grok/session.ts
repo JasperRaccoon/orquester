@@ -691,13 +691,10 @@ export class GrokSession {
         } catch {
           // A cancel that cannot be written is not a reason to drop the turn.
         }
-        // Re-open the assistant stream: `endTurn()` may have closed it, and a
-        // closed stream silently drops every chunk the steered prompt streams.
-        this.normalizer.beginTurn();
       } else {
         this.activeTurn = { turnId, epoch, settled: false, interrupted: false };
         this.normalizer.clearPlanFallback();
-        this.normalizer.beginTurn();
+        this.emitAll(this.normalizer.beginTurn());
         this.status = "running";
         this.touch();
         this.emitEvent(this.normalizer.event("session.state.changed", { state: "running" }, turnId));
@@ -726,6 +723,17 @@ export class GrokSession {
       // the text already names — the composer inserts it at upload time (§7.4).
       const text = appendAttachmentPathLines(input.text, input.attachments ?? []);
       const prompt = [{ type: "text" as const, text }];
+      if (steering) {
+        // Re-open the assistant stream at the steered prompt's DISPATCH, as
+        // T3's `prompt()` does (`AcpSessionRuntime.ts:1033-1034`): `endTurn()`
+        // may have closed it, which silently drops every chunk the steered
+        // prompt streams. The cancelled prompt's bubble ends where the next
+        // prompt's first chunk names a different `_meta.promptId` (the
+        // normaliser's `contentDelta`), so a chunk it flushes after the cancel
+        // still joins its own bubble; only a bubble with no prompt id is
+        // closed here.
+        this.emitAll(this.normalizer.beginTurn());
+      }
       const promise = this.peer().request<PromptResponse>(
         "session/prompt",
         { sessionId: this.acpSessionId, prompt },

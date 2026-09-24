@@ -90,6 +90,8 @@ interface AssistantTextBlockState {
 /** Cap on buffered nested frames awaiting an owner (see `pendingNested`). */
 const MAX_PENDING_NESTED_FRAMES = 600;
 
+type StreamEventMessage = Extract<SDKMessage, { type: "stream_event" }>;
+
 interface ToolInFlight {
   itemId: string;
   itemType: CanonicalItemType;
@@ -160,19 +162,6 @@ export interface ClaudeTurnState {
    * (live thread 8b9a20c2, seq 710/862/873/882 share one item id).
    */
   assistantTextBlocks: Map<string, AssistantTextBlockState>;
-  /**
-   * The content blocks each API message streamed, in stream order, keyed by
-   * the `message_start` id. The CLI then emits one complete `assistant`
-   * frame PER BLOCK, each carrying `content: [thatBlock]` — so a block's
-   * position in its frame is always 0, never its stream index. The k-th
-   * per-block frame for a message is its k-th streamed block; this is the
-   * join (`backfillAssistantTextFromSnapshot`).
-   */
-  streamedBlocks: Map<string, Array<{ index: number; type: string }>>;
-  /** Id of the message currently streaming (`message_start`), for `streamedBlocks`. */
-  currentStreamMessageId: string | null;
-  /** How many per-block frames of each message have been matched so far. */
-  snapshotBlockCursor: Map<string, number>;
   assistantTextBlockOrder: AssistantTextBlockState[];
   capturedProposedPlanKeys: Set<string>;
   latestAssistantUsage: unknown;
@@ -314,6 +303,41 @@ export class ClaudeNormalizer {
   lastAssistantUuid: string | undefined;
 
   turnState: ClaudeTurnState | undefined;
+  /**
+   * The parent API message that began streaming while NO turn was open, held
+   * frame by frame and replayed into whichever turn opens next (`beginTurn`).
+   * A turn the CLI starts by itself (a background task or subagent finished)
+   * streams its first message BEFORE the complete `assistant` frame that
+   * opens the synthetic turn, and `sendTurn` can land mid-message too.
+   * Dropping those frames lost the `message_start` join key: the text block
+   * streamed as `?:1` while its per-block frame looked for `msg_…:0`, a
+   * snapshot-only twin was minted and left open, and `completeTurn` flushed it
+   * at `result` — the opening paragraph printed again BELOW the final summary,
+   * where the timeline took it for the turn's answer and folded the real one
+   * away (live thread 19976137, seq 38664/38963; 160 turns across three
+   * threads). A text-first opening message had no twin but still surfaced only
+   * at `result`, after everything the turn said since, and every such turn
+   * lost its opening thinking.
+   */
+  private preTurnStream: { frames: StreamEventMessage[] } | undefined;
+  /**
+   * The stream join, scoped to the MESSAGE rather than the turn: the parent
+   * message streaming now (`message_start`), the content blocks it streamed in
+   * stream order, and how many of its per-block `assistant` frames were
+   * matched so far. The CLI emits one complete frame PER BLOCK, each carrying
+   * `content: [thatBlock]` — so a block's position in its frame is always 0,
+   * never its stream index; the k-th per-block frame of a message is its k-th
+   * streamed block (`backfillAssistantTextFromSnapshot`). A message can
+   * outlive the turn it started in: `sendTurn` settles a stale synthetic turn
+   * and opens the user's while the CLI's own message is still streaming. A
+   * join kept on the turn was reset under it — the block's per-block frame
+   * found nothing, minted a twin, and `result` flushed the twin below the
+   * user's answer. Pruned to the new message at each parent `message_start`:
+   * a message's per-block frames all precede its stop.
+   */
+  private streamMessageId: string | null = null;
+  private readonly streamedBlocks = new Map<string, Array<{ index: number; type: string }>>();
+  private readonly snapshotBlockCursor = new Map<string, number>();
 
   private threadStartedEmitted = false;
   private lastSessionState: RuntimeSessionState | undefined;
@@ -677,6 +701,11 @@ export class ClaudeNormalizer {
     synthetic?: boolean;
     anchorUuid?: string;
   }): RuntimeEvent[] {
+    // A synthetic turn still open is settled first, exactly as `sendTurn`
+    // settles one it finds at entry: the CLI can open one DURING `sendTurn`'s
+    // own awaits (model, mode, skill discovery). Overwritten, it never settled
+    // and its open items never closed.
+    const settled = this.turnState?.synthetic === true ? this.completeTurn("completed") : [];
     const turn: ClaudeTurnState = {
       turnId: input.turnId,
       startedAt: this.clock.nowIso(),
@@ -684,9 +713,6 @@ export class ClaudeNormalizer {
       items: [],
       assistantTextBlocks: new Map(),
       assistantTextBlockOrder: [],
-      streamedBlocks: new Map(),
-      currentStreamMessageId: null,
-      snapshotBlockCursor: new Map(),
       capturedProposedPlanKeys: new Set(),
       latestAssistantUsage: undefined,
       compactedSinceLatestAssistantUsage: false,
@@ -701,6 +727,7 @@ export class ClaudeNormalizer {
     this.turnStartMessageIds.push(anchorUuid);
     this.turnBoundaries.push({ turnId: input.turnId, uuid: anchorUuid });
     const events: RuntimeEvent[] = [
+      ...settled,
       {
         ...this.base({ turnId: input.turnId }),
         type: "turn.started",
@@ -711,7 +738,52 @@ export class ClaudeNormalizer {
       }
     ];
     events.push(...this.sessionStateChanged("running", "turn:started"));
+    events.push(...this.replayPreTurnStream());
     return events;
+  }
+
+  /**
+   * Hold a parent stream frame that arrived with no turn open (see
+   * `preTurnStream`). Only a message whose `message_start` was itself held is
+   * kept: the tail of a stream that began inside a turn — an interrupt's
+   * leftovers — is processed exactly as before. Returns whether it was held.
+   */
+  private holdPreTurnFrame(message: StreamEventMessage): boolean {
+    const type = message.event.type;
+    if (type === "message_start") {
+      this.preTurnStream = { frames: [message] };
+      return true;
+    }
+    const held = this.preTurnStream;
+    if (held === undefined) {
+      return false;
+    }
+    if (type === "message_stop") {
+      // A message that ended with no turn claiming it has no turn to join.
+      this.preTurnStream = undefined;
+      return false;
+    }
+    // Consecutive deltas of one block ride one frame, so a held message grows
+    // with its content — which the model's output limit bounds — and never
+    // with its frame count: a long first thinking block is thousands of them.
+    const last = held.frames.at(-1);
+    const merged = last !== undefined ? mergeDeltaFrames(last, message) : undefined;
+    if (merged !== undefined) {
+      held.frames[held.frames.length - 1] = merged;
+      return true;
+    }
+    held.frames.push(message);
+    return true;
+  }
+
+  /** Feed the held message into the turn that just opened (see `preTurnStream`). */
+  private replayPreTurnStream(): RuntimeEvent[] {
+    const held = this.preTurnStream;
+    this.preTurnStream = undefined;
+    if (held === undefined) {
+      return [];
+    }
+    return held.frames.flatMap((frame) => this.handleStreamEvent(frame));
   }
 
   /**
@@ -756,6 +828,8 @@ export class ClaudeNormalizer {
       // stream failure with no turn in flight. Keep the usage emission, drop
       // the lifecycle event — an untargeted `turn.completed` carries no turnId
       // and the projection would flip a turn that never existed (§4.5).
+      // A message still held for a turn that never opened ends with it.
+      this.preTurnStream = undefined;
       events.push(...this.emitThreadTokenUsage(usageSnapshot, "claude/result", result ?? { status }));
       return events;
     }
@@ -827,8 +901,13 @@ export class ClaudeNormalizer {
   /** Every live task closed `stopped`, for a session that is going away (§3.1). */
   closeLiveTasks(): RuntimeEvent[] {
     // Frames of a subagent that was never named have nowhere to go once the
-    // turn is over; they must not outlive it.
+    // turn is over; they must not outlive it. Nor may a parent message still
+    // waiting for its turn, or the join of a stream that is going away.
     this.dropPendingNested();
+    this.preTurnStream = undefined;
+    this.streamMessageId = null;
+    this.streamedBlocks.clear();
+    this.snapshotBlockCursor.clear();
     // A session that is going away is not compacting either — and a boundary
     // still waiting for its summary must be released, never dropped.
     this.compacting = false;
@@ -1092,15 +1171,13 @@ export class ClaudeNormalizer {
   // stream_event
   // -------------------------------------------------------------------------
 
-  private handleStreamEvent(
-    message: Extract<SDKMessage, { type: "stream_event" }>
-  ): RuntimeEvent[] {
+  private handleStreamEvent(message: StreamEventMessage): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     const event = message.event;
     const parentToolUseId = message.parent_tool_use_id ?? undefined;
 
     // A NESTED stream frame is dropped whole. Every piece of state this
-    // method keeps — `currentStreamMessageId`, `assistantTextBlocks` keyed by
+    // method keeps — `streamMessageId`, `assistantTextBlocks` keyed by
     // `(messageId, index)`, `inFlightTools` keyed by the bare content index —
     // belongs to the PARENT's message, and a subagent's indexes restart at 0
     // just like the parent's: a nested `content_block_stop {index: 0}` closed
@@ -1115,15 +1192,22 @@ export class ClaudeNormalizer {
       return events;
     }
 
+    // A message streaming before its turn opens waits for it (`preTurnStream`).
+    if (this.turnState === undefined && this.holdPreTurnFrame(message)) {
+      return events;
+    }
+
     if (event.type === "message_start") {
-      // The join key for the per-block `assistant` frames that follow.
+      // The join key for the per-block `assistant` frames that follow; the
+      // previous message's frames all preceded its stop, so its join goes.
       const started = (event as { message?: { id?: unknown } }).message;
-      const turn = this.turnState;
-      if (turn && typeof started?.id === "string") {
-        turn.currentStreamMessageId = started.id;
-        if (!turn.streamedBlocks.has(started.id)) {
-          turn.streamedBlocks.set(started.id, []);
+      if (typeof started?.id === "string") {
+        if (!this.streamedBlocks.has(started.id)) {
+          this.streamedBlocks.clear();
+          this.snapshotBlockCursor.clear();
+          this.streamedBlocks.set(started.id, []);
         }
+        this.streamMessageId = started.id;
       }
       return events;
     }
@@ -1149,9 +1233,8 @@ export class ClaudeNormalizer {
     }
 
     if (event.type === "content_block_stop") {
-      const turn = this.turnState;
-      const block = turn?.assistantTextBlocks.get(
-        textBlockKey(turn.currentStreamMessageId, event.index)
+      const block = this.turnState?.assistantTextBlocks.get(
+        textBlockKey(this.streamMessageId, event.index)
       );
       if (block) {
         block.streamClosed = true;
@@ -1203,10 +1286,7 @@ export class ClaudeNormalizer {
         });
         return events;
       }
-      const block = this.ensureAssistantTextBlock(
-        this.turnState.currentStreamMessageId,
-        event.index
-      );
+      const block = this.ensureAssistantTextBlock(this.streamMessageId, event.index);
       if (block) {
         block.state.emittedTextDelta = true;
         events.push(...block.events);
@@ -1316,15 +1396,14 @@ export class ClaudeNormalizer {
     // Only the parent's own stream reaches here: `handleStreamEvent` drops
     // every frame carrying a `parent_tool_use_id`.
     const block = event.content_block;
-    if (this.turnState?.currentStreamMessageId) {
-      const turn = this.turnState;
-      const list = turn.streamedBlocks.get(turn.currentStreamMessageId!) ?? [];
+    if (this.streamMessageId !== null) {
+      const list = this.streamedBlocks.get(this.streamMessageId) ?? [];
       list.push({ index: event.index, type: typeof block.type === "string" ? block.type : "unknown" });
-      turn.streamedBlocks.set(turn.currentStreamMessageId!, list);
+      this.streamedBlocks.set(this.streamMessageId, list);
     }
     if (block.type === "text") {
       const entry = this.ensureAssistantTextBlock(
-        this.turnState?.currentStreamMessageId ?? null,
+        this.streamMessageId,
         event.index,
         {
           fallbackText: typeof (block as { text?: unknown }).text === "string" ? block.text : ""
@@ -1817,18 +1896,17 @@ export class ClaudeNormalizer {
     // by array position, which IS the stream index there.
     const messageId = (message.message as { id?: unknown } | undefined)?.id;
     const streamed =
-      typeof messageId === "string" ? turn.streamedBlocks.get(messageId) : undefined;
+      typeof messageId === "string" ? this.streamedBlocks.get(messageId) : undefined;
     const perBlockFrame = content.length === 1 && streamed !== undefined && streamed.length > 0;
     // The frame's own id is the join key. A frame with no id at all (not a
     // shape this CLI emits) falls back to the message that is streaming.
-    const blockMessageId =
-      typeof messageId === "string" ? messageId : turn.currentStreamMessageId;
+    const blockMessageId = typeof messageId === "string" ? messageId : this.streamMessageId;
     let index = 0;
     for (const entry of content) {
       let streamIndex = index;
       if (perBlockFrame && typeof messageId === "string") {
-        const cursor = turn.snapshotBlockCursor.get(messageId) ?? 0;
-        turn.snapshotBlockCursor.set(messageId, cursor + 1);
+        const cursor = this.snapshotBlockCursor.get(messageId) ?? 0;
+        this.snapshotBlockCursor.set(messageId, cursor + 1);
         const candidate = streamed[cursor];
         const blockType =
           entry !== null && typeof entry === "object"
@@ -3305,6 +3383,46 @@ export function extractExitPlanModePlan(
 /** `assistantTextBlocks` key: the owning API message, then the content index. */
 function textBlockKey(messageId: string | null | undefined, index: number): string {
   return `${messageId ?? "?"}:${index}`;
+}
+
+/** The text field each mergeable delta kind carries. */
+const MERGEABLE_DELTA_FIELDS: Readonly<Record<string, string>> = {
+  text_delta: "text",
+  thinking_delta: "thinking",
+  input_json_delta: "partial_json"
+};
+
+/**
+ * Two consecutive deltas of the same block and kind as ONE frame, or
+ * `undefined` when they cannot merge. Replaying the merged frame emits exactly
+ * what the two would have, joined (see `preTurnStream`).
+ */
+function mergeDeltaFrames(
+  previous: StreamEventMessage,
+  next: StreamEventMessage
+): StreamEventMessage | undefined {
+  const before = previous.event as { type?: unknown; index?: unknown; delta?: Record<string, unknown> };
+  const after = next.event as { type?: unknown; index?: unknown; delta?: Record<string, unknown> };
+  if (
+    before.type !== "content_block_delta" ||
+    after.type !== "content_block_delta" ||
+    before.index !== after.index ||
+    before.delta === undefined ||
+    after.delta === undefined ||
+    before.delta.type !== after.delta.type
+  ) {
+    return undefined;
+  }
+  const field = MERGEABLE_DELTA_FIELDS[String(before.delta.type)];
+  const head = field !== undefined ? before.delta[field] : undefined;
+  const tail = field !== undefined ? after.delta[field] : undefined;
+  if (field === undefined || typeof head !== "string" || typeof tail !== "string") {
+    return undefined;
+  }
+  return {
+    ...previous,
+    event: { ...before, delta: { ...before.delta, [field]: head + tail } }
+  } as StreamEventMessage;
 }
 
 /** The shell item's fixed title; the command itself rides `detail`. */

@@ -208,21 +208,71 @@ export class CodexNormaliser {
       if (turnId !== undefined && itemTurn !== undefined && itemTurn !== turnId) {
         continue;
       }
-      this.openItems.delete(itemId);
-      this.openItemTurns.delete(itemId);
-      events.push({
-        type: "item.completed",
-        payload: { itemType, status },
-        ...(itemTurn !== undefined ? { turnId: itemTurn } : {}),
-        itemId,
-        providerRefs: {
-          ...(itemTurn !== undefined ? { providerTurnId: itemTurn } : {}),
-          providerItemId: itemId
-        },
-        ...(raw !== undefined ? { raw } : {})
-      });
+      events.push(this.closeOpenItem(itemId, itemType, status, raw));
     }
     return events;
+  }
+
+  /**
+   * Close an `agentMessage` the provider ABANDONED, the moment the next item of
+   * its turn starts (fixtures README observation 19).
+   *
+   * Codex can stream part of an `agentMessage`, drop that sampling attempt and
+   * restate it as a NEW item: no `item/completed` ever arrives for the first,
+   * and its own rollout does not keep it. Left open, it stays the turn's
+   * active message segment in ingestion, so the restatement's deltas were
+   * appended to it — under the abandoned id and with the abandoned phase. A
+   * regenerated `final_answer` glued onto `commentary` is never picked as the
+   * turn's answer, and the turn folds away with its answer inside.
+   *
+   * Scoped to `assistant_message` items of the SAME turn. Tool calls do
+   * overlap (05 starts three `exec_command` items back to back), and another
+   * turn's items are that turn's own settle to close. No other item ever
+   * starts while an `agentMessage` is open — across the capture set this
+   * fires only on 05's abandoned attempt — so it cannot cut a message that is
+   * still being written. The close is the text-less one `closeOpenItems`
+   * writes at `turn/completed`, only earlier: ingestion closes what was
+   * streamed and never re-emits it.
+   */
+  private closeAbandonedMessages(
+    turnId: string,
+    startingItemId: string,
+    raw: RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    const events: RuntimeEventDraft[] = [];
+    for (const [itemId, itemType] of [...this.openItems.entries()]) {
+      if (
+        itemType === "assistant_message" &&
+        itemId !== startingItemId &&
+        this.openItemTurns.get(itemId) === turnId
+      ) {
+        events.push(this.closeOpenItem(itemId, itemType, "completed", raw));
+      }
+    }
+    return events;
+  }
+
+  /** Forget one open item and write the text-less `item.completed` that closes it. */
+  private closeOpenItem(
+    itemId: string,
+    itemType: CanonicalItemType,
+    status: "completed" | "failed",
+    raw?: RuntimeEventRaw
+  ): RuntimeEventDraft {
+    const itemTurn = this.openItemTurns.get(itemId);
+    this.openItems.delete(itemId);
+    this.openItemTurns.delete(itemId);
+    return {
+      type: "item.completed",
+      payload: { itemType, status },
+      ...(itemTurn !== undefined ? { turnId: itemTurn } : {}),
+      itemId,
+      providerRefs: {
+        ...(itemTurn !== undefined ? { providerTurnId: itemTurn } : {}),
+        providerItemId: itemId
+      },
+      ...(raw !== undefined ? { raw } : {})
+    };
   }
 
   /**
@@ -741,6 +791,13 @@ export class CodexNormaliser {
     const item = p.item as CodexThreadItem;
     const classified = classifyItem(item);
     const events: RuntimeEventDraft[] = [];
+
+    // A message still open when the next item of its turn starts is one the
+    // provider abandoned (observation 19). It closes FIRST, or the next
+    // message's text lands in it.
+    if (phase === "started") {
+      events.push(...this.closeAbandonedMessages(p.turnId, item.id, raw));
+    }
 
     if (classified.unknownType !== undefined) {
       events.push({

@@ -800,6 +800,46 @@ export interface SplitThreadItems {
 
 const isMessage = (item: ThreadItem): item is ThreadMessageItem => item.kind === "message";
 
+export interface SplitThreadItemsOptions {
+  /** Drop re-emitted assistant copies (see `isRepeatedAssistantMessage`): Claude threads only. */
+  readonly dropRepeatedAssistantMessages?: boolean;
+}
+
+/**
+ * A finished assistant message whose text repeats an earlier finished one of
+ * the same turn — within one view, so of the same author — is a re-emission,
+ * not something the agent said twice. Hosts before the pre-turn-stream fix
+ * flushed a CLI-started Claude turn's opening paragraph AGAIN at `result`,
+ * under a new id: it rendered below the final summary, became the turn's
+ * answer and folded the real one away (live thread 19976137, seq 38664/38963;
+ * 160 turns across three threads). `events.ndjson` is never rewritten, so
+ * those logs keep the copy; the first occurrence stays where it was said.
+ * Only a Claude log can hold one, so only a Claude projection asks for this
+ * ({@link SplitThreadItemsOptions}): Codex narration may legitimately repeat
+ * itself. Records `message` as seen when it is not a repeat.
+ */
+function isRepeatedAssistantMessage(
+  message: ThreadMessageItem,
+  finishedTextsByTurn: Map<string, Set<string>>
+): boolean {
+  if (message.role !== "assistant" || message.streaming || message.turnId === null) {
+    return false;
+  }
+  if (message.text.trim().length === 0) {
+    return false;
+  }
+  const texts = finishedTextsByTurn.get(message.turnId);
+  if (texts === undefined) {
+    finishedTextsByTurn.set(message.turnId, new Set([message.text]));
+    return false;
+  }
+  if (texts.has(message.text)) {
+    return true;
+  }
+  texts.add(message.text);
+  return false;
+}
+
 /**
  * Split the fold's items into the three source arrays the timeline merges.
  *
@@ -813,17 +853,23 @@ const isMessage = (item: ThreadItem): item is ThreadMessageItem => item.kind ===
  */
 export function splitThreadItems(
   items: readonly ThreadItem[],
-  ownerAgentId?: string
+  ownerAgentId?: string,
+  options?: SplitThreadItemsOptions
 ): SplitThreadItems {
   const messages: ThreadMessageItem[] = [];
   const activities: ThreadActivityItem[] = [];
   const plansById = new Map<string, ProposedPlanEntry>();
   const planBuffers = new Map<string, string>();
+  const finishedAssistantTexts =
+    options?.dropRepeatedAssistantMessages === true ? new Map<string, Set<string>>() : null;
 
   for (const item of items) {
     if (isMessage(item)) {
       const owner = item.agentId !== undefined && item.agentId.length > 0 ? item.agentId : undefined;
       if (owner !== ownerAgentId) {
+        continue;
+      }
+      if (finishedAssistantTexts !== null && isRepeatedAssistantMessage(item, finishedAssistantTexts)) {
         continue;
       }
       messages.push(item);
@@ -1099,6 +1145,8 @@ export interface ThreadTimelineProjection extends TimelineEntriesProjection {
   readonly activities: readonly ThreadActivityItem[];
   /** Set on a drill-in projection; part of the work-entries memo key. */
   readonly ownerAgentId?: string;
+  /** Set when re-emitted copies were dropped; part of the memo key. */
+  readonly dropsRepeatedAssistantMessages?: boolean;
 }
 
 function sameByIdentity<T>(left: readonly T[], right: readonly T[]): boolean {
@@ -1143,13 +1191,19 @@ function samePlans(left: readonly ProposedPlanEntry[], right: readonly ProposedP
 export function deriveTimelineEntriesFromItems(
   items: readonly ThreadItem[],
   previous: ThreadTimelineProjection | null = null,
-  options?: DeriveWorkLogOptions
+  options?: DeriveWorkLogOptions & SplitThreadItemsOptions
 ): ThreadTimelineProjection {
   const ownerAgentId = options?.ownerAgentId;
-  if (previous !== null && previous.items === items && previous.ownerAgentId === ownerAgentId) {
+  const dropsRepeats = options?.dropRepeatedAssistantMessages === true;
+  if (
+    previous !== null &&
+    previous.items === items &&
+    previous.ownerAgentId === ownerAgentId &&
+    (previous.dropsRepeatedAssistantMessages === true) === dropsRepeats
+  ) {
     return previous;
   }
-  const split = splitThreadItems(items, ownerAgentId);
+  const split = splitThreadItems(items, ownerAgentId, options);
   const activities =
     previous !== null && sameByIdentity(previous.activities, split.activities)
       ? previous.activities
@@ -1172,7 +1226,8 @@ export function deriveTimelineEntriesFromItems(
     ...projection,
     items,
     activities,
-    ...(ownerAgentId !== undefined ? { ownerAgentId } : {})
+    ...(ownerAgentId !== undefined ? { ownerAgentId } : {}),
+    ...(dropsRepeats ? { dropsRepeatedAssistantMessages: true } : {})
   };
 }
 

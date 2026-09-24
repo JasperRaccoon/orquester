@@ -652,3 +652,36 @@ Points for the adapter:
 - **`configWarning` and `remoteControl/status/changed` arrive before you ask for anything** — both
   land between `initialize` and the first request, so a client that only starts listening after
   `thread/start` will miss them.
+
+## 19. An `agentMessage` can be abandoned mid-stream, and a NEW item restates it
+
+`05-…`, first turn. A `commentary` message streams 27 deltas and stops mid-sentence, the model
+call's usage lands 15 ms after the last delta, and the item **never gets an `item/completed`**.
+2.8 s later a new `agentMessage` restates the same thought and completes normally (abridged, `t`
+in ms):
+
+```
+17754 item/started             {"type":"agentMessage","id":"msg_…bfd06c10b98","phase":"commentary",…}
+17754 item/agentMessage/delta  ×27  "The read-only command batch was rejected … mark the one repo-derived"
+18236 thread/tokenUsage/updated
+21063 item/started             {"type":"agentMessage","id":"msg_…840b954d7ce","phase":"commentary",…}
+21063 item/agentMessage/delta  ×45  "The read-only command was blocked by the sandbox approval layer, so I’m going to try …"
+22109 item/completed           {"type":"agentMessage","id":"msg_…840b954d7ce",…}
+```
+
+Nothing sits between the two items — no tool call, no `error`, nothing on stderr — and Codex's own
+rollout for the session (`~/.codex/sessions/2026/09/21/rollout-…-01a0c201-5e6c-….jsonl`) records
+only the second message: the first was a sampling attempt the CLI discarded. It is the only one of
+the set's 32 `agentMessage` items with no completion; left alone it dangles like observation 5's
+command until the turn completes, 12 s later.
+
+- Deltas are keyed by `itemId`, but a consumer that holds "the turn's open message" until that
+  message completes appends the restatement to the abandoned one: two texts glued with no
+  separator, under the first item's id and **its** phase. A restated `final_answer` arrives
+  dressed as `commentary`, and is never taken for the turn's answer.
+- No other item ever starts while an `agentMessage` is open anywhere in the set — tool calls do
+  overlap each other (this same turn starts three `exec_command` items back to back), messages
+  never do. So the next `item/started` of the same turn is a safe signal that an open message was
+  abandoned; the normaliser closes it there, text-less, exactly as `turn/completed` would.
+- The server never retracts the partial text. The abandoned item's deltas are the only record of
+  it.
