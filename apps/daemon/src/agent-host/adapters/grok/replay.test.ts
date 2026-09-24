@@ -311,8 +311,9 @@ test("11 background task: the roster and the tool-call join produce one task.sta
   assert.equal(started[0].payload.taskId, "01a0c1a7-3335-7fc3-894b-56f0bb60a6db");
   assert.equal(started[0].payload.agentKind, "background");
   assert.equal(started[0].payload.toolUseId, "call-3bd55661-e57d-41e1-a207-08f14c96b78c-0");
-  // Nothing was emitted after the turn settled: the task never completes on
-  // its own, which is exactly why the adapter must close it on session exit.
+  // Nothing ended it in the 22 s the capture watched (the `sleep 25` outlived
+  // it, observation 29), and no frame reporting an end is mapped — which is
+  // exactly why the adapter must close it on session exit.
   assert.equal(only(events, "task.completed").length, 0);
 });
 

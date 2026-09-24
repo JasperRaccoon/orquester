@@ -98,7 +98,7 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `09b-permission-mode-auto.ndjson` | `--permission-mode auto --reasoning-effort low agent stdio` | `"Create a file named notes-b.txt…"` | `auto` does not ask. |
 | `09c-always-approve.ndjson` | `agent --always-approve stdio` | `"Create a file named notes-c.txt…"` | `--always-approve` after `agent` does not ask. |
 | `10-compact-and-context.ndjson` | `--permission-mode default --reasoning-effort low agent stdio` | `"Say OK."`, then `"/compact"`, then `"/context"` | The compaction boundary (`auto_compact_completed`) and `/context` completing in 15 ms with no output. |
-| `11-background-task.ndjson` | `agent --always-approve stdio` | `"Start \`sleep 25\` as a BACKGROUND shell command…"` then 20 s of watching | `rawOutput.type: "BackgroundTaskStarted"`, the `background_tasks` roster notification, and the absence of any post-turn task event. |
+| `11-background-task.ndjson` | `agent --always-approve stdio` | `"Start \`sleep 25\` as a BACKGROUND shell command…"` then 20 s of watching | `rawOutput.type: "BackgroundTaskStarted"`, the `background_tasks` roster notification, and no task event in the 22 s watched — the `sleep 25` outlived the capture (observation 29). |
 | `13-errors-and-rpcs.ndjson` | `--permission-mode default --reasoning-effort low agent stdio` | 12 RPCs, no model calls | Error shapes for unknown methods, bad models, unknown sessions, plus `session/set_model`, `session/set_mode`, `session/list`, `session/close` and an unadvertised `authenticate`. |
 | `14-sigterm-mid-prompt.ndjson` | `--permission-mode default --reasoning-effort low agent stdio` | `"Count slowly from 1 to 30…"`, SIGTERM after the first `agent_message_chunk` | Process behaviour on SIGTERM and the fate of the in-flight RPC. |
 | `12-cli-text/` | — | `grok --version`, `grok models` (with and without a login), `grok inspect --json` | The snapshot inputs the provider probe parses. `grok-inspect.json` is redacted and its long host-specific arrays are truncated to three entries each. |
@@ -665,6 +665,15 @@ Plus these standalone notifications: `_x.ai/models/update`, `_x.ai/settings/upda
 `_x.ai/mcp/server_status`, `_x.ai/mcp_initialized`, `_x.ai/queue/changed`, `_x.ai/sessions/changed`,
 `_x.ai/session/prompt_complete`, `_x.ai/task_backgrounded`.
 
+*Not captured — named by the 1.0.34 binary's serde tables:* the same `SessionUpdate` vocabulary also
+holds `subagent_spawned` (16 fields, among them `subagent_id`, `parent_session_id`, `subagent_type`,
+`resumed_from`), `subagent_progress` (12: `turn_count`, `tool_call_count`, `context_usage_pct`, …),
+`subagent_finished` (11, among them `turns`), `task_completed` (`task_snapshot`, `will_wake`),
+`monitor_event`, `scheduled_task_*`, `goal_updated` and more. None appeared in any run here (none
+started a subagent, and observation 29's shell never ended in the window), so their shapes — which
+fields are present, and whether a stdio client receives them at all — are unknown. An unmapped
+`sessionUpdate` stays a `runtime.warning` (observation 36).
+
 T3 registers three of these (`ask_user_question`, `exit_plan_mode`, `prompt_complete`) and drops the
 rest. Several are genuinely useful — `turn_completed` (usage), `background_tasks` (roster),
 `auto_compact_completed` (compaction), `queue/changed` (queued messages), `last_turn_summary` (a
@@ -714,10 +723,29 @@ and the tool call that starts the task reports `status: "completed"` immediately
 **title rewritten** to `"[bg] sleep 25 (01a0c1a7)"`.
 
 **Nothing was emitted after the turn settled.** Twenty seconds of watching produced no `TaskOutput`,
-no completion event, nothing — the `sleep 25` finished silently. Grok surfaces background progress
-only when the model *polls* with `get_command_or_subagent_output`. So §3.1's "background liveness
-outlives the turn" registry will see a task go `running` and never hear it end. It needs its own
-expiry, or the thread stays "monitoring" forever.
+no completion event, nothing. Grok surfaces background progress only when the model *polls* with
+`get_command_or_subagent_output`. So §3.1's "background liveness outlives the turn" registry will
+see a task go `running` and never hear it end. It needs its own expiry, or the thread stays
+"monitoring" forever.
+
+*Correction (2026-09-24, read off the capture and the binary — not captured):* the `sleep 25` did
+**not** finish silently. The task started at `t=8794` and the harness sent SIGTERM at `t=30931`,
+22.1 s later, so the capture ended before the command could have ended; it shows only that nothing
+is emitted while a task runs. The 1.0.34 binary names a notification of its own for the end,
+`x.ai/task_completed` — the CLI's own TUI parses it ("Background task completed", "Failed to parse
+x.ai/task_completed") and so does its headless runner (an internally tagged `{sessionUpdate:
+"task_completed", …}`; the `SessionUpdate` variant holds `task_snapshot` and `will_wake`), and its
+`--background-wait-timeout` help reads "Applies to bash/monitor `task_completed`, background
+subagents (`SubagentFinished`)". Its shape was never on the wire here, so the adapter does not map
+it: it reaches the peer as an unregistered notification — a `runtime.warning` — and the registry's
+expiry stays the bound.
+
+**Every task row of a shell names the shell itself as its `agentId`**
+(`adapters/grok/normalize.ts`). The liveness registry read a stamped non-agent task as a subagent's
+own work — covered by its owner — and dropped it, so this capture's `sleep 25` never counted as live
+at all. It does now: an `agentId` equal to the row's own `taskId` names no owner
+(`orchestration/liveness.ts`), and a Grok shell is a watch loop like any other, bounded by that
+expiry.
 
 ### 30. `session/new` boots every configured MCP server, and it is not fast
 
@@ -806,6 +834,70 @@ same `GROK_HOME` a thread would use.
 Also confirmed live against 1.0.34 through the adapter: `initialize._meta.availableCommands` is 7
 commands, while `available_commands_update` after `session/new` is **69** and the machine-level
 skill list from `grok inspect --json` is 57 — observation 20's ratio, reproduced end to end.
+
+### 36. Subagents — read from the CLI, **not captured**
+
+No run here started a subagent, and none has been captured since. Everything below was read from
+the installed 1.0.34 binary — its embedded docs (`16-subagents.md`, the hooks and CLI references)
+and its strings — on 2026-09-24, and none of it has been seen on the wire.
+
+What the CLI says a client gets:
+
+- **The `spawn_subagent` tool call.** Parameters `prompt`, `description` (3–5 words),
+  `subagent_type` (`general-purpose` by default, `explore`, `plan`, or a user type), `background`
+  ("return immediately with a subagent ID"), `isolation` (`none` | `worktree`), `resume_from`
+  ("Continue a completed subagent's conversation. Pass its subagent ID." — the source must be
+  completed, in this session, of the same type) and `cwd`. Its Claude-hook compat table maps
+  Claude's `Agent` onto it. Subagents cannot spawn subagents (depth one). Every captured tool call
+  has the same three frames (a `tool_call` titled with the tool's name, a status-less rewrite, a
+  terminal update with `content` and a `type`-tagged `rawOutput`), and the `rawOutput` tag set the
+  binary serialises — `SearchReplace`, `Bash`, `ReadFile`, `ListDir`, `GrepSearch`,
+  `AskUserQuestion`, `EnterPlanMode`, `BackgroundTaskStarted`, all eight seen here — also holds
+  `SubagentCompleted` (`SubagentCompletedOutput`, ten fields, among them `subagent_id`,
+  `subagent_type`, `tool_calls`, `turns`, `duration_ms`, `worktree_path`).
+- **Subagent ids are UUIDv7** ("Subagent id must be a UUIDv7").
+- **`_x.ai/session_notification` variants** `subagent_spawned`, `subagent_progress` and
+  `subagent_finished` (observation 28). The CLI's own TUI — itself an ACP client — logs "Subagent
+  finished" from its session-notification handler and keeps per-subagent views, and its leader
+  process logs "Registered child session from SubagentSpawned" / "Deregistered child session from
+  SubagentFinished" as it routes a child session's notifications. Whether a stdio client receives
+  those updates, or the child session's own `session/update` frames, is unknown — the adapter does
+  not filter frames by `sessionId`, so a child's frames, if they came, would read as the parent's.
+- **`send_subagent_message`** (off by default: `GROK_ACTIVE_AGENT_MESSAGES` / `[features]
+  active_agent_messages`) resumes an eligible completed subagent "with the same identity";
+  `get_command_or_subagent_output`, `wait_commands_or_subagents` and `kill_command_or_subagent`
+  read, wait on and kill background subagents; a finished background subagent (or command) can
+  wake the agent for a new turn.
+
+What the adapter builds from it (`adapters/grok/normalize.ts`, `subagentFromToolCall`):
+
+- **The call is the agent.** Its first frame starts a `taskType: "subagent"` task under the call's
+  id, stamped with itself (`agentId` = `taskId`, like every Grok task), launched by the call
+  (`toolUseId`), titled with `description` and with `subagent_type` as its role; the call's rows
+  are `collab_agent_tool_call`, hidden behind the agent's row as a Claude `Agent` call is. A
+  foreground call's end is the agent's end, with the call's `content` text — what the parent model
+  reads, "usually a summary" — as its result; a failed call fails it; a foreground call still open
+  when its turn settles was cut with the turn (observation 11 and fixture 05: a cancelled call gets
+  no terminal frame) and closes `stopped`.
+- **A background agent's end is not observable.** The call answers at once; the agent stays live —
+  "working", holding a deploy's drain like any agent — until a Stop, the session's stop or the
+  process's exit closes it `stopped`. If a `background_tasks` entry or a `_x.ai/task_backgrounded`
+  frame ever joins it (by the spawn call's `tool_call_id`, or by an id its launch reported), its
+  status there ends the agent, and it never becomes a shell row; whether the CLI sends either for a
+  subagent is not captured.
+- **`resume_from` reopens the same row.** The relaunch contract (AGENTS.md, "Agent rows must survive
+  resumes and retention", rule 1): the source's task starts again under the NEW call. The task is
+  found by the subagent id the source's result reported — the UUIDs in it, read without assuming a
+  shape: the CLI's `rawOutput` first, the text only when that names none, never an id the launch's
+  own input, the session or a live shell names. An id no launch reported (a host restart since)
+  starts a row of its own, under that id. A resume the CLI refuses (its source still running)
+  fails the call and never the agent it named.
+- **Unmapped:** the three `subagent_*` updates and `x.ai/task_completed` stay `runtime.warning`s —
+  guessing their fields would be worse than the warning. `send_subagent_message` is a plain tool
+  row: its run's end would be as unobservable as a background launch's.
+
+A capture of a foreground, a background and a `resume_from` launch — and of a long `sleep` watched
+past its end — would settle every "not captured" above.
 
 ---
 

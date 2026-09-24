@@ -777,7 +777,7 @@ test("Stop with NO active turn is session-scoped: live background work is closed
   assert.equal(
     r.events.some((event) => event.type === "task.completed"),
     false,
-    "Grok never reports a background task's completion of its own accord"
+    "no frame reporting a background task's end is mapped"
   );
 
   await r.adapter.interruptTurn("t1");

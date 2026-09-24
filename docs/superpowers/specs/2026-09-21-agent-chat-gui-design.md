@@ -1622,6 +1622,17 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `tool_call_update` — `Monitor`, `BackgroundTaskStarted`, `TaskOutput`, `KillTask` — and are
   emitted **even after the turn ends**.
   *T3: `apps/server/src/provider/acp/XAiBackgroundTasks.ts:61-155`; `apps/server/src/provider/Layers/GrokAdapter.ts:1343-1366`*
+  *Built: a shell's start comes from `_x.ai/task_backgrounded`, the `background_tasks` snapshot and
+  the `BackgroundTaskStarted` discriminant, joined on the task id; no frame reporting its end was
+  ever captured, so the §3.1 liveness registry's TTL bounds it — and it counts as live at all only
+  because a row whose `agentId` is its own `taskId` is its own, not an agent's internal work (Grok
+  stamps every shell with itself; `orchestration/liveness.ts`). A subagent is read off its
+  `spawn_subagent` call, not a discriminant: the call's first frame starts the agent under the
+  call's id, a foreground call's end ends it with the call's result, a `background: true` one stays
+  live until Stop or exit (its end is not observable), and `resume_from` starts the same task
+  again under the new call (`adapters/grok/normalize.ts`, `subagentFromToolCall`; the Grok fixtures
+  README, observations 29 and 36 — the subagent frames are read from the CLI's binary, not
+  captured).*
 - **Interrupt** marks the turn id as interrupted **synchronously, before taking the thread lock**,
   so late notifications and a late prompt result are dropped; then settles pending approvals and
   user-inputs as cancelled (the ACP spec requires a cancel to answer every pending permission
@@ -3843,6 +3854,9 @@ filtered by `agentId`, streaming live, rendered with the same row components, re
 breadcrumb and Escape back to main. The drill-in must not remount the parent: the composer and roster
 stay mounted so the parent can be steered while watching a child, and the child view dispatches no
 commands. On OpenCode and Grok the roster shows whatever their protocols report and nothing more.
+*Built: for Grok that is the `spawn_subagent` call alone — its start, its end and result, a
+`resume_from` relaunch — so a Grok agent's drill-in holds no child activity: none of the child's own
+work was ever observed on the wire (the Grok fixtures README, observation 36).*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything
