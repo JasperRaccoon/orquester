@@ -12,6 +12,8 @@ import {
 
 import type { AgentChatTimelineRow } from "./contracts";
 import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn } from "./drill-in.logic";
+import { deriveTimelineEntriesFromItems, EMPTY_TIMELINE_PROJECTION } from "./entries.logic";
+import { deriveTimelineRows } from "./rows.logic";
 import { activity, head, message, resetBuilders, stamp } from "./test-helpers";
 
 beforeEach(() => {
@@ -148,10 +150,11 @@ describe("a drill-in's words read as streaming only while something can still wr
   });
 });
 
-describe("a drill-in's turn folds are timed by the parent's turns", () => {
+describe("a turn fold's timing: the parent's turn in the parent view, the agent's own rows in its drill-in", () => {
   /**
-   * A background agent's share of the parent's turn `t1`, which ran 9 s: a
-   * thought, then a call it started there — which ran on after the turn
+   * One thread: the parent's turn `t1` ran 9 s — its prompt, the call that
+   * launched a background agent, its answer — and the agent's share of it: a
+   * thought, then a call it started there, which ran on after the turn
    * settled and completed an hour later, stamped with the turn it started in.
    */
   const call = (status: string) => ({
@@ -161,38 +164,68 @@ describe("a drill-in's turn folds are timed by the parent's turns", () => {
     command: "npm run build",
     status
   });
-  const lateCall = (): ThreadItem[] => [
-    message("reasoning", "Checking the build", { id: "think", agentId: "a1", turnId: "t1", createdAt: stamp(2) }),
-    activity("tool.started", call("inProgress"), { id: "start", agentId: "a1", turnId: "t1", createdAt: stamp(3) }),
-    activity("tool.completed", call("completed"), {
-      id: "done",
-      agentId: "a1",
-      turnId: "t1",
-      createdAt: stamp(3_600)
-    })
-  ];
-  const t1 = (state: "completed" | "running"): Turn => ({
-    turnId: "t1",
-    state,
-    turnCount: null,
-    requestedAt: stamp(1),
-    startedAt: stamp(1),
-    completedAt: state === "completed" ? stamp(10) : null,
-    assistantMessageId: null
-  });
-  const foldLabels = (turns: readonly Turn[]): string[] =>
-    projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
-      items: lateCall(),
-      agentId: "a1",
-      messageStreaming: NOTHING_STREAMS,
-      turns
-    }).stable.result.flatMap((row) => (row.kind === "turn-fold" ? [row.label] : []));
+  const thread = {
+    items: [
+      message("user", "Build it in the background", { id: "u1", createdAt: stamp(1) }),
+      activity(
+        "tool.completed",
+        { itemType: "command_execution", toolUseId: "call-p", command: "ls", status: "completed" },
+        { id: "parent-call", turnId: "t1", createdAt: stamp(4) }
+      ),
+      message("reasoning", "Checking the build", { id: "think", agentId: "a1", turnId: "t1", createdAt: stamp(2) }),
+      activity("tool.started", call("inProgress"), {
+        id: "start",
+        agentId: "a1",
+        turnId: "t1",
+        createdAt: stamp(3)
+      }),
+      message("assistant", "It is building.", {
+        id: "answer",
+        turnId: "t1",
+        createdAt: stamp(9),
+        updatedAt: stamp(10)
+      }),
+      activity("tool.completed", call("completed"), {
+        id: "done",
+        agentId: "a1",
+        turnId: "t1",
+        createdAt: stamp(3_600)
+      })
+    ] as ThreadItem[],
+    turns: [
+      {
+        turnId: "t1",
+        state: "completed",
+        turnCount: null,
+        requestedAt: stamp(1),
+        startedAt: stamp(1),
+        completedAt: stamp(10),
+        assistantMessageId: null,
+        userMessageId: "u1"
+      }
+    ] as Turn[]
+  };
+  const foldLabels = (rows: readonly AgentChatTimelineRow[]): string[] =>
+    rows.flatMap((row) => (row.kind === "turn-fold" ? [row.label] : []));
 
-  it("a settled turn works for its own duration, not until the last of its agent's rows landed", () => {
-    assert.deepEqual(foldLabels([t1("completed")]), ["Worked for 9.0s"]);
-  });
-
-  it("a turn still running keeps the span of its rows", () => {
-    assert.deepEqual(foldLabels([t1("running")]), ["Worked for 59m 58s"]);
+  it("the parent's fold is its settled turn's own 9 s; the agent's drill-in keeps its rows' span", () => {
+    const parent = deriveTimelineRows({
+      timelineEntries: deriveTimelineEntriesFromItems(thread.items, EMPTY_TIMELINE_PROJECTION).entries,
+      latestTurn: null,
+      runningTurnId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turns: thread.turns,
+      supportsConversationRollback: false
+    });
+    assert.deepEqual(foldLabels(parent), ["Worked for 9.0s"]);
+    // The drill-in is projected from the same thread view, its turns included — and times the agent's work by the
+    // agent's own rows: its call ran for most of an hour, however soon the parent's turn settled.
+    const drillIn = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      ...thread,
+      agentId: "a1",
+      messageStreaming: NOTHING_STREAMS
+    });
+    assert.deepEqual(foldLabels(drillIn.stable.result), ["Worked for 59m 58s"]);
   });
 });

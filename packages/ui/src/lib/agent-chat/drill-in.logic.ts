@@ -17,7 +17,7 @@
  * No React import.
  */
 
-import type { MessageStreamingContext, ThreadItem, Turn } from "@orquester/api/agent-chat";
+import type { MessageStreamingContext, ThreadItem } from "@orquester/api/agent-chat";
 
 import type { DisclosureState } from "./contracts";
 import {
@@ -40,14 +40,6 @@ export interface AgentDrillInInput {
   readonly agentId: string;
   /** The thread's `messageStreamingContext`: whether a word can still be written. */
   readonly messageStreaming: MessageStreamingContext;
-  /**
-   * The thread's turns — the parent's, which the child's rows ride. A turn
-   * fold here is timed by its turn's own start and completion once the turn
-   * settled (`deriveTurnFolds`), never by the child's last row in it: a
-   * background agent's call completes long after the turn it started in,
-   * stamped with that turn. Rewind stays off.
-   */
-  readonly turns?: readonly Turn[];
   /**
    * The drill-in's own disclosure state. Group toggles honour it; turn folds
    * start OPEN — the child's rows are the reason the view was opened, and a
@@ -106,9 +98,11 @@ export function projectAgentDrillIn(
       expandedTurnIds,
       expandedWorkGroupIds: new Set(input.disclosures?.expandedGroupIds ?? []),
       // A child timeline offers no rewind: §5.5 rolls back the thread, and
-      // a subagent has no turn of the thread's own to roll back to.
+      // a subagent has no turn of the thread's own to roll back to. Nor the
+      // thread's `turns`: a fold here is timed by the agent's own rows — a
+      // background agent works long past the parent turn its rows ride, and
+      // that turn's seconds say nothing of it (`deriveTurnFolds`).
       supportsConversationRollback: false,
-      ...(input.turns !== undefined ? { turns: input.turns } : {}),
       messageStreaming: input.messageStreaming
     },
     held?.rows ?? null

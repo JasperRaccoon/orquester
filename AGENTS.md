@@ -783,12 +783,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   and its last row's `updatedAt`; a turnless message joins no fold and keeps the fast path). Pure
   and read-side: the fold, its snapshot, the index, ingestion and the GUI's streamed-text fast path
   keep reading the flag, no version moves and nothing is written; the MCP reports no message
-  liveness at all. **A settled turn's "Worked for …" is its own duration** — its start to its
-  completion, off the fold's turn row (`deriveTurnFolds` in `rows.logic.ts`; the window, the history
-  and the drill-in all pass the thread's `turns`) — never the span to its last row: a first-load
-  closer rides the turn its work started in, and so does every row of a call a background agent
-  started there and finished later, so a turn of seconds read "Worked for 50h". Only a turn still
-  running, or one no row describes, is timed by its rows.
+  liveness at all. **A settled turn's "Worked for …" is its own duration** in the parent's view —
+  its start to its completion, off the fold's turn row (`deriveTurnFolds` in `rows.logic.ts`; the
+  window and the history pass the thread's `turns`) — never the span to its last row: a first-load
+  closer rides the turn its work started in, so a turn of seconds read "Worked for 50h". Only a turn
+  still running, or one no row describes, is timed by its rows. A drill-in's folds are always timed
+  by the agent's own rows (`drill-in.logic.ts` passes no `turns`): a background agent works long
+  past the parent turn its rows ride, and that turn's seconds would say nothing of it.
 - **The agent host is a protected kill target but its children are not.** `system-status.ts` takes
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a

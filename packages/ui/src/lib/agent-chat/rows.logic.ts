@@ -393,12 +393,13 @@ interface TurnFold {
  * A settled turn works for its OWN duration: its start to its completion, as
  * the fold's turn row has them ({@link TimelineRowsInput.turns}). A row can
  * land in a turn long after it settled — a host's first-load closer rides the
- * turn its work started in (`leftover-work.ts`), and so does every row of a
- * call a background agent started there and finished later — so the span to
- * the turn's last row read "Worked for 50h" for a turn of seconds. Only a
- * turn with no settled row to read — still running, or a caller that passes
- * no turns — is timed by its rows: from its prompt to the later of its
- * answer's last write and its last row.
+ * turn its work started in (`leftover-work.ts`) — so the span to the turn's
+ * last row read "Worked for 50h" for a turn of seconds. Only a turn with no
+ * settled row to read — still running, or a caller that passes no turns — is
+ * timed by its rows: from its prompt to the later of its answer's last write
+ * and its last row. The drill-in passes none on purpose: a background agent
+ * works long past the parent turn its rows ride, and its fold keeps the span
+ * of the agent's own rows (`drill-in.logic.ts`).
  *
  * *T3: `MessagesTimeline.logic.ts:627-803`; differs: T3 times every turn but
  * the latest by its rows.*
@@ -666,9 +667,8 @@ export interface TimelineRowsInput {
    * The fold's turns, in start order. "Rewind to here" numbers a user message
    * by the turn it opened (`Turn.userMessageId`) and that turn's position
    * among the STARTED turns (§5.5), and a settled turn's "Worked for …" is its
-   * own duration, read off its row. Absent means no rewind and folds timed by
-   * their rows; the drill-in passes them for the timing alone
-   * (`supportsConversationRollback` false).
+   * own duration, read off its row. Absent — the drill-in — means no rewind,
+   * and folds timed by their rows.
    */
   turns?: readonly Turn[];
   supportsConversationRollback: boolean;
