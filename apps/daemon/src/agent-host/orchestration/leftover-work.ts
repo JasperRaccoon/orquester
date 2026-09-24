@@ -61,8 +61,10 @@
  * message (`outsideMessages` in `orchestrator.ts`), so a settle appended here
  * would stretch an old message's span to the end of the log: the first page
  * would end at its first chunk, and every row between that chunk and the
- * window would be on neither. How a stream no process can continue reads is
- * its readers' to decide.
+ * window would be on neither. Its readers decide instead: a message reads as
+ * streaming only while a live session runs its turn or its agent is still at
+ * work (`isMessageStreaming`, `@orquester/api/agent-chat`), so a stream no
+ * process can continue reads as settled.
  *
  * A closer is a new activity id, so nothing it writes spans the log; its turn
  * may be an old one, and the index then grows that turn's range over it — the
