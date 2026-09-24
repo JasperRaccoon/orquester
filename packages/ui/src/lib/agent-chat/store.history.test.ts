@@ -1416,7 +1416,9 @@ describe("the history bridge", () => {
     const prompt = message("user", "go", { id: "uR", createdAt: stamp((clock.at += 1)) });
     const word = message("assistant", "on it", { id: "aR", turnId: "tR", createdAt: stamp((clock.at += 1)) });
     // The call in flight: its start, which retention keeps while the call runs (`openWorkOf`), and its latest update,
-    // an ordinary row.
+    // an ordinary row that goes to the bridge. A `tool.started` renders in neither timeline (`DROPPED_ACTIVITY_KINDS`),
+    // so what the kept start shows here is only that it stays in the window, older than every row the bridge took,
+    // and changes nothing the timeline draws.
     const opening = activity("tool.started", { toolUseId: "call-live", status: "inProgress" }, {
       id: "xR-open",
       turnId: "tR",
@@ -1469,7 +1471,7 @@ describe("the history bridge", () => {
     assert.ok(history.bridge.some((item) => item.id === "xR-live"), "the call in flight went to the bridge");
     assert.ok(
       state().slice.entries.some((item) => item.id === "xR-open"),
-      "its start stayed in the window, older than every row the bridge took"
+      "its start stayed in the window, older than every row the bridge took (drawn by neither timeline)"
     );
     assert.ok(history.windowCut >= 2, "the prompt and the agent's word render with the history");
 
