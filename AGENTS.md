@@ -772,12 +772,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   reconcile that stamped its settle with the restart counted the whole downtime in the turn's
   duration. So the reconcile's settle — `settleAsError` for an orphan it does not continue,
   `settleStalePendingTurns` for a stale `pending` turn (and the running turn the same `stopped`
-  settles) — is its FIRST row, stamped `lastWriteAt`: the `occurredAt` of the log's last line,
-  which the fold keeps as `head.updatedAt`, so nothing is read for it. Every row after it — the
-  notice, the closings, the launch names — keeps the clock's time, which is when the host noticed,
-  and the log's times never go back (a settle is never stamped earlier than the line above it). A
-  continuation that fails later settles at its own time; it ran in this host's lifetime. A closer
-  on an old turn is a late reference: the index grows
+  settles) — is its FIRST row, stamped `crashSettleAt`: the `occurredAt` of the log's last line
+  (`lastWriteAt`, which the fold keeps as `head.updatedAt`, so nothing is read for it), or the
+  start of a turn it settles — for a turn that never started, its request — when that is later:
+  ingestion stamps a flushed message with its first delta's time, so the last line can read seconds
+  before its own turn's start, and a settle there ended the turn before it began. Every row after
+  it — the notice, the closings, the launch names — keeps the clock's time, which is when the host
+  noticed, and the log's times never go back (a settle is never stamped earlier than the line
+  above it). The stale settle is written even when the session already reads `stopped`
+  (`persistSession`'s `force`): skipped there as an unchanged session, it left the turn `pending`
+  for good — the thread read "working" forever and every later first load wrote the notice again.
+  A continuation that fails later settles at its own time (it ran in this host's lifetime), and so
+  does a prepare that could not reach disk (the repairs before it are already at the clock's time).
+  A closer on an old turn is a late reference: the index grows
   that turn's range over it, within `MAX_LATE_REFERENCE_BYTES` of the next turn's start
   (`extendReferenced`), and "Load older" still serves every row; a later rewind that keeps that turn
   and drops the ones after it clips the range at its cut, as it clips every surviving range (the
@@ -846,8 +853,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   so with ids — one appended `task.started` naming `legacy-launch:<taskId>` (`legacyLaunchStarts`
   in `leftover-work.ts`, `recordLegacyLaunches`, after the leftover closings so an agent they stop
   counts as settled). It rides the agent's first start's turn (a rewind keeps or drops the two
-  together) and owner, carries its newest row's linkage like a closer, and is stamped with the
-  roster's own `updatedAt` for the agent, so the roster reads exactly as before — a load-time stamp
+  together) and owner, carries its newest row's linkage like a closer, and its row's
+  `createdAt`/`updatedAt` are the roster's own `updatedAt` for the agent (the event is stamped with
+  the load's time), so the roster reads exactly as before — a row stamped with the load's time
   would rank every legacy agent newest among the settled rows and let the 100-row cap drop the
   agents that really are — and only the launch id moves; it is that agent's anchor, merged into its
   spawn row, never a row of its own. An `idle` agent gets none (any start reopens it, and this one

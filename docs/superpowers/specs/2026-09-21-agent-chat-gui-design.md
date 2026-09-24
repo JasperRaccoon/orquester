@@ -428,11 +428,15 @@ with the restart counted the whole downtime in the turn's duration — a turn th
 minute read as hours. The process that ran the turn wrote nothing after its log's last line, so
 the turn was over by then; the host only notices at its next start. So the reconcile's settle is
 its FIRST row, stamped with the `occurredAt` of the log's last line (`lastWriteAt` — the head's
-`updatedAt`, which the fold stamps from every event, so nothing is read for it), and everything it
-appends after — the `runtime.error` notice, the closings below — keeps the clock's time, which is
-when it was noticed; the log's times never go back. A continuation that is attempted and fails
-settles at its own time: it ran in this host's lifetime
-(`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `reconcileThread`, `settleAsError`).*
+`updatedAt`, which the fold stamps from every event, so nothing is read for it) — or with the start
+of a turn it settles when that is later (`crashSettleAt`): ingestion stamps a flushed message with
+its first delta's time, so the last line can read seconds before its own turn's start, and a settle
+there ended the turn before it began. Everything it appends after — the `runtime.error` notice, the
+closings below — keeps the clock's time, which is when it was noticed; the log's times never go
+back. A continuation that is attempted and fails settles at its own time: it ran in this host's
+lifetime; so does a prepare that cannot reach disk, which comes after repairs already stamped with
+the clock (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `reconcileThread`,
+`settleAsError`).*
 
 **The resume cursor is not event-sourced.** It lives in a per-thread
 `binding.json` beside `meta.json` that is only ever written field-wise through
@@ -592,10 +596,13 @@ or a pre-adoption row cannot pin a thread as busy forever. That state is what th
 
 *Built: a `pending` turn the host never sent — it died between the commit and the effect — is
 settled past that grace window on the thread's first load (or in an orphan's reconcile), by a
-`stopped` session state, and the settle is stamped with the time the log was last written, as §3.3
-settles an orphaned turn: nothing sent the turn after that line, and an orphan's running turn,
-which the same settle ends, ended there too. The "Queued message was not sent" notice follows at
-the clock's time (`settleStalePendingTurns`).*
+`stopped` session state, and the settle is stamped with the time the log was last written (or the
+turn's request, when a line flushed out of order reads earlier), as §3.3 settles an orphaned turn:
+nothing sent the turn after that line, and an orphan's running turn, which the same settle ends,
+ended there too. The settle is written even when the session already reads `stopped` — a message
+sent to a stopped session, the host dead before the send: skipped as an unchanged session, it left
+the turn `pending` for good, and every later first load wrote the notice again. The "Queued message
+was not sent" notice follows at the clock's time (`settleStalePendingTurns`).*
 
 **Compaction is the one operation that both refuses and queues.** `/compact` is rejected outright
 while a turn is running or another compaction is in flight — it rewrites the conversation the turn
@@ -3818,8 +3825,9 @@ older than this change carries no launch id, and no relaunch from a terminal sta
 it — so a thread's first load names one for it rather than weaken the guard: every settled
 OpenCode or Codex agent with no launch id on any start gets one appended `task.started` naming
 `legacy-launch:<taskId>`, on its first start's turn and owner, with its newest row's linkage and
-stamped with the roster's own `updatedAt` for it, so the roster reads exactly as before and the
-agent's spawn row takes it in; the next relaunch names a different id, and reopens it. An `idle`
+the roster's own `updatedAt` for it as the row's `createdAt`/`updatedAt` (the event itself is
+stamped with the load's time), so the roster reads exactly as before and the agent's spawn row
+takes it in; the next relaunch names a different id, and reopens it. An `idle`
 agent needs none, since any start reopens it (`packages/api/src/agent-chat/roster.ts`,
 `adapters/opencode/normalize.ts`, `adapters/codex/normalise.ts`,
 `apps/daemon/src/agent-host/orchestration/leftover-work.ts` `legacyLaunchStarts`).*
