@@ -3382,8 +3382,10 @@ bring it back as a failed row. A Claude start that only names its tool with an e
 whole; a tool that takes no arguments has none until its result) keeps the tool's name alone as its
 detail, so the row reads "Write" or "mcp__x__list" meanwhile — and so does every other lifecycle row
 of a call that echoes an empty input, a no-argument tool's completion above all, so its label never
-gains ": {}" as it completes (`callRowDetail`); the `ExitPlanMode` boundary covers the start too;
-and a start never offers "Load full output": what the read cut there is the call's input. (2) The
+gains ": {}" as it completes (`callRowDetail`). Only an echo of the row's own tool, its
+`data.toolName`: OpenCode's completion detail is the tool's own output, and an output that reads
+"config: {}" stays whole. The `ExitPlanMode` boundary covers the start too; and a start never offers
+"Load full output": what the read cut there is the call's input. (2) The
 rows a list renders are the ones counted, named and judged (`isStreamedOutputEntry`,
 `withoutJoinedOutput`, `lib/agent-chat/presentation.logic.ts`): a streamed chunk whose call has a
 row of its own in the list is that row's output, and an orphan call's chunks — no row of the call in

@@ -186,7 +186,7 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       ? undefined
       : asTrimmedString(payload?.detail)
     : CALL_LIFECYCLE_KINDS.has(activity.activityKind)
-      ? callRowDetail(asTrimmedString(payload?.detail))
+      ? callRowDetail(asTrimmedString(payload?.detail), asTrimmedString(data?.toolName))
       : asTrimmedString(payload?.detail);
   const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
   // A command row shows the output its provider data carries where `detail`
@@ -368,15 +368,18 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
  * only once the input parses whole, seconds later for a `Write` or a
  * subagent's prompt, and never for a tool that takes no arguments: its start
  * is its only row until its result, and its completion echoes the same empty
- * input. The empty input names nothing, so every lifecycle row of the call
- * (start, update, completion, denial) keeps the tool's name alone — "Write",
- * "Agent", "mcp__x__list": a start reads it meanwhile, and a no-argument
- * call's label never gains ": {}" as it completes. A nested (subagent) frame
+ * input. The empty input names nothing, so a lifecycle row of the call
+ * (start, update, completion) keeps the tool's name alone — "Write", "Agent",
+ * "mcp__x__list": a start reads it meanwhile, and a no-argument call's label
+ * never gains ": {}" as it completes. Only an echo of the row's OWN tool, the
+ * `data.toolName` Claude writes on every row of a call: another provider's
+ * detail can be the tool's own output — OpenCode's completion is — and an
+ * output that reads "config: {}" is kept whole. A nested (subagent) frame
  * carries its whole input from the start.
  */
-function callRowDetail(detail: string | undefined): string | undefined {
+function callRowDetail(detail: string | undefined, toolName: string | undefined): string | undefined {
   const echo = detail === undefined ? null : /^([^\s:]+): \{\}$/.exec(detail);
-  return echo === null ? detail : echo[1];
+  return echo !== null && echo[1] === toolName ? echo[1] : detail;
 }
 
 /**
