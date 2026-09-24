@@ -7,7 +7,6 @@ import {
   startedTurns,
   TERMINAL_SUBAGENT_STATUSES
 } from "@orquester/api/agent-chat";
-import type { ThreadItem } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -53,6 +52,7 @@ import { cn } from "../../lib/cn";
 import {
   createViewerReads,
   fullOutputNotes,
+  fullOutputText,
   readFullOutput,
   type FullOutputSource
 } from "../../lib/agent-chat/full-output";
@@ -128,25 +128,6 @@ const NO_NOTES: readonly string[] = [];
 /** The daemon's own message where it sent one, else a plain fallback. */
 function errorText(error: unknown, fallback: string): string {
   return (error instanceof ApiError ? error.serverMessage : null) ?? fallback;
-}
-
-/**
- * An unslimmed item as text. The §5.6 allow-list is what the *row* renders; the
- * full payload is by definition whatever the adapter wrote, so it is shown as
- * pretty JSON rather than re-interpreted — a plain string payload stays plain.
- */
-function fullOutputText(item: ThreadItem): string {
-  if (item.kind === "message") {
-    return item.text;
-  }
-  if (typeof item.payload === "string") {
-    return item.payload;
-  }
-  try {
-    return JSON.stringify(item.payload, null, 2);
-  } catch {
-    return item.summary;
-  }
 }
 
 /**

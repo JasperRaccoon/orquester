@@ -15,14 +15,16 @@
  * through the join: its chunks are the tool's result text, no command's
  * output, and `streamedOutput` is never set on one.
  *
- * The item is handed back as it is: the viewer shows it as it always has
- * (`fullOutputText`, `AgentChatView.tsx`), as does the MCP's
- * `read_tool_output` for anything that is no command's output.
+ * An item is shown by {@link fullOutputText}: a command's output as the
+ * command printed it where its own data carries it, anything else as the
+ * viewer always showed it — the MCP's `read_tool_output` reads an item the
+ * same way.
  *
  * No React import.
  */
 
 import {
+  commandOutputText,
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   type ThreadItem,
   type ThreadItemOutputResponse,
@@ -66,17 +68,17 @@ export interface FullOutputReads {
 /**
  * What the viewer shows: a call's streamed output — `running` while the call
  * has not completed (it is the output so far), `cut` once the join passed the
- * host's cap (it is the head) — or the item, shown as it always has been.
+ * host's cap (it is the head) — or the item, shown by {@link fullOutputText}.
  */
 export type FullOutput =
   | { kind: "streamed"; text: string; running: boolean; cut: boolean }
   | { kind: "item"; item: ThreadItem };
 
 /**
- * Read a row's whole output for the viewer. A join that answers is shown even
- * when the item would say more about the call: it is the command's output as
- * printed, where the item is its payload. A failed join read is the viewer's
- * error, never a quiet fallback to a payload that holds no output.
+ * Read a row's whole output for the viewer. A join that answers is shown
+ * first: it is everything the command printed, where the item holds at most
+ * what its provider kept of it. A failed join read is the viewer's error,
+ * never a quiet fallback to an item that may hold none of the output.
  */
 export async function readFullOutput(
   reads: FullOutputReads,
@@ -93,13 +95,56 @@ export async function readFullOutput(
   return { kind: "item", item };
 }
 
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+/**
+ * An item as the viewer shows it: a message's text; a command's output as the
+ * command printed it, where the item's own data carries it
+ * (`commandOutputText` — Codex's aggregated output, a Claude Bash result's
+ * text), exactly as the MCP's `read_tool_output` reads a command item first;
+ * else a string payload as it is, the payload as indented JSON, or — nothing
+ * to write — the row's summary. The §5.6 allow-list is what the *row*
+ * renders; the item is whatever the adapter wrote, shown whole.
+ *
+ * Never a command's output out of an item stored cut (`payload.truncated`):
+ * an update, which ingestion persists already slimmed, or a completion that
+ * kept only a head of a long output (Codex's past 64 KiB). Its data holds
+ * that preview or head, and reading it as the output would pass a part for
+ * the whole; the payload shows instead, as the MCP answers it.
+ */
+export function fullOutputText(item: ThreadItem): string {
+  if (item.kind === "message") {
+    return item.text;
+  }
+  const payload = asRecord(item.payload);
+  if (payload?.itemType === "command_execution" && payload.truncated !== true) {
+    const output = commandOutputText(payload.data);
+    if (output !== undefined) {
+      return output;
+    }
+  }
+  if (typeof item.payload === "string") {
+    return item.payload;
+  }
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(item.payload, null, 2);
+  } catch {
+    json = undefined;
+  }
+  return json ?? item.summary;
+}
+
 /** The host's cap on a join, in the unit it is set in. */
 const CAP_LABEL = `${THREAD_ITEM_OUTPUT_MAX_BYTES / (1024 * 1024)} MiB`;
 
 /**
  * What the viewer says of the text it shows, above it: a running call's output
- * is what exists now, and a join past the host's cap is its head. An item
- * needs no note.
+ * is what exists now, and a join past the host's cap is its head — the log
+ * keeps every chunk, only this read stops there. An item needs no note.
  */
 export function fullOutputNotes(output: FullOutput): string[] {
   const notes: string[] = [];
@@ -110,7 +155,7 @@ export function fullOutputNotes(output: FullOutput): string[] {
     notes.push("Still running — this is its output so far.");
   }
   if (output.cut) {
-    notes.push(`Only the first ${CAP_LABEL} of this output were kept.`);
+    notes.push(`Only the first ${CAP_LABEL} of this output can be shown here.`);
   }
   return notes;
 }

@@ -70,7 +70,14 @@ function rendered(items: readonly ThreadActivityItem[]): string {
 const command = (extra: Record<string, unknown> = {}): ThreadActivityItem =>
   activity(
     "tool.completed",
-    { itemType: "command_execution", toolUseId: "call-1", title: "npm test", command: "npm test", status: "completed", ...extra },
+    {
+      itemType: "command_execution",
+      toolUseId: "call-1",
+      title: "npm test",
+      command: "npm test",
+      status: "completed",
+      ...extra
+    },
     { turnId: "t1" }
   );
 const chunk = (delta: string, streamKind = "command_output", toolUseId = "call-1"): ThreadActivityItem =>
@@ -85,7 +92,13 @@ assert.ok(streamed.includes("Load full output"), "and offers the whole of it, th
 const running = rendered([
   activity(
     "tool.started",
-    { itemType: "command_execution", toolUseId: "call-1", title: "npm test", command: "npm test", status: "inProgress" },
+    {
+      itemType: "command_execution",
+      toolUseId: "call-1",
+      title: "npm test",
+      command: "npm test",
+      status: "inProgress"
+    },
     { turnId: "t1" }
   ),
   chunk("PASS a.test.ts\n")
@@ -106,7 +119,13 @@ const edit = rendered([
   chunk("File created successfully at: /w/p/a.ts", "file_change_output", "call-e"),
   activity(
     "tool.completed",
-    { itemType: "file_change", toolUseId: "call-e", title: "File change", status: "completed", changedFiles: ["/w/p/a.ts"] },
+    {
+      itemType: "file_change",
+      toolUseId: "call-e",
+      title: "File change",
+      status: "completed",
+      changedFiles: ["/w/p/a.ts"]
+    },
     { turnId: "t1" }
   )
 ]);
@@ -134,7 +153,10 @@ const soFar = pane({
   notes: fullOutputNotes({ kind: "streamed", text: "PASS a.test.ts\n", running: true, cut: true })
 });
 assert.ok(soFar.includes("Still running — this is its output so far."), "a running call's output is so far");
-assert.ok(soFar.includes("Only the first 8 MiB of this output were kept."), "a cut join is its head");
+assert.ok(
+  soFar.includes("Only the first 8 MiB of this output can be shown here."),
+  "a cut join is its head — the log keeps the rest"
+);
 assert.ok(
   soFar.indexOf("Still running") < soFar.indexOf("PASS a.test.ts"),
   "said before the text, where the viewer opens"
