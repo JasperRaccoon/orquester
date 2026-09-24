@@ -29,7 +29,6 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { createIngestion } from "../../ingestion/index.ts";
-import { joinToolOutput } from "../../store/tool-output.ts";
 import {
   FakeClock,
   FakeTimers,
@@ -37,6 +36,7 @@ import {
   RecordingSink,
   counterIdGen
 } from "../../ingestion/test-harness.ts";
+import { joinToolOutput } from "../../store/tool-output.ts";
 import {
   closeLiveChildAgents,
   normalizeOpenCodeEvent,
