@@ -6,7 +6,10 @@
  * This is the client's own queue of messages it has **not dispatched yet**, and
  * it is a different thing from the host-side queue that holds already-posted
  * `/turn`s behind a running compaction (§3.4). A queued message is a full draft
- * snapshot held **in memory only**: a live intent, not a draft worth persisting.
+ * snapshot: a live intent, not a draft — never merged into the persisted draft
+ * while it waits. The thread store keeps the queue in the tab's outbox as well
+ * (`composer-outbox.ts`, `sessionStorage`), each message with the `commandId`
+ * it was queued with, so a reload of the tab brings it back as it was.
  *
  * It flushes at the **next tool-call boundary or at turn end**, whichever comes
  * first; taking one re-anchors every remaining message to the new boundary, so

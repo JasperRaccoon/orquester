@@ -264,8 +264,12 @@ export function draftAfterReturn(input: {
   return { ...merged, unstaged };
 }
 
-/** A stored ref as a chip, keyed and typed as `loadComposerDraft` stages it, no bound applied. */
-function storedChip(ref: AttachmentRef): StagedAttachment {
+/**
+ * A stored ref as a chip, keyed and typed as `loadComposerDraft` stages it, no
+ * bound applied — also how a send the tab's outbox kept comes back as the
+ * chips of a failed send (`restoreSend` in the thread store).
+ */
+export function storedChip(ref: AttachmentRef): StagedAttachment {
   return readyChip(stagedFieldsForRef(ref), ref);
 }
 

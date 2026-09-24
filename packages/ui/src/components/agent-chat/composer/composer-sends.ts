@@ -20,9 +20,11 @@
  * Module-level, like the composer bridge's handles and the dismissed error
  * banners, because it must outlive the thread store's generation too: that is
  * torn down 2 s after the tab unmounts, while the post keeps running. In
- * memory only: a reload aborts the post, and whatever landed arrives on the
- * stream. Nothing clears an entry but its own settle — not an unmount, not a
- * tab close (a project switch unmounts too).
+ * memory only — what survives a reload is the tab's outbox
+ * (`composer-outbox.ts`), and the thread store that picks a send up from it
+ * after the reload opens an entry here for its re-post, so the thread reads
+ * "Sending" again until that settles. Nothing clears an entry but its own
+ * settle — not an unmount, not a tab close (a project switch unmounts too).
  *
  * Beside it, the same kind of marker for the thread's QUEUED sends
  * ({@link beginQueuedSend}): the queue sends one message at a time, and the
