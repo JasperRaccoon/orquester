@@ -157,3 +157,25 @@ test("another agent's items are not this shell's output", () => {
 test("a shell that has printed nothing yet has no rows", () => {
   assert.deepEqual(backgroundShellRows([], TASK), []);
 });
+
+test("with no lifecycle frame left, the shell is ONE row titled from its roster row, its whole output joined", () => {
+  // A running shell whose opening row aged out of its window — past the cap on running work's opening rows — so
+  // only its output is left.
+  const chunks = [output("one\n", "o1"), output("two\n", "o2"), output("  three\n", "o3")];
+  const rows = backgroundShellRows(chunks, TASK, "npm run dev");
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  if (row.kind !== "work") throw new Error("a shell's row is a work row");
+  assert.equal(row.displayLabel, "npm run dev", "the roster's title, never the first line of its output");
+  assert.deepEqual(
+    joinLifecycleDetails(omitSupersededLifecycleMarkers(row.groupedEntries, (entry) => entry)).map((entry) => [entry.id, entry.detail]),
+    [["o1", "one\ntwo\n  three\n"]],
+    "one row, not one per chunk, and nothing lost"
+  );
+  // A frame of the call that is still there names the row itself, as it always has.
+  const framed = backgroundShellRows([started(), ...chunks], TASK, "npm run dev")[0];
+  assert.equal(framed?.kind === "work" ? framed.displayLabel : null, undefined);
+  // And no title to fall back on leaves the row unlabelled.
+  const untitled = backgroundShellRows(chunks, TASK)[0];
+  assert.equal(untitled?.kind === "work" ? untitled.displayLabel : null, undefined);
+});
