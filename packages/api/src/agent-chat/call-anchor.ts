@@ -7,10 +7,11 @@
  * update — carries no turn and no owner. The turn adopts the call as it opens,
  * with one update on it (the Claude normaliser's `adoptedToolEvent`), so a
  * running call always has a row that names its turn. A rewind of that turn
- * removes that row with the rest, and its completion too (`reduceReverted`
- * keeps turnless rows, and only those): the turnless rows are then all there
- * is of the call, open, and it ran in a turn that no longer exists. So is a
- * woken call no turn ever adopted, its session stopped first.
+ * removes that row with the rest, its completion too, and keeps the turnless
+ * ones (`reduceReverted` drops a removed turn's rows, never a turnless row):
+ * those are then all there is of the call, open, and it ran in a turn that no
+ * longer exists. So is a woken call no turn ever adopted, its session stopped
+ * first.
  *
  * A row of a call ({@link CALL_ROW_KINDS}) ANCHORS it ({@link anchorsCall})
  * when it names a turn, when an agent owns it (a non-blank `agentId` on the
@@ -42,7 +43,10 @@ export const CALL_ROW_KINDS: ReadonlySet<string> = new Set([
   "tool.output"
 ]);
 
-/** Whether `row`, a row of a tool call, anchors the call: it names a turn, an agent owns it, or it closes the call. */
+/**
+ * Whether `row`, a row of a tool call, anchors the call: it names a turn, an
+ * agent owns it, or it closes the call.
+ */
 export function anchorsCall(row: ThreadActivityItem): boolean {
   return Boolean(row.turnId) || isAgentOwnedActivity(row) || CALL_CLOSER_KINDS.has(row.activityKind);
 }

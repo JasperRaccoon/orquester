@@ -575,14 +575,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   finished later — the Claude normaliser stamps a call's rows with the turn it started in), so a
   rewind that kept such a turn left it reaching into the turns it removed, and "Load older" served
   their rows again. A revert now clips every surviving range at its cut, the first removed turn's
-  first line (`clipAtCut` in `index/indexer.ts`, `INDEX_SCHEMA_VERSION` 4). The late rows past the cut
-  leave the history with them, as their item positions and search rows leave the index at the
+  first line (`clipAtCut` in `index/indexer.ts`, `INDEX_SCHEMA_VERSION` 4). The late rows past the
+  cut leave the history with them, as their item positions and search rows leave the index at the
   revert; the fold keeps them by their turn (`reduceReverted`), and the window shows them while
   retention does. A deploy of the bump deletes a version-3 `index.sqlite` and rebuilds it once, in
   the background, by the boot catch-up (one thread at a time, never on the readiness path): until a
   thread's catch-up reaches it, it offers nothing older and search misses it — and a tab snapshotted
-  before then, until its next snapshot. The window boundary behind `hasOlder` is the newest first row of any
-  FULL retention class (the parent's 500, an agent's 200, the 2 000 across agents —
+  before then, until its next snapshot. The window boundary behind `hasOlder` is the newest first
+  row of any FULL retention class (the parent's 500, an agent's 200, the 2 000 across agents —
   `windowBoundary`), never simply the oldest activity the fold holds: anchors, open
   questions and the opening rows of running work survive out of age order, and a fleet
   whose agents lost their early rows would read as having nothing older. The client
@@ -740,19 +740,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   no "Load full output") — except a call no row of the window anchors (`anchorsCall`,
   `packages/api/src/agent-chat/call-anchor.ts`: every row of it turnless and ownerless — what a
   rewind leaves of a woken Claude parent's call, rule (6) below), which no view shows and which a
-  closer would bring back as a failed row after every host start; then for every task the roster shows `pending`/`running`/`waiting` (any agent kind —
-  `idle` is left alone, as the fold's session-death rule leaves it) a `task.completed {status:
-  "stopped"}` with its latest row's linkage, the roster's `agentKind`, and its start's owner and
-  turn (a rewind keeps or drops a row by its turn: a stop on any other turn could go while the start
-  stays, and the agent read running again). Calls come before tasks, so a background shell's item
-  closes before its task, and every closer carries its opener's owner as the fold reads one (any
-  non-empty `agentId`) — a closer in another retention class can age out first and leave the call
-  reading open again. **One part of the teardown is not replayed:** a message still `streaming:
-  true` is left as the log has it — every `thread.message-sent` moves the message's span in the
-  thread index, a history page never splits a message (`outsideMessages`), and a settle appended
-  here stretched an old message to the end of the log, so the first "Load older" page ended at its
-  first chunk and every row between it and the window was on neither; its readers read it as
-  settled instead (below). It runs in
+  closer would bring back as a failed row after every host start; then for every task the roster
+  shows `pending`/`running`/`waiting` (any agent kind — `idle` is left alone, as the fold's
+  session-death rule leaves it) a `task.completed {status: "stopped"}` with its latest row's
+  linkage, the roster's `agentKind`, and its start's owner and turn (a rewind keeps or drops a row
+  by its turn: a stop on any other turn could go while the start stays, and the agent read running
+  again). Calls come before tasks, so a background shell's item closes before its task, and every
+  closer carries its opener's owner as the fold reads one (any non-empty `agentId`) — a closer in
+  another retention class can age out first and leave the call reading open again. **One part of the
+  teardown is not replayed:** a message still `streaming: true` is left as the log has it — every
+  `thread.message-sent` moves the message's span in the thread index, a history page never splits a
+  message (`outsideMessages`), and a settle appended here stretched an old message to the end of the
+  log, so the first "Load older" page ended at its first chunk and every row between it and the
+  window was on neither; its readers read it as settled instead (below). It runs in
   `settleOnFirstLoad` (the `bootSettlePending` settle, before the runtime is published) and in
   `reconcileThread` after `settleStalePendingTurns` — for an orphan before its turn is settled or
   continued, since a continuation's process owns none of it — never for a thread an adapter lists
@@ -762,33 +762,33 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   that turn's range over it, within `MAX_LATE_REFERENCE_BYTES` of the next turn's start
   (`extendReferenced`), and "Load older" still serves every row; a later rewind that keeps that turn
   and drops the ones after it clips the range at its cut, as it clips every surviving range (the
-  history-pages gotcha), and the closer leaves the history with the dropped turns. On the owner's host (2026-09-24) the three big threads' first loads
-  would append 1–9 rows each (their live work at the time; no request was pending) and leave the
-  270–1 800 messages still flagged streaming in each window as they are. **Their readers decide
-  instead, by one rule:** a message reads as streaming only by `isMessageStreaming`
-  (`packages/api/src/agent-chat/message-liveness.ts`) — its flag says so, the session is live
-  (`isSessionLive`, the roster's session-death notion), and its `turnId` is the head's
-  `activeTurnId` or its `agentId` an agent the roster shows `pending`/`running`/`waiting`; anything
-  else reads as settled — a dead host's stream, an agent's turnless words from before ingestion
-  closed them, a turnless message nobody owns. Every reader that shows liveness goes through it:
-  the GUI's rows derivation stamps it on a message row (`streaming`), which the reasoning row's
-  "Thinking" shimmer and an answer's streaming text read, and only an answer that streams by it
-  holds its turn's fold open — the window (`store.ts`), the history (`liveInputOf` keeps the
-  session and the running turn only: the parent's timeline holds no agent's words, so no roster
-  change re-projects it) and the drill-in (`drill-in.logic.ts`) all pass the thread's
-  `messageStreamingContext` (`messageStreaming` on `TimelineRowsInput`; memoised by the roster
-  array, so a streamed token keeps the fast path — except a token of a flagged message WITH a turn
-  that reads settled, answer or thinking block alike, which rebuilds: its turn may fold, and the
-  "Worked for …" of a fold with no settled turn row to read is timed by its terminal answer's and
-  its last row's `updatedAt`; a turnless message joins no fold and keeps the fast path). Pure and
-  read-side: the fold, its snapshot, the index, ingestion and the GUI's streamed-text fast path keep
-  reading the flag, no version moves and nothing is written; the MCP reports no message liveness at
-  all. **A settled turn's "Worked for …" is its own duration** — its start to its completion, off
-  the fold's turn row (`deriveTurnFolds` in `rows.logic.ts`; the window, the history and the
-  drill-in all pass the thread's `turns`) — never the span to its last row: a first-load closer
-  rides the turn its work started in, and so does every row of a call a background agent started
-  there and finished later, so a turn of seconds read "Worked for 50h". Only a turn still running,
-  or one no row describes, is timed by its rows.
+  history-pages gotcha), and the closer leaves the history with the dropped turns. On the owner's
+  host (2026-09-24) the three big threads' first loads would append 1–9 rows each (their live work
+  at the time; no request was pending) and leave the 270–1 800 messages still flagged streaming in
+  each window as they are. **Their readers decide instead, by one rule:** a message reads as
+  streaming only by `isMessageStreaming` (`packages/api/src/agent-chat/message-liveness.ts`) — its
+  flag says so, the session is live (`isSessionLive`, the roster's session-death notion), and its
+  `turnId` is the head's `activeTurnId` or its `agentId` an agent the roster shows
+  `pending`/`running`/`waiting`; anything else reads as settled — a dead host's stream, an agent's
+  turnless words from before ingestion closed them, a turnless message nobody owns. Every reader
+  that shows liveness goes through it: the GUI's rows derivation stamps it on a message row
+  (`streaming`), which the reasoning row's "Thinking" shimmer and an answer's streaming text read,
+  and only an answer that streams by it holds its turn's fold open — the window (`store.ts`), the
+  history (`liveInputOf` keeps the session and the running turn only: the parent's timeline holds no
+  agent's words, so no roster change re-projects it) and the drill-in (`drill-in.logic.ts`) all pass
+  the thread's `messageStreamingContext` (`messageStreaming` on `TimelineRowsInput`; memoised by the
+  roster array, so a streamed token keeps the fast path — except a token of a flagged message WITH a
+  turn that reads settled, answer or thinking block alike, which rebuilds: its turn may fold, and
+  the "Worked for …" of a fold with no settled turn row to read is timed by its terminal answer's
+  and its last row's `updatedAt`; a turnless message joins no fold and keeps the fast path). Pure
+  and read-side: the fold, its snapshot, the index, ingestion and the GUI's streamed-text fast path
+  keep reading the flag, no version moves and nothing is written; the MCP reports no message
+  liveness at all. **A settled turn's "Worked for …" is its own duration** — its start to its
+  completion, off the fold's turn row (`deriveTurnFolds` in `rows.logic.ts`; the window, the history
+  and the drill-in all pass the thread's `turns`) — never the span to its last row: a first-load
+  closer rides the turn its work started in, and so does every row of a call a background agent
+  started there and finished later, so a turn of seconds read "Worked for 50h". Only a turn still
+  running, or one no row describes, is timed by its rows.
 - **The agent host is a protected kill target but its children are not.** `system-status.ts` takes
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a
@@ -862,8 +862,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   builds no entry from a call whose rows are all turnless, ownerless and unclosed. That is one
   rule, `anchorsCall` (`packages/api/src/agent-chat/call-anchor.ts`: a row anchors its call by its
   turn, its owner, or as its close), and a host's first load follows it too: it writes such a call
-  no closer (`leftover-work.ts`), which would anchor it and bring it back as a failed row. A log a host
-  wrote before the stamp — an older host surviving a deploy writes such chunks until its
+  no closer (`leftover-work.ts`), which would anchor it and bring it back as a failed row. A log a
+  host wrote before the stamp — an older host surviving a deploy writes such chunks until its
   drain-restart — is read by the call, on the read side only (no fold change, no version bump): an
   unstamped `tool.output` takes the owner of its call's lifecycle rows in the same derivation input
   — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in,
