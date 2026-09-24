@@ -1137,7 +1137,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   /**
    * `occurredAt` is the clock's unless given — only a settle of a turn whose
    * process died before the host could see it end gives one
-   * ({@link lastWriteAt}).
+   * ({@link crashSettleAt}).
    *
    * `force` appends the session even when it is unchanged: the one caller is
    * a settle whose whole point is the turn it ends, not a new session state
@@ -4194,10 +4194,41 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * `settledAt` stamps the settling `thread.session-set`: the reconcile's
-   * settle of an orphaned turn gives {@link lastWriteAt}; a continuation that
-   * failed — in this host's lifetime, while the user may be watching — settles
-   * at the clock's time.
+   * The time a crash settle is stamped with: {@link lastWriteAt}, or the
+   * start of a turn it settles when that is later — for a turn that never
+   * started, its request. The log's times are not strictly in order:
+   * ingestion stamps a flushed message with its first delta's time, so the
+   * last line can read seconds before the start of the very turn it belongs
+   * to, and a settle stamped there ended the turn before it began (the GUI
+   * shows no duration for it). Never earlier than the line above it either
+   * way: the latest of that line's time and those.
+   */
+  const crashSettleAt = (runtime: ThreadRuntime): string => {
+    let settleAt = lastWriteAt(runtime);
+    let settleMs = Date.parse(settleAt);
+    for (const turn of runtime.state.turns ?? []) {
+      // The turns the settle ends: every one still unsettled.
+      if (SETTLED_TURN_STATES.has(turn.state)) continue;
+      for (const began of [turn.startedAt, turn.requestedAt]) {
+        const beganMs = typeof began === "string" ? Date.parse(began) : Number.NaN;
+        if (Number.isFinite(beganMs) && beganMs > settleMs) {
+          settleAt = began as string;
+          settleMs = beganMs;
+        }
+      }
+    }
+    return settleAt;
+  };
+
+  /**
+   * `settledAt` stamps the settling `thread.session-set`. The reconcile's
+   * settle of an orphaned turn it does not continue gives
+   * {@link crashSettleAt}: it is the reconcile's first row. Every other caller
+   * settles at the clock's time: a continuation that was sent and failed ran
+   * in this host's lifetime, and a prepare that could not reach disk comes
+   * after the repairs the reconcile has already appended at the clock's time
+   * (`repairLeftovers`), so a settle stamped with the dead process's last
+   * write would go back past them.
    */
   const settleAsError = async (
     runtime: ThreadRuntime,
@@ -4234,7 +4265,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * by {@link PENDING_TURN_GRACE_MS} so a turn that is merely slow to start on
    * a live session is left alone.
    *
-   * The settle comes first, at {@link lastWriteAt}: nothing sent the turn
+   * The settle comes first, at {@link crashSettleAt}: nothing sent the turn
    * after that line, and an orphan's running turn — which the same
    * `stopped` settles — ended there too. The notice follows, at the time it
    * was noticed. The settle is written even when the session already reads
@@ -4265,7 +4296,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         status: "stopped",
         activeTurnId: null
       },
-      { occurredAt: lastWriteAt(runtime), force: true }
+      { occurredAt: crashSettleAt(runtime), force: true }
     );
     await appendActivity(runtime, {
       kind: "provider.turn.start.failed",
@@ -4516,14 +4547,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (!continuable || typeof turnId !== "string") {
       // Archived and deleted threads, threads whose project opted out, and
       // threads with no cursor are settled, never continued (§3.3) — at the
-      // time the dead process last wrote (`lastWriteAt`), not at this
-      // restart. That is honest: the turn ended when its process died, and
-      // nothing it did ran past that process's last line; the host notices
-      // only now, so what it then writes — the error, and the closing of the
-      // work the process left open — carries the clock's time. The settle
-      // comes first, so the log's times never go back.
+      // time the dead process last wrote (`crashSettleAt`: that line, or the
+      // turn's start when a line flushed out of order reads before it), not
+      // at this restart. That is honest: the turn ended when its process
+      // died, and nothing it did ran past that process's last line; the host
+      // notices only now, so what it then writes — the error, and the closing
+      // of the work the process left open — carries the clock's time. The
+      // settle comes first, so the log's times never go back.
       await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE, {
-        settledAt: lastWriteAt(runtime)
+        settledAt: crashSettleAt(runtime)
       });
       // A parked request's cancellation rides the turn the head said was
       // running, as a Stop's does, though the settle has just cleared it.

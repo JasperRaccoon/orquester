@@ -1534,6 +1534,104 @@ describe("reconcile — a crash-settled turn ends when its process died", () => 
     assert.equal(turnOf(again, null).state, "interrupted");
     assert.equal(notices(), 1, "one notice, once");
   });
+
+  it("never ends a turn before it started: a line flushed out of order after the start does not set the time", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    const startedAt = first.clock.nowIso();
+    // Ingestion stamps a flushed message with its first delta's time: the
+    // last line the process wrote can read seconds before the turn's start.
+    await first.orchestrator.ingestionSink(threadId, [
+      writtenAt(
+        sunk(threadId, "thread.message-sent", {
+          messageId: "assistant:early",
+          role: "assistant",
+          text: "Starting on it",
+          streaming: false,
+          turnId: "turn-1"
+        }),
+        new Date(Date.parse(startedAt) - 2_000).toISOString()
+      )
+    ]);
+    await first.settle();
+    await first.stop();
+    const log = first.store.logs.get(threadId)!;
+    const logLength = log.length;
+    assert.ok(Date.parse(log.at(-1)!.occurredAt) < Date.parse(startedAt), "the last line reads before the start");
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.set(Date.parse(startedAt) + 3_600_000);
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const turn = turnOf(await next.orchestrator.readThread(threadId), "turn-1");
+    assert.deepEqual([turn.state, turn.startedAt, turn.completedAt], ["failed", startedAt, startedAt]);
+    // Still never before the line above it.
+    const settle = log[logLength]!;
+    assert.equal(settle.type, "thread.session-set");
+    assert.ok(Date.parse(settle.occurredAt) >= Date.parse(log[logLength - 1]!.occurredAt));
+    await next.stop();
+  });
+
+  it("nor ends a turn that never started before it was requested", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.stop();
+    const requestedAt = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, requestedAt);
+    const log = first.store.logs.get(threadId)!;
+    // A line written after the request, stamped seconds before it.
+    log.push({
+      seq: log.length + 1,
+      eventId: "late-flush",
+      threadId,
+      type: "thread.message-sent",
+      payload: { messageId: "assistant:late", role: "assistant", text: "late", streaming: false, turnId: null },
+      occurredAt: new Date(Date.parse(requestedAt) - 2_000).toISOString(),
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    } as DomainEvent);
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.deepEqual([turnOf(read, null).state, turnOf(read, null).completedAt], ["interrupted", requestedAt]);
+    await next.stop();
+  });
+
+  it("settles at the restart, as it did, when the last line carries no time it can read", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    await first.stop();
+    const log = first.store.logs.get(threadId)!;
+    log.push({
+      seq: log.length + 1,
+      eventId: "no-time",
+      threadId,
+      type: "thread.message-sent",
+      payload: { messageId: "assistant:x", role: "assistant", text: "x", streaming: false, turnId: "turn-1" },
+      occurredAt: "not a time",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    } as DomainEvent);
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.advance(3_600_000);
+    const restart = next.clock.nowIso();
+    await next.orchestrator.reconcile();
+    await next.settle();
+    const turn = turnOf(await next.orchestrator.readThread(threadId), "turn-1");
+    assert.deepEqual([turn.state, turn.completedAt], ["failed", restart]);
+    await next.stop();
+  });
 });
 
 describe("reconcile — a first load gives a legacy agent the launch id an older host never wrote", () => {
