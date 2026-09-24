@@ -852,6 +852,12 @@ command that streams past ~550 flushes — its chunks are parent rows, and the p
 its start row while it runs, and the parent view has no entry for it, so no `outputItemId`, until its completion lands.
 Follow-up: stamp streamed deltas with their agent — Claude sends a subagent's Bash output with no agent id today — so
 that the parent view can build entries for its own streaming commands, as a drill-in does.*
+*Built (plan `2026-09-24-subagent-output-long-calls-and-composer-sends`, Task 2): the stamp half. The Claude normaliser
+now gives a call's output chunk the owner (and the turn) its item rows carry, so a subagent's Bash result is in its
+drill-in and offers the completion there as `outputItemId`. An older log's unstamped chunk counts for its call's owner
+whenever the snapshot holds an owned lifecycle row of the call (`unstampedChunkOwner`, `transcript.ts` — the GUI's
+`callOwnersOf` rule); one whose call's rows were all evicted still reads as the parent's, so the parent view still
+builds no entry from chunks alone.*
 
 ### 7.7 Waiting
 

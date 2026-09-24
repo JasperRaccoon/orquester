@@ -700,6 +700,20 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   close the parent's thinking block. `splitThreadItems(items, ownerAgentId)` is the client mirror
   — the parent's view drops agent-owned messages, the drill-in keeps its own — and the Claude
   normaliser projects a nested `thinking` block as the agent's reasoning row, which it used to drop.
+  (6) **A call's rows are one owner's and one turn's — its output chunks included.** A subagent's
+  `tool_result` names only `parent_tool_use_id`, and the Claude normaliser's `content.delta
+  {command_output|file_change_output}` left out the `agentId` the call's `item.*` rows carried: the
+  chunk folded as a PARENT `tool.output` row — a stray "Tool output" in the parent timeline, one
+  more row in the parent's 500-row window — and the drill-in never showed the output (fixture
+  `claude/07`, fixtures README observation 22). Every event of a call now carries the call's owner
+  and rides `ToolInFlight.turnId`, the turn active when the call STARTED (absent between parent
+  turns), never the one active when the event is emitted — one call, one `tool:<turn>:<id>` key.
+  A log written before the stamp is read by the call, on the read side only (no fold change, no
+  version bump): an unstamped `tool.output` takes the owner of its call's lifecycle rows in the same
+  derivation input — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's
+  drill-in, `deriveWorkLogEntries` keeps it out of every other view) and `unstampedChunkOwner` in
+  `mcp/transcript.ts`. One whose call's rows are gone stays the parent's; the fold, its retention
+  and the history bridge keep mirroring the log.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
@@ -723,6 +737,26 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   "Task stopped" row just before the real completion, and the roster fold keeps the first terminal
   status, so a clean shell read as interrupted forever. The level may still name unknown tasks and
   clear liveness, but it is not a roster event (fixtures README observation 18).
+- **Background agents (Claude) outlive the parent's turn.** Since CLI 2.1.280 `run_in_background`
+  defaults to true: the parent's Agent call answers at once, its `result` ends the turn, and the
+  agent works on — in the biggest live thread 97 of 112 subagents finished after their parent's
+  turn (fixtures README observation 22; no capture yet). (1) `completeTurn` — and the auto-close of
+  a stale synthetic turn, which goes through it — neither settles nor forgets an in-flight call
+  whose owner, or an agent that owner runs inside, is a live task with `is_backgrounded: true`
+  (`outlivesParentTurn`): settling it reported the call "completed" with no result and dropped the
+  real one when it came. Such a call ends by its own `tool_result`; else `failed`, on its own turn,
+  at its owner's terminal edge (`closeInFlightToolsOf`, from `task_notification` and a terminal
+  `task_updated`, BEFORE the task row) or with the session (`closeLiveTasks` closes every call a
+  subagent still has open: teardown runs it before `completeTurn`, and between parent turns there
+  is no turn to complete). A foreground agent (`is_backgrounded` false or absent — fixture 07,
+  older CLIs) keeps the settle at the parent's turn end. Nested frames never open a turn and the
+  output chunk has no turn guard, so a call that starts between parent turns is turnless for its
+  whole life. (2) Ingestion closes a turnless `assistant_message`/`reasoning` message on its own
+  `item.completed` (`handleTurnlessCompletion`, the ids `handleContentDelta` mints with no turn):
+  nothing else closed it but a session stop — after a host restart, nothing at all — and one live
+  thread held 5 479 agent messages still "Thinking". (3) A `tool_progress` heartbeat belongs to its
+  call (`toolProgressEvent`): no nested frame on 2.1.280 carries `task_id`, so owning it by
+  `task_id` dropped every subagent heartbeat; `task_id` counts only for a surfaced subagent.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
