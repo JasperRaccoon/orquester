@@ -249,6 +249,21 @@ export interface WorkLogEntry {
    * *Added by W12; additive to the foundation's contract.*
    */
   truncated?: boolean;
+  /**
+   * The call streamed a command's output — `tool.output` chunks of
+   * `command_output` (§5.6's command-output buffer) — so its whole output is
+   * the host's join of them (`GET …/items/:itemId/output`), which no item's
+   * payload holds and the retained window may hold only the latest of. The
+   * expanded row offers "load full output" whether or not its own payload
+   * was cut, and the viewer reads that join. Set on those chunks, on every
+   * lifecycle row of a call whose chunks the derivation input holds
+   * (`entries.logic.ts`) — a Claude background shell's (`bgshell:`) with none
+   * of them in view, since its output only ever streams — and on the row
+   * `joinLifecycleDetails` puts the output on. Never on a file change's: its
+   * chunks are the tool's result text, no command's output (the MCP's
+   * `read_tool_output` rule).
+   */
+  streamedOutput?: boolean;
   /** Grouping key for subagent lifecycle rows — one row per agent. */
   taskId?: string;
   /**

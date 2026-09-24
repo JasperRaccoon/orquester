@@ -2946,6 +2946,38 @@ The daemon forwards `offset`/`maxBytes` verbatim — an empty or a repeated valu
 host's rules are the only ones: an empty or repeated `offset` is its 400, a repeated `maxBytes`
 takes its first value.*
 
+*Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, task 4): the timeline reads
+it too. A row showed only the chunks the window still held, and its "Load full output" — offered
+only where §5.6 stamped `truncated`, so never on a running command's start — read the row's own item
+back as JSON: a command's streamed output is in no item, so the viewer showed a completion's payload
+(a Codex command's 180-character preview, a background shell's command and exit code), never what
+the command printed, and the chunks the window had evicted were unreadable in the GUI. Now a row
+whose command streamed its output offers it whether or not its payload was cut
+(`fullOutputSourceOf`, `lib/agent-chat/full-output.ts`) — a running command's start, its call's only
+row, included, since what it reads is the join, never the start's item. `streamedOutput` marks such
+a row: a `tool.output` chunk of `command_output`, every lifecycle row of a call whose chunks the
+derivation input holds — wherever they fall, as the MCP's transcript counts them — the row
+`joinLifecycleDetails` puts them on (`entries.logic.ts`, `timeline/row-chrome.ts`), and every
+lifecycle row of a Claude background shell's call (`bgshell:<taskId>`) with none of its chunks in
+view: its output only ever streams, and in a busy fleet the cross-agent ceiling can evict every
+chunk of a quiet shell while retention keeps its start. The viewer reads the join through the chat
+transport's `readItemOutput`: one window at a time, `THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide, from
+0 to the end, every window starting where the last ended and naming its end as the next — else the
+read fails rather than stitch a text the call never printed. Above the text it says that a running
+call's output is its output so far, and that past the host's 8 MiB cap only the first 8 MiB can be
+shown (the log keeps the rest). A host from before windows answers the whole join, taken as it
+comes; a 404 (`ITEM_NOT_FOUND`, a host from before the route, a thread deleted between two windows)
+or an empty join falls back to the item read, never an error. The item read shows a command's output
+as the command printed it where the item's own data carries it (`commandOutputText`, as the MCP's
+`read_tool_output` reads a command item first: a Codex completion's aggregated output, a Claude Bash
+result's text) — never out of an item stored cut (`payload.truncated`), whose data holds a head —
+and anything else as before: a message's text, a string payload, the payload as JSON
+(`fullOutputText`). A file change is never read through the join: its chunks are its result text, no
+command's output (the MCP's rule). The subagent drill-in, whose window keeps an agent's 200 rows,
+opens the same viewer — a read, not a command. Still out of reach: a call none of whose chunks the
+window or the loaded history holds — a background shell's aside — offers the button only where its
+own payload was cut, since nothing else in the snapshot says it streamed.*
+
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
 *over this thread's rows alone*, is ≤ 1 000 events **and** ≤ 8 MiB of payload; past either it sends
@@ -3392,7 +3424,8 @@ of a call that echoes an empty input, a no-argument tool's completion above all,
 gains ": {}" as it completes (`callRowDetail`). Only an echo of the row's own tool, its
 `data.toolName`: OpenCode's completion detail is the tool's own output, and an output that reads
 "config: {}" stays whole. The `ExitPlanMode` boundary covers the start too; and a start never offers
-"Load full output": what the read cut there is the call's input. (2) The
+its ITEM as "Load full output": what the read cut there is the call's input — a streamed command's
+start offers the call's join instead (§6.3's task-4 note on `GET …/items/:itemId/output`). (2) The
 rows a list renders are the ones counted, named and judged (`isStreamedOutputEntry`,
 `withoutJoinedOutput`, `lib/agent-chat/presentation.logic.ts`): a streamed chunk whose call has a
 row of its own in the list is that row's output, and an orphan call's chunks — no row of the call in

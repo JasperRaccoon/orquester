@@ -355,6 +355,32 @@ test("several orphan chunks of one call join into ONE row: the first carries all
   );
 });
 
+test("the row a command's streamed output joins onto says the call streamed, however its rows were built", () => {
+  // The background shell's drill-in builds its entries one activity at a time: only the chunks know what they are.
+  const started = entry({
+    id: "s",
+    toolCallId: "c1",
+    itemType: "command_execution",
+    sourceActivityKind: "tool.started"
+  });
+  const chunk = (id: string, detail: string, over: Partial<WorkLogEntry> = {}) =>
+    entry({ id, toolCallId: "c1", sourceActivityKind: "tool.output", detail, streamedOutput: true, ...over });
+  const [row] = joinLifecycleDetails([started, chunk("o1", "one\n")]);
+  assert.deepEqual([row?.id, row?.detail, row?.streamedOutput], ["s", "one\n", true]);
+  // A file change's result text joins like a command's, and says nothing: it is no command's output.
+  const edit = entry({ id: "e", toolCallId: "c2", itemType: "file_change", sourceActivityKind: "tool.completed" });
+  const result = entry({ id: "r", toolCallId: "c2", sourceActivityKind: "tool.output", detail: "File created" });
+  assert.equal(joinLifecycleDetails([edit, result])[0]?.streamedOutput, undefined);
+  // Never a file change's row, whatever its chunks claim.
+  assert.equal(
+    joinLifecycleDetails([{ ...edit, toolCallId: "c1" }, chunk("o1", "one\n")])[0]?.streamedOutput,
+    undefined
+  );
+  // An orphan call's chunks are one row, its first chunk, which says so itself.
+  const [orphan] = joinLifecycleDetails([chunk("o1", "one\n"), chunk("o2", "two\n")]);
+  assert.deepEqual([orphan?.id, orphan?.detail, orphan?.streamedOutput], ["o1", "one\ntwo\n", true]);
+});
+
 test("the join never overwrites a value the row already has", () => {
   const a = entry({ id: "a", toolCallId: "c", detail: "first", command: "ls" });
   const b = entry({ id: "b", toolCallId: "c", detail: "second" });

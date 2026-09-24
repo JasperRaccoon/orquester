@@ -3,7 +3,12 @@ import { beforeEach, describe, it } from "node:test";
 
 import type { StreamHandlers, Transporter, TransportRequest, TransportResponse } from "../transporter";
 
-import type { AgentChatStreamFrame } from "@orquester/api/agent-chat";
+import {
+  THREAD_ITEM_OUTPUT_MAX_BYTES,
+  THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
+  type AgentChatStreamFrame,
+  type ThreadItemOutputWindowResponse
+} from "@orquester/api/agent-chat";
 
 import {
   AgentChatCommandError,
@@ -356,6 +361,192 @@ describe("indexed history and search (design 2026-09-23 §C)", () => {
         return true;
       });
     }
+  });
+});
+
+describe("a call's streamed output (GET …/items/:itemId/output, window by window)", () => {
+  /** One window of the join, as a host that windows answers it. */
+  const window = (over: Partial<ThreadItemOutputWindowResponse>): ThreadItemOutputWindowResponse => ({
+    toolUseId: "call-1",
+    offset: 0,
+    text: "",
+    totalBytes: 0,
+    complete: true,
+    truncated: false,
+    ...over
+  });
+  const ok = (data: unknown): TransportResponse<unknown> => ({ status: 200, ok: true, data });
+
+  it("pages a window chain to the end and answers the whole join", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    // "héllo " is 7 UTF-8 bytes (é takes two): the next window starts there.
+    transporter.responses.push(ok(window({ text: "héllo ", totalBytes: 12, nextOffset: 7, complete: false })));
+    // The call printed on between the two reads: its join grew at its end, and the last window says it completed.
+    transporter.responses.push(ok(window({ offset: 7, text: "wörld", totalBytes: 13 })));
+
+    const join = await transport.readItemOutput!("s 1", "item/1");
+
+    assert.deepEqual(join, { toolUseId: "call-1", output: "héllo wörld", complete: true, truncated: false });
+    const path = "/api/sessions/s%201/items/item%2F1/output";
+    assert.deepEqual(
+      transporter.requests.map((request) => [request.method, request.path, request.query]),
+      [
+        ["GET", path, { offset: 0, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES }],
+        ["GET", path, { offset: 7, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES }]
+      ],
+      "every window as wide as one read takes, each from where the last one ended"
+    );
+  });
+
+  it("says what the last window says: a running call's output so far, a join cut at the host's cap", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push(ok(window({ text: "so far\n", totalBytes: 7, complete: false, truncated: true })));
+
+    assert.deepEqual(await transport.readItemOutput!("s1", "i1"), {
+      toolUseId: "call-1",
+      output: "so far\n",
+      complete: false,
+      truncated: true
+    });
+  });
+
+  it("answers an empty join empty — the call streamed nothing", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push(ok(window({})));
+
+    assert.deepEqual(await transport.readItemOutput!("s1", "i1"), {
+      toolUseId: "call-1",
+      output: "",
+      complete: true,
+      truncated: false
+    });
+  });
+
+  it("takes the whole join a host from before windows answers, whatever the query asked", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const whole = { toolUseId: "call-1", output: "every line\n", complete: false, truncated: false };
+    transporter.responses.push(ok(whole));
+
+    assert.deepEqual(await transport.readItemOutput!("s1", "i1"), whole);
+    assert.equal(transporter.requests.length, 1, "the whole join is the whole answer");
+  });
+
+  it("answers null on a 404: the host's ITEM_NOT_FOUND, or a host from before the route", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push({
+      status: 404,
+      ok: false,
+      data: { error: { code: "ITEM_NOT_FOUND", message: "Item i1 names no tool call." } }
+    });
+    transporter.responses.push({
+      status: 404,
+      ok: false,
+      data: { error: { code: "THREAD_NOT_FOUND", message: "No route for GET /threads/s1/items/i1/output" } }
+    });
+
+    assert.equal(await transport.readItemOutput!("s1", "i1"), null);
+    assert.equal(await transport.readItemOutput!("s1", "i1"), null);
+  });
+
+  it("keeps any other failure's code", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push({
+      status: 503,
+      ok: false,
+      data: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } }
+    });
+
+    await assert.rejects(
+      () => transport.readItemOutput!("s1", "i1"),
+      (error: unknown) => error instanceof AgentChatCommandError && error.code === "HOST_UNAVAILABLE"
+    );
+  });
+
+  it("refuses a body of neither shape, and windows that do not meet end to end", async () => {
+    // Refused at the last page given — never read past it into the fake's default answer.
+    const refused = async (...pages: unknown[]): Promise<void> => {
+      const transporter = new FakeTransporter();
+      const transport = createAgentChatTransport(transporter);
+      transporter.responses.push(...pages.map(ok));
+      await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /streamed output/);
+      assert.equal(transporter.requests.length, pages.length);
+    };
+    await refused({ seq: 3 });
+    // Not the window asked for: a stitched text would hold bytes twice, or skip some.
+    await refused(
+      window({ text: "abc", totalBytes: 6, nextOffset: 3 }),
+      window({ offset: 2, text: "cdef", totalBytes: 6 })
+    );
+    // A next window where the text does not end, or an empty one before the end: never a gap, never a loop.
+    await refused(window({ text: "abc", totalBytes: 6, nextOffset: 4 }));
+    await refused(window({ text: "", totalBytes: 6, nextOffset: 0 }));
+    // No next window, yet short of the end.
+    await refused(window({ text: "abc", totalBytes: 6 }));
+    // Another call's window mid-chain.
+    await refused(
+      window({ text: "abc", totalBytes: 6, nextOffset: 3 }),
+      window({ toolUseId: "call-2", offset: 3, text: "def", totalBytes: 6 })
+    );
+  });
+
+  it("refuses a window wider than one read takes, and a join past the host's cap", async () => {
+    // Refused as it arrives — never read past it into the fake's default answer.
+    const refused = async (page: ThreadItemOutputWindowResponse): Promise<void> => {
+      const transporter = new FakeTransporter();
+      const transport = createAgentChatTransport(transporter);
+      transporter.responses.push(ok(page));
+      await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /streamed output/);
+      assert.equal(transporter.requests.length, 1);
+    };
+    const wide = THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES + 1;
+    await refused(window({ text: "a".repeat(wide), totalBytes: wide }));
+    await refused(window({ text: "a", totalBytes: THREAD_ITEM_OUTPUT_MAX_BYTES + 1, nextOffset: 1 }));
+  });
+
+  it("takes a whole join arriving mid-chain (an older host back after a rollback) as the answer", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const whole = { toolUseId: "call-1", output: "abcd", complete: true, truncated: false };
+    transporter.responses.push(ok(window({ text: "ab", totalBytes: 4, nextOffset: 2, complete: false })));
+    transporter.responses.push(ok(whole));
+
+    assert.deepEqual(await transport.readItemOutput!("s1", "i1"), whole, "never the first window glued to it");
+    assert.equal(transporter.requests.length, 2);
+  });
+
+  it("answers null on a 404 mid-chain — the thread deleted between two reads — dropping what it had", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push(ok(window({ text: "ab", totalBytes: 4, nextOffset: 2, complete: false })));
+    transporter.responses.push({
+      status: 404,
+      ok: false,
+      data: { error: { code: "THREAD_NOT_FOUND", message: "No thread s1." } }
+    });
+
+    assert.equal(await transport.readItemOutput!("s1", "i1"), null);
+    assert.equal(transporter.requests.length, 2);
+  });
+
+  it("forwards the abort signal on every page", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push(ok(window({ text: "ab", totalBytes: 4, nextOffset: 2 })));
+    transporter.responses.push(ok(window({ offset: 2, text: "cd", totalBytes: 4 })));
+    const controller = new AbortController();
+
+    await transport.readItemOutput!("s1", "i1", controller.signal);
+
+    assert.deepEqual(
+      transporter.requests.map((request) => request.signal),
+      [controller.signal, controller.signal]
+    );
   });
 });
 

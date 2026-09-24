@@ -934,6 +934,28 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
   `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
   a surfaced subagent.
+- **"Load full output" on a command whose output streamed reads the host's join, never the row.**
+  A row holds only the chunks its window kept (a parent's 500 rows, an agent's 200), and a streamed
+  command's item holds at most a preview of what it printed (a Codex completion's 180-character
+  detail; a background shell's completion, its command and exit code) — reading the item back showed
+  that payload as JSON. So a row whose command streamed (`streamedOutput`, `WorkLogEntry`: a
+  `command_output` chunk, every lifecycle row of a call whose chunks the derivation input holds —
+  wherever they fall — the row `joinLifecycleDetails` puts them on, and every lifecycle row of a
+  Claude background shell's `bgshell:` call, whose chunks the cross-agent ceiling can evict while
+  retention keeps its start) offers the button whether or not its payload was cut — a running
+  command's start included (`fullOutputSourceOf`) — and the viewer reads the call's join
+  (`readFullOutput`, `packages/ui/src/lib/agent-chat/full-output.ts`) through the chat transport's
+  `readItemOutput`: `GET …/items/:itemId/output` one window at a time,
+  `THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide, each starting where the last ended — else the read
+  fails rather than stitch a text the call never printed — with "still running" / "only the first 8
+  MiB can be shown here" notes above the text (the log keeps every chunk; only the join stops at its
+  cap). A host from before windows answers the whole join, taken as it comes; a 404 or an empty join
+  falls back to the item read, never an error — which shows a command's own output as text
+  (`commandOutputText`, the MCP's first step; never out of an item stored cut, `payload.truncated`)
+  and anything else as before (`fullOutputText`). Never a file change's join: its chunks are its
+  result text (the MCP's rule). The subagent drill-in opens the same viewer: a read, not a command.
+  The read is not routed through the thread store: an output the user asked to see once is not
+  thread state.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission

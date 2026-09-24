@@ -39,6 +39,7 @@ import type {
   QueuedComposerMessage,
   RememberedTimelinePosition
 } from "../../lib/agent-chat/contracts";
+import type { FullOutputSource } from "../../lib/agent-chat/full-output";
 import type { RewindTarget } from "../../lib/agent-chat/rewind.logic";
 
 /**
@@ -94,8 +95,12 @@ export interface ChatTimelineProps {
   onOpenTurnDiff: (turnCount: number) => void;
   /** Click-through from a file-change row to an editor tab. */
   onOpenFile: (path: string) => void;
-  /** Fetch one item's full, unslimmed payload (§5.6 "load full output"). */
-  onLoadFullOutput: (itemId: string) => void;
+  /**
+   * Fetch one item's full, unslimmed payload (§5.6 "load full output") — or,
+   * for a command whose output streamed (`source: "streamed"`), first its
+   * call's whole output as the host joins it (§6.3).
+   */
+  onLoadFullOutput: (itemId: string, source?: FullOutputSource) => void;
   /** Drill in to a subagent's own timeline (§7.6). */
   onOpenAgent: (agentId: string) => void;
   onSendQueuedNow: (queuedId: string) => void;
@@ -367,6 +372,12 @@ export interface AgentDrillInProps {
   roster?: readonly RuntimeSubagent[] | undefined;
   /** Forwarded so changed-file paths render workspace-relative. */
   projectPath?: string | undefined;
+  /**
+   * The parent view's full-output viewer. A read, not a command, so the child
+   * view offers it too: an agent's window keeps 200 rows, and a long
+   * command's output outlives it in the host's join. Absent means inert.
+   */
+  onLoadFullOutput?: ((itemId: string, source?: FullOutputSource) => void) | undefined;
 }
 
 export interface ChatStatusLineProps {

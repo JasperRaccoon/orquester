@@ -16,7 +16,9 @@
  *    is inert: there is no revert, no approval and no queue inside a child.
  *    The one exception is opening a file, which is navigation, not a command —
  *    and even that is left to the parent through props we do not have, so it
- *    is a no-op here too.
+ *    is a no-op here too. Reading a call's whole output is no command either:
+ *    the parent's viewer serves it (`onLoadFullOutput`), because an agent's
+ *    window keeps 200 rows and a long command's output outlives them.
  *
  * §7.2's rule holds on the way in: items stamped with an `agentId` never
  * render in the parent timeline, they are re-homed here. **Both halves come
@@ -101,7 +103,8 @@ export function AgentDrillIn({
   rows: rowsOverride,
   onBack,
   roster,
-  projectPath
+  projectPath,
+  onLoadFullOutput
 }: AgentDrillInProps): React.ReactElement {
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
   const live = useAgentChatDrillIn(sessionId, agentId, disclosures);
@@ -252,7 +255,7 @@ export function AgentDrillIn({
         onRevert={noop}
         onOpenTurnDiff={noop}
         onOpenFile={noop}
-        onLoadFullOutput={noop}
+        onLoadFullOutput={onLoadFullOutput ?? noop}
         onOpenAgent={noop}
         onSendQueuedNow={noop}
         onReturnQueuedToComposer={noop}
