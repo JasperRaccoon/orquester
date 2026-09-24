@@ -24,13 +24,22 @@
  * whole timeline would — the live tail at the very end, the "Working…" header
  * after the last prompt, whichever part holds it.
  *
+ * A message's liveness is `isMessageStreaming`'s (`@orquester/api/agent-chat`)
+ * against the thread's context (`messageStreaming`), never its bare flag: the
+ * log keeps `streaming: true` for good on words a dead host or an unclosed
+ * agent left. The message row's `streaming` and the fold a streaming answer
+ * keeps open read it. The streamed-text fast path and the (unrendered)
+ * duration boundaries read the flag, which is what a delta merges on.
+ *
  * No React import.
  */
 
 import {
+  isMessageStreaming,
   startedTurns,
   type Checkpoint,
   type LatestTurnSummary,
+  type MessageStreamingContext,
   type ThreadMessageItem,
   type Turn
 } from "@orquester/api/agent-chat";
@@ -57,6 +66,13 @@ import {
 
 const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 const WORKING_ROW_ID = "working-indicator-row";
+
+/** No live session to name: nothing reads as streaming ({@link TimelineRowsInput.messageStreaming}). */
+const NOTHING_STREAMS: MessageStreamingContext = {
+  sessionLive: false,
+  activeTurnId: null,
+  activeAgentIds: new Set()
+};
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -386,6 +402,8 @@ function deriveTurnFolds(input: {
   terminalAssistantMessageIds: ReadonlySet<string>;
   latestTurn: LatestTurnSummary | null;
   unfoldedTurnIds: ReadonlySet<string>;
+  /** {@link TimelineRowsInput.messageStreaming}'s answer for a message. */
+  isStreaming: (message: ThreadMessageItem) => boolean;
 }): ReadonlyMap<string, TurnFold> {
   interface TurnGroup {
     entries: TimelineEntry[];
@@ -421,9 +439,10 @@ function deriveTurnFolds(input: {
       if (input.terminalAssistantMessageIds.has(entry.message.id)) {
         group.terminalEntry = entry;
       }
-      // A thinking block stranded by a crashed provider keeps its streaming
-      // flag forever and must not hold a fold open.
-      if (entry.message.streaming && !isGroupMessage(entry.message)) {
+      // An answer keeps its turn unfolded only while it can still be written
+      // (`isStreaming`): one a dead host left keeps its flag for good and
+      // reads as settled. A thinking block never holds a fold open.
+      if (!isGroupMessage(entry.message) && input.isStreaming(entry.message)) {
         group.hasStreamingMessage = true;
       }
     }
@@ -631,6 +650,17 @@ export interface TimelineRowsInput {
   supportsConversationRollback: boolean;
   /** Task ids of subagents still working; the live activity row reads them. */
   liveAgentTaskIds?: ReadonlySet<string>;
+  /**
+   * Whether a message can still be streaming — the thread's
+   * `messageStreamingContext` (`@orquester/api/agent-chat`). A message row's
+   * `streaming` and the fold a streaming answer keeps open read
+   * `isMessageStreaming` against it, never the bare flag, which the log keeps
+   * `true` for good on words a dead host or an unclosed agent left. Absent,
+   * nothing reads as streaming: a caller that names no live session has no
+   * stream to show. Compared by identity, like the sets above; the context is
+   * memoised by the roster, so a streamed token keeps the fast path.
+   */
+  messageStreaming?: MessageStreamingContext;
   /** The client's own undispatched queue, rendered as ghost bubbles (§7.4). */
   queuedMessages?: readonly QueuedComposerMessage[];
   /**
@@ -694,6 +724,10 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     turns: input.turns ?? []
   });
 
+  const streamingContext = input.messageStreaming ?? NOTHING_STREAMS;
+  const isStreaming = (message: ThreadMessageItem): boolean =>
+    isMessageStreaming(message, streamingContext);
+
   const rows: AgentChatTimelineRow[] = [];
   const durationStartByMessageId = computeMessageDurationStart(
     entries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : []))
@@ -714,7 +748,8 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     entries,
     terminalAssistantMessageIds,
     latestTurn: input.latestTurn ?? null,
-    unfoldedTurnIds: activeVisualResponseTurnIds
+    unfoldedTurnIds: activeVisualResponseTurnIds,
+    isStreaming
   });
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorEntryId.values()) {
@@ -1126,7 +1161,8 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       showAssistantMeta,
       ...(message.role === "user" && revertTurnCountByUserMessageId.has(message.id)
         ? { revertTurnCount: revertTurnCountByUserMessageId.get(message.id) }
-        : {})
+        : {}),
+      ...(isStreaming(message) ? { streaming: true } : {})
     });
 
     // The changed-files card sits at the end of the turn it belongs to (§7.3).
@@ -1321,6 +1357,7 @@ function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): b
     // touching a single timeline entry.
     left.turns === right.turns &&
     left.liveAgentTaskIds === right.liveAgentTaskIds &&
+    left.messageStreaming === right.messageStreaming &&
     left.queuedMessages === right.queuedMessages &&
     left.expandedTurnIds === right.expandedTurnIds &&
     left.expandedWorkGroupIds === right.expandedWorkGroupIds &&
@@ -1367,6 +1404,15 @@ function replaceStreamingMessageRows(
       continue;
     }
     if (!isStreamingMessageTextUpdate(previousEntry.message, entry.message)) {
+      return null;
+    }
+    // A flagged message that reads as settled lets its turn fold, and the
+    // fold's "Worked for …" is timed by its `updatedAt`, so it rebuilds. A
+    // live one keeps its turn unfolded, and a turnless one joins no fold.
+    if (
+      entry.message.turnId !== null &&
+      !isMessageStreaming(entry.message, input.messageStreaming ?? NOTHING_STREAMS)
+    ) {
       return null;
     }
     replacements.set(previousEntry.message, entry.message);
@@ -1566,7 +1612,8 @@ export function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow)
         a.message === other.message &&
         a.durationStart === other.durationStart &&
         a.showAssistantMeta === other.showAssistantMeta &&
-        a.revertTurnCount === other.revertTurnCount
+        a.revertTurnCount === other.revertTurnCount &&
+        a.streaming === other.streaming
       );
     }
   }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import type { Turn } from "@orquester/api/agent-chat";
+import { messageStreamingContext, type MessageStreamingContext, type Turn } from "@orquester/api/agent-chat";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { AgentChatTimelineRow, WorkLogEntry } from "./contracts";
@@ -1208,5 +1208,124 @@ describe("R7-12 — stable rows survive a duplicate row id", () => {
     const first = computeStableRows(rows, EMPTY_STABLE_ROWS);
     const second = computeStableRows(rows.map((row) => ({ ...row })) as AgentChatTimelineRow[], first);
     assert.equal(second, first);
+  });
+});
+
+describe("a message's liveness is the rule's, never its bare flag (isMessageStreaming)", () => {
+  type MessageRow = Extract<AgentChatTimelineRow, { kind: "message" }>;
+  const messageRow = (rows: readonly AgentChatTimelineRow[], id: string): MessageRow => {
+    const row = rows.find((candidate): candidate is MessageRow => candidate.kind === "message" && candidate.id === id);
+    assert.ok(row, `a message row ${id}`);
+    return row;
+  };
+  const running = (activeTurnId: string | null): MessageStreamingContext =>
+    messageStreamingContext({ head: { session: { status: "running", activeTurnId } }, roster: [] });
+
+  /**
+   * Turn `t1` settled long ago with its answer still flagged: the host that was
+   * streaming it was killed. Turn `t2` is running and streaming its own.
+   */
+  const items = () => [
+    message("user", "first", { id: "u1", createdAt: stamp(1) }),
+    activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: "call-1", title: "ls", command: "ls", status: "completed" },
+      { id: "ls", turnId: "t1", createdAt: stamp(2) }
+    ),
+    message("assistant", "Half an answer", { id: "stuck", turnId: "t1", streaming: true, createdAt: stamp(3) }),
+    message("user", "second", { id: "u2", createdAt: stamp(4) }),
+    message("assistant", "Now answer", { id: "live", turnId: "t2", streaming: true, createdAt: stamp(5) })
+  ];
+  const t2Running = {
+    latestTurn: { turnId: "t2", state: "running" as const, startedAt: stamp(4), completedAt: null },
+    runningTurnId: "t2",
+    isWorking: true,
+    activeTurnStartedAt: stamp(4)
+  };
+
+  it("the running turn's answer streams; a settled turn's stuck answer reads settled and its turn folds", () => {
+    const rows = deriveTimelineRows(
+      baseInput(entriesFrom(items()), { ...t2Running, messageStreaming: running("t2") })
+    );
+    assert.equal(messageRow(rows, "live").streaming, true);
+    assert.equal(messageRow(rows, "stuck").streaming, undefined);
+    assert.ok(
+      rows.some((row) => row.kind === "turn-fold" && row.turnId === "t1"),
+      `the stuck answer no longer holds t1's fold open: ${kinds(rows).join(", ")}`
+    );
+  });
+
+  it("a streaming answer holds its turn's fold open while it can still be written", () => {
+    // `isWorking: false`, so only the answer's own liveness keeps `t1` unfolded.
+    const live = deriveTimelineRows(
+      baseInput(entriesFrom(items()), { messageStreaming: running("t1") })
+    );
+    assert.equal(messageRow(live, "stuck").streaming, true);
+    assert.ok(!live.some((row) => row.kind === "turn-fold" && row.turnId === "t1"));
+  });
+
+  it("nothing streams without a context — a caller that names no live session", () => {
+    const rows = deriveTimelineRows(baseInput(entriesFrom(items()), t2Running));
+    assert.equal(messageRow(rows, "live").streaming, undefined);
+    assert.equal(messageRow(rows, "stuck").streaming, undefined);
+  });
+
+  it("a moved context re-derives: the streamed-text fast path never keeps a stale streaming row", () => {
+    const entries = entriesFrom(items());
+    const first = deriveTimelineRowsWithState(baseInput(entries, { messageStreaming: running("t2") }));
+    assert.equal(messageRow(first.rows, "live").streaming, true);
+    // The session died under the same entries: only the context moved.
+    const dead = messageStreamingContext({
+      head: { session: { status: "stopped", activeTurnId: null } },
+      roster: []
+    });
+    const second = deriveTimelineRowsWithState(baseInput(entries, { messageStreaming: dead }), first);
+    assert.equal(messageRow(second.rows, "live").streaming, undefined);
+
+    const stable = computeStableRows(second.rows, computeStableRows(first.rows, EMPTY_STABLE_ROWS));
+    assert.equal(messageRow(stable.result, "live").streaming, undefined, "the stable layer takes the new row");
+  });
+
+  it("a streamed token keeps the row's liveness through the fast path", () => {
+    const context = running("t2");
+    const base = items();
+    const first = deriveTimelineEntriesFromItems(base, EMPTY_TIMELINE_PROJECTION);
+    const firstRows = deriveTimelineRowsWithState(baseInput(first.entries, { messageStreaming: context }));
+    const grown = base.map((item) =>
+      item.id === "live" && item.kind === "message" ? { ...item, text: "Now answering", updatedAt: stamp(6) } : item
+    );
+    const second = deriveTimelineEntriesFromItems(grown, first);
+    const secondRows = deriveTimelineRowsWithState(baseInput(second.entries, { messageStreaming: context }), firstRows);
+    assert.equal(secondRows.rows[0], firstRows.rows[0], "the fast path took it: the untouched rows are the same objects");
+    const row = messageRow(secondRows.rows, "live");
+    assert.equal(row.message.text, "Now answering");
+    assert.equal(row.streaming, true);
+  });
+
+  it("a delta on an answer that reads settled rebuilds: its turn's fold is timed by it", () => {
+    const context = running("t2");
+    const base = items();
+    const first = deriveTimelineEntriesFromItems(base, EMPTY_TIMELINE_PROJECTION);
+    const firstRows = deriveTimelineRowsWithState(baseInput(first.entries, { messageStreaming: context }));
+    const label = (rows: readonly AgentChatTimelineRow[]) =>
+      rows.flatMap((row) => (row.kind === "turn-fold" && row.turnId === "t1" ? [row.label] : []));
+    assert.deepEqual(label(firstRows.rows), ["Worked for 2.0s"], "from the prompt to the answer's last write");
+    // A late write to the stuck answer (flagged, of a turn no longer running).
+    const late = base.map((item) =>
+      item.id === "stuck" && item.kind === "message" ? { ...item, text: "Half an answer, late", updatedAt: stamp(9) } : item
+    );
+    const second = deriveTimelineEntriesFromItems(late, first);
+    const secondRows = deriveTimelineRowsWithState(baseInput(second.entries, { messageStreaming: context }), firstRows);
+    assert.deepEqual(label(secondRows.rows), ["Worked for 8.0s"], "never the fast path's stale label");
+  });
+
+  it("isRowUnchanged sees a message row's liveness", () => {
+    const row = messageRow(
+      deriveTimelineRows(baseInput(entriesFrom(items()), { ...t2Running, messageStreaming: running("t2") })),
+      "live"
+    );
+    assert.equal(isRowUnchanged(row, { ...row }), true);
+    const { streaming: _live, ...settled } = row;
+    assert.equal(isRowUnchanged(row, settled), false);
   });
 });
