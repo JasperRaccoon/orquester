@@ -107,8 +107,9 @@ interface ToolInFlight {
    * turn active when the event is emitted: a background subagent's result
    * lands after the parent's turn has ended, and a call whose rows carry two
    * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`). The
-   * one late assignment: a parent call streamed just before its synthetic turn
-   * opened adopts that turn (`handleAssistantMessage`).
+   * one late assignment: a parent call streamed while no turn was open adopts
+   * the next turn to open (`beginTurn`) — the woken parent's synthetic turn,
+   * or a user turn sent in that window.
    */
   turnId?: string;
 }
@@ -710,6 +711,21 @@ export class ClaudeNormalizer {
       announcedUsageLimitKeys: new Set()
     };
     this.turnState = turn;
+    // A turn that opens adopts every in-flight call with neither an owner nor a
+    // turn: a parent call streamed while none was open. A woken parent (each
+    // background agent that finishes wakes it) streams before the complete
+    // frame that opens its synthetic turn, and a user's message sent in that
+    // window opens THEIR turn first. Either way everything the call emits from
+    // here rides the turn that opened under it, so the turn's fold holds it
+    // and a rewind to before the turn removes it; what it emitted before (its
+    // start, an early input update) stays turnless. Only such a stream can
+    // have registered one — the parent's calls are settled at every turn end —
+    // and a subagent's call is its own: it never joins a parent turn.
+    for (const tool of this.inFlightTools.values()) {
+      if (tool.agentId === undefined && tool.turnId === undefined) {
+        tool.turnId = input.turnId;
+      }
+    }
     const anchorUuid = input.anchorUuid ?? input.turnId;
     this.turnStartMessageIds.push(anchorUuid);
     this.turnBoundaries.push({ turnId: input.turnId, uuid: anchorUuid });
@@ -1860,30 +1876,17 @@ export class ClaudeNormalizer {
     }
 
     if (!this.turnState) {
-      // Background assistant output between prompts opens a synthetic turn.
-      const turnId = this.ids.uuid();
+      // Background assistant output between prompts opens a synthetic turn —
+      // on this COMPLETE frame, never earlier: its uuid is the turn's rewind
+      // anchor. A call this message's stream already registered adopts the
+      // turn as it opens (`beginTurn`).
       events.push(
         ...this.beginTurn({
-          turnId,
+          turnId: this.ids.uuid(),
           synthetic: true,
           anchorUuid: message.uuid
         })
       );
-      // It opens on the first COMPLETE parent frame, but that message's stream
-      // began before it (a woken parent — each background agent that finishes
-      // wakes it), so a `tool_use` streamed first registered with no turn. Only
-      // this message's stream can have done so — the parent's calls are settled
-      // at every turn end — and such a call adopts the turn: everything it
-      // emits from here rides it, so its turn's fold holds it and a rewind to
-      // before the turn removes it. What it emitted before (its start, an early
-      // input update) stays turnless. A subagent's call is its own and never
-      // joins a parent turn. The turn cannot open earlier: its rewind anchor is
-      // this complete frame's transcript uuid.
-      for (const tool of this.inFlightTools.values()) {
-        if (tool.agentId === undefined && tool.turnId === undefined) {
-          tool.turnId = turnId;
-        }
-      }
     }
 
     const content: unknown = message.message?.content;

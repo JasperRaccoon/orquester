@@ -708,17 +708,17 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `claude/07`, fixtures README observation 22). Every event of a call now carries the call's owner
   and rides `ToolInFlight.turnId`, the turn active when the call STARTED (absent between parent
   turns), never the one active when the event is emitted — one call, one `tool:<turn>:<id>` key.
-  The one late assignment: a parent call streamed before its synthetic turn opens — a woken
-  parent's stream precedes the complete frame that opens the turn — adopts that turn as it opens
-  (`handleAssistantMessage`), so the turn's fold holds it and a rewind to before the turn removes
-  it (`reduceReverted` keeps turnless rows); its start row stays turnless. A log a host wrote before
-  the stamp — an older host surviving a deploy writes such chunks until its drain-restart — is read
-  by the call, on the read side only (no fold change, no version bump): an unstamped `tool.output`
-  takes the owner of its call's lifecycle rows in the same derivation input — `callOwnersOf` in
-  `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in, `deriveWorkLogEntries` keeps
-  it out of every other view) and `unstampedChunkOwner` in `mcp/transcript.ts`. One whose call's
-  rows are gone stays the parent's; the fold, its retention and the history bridge keep mirroring
-  the log.
+  The one late assignment: a parent call streamed while no turn was open — a woken parent's stream
+  precedes the complete frame that opens its synthetic turn — adopts the next turn to open
+  (`beginTurn`: that synthetic turn, or a user turn sent in the window), so the turn's fold holds
+  it and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); its start
+  row stays turnless. A log a host wrote before the stamp — an older host surviving a deploy writes
+  such chunks until its drain-restart — is read by the call, on the read side only (no fold change,
+  no version bump): an unstamped `tool.output` takes the owner of its call's lifecycle rows in the
+  same derivation input — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its
+  owner's drill-in, `deriveWorkLogEntries` keeps it out of every other view) and
+  `unstampedChunkOwner` in `mcp/transcript.ts`. One whose call's rows are gone stays the parent's;
+  the fold, its retention and the history bridge keep mirroring the log.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no

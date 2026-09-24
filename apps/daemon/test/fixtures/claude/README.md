@@ -870,10 +870,10 @@ capture of a background agent outliving a parent `result` the next time captures
 A finishing background agent also **wakes the parent** between prompts (*"you will be notified when
 one completes"*), and that answer's stream begins before its first complete `assistant` frame —
 the frame that opens the adapter's synthetic turn, and whose uuid is that turn's rewind anchor
-(observation 21). A `tool_use` streamed first therefore registers with no turn; it adopts the
-synthetic turn the moment the turn opens, so everything it emits from then on rides it, and its
-turn's fold holds it and a rewind to before the turn removes it. What it emitted before — its start,
-an early input update — stays turnless.
+(observation 21). A `tool_use` streamed first therefore registers with no turn; it adopts the next
+turn to open — that synthetic turn, or a user turn if the user sends a message in that window — so
+everything it emits from then on rides it, and its turn's fold holds it and a rewind to before the
+turn removes it. What it emitted before — its start, an early input update — stays turnless.
 
 **c. Nested `tool_progress` frames carry no `task_id`.** The live windows held 6 / 10 / 46
 `tool_progress` frames — every one nested (a subagent's `Bash`), and not one with `task_id`; the SDK

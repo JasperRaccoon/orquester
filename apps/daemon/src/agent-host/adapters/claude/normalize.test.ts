@@ -2623,6 +2623,71 @@ describe("claude normaliser — a background subagent outlives the parent's turn
     );
   });
 
+  it("a parent call streamed before a USER turn opens in that window rides the user turn", () => {
+    const { normalizer, feed } = feedable();
+    feed(agentStartedFrame({ is_backgrounded: true }));
+    feed(nestedToolUseFrame("toolu_sub", "Bash", { command: "sleep 9" }));
+    // The woken parent's stream begins…
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
+    stream({ type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } });
+    const started = stream({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }
+    });
+    assert.equal(allOf(started, "item.started")[0]?.turnId, undefined);
+    // …and the user sends a message before its complete frame arrives: `sendTurn`
+    // opens a USER turn, so the complete frame finds a turn open and no
+    // synthetic turn opens under the call.
+    normalizer.beginTurn({ turnId: "turn-user" });
+    const frame = feed({
+      type: "assistant",
+      uuid: "u-wake",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: {
+        id: "msg_wake",
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }]
+      }
+    });
+    assert.deepEqual(allOf(frame, "turn.started"), [], "no synthetic turn: one is already open");
+
+    const done = feed({
+      type: "user",
+      uuid: "u-r",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_P", content: "done\n" }] }
+    });
+    assert.deepEqual(
+      done
+        .filter((event) => event.itemId === "toolu_P")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", "turn-user", undefined],
+        ["content.delta", "turn-user", undefined],
+        ["item.completed", "turn-user", undefined]
+      ],
+      "the call rides the turn that opened under it, whoever opened it"
+    );
+
+    // The subagent's call is its own: no parent turn adopts it.
+    const sub = feed(nestedToolResultFrame("toolu_sub", "slept\n"));
+    assert.deepEqual(
+      sub
+        .filter((event) => event.itemId === "toolu_sub")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", undefined, AGENT_TASK_ID],
+        ["content.delta", undefined, AGENT_TASK_ID],
+        ["item.completed", undefined, AGENT_TASK_ID]
+      ]
+    );
+  });
+
   it("a subagent's tool_progress is its owner's heartbeat, on the call's own turn", () => {
     const { feed } = launched();
     feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
