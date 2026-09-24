@@ -106,7 +106,9 @@ interface ToolInFlight {
    * started between parent turns. Every event of the call rides it, never the
    * turn active when the event is emitted: a background subagent's result
    * lands after the parent's turn has ended, and a call whose rows carry two
-   * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`).
+   * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`). The
+   * one late assignment: a parent call streamed just before its synthetic turn
+   * opened adopts that turn (`handleAssistantMessage`).
    */
   turnId?: string;
 }
@@ -1859,13 +1861,29 @@ export class ClaudeNormalizer {
 
     if (!this.turnState) {
       // Background assistant output between prompts opens a synthetic turn.
+      const turnId = this.ids.uuid();
       events.push(
         ...this.beginTurn({
-          turnId: this.ids.uuid(),
+          turnId,
           synthetic: true,
           anchorUuid: message.uuid
         })
       );
+      // It opens on the first COMPLETE parent frame, but that message's stream
+      // began before it (a woken parent — each background agent that finishes
+      // wakes it), so a `tool_use` streamed first registered with no turn. Only
+      // this message's stream can have done so — the parent's calls are settled
+      // at every turn end — and such a call adopts the turn: everything it
+      // emits from here rides it, so its turn's fold holds it and a rewind to
+      // before the turn removes it. What it emitted before (its start, an early
+      // input update) stays turnless. A subagent's call is its own and never
+      // joins a parent turn. The turn cannot open earlier: its rewind anchor is
+      // this complete frame's transcript uuid.
+      for (const tool of this.inFlightTools.values()) {
+        if (tool.agentId === undefined && tool.turnId === undefined) {
+          tool.turnId = turnId;
+        }
+      }
     }
 
     const content: unknown = message.message?.content;

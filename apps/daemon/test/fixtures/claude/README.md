@@ -862,10 +862,18 @@ explicitly and its `task_started` predates the field. So the adapter keeps a bac
 calls open across the parent's `result` (settling them there reported each "completed" with no
 result, and dropped the real one when it came), lets each end by its own `tool_result`, closes what
 is left `failed` on the agent's own terminal edge or with the session, and gives every event of a
-call the turn it started in — a call that starts between parent turns is turnless for its whole
-life, and nested frames never open a turn. A foreground agent (`is_backgrounded: false`, or the
-field absent as in 07) keeps its calls' settle at the parent's turn end. Record a real capture of
-a background agent outliving a parent `result` the next time captures are allowed.
+call the turn it started in — a subagent's call that starts between parent turns is turnless for
+its whole life, and nested frames never open a turn. A foreground agent (`is_backgrounded: false`,
+or the field absent as in 07) keeps its calls' settle at the parent's turn end. Record a real
+capture of a background agent outliving a parent `result` the next time captures are allowed.
+
+A finishing background agent also **wakes the parent** between prompts (*"you will be notified when
+one completes"*), and that answer's stream begins before its first complete `assistant` frame —
+the frame that opens the adapter's synthetic turn, and whose uuid is that turn's rewind anchor
+(observation 21). A `tool_use` streamed first therefore registers with no turn; it adopts the
+synthetic turn the moment the turn opens, so everything it emits from then on rides it, and its
+turn's fold holds it and a rewind to before the turn removes it. What it emitted before — its start,
+an early input update — stays turnless.
 
 **c. Nested `tool_progress` frames carry no `task_id`.** The live windows held 6 / 10 / 46
 `tool_progress` frames — every one nested (a subagent's `Bash`), and not one with `task_id`; the SDK

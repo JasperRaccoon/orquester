@@ -2544,6 +2544,85 @@ describe("claude normaliser — a background subagent outlives the parent's turn
     );
   });
 
+  it("a parent call streamed before its synthetic turn opens rides that turn from then on", () => {
+    const { feed } = feedable();
+    // A background agent works between prompts, one call of its own in flight.
+    feed(agentStartedFrame({ is_backgrounded: true }));
+    feed(nestedToolUseFrame("toolu_sub", "Bash", { command: "sleep 9" }));
+    // Its finishing wakes the parent: the parent's stream begins BEFORE the
+    // complete assistant frame that opens the synthetic turn, so a tool_use
+    // streamed first registers with no turn.
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
+    const early = [
+      stream({ type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } }),
+      stream({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: {} }
+      }),
+      stream({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"command":"cat out.txt"}' }
+      })
+    ].flat();
+    assert.deepEqual(
+      early.filter((event) => event.itemId === "toolu_P").map((event) => [event.type, event.turnId]),
+      [
+        ["item.started", undefined],
+        ["item.updated", undefined]
+      ],
+      "what went out before the turn opened stays turnless"
+    );
+    const opened = feed({
+      type: "assistant",
+      uuid: "u-wake",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: {
+        id: "msg_wake",
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }]
+      }
+    });
+    const turnId = allOf(opened, "turn.started")[0]?.turnId;
+    assert.ok(turnId, "the complete frame opens the synthetic turn");
+
+    const done = feed({
+      type: "user",
+      uuid: "u-r",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_P", content: "done\n" }] }
+    });
+    assert.deepEqual(
+      done
+        .filter((event) => event.itemId === "toolu_P")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", turnId, undefined],
+        ["content.delta", turnId, undefined],
+        ["item.completed", turnId, undefined]
+      ],
+      "the call rides the turn that opened under it, so a rewind before it removes it"
+    );
+
+    // The subagent's call is its own: the parent's turn never adopts it.
+    const sub = feed(nestedToolResultFrame("toolu_sub", "slept\n"));
+    assert.deepEqual(
+      sub
+        .filter((event) => event.itemId === "toolu_sub")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", undefined, AGENT_TASK_ID],
+        ["content.delta", undefined, AGENT_TASK_ID],
+        ["item.completed", undefined, AGENT_TASK_ID]
+      ]
+    );
+  });
+
   it("a subagent's tool_progress is its owner's heartbeat, on the call's own turn", () => {
     const { feed } = launched();
     feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
@@ -2625,5 +2704,25 @@ describe("claude normaliser — a background subagent outlives the parent's turn
     assert.equal(parent.agentId, undefined);
     const named = heartbeat("toolu_elsewhere", AGENT_TASK_ID);
     assert.deepEqual([named?.payload.taskId, named?.agentId], [AGENT_TASK_ID, AGENT_TASK_ID]);
+
+    // With no call in flight and no parent_tool_use_id, `task_id` alone is
+    // read — and only a surfaced SUBAGENT's counts: not a suppressed
+    // foreground shell's, nor a surfaced background shell's.
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "bg-bash",
+      tool_use_id: "toolu_Q",
+      task_type: "local_bash",
+      is_backgrounded: true,
+      uuid: "u-bg",
+      session_id: "s"
+    });
+    assert.equal(normalizer.liveTasks().has("bg-bash"), true, "the shell is on the roster");
+    for (const taskId of ["fg-bash", "bg-bash"]) {
+      const orphan = heartbeat("toolu_gone", taskId);
+      assert.ok(orphan);
+      assert.deepEqual([orphan.payload.taskId, orphan.agentId], [undefined, undefined], taskId);
+    }
   });
 });
