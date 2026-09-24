@@ -392,6 +392,12 @@ export interface AccountChipProps {
   selectedId?: string;
   /** False while a turn, a request, a queue or a revert is in flight. */
   canSwitch?: boolean;
+  /**
+   * Why a closed chip is closed, in the host's words when it names one: a
+   * running compaction, or a continuing goal (goals §5.5). Absent ⇒ the
+   * chip's own "available when idle".
+   */
+  disabledReason?: string | null;
   onChange?: (accountId: string) => void;
   returnFocusTo?: () => HTMLElement | null;
 }
@@ -417,6 +423,7 @@ export function AccountChip({
   options,
   selectedId,
   canSwitch = true,
+  disabledReason = null,
   onChange,
   returnFocusTo
 }: AccountChipProps): React.ReactElement {
@@ -442,7 +449,9 @@ export function AccountChip({
           type="button"
           disabled={!canSwitch}
           data-composer-shortcut="account"
-          title={canSwitch ? `Running as ${label} — click to switch` : ACCOUNT_BUSY_TITLE}
+          title={
+            canSwitch ? `Running as ${label} — click to switch` : (disabledReason ?? ACCOUNT_BUSY_TITLE)
+          }
           className={cn(CHIP, "max-w-40")}
         >
           {chipContent({

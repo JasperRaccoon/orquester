@@ -829,6 +829,97 @@ resumed after the compaction) rather than guessed. On a transcript whose summary
 list alone decides, as before. Note that the boundary row *in the transcript* carried no
 `compact_metadata` blocks at all in the 2.1.280 capture above — the metadata rides the live frame.
 
+### 22. `/goal`: four channels, and the verdict that matters most is on none of them
+
+Not a capture — Claude Code **2.1.280** read out of the installed binary for the goals spec
+(`docs/superpowers/specs/2026-09-24-agent-goals-design.md` §3.1), checked against a live
+transcript on this host. No frame here was produced by running the CLI. `/goal <condition>`
+registers a session-scoped **prompt** Stop hook that a small model evaluates at every turn end.
+What the adapter reads (`adapters/claude/goal.ts`, `goal-transcript.ts`), per channel:
+
+**a. The command's own output is a `<synthetic>` assistant frame.** A local command's printed text
+is re-emitted as an assistant "twin":
+
+```json
+{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Goal set: <cond>"}],"stop_reason":"end_turn",…},"parent_tool_use_id":null,"local_command_source":"<local-command-stdout>Goal set: <cond></local-command-stdout>","local_command_run":{"command":"goal","args":"<cond>"},…}
+```
+
+A replace prints exactly what a set prints; the kickoff prompt behind it is not echoed, and the
+model turn follows in the SAME turn. A bare `/goal` prints `No goal set. Usage: \`/goal
+<condition>\`` or `Goal active: <cond> (not yet evaluated|<n> turn[s])` plus an optional `\nLast
+check: <reason>` line, then a `result` with `num_turns: 0`; `/goal clear` (or `stop`, `off`,
+`reset`, `none`, `cancel`, any case) prints `Goal cleared: <cond>` or `No goal set`. The refusals
+(`Goal condition is limited to 4000 characters (got <n>)`, `/goal can't run while hooks are
+restricted (…)`) have the same frame shape. **A never-streamed frame was parked until the
+`result`** like any snapshot-only message — and a goal run is ONE turn that the Stop hook keeps
+going until the condition holds, so "Goal set" appeared when the whole run was over. Every
+`<synthetic>` frame (local-command output, CLI-phrased API errors — `16-errors.ndjson` line 10 is
+one) now completes at once.
+
+**b. A "not met" check is a synthetic `user` frame.** `isSynthetic: true`, main thread, a plain
+string body `Stop hook feedback:\n[<cond>]: <reason>`; the turn goes on. Once the conversation
+already quotes the condition whole, the CLI cuts it to 500 UTF-16 units and appends `… [+<n>
+chars]`, and the condition is user text that may itself contain `]: `, so the match runs against
+the tracked objective, never the first `]: `. A deferred evaluation that has waited long enough
+sends `Goal check-in: «<cond>» is still active, … because background work is still running:`
+the same way — and so do two check-ins that mean the OPPOSITE: the idle one (`… and that work
+is no longer running …`, never in an SDK session) and the re-prompt after a turn an API error cut
+short (`Goal check-in: «<cond>» is still active. The last turn ended before the goal could be
+evaluated: <cause>. Continue toward the goal.`). Only the first phrase means background work.
+None of these is a user message (all are the CLI talking to its model); any OTHER Stop hook's
+feedback is handled exactly as before.
+
+**c. `active_goal` never reaches this adapter.** The SDK types it (`SDKActiveGoalMessage`, in the
+stdout union only — not in `SDKMessage`), but the CLI writes it solely when `CLAUDE_CODE_REMOTE`
+is set, which flips 183 remote-mode code sites and is never set here. It is still recognised
+before the exhaustiveness switch — it used to fall into the default arm's `runtime.warning` —
+`{value: {condition, iterations, set_at, tokens_at_start, last_reason?} | null}`.
+
+**d. Met, impossible, and cleared-by-error are ONLY in the transcript — and land after `result`.**
+Nothing on stdout: the CLI's `<CLAUDE_CONFIG_DIR>/projects/<cwd slug>/<session id>.jsonl` gets an
+`attachment` row. In an SDK session that row is written **~100 ms AFTER the `result`**, not before
+it: the headless loop hard-flushes the transcript only when `CLAUDE_CODE_EAGER_FLUSH` or
+`CLAUDE_CODE_IS_COWORK` is set (`if(ar){if(await ur.record(!0),Zs)await hu()}`, `Zs` = those two
+flags). Otherwise `record()` just enqueues: attachment rows ride the `dedup-transcript` policy,
+and the store drains its write queue on a `FLUSH_INTERVAL_MS = 100` timer. The adapter never sets
+either flag, because the chat spec keeps the Claude env to `CLAUDE_CONFIG_DIR`. A read taken right
+at `result` therefore often finds no verdict, so a turn-end walk that finds none re-reads twice
+more, ~0.3 s and ~1.5 s after the turn end (`GOAL_VERDICT_REREAD_DELAYS_MS`). It does so only when
+nothing ran in the background at turn end (see f: otherwise the CLI evaluated nothing). The
+re-reads are cancelled by the next walk, a new turn, stdout goal news, or teardown. Read at
+`result` alone, a met goal kept reading "active" until the next turn ended.
+
+| `attachment` row | written by |
+|---|---|
+| `{type:"goal_status", met:false, sentinel:true, condition}` | a set — and a compaction that keeps the goal |
+| `{…, met:false, condition, reason}` | a "not met" check (b says it on stdout too) |
+| `{…, met:true, condition, reason, iterations, durationMs, tokens}` | met |
+| `{…, met:false, failed:true, condition, reason, iterations, durationMs, tokens}` | judged impossible |
+| `{…, met:true, sentinel:true, condition}` | `/goal clear`, and a clear after an unrecoverable API error |
+
+The live transcript shows the set's order: the sentinel row is written BEFORE the `/goal` command
+row and its `system/local_command` row (`commandRun: {command:"goal", args}`, content
+`<local-command-stdout>Goal set: …</local-command-stdout>`), then the kickoff prompt as an
+`isMeta` user row (`A session-scoped Stop hook is now active with condition: "…"`). A compaction
+later wrote a second `met:false, sentinel:true` row after the boundary. The SDK's
+`getSessionMessages` never returns an attachment (nor an `isMeta` row), which is why the adapter
+reads the file itself, incrementally, and only JSON-parses a line that holds `"goal_status"`.
+
+**e. `--resume` re-arms the goal silently, by the LAST row.** `restoreGoalFromTranscript` takes the
+last `goal_status` row: `met` (sentinel or not) or `failed` means no goal; anything else re-arms
+its condition with `iterations: 0`. Nothing is emitted, so the adapter applies the same rule to
+the file and compares it with the thread's goal once, at session start.
+
+**f. With background work running at a turn end, the evaluation is skipped.** The hook is removed
+for that pass and the turn simply ends — no `goal_status`, no stdout. The live transcript shows two
+such turn ends under a running subagent fleet: `stop_hook_summary` with `hookCount: 2`, both
+**command** hooks (Orquester's `agent-hook.sh` and a plugin's `stop.py`), the prompt hook absent,
+the goal still active. An SDK session is non-interactive, so the idle check-in timer never runs:
+the goal is judged again only when a later turn (a task-notification turn, typically) ends with
+nothing in the background. The adapter reports `phase: "waiting-background"` meanwhile. An
+evaluator error, a timeout and the per-turn block cap all end the turn silently too, the goal
+still active; an interrupt leaves it active and unevaluated.
+
 ## Re-capturing
 
 Nothing here is generated; re-capturing means driving the real CLI again. Keep the format above,

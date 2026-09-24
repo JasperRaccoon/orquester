@@ -54,6 +54,15 @@
  * The daemon nudges the same route after an install/update it ran itself
  * (`agent-chat/service.ts`'s `onRegistryEntryChanged`), so the common case does
  * not even wait for a read.
+ *
+ * **And a fifth, for a host that is new but whose cache is not (goals §5.4):
+ * capabilities are the ADAPTER's, not the cache's.** Layer two serves a
+ * correlated cached row WITHOUT a probe, and that row carries the capability
+ * block of whichever host probed it — so a deploy that gives an adapter a new
+ * capability (`goals`) would keep serving the old block until the next probe,
+ * which a correlated cache no longer triggers. Every row stored here is
+ * stamped with the adapter's current capabilities: the pending seed's at
+ * construction, then whatever the latest live probe reported.
  */
 
 import { realpathSync, statSync } from "node:fs";
@@ -61,6 +70,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type {
+  AdapterCapabilities,
   AgentAdapterId,
   ProviderSnapshot,
   ProviderUsageWindow,
@@ -454,6 +464,23 @@ export function createProviderSnapshotRegistry(
     }
   };
 
+  /**
+   * goals §5.4: each adapter's CURRENT capabilities — the block every row is
+   * served with, whatever block it was cached with. Seeded from the pending
+   * seed, which is built from the same capability constant the adapter serves
+   * (`adapters/index.ts`: "the two spellings share one implementation"), and
+   * replaced by every live probe's own block, since a probe asks the running
+   * adapter itself. An adapter with neither yet has nothing to overlay.
+   */
+  const currentCapabilities = new Map<AgentAdapterId, AdapterCapabilities>();
+
+  const withCurrentCapabilities = (snapshot: ProviderSnapshot): ProviderSnapshot => {
+    const capabilities = currentCapabilities.get(snapshot.id);
+    return capabilities === undefined || capabilities === snapshot.capabilities
+      ? snapshot
+      : { ...snapshot, capabilities };
+  };
+
   // ---- layer 1: the pending seed, before load() and before any probe -------
   // *T3: `makeManagedServerProvider.ts:69-73` — `initialSnapshot(settings)` is
   // resolved at construction; the provider is never snapshot-less.*
@@ -462,7 +489,9 @@ export function createProviderSnapshotRegistry(
   // as if it were a probe result on the next boot.
   for (const probe of options.probes) {
     if (probe.pending === undefined) continue;
-    snapshots.set(probe.id, probe.pending(clock.nowIso()));
+    const seed = probe.pending(clock.nowIso());
+    currentCapabilities.set(probe.id, seed.capabilities);
+    snapshots.set(probe.id, seed);
   }
 
   // One permit, so two clients opening Settings cannot run two probes.
@@ -585,7 +614,14 @@ export function createProviderSnapshotRegistry(
     } else {
       identities.delete(adapterId);
     }
-    const merged = mergeWorkspaceOverlay(snapshots.get(adapterId), fresh, input?.cwd);
+    // The running adapter's own word on what it can do (goals §5.4). A cwd
+    // probe merges onto the stored row, so the block is re-stamped either way.
+    if (typeof fresh.capabilities === "object" && fresh.capabilities !== null) {
+      currentCapabilities.set(adapterId, fresh.capabilities);
+    }
+    const merged = withCurrentCapabilities(
+      mergeWorkspaceOverlay(snapshots.get(adapterId), fresh, input?.cwd)
+    );
     const changed = store(merged);
     return { snapshot: merged, changed };
   };
@@ -935,7 +971,9 @@ export function createProviderSnapshotRegistry(
           // claim a probe that never happened.
           continue;
         }
-        snapshots.set(id, entry.snapshot);
+        // Everything the probe learned, with what the adapter can do TODAY
+        // (goals §5.4): the cached block is the probing host's.
+        snapshots.set(id, withCurrentCapabilities(entry.snapshot));
         // The identity the CACHED snapshot was produced under, not the one just
         // read: `identities` means "what this snapshot describes", and the
         // correlation above already proved the two agree on everything both

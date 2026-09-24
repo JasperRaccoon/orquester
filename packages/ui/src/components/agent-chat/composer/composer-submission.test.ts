@@ -8,15 +8,21 @@ import {
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
+  externalSendRefusal,
   hasSendableContent,
+  isHostGoalCommandText,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
   pastedTextDisposition,
   PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES,
+  PENDING_REQUEST_REASON,
+  pendingRequestBlocksSend,
   PLAN_IMPLEMENTATION_PROMPT_PREFIX,
+  planExternalSend,
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  REVERT_RUNNING_REASON,
   stagedAttachmentKeyForRef,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
@@ -471,4 +477,139 @@ test("R2-3: only a STANDALONE command is swallowed", () => {
     }),
     null
   );
+});
+
+// ---------------------------------------------------------------------------
+// Goals §8.2 — a goal chip action goes through the composer's own send path
+// ---------------------------------------------------------------------------
+
+const ACTION = {
+  text: "/goal pause",
+  reverting: false,
+  sending: false,
+  hasPendingRequest: false,
+  adapterId: "codex"
+};
+
+test("goals §8.2: a chip action is refused for exactly what refuses the composer's own send", () => {
+  assert.equal(externalSendRefusal(ACTION), null);
+  assert.equal(externalSendRefusal({ ...ACTION, reverting: true }), REVERT_RUNNING_REASON);
+  assert.equal(externalSendRefusal({ ...ACTION, hasPendingRequest: true }), PENDING_REQUEST_REASON);
+  assert.equal(
+    externalSendRefusal({ ...ACTION, sending: true }),
+    "A message is still being sent.",
+    "one send at a time, whoever started it"
+  );
+  assert.match(
+    externalSendRefusal({ ...ACTION, adapterId: "grok", text: "/always-approve" }) ?? "",
+    /mode chip/,
+    "the provider-command refusal holds on this path too"
+  );
+  assert.match(
+    externalSendRefusal({ ...ACTION, text: "x".repeat(MAX_TURN_INPUT_CHARS + 1) }) ?? "",
+    /over the/,
+    "and so does the turn's length bound"
+  );
+  assert.equal(externalSendRefusal({ ...ACTION, text: "  " }), "Nothing to send.");
+});
+
+test("goals §8.2: the refusals read exactly as the composer's own", () => {
+  assert.equal(REVERT_RUNNING_REASON, "A revert is running.");
+  assert.equal(PENDING_REQUEST_REASON, "Answer the request above first.");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1
+// ---------------------------------------------------------------------------
+
+test("fix round 1 (5): a chip action the composer accepts clears its notice, as a submit does", () => {
+  assert.deepEqual(planExternalSend({ ...ACTION, text: "  /goal pause  " }), {
+    text: "/goal pause",
+    notice: null
+  });
+  assert.deepEqual(
+    planExternalSend({ ...ACTION, hasPendingRequest: true }),
+    { text: null, notice: PENDING_REQUEST_REASON },
+    "a refused one says why instead, and sends nothing"
+  );
+});
+
+test("fix round 1 (7): which typed text the host takes as its /goal (goals §5.1)", () => {
+  for (const text of ["/goal pause", "/goal", "  /GOAL clear  ", "/goal Make CI green", "/goal\nfix it"]) {
+    assert.equal(isHostGoalCommandText(text, true), true, JSON.stringify(text));
+  }
+  for (const text of ["/goals", "/goalie", "fix it /goal x", "goal pause", ""]) {
+    assert.equal(isHostGoalCommandText(text, true), false, JSON.stringify(text));
+  }
+  assert.equal(
+    isHostGoalCommandText("/goal pause", false),
+    false,
+    "where the provider parses /goal (Claude, Grok) it is an ordinary prompt"
+  );
+});
+
+test("fix round 1 (7): a typed host /goal is never queued — the host applies it at once", () => {
+  for (const followUpBehavior of ["queue", "steer"] as const) {
+    for (const intent of ["foreground", "alternate"] as const) {
+      assert.equal(
+        resolveFollowUpDisposition({ followUpBehavior, intent, isRunning: true, hostCommand: true }),
+        "send",
+        `${followUpBehavior}/${intent}`
+      );
+    }
+  }
+  assert.equal(
+    resolveFollowUpDisposition({ followUpBehavior: "queue", intent: "foreground", isRunning: true }),
+    "queue",
+    "every other message still follows the preference"
+  );
+  assert.equal(
+    resolveFollowUpDisposition({
+      followUpBehavior: "queue",
+      intent: "foreground",
+      isRunning: true,
+      hostCommand: false
+    }),
+    "queue"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Final fix wave
+// ---------------------------------------------------------------------------
+
+test("final wave (4): an open card never holds back a goal command the HOST applies", () => {
+  // Pause and Clear are exactly what a user wants while an approval waits, and
+  // the host needs no such guard: it applies them without starting a turn.
+  const card = { ...ACTION, hasPendingRequest: true, hostParsesGoal: true };
+  assert.equal(externalSendRefusal(card), null);
+  assert.deepEqual(planExternalSend(card), { text: "/goal pause", notice: null });
+  assert.equal(externalSendRefusal({ ...card, text: "/goal clear" }), null);
+});
+
+test("final wave (4): everything else still waits for the card", () => {
+  const card = { ...ACTION, hasPendingRequest: true };
+  assert.equal(
+    externalSendRefusal({ ...card, hostParsesGoal: false }),
+    PENDING_REQUEST_REASON,
+    "a provider-parsed /goal (Claude, Grok) is an ordinary prompt"
+  );
+  assert.equal(externalSendRefusal({ ...card, hostParsesGoal: undefined }), PENDING_REQUEST_REASON);
+  assert.equal(
+    externalSendRefusal({ ...card, hostParsesGoal: true, text: "Continue working toward the goal." }),
+    PENDING_REQUEST_REASON,
+    "ordinary text on a host adapter"
+  );
+  assert.equal(
+    externalSendRefusal({ ...card, hostParsesGoal: true, reverting: true }),
+    REVERT_RUNNING_REASON,
+    "a revert still holds everything — it is rewriting the thread"
+  );
+});
+
+test("final wave (4): the rule itself, shared with the composer's own Send", () => {
+  assert.equal(pendingRequestBlocksSend({ hasPendingRequest: false, text: "hi", hostParsesGoal: false }), false);
+  assert.equal(pendingRequestBlocksSend({ hasPendingRequest: true, text: "hi", hostParsesGoal: true }), true);
+  assert.equal(pendingRequestBlocksSend({ hasPendingRequest: true, text: "/goal pause", hostParsesGoal: true }), false);
+  assert.equal(pendingRequestBlocksSend({ hasPendingRequest: true, text: "/goal pause", hostParsesGoal: false }), true);
 });

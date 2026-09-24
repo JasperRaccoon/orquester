@@ -66,6 +66,25 @@ assert.ok(
   "a disabled control must say why it is disabled"
 );
 
+// Goals §5.5: a continuing goal holds the chip for something the user must
+// DO — pause the goal — and the chip says that instead of "wait".
+const goalHeld = render(
+  createElement(AccountChip, {
+    label: "one",
+    options: OPTIONS,
+    selectedId: "acc-1",
+    canSwitch: false,
+    disabledReason: "Pause the goal before switching accounts.",
+    onChange: () => undefined
+  })
+);
+assert.ok(DISABLED_ATTR.test(goalHeld), "a continuing goal closes the picker");
+assert.ok(
+  goalHeld.includes("Pause the goal before switching accounts."),
+  "and the chip says what would open it"
+);
+assert.ok(!goalHeld.includes("Available when the agent is idle"), "not a wait that never ends");
+
 // ---------------------------------------------------------------------------
 // The label-only fallback
 // ---------------------------------------------------------------------------

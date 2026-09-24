@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
+import { useKeyboardLayer } from "../../hooks/use-keyboard-layer";
 import { DropdownContext } from "./dropdown";
 
 export interface BottomSheetProps {
@@ -24,6 +25,9 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, 
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+  // A keyboard layer while open: Escape is the sheet's to close
+  // (`lib/keyboard-layers.ts`).
+  useKeyboardLayer(open);
 
   if (!open) {
     return null;

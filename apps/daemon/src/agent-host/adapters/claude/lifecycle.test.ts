@@ -15,7 +15,7 @@ import { EventEmitter } from "node:events";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as nodePath from "node:path";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 
 import type {
   Options as ClaudeQueryOptions,
@@ -34,7 +34,8 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
-import { BACKGROUND_SHELL_TAIL_INTERVAL_MS } from "./session.ts";
+import { ClaudeNormalizer } from "./normalize.ts";
+import { BACKGROUND_SHELL_TAIL_INTERVAL_MS, GOAL_VERDICT_REREAD_DELAYS_MS } from "./session.ts";
 
 // ---------------------------------------------------------------------------
 // The scripted peer
@@ -270,6 +271,17 @@ interface Harness {
   clearedTimers: Array<NodeJS.Timeout | number>;
   /** Every `logger.debug` message, in order. */
   debugLines: string[];
+  /** Every `logger.error` message, in order. */
+  errorLines: string[];
+  /** How many times the goal transcript work of a session has drained. */
+  goalIdleCount: () => number;
+  /**
+   * Resolves once goal transcript work drains after the `after`-th time — the
+   * reads run off the message loop, and this is the wait instead of a sleep.
+   */
+  waitForGoalIdle: (after: number) => Promise<void>;
+  /** Every write of a start record, in order (`deps.onStartRecord`). */
+  startRecords: Array<{ threadId: string; writer: string }>;
 }
 
 interface HarnessOptions {
@@ -289,6 +301,10 @@ interface HarnessOptions {
   /** How the scripted peer answers `getContextUsage` (§7.6). */
   contextUsage?: ContextUsageBehaviour;
   signal?: AbortSignal;
+  /** Parks goal transcript work (`deps.goalReadGate`). */
+  goalReadGate?: (threadId: string, label: string) => Promise<void>;
+  /** Makes the test-only `onGoalWorkIdle` hook throw after counting. */
+  goalWorkIdleThrows?: boolean;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -298,7 +314,11 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const timers: Array<{ fn: () => void; ms: number }> = [];
   const clearedTimers: Array<NodeJS.Timeout | number> = [];
   const debugLines: string[] = [];
+  const errorLines: string[] = [];
   const listeners: Array<() => void> = [];
+  let goalIdle = 0;
+  const goalIdleListeners: Array<() => void> = [];
+  const startRecords: Array<{ threadId: string; writer: string }> = [];
 
   let nowMs = Date.parse("2026-09-21T00:00:00.000Z");
   const advance = (ms: number): void => {
@@ -312,18 +332,22 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       },
       info() {},
       warn() {},
-      error() {}
+      error(message) {
+        errorLines.push(message);
+      }
     },
     clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
     ids: countingIds(),
     resolveAttachmentPath: async (_threadId, id) => `/attachments/${id}`,
     attachmentsDir: (threadId) => `/appdir/threads/${threadId}/attachments`,
     logRawFrame: () => {},
+    // As `main.ts` builds it: only a managed (non-system) home is bound
+    // through CLAUDE_CONFIG_DIR; a system home's path is the user's own HOME.
     buildEnv: ({ home }) => ({
       PATH: "/usr/bin",
       HOME: "/home/orq",
       TMPDIR: "/tmp",
-      ...(home.path.length > 0 ? { CLAUDE_CONFIG_DIR: home.path } : {})
+      ...(home.kind !== "system" && home.path.length > 0 ? { CLAUDE_CONFIG_DIR: home.path } : {})
     }),
     resolveBin: async () =>
       options.binaryPath === undefined ? "/usr/local/bin/claude" : options.binaryPath,
@@ -370,6 +394,19 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     },
     hostConfigDir: "/host/.claude",
     nodePath: process.execPath,
+    onGoalWorkIdle: () => {
+      goalIdle += 1;
+      for (const listener of [...goalIdleListeners]) {
+        listener();
+      }
+      if (options.goalWorkIdleThrows === true) {
+        throw new Error("a test hook threw");
+      }
+    },
+    ...(options.goalReadGate !== undefined ? { goalReadGate: options.goalReadGate } : {}),
+    onStartRecord: (threadId, writer) => {
+      startRecords.push({ threadId, writer });
+    },
     deadlines: {
       handshakeMs: options.deadlineMs ?? 50,
       cancelMs: options.deadlineMs ?? 50,
@@ -433,6 +470,27 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     await new Promise((resolve) => setImmediate(resolve));
   };
 
+  const waitForGoalIdle = (afterCount: number): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      if (goalIdle > afterCount) {
+        resolve();
+        return;
+      }
+      const listener = (): void => {
+        if (goalIdle > afterCount) {
+          clearTimeout(guard);
+          goalIdleListeners.splice(goalIdleListeners.indexOf(listener), 1);
+          resolve();
+        }
+      };
+      goalIdleListeners.push(listener);
+      // A missing drain must FAIL the test rather than hang it.
+      const guard = setTimeout(() => {
+        goalIdleListeners.splice(goalIdleListeners.indexOf(listener), 1);
+        reject(new Error(`timed out waiting for goal work to drain past ${afterCount}`));
+      }, 5_000);
+    });
+
   return {
     adapter,
     events,
@@ -443,7 +501,11 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     drain,
     advance,
     clearedTimers,
-    debugLines
+    debugLines,
+    errorLines,
+    goalIdleCount: () => goalIdle,
+    waitForGoalIdle,
+    startRecords
   };
 }
 
@@ -653,6 +715,45 @@ describe("claude adapter — turns", () => {
     const second = peer.received[1]?.message.content as Array<{ type: string; text?: string }>;
     assert.equal(second.length, 1);
     assert.equal(second[0]?.text, "Attached files:\n- notes.csv: /attachments/att-3");
+  });
+
+  it("a system-home thread finds its user-scope skills under the host user's ~/.claude", async () => {
+    // A system home names no CLAUDE_CONFIG_DIR, and in production its
+    // `home.path` is the daemon user's home dir itself (`main.ts`): the
+    // user-scope skills are where the CLI looks — `~/.claude` of the host
+    // user — never `<home>/skills`. `os.homedir()` honours HOME, so a temp
+    // HOME stands in for it.
+    const home = await mkdtemp(nodePath.join(tmpdir(), "orq-system-home-"));
+    const savedHome = process.env.HOME;
+    try {
+      const skillDir = nodePath.join(home, ".claude", "skills", "review");
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(
+        nodePath.join(skillDir, "SKILL.md"),
+        "---\ndescription: Review the change\n---\nReview it.\n",
+        "utf8"
+      );
+      process.env.HOME = home;
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...START, home: { kind: "system", path: home } });
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "please $review",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
+      assert.equal(content.at(-1)?.text, "/review", "the user-scope skill was found and dispatched");
+    } finally {
+      if (savedHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = savedHome;
+      }
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   it("under a skill dispatch, a path typed after the `$skill` mention is not repeated (§4.6.8)", async () => {
@@ -2413,5 +2514,913 @@ describe("claude adapter — the context meter asks the CLI for its own /context
       harness.events.filter((event) => event.type === "runtime.error"),
       []
     );
+  });
+});
+
+describe("claude adapter — goals (goals §6.1)", () => {
+  /** The CLI session every goal test's frames name, so its transcript is `<id>.jsonl`. */
+  const SESSION = "5e0c7a1d-2b3f-4c5d-8e9f-0a1b2c3d4e5f";
+  const SHIP = { objective: "ship the release", status: "active" as const, rounds: 0 };
+  let root: string;
+  let homes = 0;
+
+  before(async () => {
+    root = await mkdtemp(nodePath.join(tmpdir(), "orq-claude-goals-"));
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /**
+   * An account home of its own — `CLAUDE_CONFIG_DIR` is the home path in this
+   * harness — and, when `content` is given, the session's transcript in it.
+   */
+  async function goalHome(
+    content?: string
+  ): Promise<{ start: typeof START & { home: { kind: "account"; accountId: string; path: string } }; transcript: string }> {
+    homes += 1;
+    const configDir = nodePath.join(root, `home-${homes}`);
+    const dir = nodePath.join(configDir, "projects", "-work-project");
+    await mkdir(dir, { recursive: true });
+    const transcript = nodePath.join(dir, `${SESSION}.jsonl`);
+    if (content !== undefined) {
+      await writeFile(transcript, content);
+    }
+    return {
+      start: { ...START, home: { kind: "account", accountId: "acc-1", path: configDir } },
+      transcript
+    };
+  }
+
+  function transcriptRow(row: Record<string, unknown>): string {
+    return `${JSON.stringify({ uuid: `row-${Math.random().toString(16).slice(2)}`, sessionId: SESSION, ...row })}\n`;
+  }
+
+  function goalStatus(attachment: Record<string, unknown>): string {
+    return transcriptRow({ type: "attachment", attachment: { type: "goal_status", ...attachment } });
+  }
+
+  function conversationRow(text: string): string {
+    return transcriptRow({ type: "user", message: { role: "user", content: text } });
+  }
+
+  /** The `/goal` command's own output frame (goals §3.1). */
+  function goalOutput(text: string): SDKMessage {
+    return {
+      type: "assistant",
+      message: {
+        id: `synthetic-${Math.random().toString(16).slice(2)}`,
+        model: "<synthetic>",
+        role: "assistant",
+        type: "message",
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        content: [{ type: "text", text }]
+      },
+      parent_tool_use_id: null,
+      local_command_source: `<local-command-stdout>${text}</local-command-stdout>`,
+      local_command_run: { command: "goal", args: text.replace(/^Goal set: /, "") },
+      session_id: SESSION,
+      uuid: `u-${Math.random().toString(16).slice(2)}`
+    } as unknown as SDKMessage;
+  }
+
+  function goalRows(harness: Harness, from = 0): Array<EventOf<"thread.goal.updated">> {
+    return harness.events
+      .slice(from)
+      .filter((event): event is EventOf<"thread.goal.updated"> => event.type === "thread.goal.updated");
+  }
+
+  /** Start, open a turn and set a goal on it; resolves once the set point is marked. */
+  async function goalTurn(
+    harness: Harness,
+    start: Parameters<AgentAdapter["startSession"]>[0]
+  ): Promise<{ peer: ScriptedQuery; turn: SendTurnResult }> {
+    await harness.adapter.startSession(start);
+    const peer = harness.peers.at(-1)!;
+    const turn = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "/goal ship the release",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit(systemInit(SESSION));
+    const idle = harness.goalIdleCount();
+    const before = harness.events.length;
+    peer.emit(goalOutput("Goal set: ship the release"));
+    const set = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(set.payload.change, "set");
+    await harness.waitForGoalIdle(idle);
+    return { peer, turn };
+  }
+
+  it("declares the provider-command goal surface (goals §4.5)", async () => {
+    const harness = await makeHarness();
+    assert.deepEqual(harness.adapter.capabilities.goals, {
+      command: "provider",
+      actions: ["continue", "clear"],
+      continuesAcrossTurns: false
+    });
+  });
+
+  it("reads the transcript after a result: a met goal is `achieved`, after the turn's own events", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const harness = await makeHarness();
+    const { peer, turn } = await goalTurn(harness, start);
+
+    // What the CLI writes at the turn end that met the goal: nothing on stdout.
+    await appendFile(
+      transcript,
+      goalStatus({ met: false, sentinel: true, condition: "ship the release" }) +
+        goalStatus({
+          met: true,
+          condition: "ship the release",
+          reason: "everything is green",
+          iterations: 2,
+          durationMs: 90_000,
+          tokens: 4_200
+        })
+    );
+    const before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    const achieved = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(achieved.payload.change, "achieved");
+    assert.equal(achieved.payload.goal, null);
+    assert.equal(achieved.payload.previous?.status, "complete");
+    assert.equal(achieved.payload.previous?.rounds, 2);
+    assert.equal(achieved.payload.previous?.elapsedMs, 90_000);
+    assert.equal(achieved.payload.previous?.tokensUsed, 4_200);
+    assert.equal(achieved.turnId, turn.turnId, "the turn that met it");
+    const tail = harness.events.slice(before).map((event) => event.type);
+    assert.ok(
+      tail.indexOf("turn.completed") < tail.indexOf("thread.goal.updated"),
+      `the turn settles first: ${tail.join(", ")}`
+    );
+  });
+
+  it("a row of the goal's previous run, behind the set point, never ends the new run", async () => {
+    const { start, transcript } = await goalHome(
+      goalStatus({ met: false, sentinel: true, condition: "ship the release" }) +
+        goalStatus({ met: true, condition: "ship the release", iterations: 5 })
+    );
+    const harness = await makeHarness();
+    const { peer } = await goalTurn(harness, start);
+    await appendFile(transcript, goalStatus({ met: false, sentinel: true, condition: "ship the release" }));
+    const before = harness.events.length;
+    const idle = harness.goalIdleCount();
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await harness.waitForGoalIdle(idle);
+    assert.deepEqual(goalRows(harness, before), [], "the old met row is behind the set point");
+  });
+
+  it("still unmet with background work live at turn end is `waiting-background`; a throttled change is flushed by its timer", async () => {
+    const { start } = await goalHome();
+    const harness = await makeHarness();
+    const { peer } = await goalTurn(harness, start);
+    peer.emit({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-1",
+      description: "Run the e2e suite",
+      task_type: "local_agent",
+      session_id: SESSION,
+      uuid: "u-task"
+    } as unknown as SDKMessage);
+    await harness.waitFor("task.started");
+
+    let before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    const waiting = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(waiting.payload.change, "progress");
+    assert.equal(waiting.payload.goal?.phase, "waiting-background");
+    assert.equal(
+      rereadTimer(harness, 0),
+      undefined,
+      "background work was live: the CLI evaluated nothing, so no verdict will be written to wait for"
+    );
+    assert.ok(
+      harness.debugLines.some((line) => line.includes("no transcript")),
+      `a missing transcript is a debug line: ${harness.debugLines.join(" | ")}`
+    );
+
+    // The task finishes and its notification turn ends with nothing in the
+    // background — inside the 30 s window, so the phase change is deferred.
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "go on",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-1",
+      status: "completed",
+      summary: "done",
+      output_file: "",
+      session_id: SESSION,
+      uuid: "u-note"
+    } as unknown as SDKMessage);
+    before = harness.events.length;
+    const idle = harness.goalIdleCount();
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await harness.waitForGoalIdle(idle);
+    assert.deepEqual(goalRows(harness, before), [], "throttled, not dropped");
+    const flush = harness.timers.find((timer) => timer.ms === 30_000);
+    assert.ok(flush, `a flush timer for the window's end: ${harness.timers.map((t) => t.ms).join(", ")}`);
+    // Fired early (the window has not elapsed), it waits for the window.
+    flush.fn();
+    await harness.drain();
+    assert.deepEqual(goalRows(harness, before), [], "never before the window ends");
+    const again = harness.timers.at(-1);
+    assert.ok(again !== flush && again?.ms === 30_000, "re-armed for the window's end");
+    harness.advance(30_000);
+    again.fn();
+    await harness.waitFor("thread.goal.updated", before);
+    const [flushed] = goalRows(harness, before);
+    assert.equal(flushed?.payload.change, "progress");
+    assert.equal(flushed?.payload.goal?.phase, undefined, "nothing is in the background any more");
+  });
+
+  it("a stop waits for a read in flight: the goal lands before session.exited", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const harness = await makeHarness();
+    const { peer } = await goalTurn(harness, start);
+    await appendFile(transcript, goalStatus({ met: false, failed: true, condition: "ship the release", reason: "there is no repo" }));
+    const before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await harness.adapter.stopSession(START.threadId);
+    const tail = harness.events.slice(before).map((event) => event.type);
+    assert.ok(tail.includes("thread.goal.updated"), tail.join(", "));
+    assert.ok(
+      tail.indexOf("thread.goal.updated") < tail.indexOf("session.exited"),
+      `nothing follows session.exited: ${tail.join(", ")}`
+    );
+    assert.equal(goalRows(harness, before)[0]?.payload.change, "failed");
+  });
+
+  /** A gate that parks goal work of one kind until released. */
+  function parkedGate(label: string): {
+    gate: (threadId: string, label: string) => Promise<void>;
+    release: () => void;
+  } {
+    let release!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return {
+      gate: (_threadId, which) => (which === label ? parked : Promise.resolve()),
+      release
+    };
+  }
+
+  it("a session dying with a goal read parked finishes its teardown before its recovery starts", async () => {
+    const { start } = await goalHome(conversationRow("an earlier turn"));
+    const { gate, release } = parkedGate("read");
+    const harness = await makeHarness({ goalReadGate: gate });
+    const { peer } = await goalTurn(harness, start);
+
+    const before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    // The CLI dies with the turn-end read parked: the teardown waits on it.
+    peer.endStream();
+    await harness.drain();
+    assert.equal(findEvent(harness.events, "session.exited", before), undefined, "still tearing down");
+
+    const queries = harness.queryOptions.length;
+    const records = harness.startRecords.length;
+    const sending = harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "carry on",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await harness.drain();
+    assert.equal(harness.queryOptions.length, queries, "no replacement starts while the old one is still exiting");
+
+    release();
+    await sending;
+    const exitedAt = harness.events.findIndex(
+      (event, index) => index >= before && event.type === "session.exited"
+    );
+    const restartedAt = harness.events.findIndex(
+      (event, index) => index >= before && event.type === "session.started"
+    );
+    assert.ok(exitedAt >= 0 && restartedAt > exitedAt, `old exit first: ${exitedAt} < ${restartedAt}`);
+    assert.equal(
+      harness.queryOptions.at(-1)?.resume,
+      SESSION,
+      "the recovery resumes the cursor the dead session last held: its onClosed ran first"
+    );
+    assert.deepEqual(
+      harness.startRecords.slice(records).map((record) => record.writer),
+      ["closed", "start", "started", "send"],
+      "the dead session's record lands first; nothing of it overwrites the new session's"
+    );
+  });
+
+  it("a stop on a session already closing waits for all of its teardown", async () => {
+    const { start } = await goalHome(conversationRow("an earlier turn"));
+    const { gate, release } = parkedGate("read");
+    const harness = await makeHarness({ goalReadGate: gate });
+    const { peer } = await goalTurn(harness, start);
+    const before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    peer.endStream();
+    await harness.drain();
+
+    let stopped = false;
+    const stopping = harness.adapter.stopSession(START.threadId).then(() => {
+      stopped = true;
+    });
+    await harness.drain();
+    assert.equal(stopped, false, "not while the first teardown is still running");
+    release();
+    await stopping;
+    assert.ok(findEvent(harness.events, "session.exited", before), "fully exited when stop resolves");
+  });
+
+  it("a delta bigger than one read is walked chunk by chunk to its verdict", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const harness = await makeHarness();
+    const { peer } = await goalTurn(harness, start);
+    // Over two whole 1 MiB reads of tool output before the met row.
+    const filler = conversationRow("x".repeat(64 * 1024));
+    await appendFile(
+      transcript,
+      filler.repeat(40) + goalStatus({ met: true, condition: "ship the release", iterations: 1 })
+    );
+    const before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    const achieved = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(achieved.payload.change, "achieved");
+  });
+
+  /** A gate that parks the Nth `read` (1-based) until released; the rest pass. */
+  function nthReadGate(n: number): {
+    gate: (threadId: string, label: string) => Promise<void>;
+    release: () => void;
+    parked: Promise<void>;
+  } {
+    let reads = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let signal!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      signal = resolve;
+    });
+    return {
+      gate: (_threadId, label) => {
+        if (label !== "read") {
+          return Promise.resolve();
+        }
+        reads += 1;
+        if (reads === n) {
+          signal();
+          return held;
+        }
+        return Promise.resolve();
+      },
+      release,
+      parked
+    };
+  }
+
+  function rereadTimer(harness: Harness, index: number): { fn: () => void; ms: number; handle: number } | undefined {
+    const at = harness.timers.findIndex((timer) => timer.ms === GOAL_VERDICT_REREAD_DELAYS_MS[index]);
+    const timer = harness.timers[at];
+    return timer === undefined ? undefined : { ...timer, handle: at + 1 };
+  }
+
+  it("a met verdict the CLI writes ~100 ms AFTER its result is found by the re-read, stamped with the turn that ended", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const harness = await makeHarness();
+    const { peer, turn } = await goalTurn(harness, start);
+    const before = harness.events.length;
+    const idle = harness.goalIdleCount();
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await harness.waitForGoalIdle(idle);
+    assert.deepEqual(goalRows(harness, before), [], "the walk at the result finds no verdict yet");
+    const reread = rereadTimer(harness, 0);
+    assert.ok(reread, "a bounded re-read is scheduled");
+    // An SDK session's transcript write queue drains ~100 ms after `result`.
+    await appendFile(
+      transcript,
+      goalStatus({ met: true, condition: "ship the release", reason: "all green", iterations: 2 })
+    );
+    reread.fn();
+    const achieved = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(achieved.payload.change, "achieved");
+    assert.equal(achieved.turnId, turn.turnId, "stamped with the turn that ended");
+    assert.equal(rereadTimer(harness, 1), undefined, "a verdict ends the re-reads");
+  });
+
+  it("an impossible verdict landing only by the second re-read is `failed`", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const harness = await makeHarness();
+    const { peer, turn } = await goalTurn(harness, start);
+    const before = harness.events.length;
+    let idle = harness.goalIdleCount();
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await harness.waitForGoalIdle(idle);
+    idle = harness.goalIdleCount();
+    rereadTimer(harness, 0)!.fn();
+    await harness.waitForGoalIdle(idle);
+    assert.deepEqual(goalRows(harness, before), [], "not there at the first re-read either");
+    await appendFile(
+      transcript,
+      goalStatus({ met: false, failed: true, condition: "ship the release", reason: "there is no repo", iterations: 1 })
+    );
+    const second = rereadTimer(harness, 1);
+    assert.ok(second, "a second, later re-read");
+    second.fn();
+    const failed = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(failed.payload.change, "failed");
+    assert.equal(failed.payload.previous?.lastCheck, "there is no repo");
+    assert.equal(failed.turnId, turn.turnId);
+  });
+
+  it("a verdict that never lands costs two bounded re-reads, no rows, and a timer cleared at teardown", async () => {
+    const { start } = await goalHome(conversationRow("an earlier turn"));
+    const harness = await makeHarness();
+    const { peer } = await goalTurn(harness, start);
+    const before = harness.events.length;
+    let idle = harness.goalIdleCount();
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await harness.waitForGoalIdle(idle);
+    idle = harness.goalIdleCount();
+    rereadTimer(harness, 0)!.fn();
+    await harness.waitForGoalIdle(idle);
+    const second = rereadTimer(harness, 1);
+    assert.ok(second, "the second re-read is pending");
+    assert.equal(
+      harness.timers.filter((timer) => (GOAL_VERDICT_REREAD_DELAYS_MS as readonly number[]).includes(timer.ms)).length,
+      2,
+      "bounded: never a third"
+    );
+    await harness.adapter.stopSession(START.threadId);
+    assert.ok(harness.clearedTimers.includes(second.handle), "the pending re-read is cancelled at teardown");
+    assert.deepEqual(goalRows(harness, before), [], "no verdict, no rows");
+  });
+
+  it("a new turn supersedes a pending re-read", async () => {
+    const { start } = await goalHome(conversationRow("an earlier turn"));
+    // Every chunk a walk starts passes the gate before it touches the file:
+    // a walk queued by mistake shows up here at once, I/O or not.
+    const reads: string[] = [];
+    const harness = await makeHarness({
+      goalReadGate: (_threadId, label) => {
+        reads.push(label);
+        return Promise.resolve();
+      }
+    });
+    const { peer } = await goalTurn(harness, start);
+    const before = harness.events.length;
+    const idle = harness.goalIdleCount();
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await harness.waitForGoalIdle(idle);
+    const reread = rereadTimer(harness, 0);
+    assert.ok(reread);
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "keep going",
+      attachments: [],
+      interactionMode: "default"
+    });
+    assert.ok(harness.clearedTimers.includes(reread.handle), "cancelled by the new turn");
+    const readsBefore = reads.filter((label) => label === "read").length;
+    // A timer the loop had already taken can still fire after its cancel.
+    reread.fn();
+    await harness.drain();
+    assert.equal(
+      reads.filter((label) => label === "read").length,
+      readsBefore,
+      "a superseded re-read queues no walk even if it fires anyway"
+    );
+  });
+
+  it("a walk whose epoch moved before it started ends WITHOUT reading: its rows stay for the next walk", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const { gate, release, parked } = nthReadGate(1);
+    const harness = await makeHarness({ goalReadGate: gate });
+    const { peer } = await goalTurn(harness, start);
+    let before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await parked;
+    // A check arrives on stdout while that walk waits to start: its epoch moves.
+    peer.emit({
+      type: "user",
+      message: { role: "user", content: "Stop hook feedback:\n[ship the release]: not yet" },
+      parent_tool_use_id: null,
+      session_id: SESSION,
+      uuid: "u-feedback",
+      isSynthetic: true
+    } as unknown as SDKMessage);
+    const checked = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(checked.payload.change, "checked");
+    await appendFile(transcript, goalStatus({ met: true, condition: "ship the release", iterations: 2 }));
+    const idle = harness.goalIdleCount();
+    release();
+    await harness.waitForGoalIdle(idle);
+    assert.equal(
+      goalRows(harness, before).filter((row) => row.payload.change === "achieved").length,
+      0,
+      "the stale walk read nothing"
+    );
+    assert.equal(rereadTimer(harness, 0), undefined, "and scheduled no re-read");
+
+    const second = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "keep going",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    const achieved = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(achieved.payload.change, "achieved", "the row was still there to read");
+    assert.equal(achieved.turnId, second.turnId);
+  });
+
+  it("a read that fails ends its walk and hands off to the next waiting walk", async () => {
+    const original = conversationRow("an earlier turn");
+    const { start, transcript } = await goalHome(original);
+    let reads = 0;
+    const holds = [0, 1].map(() => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let signal!: () => void;
+      const parked = new Promise<void>((resolve) => {
+        signal = resolve;
+      });
+      return { held, release, parked, signal };
+    });
+    const harness = await makeHarness({
+      goalReadGate: (_threadId, label) => {
+        if (label !== "read") {
+          return Promise.resolve();
+        }
+        const hold = holds[reads];
+        reads += 1;
+        if (hold === undefined) {
+          return Promise.resolve();
+        }
+        hold.signal();
+        return hold.held;
+      }
+    });
+    const { peer } = await goalTurn(harness, start);
+    let before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await holds[0]!.parked;
+    const second = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "keep going",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+
+    // The first walk's read fails: the transcript is a directory for a moment
+    // (EISDIR — not "missing", a real I/O failure).
+    await rm(transcript);
+    await mkdir(transcript);
+    holds[0]!.release();
+    await holds[1]!.parked;
+    assert.ok(
+      harness.debugLines.some((line) => line.includes("goal transcript read") && line.includes("failed")),
+      harness.debugLines.join(" | ")
+    );
+    // The waiting walk took over; the file is back, with the verdict in it.
+    await rm(transcript, { recursive: true });
+    await writeFile(
+      transcript,
+      original + goalStatus({ met: true, condition: "ship the release", iterations: 1 })
+    );
+    holds[1]!.release();
+    const achieved = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(achieved.payload.change, "achieved");
+    assert.equal(achieved.turnId, second.turnId, "read by the walk that took over");
+  });
+
+  it("a throwing test hook at the end of goal work never breaks the chain", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const harness = await makeHarness({ goalWorkIdleThrows: true });
+    const { peer } = await goalTurn(harness, start);
+    await appendFile(transcript, goalStatus({ met: true, condition: "ship the release", iterations: 1 }));
+    const before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    const achieved = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(achieved.payload.change, "achieved", "later goal work still runs");
+  });
+
+  it("a stop mid-way through a multi-chunk walk still lands the verdict before session.exited", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    let reads = 0;
+    let release!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let secondReadParked!: () => void;
+    const walkMidWay = new Promise<void>((resolve) => {
+      secondReadParked = resolve;
+    });
+    const harness = await makeHarness({
+      goalReadGate: (_threadId, label) => {
+        if (label !== "read") {
+          return Promise.resolve();
+        }
+        reads += 1;
+        if (reads === 2) {
+          secondReadParked();
+          return parked;
+        }
+        return Promise.resolve();
+      }
+    });
+    const { peer } = await goalTurn(harness, start);
+    // A goal run writes well over 1 MiB since its set point: the verdict is in
+    // the walk's LAST chunk.
+    await appendFile(
+      transcript,
+      conversationRow("x".repeat(64 * 1024)).repeat(40) +
+        goalStatus({ met: true, condition: "ship the release", iterations: 2 })
+    );
+    const before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    await walkMidWay;
+    // A deploy drain stops the session with chunk 2 of 3 in flight.
+    const stopping = harness.adapter.stopSession(START.threadId);
+    await harness.drain();
+    release();
+    await stopping;
+    await harness.waitFor("session.exited", before);
+    const tail = harness.events.slice(before);
+    const verdictAt = tail.findIndex(
+      (event) =>
+        event.type === "thread.goal.updated" &&
+        (event as EventOf<"thread.goal.updated">).payload.change === "achieved"
+    );
+    const exitAt = tail.findIndex((event) => event.type === "session.exited");
+    assert.ok(
+      verdictAt >= 0 && verdictAt < exitAt,
+      `the verdict lands before the exit: ${tail.map((event) => event.type).join(", ")}`
+    );
+  });
+
+  it("two turn-end walks never interleave: a verdict keeps the turn that wrote it", async () => {
+    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
+    const { gate, release } = parkedGate("read");
+    const harness = await makeHarness({ goalReadGate: gate });
+    const { peer, turn } = await goalTurn(harness, start);
+    // Turn 1's delta: ~1.5 MiB of tool output, then the met row — in the
+    // second chunk of turn 1's walk.
+    await appendFile(
+      transcript,
+      conversationRow("x".repeat(64 * 1024)).repeat(24) +
+        goalStatus({ met: true, condition: "ship the release", iterations: 1 })
+    );
+    let before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    // Turn 2 ends while turn 1's walk has not read a byte.
+    const second = await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "and update the docs",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    await harness.waitFor("turn.completed", before);
+    release();
+    const achieved = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(achieved.payload.change, "achieved");
+    assert.notEqual(turn.turnId, second.turnId);
+    assert.equal(achieved.turnId, turn.turnId, "stamped with the turn whose end met it");
+  });
+
+  it("a teardown step that throws still ends the session: onClosed runs, nothing rejects, the thread recovers", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "hello",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    peer.emit(systemInit(SESSION));
+    await harness.drain();
+
+    const records = harness.startRecords.length;
+    const before = harness.events.length;
+    const original = ClaudeNormalizer.prototype.closeLiveTasks;
+    ClaudeNormalizer.prototype.closeLiveTasks = function (): never {
+      throw new Error("the normaliser broke during teardown");
+    };
+    try {
+      await harness.adapter.stopSession(START.threadId);
+    } finally {
+      ClaudeNormalizer.prototype.closeLiveTasks = original;
+    }
+    await harness.waitFor("session.exited", before);
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+    assert.deepEqual(
+      harness.startRecords.slice(records).map((record) => record.writer),
+      ["closed"],
+      "onClosed ran"
+    );
+    assert.ok(
+      harness.errorLines.some((line) => line.includes("teardown")),
+      `the failure is logged: ${harness.errorLines.join(" | ")}`
+    );
+    const settled = findEvent(harness.events, "turn.completed", before);
+    assert.equal(settled?.payload.state, "interrupted", "the steps after the failed one still ran");
+
+    // Not stuck: the next turn recovers onto a fresh session.
+    const queries = harness.queryOptions.length;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "again",
+      attachments: [],
+      interactionMode: "default"
+    });
+    assert.equal(harness.queryOptions.length, queries + 1);
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+
+  it("a session that ends drops the waiting phase — unthrottled, before session.exited", async () => {
+    const { start } = await goalHome();
+    const harness = await makeHarness();
+    const { peer } = await goalTurn(harness, start);
+    peer.emit({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-1",
+      description: "Run the e2e suite",
+      task_type: "local_agent",
+      session_id: SESSION,
+      uuid: "u-task"
+    } as unknown as SDKMessage);
+    await harness.waitFor("task.started");
+    let before = harness.events.length;
+    peer.emit(successResult(SESSION));
+    const waiting = await harness.waitFor("thread.goal.updated", before);
+    assert.equal(waiting.payload.goal?.phase, "waiting-background");
+
+    // Inside the 30 s window: an ordinary progress would be deferred.
+    before = harness.events.length;
+    await harness.adapter.stopSession(START.threadId);
+    await harness.waitFor("session.exited", before);
+    const tail = harness.events.slice(before);
+    const goalAt = tail.findIndex((event) => event.type === "thread.goal.updated");
+    const exitAt = tail.findIndex((event) => event.type === "session.exited");
+    assert.ok(goalAt >= 0 && goalAt < exitAt, tail.map((event) => event.type).join(", "));
+    const ended = tail[goalAt] as EventOf<"thread.goal.updated">;
+    assert.equal(ended.payload.change, "progress");
+    assert.equal(ended.payload.goal?.phase, undefined, "no background work outlives its process");
+    assert.equal(ended.payload.goal?.status, "active", "the goal itself goes on, in the transcript");
+  });
+
+  describe("on resume, the transcript's goal against the thread's (goals §6.1.5)", () => {
+    const resumed = { threadId: START.threadId, resume: SESSION };
+
+    it("a slow scan never resurrects a goal the user cleared meanwhile", async () => {
+      const { start } = await goalHome(goalStatus({ met: false, sentinel: true, condition: "ship the release" }));
+      const { gate, release } = parkedGate("restore");
+      const harness = await makeHarness({ goalReadGate: gate });
+      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
+      const peer = harness.peers[0]!;
+      const before = harness.events.length;
+      peer.emit(goalOutput("Goal cleared: ship the release"));
+      const cleared = await harness.waitFor("thread.goal.updated", before);
+      assert.equal(cleared.payload.change, "cleared");
+      release();
+      await harness.waitForGoalIdle(0);
+      assert.deepEqual(
+        goalRows(harness, before).map((row) => row.payload.change),
+        ["cleared"],
+        "the scan still reads the goal as running, and is moot"
+      );
+    });
+
+    it("a goal the CLI re-arms but the thread lacks is `restored`", async () => {
+      const { start } = await goalHome(goalStatus({ met: false, sentinel: true, condition: "ship the release" }));
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...start, resumeCursor: resumed });
+      const restored = await harness.waitFor("thread.goal.updated");
+      assert.equal(restored.payload.change, "restored");
+      assert.deepEqual(restored.payload.goal, SHIP);
+      assert.equal(restored.turnId, undefined);
+    });
+
+    it("the thread's goal that the transcript ended is `achieved`", async () => {
+      const { start } = await goalHome(
+        goalStatus({ met: false, sentinel: true, condition: "ship the release" }) +
+          goalStatus({ met: true, condition: "ship the release", iterations: 3 })
+      );
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
+      const achieved = await harness.waitFor("thread.goal.updated");
+      assert.equal(achieved.payload.change, "achieved");
+      assert.equal(achieved.payload.previous?.rounds, 3);
+    });
+
+    it("the thread's goal with no goal_status row at all is `cleared`", async () => {
+      const { start } = await goalHome(conversationRow("no goal was ever set here"));
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
+      const cleared = await harness.waitFor("thread.goal.updated");
+      assert.equal(cleared.payload.change, "cleared");
+      assert.deepEqual(cleared.payload.previous, SHIP);
+    });
+
+    it("the same goal on both sides is quiet", async () => {
+      const { start } = await goalHome(goalStatus({ met: false, condition: "ship the release", reason: "not yet" }));
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
+      await harness.waitForGoalIdle(0);
+      assert.deepEqual(goalRows(harness), []);
+    });
+
+    it("a missing transcript leaves the thread's goal alone, with a debug line", async () => {
+      const { start } = await goalHome();
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
+      await harness.waitForGoalIdle(0);
+      assert.deepEqual(goalRows(harness), []);
+      assert.ok(
+        harness.debugLines.some((line) => line.includes("not there")),
+        harness.debugLines.join(" | ")
+      );
+    });
+
+    it("a fresh session holds no goal: the thread's is `cleared`", async () => {
+      const { start } = await goalHome();
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...start, knownGoal: SHIP });
+      const cleared = await harness.waitFor("thread.goal.updated");
+      assert.equal(cleared.payload.change, "cleared");
+    });
+
+    it("a lazy recovery compares with the goal the dead session last reported, not the one it started with", async () => {
+      const { start } = await goalHome(goalStatus({ met: false, sentinel: true, condition: "ship the release" }));
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
+      await harness.waitForGoalIdle(0);
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "/goal fix every flaky test",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      peer.emit(systemInit(SESSION));
+      peer.emit(goalOutput("Goal set: fix every flaky test"));
+      const replaced = await harness.waitFor("thread.goal.updated");
+      assert.equal(replaced.payload.change, "replaced");
+
+      peer.endStream();
+      await harness.waitFor("session.exited");
+      const before = harness.events.length;
+      // The transcript still ends on the first goal's sentinel, so the CLI
+      // re-arms THAT one — which the thread stopped showing when it was
+      // replaced.
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "carry on",
+        attachments: [],
+        interactionMode: "default"
+      });
+      const restored = await harness.waitFor("thread.goal.updated", before);
+      assert.equal(restored.payload.change, "restored");
+      assert.equal(restored.payload.goal?.objective, "ship the release");
+    });
   });
 });

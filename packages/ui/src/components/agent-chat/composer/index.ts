@@ -74,6 +74,7 @@ export {
   compactCommandAvailable,
   formatSkillDisplayName,
   isProviderSkillUserInvocable,
+  menuItemAction,
   menuItemReplacement,
   providerCommandDescription,
   providerCommandsForSlashMenu,

@@ -263,7 +263,9 @@ describe("§4.1 the Codex capability row", () => {
       supportsConversationRollback: true,
       showPlanModeToggle: true,
       reportsContextWindow: true,
-      compaction: { type: "native" }
+      compaction: { type: "native" },
+      // Goals §4.5: the host parses `/goal`, and Codex runs the goal's turns.
+      goals: { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true }
     });
   });
 });

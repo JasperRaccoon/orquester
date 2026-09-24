@@ -28,6 +28,7 @@ import {
   ROSTER_LIMIT,
   RUNTIME_MODES,
   TOOL_LIFECYCLE_ITEM_TYPES,
+  TRANSIENT_RUNTIME_EVENT_TYPES,
   agentChatCommandPath,
   agentChatRoutes,
   classifyTaskAgentKind,
@@ -37,18 +38,31 @@ import {
   isSettledTurnState
 } from "./index.ts";
 import type {
+  AdapterCapabilities,
+  AdapterGoalSupport,
   AgentAdapterId,
+  AgentChatGoalSummary,
+  AgentChatSessionSummaryFields,
+  AgentGoal,
+  AgentGoalStatus,
   ApprovalDecision,
   CanonicalItemType,
   CanonicalRequestType,
   DomainEventType,
+  GoalAction,
+  GoalUpdatedPayload,
   RuntimeEvent,
   RuntimeEventType,
   RuntimeTaskStatus,
   RuntimeTurnState,
+  ThreadActivityPayloadFields,
+  ThreadFoldState,
+  ThreadGoal,
+  ThreadSnapshotPayload,
   TurnState,
   TurnTokenUsage
 } from "./index.ts";
+import type { SessionSummary } from "../index.ts";
 
 /** Fails to compile if `T` is not exactly `U`. */
 type Exact<T, U> = [T] extends [U] ? ([U] extends [T] ? true : never) : never;
@@ -149,6 +163,67 @@ test("the runtime union carries its envelope and the deliberate exclusions", () 
 
   const type: RuntimeEventType = "task.completed";
   assert.equal(type, "task.completed");
+});
+
+test("the goal contracts are the goals spec's (goals §4.2–§4.5, §4.7)", () => {
+  // §4.2: one runtime event in the closed union, and NOT transient — every
+  // goal update is written to `raw.ndjson`.
+  const goalEvent: RuntimeEvent = {
+    eventId: "e1",
+    threadId: "t1",
+    createdAt: "2026-09-24T00:00:00.000Z",
+    type: "thread.goal.updated",
+    payload: { goal: { objective: "Ship it", status: "active" }, change: "set" }
+  };
+  const goalType: RuntimeEventType = goalEvent.type;
+  assert.equal(TRANSIENT_RUNTIME_EVENT_TYPES.has(goalType), false);
+  const eventPayload: Exact<
+    Extract<RuntimeEvent, { type: "thread.goal.updated" }>["payload"],
+    GoalUpdatedPayload
+  > = true;
+
+  // §4.3 / §4.4: the payload fields the wire keeps, the fold's field and the
+  // snapshot's — each optional, so an older writer's shape still decodes.
+  const payloadFields: Exact<
+    Pick<ThreadActivityPayloadFields, "goal" | "change" | "previous">,
+    { goal?: AgentGoal | null; change?: GoalUpdatedPayload["change"]; previous?: AgentGoal }
+  > = true;
+  const foldGoal: Exact<ThreadFoldState["goal"], ThreadGoal | null | undefined> = true;
+  const snapshotGoal: Exact<ThreadSnapshotPayload["goal"], ThreadGoal | null | undefined> = true;
+
+  // §4.5: the capability block, absent for a provider with no goal surface.
+  const actions: Exact<GoalAction, "continue" | "pause" | "resume" | "clear"> = true;
+  const support: Exact<
+    AdapterGoalSupport,
+    { command: "provider" | "host"; actions: readonly GoalAction[]; continuesAcrossTurns: boolean }
+  > = true;
+  const capability: Exact<AdapterCapabilities["goals"], AdapterGoalSupport | undefined> = true;
+
+  // §4.7: the summary the tab strip, sidebar and Attention Center read.
+  const summary: Exact<
+    AgentChatGoalSummary,
+    { objective: string; status: AgentGoalStatus; continuing: boolean }
+  > = true;
+  const summaryField: Exact<
+    AgentChatSessionSummaryFields["goal"],
+    AgentChatGoalSummary | null | undefined
+  > = true;
+  const sessionField: Exact<SessionSummary["goal"], AgentChatGoalSummary | null | undefined> = true;
+
+  for (const pinned of [
+    eventPayload,
+    payloadFields,
+    foldGoal,
+    snapshotGoal,
+    actions,
+    support,
+    capability,
+    summary,
+    summaryField,
+    sessionField
+  ]) {
+    exact(pinned);
+  }
 });
 
 test("turn token usage is tagged by usageStatus", () => {

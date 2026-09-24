@@ -21,6 +21,7 @@ import type {
   RuntimeMode
 } from "./adapter-types.ts";
 import type { DomainEvent } from "./domain-events.ts";
+import type { AgentGoalStatus } from "./goal.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
   Checkpoint,
@@ -607,7 +608,7 @@ export const AGENT_CHAT_EVENT_TYPES = [
 ] as const satisfies readonly AgentChatEventType[];
 
 // ---------------------------------------------------------------------------
-// §6.4 / §7.1 — the six derived `SessionSummary` fields
+// §6.4 / §7.1 — the seven derived `SessionSummary` fields
 // ---------------------------------------------------------------------------
 
 /**
@@ -620,10 +621,31 @@ export const AGENT_CHAT_EVENT_TYPES = [
 export type BackgroundLiveness = "working" | "monitoring";
 
 /**
- * The six fields `SessionSummary` gains for chat sessions (§6.4). **This list
- * is the contract §7.1 and §7.7 read, and no surface may invent a name for one
- * of them.** The names are T3's
- * (`orchestration.ts:860-919`, `OrchestrationThreadShell`).
+ * A thread's unfinished goal as every ambient surface reads it (goals §4.7).
+ * `continuing` is true while the provider starts turns by itself — a Codex
+ * goal that is `active` — and one of these holds:
+ * - its session is live AND a turn is running, or the last idle point it
+ *   continues from (a turn settling, the session (re)starting) is within the
+ *   host's grace (`GOAL_CONTINUATION_GRACE_MS`, 60 s): a continuation that
+ *   never starts stops reading as work, with no event — the host recomputes
+ *   the field on every read;
+ * - a host restart's resume of it is still owed (goals §5.5, the head's
+ *   `resumeGoalAfterRestart`), even while the session reads `error`.
+ * A settled latest turn is then not "finished", and the host's word is final:
+ * no surface re-derives it. Without a pending resume the host never reports
+ * it for a stopped or errored session, so a goal never masks an error.
+ */
+export interface AgentChatGoalSummary {
+  objective: string;
+  status: AgentGoalStatus;
+  continuing: boolean;
+}
+
+/**
+ * The seven fields `SessionSummary` gains for chat sessions (§6.4, and
+ * goals §4.7 for `goal`). **This list is the contract §7.1 and §7.7 read, and
+ * no surface may invent a name for one of them.** The first six names are
+ * T3's (`orchestration.ts:860-919`, `OrchestrationThreadShell`).
  *
  * They exist so every surface already reading only `SessionSummary` — tab
  * strip, Attention Center, command palette, push gate — keeps working without
@@ -638,4 +660,6 @@ export interface AgentChatSessionSummaryFields {
   latestTurn?: LatestTurnSummary | null;
   /** The session status from §5.1's `ThreadHead`. */
   chatSessionStatus?: ThreadSessionStatus;
+  /** The thread's unfinished goal, `null` when it has none (goals §4.7). */
+  goal?: AgentChatGoalSummary | null;
 }

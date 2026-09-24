@@ -31,8 +31,15 @@ import type { Skill, SlashCommand } from "@orquester/api/agent-chat";
  * `/compact` is deliberately NOT here: §4.6.3 synthesises it into every
  * adapter's catalog, so it arrives as an ordinary provider command and is
  * gated by {@link compactCommandAvailable}.
+ *
+ * **`goal` is the one host row that is TYPED** (goals §8.5): where the host
+ * parses `/goal` (Codex, `capabilities.goals.command === "host"`) there is no
+ * provider catalog row for it, so the host advertises it — but the host acts
+ * on the SENT text, in `decide("turn")`, so picking it inserts `/goal ` and
+ * the user goes on to type the objective or subcommand. Nothing is sent by the
+ * pick.
  */
-export type HostComposerCommand = "model" | "effort" | "plan" | "default";
+export type HostComposerCommand = "model" | "effort" | "plan" | "default" | "goal";
 
 export type ComposerMenuItem =
   | {
@@ -43,7 +50,15 @@ export type ComposerMenuItem =
       path: string;
       pathKind: "file" | "dir";
     }
-  | { id: string; type: "host-command"; label: string; description: string; command: HostComposerCommand }
+  | {
+      id: string;
+      type: "host-command";
+      label: string;
+      description: string;
+      command: HostComposerCommand;
+      /** The argument grammar, shown beside the label (goals §8.5's `/goal`). */
+      hint?: string;
+    }
   | { id: string; type: "provider-command"; label: string; description: string; command: SlashCommand }
   | { id: string; type: "skill"; label: string; description: string; skill: Skill };
 
@@ -352,7 +367,13 @@ export function slashMenuItemsForPromptPosition(
   isAtPromptStart: boolean
 ): SlashMenuItem[] {
   if (isAtPromptStart) return [...items];
-  return items.filter((item) => item.type !== "provider-command");
+  // The typed host `/goal` is positioned like a provider command: the host
+  // recognises it only when it opens the message (goals §5.1), and anywhere
+  // else it would reach the model as text — the bug it exists to fix.
+  return items.filter(
+    (item) =>
+      item.type !== "provider-command" && !(item.type === "host-command" && item.command === "goal")
+  );
 }
 
 export function searchSlashMenuItems(
@@ -417,13 +438,25 @@ export interface SlashMenuInput {
   showSkillsInSlashMenu: boolean;
   isAtPromptStart: boolean;
   query: string;
+  /**
+   * The host parses `/goal` for this adapter (`capabilities.goals.command ===
+   * "host"`, Codex), so the host advertises it (goals §8.5). A provider that
+   * parses its own (Claude, Grok) lists it in its catalog, used unchanged.
+   */
+  hostGoalCommand?: boolean;
 }
 
 const HOST_COMMAND_DESCRIPTIONS: Record<HostComposerCommand, string> = {
   model: "Switch the model for this thread",
   effort: "Change the reasoning effort for this thread",
   plan: "Switch this thread into plan mode",
-  default: "Switch this thread back to normal build mode"
+  default: "Switch this thread back to normal build mode",
+  goal: "Set, check, pause, resume or clear a goal"
+};
+
+/** The argument grammar of the host-parsed `/goal` (goals §5.1, §8.5). */
+const HOST_COMMAND_HINTS: Partial<Record<HostComposerCommand, string>> = {
+  goal: "<objective> | pause | resume | clear | edit <objective>"
 };
 
 /**
@@ -455,14 +488,19 @@ export function buildSlashMenuItems(input: SlashMenuInput): SlashMenuItem[] {
   const hostCommands: HostComposerCommand[] = ["model"];
   if (input.hasEffortOption) hostCommands.push("effort");
   if (input.showPlanModeToggle) hostCommands.push("plan", "default");
+  if (input.hostGoalCommand === true) hostCommands.push("goal");
 
-  const hostItems: SlashMenuItem[] = hostCommands.map((command) => ({
-    id: `host:${command}`,
-    type: "host-command",
-    command,
-    label: `/${command}`,
-    description: HOST_COMMAND_DESCRIPTIONS[command]
-  }));
+  const hostItems: SlashMenuItem[] = hostCommands.map((command) => {
+    const hint = HOST_COMMAND_HINTS[command];
+    return {
+      id: `host:${command}`,
+      type: "host-command",
+      command,
+      label: `/${command}`,
+      description: HOST_COMMAND_DESCRIPTIONS[command],
+      ...(hint !== undefined ? { hint } : {})
+    };
+  });
 
   const visibleSkills = skillsForSlashMenu(input.skills, input.showSkillsInSlashMenu);
   const providerItems: SlashMenuItem[] = providerCommandsForSlashMenu(
@@ -521,14 +559,16 @@ export function buildSkillMenuItems(skills: readonly Skill[], query: string): Co
  *  - a provider command inserts `` `/name ` `` with a trailing space,
  *  - a skill inserts `` `$name ` ``,
  *  - a path inserts the canonical path with a trailing space,
- *  - **a host command inserts nothing** — it erases the trigger and acts.
+ *  - **a host command inserts nothing** — it erases the trigger and acts —
+ *    except the host `/goal`, which the host reads off the sent text and so
+ *    inserts `` `/goal ` `` for the user to finish (goals §8.5).
  *
  * *T3: `ChatComposer.tsx:3597-3643`.*
  */
 export function menuItemReplacement(item: ComposerMenuItem): string {
   switch (item.type) {
     case "host-command":
-      return "";
+      return item.command === "goal" ? "/goal " : "";
     case "provider-command":
       return `/${item.command.name} `;
     case "skill":
@@ -536,4 +576,18 @@ export function menuItemReplacement(item: ComposerMenuItem): string {
     case "path":
       return `@${item.path} `;
   }
+}
+
+/**
+ * What picking a row DOES beyond the text {@link menuItemReplacement} puts in
+ * the draft: the host command to perform, or `null` when the insertion is the
+ * whole pick — every provider command, skill and path, and the host `/goal`,
+ * which the host parses from the sent text (goals §8.5). No pick sends a
+ * message.
+ */
+export function menuItemAction(
+  item: ComposerMenuItem
+): Exclude<HostComposerCommand, "goal"> | null {
+  if (item.type !== "host-command" || item.command === "goal") return null;
+  return item.command;
 }

@@ -5,7 +5,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { TOOL_LIFECYCLE_ITEM_TYPES, type CanonicalItemType } from "@orquester/api/agent-chat";
+import {
+  AGENT_GOAL_CHANGES,
+  GOAL_ACTIVITY_KIND,
+  HISTORICAL_RAW_SOURCE,
+  TOOL_LIFECYCLE_ITEM_TYPES,
+  type AgentGoal,
+  type CanonicalItemType,
+  type GoalUpdatedPayload
+} from "@orquester/api/agent-chat";
 
 import {
   requestKindFromCanonicalRequestType,
@@ -424,6 +432,125 @@ describe("tool progress, denials and diagnostics (§5.1 catch-all)", () => {
       runtimeEvent("user-input.resolved", { answers: { q: "yes" } }, { requestId: "q1" })
     );
     assert.equal(resolved!.activityKind, "user-input.resolved");
+  });
+});
+
+describe("goals (goals §4.3)", () => {
+  const goal: AgentGoal = {
+    objective: "Make CI green",
+    status: "active",
+    rounds: 2,
+    lastCheck: "lint still fails",
+    tokenBudget: null
+  };
+
+  it("one thread.goal.updated is ONE goal.updated row carrying the payload verbatim", () => {
+    const payload: GoalUpdatedPayload = { goal, change: "checked" };
+    const rows = runtimeEventToActivities(
+      runtimeEvent("thread.goal.updated", payload, { eventId: "re-goal", turnId: "turn-7" })
+    );
+    assert.equal(rows.length, 1);
+    const [row] = rows;
+    assert.equal(row!.id, "re-goal");
+    assert.equal(row!.activityKind, GOAL_ACTIVITY_KIND);
+    assert.equal(row!.tone, "info");
+    assert.equal(row!.summary, "Goal check 2: not met — lint still fails");
+    assert.equal(row!.turnId, "turn-7");
+    assert.deepEqual(row!.payload, payload);
+  });
+
+  it("a goal outside a turn is turnless, and no row ever names an agent", () => {
+    const [row] = runtimeEventToActivities(
+      runtimeEvent(
+        "thread.goal.updated",
+        { goal: null, change: "cleared", previous: goal },
+        { agentId: "agent-1" }
+      )
+    );
+    assert.equal(row!.turnId, null);
+    assert.equal(row!.agentId, undefined);
+    assert.equal("agentId" in payloadOf(row!), false);
+    assert.equal(row!.summary, "Goal cleared: Make CI green");
+  });
+
+  it("only a failed goal is error-toned", () => {
+    for (const change of AGENT_GOAL_CHANGES) {
+      const [row] = runtimeEventToActivities(
+        runtimeEvent("thread.goal.updated", { goal: null, change, previous: goal })
+      );
+      assert.equal(row!.tone, change === "failed" ? "error" : "info", change);
+    }
+  });
+
+  it("the row text is §4.3's: a long objective is cut, the payload keeps it whole", () => {
+    const objective = `Refactor ${"the billing module ".repeat(30)}`;
+    const payload: GoalUpdatedPayload = {
+      goal: { objective, status: "active", rounds: 0 },
+      change: "set"
+    };
+    const [row] = runtimeEventToActivities(runtimeEvent("thread.goal.updated", payload));
+    assert.ok(row!.summary.startsWith("Goal set: Refactor the billing module"));
+    assert.ok(row!.summary.endsWith("…"));
+    assert.ok(row!.summary.length <= "Goal set: ".length + 200);
+    assert.equal((payloadOf(row!).goal as AgentGoal).objective, objective);
+
+    const [limited] = runtimeEventToActivities(
+      runtimeEvent("thread.goal.updated", {
+        goal: { ...goal, status: "usage-limited" },
+        change: "limited"
+      })
+    );
+    assert.equal(limited!.summary, "Goal stopped: usage limit reached");
+  });
+
+  it("a cleared goal's row keeps the goal that ended, verbatim", () => {
+    const [row] = runtimeEventToActivities(
+      runtimeEvent("thread.goal.updated", { goal: null, change: "cleared", previous: goal })
+    );
+    assert.deepEqual(row!.payload, { goal: null, change: "cleared", previous: goal });
+  });
+
+  it("every hidden progress row of a thread shares ONE stable id — the latest replaces it in place", () => {
+    // A `progress` row is the goal's latest state, not history (§8.4 hides
+    // it): a fresh id per tick would spend one slot of the 500-row parent
+    // window on each, like the `task-progress:` rows before them.
+    const rows = [1, 2, 3].map((rounds) =>
+      runtimeEventToActivities(
+        runtimeEvent(
+          "thread.goal.updated",
+          { goal: { ...goal, rounds }, change: "progress" },
+          { threadId: "thread-9" }
+        )
+      )[0]!
+    );
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      ["goal-progress:thread-9", "goal-progress:thread-9", "goal-progress:thread-9"]
+    );
+    assert.equal(rows[2]!.summary, "Goal progress");
+    assert.deepEqual(rows[2]!.payload, { goal: { ...goal, rounds: 3 }, change: "progress" });
+    // Every other change is a row of its own, history the timeline shows.
+    for (const change of AGENT_GOAL_CHANGES.filter((entry) => entry !== "progress")) {
+      const [row] = runtimeEventToActivities(
+        runtimeEvent("thread.goal.updated", { goal, change }, { eventId: `re-${change}` })
+      );
+      assert.equal(row!.id, `re-${change}`, change);
+    }
+  });
+
+  it("a goal event replayed out of the provider's history produces nothing", () => {
+    // Adapters must not emit goal events from replayed history (goals §6.3);
+    // ingestion refuses one anyway, so a replay can never move the goal.
+    assert.deepEqual(
+      runtimeEventToActivities(
+        runtimeEvent(
+          "thread.goal.updated",
+          { goal, change: "restored" },
+          { raw: { source: HISTORICAL_RAW_SOURCE, payload: {} } }
+        )
+      ),
+      []
+    );
   });
 });
 

@@ -1024,3 +1024,237 @@ describe("R7-12 — stable rows survive a duplicate row id", () => {
     assert.equal(second, first);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Goal markers (goals §8.4)
+// ---------------------------------------------------------------------------
+
+describe("goal marker rows", () => {
+  const goal = { objective: "Make CI green", status: "active" };
+  const goalRow = (payload: unknown, summary: string, at: number, turnId: string | null = "t1") =>
+    activity("goal.updated", payload, {
+      tone: (payload as { change?: string }).change === "failed" ? "error" : "info",
+      summary,
+      turnId,
+      createdAt: stamp(at)
+    });
+  const tool = (command: string, at: number, turnId = "t1") =>
+    activity("tool.completed", { itemType: "command_execution", command }, {
+      turnId,
+      createdAt: stamp(at)
+    });
+  const running = { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) } as const;
+  const goalMarkers = (rows: readonly AgentChatTimelineRow[]) =>
+    rows.flatMap((row) => (row.kind === "goal-marker" ? [row] : []));
+
+  it("a goal update is its own marker row, carrying its label, change and objective", () => {
+    const rows = deriveTimelineRows(
+      baseInput(entriesFrom([goalRow({ goal, change: "set" }, "Goal set: Make CI green", 1)]), running)
+    );
+    const [marker] = goalMarkers(rows);
+    assert.ok(marker, "a goal row projects a goal marker");
+    assert.equal(marker.label, "Goal set: Make CI green");
+    assert.equal(marker.change, "set");
+    assert.equal(marker.objective, "Make CI green");
+    assert.equal(marker.turnId, "t1");
+    assert.equal(marker.rounds, undefined, "a set goal has cost nothing yet — no stats");
+  });
+
+  it("only an achieved or failed marker carries the stats of the goal that ended", () => {
+    const ended = { ...goal, rounds: 4, elapsedMs: 725_000, tokensUsed: 1_250_000 };
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          goalRow({ goal: { ...ended, lastCheck: "lint" }, change: "checked" }, "Goal check 4: not met — lint", 1),
+          goalRow({ goal: null, change: "achieved", previous: { ...ended, status: "complete" } }, "Goal achieved: Make CI green", 2),
+          goalRow({ goal: null, change: "failed", previous: { ...ended, status: "failed" } }, "Goal can't be met", 3)
+        ]),
+        running
+      )
+    );
+    const [checked, achieved, failed] = goalMarkers(rows);
+    assert.equal(checked?.rounds, undefined, "a check is not an ending");
+    assert.deepEqual(
+      [achieved?.rounds, achieved?.elapsedMs, achieved?.tokensUsed],
+      [4, 725_000, 1_250_000]
+    );
+    assert.deepEqual([failed?.change, failed?.rounds, failed?.elapsedMs], ["failed", 4, 725_000]);
+  });
+
+  it("drops `progress` rows: the chip is what they keep current", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          goalRow({ goal, change: "set" }, "Goal set: Make CI green", 1),
+          goalRow({ goal: { ...goal, rounds: 1 }, change: "progress" }, "Goal progress", 2)
+        ]),
+        running
+      )
+    );
+    assert.deepEqual(
+      goalMarkers(rows).map((row) => row.label),
+      ["Goal set: Make CI green"]
+    );
+    assert.ok(!rows.some((row) => row.kind === "work" || row.kind === "work-toggle" || row.kind === "work-live"));
+  });
+
+  it("a marker is never folded into an activity group, a tool group or the live tool row", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(0) }),
+          message("reasoning", "thinking", { turnId: "t1", createdAt: stamp(1) }),
+          tool("ls", 2),
+          goalRow({ goal: { ...goal, rounds: 1, lastCheck: "red" }, change: "checked" }, "Goal check 1: not met — red", 3),
+          tool("npm test", 4),
+          goalRow({ goal: { ...goal, rounds: 2, lastCheck: "red" }, change: "checked" }, "Goal check 2: not met — red", 5)
+        ]),
+        running
+      )
+    );
+    assert.deepEqual(
+      goalMarkers(rows).map((row) => row.label),
+      ["Goal check 1: not met — red", "Goal check 2: not met — red"]
+    );
+    for (const row of rows) {
+      const grouped =
+        row.kind === "activity-group"
+          ? row.entries
+          : row.kind === "work" || row.kind === "work-live"
+            ? row.groupedEntries
+            : [];
+      assert.ok(
+        grouped.every((entry) => entry.goal === undefined),
+        `${row.kind} swallowed a goal marker`
+      );
+    }
+    // The trailing marker sits after the last tool call, in log order.
+    const kindsInOrder = kinds(rows);
+    assert.ok(kindsInOrder.lastIndexOf("goal-marker") > kindsInOrder.indexOf("activity-group"));
+  });
+
+  it("a settled turn's fold hides its work but never its goal markers", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "/goal Make CI green", { createdAt: stamp(0) }),
+          goalRow({ goal, change: "set" }, "Goal set: Make CI green", 1),
+          tool("npm test", 2),
+          goalRow({ goal: { ...goal, rounds: 1, lastCheck: "red" }, change: "checked" }, "Goal check 1: not met — red", 3),
+          tool("npm test", 4),
+          message("assistant", "CI is green.", { turnId: "t1", createdAt: stamp(5) }),
+          goalRow({ goal: null, change: "achieved", previous: { ...goal, status: "complete", rounds: 1 } }, "Goal achieved: Make CI green", 6)
+        ]),
+        {
+          latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(6) }
+        }
+      )
+    );
+    assert.ok(kinds(rows).includes("turn-fold"), "the turn folds");
+    assert.ok(!kinds(rows).includes("work-toggle") && !kinds(rows).includes("work"), "its tool calls fold away");
+    assert.deepEqual(
+      goalMarkers(rows).map((row) => row.change),
+      ["set", "checked", "achieved"],
+      "the goal's story outlives the work it drove"
+    );
+  });
+
+  it("a marker after the answer changes nothing about what else folds", () => {
+    // One ordinary trailing activity joins the fold; a goal marker beside it
+    // is never folded itself and must not make that activity "two trailing".
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(0) }),
+          tool("npm test", 1),
+          message("assistant", "Done.", { turnId: "t1", createdAt: stamp(2) }),
+          goalRow({ goal: null, change: "achieved", previous: { ...goal, status: "complete" } }, "Goal achieved: Make CI green", 3),
+          tool("git status", 4)
+        ]),
+        {
+          latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(4) }
+        }
+      )
+    );
+    assert.ok(kinds(rows).includes("turn-fold"));
+    assert.ok(
+      !rows.some((row) => row.kind === "work" || row.kind === "work-toggle"),
+      "the single trailing tool call folds, exactly as it would without the marker"
+    );
+    assert.equal(goalMarkers(rows).length, 1, "and the marker stays");
+  });
+
+  it("a host `/goal` answer is its own row, never hidden in a tool group or an activity group", () => {
+    const status = activity("goal.status", { summary: "Goal active: Make CI green" }, {
+      tone: "info",
+      summary: "Goal active: Make CI green",
+      turnId: "t1",
+      createdAt: stamp(3)
+    });
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          message("reasoning", "thinking", { turnId: "t1", createdAt: stamp(1) }),
+          tool("ls", 2),
+          status,
+          tool("pwd", 4),
+          tool("npm test", 5)
+        ]),
+        running
+      )
+    );
+    const own = rows.filter(
+      (row) =>
+        row.kind === "work" &&
+        row.groupedEntries.length === 1 &&
+        row.groupedEntries[0]?.id === status.id
+    );
+    assert.equal(own.length, 1, "the answer the user asked for is a row of its own");
+    for (const row of rows) {
+      if (row.kind === "activity-group") {
+        assert.ok(!row.entries.some((entry) => entry.id === status.id));
+      }
+      if (row.kind === "work-live" || (row.kind === "work" && row.groupedEntries.length > 1)) {
+        assert.ok(!row.groupedEntries.some((entry) => entry.id === status.id));
+      }
+    }
+  });
+
+  it("goal entries are not grouping entries", () => {
+    const [marker, status] = entriesFrom([
+      goalRow({ goal, change: "set" }, "Goal set: Make CI green", 1),
+      activity("goal.status", {}, { tone: "info", summary: "No goal is set.", turnId: "t1", createdAt: stamp(2) })
+    ]);
+    assert.ok(marker && status);
+    assert.equal(isGroupingEntry(marker), false);
+    assert.equal(isGroupingEntry(status), false);
+  });
+
+  it("a marker row is unchanged exactly when nothing it renders changed", () => {
+    const row: Extract<AgentChatTimelineRow, { kind: "goal-marker" }> = {
+      kind: "goal-marker",
+      id: "g1",
+      createdAt: stamp(1),
+      turnId: "t1",
+      label: "Goal achieved: Make CI green",
+      change: "achieved",
+      objective: "Make CI green",
+      rounds: 4,
+      elapsedMs: 1_000,
+      tokensUsed: 10
+    };
+    assert.equal(isRowUnchanged(row, { ...row }), true);
+    for (const patch of [
+      { label: "Goal achieved" },
+      { change: "failed" as const },
+      { objective: "Other" },
+      { rounds: 5 },
+      { elapsedMs: 2_000 },
+      { tokensUsed: 11 },
+      { turnId: null },
+      { createdAt: stamp(2) }
+    ]) {
+      assert.equal(isRowUnchanged(row, { ...row, ...patch }), false, JSON.stringify(patch));
+    }
+  });
+});

@@ -25,6 +25,8 @@
  * - a revert (§5.5) keeps the first `turnCount` STARTED turns, by turn ORDER
  *   (`turns.ts`) — the checkpoint list decides only for a log that recorded no
  *   started turn at all, the legacy fallback;
+ * - the thread's goal is the last `goal.updated` row that parses (goals §4.4),
+ *   and neither retention nor a revert touches it;
  * - a malformed line truncates the fold at that point rather than discarding
  *   the file (the reader's job — this fold only ever sees decoded events).
  *
@@ -48,6 +50,8 @@ import type {
   ThreadMessageSentPayload,
   ThreadTurnDiffCompletedPayload
 } from "./domain-events.ts";
+import { GOAL_ACTIVITY_KIND, parseGoalUpdatedPayload } from "./goal.ts";
+import type { ThreadGoal } from "./goal.ts";
 import { derivePendingRequests } from "./pending.ts";
 import {
   createRosterEngine,
@@ -146,6 +150,14 @@ export interface ThreadFoldState {
   /** Derived from the activity fold, never stored separately (§5.1). */
   pending: PendingRequests;
   roster: RuntimeSubagent[];
+  /**
+   * The provider's goal as the last `goal.updated` row that parsed left it
+   * (goals §4.4), `null` when the thread has none. The provider's state, not
+   * the conversation's: retention and a revert never touch it, and the
+   * provider's next update corrects it. Optional so a state built by an older
+   * constructor still folds; `undefined` reads as `null`.
+   */
+  goal?: ThreadGoal | null;
   /** Request ids closed by a `*.resolved` row (the tombstone set). */
   closedRequestIds: Set<string>;
   /**
@@ -176,6 +188,7 @@ export function createEmptyThreadState(): ThreadFoldState {
     checkpoints: [],
     pending: EMPTY_PENDING,
     roster: [],
+    goal: null,
     closedRequestIds: new Set(),
     closedRequestAt: new Map(),
     seq: 0,
@@ -808,6 +821,8 @@ type Mutation = {
   rederivePending?: boolean;
   /** Re-derive `roster` from the (possibly new) activity list. */
   rederiveRoster?: boolean;
+  /** The goal after this event (goals §4.4); `undefined` means unchanged. */
+  goal?: ThreadGoal | null;
 };
 
 /**
@@ -919,6 +934,11 @@ function commit(
     caches = engine === current.roster ? current : { ...current, roster: engine };
   }
 
+  // Only a `goal.updated` row moves the goal (goals §4.4); every other step —
+  // a trim and a revert included — carries it by identity, and a state built
+  // before goals keeps none until a goal row lands.
+  const goal = mutation.goal !== undefined ? mutation.goal : state.goal;
+
   const head = mutation.head !== undefined ? mutation.head : state.head;
   const nextHead =
     head === null
@@ -933,6 +953,7 @@ function commit(
     checkpoints: mutation.checkpoints ?? state.checkpoints,
     pending,
     roster,
+    ...(goal !== undefined ? { goal } : {}),
     closedRequestIds,
     ...(closedRequestAt !== undefined ? { closedRequestAt } : {}),
     seq: event.seq,
@@ -1451,7 +1472,8 @@ function reduceActivityAppended(
 
   const mutationFlags = {
     rederivePending: touchesPending(activity.activityKind),
-    rederiveRoster: touchesRoster(activity.activityKind)
+    rederiveRoster: touchesRoster(activity.activityKind),
+    ...goalAfterActivity(activity)
   };
 
   if (existing !== undefined && existing.kind === "activity") {
@@ -1481,6 +1503,28 @@ function reduceActivityAppended(
     activities: state.activities.concat([activity]),
     change: { kind: "appended", item: activity },
     ...mutationFlags
+  };
+}
+
+const NO_GOAL_CHANGE: Pick<Mutation, "goal"> = {};
+
+/**
+ * Goals §4.4: a `goal.updated` row whose payload parses sets the thread's
+ * goal — `null` included — stamped with the row's own `updatedAt`. Any other
+ * row, and one that does not parse, leaves it alone; either way the row itself
+ * is appended as usual. The row alone decides: O(1), never a walk of the
+ * window.
+ */
+function goalAfterActivity(activity: ThreadActivityItem): Pick<Mutation, "goal"> {
+  if (activity.activityKind !== GOAL_ACTIVITY_KIND) {
+    return NO_GOAL_CHANGE;
+  }
+  const payload = parseGoalUpdatedPayload(activity.payload);
+  if (payload === null) {
+    return NO_GOAL_CHANGE;
+  }
+  return {
+    goal: payload.goal === null ? null : { ...payload.goal, updatedAt: activity.updatedAt }
   };
 }
 
@@ -1895,6 +1939,7 @@ export function toThreadSnapshot(state: ThreadFoldState): ThreadSnapshotPayload 
     checkpoints: state.checkpoints,
     pending: state.pending,
     roster: state.roster,
-    seq: state.seq
+    seq: state.seq,
+    goal: state.goal ?? null
   };
 }

@@ -18,6 +18,7 @@
 import type {
   CanonicalItemType,
   CanonicalRequestType,
+  GoalUpdatedPayload,
   RuntimeContentStreamKind,
   RuntimeErrorClass,
   RuntimeEvent,
@@ -28,6 +29,7 @@ import type {
 
 import type { CodexProtocol, ServerNotificationMethod } from "./_generated/index.ts";
 import { notificationThreadId, routeCodexChildNotification } from "./child-routing.ts";
+import { CodexGoalTracker, agentGoalFromCodex } from "./goal.ts";
 import { classifyItem, type CodexThreadItem } from "./items.ts";
 import { usageWindowsFromRateLimits, CodexUsageTracker } from "./usage.ts";
 
@@ -53,6 +55,13 @@ export interface CodexNormaliserOptions {
    * collab-child traffic (`child-routing.ts`).
    */
   ownThreadId?: () => string | null;
+  /**
+   * The thread's goal as this session knows it (goals §6). The session owns
+   * it — it seeds it from the fold, weighs the resume snapshot with it and
+   * feeds it the responses to its own goal requests — and shares it here, as
+   * it shares `usage`. A replay test gets a fresh one.
+   */
+  goals?: CodexGoalTracker;
 }
 
 /** Per-session normalisation state. */
@@ -67,6 +76,7 @@ const SETTLED_TURNS_CAP = 64;
 export class CodexNormaliser {
   private readonly usage: CodexUsageTracker;
   private readonly ownThreadId: () => string | null;
+  private readonly goals: CodexGoalTracker;
   /** `turn/diff/updated` is cumulative and repeats; de-duplicate on content. */
   private lastDiff: string | null = null;
   /** itemId → canonical item type, while the item is still `inProgress`. */
@@ -99,6 +109,7 @@ export class CodexNormaliser {
   constructor(options: CodexNormaliserOptions) {
     this.usage = options.usage;
     this.ownThreadId = options.ownThreadId ?? ((): string | null => null);
+    this.goals = options.goals ?? new CodexGoalTracker();
   }
 
   get currentTurnId(): string | null {
@@ -136,6 +147,19 @@ export class CodexNormaliser {
     this.turnEffort = effort ?? null;
     this.lastTurnError = null;
     this.usage.beginTurn(turnId);
+  }
+
+  /**
+   * The thread's settings moved without a turn (`thread/settings/update`,
+   * goals §4.6): the turns Codex starts next — a goal's — run on them, so
+   * their `turn.started` names them. An effort left out is left as it was, as
+   * the provider leaves it.
+   */
+  noteThreadSettings(model: string, effort?: string): void {
+    this.turnModel = model;
+    if (effort !== undefined) {
+      this.turnEffort = effort;
+    }
   }
 
   /** Called when the session settles a turn outside the protocol (child death). */
@@ -653,6 +677,38 @@ export class CodexNormaliser {
         ];
       }
 
+      // ----------------------------------------------------------------- goals
+      //
+      // The provider's own goal (goals §6.2.1): after every set, on the model's
+      // `create_goal` / `update_goal`, on progress flushes and at turn stop —
+      // and once as a snapshot after every `thread/resume`, which is the
+      // `cleared` fixture 07 records. The tracker names the change and decides
+      // whether it is news; a collab child's goal never reaches here, it is
+      // child chatter (`child-routing.ts`).
+      case "thread/goal/updated": {
+        const p = params as CodexProtocol.v2.ThreadGoalUpdatedNotification;
+        const goal = agentGoalFromCodex(p.goal);
+        if (goal === null) {
+          // A status this build does not know: surfaced, never folded as a
+          // clear and never dropped (§10). The tracked goal stays as it was,
+          // but the provider did speak — counted, and a snapshot it was is over.
+          this.goals.unreadable();
+          return [
+            {
+              type: "runtime.warning",
+              payload: { message: "Unrecognised codex goal", detail: p.goal },
+              raw: raw()
+            }
+          ];
+        }
+        return goalUpdatedEvents(this.goals.notified(goal), {
+          turnId: p.turnId,
+          raw: raw()
+        });
+      }
+      case "thread/goal/cleared":
+        return goalUpdatedEvents(this.goals.notified(null), { raw: raw() });
+
       // ------------------------------------------------------- handled, no arm
       //
       // Every method below is KNOWN and deliberately produces no runtime event.
@@ -661,8 +717,6 @@ export class CodexNormaliser {
       // breaks this switch instead of silently disappearing.
       case "thread/settings/updated": // sticky thread config; read by the session, not the timeline
       case "thread/reverted": // §5.5 revert is host-orchestrated; the ack adds nothing
-      case "thread/goal/updated":
-      case "thread/goal/cleared": // arrives unprompted after every resume
       case "thread/queue/changed":
       case "thread/project/updated":
       case "thread/environment/connected":
@@ -1164,6 +1218,36 @@ export function providerRequestKind(
     default:
       return "permission";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Goals (goals §4.2, §6.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `thread.goal.updated` for a change the tracker decided is news, or
+ * nothing when it decided none is. `turnId` is the provider's — a progress
+ * flush or a turn-stop update names its turn, a set or a snapshot names none.
+ * A row taken from a response to one of our own requests carries no `raw`:
+ * the frame is in `raw.ndjson` either way, and it is not a notification.
+ */
+export function goalUpdatedEvents(
+  payload: GoalUpdatedPayload | null,
+  options: { turnId?: string | null; raw?: RuntimeEventRaw } = {}
+): RuntimeEventDraft[] {
+  if (payload === null) {
+    return [];
+  }
+  const turnId =
+    typeof options.turnId === "string" && options.turnId.length > 0 ? options.turnId : undefined;
+  return [
+    {
+      type: "thread.goal.updated",
+      payload,
+      ...(turnId !== undefined ? { turnId, providerRefs: { providerTurnId: turnId } } : {}),
+      ...(options.raw !== undefined ? { raw: options.raw } : {})
+    }
+  ];
 }
 
 // ---------------------------------------------------------------------------

@@ -103,7 +103,25 @@ export type MockTurnScript =
       keepParentRunning?: boolean;
     }
   | { kind: "silent" }
+  /** Start a tool call and go silent: the liveness watchdog's WIDER window. */
+  | { kind: "open-tool" }
   | { kind: "exit-mid-turn"; exitCode: number };
+
+/**
+ * A goal as the mock's goal store holds it: the app-server's own `ThreadGoal`
+ * without `threadId`, which the mock stamps. Unset counters start at 0, and
+ * `createdAt`/`updatedAt` at 1 789 950 000 (unix seconds).
+ */
+export interface MockGoal {
+  objective: string;
+  /** The app-server's spelling: `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`. */
+  status: string;
+  tokenBudget?: number | null;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  createdAt?: number;
+  updatedAt?: number;
+}
 
 export interface MockConfig {
   userAgent?: string;
@@ -131,6 +149,39 @@ export interface MockConfig {
    * history remains. Unset, every list answers the whole history in one page.
    */
   turnsPageSize?: number;
+  /**
+   * What the thread's goal store (`goals_1.sqlite`) holds at start. The mock
+   * answers `thread/goal/get|set|clear` against it the way the app-server does
+   * — reply first, then `thread/goal/updated {turnId: null}` after a set and
+   * `thread/goal/cleared` after a clear that removed something — and sends it
+   * as the snapshot after every `thread/resume`. It starts no continuation
+   * turns: a test starts its own.
+   */
+  goal?: MockGoal | null;
+  /** `thread/resume` sends no goal snapshot at all — the store unreadable, say. */
+  noResumeGoalSnapshot?: boolean;
+  /** Every `thread/goal/*` request answers THIS error instead. */
+  goalError?: { code: number; message: string };
+  /** `thread/goal/set` is never answered: a wedged goal store. */
+  hangGoalSet?: boolean;
+  /** Every `thread/goal/*` request is handled this many ms late: a slow goal store. */
+  goalReplyDelayMs?: number;
+  /** The resume's goal snapshot goes out this many ms after the resume's reply. */
+  resumeGoalSnapshotDelayMs?: number;
+  /**
+   * A `thread/goal/set`'s reply goes out alone; 30 ms later an `updated`
+   * carrying the goal as it was BEFORE the set — a progress flush queued
+   * earlier, trailing the reply — and only then the set's own `updated`.
+   */
+  staleGoalUpdateAfterSet?: boolean;
+  /** `thread/settings/update` answers THIS error instead of `{}`. */
+  settingsError?: { code: number; message: string };
+  /**
+   * `thread/goal/get` is overtaken by a change: the stored goal moves to this
+   * status and its `thread/goal/updated` goes out BEFORE the reply, which
+   * still carries the goal as it was when the request was read.
+   */
+  goalMovesDuringGet?: string;
   /** Everything the mock received, appended as NDJSON. */
   logPath: string;
 }
@@ -315,6 +366,20 @@ const turnObject = (id, status) => ({
   startedAt: 0, completedAt: status === "inProgress" ? null : 1, durationMs: null
 });
 
+// The goal store (\`goals_1.sqlite\`): one goal per thread, or none.
+let goalClock = 1789950000;
+const goalNow = () => ++goalClock;
+let goal = config.goal
+  ? { tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1789950000, updatedAt: 1789950000, ...config.goal }
+  : null;
+const goalCopy = () => (goal === null ? null : { threadId, ...goal });
+const sendGoalUpdated = (turnId) => send({ method: "thread/goal/updated", params: { threadId, turnId, goal: goalCopy() } });
+const sendGoalCleared = () => send({ method: "thread/goal/cleared", params: { threadId } });
+const noGoalError = () => ({ code: -32600, message: "cannot update goal for thread " + threadId + ": no goal exists" });
+const goalLater = (fn) => {
+  if (typeof config.goalReplyDelayMs === "number") { setTimeout(fn, config.goalReplyDelayMs); } else { fn(); }
+};
+
 const askServerRequest = (method, params) => new Promise((resolve) => {
   const id = serverRequestId++;
   pendingServerRequests.set(id, resolve);
@@ -413,6 +478,9 @@ async function runTurn(turnId, script) {
     }
     case "silent":
       return;
+    case "open-tool":
+      send({ method: "item/started", params: { item: { type: "commandExecution", id: itemId, pluginId: null, scriptPath: null, command: "sleep 3600", cwd: process.cwd(), processId: null, source: "agent", status: "inProgress", commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null }, threadId, turnId, startedAtMs: 0 } });
+      return;
     case "exit-mid-turn": {
       send({ method: "item/started", params: { item: { type: "commandExecution", id: itemId, pluginId: null, scriptPath: null, command: "sleep 30", cwd: process.cwd(), processId: null, source: "agent", status: "inProgress", commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null }, threadId, turnId, startedAtMs: 0 } });
       setTimeout(() => { process.exit(script.exitCode); }, 10);
@@ -445,7 +513,86 @@ function handle(frame) {
     case "thread/resume":
       if (config.failResume) { send({ id, error: { code: -32600, message: "thread not found" } }); return; }
       send({ id, result: { ...threadResponse(), initialTurnsPage: null, turnsBackwardsCursor: null, itemsBackwardsCursor: null } });
-      send({ method: "thread/goal/cleared", params: { threadId } });
+      // The goal snapshot, after the reply: \`updated\` when there is a goal,
+      // \`cleared\` when there is none (fixture 07).
+      if (!config.noResumeGoalSnapshot) {
+        const snapshot = () => {
+          if (goal !== null) { sendGoalUpdated(null); } else { sendGoalCleared(); }
+        };
+        if (typeof config.resumeGoalSnapshotDelayMs === "number") {
+          setTimeout(snapshot, config.resumeGoalSnapshotDelayMs);
+        } else {
+          snapshot();
+        }
+      }
+      return;
+    case "thread/goal/get":
+      goalLater(() => {
+        if (config.goalError) { send({ id, error: config.goalError }); return; }
+        if (config.goalMovesDuringGet && goal !== null) {
+          const asRead = goalCopy();
+          goal = { ...goal, status: config.goalMovesDuringGet, updatedAt: goalNow() };
+          sendGoalUpdated(null);
+          send({ id, result: { goal: asRead } });
+          return;
+        }
+        send({ id, result: { goal: goalCopy() } });
+      });
+      return;
+    case "thread/goal/set":
+      goalLater(() => {
+        if (config.goalError) { send({ id, error: config.goalError }); return; }
+        if (config.hangGoalSet) return;
+        let objective;
+        if (typeof params.objective === "string") {
+          objective = params.objective.trim();
+          if (objective.length === 0 || objective.length > 4000) {
+            send({ id, error: { code: -32600, message: "goal objective must be between 1 and 4000 characters" } });
+            return;
+          }
+        }
+        const before = goalCopy();
+        const now = goalNow();
+        if (goal === null) {
+          if (objective === undefined) { send({ id, error: noGoalError() }); return; }
+          goal = { objective, status: params.status ?? "active", tokenBudget: typeof params.tokenBudget === "number" ? params.tokenBudget : null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: now, updatedAt: now };
+        } else {
+          goal = {
+            ...goal,
+            ...(objective !== undefined ? { objective } : {}),
+            ...(params.status !== undefined && params.status !== null ? { status: params.status } : {}),
+            ...("tokenBudget" in params ? { tokenBudget: params.tokenBudget ?? null } : {}),
+            updatedAt: now
+          };
+        }
+        // The reply first, then the notification — the app-server's order.
+        send({ id, result: { goal: goalCopy() } });
+        if (config.staleGoalUpdateAfterSet && before !== null) {
+          // Queued before the set, delivered a moment after its reply: the
+          // reply has been read by the time the stale update lands.
+          const after = goalCopy();
+          setTimeout(() => {
+            send({ method: "thread/goal/updated", params: { threadId, turnId: null, goal: before } });
+            send({ method: "thread/goal/updated", params: { threadId, turnId: null, goal: after } });
+          }, 30);
+          return;
+        }
+        sendGoalUpdated(null);
+      });
+      return;
+    case "thread/settings/update":
+      // Sticky overrides for the thread's subsequent turns; the reply is \`{}\`.
+      if (config.settingsError) { send({ id, error: config.settingsError }); return; }
+      send({ id, result: {} });
+      return;
+    case "thread/goal/clear":
+      goalLater(() => {
+        if (config.goalError) { send({ id, error: config.goalError }); return; }
+        const cleared = goal !== null;
+        goal = null;
+        send({ id, result: { cleared } });
+        if (cleared) { sendGoalCleared(); }
+      });
       return;
     case "turn/start": {
       const isSteering = activeTurnId !== null;

@@ -116,6 +116,12 @@ export const AGENT_HOST_DEADLINES = {
   interruptChildMs: 3_000,
   /** The whole fleet interrupt, however many children there are. */
   interruptAllMs: 10_000,
+  /**
+   * Pausing a continuing goal before a Stop reaches the provider (goals §5.5,
+   * §6.2.4). Short on purpose: it is a courtesy in front of the interrupt,
+   * which must never wait on it.
+   */
+  goalPauseMs: 1_500,
   /** A prompt submit call (OpenCode's `promptAsync`). */
   submitMs: 10_000,
   /** A generic provider probe (version). */
@@ -144,8 +150,24 @@ export const AGENT_HOST_DEADLINES = {
  * deadline does not start until the protocol has produced observable progress
  * and is **paused entirely while an approval or user-input request is
  * pending** — a turn waiting on a human is not a stalled turn.
+ *
+ * `goalMs` (goals §5.2) is the window while the thread's goal is `active`: a
+ * goal run can be silent far longer than one turn — Grok runs the whole goal
+ * inside one prompt turn, and its verifier rounds go quiet for 10–20 minutes.
+ * It never SHORTENS the other two; the watchdog takes the longer window.
  */
 export const TURN_LIVENESS_WINDOWS = {
   idleMs: 10 * 60_000,
-  activeToolMs: 30 * 60_000
+  activeToolMs: 30 * 60_000,
+  goalMs: 60 * 60_000
 } as const;
+
+/**
+ * Goals §4.7, §5.5: how long a goal the provider continues by itself (Codex)
+ * still reads as CONTINUING with no turn running — after its last turn
+ * settled, or after its session (re)started. Codex starts the next goal turn
+ * at once at such an idle point; a continuation that has not started within
+ * this is not work, and the thread must not read "working" forever. The
+ * summary is recomputed on every read, so it flips without an event.
+ */
+export const GOAL_CONTINUATION_GRACE_MS = 60_000;

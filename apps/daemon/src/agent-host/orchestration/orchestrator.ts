@@ -26,6 +26,8 @@ import {
   AGENT_ACTIVITY_TOTAL_LIMIT,
   COMMANDS_ALLOWED_IN_ERROR_STATE,
   DEFAULT_RUNTIME_MODE,
+  GOAL_COMMAND_FAILED_ACTIVITY_KIND,
+  GOAL_STATUS_ACTIVITY_KIND,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
@@ -36,14 +38,18 @@ import {
   deserializeFoldState,
   encodeHistoryCursor,
   isHistoricalRuntimeEvent,
+  isUnfinishedGoal,
   SETTLED_TURN_STATES,
   slimActivityPayload,
   startedTurns,
   turnOrdinal,
   type AgentAdapterId,
   type AgentChatCommandName,
+  type AgentChatGoalSummary,
   type AgentChatSessionSummaryFields,
+  type AgentGoal,
   type AttachmentRef,
+  type ComposerContextRecord,
   type DomainEvent,
   type HistoryCursor,
   type InteractionMode,
@@ -77,7 +83,12 @@ import type { AccountHome } from "@orquester/api/agent-chat";
 
 import { stat } from "node:fs/promises";
 
-import type { AdapterLogger, AgentAdapter } from "../adapter.ts";
+import type {
+  AdapterLogger,
+  AgentAdapter,
+  GoalCommandOptions,
+  HostGoalCommand
+} from "../adapter.ts";
 import {
   CONTINUATION_FAILED_MESSAGE,
   CONTINUATION_PROMPT,
@@ -104,7 +115,11 @@ import type { IndexedItemPosition, IndexedTurn, ThreadIndex } from "../index/ind
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
-import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
+import {
+  AGENT_HOST_DEADLINES,
+  GOAL_CONTINUATION_GRACE_MS,
+  withDeadline
+} from "../support/deadline.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
 import {
   AgentChatCommandError,
@@ -143,6 +158,7 @@ import {
   blockedProviderCommandMessage,
   COMPACT_COMMAND_TEXT,
   isHostNativeCompact,
+  parseHostGoalCommand,
   providerInputFor
 } from "./slash.ts";
 import { createTurnWatchdog, stalledTurnMessage, type TurnWatchdog } from "./turn-watchdog.ts";
@@ -287,6 +303,20 @@ interface ThreadRuntime {
    * it lives in `meta.json` and is merged back onto every projected head.
    */
   continueAfterRestart: ThreadHead["continueAfterRestart"];
+  /**
+   * Goals §5.5, head-only like {@link continueAfterRestart}: the handover
+   * found this thread's goal continuing, so this host resumes its provider
+   * session after the gate opens — and the summary keeps the goal
+   * `continuing` until then.
+   */
+  resumeGoalAfterRestart: true | undefined;
+  /**
+   * When this host last started a provider session for the thread (epoch ms),
+   * or null. A (re)started session is an idle point a provider continues its
+   * goal from (Codex, right after a resume), so it opens the
+   * {@link GOAL_CONTINUATION_GRACE_MS} window as a settled turn does.
+   */
+  sessionStartedAt: number | null;
   /**
    * `binding.json` — the durable provider-session binding (§3.3, §4.1) and the
    * AUTHORITY for the resume cursor. `null` until the thread has one; the head's
@@ -610,6 +640,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (gateOpen) return;
     gateOpen = true;
     gate.resolve();
+    // Goals §5.5: what the reconcile collected, after readiness — never on it.
+    startGoalResumes();
   };
 
   const failGate = (error: unknown): void => {
@@ -844,6 +876,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       captures: createSerialQueue(),
       state,
       continueAfterRestart: persistedHead?.continueAfterRestart,
+      resumeGoalAfterRestart: persistedHead?.resumeGoalAfterRestart === true ? true : undefined,
+      sessionStartedAt: null,
       binding,
       eventsSinceHeadSave: 0,
       eventsSinceSnapshot: loaded.folded,
@@ -885,11 +919,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const headOf = (runtime: ThreadRuntime): ThreadHead | null => {
     const head = runtime.state.head;
-    if (!head) return null;
-    return runtime.continueAfterRestart === undefined
-      ? head
-      : { ...head, continueAfterRestart: runtime.continueAfterRestart };
+    return head ? withHeadOnlyState(runtime, head) : null;
   };
+
+  /** The two head-only markers, merged onto a projected head (§3.3, goals §5.5). */
+  const withHeadOnlyState = (runtime: ThreadRuntime, head: ThreadHead): ThreadHead =>
+    runtime.continueAfterRestart === undefined && runtime.resumeGoalAfterRestart === undefined
+      ? head
+      : {
+          ...head,
+          ...(runtime.continueAfterRestart !== undefined
+            ? { continueAfterRestart: runtime.continueAfterRestart }
+            : {}),
+          ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {})
+        };
 
   const requireHead = (runtime: ThreadRuntime): ThreadHead => {
     const head = headOf(runtime);
@@ -1108,6 +1151,69 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const currentSession = (runtime: ThreadRuntime): ThreadSessionState =>
     runtime.state.head?.session ?? { status: "idle", activeTurnId: null };
 
+  /**
+   * Goals §5.5: the thread's goal is CONTINUING — `active` in the fold, on an
+   * adapter whose provider starts its next turn by itself
+   * (`goals.continuesAcrossTurns`, Codex) — so the gaps between its turns are
+   * not idle. Whether a provider process is there to start that turn is each
+   * caller's own question ({@link sessionIsLive}).
+   */
+  const goalContinues = (runtime: ThreadRuntime, adapter: AgentAdapter | undefined): boolean =>
+    runtime.state.goal?.status === "active" &&
+    adapter?.capabilities.goals?.continuesAcrossTurns === true;
+
+  /**
+   * A provider session this host serves for the thread — the child is there
+   * and the head does not say `stopped` or `error`, whatever the provider
+   * still holds.
+   */
+  const sessionIsLive = (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    adapter: AgentAdapter | undefined
+  ): boolean =>
+    adapter !== undefined &&
+    adapter.hasSession(runtime.id) &&
+    head.session.status !== "stopped" &&
+    head.session.status !== "error";
+
+  /**
+   * Goals §4.7, §5.5: the goal is CONTINUING right now — the summary's
+   * `continuing`, and the one expression the account-switch gate and the
+   * `/compact` advice read too, so none of them can disagree with what the
+   * tab shows. The goal continues ({@link goalContinues}), and either
+   * - a restart's resume is still owed (the mark), whatever the session says; or
+   * - a provider session is live, AND a turn is running or the provider is
+   *   still inside {@link GOAL_CONTINUATION_GRACE_MS} of an idle point it
+   *   continues from — its last turn settling, or its session (re)starting.
+   *
+   * The grace is what keeps a continuation that never starts from reading as
+   * "working" forever. Read against the clock on every call: the summary poll
+   * sees it end with no event.
+   */
+  const goalContinuingNow = (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    adapter: AgentAdapter | undefined
+  ): boolean => {
+    if (!goalContinues(runtime, adapter)) return false;
+    if (runtime.resumeGoalAfterRestart === true) return true;
+    if (!sessionIsLive(runtime, head, adapter)) return false;
+    if (turnIsActive(runtime)) return true;
+    const idleSince = lastContinuationPoint(runtime);
+    return idleSince !== null && clock.now().getTime() - idleSince < GOAL_CONTINUATION_GRACE_MS;
+  };
+
+  /** The latest idle point a provider continues a goal from, or null (epoch ms). */
+  const lastContinuationPoint = (runtime: ThreadRuntime): number | null => {
+    const turns = runtime.state.turns ?? [];
+    const settledAt = Date.parse(turns[turns.length - 1]?.completedAt ?? "");
+    const points = [settledAt, runtime.sessionStartedAt ?? Number.NaN].filter((point) =>
+      Number.isFinite(point)
+    );
+    return points.length === 0 ? null : Math.max(...points);
+  };
+
   // -------------------------------------------------------------------------
   // The provider session binding (§3.3, §4.1) — the cursor's real home
   // -------------------------------------------------------------------------
@@ -1228,7 +1334,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       const cursor = decision.carryResumeCursor
         ? (bound.session.resumeCursor ?? persistedResumeCursor(runtime, head))
         : undefined;
-      return startSession(runtime, head, desired, cursor, pendingTurnStart);
+      return startSession(runtime, head, desired, cursor, pendingTurnStart, {
+        // goals §5.3: the goal may live in the OLD account's home (Codex's
+        // `goals_1.sqlite`), which the new session cannot see.
+        carryGoal: decision.reasons.includes("account")
+      });
     }
 
     await stopStaleSessions(runtime, head.adapter);
@@ -1241,8 +1351,39 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       head,
       desired,
       persistedResumeCursor(runtime, head),
-      pendingTurnStart
+      pendingTurnStart,
+      { carryGoal: accountMovedSinceLastSession(runtime, desired) }
     );
+  };
+
+  /**
+   * goals §5.3, for a start with no live session to compare against: the
+   * account switch of §3.4 is applied on the next message, and the session it
+   * restarts may already be gone by then — stopped, crashed, or a host
+   * restarted in between. The binding still names the identity the last
+   * session ran under (`providerInstanceId`, written by every start), so a
+   * start under another identity is exactly an account switch. A binding that
+   * never recorded one says nothing.
+   */
+  const accountMovedSinceLastSession = (
+    runtime: ThreadRuntime,
+    desired: DesiredSessionShape
+  ): boolean => {
+    const previous = runtime.binding?.providerInstanceId ?? null;
+    return previous !== null && previous !== desired.accountKey;
+  };
+
+  /**
+   * goals §5.3: the goal the fold holds, as an adapter compares it — without
+   * the row stamp, which is the host's and not the provider's. `null` when the
+   * thread has none, so an adapter can tell "no goal" from "not told".
+   */
+  const knownGoalOf = (runtime: ThreadRuntime): AgentGoal | null => {
+    const goal = runtime.state.goal ?? null;
+    if (goal === null) return null;
+    const { updatedAt: _updatedAt, ...known } = goal;
+    void _updatedAt;
+    return known;
   };
 
   const startSession = async (
@@ -1250,7 +1391,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     head: ThreadHead,
     desired: DesiredSessionShape,
     resumeCursor: unknown,
-    pendingTurnStart: boolean
+    pendingTurnStart: boolean,
+    goal: { carryGoal: boolean } = { carryGoal: false }
   ): Promise<ProviderSession> => {
     const adapter = adapterFor(head.adapter);
     // §3.2: an out-of-range CLI is refused with the required version in the
@@ -1285,9 +1427,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       modelSelection: head.modelSelection,
       runtimeMode: head.runtimeMode,
       ...(launchArgs.length > 0 ? { launchArgs } : {}),
-      ...(resumeCursor !== undefined ? { resumeCursor } : {})
+      ...(resumeCursor !== undefined ? { resumeCursor } : {}),
+      // goals §5.3: on EVERY start, so an adapter emits only real changes — a
+      // resumed provider repeating the goal the thread already shows is not one.
+      knownGoal: knownGoalOf(runtime),
+      ...(goal.carryGoal ? { carryGoal: true } : {})
     });
     runtime.bound = { ...desired, session };
+    runtime.sessionStartedAt = clock.now().getTime();
     // The binding is written BEFORE the session is announced and before any
     // history replay: a host that dies between the provider handing back a
     // cursor and `thread.session-set` landing must still find that cursor on
@@ -1530,6 +1677,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.bound = null;
     releaseProviderThreads(runtime.id);
     liveness.clear(runtime.id);
+    // Goals §5.5: a session the user stopped is not a goal to resume — the
+    // Stop wins over a handover's mark the boot has not acted on yet.
+    if (runtime.resumeGoalAfterRestart === true) {
+      runtime.resumeGoalAfterRestart = undefined;
+      await saveHeadNow(runtime);
+    }
     await ingestion.flushThread(runtime.id).catch(() => undefined);
   };
 
@@ -1544,6 +1697,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       clock,
       setTimer,
       clearTimer,
+      // goals §5.2, for every adapter: an active goal can be silent far past a
+      // turn's idle window (Grok's verifiers), so the window is the goal's.
+      isGoalActive: () => runtime.state.goal?.status === "active",
       onStalled: ({ threadId, turnId, elapsedMs, windowMs }) => {
         const message = stalledTurnMessage(elapsedMs, windowMs);
         void runEffect(runtime, async () => {
@@ -1714,6 +1870,146 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * goals §5.1: run a host-parsed `/goal …` against the provider. The session
+   * is ensured first, exactly as a turn ensures it — after a host restart or a
+   * crash the thread has no live provider until something starts one.
+   *
+   * The result is at most one row: the adapter's non-empty summary as a
+   * visible `goal.status`, or the failure as a `goal.command.failed`. Never an
+   * HTTP error and never the session's error state: the command was already
+   * recorded, and a refused goal command leaves the conversation usable. The
+   * goal ITSELF moves only through the adapter's `thread.goal.updated` events.
+   */
+  const goalCommandEffect = async (
+    runtime: ThreadRuntime,
+    command: HostGoalCommand,
+    goalOptions: GoalCommandOptions
+  ): Promise<void> => {
+    const head = headOf(runtime);
+    if (!head) return;
+    try {
+      const adapter = adapterFor(head.adapter);
+      if (!adapter.goalCommand) {
+        throw new Error(`${head.adapter} cannot run goal commands.`);
+      }
+      await ensureSession(runtime);
+      const result = await adapter.goalCommand(runtime.id, command, goalOptions);
+      if (typeof result.summary === "string" && result.summary.length > 0) {
+        await appendActivity(runtime, {
+          kind: GOAL_STATUS_ACTIVITY_KIND,
+          tone: "info",
+          summary: result.summary
+        });
+      }
+    } catch (error) {
+      await appendActivity(runtime, {
+        kind: GOAL_COMMAND_FAILED_ACTIVITY_KIND,
+        tone: "error",
+        summary: "Goal command failed",
+        detail: describeFailure(error)
+      });
+    }
+  };
+
+  /**
+   * Goals §5.5, §6.2.4: a Stop on a thread whose goal continues pauses the goal
+   * FIRST — before any open card is cancelled. On Codex a `cancel` ends the
+   * turn by itself, and a goal still active starts the next turn at once,
+   * before the adapter's own pause-then-interrupt inside `interruptTurn` gets
+   * to run. The adapter skips its own pause only once this pause's
+   * notification has reached it; when the notification trails the reply, the
+   * adapter pauses a second time — harmless, the goal is already paused.
+   *
+   * A courtesy in front of the interrupt, never a gate on it: bounded by
+   * {@link AGENT_HOST_DEADLINES.goalPauseMs}, and a failure or a timeout is
+   * logged and the Stop goes on. No row either way — the user asked to stop,
+   * and the goal's own update tells the timeline it is paused.
+   */
+  const pauseContinuingGoal = async (
+    runtime: ThreadRuntime,
+    adapter: AgentAdapter
+  ): Promise<void> => {
+    if (!goalPauseApplies(runtime, adapter)) {
+      return;
+    }
+    try {
+      await withDeadline(() => adapter.goalCommand!(runtime.id, { kind: "pause" }), {
+        timeoutMs: AGENT_HOST_DEADLINES.goalPauseMs,
+        label: `goal-pause:${adapter.id}`
+      });
+    } catch (error) {
+      logger.warn(`agent-host: could not pause ${runtime.id}'s goal before a Stop`, {
+        threadId: runtime.id,
+        error: describeFailure(error)
+      });
+    }
+  };
+
+  /** A continuing goal the provider can be asked to pause (goals §5.5). */
+  const goalPauseApplies = (runtime: ThreadRuntime, adapter: AgentAdapter): boolean =>
+    adapter.goalCommand !== undefined && goalContinues(runtime, adapter);
+
+  /**
+   * A turn the fold recorded through its provider-initiated path — no user
+   * message started it: a goal's continuation, a turn after a resume. A turn
+   * row that cannot be found is treated as the user's, and protected.
+   */
+  const isProviderInitiatedTurn = (runtime: ThreadRuntime, turnId: string): boolean => {
+    const turn = (runtime.state.turns ?? []).find((entry) => entry.turnId === turnId);
+    return turn !== undefined && turn.userMessageId === undefined;
+  };
+
+  /** Cards first, then the provider (§4.1); a refusal is a row, never an HTTP error. */
+  const interruptTurnNow = async (
+    runtime: ThreadRuntime,
+    adapter: AgentAdapter,
+    turnId: string | undefined
+  ): Promise<void> => {
+    await settlePendingRequests(runtime);
+    try {
+      await adapter.interruptTurn(runtime.id, turnId);
+      runtime.watchdog?.stop();
+    } catch (error) {
+      await appendActivity(runtime, {
+        kind: "provider.turn.interrupt.failed",
+        summary: "Provider turn interrupt failed",
+        detail: describeFailure(error),
+        turnId: turnId ?? null
+      });
+    }
+  };
+
+  /**
+   * Goals §5.5: a Stop on a thread whose goal CONTINUES. The goal is paused
+   * first, then the turn to stop is read AGAIN — the provider may have ended
+   * the Stop's turn and started its next goal turn before the Stop, or while
+   * the pause was being asked:
+   * - no turn named, or the named turn still running → it is interrupted, as
+   *   any Stop interrupts;
+   * - the named turn is over → the staleness guard's case: the turn running
+   *   now is interrupted when the provider started it by itself (no user
+   *   message behind it), and left alone when the user started it — the
+   *   guard's protection of the user's own next turn holds. With nothing
+   *   running, the pause was the whole Stop.
+   * Either way in the normal order: pause, then cards, then the interrupt.
+   */
+  const stopContinuingGoal = async (
+    runtime: ThreadRuntime,
+    adapter: AgentAdapter,
+    turnId: string | undefined
+  ): Promise<void> => {
+    await pauseContinuingGoal(runtime, adapter);
+    const activeTurnId = currentSession(runtime).activeTurnId;
+    if (turnId === undefined || activeTurnId === turnId) {
+      await interruptTurnNow(runtime, adapter, turnId);
+      return;
+    }
+    if (activeTurnId !== null && isProviderInitiatedTurn(runtime, activeTurnId)) {
+      await interruptTurnNow(runtime, adapter, activeTurnId);
+    }
+  };
+
   const interruptEffect = async (
     runtime: ThreadRuntime,
     turnId: string | undefined
@@ -1725,6 +2021,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const head = headOf(runtime);
     const adapter = head ? options.adapters.get(head.adapter) : undefined;
     const session = currentSession(runtime);
+    const live =
+      adapter !== undefined && adapter.hasSession(runtime.id) && session.status !== "stopped";
+    if (live && goalPauseApplies(runtime, adapter)) {
+      await stopContinuingGoal(runtime, adapter, turnId);
+      return;
+    }
     // Interrupt is turn-scoped (§4.1): a Stop the client aimed at a turn that
     // is no longer the active one must not kill the next turn. Enforced here so
     // no adapter can forget it.
@@ -1740,7 +2042,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
       return;
     }
-    if (!adapter || !adapter.hasSession(runtime.id) || session.status === "stopped") {
+    if (!live) {
       // Against a thread with no bound session, or one already stopped, the
       // host appends an activity rather than answering an HTTP error (§6.2).
       await appendActivity(runtime, {
@@ -1751,18 +2053,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
       return;
     }
-    await settlePendingRequests(runtime);
-    try {
-      await adapter.interruptTurn(runtime.id, turnId);
-      runtime.watchdog?.stop();
-    } catch (error) {
-      await appendActivity(runtime, {
-        kind: "provider.turn.interrupt.failed",
-        summary: "Provider turn interrupt failed",
-        detail: describeFailure(error),
-        turnId: turnId ?? null
-      });
-    }
+    await interruptTurnNow(runtime, adapter, turnId);
   };
 
   const approvalEffect = async (
@@ -2018,15 +2309,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (userMessages.length === 0) {
       throw commandRejected("Context compaction requires an existing conversation.");
     }
-    if (
-      runtime.compacting ||
-      runtime.queuedTurns.length > 0 ||
-      session.status === "starting" ||
-      session.status === "running" ||
-      turnIsActive(runtime)
-    ) {
+    // A compaction in flight, or turns queued behind one, is named first — it
+    // ends by itself, and a goal command waits for it too (the account-switch
+    // gate names it first for the same reason).
+    if (runtime.compacting || runtime.queuedTurns.length > 0) {
       throw compactionUnavailable(
         "Context compaction is unavailable while a provider turn is running."
+      );
+    }
+    if (session.status === "starting" || session.status === "running" || turnIsActive(runtime)) {
+      // Goals §5.5: under a continuing goal, waiting for the turn to finish is
+      // useless advice — the provider starts the next one by itself.
+      const head = headOf(runtime);
+      throw compactionUnavailable(
+        head !== null && goalContinuingNow(runtime, head, options.adapters.get(head.adapter))
+          ? "Pause the goal before compacting."
+          : "Context compaction is unavailable while a provider turn is running."
       );
     }
     const messageId = ids.messageId("user:");
@@ -2052,6 +2350,87 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // queued rather than dispatched into an uncompacted conversation.
         runtime.compacting = true;
         void runEffect(runtime, () => compactEffect(runtime, messageId));
+      }
+    };
+  };
+
+  /**
+   * goals §5.1: a `/goal …` the host parsed is a goal command, not a turn.
+   *
+   * The user's text is committed as their message — on the running turn when
+   * there is one, exactly like a steer's — and **no
+   * `thread.turn-start-requested`**: the host starts no turn, so no pending
+   * row opens for one. Any turn Codex then starts by itself (a goal set active
+   * continues at once) arrives as a provider-initiated turn and is recorded by
+   * the fold's adoption path like any other.
+   *
+   * Refused, before anything is committed, while a compaction runs or turns
+   * are queued behind one — the same moment `decideCompaction` refuses at: the
+   * effect queue would otherwise run the command after messages the user sent
+   * later, or after a compaction that failed and dropped them.
+   */
+  const decideGoalCommand = (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    commandId: string,
+    request: {
+      input: string;
+      command: HostGoalCommand;
+      context: ComposerContextRecord[] | undefined;
+      modelSelection: ModelSelection | undefined;
+    }
+  ): Decision => {
+    if (runtime.compacting || runtime.queuedTurns.length > 0) {
+      throw invalidCommand("Wait for the compaction to finish before changing the goal.");
+    }
+    const { input, command, context, modelSelection } = request;
+    const occurredAt = clock.nowIso();
+    const events: AppendableDomainEvent[] = [];
+    // A model picked together with the command is recorded exactly as a turn
+    // records it, so the next turn Orquester starts runs on it — AND handed to
+    // the goal command: the provider starts a goal's turns by itself (Codex),
+    // on the thread's own settings, and the adapter applies the new model
+    // before the goal request so those turns run on it too.
+    const changedModel =
+      modelSelection !== undefined && !modelSelectionEquals(modelSelection, head.modelSelection)
+        ? modelSelection
+        : undefined;
+    if (changedModel !== undefined) {
+      events.push(
+        buildEvent(
+          runtime.id,
+          "thread.meta-updated",
+          { modelSelection: changedModel },
+          { commandId, occurredAt }
+        )
+      );
+    }
+    events.push(
+      buildEvent(
+        runtime.id,
+        "thread.message-sent",
+        {
+          messageId: ids.messageId("user:"),
+          role: "user",
+          // As typed: the command is the provider's business, the bubble the user's.
+          text: input,
+          streaming: false,
+          turnId: currentSession(runtime).activeTurnId,
+          ...(context !== undefined ? { context } : {})
+        },
+        { commandId, occurredAt }
+      )
+    );
+    return {
+      events,
+      schedule: () => {
+        void runEffect(runtime, () =>
+          goalCommandEffect(
+            runtime,
+            command,
+            changedModel !== undefined ? { modelSelection: changedModel } : {}
+          )
+        );
       }
     };
   };
@@ -2112,6 +2491,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // its refusal and queueing rules.
         if (isHostNativeCompact({ text: input, attachments })) {
           return decideCompaction(runtime, commandId, input);
+        }
+        // goals §5.1: where goals are the HOST's to parse (Codex), `/goal …` is
+        // a goal command and never reaches the model as text (T3 #13252). A
+        // malformed one is refused here, before anything is committed (R2-7).
+        if (options.adapters.get(head.adapter)?.capabilities.goals?.command === "host") {
+          const goalCommand = parseHostGoalCommand(input, attachments);
+          if (goalCommand !== null) {
+            if ("error" in goalCommand) {
+              throw invalidCommand(goalCommand.error);
+            }
+            return decideGoalCommand(runtime, head, commandId, {
+              input,
+              command: goalCommand,
+              context,
+              modelSelection
+            });
+          }
         }
 
         const messageId = ids.messageId("user:");
@@ -2919,7 +3315,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       pendingRequestCount: pending.approvals.length + pending.userInputs.length,
       queuedTurnCount: runtime.queuedTurns.length,
       compacting: runtime.compacting,
-      backgroundLive: liveness.liveness(runtime.id) !== null
+      backgroundLive: liveness.liveness(runtime.id) !== null,
+      // Goals §5.5, in the summary's sense: only a goal continuing NOW blocks
+      // the switch. A stopped or errored session may switch — pausing a
+      // stopped Codex session would itself resume it and start a goal turn —
+      // and `carryGoal` re-creates the goal on the new account; except one
+      // whose resume mark is still pending (after a handover it may read
+      // `stopped` or `error`), which reads as continuing and is refused.
+      goalContinuing: goalContinuingNow(runtime, head, options.adapters.get(head.adapter))
     });
     if (refusal !== null) {
       throw commandRejected(refusal);
@@ -3104,10 +3507,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // half); `GET …/items/:itemId` stays unslimmed and is what "load full
     // output" reads.
     const items = slimItemsForRead(payload.items);
-    const head =
-      runtime.continueAfterRestart === undefined
-        ? payload.head
-        : { ...payload.head, continueAfterRestart: runtime.continueAfterRestart };
+    const head = withHeadOnlyState(runtime, payload.head);
     return { ...payload, head, items, history: historyBoundsOf(runtime) };
   };
 
@@ -3577,7 +3977,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             ...(latest.tokenUsage !== undefined ? { tokenUsage: latest.tokenUsage } : {})
           }
         : null,
-      chatSessionStatus: head.session.status
+      chatSessionStatus: head.session.status,
+      goal: goalSummaryOf(runtime, head)
+    };
+  };
+
+  /**
+   * goals §4.7, §5.5: the thread's unfinished goal for every ambient surface,
+   * or `null`. `continuing` ({@link goalContinuingNow}) says the provider will
+   * start the next turn by itself, which is what keeps a settled turn, and the
+   * gap across a deploy, from reading as "finished" between two of those
+   * turns — for as long as that is still believable.
+   */
+  const goalSummaryOf = (runtime: ThreadRuntime, head: ThreadHead): AgentChatGoalSummary | null => {
+    const goal = runtime.state.goal ?? null;
+    if (goal === null || !isUnfinishedGoal(goal)) {
+      return null;
+    }
+    return {
+      objective: goal.objective,
+      status: goal.status,
+      continuing: goalContinuingNow(runtime, head, options.adapters.get(head.adapter))
     };
   };
 
@@ -3827,6 +4247,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           liveness.observe(event);
           const runtime = runtimes.get(event.threadId);
           if (runtime) {
+            // §3.1 for EVERY live turn. A turn the provider starts by itself —
+            // a goal's continuation, the turn Codex starts for a host `/goal`,
+            // one after a create-time or a goals §5.5 boot resume — never went
+            // through `sendTurnEffect`, so nothing armed a watchdog for it: its
+            // first `turn.started` does. The explicit arms stay. A replayed
+            // turn is the past and is never watched.
+            if (
+              event.type === "turn.started" &&
+              runtime.watchdog === null &&
+              !isHistoricalRuntimeEvent(event)
+            ) {
+              watchdogFor(runtime);
+            }
             runtime.watchdog?.observe(event);
             if (event.type === "session.exited") {
               runtime.watchdog?.stop();
@@ -3981,6 +4414,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const markThreadsForContinuation = async (): Promise<string[]> => {
+    // The intentional stop begins here: a goal resume that has not reached
+    // the provider yet must not start a child now (goals §5.5).
+    handoverStarted = true;
     const marked: string[] = [];
     // `/stop` is the deploy handover's critical path. Most production threads
     // are idle and some have 40-100 MB histories, so loading all of them here
@@ -3993,7 +4429,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // opted in, and a cursor exists, the two predicates repeated after the
     // load — or when it cannot be read at all, the same rule the reconcile
     // applies. `binding.json` is small too and stays the cursor authority, so
-    // a head written by an older version still works.
+    // a head written by an older version still works. A continuing goal
+    // (goals §5.5) needs no rule of its own here: it has a live session, so
+    // its thread is a candidate already.
     const candidates = new Set<string>(runtimes.keys());
     const liveSessions = new Set<string>();
     for (const adapter of options.adapters.values()) {
@@ -4034,20 +4472,38 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const runtime = await loadRuntime(threadId);
         const head = headOf(runtime);
         if (!head || runtime.deleted) continue;
-        const { session } = head;
-        // Only threads that are running with a usable cursor (§3.3).
-        if (session.status !== "running" || session.activeTurnId === null) continue;
-        // The cursor is read from the BINDING (§3.3): a marker is only ever
-        // written for a thread that really can be resumed, and the head's copy
-        // is a projection that an event may already have replaced.
+        const { activeTurnId, status } = head.session;
+        // Only threads with a usable cursor (§3.3). The cursor is read from
+        // the BINDING: a marker is only ever written for a thread that really
+        // can be resumed, and the head's copy is a projection that an event may
+        // already have replaced.
         if (persistedResumeCursor(runtime, head) === undefined) continue;
-        // …and only where the project opted in. Continuation is opt-in per
-        // project over a host-wide default that is OFF, so a marker written
-        // for an opted-out thread would make the next boot resume it — the
-        // reconcile trusts a marker on its own, exactly because the stop path
-        // is supposed to be the place that filter is applied.
-        if ((await options.continuationEnabled?.(head.projectPath)) !== true) continue;
-        await writeMarker(runtime, { turnId: session.activeTurnId });
+        // A running turn is continued only where the project opted in.
+        // Continuation is opt-in per project over a host-wide default that is
+        // OFF, so a marker written for an opted-out thread would make the next
+        // boot resume it — the reconcile trusts a marker on its own, exactly
+        // because the stop path is supposed to be the place that filter is
+        // applied.
+        const turnToContinue =
+          status === "running" &&
+          activeTurnId !== null &&
+          (await options.continuationEnabled?.(head.projectPath)) === true
+            ? activeTurnId
+            : null;
+        // Goals §5.5: a goal the provider continues by itself is resumed
+        // WITHOUT that opt-in — setting the goal was the user's opt-in to
+        // autonomous work. Only one that IS continuing, on a live session: a
+        // goal whose session the user stopped must not be revived by a deploy.
+        const adapter = options.adapters.get(head.adapter);
+        const resumeGoal = goalContinues(runtime, adapter) && sessionIsLive(runtime, head, adapter);
+        if (turnToContinue === null && !resumeGoal) continue;
+        if (resumeGoal) {
+          runtime.resumeGoalAfterRestart = true;
+        }
+        await writeMarker(
+          runtime,
+          turnToContinue !== null ? { turnId: turnToContinue } : runtime.continueAfterRestart
+        );
         marked.push(threadId);
       } catch (error) {
         logger.warn(`agent-host: failed to mark ${threadId} for continuation`, error);
@@ -4057,10 +4513,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const clearContinuationMarkers = async (threadIds: readonly string[]): Promise<void> => {
+    // The stop was aborted. No resume is restarted from here — this path runs
+    // when a teardown failed part-way, and a goal a resume skipped keeps its
+    // mark on disk for the next boot.
+    handoverStarted = false;
     for (const threadId of threadIds) {
       const runtime = runtimes.get(threadId);
       if (!runtime) continue;
       try {
+        // Both kinds: a cancelled restart must not resume anything next boot.
+        runtime.resumeGoalAfterRestart = undefined;
         await writeMarker(runtime, undefined);
       } catch (error) {
         logger.warn(`agent-host: failed to clear the continuation marker on ${threadId}`, error);
@@ -4163,6 +4625,160 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     } catch (error) {
       logger.warn("agent-host: thread reconciliation failed", error);
     }
+    // Goals §5.5: a no-op before the gate — `openGate` starts them then.
+    startGoalResumes();
+  };
+
+  /**
+   * Goals §5.5: threads whose persisted head asks for their continuing goal's
+   * provider session back, as the reconcile found them from `meta.json` alone.
+   * Resumed only once the gate is open — never on the readiness path.
+   */
+  const goalResumePending = new Set<string>();
+  /** The resume pass in flight; `drain` waits on it (§9). */
+  let goalResumes: Promise<void> = Promise.resolve();
+
+  /**
+   * The intentional stop has begun: `/stop` runs `markThreadsForContinuation`
+   * first, before any adapter is torn down, so this is the earliest this host
+   * can know it is going away. Reset only when that stop is aborted
+   * (`clearContinuationMarkers`).
+   */
+  let handoverStarted = false;
+
+  /**
+   * This host is going away — the handover pass has begun, or the orchestrator
+   * itself is stopping. A goal resume cut short by it keeps its mark: the next
+   * host owes the resume, and a provider child started now would outlive
+   * `stopAll`.
+   */
+  const hostStopping = (): boolean => stopped || handoverStarted;
+
+  const startGoalResumes = (): void => {
+    if (!gateOpen || hostStopping() || goalResumePending.size === 0) {
+      return;
+    }
+    const threadIds = [...goalResumePending];
+    goalResumePending.clear();
+    goalResumes = goalResumes
+      // A macrotask later, so the health answer the gate just released goes
+      // out first.
+      .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
+      // Side by side: each resume is bounded by its own session-open deadline,
+      // and one wedged provider must not hold every other goal back.
+      .then(() => Promise.all(threadIds.map((threadId) => resumeGoalSession(threadId))))
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        logger.warn("agent-host: the goal resume pass failed", error);
+      });
+  };
+
+  /**
+   * Goals §5.5: bring back the provider session of a thread whose goal was
+   * continuing when the previous host stopped — through the same ensure-session
+   * path a turn uses, and WITHOUT sending a turn: the provider continues the
+   * goal by itself once its session is back (Codex, §3.2). The mark is then
+   * cleared, success or not; a failure is logged and never retried.
+   *
+   * Except when a stop cut the resume short ({@link hostStopping}, checked
+   * before the provider is asked and again once it has answered): the mark is
+   * KEPT for the next host, and a session the resume did start is stopped
+   * again — `stopAll` may already have run, and nothing else would stop it.
+   */
+  const resumeGoalSession = async (threadId: string): Promise<void> => {
+    if (hostStopping()) return;
+    let runtime: ThreadRuntime;
+    try {
+      runtime = await loadRuntime(threadId);
+    } catch (error) {
+      if (hostStopping()) return;
+      logger.warn(`agent-host: could not load ${threadId} to resume its goal`, error);
+      await clearGoalResumeMarkOnDisk(threadId);
+      return;
+    }
+    await runEffect(runtime, async () => {
+      // Cleared since — the user's own Stop, an aborted handover: nothing owed.
+      if (runtime.resumeGoalAfterRestart !== true) return;
+      let keepMark = false;
+      try {
+        const head = headOf(runtime);
+        if (!head || runtime.deleted) return;
+        // A closed tab's thread is settled, never continued (§3.3).
+        if ((await options.isThreadClosed?.(threadId)) === true) {
+          logger.info("agent-host: not resuming the goal of a closed tab", { threadId });
+          return;
+        }
+        if (persistedResumeCursor(runtime, head) === undefined) {
+          logger.warn(`agent-host: ${threadId}'s goal has no resume cursor; not resuming it`);
+          return;
+        }
+        if (hostStopping()) {
+          keepMark = true;
+          return;
+        }
+        await ensureSession(runtime);
+        if (hostStopping()) {
+          keepMark = true;
+          await stopResumedSession(runtime);
+          return;
+        }
+        logger.info("agent-host: resumed a continuing goal's session after a restart", {
+          threadId
+        });
+      } catch (error) {
+        if (hostStopping()) {
+          // Most likely the stop itself tore the starting child down.
+          keepMark = true;
+          await stopResumedSession(runtime);
+          return;
+        }
+        logger.warn(`agent-host: could not resume ${threadId}'s goal session after a restart`, error);
+      } finally {
+        if (!keepMark) {
+          runtime.resumeGoalAfterRestart = undefined;
+          if (!runtime.deleted) {
+            await saveHeadNow(runtime);
+          }
+        }
+      }
+    });
+  };
+
+  /**
+   * Take back a session the goal resume started after the host began to stop.
+   * The head's session state is left as it was: the kept mark, not the head,
+   * is what the next host acts on.
+   */
+  const stopResumedSession = async (runtime: ThreadRuntime): Promise<void> => {
+    runtime.watchdog?.stop();
+    runtime.watchdog = null;
+    runtime.bound = null;
+    releaseProviderThreads(runtime.id);
+    const adapterId = runtime.state.head?.adapter;
+    const adapter = adapterId === undefined ? undefined : options.adapters.get(adapterId);
+    if (adapter === undefined || !adapter.hasSession(runtime.id)) return;
+    try {
+      await adapter.stopSession(runtime.id);
+    } catch (error) {
+      logger.warn(`agent-host: could not stop ${runtime.id}'s resumed session during a stop`, error);
+    }
+  };
+
+  /**
+   * The mark of a thread this host cannot even load: the resume failed, so the
+   * mark goes, once (goals §5.5). Off `meta.json` itself — the read the
+   * reconcile found it with — since there is no runtime to clear it on.
+   */
+  const clearGoalResumeMarkOnDisk = async (threadId: string): Promise<void> => {
+    try {
+      const persisted = await store.loadHead(threadId, { seedRuntime: false });
+      if (persisted === null || persisted.resumeGoalAfterRestart !== true) return;
+      const { resumeGoalAfterRestart: _resumed, ...cleared } = persisted;
+      void _resumed;
+      await store.saveHead(cleared);
+    } catch (error) {
+      logger.warn(`agent-host: could not clear ${threadId}'s goal resume mark`, error);
+    }
   };
 
   const reconcileThread = async (threadId: string, live: Set<string>): Promise<void> => {
@@ -4183,6 +4799,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         .catch(() => null);
       if (persistedHead !== null && !isOrphanedHead(persistedHead)) {
         bootSettlePending.add(threadId);
+        // Goals §5.5, decided off the same `meta.json` read: the handover
+        // marked this thread's continuing goal for a resume after the gate.
+        if (persistedHead.resumeGoalAfterRestart === true) {
+          goalResumePending.add(threadId);
+        }
         return;
       }
     }
@@ -4192,6 +4813,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // A thread directory that fails to parse marks that thread `error`; it
       // never affects other threads or host startup (§5.1).
       return;
+    }
+    // Goals §5.5 on the full path too: an orphan the handover also marked (a
+    // manual stop mid-turn), or a thread already in memory.
+    if (head.resumeGoalAfterRestart === true) {
+      goalResumePending.add(threadId);
     }
     const session = head.session;
     const marker = head.continueAfterRestart;
@@ -4298,6 +4924,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   // -------------------------------------------------------------------------
 
   const drain = async (): Promise<void> => {
+    await goalResumes;
     for (const runtime of [...runtimes.values()]) {
       await runtime.commands.drain();
       await runtime.effects.drain();

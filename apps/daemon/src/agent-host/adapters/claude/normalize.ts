@@ -19,6 +19,8 @@
  */
 
 import type {
+  AgentGoal,
+  AgentGoalChange,
   ApprovalDecision,
   ApprovalOption,
   CanonicalItemType,
@@ -36,6 +38,7 @@ import type {
   TaskAgentLinkage,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
+import { isUnfinishedGoal } from "@orquester/api/agent-chat";
 import type { SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Clock, IdGen } from "../../adapter.ts";
@@ -56,6 +59,22 @@ import {
   tryParseJsonRecord
 } from "./classify.ts";
 import type { ClaudeTurnBoundary } from "./cursor.ts";
+import {
+  ClaudeGoalTracker,
+  GOAL_COMMAND_NAME,
+  GOAL_WAITING_BACKGROUND_PHASE,
+  endedGoal,
+  goalEndingOf,
+  localCommandOutputText,
+  matchGoalStopHookFeedback,
+  parseActiveGoalValue,
+  parseGoalCheckIn,
+  parseGoalCommandOutput,
+  reviseGoal,
+  type ClaudeGoalDecision,
+  type ClaudeGoalStatusRow,
+  type ClaudeTranscriptGoal
+} from "./goal.ts";
 import {
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
@@ -206,6 +225,28 @@ export interface NormalizerOptions {
    * hands it over (§4.5 "background shells").
    */
   onBackgroundShell?: (change: BackgroundShellChange) => void;
+  /**
+   * The goal the host's fold holds when this session starts (goals §5.3): the
+   * tracker is seeded from it, so a provider repeating it is no news (§6).
+   */
+  knownGoal?: AgentGoal | null;
+  /**
+   * A goal was set, replaced or restored: rows the transcript already holds
+   * belong to an earlier run, so the session moves its read position to the
+   * end (goals §6.1.4, "start at the set point").
+   */
+  onGoalSetPoint?: () => void;
+  /**
+   * `active_goal: null` — the goal is gone, and only the transcript says
+   * whether it was met, impossible or cleared (goals §6.1.6). The normaliser
+   * never touches the filesystem; the session reads it.
+   */
+  onGoalTranscriptCheck?: () => void;
+  /**
+   * A `progress` update was throttled (goals §6): the session flushes it with
+   * {@link ClaudeNormalizer.flushGoalProgress} at `dueAtMs`.
+   */
+  onGoalProgressDeferred?: (dueAtMs: number) => void;
 }
 
 /** What {@link NormalizerOptions.onBackgroundShell} reports. */
@@ -287,6 +328,9 @@ const CLAUDE_TASK_PATCH_STATUS: Record<string, RuntimeTaskStatus> = {
 
 const RAW_SDK_MESSAGE: RuntimeEventRawSource = "claude.sdk.message";
 const RAW_SDK_PERMISSION: RuntimeEventRawSource = "claude.sdk.permission";
+
+/** The model id the CLI stamps on every message it wrote itself rather than streamed. */
+const SYNTHETIC_MODEL = "<synthetic>";
 
 /**
  * Wire-only frames that are real but absent from the SDK's exported union, so
@@ -375,11 +419,26 @@ export class ClaudeNormalizer {
    */
   readonly turnBoundaries: ClaudeTurnBoundary[] = [];
 
+  /** The CLI's `/goal`, as this session has reported it (goals §6.1). */
+  readonly goals: ClaudeGoalTracker;
+  /**
+   * Bumped whenever a goal is set, replaced or restored. A transcript read is
+   * applied only if no goal (re)started since it was asked for: a met row of
+   * a goal's PREVIOUS run must never end the run that just began.
+   */
+  private goalEpochCount = 0;
+
   constructor(options: NormalizerOptions) {
     this.threadId = options.threadId;
     this.clock = options.clock;
     this.ids = options.ids;
     this.options = options;
+    this.goals = new ClaudeGoalTracker({ clock: options.clock, knownGoal: options.knownGoal ?? null });
+  }
+
+  /** See {@link goalEpochCount}; the session captures it when it schedules a read. */
+  get goalEpoch(): number {
+    return this.goalEpochCount;
   }
 
   // -------------------------------------------------------------------------
@@ -906,6 +965,14 @@ export class ClaudeNormalizer {
     events.push(...this.releasePendingCompaction());
 
     const rawType = (message as { type?: unknown }).type;
+    if (rawType === "active_goal") {
+      // Declared by the SDK (`SDKActiveGoalMessage`) but only in its stdout
+      // union, never in `SDKMessage`, so it cannot be a switch case — and it
+      // is not bookkeeping to drop: it IS the goal (goals §6.1.6). It reached
+      // the default arm's `runtime.warning` before.
+      events.push(...this.handleActiveGoal(message));
+      return events;
+    }
     if (typeof rawType === "string" && UNDECLARED_TOP_LEVEL_TYPES.has(rawType)) {
       // Wire-only bookkeeping with no user-facing lifecycle.
       return events;
@@ -1484,6 +1551,10 @@ export class ClaudeNormalizer {
   private handleUserMessage(
     message: Extract<SDKMessage, { type: "user" }>
   ): RuntimeEvent[] {
+    const goalFrame = this.goalUserFrame(message);
+    if (goalFrame !== undefined) {
+      return goalFrame;
+    }
     const events: RuntimeEvent[] = [];
     const nestedParent = message.parent_tool_use_id ?? undefined;
     if (nestedParent !== undefined) {
@@ -1787,7 +1858,19 @@ export class ClaudeNormalizer {
         turn.latestAssistantUsage = usage;
         turn.compactedSinceLatestAssistantUsage = false;
       }
-      events.push(...this.backfillAssistantTextFromSnapshot(message));
+      // A message the CLI wrote itself — a local command's output (`/goal`'s
+      // "Goal set: …" above all), an API error it phrased — never streams and
+      // never will, so it is complete the moment it arrives. Parked for the
+      // `result` like a snapshot, it stayed invisible until the whole turn
+      // ended: for a `/goal`, until the whole goal run was over (goals §6.1.1).
+      events.push(
+        ...this.backfillAssistantTextFromSnapshot(message, {
+          complete: message.message?.model === SYNTHETIC_MODEL
+        })
+      );
+      // After its text: the row says what the CLI printed, the goal row what
+      // it means (goals §6.1.2).
+      events.push(...this.goalCommandEvents(message));
     }
 
     this.lastAssistantUuid = message.uuid;
@@ -1797,10 +1880,12 @@ export class ClaudeNormalizer {
   /**
    * A text block that never streamed (no `includePartialMessages`, or a block
    * the stream closed before the deltas arrived) is backfilled from the
-   * assistant snapshot so it is never an empty bubble.
+   * assistant snapshot so it is never an empty bubble. With `complete` the
+   * block is also finished here, text and all, instead of at the `result`.
    */
   private backfillAssistantTextFromSnapshot(
-    message: Extract<SDKMessage, { type: "assistant" }>
+    message: Extract<SDKMessage, { type: "assistant" }>,
+    options?: { complete?: boolean }
   ): RuntimeEvent[] {
     const turn = this.turnState;
     const content: unknown = message.message?.content;
@@ -1864,6 +1949,15 @@ export class ClaudeNormalizer {
       });
       if (created) {
         events.push(...created.events);
+        if (options?.complete === true) {
+          events.push(
+            ...this.completeAssistantTextBlock(created.state, {
+              force: true,
+              method: "claude/assistant",
+              payload: message
+            })
+          );
+        }
       }
       index += 1;
     }
@@ -3088,6 +3182,472 @@ export class ClaudeNormalizer {
       }
     }
     return events;
+  }
+
+  // -------------------------------------------------------------------------
+  // Goals (goals §6.1)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The `/goal` command's own output (goals §6.1.2): the `<synthetic>` frame
+   * whose `local_command_run.command` is `goal`. Its text has already been
+   * rendered (§6.1.1); this is what it means for the goal. A refusal, and any
+   * other text, means nothing.
+   */
+  private goalCommandEvents(message: Extract<SDKMessage, { type: "assistant" }>): RuntimeEvent[] {
+    const run = (message as { local_command_run?: unknown }).local_command_run;
+    if (
+      run === null ||
+      typeof run !== "object" ||
+      (run as { command?: unknown }).command !== GOAL_COMMAND_NAME
+    ) {
+      return [];
+    }
+    const text = localCommandOutputText(
+      (message.message as { content?: unknown } | undefined)?.content,
+      (message as { local_command_source?: unknown }).local_command_source
+    );
+    if (text === undefined) {
+      return [];
+    }
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    const output = parseGoalCommandOutput(text, running?.objective);
+    const turnId = this.activeTurnId;
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/assistant/goal",
+      messageType: "assistant",
+      payload: message
+    };
+    switch (output.kind) {
+      case "set":
+        return this.goalEvents({
+          change: running !== null && running.objective !== output.objective ? "replaced" : "set",
+          goal: {
+            objective: output.objective,
+            status: "active",
+            rounds: 0,
+            setAt: this.clock.nowIso()
+          },
+          turnId,
+          raw,
+          source: "stdout"
+        });
+      case "cleared":
+        return this.goalEvents({
+          change: "cleared",
+          goal: null,
+          previous:
+            running !== null && running.objective === output.objective
+              ? endedGoal(running, "cleared")
+              : { objective: output.objective, status: "active" },
+          turnId,
+          raw,
+          source: "stdout"
+        });
+      case "none":
+        // The CLI has no goal. Only news when this session thought it had one.
+        return running === null
+          ? []
+          : this.goalEvents({
+              change: "cleared",
+              goal: null,
+              previous: endedGoal(running, "cleared"),
+              turnId,
+              raw,
+              source: "stdout"
+            });
+      case "active":
+        if (running === null || running.objective !== output.objective) {
+          return this.goalEvents({
+            change: "restored",
+            goal: {
+              objective: output.objective,
+              status: "active",
+              rounds: output.rounds,
+              ...(output.lastCheck !== undefined ? { lastCheck: output.lastCheck } : {})
+            },
+            turnId,
+            raw,
+            source: "stdout"
+          });
+        }
+        return this.goalEvents({
+          change: "progress",
+          goal: reviseGoal(running, { rounds: output.rounds, lastCheck: output.lastCheck ?? null }),
+          turnId,
+          raw,
+          source: "stdout"
+        });
+      case "other":
+        return [];
+      default: {
+        const exhaustive: never = output;
+        void exhaustive;
+        return [];
+      }
+    }
+  }
+
+  /**
+   * The CLI's goal frames among the `user` messages (goals §6.1.3): a
+   * main-thread, `isSynthetic`, plain-string body. `undefined` for anything
+   * else — including another hook's Stop-hook feedback — which keeps the
+   * ordinary handling. Neither frame is ever a conversation item: the
+   * check-in and a check's verdict are the CLI talking to its model.
+   */
+  private goalUserFrame(message: Extract<SDKMessage, { type: "user" }>): RuntimeEvent[] | undefined {
+    if (
+      message.isSynthetic !== true ||
+      (message.parent_tool_use_id !== null && message.parent_tool_use_id !== undefined)
+    ) {
+      return undefined;
+    }
+    const content: unknown = (message.message as { content?: unknown } | undefined)?.content;
+    if (typeof content !== "string") {
+      return undefined;
+    }
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/user/goal",
+      messageType: "user",
+      payload: message
+    };
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    const checkIn = parseGoalCheckIn(content);
+    if (checkIn !== undefined) {
+      // The evaluation was deferred for background work, long enough for the
+      // CLI to nudge the model about it.
+      if (running === null) {
+        return [];
+      }
+      return this.goalEvents({
+        change: "progress",
+        goal: reviseGoal(running, {
+          phase: checkIn.backgroundRunning ? GOAL_WAITING_BACKGROUND_PHASE : null
+        }),
+        turnId: this.activeTurnId,
+        raw,
+        source: "stdout"
+      });
+    }
+    if (running === null) {
+      return undefined;
+    }
+    const feedback = matchGoalStopHookFeedback(content, running.objective);
+    if (feedback === undefined) {
+      return undefined;
+    }
+    // A "not met" check: the turn goes on, one round more.
+    return this.goalEvents({
+      change: "checked",
+      goal: reviseGoal(running, {
+        rounds: (running.rounds ?? 0) + 1,
+        lastCheck: feedback.reason.length > 0 ? feedback.reason : null,
+        phase: null
+      }),
+      turnId: this.activeTurnId,
+      raw,
+      source: "stdout"
+    });
+  }
+
+  /**
+   * `active_goal` (goals §6.1.6). Only a remote-mode CLI writes it, but it is
+   * the goal whenever it comes: a value moves the tracked goal (`checked` when
+   * a new round brought a verdict), names a goal this session did not know
+   * (`restored`), or — `null` — says the goal is gone, which only the
+   * transcript can say more about.
+   */
+  private handleActiveGoal(message: SDKMessage): RuntimeEvent[] {
+    const value = parseActiveGoalValue((message as { value?: unknown }).value);
+    if (value === undefined) {
+      return [];
+    }
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    if (value === null) {
+      if (running !== null) {
+        this.options.onGoalTranscriptCheck?.();
+      }
+      return [];
+    }
+    const turnId = this.activeTurnId;
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/active_goal",
+      messageType: "active_goal",
+      payload: message
+    };
+    if (running === null || running.objective !== value.condition) {
+      return this.goalEvents({
+        change: "restored",
+        goal: {
+          objective: value.condition,
+          status: "active",
+          rounds: value.iterations,
+          ...(value.lastReason !== undefined ? { lastCheck: value.lastReason } : {}),
+          ...(value.setAt !== undefined ? { setAt: value.setAt } : {})
+        },
+        turnId,
+        raw,
+        source: "stdout"
+      });
+    }
+    const checked = value.iterations > (running.rounds ?? 0) && value.lastReason !== undefined;
+    return this.goalEvents({
+      change: checked ? "checked" : "progress",
+      goal: reviseGoal(running, {
+        rounds: value.iterations,
+        lastCheck: value.lastReason ?? null,
+        ...(checked ? { phase: null } : {})
+      }),
+      turnId,
+      raw,
+      source: "stdout"
+    });
+  }
+
+  /**
+   * What the CLI's transcript said after a turn ended (goals §6.1.4): a met,
+   * impossible or error-cleared row of the running goal ends it, and — at a
+   * turn end — a goal still running is `waiting-background` exactly while
+   * background work was live when the turn ended, because the CLI skips the
+   * evaluation then. `epoch` is {@link goalEpoch} as it was when the read was
+   * asked for; a goal (re)started since makes the whole read moot.
+   */
+  applyGoalTranscriptRows(
+    rows: readonly ClaudeGoalStatusRow[],
+    input: { turnId?: string; backgroundLive: boolean; atTurnEnd: boolean; epoch?: number }
+  ): RuntimeEvent[] {
+    if (input.epoch !== undefined && input.epoch !== this.goalEpochCount) {
+      return [];
+    }
+    const events: RuntimeEvent[] = [];
+    for (const row of rows) {
+      const tracked = this.goals.goal;
+      if (tracked === null || !isUnfinishedGoal(tracked)) {
+        break;
+      }
+      const ending = row.condition === tracked.objective ? goalEndingOf(row) : undefined;
+      if (ending === undefined) {
+        // A set or post-compaction sentinel, or a check stdout already told.
+        continue;
+      }
+      events.push(
+        ...this.goalEvents({
+          change: ending,
+          goal: null,
+          previous: endedGoal(tracked, ending, row),
+          turnId: input.turnId,
+          raw: {
+            source: RAW_SDK_MESSAGE,
+            method: "claude/transcript/goal_status",
+            payload: row
+          },
+          source: "transcript"
+        })
+      );
+    }
+    const tracked = this.goals.goal;
+    if (input.atTurnEnd && tracked !== null && isUnfinishedGoal(tracked)) {
+      const phase = input.backgroundLive ? GOAL_WAITING_BACKGROUND_PHASE : undefined;
+      if (tracked.phase !== phase) {
+        events.push(
+          ...this.goalEvents({
+            change: "progress",
+            goal: reviseGoal(tracked, { phase: phase ?? null }),
+            turnId: input.turnId,
+            raw: {
+              source: RAW_SDK_MESSAGE,
+              method: "claude/goal/turn-end",
+              payload: { backgroundLive: input.backgroundLive }
+            },
+            source: "transcript"
+          })
+        );
+      }
+    }
+    return events;
+  }
+
+  /**
+   * A resumed session's goal, against the fold's (goals §6.1.5). `--resume`
+   * re-arms whatever the transcript's last `goal_status` row left running and
+   * says nothing about it, so the comparison is the only news there will be:
+   * a goal the CLI re-arms but the fold lacks is `restored`; the fold's goal
+   * that the transcript ended is `achieved`/`failed`/`cleared`; the fold's
+   * goal with no row at all is `cleared`. None of it belongs to a turn.
+   */
+  reconcileTranscriptGoal(found: ClaudeTranscriptGoal, options?: { epoch?: number }): RuntimeEvent[] {
+    if (options?.epoch !== undefined && options.epoch !== this.goalEpochCount) {
+      return [];
+    }
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/transcript/restore",
+      payload: found
+    };
+    switch (found.kind) {
+      case "active":
+        if (running === null || running.objective !== found.objective) {
+          return this.goalEvents({
+            change: "restored",
+            goal: { objective: found.objective, status: "active", rounds: 0 },
+            turnId: undefined,
+            raw,
+            source: "transcript"
+          });
+        }
+        // The same goal — in a new process, which has nothing in the
+        // background, so a waiting phase from the last one is stale.
+        return running.phase === GOAL_WAITING_BACKGROUND_PHASE
+          ? this.goalEvents({
+              change: "progress",
+              goal: reviseGoal(running, { phase: null }),
+              turnId: undefined,
+              raw,
+              source: "transcript"
+            })
+          : [];
+      case "ended": {
+        if (running === null) {
+          return [];
+        }
+        const ending =
+          found.row.condition === running.objective ? (goalEndingOf(found.row) ?? "cleared") : "cleared";
+        return this.goalEvents({
+          change: ending,
+          goal: null,
+          previous: endedGoal(running, ending, ending === "cleared" ? undefined : found.row),
+          turnId: undefined,
+          raw,
+          source: "transcript"
+        });
+      }
+      case "none":
+        return running === null
+          ? []
+          : this.goalEvents({
+              change: "cleared",
+              goal: null,
+              previous: endedGoal(running, "cleared"),
+              turnId: undefined,
+              raw,
+              source: "transcript"
+            });
+      default: {
+        const exhaustive: never = found;
+        void exhaustive;
+        return [];
+      }
+    }
+  }
+
+  /** A throttled `progress`, once it is due (goals §6). */
+  flushGoalProgress(): RuntimeEvent[] {
+    return this.goalDecisionEvents(this.goals.flushProgress(), this.activeTurnId, {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/goal/progress",
+      payload: { goal: this.goals.goal }
+    });
+  }
+
+  /**
+   * The goal as this session ends (goals §6): the CLI's background work dies
+   * with its process, so a `waiting-background` phase is dropped, and a
+   * `progress` the throttle was holding goes out — both NOW, unthrottled,
+   * because the flush timer goes with the session. The session's teardown
+   * calls this before `session.exited`, which nothing may follow.
+   */
+  goalAtSessionEnd(): RuntimeEvent[] {
+    const tracked = this.goals.goal;
+    if (tracked === null || !isUnfinishedGoal(tracked)) {
+      return [];
+    }
+    return this.goalEvents({
+      change: "progress",
+      goal:
+        tracked.phase === GOAL_WAITING_BACKGROUND_PHASE ? reviseGoal(tracked, { phase: null }) : tracked,
+      turnId: undefined,
+      raw: {
+        source: RAW_SDK_MESSAGE,
+        method: "claude/goal/session-end",
+        payload: { goal: tracked }
+      },
+      source: "session",
+      immediate: true
+    });
+  }
+
+  /**
+   * Every goal update goes through here: the tracker decides, this builds.
+   * `turnId` is explicit — a frame's update belongs to the turn in flight, a
+   * transcript read's to the turn that ended, a resume's to none.
+   *
+   * `source` says where the news came from. A goal update the CLI's
+   * **stdout** caused — one that went out, or a run that starts — is the
+   * latest word about the goal, so every transcript read asked for before it
+   * is moot ({@link goalEpoch}): a slow resume scan must never resurrect a
+   * goal the user has just cleared. A stdout frame that changed nothing, or
+   * a progress the throttle holds back, is not news and moves nothing — it
+   * must not void a verdict re-read still owed. A stdout set, replace or
+   * restore starts a run, judged from here on (`onGoalSetPoint`). What the
+   * **transcript** says moves neither: it IS the read, and the resume scan's
+   * `restored` FOUND the CLI's run, whose set point its end already is.
+   */
+  private goalEvents(input: {
+    change: AgentGoalChange;
+    goal: AgentGoal | null;
+    previous?: AgentGoal;
+    turnId: string | undefined;
+    raw: RuntimeEventRaw;
+    source: "stdout" | "transcript" | "session";
+    immediate?: boolean;
+  }): RuntimeEvent[] {
+    const decision = this.goals.apply(input.change, input.goal, input.previous, {
+      ...(input.immediate === true ? { immediate: true } : {})
+    });
+    if (input.source === "stdout") {
+      const startsRun =
+        input.change === "set" || input.change === "replaced" || input.change === "restored";
+      // Only real news moves the epoch: a frame that changed nothing (the
+      // same check-in again) must not void a read still owed — the turn-end
+      // re-read waiting for a verdict above all — and a progress the throttle
+      // holds back is not news until it goes out.
+      if (startsRun || decision.kind === "emit") {
+        this.goalEpochCount += 1;
+      }
+      if (startsRun) {
+        this.options.onGoalSetPoint?.();
+      }
+    }
+    return this.goalDecisionEvents(decision, input.turnId, input.raw);
+  }
+
+  private goalDecisionEvents(
+    decision: ClaudeGoalDecision,
+    turnId: string | undefined,
+    raw: RuntimeEventRaw
+  ): RuntimeEvent[] {
+    if (decision.kind === "deferred") {
+      this.options.onGoalProgressDeferred?.(decision.dueAtMs);
+      return [];
+    }
+    if (decision.kind === "unchanged") {
+      return [];
+    }
+    return [
+      {
+        ...this.base({ turnId, raw }),
+        type: "thread.goal.updated",
+        payload: decision.payload
+      }
+    ];
   }
 
   // -------------------------------------------------------------------------

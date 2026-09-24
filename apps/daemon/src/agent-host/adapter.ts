@@ -19,6 +19,7 @@ import type {
   AccountHome,
   AdapterCapabilities,
   AgentAdapterId,
+  AgentGoal,
   ApprovalDecision,
   AttachmentRef,
   InteractionMode,
@@ -66,6 +67,21 @@ export interface StartSessionInput {
    * error.
    */
   resumeCursor?: unknown;
+  /**
+   * The goal the host's fold holds for this thread, without its `updatedAt`
+   * (goals §4.6, §5.3). An adapter seeds the goal it tracks from it, so it
+   * emits `thread.goal.updated` only for a real change — a resumed provider
+   * repeating the goal the thread already shows is not one. `null`: the fold
+   * has no goal.
+   */
+  knownGoal?: AgentGoal | null;
+  /**
+   * True only when this start restarts the session for an account switch
+   * (goals §4.6, §5.3). A goal can live in the old account's home (Codex's
+   * `goals_1.sqlite`), so the new session may not know it: the adapter then
+   * re-creates {@link knownGoal} rather than reporting it cleared.
+   */
+  carryGoal?: boolean;
 }
 
 export interface SendTurnInput {
@@ -90,6 +106,38 @@ export interface SendTurnResult {
   turnId: string;
   /** Persisted to `meta.json` every time (§4.1 "Cursor per turn"). */
   resumeCursor?: unknown;
+}
+
+/**
+ * A `/goal …` the HOST parsed (goals §4.6, §5.1) — only ever handed to an
+ * adapter whose `capabilities.goals.command` is `"host"` (Codex). Any other
+ * adapter receives `/goal …` as an ordinary turn, which its CLI parses.
+ */
+export type HostGoalCommand =
+  | { kind: "status" }
+  | { kind: "set"; objective: string }
+  | { kind: "edit"; objective: string }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "clear" };
+
+export interface GoalCommandResult {
+  /** Human text for a visible `goal.status` row; "" when the provider's own updates tell the story. */
+  summary: string;
+}
+
+/** What the host hands a `/goal …` besides the command itself (goals §4.6). */
+export interface GoalCommandOptions {
+  /**
+   * The model the user picked in the composer together with the command,
+   * passed when it differs from the one the thread last ran. An adapter whose
+   * provider starts the goal's turns by itself
+   * (`capabilities.goals.continuesAcrossTurns`, Codex) applies it BEFORE the
+   * goal request: those turns run on the thread's own settings, and the next
+   * turn the user sends would be too late. Best-effort — failing to apply it
+   * is logged and never fails the command. Absent: nothing changes.
+   */
+  modelSelection?: ModelSelection;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +236,19 @@ export interface AgentAdapter {
    * when the provider had nothing to move.
    */
   backgroundTasks?(threadId: string, toolUseId?: string): Promise<boolean>;
+  /**
+   * Run a host-parsed `/goal …` (goals §4.6, §5.1). Present exactly when
+   * `capabilities.goals?.command === "host"`. The goal itself moves only
+   * through this adapter's `thread.goal.updated` events, never through the
+   * result; a provider error rejects with the provider's message.
+   * `options.modelSelection` is the model picked together with the command
+   * ({@link GoalCommandOptions}).
+   */
+  goalCommand?(
+    threadId: string,
+    command: HostGoalCommand,
+    options?: GoalCommandOptions
+  ): Promise<GoalCommandResult>;
   readThread(threadId: string): Promise<ThreadSnapshot>;
 
   /**

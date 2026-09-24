@@ -2,10 +2,10 @@
  * The daemon's coarse view of every chat thread (spec §6.4).
  *
  * It reads `GET /threads/:id/summary` on the agent-host socket — the host's
- * own projection of the six derived fields — and from that one read produces
+ * own projection of the seven derived fields — and from that one read produces
  * everything the daemon owes the rest of the app:
  *
- * 1. the six `SessionSummary` fields, so every surface that already reads only
+ * 1. the seven `SessionSummary` fields, so every surface that already reads only
  *    a `SessionSummary` — tab strip, Attention Center, command palette, push
  *    gate — keeps working with no thread subscription;
  * 2. `session.activity`, resolved by the ONE ladder of `activity-ladder.ts`
@@ -25,16 +25,18 @@
 
 import type { SessionActivity, SessionActivityEvent, SessionSummary } from "@orquester/api";
 import type {
+  AgentChatGoalSummary,
   AgentChatPendingEventPayload,
   AgentChatSessionSummaryFields,
   AgentChatTurnEventPayload,
+  AgentGoalStatus,
   AgentProvidersChangedPayload,
   BackgroundLiveness,
   LatestTurnSummary,
   ThreadSessionStatus,
   TurnState
 } from "@orquester/api/agent-chat";
-import { SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
+import { AGENT_GOAL_STATUSES, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
 import { agentHostExtraRoutes, type AgentHostPendingRequest } from "../agent-host/server/index.ts";
 import {
   pushTypeForFields,
@@ -238,7 +240,7 @@ export class AgentChatSummaryService {
   }
 
   /**
-   * Merge the six fields onto the tab, resolve the ladder, broadcast what
+   * Merge the seven fields onto the tab, resolve the ladder, broadcast what
    * changed, and push.
    *
    * Exposed so tests drive the fold directly, without a host.
@@ -287,7 +289,7 @@ export class AgentChatSummaryService {
       this.opts.onBackgroundWorkEnded?.();
     }
 
-    // The tab's own copy of the six fields (the tab strip reads them off the
+    // The tab's own copy of the seven fields (the tab strip reads them off the
     // summary), published only when one actually moved.
     this.opts.chat.applyFields(threadId, fields);
     this.opts.chat.setActivity(threadId, activity);
@@ -402,7 +404,8 @@ export class AgentChatSummaryService {
 }
 
 /**
- * Keep only the six §6.4 fields, each only when it has the right shape.
+ * Keep only the seven §6.4 fields (goals §4.7 added `goal`), each only when
+ * it has the right shape.
  *
  * This is another process's JSON reaching typed code, so it goes through
  * field-wise validation with a fallback exactly as AGENTS.md requires of every
@@ -475,7 +478,28 @@ export function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
   if (isThreadSessionStatus(row.chatSessionStatus)) {
     fields.chatSessionStatus = row.chatSessionStatus;
   }
+  if (row.goal === null) {
+    fields.goal = null;
+  } else {
+    const goal = sanitizeGoal(row.goal);
+    if (goal !== null) fields.goal = goal;
+  }
   return fields;
+}
+
+/**
+ * The goal of goals §4.7, or null when the host sent none that the ladder can
+ * trust: the objective must be a non-empty string and the status one of
+ * {@link AGENT_GOAL_STATUSES}. `continuing` falls back to `false`, the
+ * pre-goal behaviour — a "finished" that turns out early is recoverable, a tab
+ * that reads as working forever is not.
+ */
+function sanitizeGoal(value: unknown): AgentChatGoalSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const goal = value as Record<string, unknown>;
+  if (typeof goal.objective !== "string" || goal.objective.length === 0) return null;
+  if (!isGoalStatus(goal.status)) return null;
+  return { objective: goal.objective, status: goal.status, continuing: goal.continuing === true };
 }
 
 /** `TurnState` = `"pending" | "running"` plus the four `RuntimeTurnState`s. */
@@ -503,4 +527,10 @@ function isTurnState(value: unknown): value is TurnState {
 
 function isThreadSessionStatus(value: unknown): value is ThreadSessionStatus {
   return typeof value === "string" && THREAD_SESSION_STATUSES.has(value);
+}
+
+const GOAL_STATUSES: ReadonlySet<string> = new Set<AgentGoalStatus>(AGENT_GOAL_STATUSES);
+
+function isGoalStatus(value: unknown): value is AgentGoalStatus {
+  return typeof value === "string" && GOAL_STATUSES.has(value);
 }

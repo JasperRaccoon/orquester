@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import { useApi } from "../../context/orquester-context";
 import type { ApiClient } from "../../lib/api-client";
+import { keyboardLayerOpen } from "../../lib/keyboard-layers";
 import { ensureProjectIndex } from "../../lib/project-index";
 import { insideShortcutBailZone } from "../../lib/session-nav";
 import { useAppStore } from "../../store/app";
@@ -68,9 +69,15 @@ export function matchesPaletteToggle(event: ShortcutEventLike): boolean {
  * Settings modal, close-confirmation or palette would leave the layer floating
  * over a view the user never asked for. Same gate the palette's own opener uses.
  *
- * Exported because the chat surface's own scoped Escape listener has to stand
- * down for exactly the same set — two copies of this list would drift, and the
- * drift would only show up as a shortcut firing under a modal.
+ * Exported because the chat surface's own scoped Escape listeners have to
+ * stand down for exactly the same set — two copies of this list would drift,
+ * and the drift would only show up as a shortcut firing under a modal.
+ *
+ * An open floating layer — a dropdown or popover, a modal, a sheet, a context
+ * menu (`lib/keyboard-layers.ts`) — is on the list too: Escape is its to close.
+ * Without it the chat's capture-phase listener took an Escape meant for an
+ * open popover and interrupted the running turn instead (fix round 1, the
+ * goal popover of goals §8.2).
  */
 export function anotherLayerOwnsTheKeyboard(): boolean {
   const state = useAppStore.getState();
@@ -78,7 +85,8 @@ export function anotherLayerOwnsTheKeyboard(): boolean {
     state.settingsOpen ||
     state.authPrompt !== null ||
     state.pendingCloseTabId !== null ||
-    isCommandPaletteOpen()
+    isCommandPaletteOpen() ||
+    keyboardLayerOpen()
   );
 }
 

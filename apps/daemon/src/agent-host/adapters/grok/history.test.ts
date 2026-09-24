@@ -272,6 +272,109 @@ test("a replayed prompt loses the `Attached files:` block the adapter appended, 
   ]);
 });
 
+test("a replayed goal <system-reminder> projects as the /goal that set it, and the goal rows project nothing", () => {
+  // Goals §6.3 items 4–5, shaped on a real goal session (fixtures README
+  // observation 36): the goal's `goal_updated` rows arrive BEFORE its user
+  // message, and that message is a ~6 KB reminder block, never what the user
+  // typed. Text invented.
+  const objective = "Audit every request handler for cross-clinic data access and fix each hole.";
+  const block =
+    `<system-reminder>\nA goal has been set: ${objective}\n\nYou are working directly on this goal across multiple turns. Deliver\n` +
+    "EVERYTHING the user asked for yourself — no follow-up questions, no manual\nsteps left for the user.\n\n" +
+    "Plan: /home/sessions/goal/plan.md\n\nStart now.\n</system-reminder>\n\n";
+  const goalRow = (fields: Record<string, unknown>): Record<string, unknown> => ({
+    sessionUpdate: "goal_updated",
+    goal_id: "3f6b2c1e-8a4d-4f0b-9c2e-7d5a1b9e0c44",
+    objective,
+    status: "active",
+    phase: "executing",
+    tokens_used: 0,
+    elapsed_ms: 0,
+    total_worker_rounds: 0,
+    last_event: "goal_created",
+    last_event_timestamp: "2026-09-24T09:00:00.622415836+00:00",
+    ...fields
+  });
+  const normalizer = new GrokNormalizer(
+    {
+      threadId: "t1",
+      stamp: stamps().stamp,
+      uuid: () => "u",
+      activeTurnId: () => undefined,
+      planHost: { platform: "linux", env: {} }
+    },
+    "session-1"
+  );
+  const replayed: RuntimeEvent[] = [];
+  const replay = (method: string, update: Record<string, unknown>): void => {
+    const params = { sessionId: "s", update, _meta: { eventId: "s-1", isReplay: true } };
+    replayed.push(
+      ...(method === "session/update"
+        ? normalizer.handleSessionUpdate(params as unknown as SessionNotification)
+        : normalizer.handleXaiNotification(method, params))
+    );
+  };
+  replay("_x.ai/session/update", goalRow({}));
+  replay("_x.ai/session/update", goalRow({ planning: true }));
+  replay("session/update", { sessionUpdate: "user_message_chunk", content: { type: "text", text: block } });
+  replay("session/update", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "On it." } });
+  replay(
+    "_x.ai/session/update",
+    goalRow({ status: "complete", phase: "idle", last_event: "goal_completed", total_worker_rounds: 2 })
+  );
+  replay("_x.ai/session/update", { sessionUpdate: "turn_completed", prompt_id: "p1", stop_reason: "end_turn" });
+  assert.deepEqual(replayed, [], "replay emits nothing as it arrives");
+
+  const events = projectGrokHistory(
+    { threadId: "t1", turns: normalizer.historyTurns() },
+    { threadId: "t1", ...stamps() }
+  );
+  assert.equal(
+    events.some((event) => event.type === "thread.goal.updated"),
+    false,
+    "a replayed goal is the past: never a goal row"
+  );
+  const rows = events
+    .filter(
+      (event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed"
+    )
+    .map((event) => [event.payload.itemType, event.payload.detail]);
+  assert.deepEqual(rows, [
+    ["user_message", `/goal ${objective}`],
+    ["assistant_message", "On it."]
+  ]);
+  assert.equal(JSON.stringify(events).includes("You are working directly on this goal"), false, "the block is never rendered");
+});
+
+test("text after a replayed goal block survives beneath the /goal line, its attachment block stripped", () => {
+  const collector = new GrokHistoryCollector();
+  const text =
+    "<system-reminder>\nA goal has been set: Fix the audit\n\nYou are working directly on this goal across multiple turns.\n</system-reminder>\n\n" +
+    "Also keep the changelog current.\n\nAttached files:\n- notes.txt: /a/notes.txt";
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  const user = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  ).find((event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed");
+  assert.equal(user?.payload.detail, "/goal Fix the audit\n\nAlso keep the changelog current.");
+});
+
+test("a reminder that is not a goal block projects as it was replayed", () => {
+  const collector = new GrokHistoryCollector();
+  const text = "<system-reminder>\nThe user switched models.\n</system-reminder>";
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  const events = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  );
+  const user = events.find(
+    (event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed"
+  );
+  assert.equal(user?.payload.detail, text);
+});
+
 test("a tool call is kept, and it flushes the text before it", () => {
   const collector = new GrokHistoryCollector();
   collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "writing" } });

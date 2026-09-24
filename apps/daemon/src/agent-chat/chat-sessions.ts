@@ -225,7 +225,7 @@ export class ChatSessionManager {
   }
 
   /**
-   * Merge the six §6.4 fields onto a tab and publish "updated" only when
+   * Merge the seven §6.4 fields onto a tab and publish "updated" only when
    * something actually changed — the summary service runs off a live stream and
    * must not turn every heartbeat into a broadcast.
    */
@@ -242,7 +242,8 @@ export class ChatSessionManager {
       hasActionableProposedPlan: fields.hasActionableProposedPlan,
       backgroundLiveness: fields.backgroundLiveness,
       latestTurn: fields.latestTurn,
-      chatSessionStatus: fields.chatSessionStatus
+      chatSessionStatus: fields.chatSessionStatus,
+      goal: fields.goal
     };
     if (sameDerivedFields(session.summary, next)) return null;
     session.summary = next;
@@ -327,8 +328,18 @@ function sameDerivedFields(a: SessionSummary, b: SessionSummary): boolean {
     Boolean(a.hasActionableProposedPlan) === Boolean(b.hasActionableProposedPlan) &&
     (a.backgroundLiveness ?? null) === (b.backgroundLiveness ?? null) &&
     a.chatSessionStatus === b.chatSessionStatus &&
-    sameLatestTurn(a.latestTurn ?? null, b.latestTurn ?? null)
+    sameLatestTurn(a.latestTurn ?? null, b.latestTurn ?? null) &&
+    sameGoal(a.goal ?? null, b.goal ?? null)
   );
+}
+
+/** goals §4.7: every field of the goal summary is what a surface renders. */
+function sameGoal(
+  a: SessionSummary["goal"] | null,
+  b: SessionSummary["goal"] | null
+): boolean {
+  if (!a || !b) return !a && !b;
+  return a.objective === b.objective && a.status === b.status && a.continuing === b.continuing;
 }
 
 function sameLatestTurn(

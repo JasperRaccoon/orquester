@@ -219,6 +219,23 @@ adapter — a wedged Codex or OpenCode turn is the same failure and deserves the
 the watchdog stalls settles `failed` **and** puts the session in `error`, so the next `/turn` takes
 the §4.1 lazy-recovery path instead of steering into a child that stopped answering.*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): there is a **third** window, stated in
+goals §5.2, and it only ever widens the other two: **60 minutes while the thread's goal is
+`active`**. In code it sits beside them (`TURN_LIVENESS_WINDOWS.goalMs`,
+`apps/daemon/src/agent-host/support/deadline.ts`); the orchestrator hands the watchdog
+`TurnWatchdogOptions.isGoalActive` (the fold's goal is `active`) and the window is then
+`max(goalMs, the normal window)`, for all four adapters. Grok runs a whole goal inside one prompt
+turn and its verifier rounds go quiet for 10–20 minutes, so the 10-minute window would cancel the
+goal the user left running. Three rules came with it (goals §5.2). The timer never sleeps past
+the normal window on the goal's word — the goal row lands after the event that armed it, so every
+wake re-reads the window and an active goal simply re-arms (`turn-watchdog.ts`). The host arms the
+watchdog lazily on the first live `turn.started` of a turn it did not send — a goal's
+continuation, the turn Codex starts after a host `/goal`, one after a resume — which nothing armed
+before (`consume`, `orchestrator.ts`). And a Codex goal's turns have ONE watchdog: the adapter's
+own idle watchdog stands down while its goal is active, and the host's stall interrupt goes
+through `interruptTurn`, which pauses the goal first — a stalled goal turn ends paused, never
+interrupted and continued.*
+
 **Background liveness outlives the turn.** Subagent fleets, background shells and watch loops
 keep running inside the provider process after the turn that launched them has settled. The host
 tracks, per thread and in memory only, which task ids are still live from the same task events
@@ -403,6 +420,11 @@ first, so an adopted host is not reconciled against itself.
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:503-540` — live thread ids from `listSessions()` subtracted, the `starting | running | activeTurnId !== null | prepared-while-ready` orphan filter*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): the input also takes, off the same
+`meta.json` read, every thread whose head carries a goal resume mark (`resumeGoalAfterRestart` →
+`goalResumePending`), whatever its session says and whether or not a turn was active; its session
+is resumed after the gate, without a turn (goals §5.5).*
+
 1. Mark `continueAfterRestart` in `meta.json` before doing anything.
 2. Resume the session from its resume cursor.
 3. Send a continuation turn: promptless where the adapter declares
@@ -465,6 +487,11 @@ every marker written for it is cleared, so a cancelled restart does not inject a
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:393-399` — `readServerUpdateContinuationTurnId`: the marker is the turn id; `:406-448` — `markRunningProviderSessionsForContinuation`, only threads with a resume cursor, and markers rolled back if the marking itself fails; `:450-480` — `clearContinuationMarkers`; `apps/server/src/cloud/selfUpdate.ts:65-135` — `withRunningThreadContinuation`: mark during the update, clear on any failure that is not an accepted handoff; `apps/server/src/provider/Layers/ProviderService.ts:2296-2360` — the same marker written from the graceful stop-all path; `apps/server/src/serverRuntimeStartup.ts:508-540` + `:576-592` — the `prepared`-while-`ready` case and its guards*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a second mark rides the same intentional
+stop — `resumeGoalAfterRestart`, a boolean — for a thread whose Codex goal continues on a live
+session: there is no turn to name, since the goal's next turn is the provider's to start. An
+aborted stop clears it with the rest (goals §5.5).*
+
 **Archived and deleted threads are settled, never continued.** A thread the user closed or
 deleted while a turn was running is settled as an error on the next boot; resuming it would
 restart a provider process and spend tokens for a tab nobody is looking at.
@@ -484,6 +511,12 @@ again.
 at reconcile rather than being told by the daemon. Reconcile runs before the daemon has necessarily
 adopted the host — that is the whole point of §3.3 — so a continuation that had to wait for the
 daemon to hand it a setting would either stall or silently take the default.*
+
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): one kind of work is continued WITHOUT the
+opt-in — a Codex goal that continues on a live session with a usable cursor. The `/stop` handover
+marks it (`resumeGoalAfterRestart`, a head field beside `continueAfterRestart`), and the next host
+resumes its session after the gate without sending a turn: setting the goal was the user's opt-in
+to autonomous work, and Codex continues it by itself (goals §5.5).*
 
 **Reconcile never blocks or fails host startup.** Each continuation is forked; the loop only
 prepares it. A thread whose directory binding cannot be read, whose projection dispatch fails, or
@@ -511,6 +544,11 @@ too: it reads references off the fold snapshot + tail and skips a thread with no
 outright (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `reconcileThread` /
 `loadRuntime`, `apps/daemon/src/agent-host/store/index.ts` `pruneAttachments`). See
 `docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, A1.*
+
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): one exception to that lazy recovery — a
+thread the handover marked for its continuing goal has its session resumed right after the gate,
+without a turn and whether or not one was active; the mark is read off the same `meta.json` as
+`isOrphanedHead` (goals §5.5).*
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:503-544` — the orphan filter runs over `getCommandReadModel()`, rows of the persisted projections, so T3 never folds a log at boot either; `apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2059-2074` — projectors resume from their `projection_state` cursor rather than replaying; differs: Orquester has no persisted read model, so the head (`meta.json`) is the only thing read for every thread, and the fold is deferred to first use and started from `state.json` (§5.1)*
 
@@ -553,6 +591,12 @@ conversation that was not compacted. §6.2 carries only the HTTP surface of this
 
 *T3: `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1414-1427` — compaction refused while `starting`/`running` or already compacting; `:1467-1476` — turn starts arriving during compaction pushed onto the per-thread queue; `:327-370` — ordered replay, one awaited at a time, re-queued on dispatch failure; `:1450-1461` + `:306-324` — the queue drained into "Queued message was not sent" activities on failure; differs: our copy is "Context compaction failed. Send this message again to continue."*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): one `/turn` is refused instead of queued —
+a Codex `/goal …`, which the host parses into a goal command. During a compaction, or with turns
+queued behind one, it is a 400 `INVALID_COMMAND`, `Wait for the compaction to finish before
+changing the goal.`, refused before anything is committed; queued, it would run after messages the
+user sent later (goals §5.1).*
+
 *Built: the queues are per thread and there are **two** of them plus a git queue — one for commands
 and one for turns — so a `/mode`, `/approval` or `/answer` arriving during a compaction is not
 parked behind a queued turn (`apps/daemon/src/agent-host/orchestration/`). And `/mode` against a
@@ -576,6 +620,12 @@ next `/turn`'s ensure step, carrying the cursor. Three things make it safe:*
    expression to gate itself. A session in **`error`** is deliberately still switchable — a stale
    login is exactly when the user wants another account, and the switch starts nothing, so it earns
    the same carve-out `/session/stop` and `/revert` have in §6.2.*
+   *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): one more refusal, checked after the
+   compaction one and before the turn conditions — a continuing goal, `Pause the goal before
+   switching accounts.`: between a Codex goal's turns idle never comes. A session whose goal resume
+   mark is still pending reads as continuing whatever it says — after a handover it may read
+   `stopped` or `error` — so the `error` carve-out does not hold while that mark stands (goals
+   §5.5).*
 3. ***The home KIND may never cross the cliproxy boundary, and OpenCode is excluded outright.*** *A
    thread's home kind is a function of its registry entry, which never changes; and OpenCode runs
    one server per project under the daemon's own identity (§3.2), so there is no per-thread account
@@ -630,6 +680,13 @@ interface AgentAdapter {
 
 *T3: `apps/server/src/provider/Services/ProviderAdapter.ts:67-158` — `ProviderAdapterShape`; `:45-55` — capabilities (`sessionModelSwitch`, `promptlessTurnContinuation`, `supportsConversationRollback`); `:35-43` — `ProviderCompaction`; `packages/contracts/src/provider.ts:54-89` — session-start / send-turn / turn-result inputs; `packages/contracts/src/server.ts:199-201` — `showInteractionModeToggle` and `reportsContextWindow`, which are snapshot presentation flags in T3 (differs: Orquester folds both onto the adapter's `capabilities`, since one adapter serves one provider); `apps/server/src/provider/Services/ProviderAdapter.ts:99-104` — T3 names it `respondToRequest` (differs: `respondToApproval` here, same contract)*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): the interface gained its goal pieces
+(goals §4.5–§4.6): `capabilities.goals?` (`{command, actions, continuesAcrossTurns}`, absent for
+OpenCode; `AdapterGoalSupport` in `packages/api/src/agent-chat/adapter-types.ts`), an optional
+`goalCommand?(threadId, command, options?)` present exactly where the host parses `/goal`
+(Codex), and `startSession`'s `knownGoal` / `carryGoal` (both in
+`apps/daemon/src/agent-host/adapter.ts`).*
+
 `startSession` returns the whole session record, not just a cursor: `{threadId, status:
 "starting"|"ready"|"running"|"stopped"|"error", runtimeMode, cwd?, model?, resumeCursor?,
 activeTurnId?, createdAt, updatedAt, lastError?}` — the same five states `session.state.changed`
@@ -667,6 +724,10 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
 - **Interrupt is turn-scoped.** `interruptTurn` carries the turn id the user pressed Stop on and
   is a no-op when that turn is no longer the active one, so a Stop that races a settling turn
   cannot kill the next one.
+  *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): except the next turn a continuing Codex
+  goal started by itself. On such a thread a stale Stop still pauses the goal, then interrupts the
+  turn running now if the provider started it (a turn row with no user message); a turn the user
+  started keeps this protection (goals §5.6, `stopContinuingGoal`).*
 - **Lazy recovery.** `sendTurn` on a thread with no live session starts one from the persisted
   cursor first. A crashed, OOM-killed or restarted session is indistinguishable from a fresh one.
 - **Promptless continuation is validated, not assumed.** A `continuation: true` turn with no
@@ -1254,6 +1315,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   real constraint is a **32 in-flight server-request cap**, beyond which the peer is answered
   `-32001 "Too many Codex requests are already active."`.
   *T3: `apps/server/src/provider/Layers/CodexSessionRuntime.ts:2562-2602`; `packages/effect-codex-app-server/src/protocol.ts:18, 300-314` (the cap), `:159, 338` (requests forked into `requestHandlerScope`)*
+  *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a step (0) runs first — the adapter's
+  `interruptTurn` pauses an active goal (`thread/goal/set {status:"paused"}`, bounded at 1.5 s)
+  before settling anything, since a `cancel` ends the turn by itself and an active goal's next
+  continuation starts the moment it does. A session stop never pauses (goals §6.2.4).*
 - **Transport.** NDJSON, one JSON object per line, **no `jsonrpc` field**, and **no request
   timeouts at all** — callers add their own deadlines.
   *T3: `packages/effect-codex-app-server/src/protocol.ts:100-115` (line framing), `:455-474` (request/notify write only `{id, method, params}`)*
@@ -1617,6 +1682,10 @@ commands it cannot implement. Three rules decide everything below:
 2. **The host intercepts only what it can do better than the CLI.** Exactly three commands are
    taken over: `/model`, `/effort` and `/compact`. Everything else is either a client-side UI
    command or is forwarded verbatim.
+   *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a fourth on Codex only — `/goal`, which
+   the host parses and runs as `thread/goal/*` requests, since Codex's app-server has no `/goal` of
+   its own (goals §5.1; the note under §4.6.6's "Neither `/goal` nor `/loop` is a host
+   command").*
 3. **A forwarded command must open the message.** Every one of the four protocols expands a
    slash command only when it is the first character of the turn text. Anywhere else it is prose,
    and the composer must not pretend otherwise.
@@ -1735,6 +1804,10 @@ it into both the machine list and every workspace snapshot. **differs:** Orquest
 command; quota lives in the Settings usage overview and the top-bar chip (§7.7), which are one
 click away and already per-account. **differs:** T3 has no `/effort`; Orquester adds it (§4.6.5).*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a third on Codex only — the host `goal`
+row, for the `/goal` the host parses there (goals §8.5; `buildSlashMenuItems`,
+`packages/ui/src/components/agent-chat/composer/composer-menu.ts`).*
+
 #### 4.6.4 Per-cwd scoping and refresh
 
 `workspaceSnapshots[]` overlays the machine-level catalog for one working directory. Rules:
@@ -1818,6 +1891,11 @@ string.*
 *T3: `apps/web/src/components/ChatView.tsx:7145, 7171` — the context-meter button sends the same
 literal `/compact` message; `:735-738` re-recognises it on render.*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a second host-native command, on **Codex
+only**: `/goal`, parsed by `parseHostGoalCommand` in `decide("turn")` right after this predicate and
+turned into `thread/goal/*` requests rather than a turn. See the note under §4.6.6's "Neither
+`/goal` nor `/loop` is a host command", and goals §5.1.*
+
 **(c) Forwarded — the turn text, as typed.** Everything else. The host does not validate the name
 against the catalog, does not rewrite it and does not block it: the CLI decides. The only send-path
 check is the §4.1 input bound.
@@ -1843,7 +1921,8 @@ Two forwarding refinements are adapter-level, not composer-level:
 
 **C** client-only · **H** host-native · **F** forwarded verbatim · **F\*** forwarded and the
 protocol genuinely dispatches it · **—** never advertised, so never in the menu; typed by hand it
-is prose.
+is prose. **tracked** / **untracked** (`/goal` only): whether the adapter mirrors the provider's
+goal into the thread; Codex's **H** is tracked too (`2026-09-24-agent-goals-design.md`).
 
 | Command | Claude | Codex | OpenCode | Grok |
 |---|---|---|---|---|
@@ -1851,7 +1930,7 @@ is prose.
 | `/effort` | C | C | C | C |
 | `/plan` · `/default` | C | C | not offered | not offered |
 | `/compact` | H → `/compact` turn | H → `thread/compact/start` | H → `session.summarize` | H → `/compact` turn |
-| `/goal` | F if a command or skill of that name exists | — | F\* if `command.list` has it | F if advertised |
+| `/goal` | F + tracked | H → `thread/goal/*` | F\* if `command.list` has it, untracked | F + tracked |
 | `/loop` | F if a command or skill of that name exists | — | F\* if `command.list` has it | F if advertised |
 | `/clear` · `/help` · `/login` · `/status` · `/cost` · `/context` · `/init` · `/review` · `/resume` · `/rewind` · `/btw` · `/mcp` | F if the CLI advertises it | — | F\* if `command.list` has it | F if advertised, except `/context` which is stripped |
 | `/feedback` | — | F (Codex's only real advertised command) | — | — |
@@ -1876,6 +1955,25 @@ work exactly to the extent the selected agent publishes them, and the catalog is
 user whether they do.
 *T3: repo-wide grep for `"/goal"` and `"/loop"` over `apps/` and `packages/` returns zero hits.*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): on **Codex only**, `/goal` became a host
+command, and of "no adapter, no route, no synthetic entry" only "no route" still holds. Codex's
+app-server takes goals only as `thread/goal/*` requests — the `/goal` grammar belongs to its TUI —
+so the typed command reached the model as prose (T3's open issue #13252 is the same bug). The host
+now parses it (`parseHostGoalCommand` in `apps/daemon/src/agent-host/orchestration/slash.ts`,
+checked in `decide("turn")` right after §4.6.5(b)'s `/compact` predicate, so `/compact` is no
+longer the only host-native command) and runs it through a new adapter method, `goalCommand`: the
+user message is recorded, no turn is started, and a status answer or a failure is an activity row.
+The command still rides `/turn`. A Codex thread's composer menu gains a synthetic host `goal` row —
+description `Set, check, pause, resume or clear a goal`, hint
+`<objective> | pause | resume | clear | edit <objective>` — that replaces any provider row of that
+name and, unlike the other host commands, which insert nothing (§4.6.7), types `/goal ` into the
+draft and waits for the argument, because the host parses the sent text; like a provider command
+it is offered only at the start of the prompt. Claude and Grok still forward `/goal` verbatim for
+their CLIs to parse, and OpenCode keeps `F*`. The matrix's "tracked" is the other half: Claude,
+Codex and Grok mirror the provider's own goal into the thread (a `goal.updated` activity folded
+into the thread's `goal`, shown as a status-line chip); OpenCode has no goal surface at all.
+Orquester still runs no goal loop of its own, and `/loop` is unchanged.*
+
 #### 4.6.7 Composer menu
 
 - **Trigger.** `/` opens the command menu when it is the first non-empty character of the **current
@@ -1888,6 +1986,11 @@ user whether they do.
   the whole message, so offering one mid-message would hand the user a guaranteed no-op.
   *T3: `apps/web/src/components/chat/composerSlashCommandSearch.ts:15-29` — the filter and that
   exact rationale, called with `rangeStart === 0` at `apps/web/src/components/chat/ChatComposer.tsx:2377-2380`.*
+  *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): one host command does not stay — Codex's
+  host `/goal` (goals §8.5) is gated like a provider command, because the host recognises it only
+  when it opens the message and anywhere else it would reach the model as text
+  (`slashMenuItemsForPromptPosition`,
+  `packages/ui/src/components/agent-chat/composer/composer-menu.ts`).*
 - **Per-provider gating.** `/plan` and `/default` appear only where `showPlanModeToggle` is true
   (§4.4), i.e. Claude and Codex. `/effort` appears only when the selected model has a reasoning
   descriptor. `/compact` appears only when the thread has something to compact and the draft is
@@ -1905,10 +2008,17 @@ user whether they do.
   caret after it. A skill is inserted as `` `$name ` ``. Host commands insert nothing — they erase
   the trigger and act.
   *T3: `apps/web/src/components/chat/ChatComposer.tsx:3597-3643` — exactly these three behaviours.*
+  *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): except Codex's host `/goal`, which types
+  `` `/goal ` `` and waits for the argument — the host parses the sent text, so it must reach the
+  draft (`menuItemReplacement`, goals §8.5).*
 - **Argument hints** render as the row's secondary line when there is no description. There is no
   parameter form and no placeholder-stepping.
   *T3: `apps/web/src/components/chat/ChatComposer.tsx:2358` — `description ?? input.hint ??
   "Run provider command"`.*
+  *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a host command with a hint — Codex's
+  `/goal`, the only one — shows the hint beside its name and keeps its description on the
+  secondary line: the grammar is the point of a command that is typed on
+  (`ComposerTokenMenu.tsx`, goals §8.5).*
 - **What the sent message records.** Nothing. A command is ordinary message text; `/compact` is
   re-recognised by string comparison at render time and `$skill` mentions are re-chipped from the
   stored text by the same tokeniser the composer uses. No `isCommand` flag is persisted.
@@ -2046,6 +2156,11 @@ without a second event type, and what the §6.1 `PUT` rename appends.
 
 *T3: `packages/contracts/src/orchestration.ts:1655-1688` — the 35-member `OrchestrationEventType`; `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:469-1012` — `runtimeEventToActivities`, the runtime→domain hop; `packages/contracts/src/orchestration.ts:1208-1214` + `:1808-1822` — `thread.meta.update` and `thread.meta-updated` both carry an optional `modelSelection` beside the title, so T3 has no model-set event either; `apps/server/src/orchestration/decider.ts:1753-1796` — `thread.user-input.dismiss` decides to a plain `thread.activity-appended`; differs: T3 also carries project, archive/settle/snooze/pin, proposed-plan and pull-request events this design does not*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a `/turn` carrying a Codex `/goal …` lands
+on `thread.message-sent` alone — plus `thread.meta-updated` when a new model came with it — and
+writes no `thread.turn-start-requested`: the host starts no turn for it. The adapter's answer, if
+any, is a `goal.status` or `goal.command.failed` activity (goals §5.1).*
+
 *Built: a third layer sits beside the two, and it is **derived**: the thread index,
 `<appdir>/daemon/agent/index.sqlite` (host-wide, WAL, 0600 — it holds the text of every
 conversation, so it is as sensitive as `raw.ndjson`, §10). It projects the domain events into turn
@@ -2102,6 +2217,11 @@ upsertSessionBinding({ threadId, adapter, patch: Partial<ProviderSessionBinding>
 ```
 
 *T3: `packages/contracts/src/orchestration.ts:599-609` — `OrchestrationSession {threadId, status: idle|starting|running|ready|interrupted|stopped|error, providerName, providerInstanceId?, runtimeMode, activeTurnId, lastError, updatedAt}`; `apps/server/src/persistence/ProviderSessionRuntime.ts:36-53` — the resume cursor is a `Schema.NullOr(Schema.Unknown)` blob each adapter writes and parses itself; differs: T3 has no `turnCount` on the head at all — it recomputes it as the maximum `checkpointTurnCount` over the thread's checkpoints, and drops the `interrupted` session status this design folds into `stopped`*
+
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): the head also carries
+`resumeGoalAfterRestart?: true` — head-only like `continueAfterRestart`, written by the `/stop`
+handover for a continuing Codex goal and cleared once the next host's resume has succeeded or
+failed; a resume that a stop cuts short keeps it (goals §5.5).*
 
 The projected timeline is a fold over `events.ndjson`. Items are one of two shapes:
 
@@ -2605,6 +2725,11 @@ command-rejection surfaces (`apps/daemon/src/agent-chat/{service.ts,proxy-routes
 `/interrupt` takes the optional `turnId` so a stale interrupt from a client that has not yet seen
 the turn end cannot kill the next turn.
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): unless that next turn is one a continuing
+Codex goal started by itself: a stale `/interrupt` on such a thread still pauses the goal and then
+interrupts the provider-started turn — the user asked the goal to stop — while a turn the user
+started stays protected (goals §5.6).*
+
 **`/interrupt` is also the only way to stop background work, and it stops all of it.** It is
 addressed to the session, not to a turn, so it is valid with no turn running: the client omits
 `turnId` whenever the session is not `running`, and the adapter kills every live subagent,
@@ -2693,6 +2818,10 @@ every turn, which keeps the host from carrying a setting no adapter reads betwee
 states; the HTTP surface of that rule is 409 `COMPACTION_UNAVAILABLE` on `/compact` and an ordinary
 `{seq}` on a `/turn` the host will hold.
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): except a `/turn` carrying a Codex
+`/goal …`, which is refused with 400 `INVALID_COMMAND` (`Wait for the compaction to finish before
+changing the goal.`) rather than held (goals §5.1).*
+
 **Receipts and responses.** `commandId` is minted by the client (a UUID) and is the idempotency
 key. The host keeps `commandId -> {seq, status}` in `receipts.json` (§5.1) and the response is
 `{seq}` — the sequence the command landed at, or the recorded sequence for a repeated `commandId`,
@@ -2746,6 +2875,9 @@ absence from `AGENT_CHAT_COMMAND_NAMES`).*
 - `GET /api/sessions/:id/thread` → `{head, items, turns, checkpoints, pending, roster, seq}`. With
   `?after=<seq>` the host may answer with events after that sequence instead — see the decision
   rule below. The response says which it is, so the client handles either.
+  *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): the snapshot also carries the fold's
+  `goal` (`ThreadGoal | null`; absent from an older host), which a client adopts as `?? null`
+  (goals §4.4).*
 - `GET /api/sessions/:id/events?after=<seq>` → long-lived chunked NDJSON. Frames:
   `{kind: "snapshot", thread}` when `after` is older than the retained replay window or below a
   revert truncation, then `{kind: "event", seq, event}` for each event, then
@@ -2762,6 +2894,8 @@ absence from `AGENT_CHAT_COMMAND_NAMES`).*
 - `POST /api/agent-host/stop` → the intentional host stop named in §3.3: it writes every
   continuation marker for a running thread with a usable cursor, then drains and stops the host.
   It is the one route here that is not per session.
+  *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): it also marks every thread whose Codex
+  goal continues on a live session with a usable cursor, with no project opt-in (goals §5.5).*
 
 *T3: `packages/contracts/src/orchestration.ts:2164-2177` — the three thread stream frames (`snapshot` / `event` / `synchronized`), adopted verbatim; `:953-963` — the shell stream's own frames, differs: no shell stream here (§6.4); `:2223-2229` — `getTurnDiff` takes `{threadId, fromTurnCount, toTurnCount, ignoreWhitespace?}`, with the `fromTurnCount ≤ toTurnCount` filter at `:2182-2195`*
 
@@ -2914,6 +3048,18 @@ push copy, and collapsing them into one "waiting" bit loses that.
 
 *T3: `packages/contracts/src/orchestration.ts:860-919` — `OrchestrationThreadShell` is the head without the body plus these derived columns (`latestTurn`, `session`, `hasPendingApprovals`, `hasPendingUserInput`, `hasActionableProposedPlan`, `backgroundLiveness`, `planProgress`); differs: `planProgress` is dropped (the checklist is a thread-level surface, §7.3), and we hang the rest on `SessionSummary` and push them on the existing bus instead of running a second `subscribeShell` stream*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): there is a **seventh** field, `goal` —
+`AgentChatGoalSummary {objective, status, continuing}`, or `null` — which the host sets only while
+the thread's goal is unfinished. `continuing` is true when the goal is `active`, the provider starts
+turns by itself (`capabilities.goals.continuesAcrossTurns`: Codex), and either a deploy handover's
+resume mark is still pending (goals §5.5 — whatever the session says, an errored one included) or
+the session is live with a turn running or within 60 s of the last turn settling or the session
+(re)starting (`GOAL_CONTINUATION_GRACE_MS`, so a continuation that never starts cannot read
+"working" forever); the ladder below reads it (`goalContinuingNow`,
+`apps/daemon/src/agent-host/orchestration/orchestrator.ts`). The daemon validates it field-wise
+(`apps/daemon/src/agent-chat/summary.ts`) and copies and compares it with the other six
+(`chat-sessions.ts`). Goals §4.7.*
+
 The activity state is resolved from those fields by one strict priority ladder — this ladder, and
 no per-surface variant of it: pending approval → `waiting`/approval; pending question →
 `waiting`/question; session in `error` or latest turn `failed` → `error`; session starting →
@@ -2951,6 +3097,20 @@ approval, question and error. Differs from T3 in one clause: T3 also requires `i
 "plan"`, which is not on `AgentChatSessionSummaryFields` and would be the wrong test anyway —
 `hasActionableProposedPlan` already means "the LATEST plan is unimplemented" (R6-3), and a thread
 switched out of plan mode after proposing still owes the user that decision.*
+
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): "turn completed → `idle`+finished" and both
+fallbacks yield to a **`goal-continuing` rung**. While the summary's `goal.continuing` is true — a
+Codex goal, which keeps starting its own turns — a settled latest turn is a pause between two of
+them, not the end: the thread resolves as `working`, with no "finished" stamp and no push. The rung
+sits below approval, question, `starting` and a running turn, and above plan-ready and both
+liveness rungs (`apps/daemon/src/agent-chat/activity-ladder.ts`). The `error` rung yields to it,
+taking the host's word. A failed TURN does not end a Codex goal by itself: Codex blocks the goal on
+a turn error (upstream `ActiveGoalStopReason::TurnError`), and that goal update ends `continuing`,
+so the rung holds only until the update lands and the failure then shows. An errored SESSION
+reads continuing only while a goals §5.5 resume mark is pending. `continuing` never feeds
+`backgroundWorkThreadIds`, but a goal's turns follow each other within milliseconds, so a
+code-only deploy's drain waits for the goal to pause, block or end like any running work; a
+goal-aware drain is an open follow-up. Goals §4.7.*
 
 **Amendment (implementation): the trust grant is confined to `projectPath`.** A chat launch
 auto-accepts Claude's project-trust dialog for the thread's project (a never-seen directory is
@@ -3037,6 +3197,10 @@ The heavy payload (`items`, `turns`, `checkpoints`, `roster`) only ships to the 
 this split the Attention Center would have to subscribe to every chat thread in the workspace.
 *T3: `packages/contracts/src/orchestration.ts:860-919` — `OrchestrationThreadShell` (`latestTurn`, `session`, `hasPendingApprovals`, `hasPendingUserInput`, `hasActionableProposedPlan`, `backgroundLiveness`, `planProgress`); `:773-833` — `OrchestrationThread` adds `messages`, `activities`, `checkpoints`, `proposedPlans` and is fetched only for the open thread*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): seven fields, not six — §6.4 gained
+`goal`, which is what lets the tab strip and the sidebar draw a goal marker before the status dot
+(`SessionStatusDot`'s `goal`, goals §8.3) without opening a thread stream.*
+
 ### 7.2 Store
 
 A zustand slice per open thread, created on tab open and dropped on tab close:
@@ -3046,6 +3210,10 @@ stream frames. Rows are built by three memoised layers, entries → rows → sta
 fast path and a per-variant `isRowUnchanged`, so one token changes one row object. Closed tabs
 keep nothing; the tab strip reads only `SessionSummary`.
 *T3: `apps/web/src/session-logic.ts:1654-1715` — `deriveTimelineEntriesWithState` (streaming fast path, strict-prefix append, full rebuild last); `:1620-1651` — `isStreamingMessageTextUpdate` / `replaceStreamingTimelineMessages`; `apps/web/src/components/chat/MessagesTimeline.logic.ts:1477-1554` — `replaceStreamingMessageRows` / `deriveMessagesTimelineRowsWithState`; `:1556-1675` — `computeStableMessagesTimelineRows` + the hand-written per-variant `isRowUnchanged`; `apps/web/src/components/chat/MessagesTimeline.tsx:4157-4174` — `useStableRows`. differs: T3 holds domain state in Effect Atom with per-thread scoped resources (`packages/client-runtime/src/state/threads.ts:178`); we use one zustand slice and a hand-rolled reducer, so the memoisation T3 gets partly from the React Compiler must be written by hand*
+
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): the slice also carries the fold's `goal`
+— the snapshot's, then every live `goal.updated` row that parses (goals §8.1,
+`packages/ui/src/lib/agent-chat/contracts.ts`) — and rows gained a `goal-marker` kind (goals §8.4).*
 
 **The activity item is one normalised record, not a component taxonomy.** The presentation
 resolver reads §5.1's promoted fields — `tone`, `activityKind` (the originating event kind),
@@ -3332,6 +3500,12 @@ effort option and sends nothing (§4.6.5). A paste that folds into a text attach
 **inline in the composer** rather than as a toast, because a toast for something that already
 produced a visible chip is noise (`packages/ui/src/components/agent-chat/composer/`).*
 
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a disabled account chip names the host's
+own reason when there is one, in `identitySwitchRefusal`'s order (`chatAccountSwitchRefusal`,
+`lib/agent-chat/account-switch.ts`): `Wait for the context compaction to finish before switching
+accounts.` during a compaction, `Pause the goal before switching accounts.` under a continuing goal
+(goals §5.5) — and "Available when the agent is idle" otherwise.*
+
 *Built: **attachments name themselves in the text.** An image inserts `[Image #N]` at the caret
 when it is staged — the CLI's own placeholder for a pasted image — numbered by its position among
 the staged images; removing it drops the placeholder and renumbers the later ones
@@ -3367,6 +3541,15 @@ question is pending.
 preference; holding the mod key with Enter does the opposite for that one message. A separate
 binding sends the head of the queue immediately, leaving the current draft alone.
 *T3: `apps/web/src/components/ChatView.tsx:7629-7658` — the XOR `(followUpBehavior === "queue") !== (submissionIntent === "alternate")`; `apps/web/src/composer-logic.ts:27-44` — `"alternate"` from mod+Enter while running; `packages/shared/src/keybindings.ts:45` — `mod+shift+enter` → `thread.steerQueuedMessage`*
+
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): two exceptions. A command the host applies
+itself is never queued: a typed `/goal …` where the host parses it (Codex) starts no turn and never
+reaches the model, so holding a Pause until the goal's own turn ends would defeat it — and no open
+approval or question holds it back either. And the goal chip's actions are never queued, on every
+adapter (`sendExternalText`); only a host-parsed one (Codex) also passes an open approval or
+question card — for Claude and Grok the card still holds it back (`resolveFollowUpDisposition`,
+`pendingRequestBlocksSend`, `packages/ui/src/components/agent-chat/composer/composer-submission.ts`;
+goals §8.2, §8.5).*
 
 The ghost bubble is a dashed, right-aligned, dimmed user bubble carrying a "Queued" clock chip whose
 tooltip says *when* it will go — "Sends after the next tool call or when the turn ends", or "Sends
@@ -3734,6 +3917,12 @@ copy must say what the setting resumes (a thread with a saved resume cursor) and
 thread without one needs a new message).
 
 *T3: `docs/user/updating.md:8-22` — "Server updates restart the connection and can interrupt active agents"; the continuation setting is off by default and "threads without saved provider resume state need a new message"; `apps/server/src/cli/update.ts:468-487` — the CLI names what a restart interrupts, prompts, and refuses to restart non-interactively without `--yes`*
+
+*Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a continuing Codex goal is the exception on
+both counts. A drain-restart waits for it to pause, block or end — its turns follow each other
+within milliseconds, so a settled moment to restart in almost never comes — and a manual
+restart's `/stop` marks it, so the next host resumes it without the per-project setting (goals
+§4.7, §5.5). A crash writes no mark; the goal continues the next time its session starts.*
 
 **The thread log is outside every rollback.** Rolling the deploy back to an older host rolls back
 code, never `<appdir>/daemon/agent/threads/`: events appended by the newer host stay on disk and

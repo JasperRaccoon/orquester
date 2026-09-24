@@ -2,6 +2,7 @@ import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { useKeyboardLayer } from "../../hooks/use-keyboard-layer";
 
 export interface ModalProps {
   open: boolean;
@@ -20,6 +21,9 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+  // A keyboard layer while open: Escape is the modal's to close, never a
+  // running chat turn's to interrupt (`lib/keyboard-layers.ts`).
+  useKeyboardLayer(open);
 
   if (!open) {
     return null;

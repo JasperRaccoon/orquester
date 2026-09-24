@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { isValidName, parseSessionsConfig } from "./index.ts";
+import { isValidName, parseAgentThreadHead, parseSessionsConfig } from "./index.ts";
 import { assertInsideFsRoot, FsSandboxError } from "./fs.ts";
 
 test("isValidName rejects traversal and empties", () => {
@@ -44,4 +44,57 @@ test("assertInsideFsRoot allows in-root paths and rejects escapes", async () => 
   assert.equal(await assertInsideFsRoot(root, join(root, "ws", "new")), join(root, "ws", "new"));
   await assert.rejects(() => assertInsideFsRoot(root, join(root, "..", "escape")), FsSandboxError);
   await assert.rejects(() => assertInsideFsRoot(root, "/etc"), FsSandboxError);
+});
+
+// --- goals §5.5: the head's `resumeGoalAfterRestart` ------------------------
+
+const persistedHead = {
+  id: "t1",
+  projectPath: "/w/p",
+  cwd: "/w/p",
+  title: "Chat",
+  adapter: "codex",
+  refId: "codex",
+  accountId: "acc1",
+  home: "account",
+  modelSelection: { model: "gpt-5" },
+  runtimeMode: "approval-required",
+  session: { status: "ready", activeTurnId: null, resumeCursor: { threadId: "p1" } },
+  turnCount: 2,
+  seq: 40,
+  createdAt: "2026-09-24T00:00:00.000Z",
+  updatedAt: "2026-09-24T00:05:00.000Z"
+};
+
+test("a head carrying the goal-resume marker round-trips it", () => {
+  const parsed = parseAgentThreadHead({ ...persistedHead, resumeGoalAfterRestart: true });
+  assert.ok(parsed);
+  assert.equal(parsed.resumeGoalAfterRestart, true);
+  // …next to the other head-only marker, which it never disturbs.
+  const both = parseAgentThreadHead({
+    ...persistedHead,
+    continueAfterRestart: { turnId: "turn-7" },
+    resumeGoalAfterRestart: true
+  });
+  assert.deepEqual(both?.continueAfterRestart, { turnId: "turn-7" });
+  assert.equal(both?.resumeGoalAfterRestart, true);
+  // Through JSON, as meta.json holds it.
+  const reread = parseAgentThreadHead(JSON.parse(JSON.stringify(parsed)));
+  assert.equal(reread?.resumeGoalAfterRestart, true);
+});
+
+test("a head written before goals — no marker — still parses, and says no", () => {
+  const parsed = parseAgentThreadHead(persistedHead);
+  assert.ok(parsed, "an older head is not a broken one");
+  assert.equal(parsed.resumeGoalAfterRestart, undefined);
+  assert.equal("resumeGoalAfterRestart" in JSON.parse(JSON.stringify(parsed)), false);
+});
+
+test("a malformed goal-resume marker is dropped, never the whole head", () => {
+  // A bad optional marker must not turn the thread into an unreadable one.
+  for (const value of [false, "yes", 1, null, { turnId: "x" }]) {
+    const parsed = parseAgentThreadHead({ ...persistedHead, resumeGoalAfterRestart: value });
+    assert.ok(parsed, JSON.stringify(value));
+    assert.equal(parsed.resumeGoalAfterRestart, undefined, JSON.stringify(value));
+  }
 });

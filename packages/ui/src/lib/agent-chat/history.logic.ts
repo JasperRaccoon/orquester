@@ -691,6 +691,7 @@ function rowTurnId(row: AgentChatTimelineRow): string | null {
       return row.turnId;
     case "work-toggle":
     case "turn-diff":
+    case "goal-marker":
       return row.turnId;
     case "work":
       return row.groupedEntries[0]?.turnId ?? null;

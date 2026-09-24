@@ -521,3 +521,80 @@ describe("a subagent's own messages in its drill-in (§7.6)", () => {
     assert.deepEqual(parentMessages, ["go", "parent answer"]);
   });
 });
+
+describe("goal rows (goals §8.4)", () => {
+  const goal = { objective: "Make CI green", status: "active" };
+  const goalRow = (payload: unknown, summary: string, tone: "info" | "error" = "info") =>
+    activity("goal.updated", payload, { tone, summary, turnId: "t1" });
+
+  it("a goal update is a marker entry carrying its change, under the row's own summary", () => {
+    const entry = workLogEntryFromActivity(
+      goalRow({ goal: { ...goal, rounds: 2 }, change: "checked" }, "Goal check 2: not met — lint fails")
+    );
+    assert.equal(entry.label, "Goal check 2: not met — lint fails");
+    assert.deepEqual(entry.goal, { change: "checked", objective: "Make CI green", rounds: 2 });
+    assert.equal(entry.tone, "info");
+  });
+
+  it("an ended goal's marker carries what it cost, read off the goal that ended", () => {
+    const entry = workLogEntryFromActivity(
+      goalRow(
+        {
+          goal: null,
+          change: "failed",
+          previous: { ...goal, status: "failed", rounds: 5, elapsedMs: 60_000, lastCheck: "impossible" }
+        },
+        "Goal can't be met: impossible",
+        "error"
+      )
+    );
+    assert.deepEqual(entry.goal, {
+      change: "failed",
+      objective: "Make CI green",
+      rounds: 5,
+      elapsedMs: 60_000
+    });
+    assert.equal(entry.tone, "error");
+  });
+
+  it("drops `progress` from the work log and keeps every other change", () => {
+    const rows = [
+      goalRow({ goal, change: "set" }, "Goal set: Make CI green"),
+      goalRow({ goal: { ...goal, phase: "executing" }, change: "progress" }, "Goal progress"),
+      goalRow({ goal: { ...goal, status: "paused" }, change: "paused" }, "Goal paused"),
+      goalRow({ goal: null, change: "cleared", previous: goal }, "Goal cleared: Make CI green")
+    ];
+    assert.deepEqual(
+      deriveWorkLogEntries(rows).map((entry) => entry.label),
+      ["Goal set: Make CI green", "Goal paused", "Goal cleared: Make CI green"]
+    );
+  });
+
+  it("keeps a goal row it cannot read as the generic row, with its summary (goals §9)", () => {
+    const [entry] = deriveWorkLogEntries([
+      goalRow({ goal: null, change: "renamed" }, "Goal renamed")
+    ]);
+    assert.ok(entry, "never a silent drop");
+    assert.equal(entry.label, "Goal renamed");
+    assert.equal(entry.goal, undefined, "not a marker: nothing about it can be trusted");
+  });
+
+  it("a host `/goal` answer and a failed goal command are generic info and error rows", () => {
+    const [status, failed] = deriveWorkLogEntries([
+      activity("goal.status", { summary: "Goal active: Make CI green" }, {
+        tone: "info",
+        summary: "Goal active: Make CI green"
+      }),
+      activity("goal.command.failed", { detail: "no goal exists" }, {
+        tone: "error",
+        summary: "Goal command failed"
+      })
+    ]);
+    assert.equal(status?.label, "Goal active: Make CI green");
+    assert.equal(status?.tone, "info");
+    assert.equal(status?.goal, undefined);
+    assert.equal(failed?.tone, "error");
+    assert.equal(failed?.detail, "no goal exists", "the provider's own message rides the row");
+    assert.equal(failed?.goal, undefined);
+  });
+});

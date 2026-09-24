@@ -81,13 +81,20 @@ const ADAPTER_ID: AgentAdapterId = "grok";
  *
  * `supportsConversationRollback: false` stays too: there is no provider-side
  * rollback, and §5.5 step 2 refuses before anything is touched.
+ *
+ * `goals` (goals §4.5): `/goal …` is forwarded and the CLI parses it; the goal
+ * runs inside the one turn that set it, so the provider never starts a turn by
+ * itself; and `/goal status|pause|resume|clear` are prompts that queue behind
+ * a running goal turn (fixtures README observation 19), which is why the chip
+ * offers resume and clear only.
  */
 export const GROK_CAPABILITIES: AdapterCapabilities = {
   sessionModelSwitch: "in-session",
   supportsConversationRollback: false,
   showPlanModeToggle: false,
   reportsContextWindow: true,
-  compaction: { type: "slash-command", command: "/compact" }
+  compaction: { type: "slash-command", command: "/compact" },
+  goals: { command: "provider", actions: ["resume", "clear"], continuesAcrossTurns: false }
 };
 
 /**
@@ -251,6 +258,11 @@ class GrokAdapter implements AgentAdapter {
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       ...(input.resumeCursor === undefined ? {} : { resumeCursor: input.resumeCursor }),
+      // Goals §5.3. `carryGoal` needs nothing here: a Grok goal lives in the
+      // session's own files, which every account home shares, so a load
+      // under the new account replays it like any other.
+      knownGoal: input.knownGoal ?? null,
+      now: () => this.context.clock.now().getTime(),
       command,
       env,
       clientInfo: { name: "orquester", version: "1" },

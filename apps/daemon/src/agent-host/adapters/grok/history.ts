@@ -34,6 +34,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
+import { goalCommandFromReminder } from "./goal.ts";
 
 /**
  * The method stamped on every projected event's `raw`. The SOURCE is
@@ -145,8 +146,10 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
         // `Attached files:` block it appended (`attachment-lines.ts`):
         // provider input, not the user's own text. Stripped here, from the
         // whole collected message — a chunk is not a message, and a block
-        // can straddle two.
-        const text = stripAttachmentPathLines(item.text);
+        // can straddle two. A goal's message is replayed as the CLI's ~6 KB
+        // goal `<system-reminder>`, never the `/goal …` that was typed, so it
+        // reads as that command instead (goals §6.3 item 5).
+        const text = stripAttachmentPathLines(goalCommandFromReminder(item.text) ?? item.text);
         events.push(
           event(
             "item.completed",

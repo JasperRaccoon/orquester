@@ -94,6 +94,52 @@ const initializeResult = {
 
 let promptSeq = 0;
 
+// The `goal` scenario's goal (goals §6.3). Every field is a real
+// `goal_updated` row's, in its order (fixtures README observation 36); the
+// text is invented.
+const goalId = "3f6b2c1e-8a4d-4f0b-9c2e-7d5a1b9e0c44";
+const goalObjective = "Audit every request handler for cross-clinic data access and fix each hole";
+
+function goalUpdate(fields) {
+  return {
+    sessionUpdate: "goal_updated",
+    goal_id: goalId,
+    objective: goalObjective,
+    status: "active",
+    phase: "executing",
+    tokens_used: 0,
+    elapsed_ms: 0,
+    total_deliverables: 0,
+    completed_deliverables: 0,
+    total_worker_rounds: 0,
+    total_verify_rounds: 0,
+    token_baseline: 15509,
+    finished_subagent_tokens: 0,
+    last_event: "goal_created",
+    last_event_timestamp: "2026-09-24T09:00:00.622415836+00:00",
+    ...fields
+  };
+}
+
+const goalRoundOne = {
+  tokens_used: 1200000,
+  elapsed_ms: 2400000,
+  total_worker_rounds: 1,
+  last_event: "worker_completed",
+  last_event_detail: "Round one: the handlers were inventoried.",
+  last_event_timestamp: "2026-09-24T09:40:00.176452626+00:00",
+  classifier_runs_attempted: 1,
+  classifier_max_runs: 6,
+  verifying_completion: true
+};
+
+/** What the CLI replays as the goal's user message: a reminder, not the typed `/goal`. */
+const goalReminder =
+  `<system-reminder>\nA goal has been set: ${goalObjective}\n\n` +
+  "You are working directly on this goal across multiple turns. Deliver\n" +
+  "EVERYTHING the user asked for yourself — no follow-up questions, no manual\n" +
+  "steps left for the user.\n\nStart now.\n</system-reminder>\n\n";
+
 function handle(frame) {
   const { id, method, params } = frame;
 
@@ -141,6 +187,30 @@ function handle(frame) {
         error: { code: -32603, message: "Path not found.", data: { code: "FS_NOT_FOUND" } }
       });
       return;
+    }
+    if (scenario === "goal") {
+      // A goal session's persisted `updates.jsonl`, replayed: the goal's rows
+      // come BEFORE its user message, which is the reminder block.
+      notify("_x.ai/session/update", {
+        sessionId,
+        update: goalUpdate({}),
+        _meta: { eventId: `${sessionId}-2`, agentTimestampMs: 1790240400622, isReplay: true }
+      });
+      notify("_x.ai/session/update", {
+        sessionId,
+        update: goalUpdate({ planning: true }),
+        _meta: { eventId: `${sessionId}-3`, agentTimestampMs: 1790240400623, isReplay: true }
+      });
+      notify("session/update", {
+        sessionId,
+        update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: goalReminder } },
+        _meta: { eventId: `${sessionId}-4`, agentTimestampMs: 1790240400700, isReplay: true }
+      });
+      notify("_x.ai/session/update", {
+        sessionId,
+        update: goalUpdate(goalRoundOne),
+        _meta: { eventId: `${sessionId}-5`, agentTimestampMs: 1790242800176, isReplay: true }
+      });
     }
     // Replay, on the underscore-prefixed channel T3 does not register.
     notify("_x.ai/session/update", {
@@ -352,6 +422,99 @@ async function runPrompt(id, params) {
     await waitFor(() => cancelled);
     result(id, { stopReason: "cancelled", _meta: { sessionId, promptId } });
     return;
+  }
+
+  if (scenario === "goal") {
+    // The whole goal runs inside this one prompt turn. Its frames go out on
+    // every private-channel spelling the adapter registers — the last one
+    // LIVE on the replay method name — and the completion twice, verbatim.
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: goalUpdate({}),
+      _meta: { eventId: `${sessionId}-g1`, agentTimestampMs: 1790240400622 }
+    });
+    // The rest of a goal run's private traffic (fixtures README observation
+    // 37): the goal engine's planner as a subagent, a transport retry, and a
+    // compaction checkpoint — real shapes, invented ids.
+    const planner = "01a05789-0cc0-7563-9e4f-4b4b576928cc";
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: {
+        sessionUpdate: "subagent_spawned",
+        subagent_id: planner,
+        parent_session_id: sessionId,
+        parent_prompt_id: promptId,
+        child_session_id: planner,
+        subagent_type: "general-purpose",
+        description: "goal plan writer",
+        effective_context_source: "new",
+        model: "grok-4.6"
+      },
+      _meta: { eventId: `${sessionId}-s1`, agentTimestampMs: 1790240400623 }
+    });
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: {
+        sessionUpdate: "retry_state",
+        type: "retrying",
+        attempt: 1,
+        max_retries: 15,
+        reason: "request error: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses)"
+      },
+      _meta: { eventId: `${sessionId}-r1`, agentTimestampMs: 1790240400700 }
+    });
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: {
+        sessionUpdate: "subagent_finished",
+        subagent_id: planner,
+        child_session_id: planner,
+        status: "completed",
+        tool_calls: 44,
+        turns: 1,
+        duration_ms: 222472,
+        tokens_used: 66865,
+        output: "Done",
+        will_wake: false
+      },
+      _meta: { eventId: `${sessionId}-s2`, agentTimestampMs: 1790240623095 }
+    });
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: {
+        sessionUpdate: "compaction_checkpoint",
+        checkpoint_id: "da9439f2-d6e4-4479-9507-e7909c769b6a",
+        prompt_index_at_compaction: 3,
+        checkpoint_file: "compaction_checkpoints/da9439f2-d6e4-4479-9507-e7909c769b6a.json",
+        schema_version: 1,
+        created_at: "2026-09-24T09:03:42.539454633+00:00"
+      },
+      _meta: { eventId: `${sessionId}-c1`, agentTimestampMs: 1790240622539 }
+    });
+    notify("x.ai/session_notification", {
+      sessionId,
+      update: goalUpdate(goalRoundOne),
+      _meta: { eventId: `${sessionId}-g2`, agentTimestampMs: 1790242800176 }
+    });
+    const completed = goalUpdate({
+      ...goalRoundOne,
+      status: "complete",
+      phase: "idle",
+      last_event: "goal_completed",
+      last_event_detail: undefined,
+      last_event_timestamp: "2026-09-24T10:00:00.291969815+00:00",
+      verifying_completion: undefined,
+      last_classifier_verdict: "achieved",
+      last_classifier_details_path: "/scratch/goal-classifier-1.md"
+    });
+    for (const eventId of ["g3", "g4"]) {
+      notify("_x.ai/session/update", {
+        sessionId,
+        update: completed,
+        _meta: { eventId: `${sessionId}-${eventId}`, agentTimestampMs: 1790244000291 }
+      });
+    }
+    // …then the turn settles as the happy path does.
   }
 
   notify("session/update", {

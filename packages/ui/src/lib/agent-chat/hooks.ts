@@ -195,7 +195,8 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
       // the settled turn is in the snapshot (fix-wave E1). The status line
       // reads any non-null value as "a turn is running", so `null` is the
       // whole signal that it stopped.
-      turnStartedAt: turnStartedAt(latestTurn, slice.sessionStatus)
+      turnStartedAt: turnStartedAt(latestTurn, slice.sessionStatus),
+      isCompacting
     };
   }, [slice, rows, snapshot, isCompacting]);
 };

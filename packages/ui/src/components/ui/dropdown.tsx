@@ -1,6 +1,15 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
+import { useKeyboardLayer } from "../../hooks/use-keyboard-layer";
+import {
+  dropdownDismissSubscription,
+  dropdownFocusTarget,
+  dropdownHorizontalPosition,
+  dropdownPanelAttributes,
+  dropdownPanelMaxWidth,
+  type DropdownRole
+} from "./dropdown-logic";
 
 export interface DropdownProps {
   trigger: React.ReactNode;
@@ -27,6 +36,37 @@ export interface DropdownProps {
   hoverOpenDelay?: number;
   /** Grace after the pointer leaves, so the gap to the panel is crossable. */
   hoverCloseDelay?: number;
+  /**
+   * What the panel announces itself as: a `menu` (the default, unchanged), or
+   * a `dialog` for a panel holding a readout and plain buttons rather than
+   * menu items — the goal popover (goals §8.2). The trigger then says it opens
+   * a dialog.
+   */
+  role?: DropdownRole;
+  /** The panel's accessible name. */
+  ariaLabel?: string;
+  /**
+   * Move focus into the panel when it opens — its first control, else the
+   * panel itself — and give it back to the trigger when the panel closes from
+   * the keyboard or from one of its own controls (an outside click leaves
+   * focus where the click put it). Off by default: every existing menu keeps
+   * its focus behaviour.
+   */
+  focusOnOpen?: boolean;
+  /**
+   * Extra classes for the trigger `<button>`: a focus ring, or `min-w-0
+   * shrink` so a trigger in a crowded flex row may shrink below its content
+   * (its own content then truncates) — the goal chip in a 360 px status line.
+   */
+  triggerClassName?: string;
+  /**
+   * Subscribe to the event that closes an open panel, e.g.
+   * `dismissWhenChatTabLeaves(sessionId)`: a chat tab's popover must not
+   * outlive its own tab being on screen, and must not close when that tab is
+   * the one being activated. Called with the dismiss; returns its unsubscribe.
+   * Focus is not moved back to the trigger — it lives in the tab just left.
+   */
+  dismissOn?: (dismiss: () => void) => () => void;
 }
 
 interface DropdownContextValue {
@@ -45,6 +85,7 @@ interface PanelPosition {
   left?: number;
   right?: number;
   maxHeight: number;
+  maxWidth: number;
 }
 
 const GAP = 4;
@@ -55,6 +96,12 @@ const MARGIN = 8;
  * with fixed positioning derived from the trigger, so it never gets clipped or
  * pushed around by `overflow`/flex ancestors (e.g. the scrollable tab strip).
  * Closes on outside click or Escape.
+ *
+ * Open, it is a keyboard layer (`lib/keyboard-layers.ts`): Escape is its to
+ * close, so the chat's capture-phase listeners stand down instead of
+ * interrupting a running turn. It flips vertically when there is no room
+ * below, and a panel that would leave the viewport sideways is clamped back
+ * inside (`dropdownHorizontalPosition`).
  */
 export const Dropdown: React.FC<DropdownProps> = ({
   trigger,
@@ -64,15 +111,41 @@ export const Dropdown: React.FC<DropdownProps> = ({
   className,
   openOnHover = false,
   hoverOpenDelay = 150,
-  hoverCloseDelay = 150
+  hoverCloseDelay = 150,
+  role,
+  ariaLabel,
+  focusOnOpen = false,
+  triggerClassName,
+  dismissOn
 }) => {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<PanelPosition | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const close = useCallback(() => setOpen(false), []);
+  /**
+   * Close from the keyboard or from one of the panel's own controls. A panel
+   * that took focus gives it back to its trigger — never stranded on a control
+   * that has just disappeared. (An outside click closes without this: focus
+   * goes where the click put it.)
+   */
+  const close = useCallback(() => {
+    setOpen(false);
+    if (focusOnOpen) triggerRef.current?.focus({ preventScroll: true });
+  }, [focusOnOpen]);
+
+  // Open, it is a keyboard layer: Escape is this panel's to close, so the
+  // chat's capture-phase listeners stand down (`lib/keyboard-layers.ts`).
+  useKeyboardLayer(open);
+
+  // Closed from outside (the caller's `dismissOn`): no focus move — the
+  // trigger belongs to whatever just went off screen.
+  const dismissQuietly = useCallback(() => setOpen(false), []);
+  useEffect(
+    () => dropdownDismissSubscription(open, dismissOn, dismissQuietly),
+    [open, dismissOn, dismissQuietly]
+  );
 
   const cancelHoverTimer = useCallback(() => {
     if (hoverTimer.current !== null) {
@@ -123,15 +196,40 @@ export const Dropdown: React.FC<DropdownProps> = ({
     const vertical = openUp
       ? { bottom: window.innerHeight - rect.top + GAP }
       : { top: rect.bottom + GAP };
-    const horizontal =
-      align === "right" ? { right: window.innerWidth - rect.right } : { left: rect.left };
+    // Anchored to the trigger; clamped inside the viewport once the panel has
+    // been measured (the first pass has no panel yet — `attachPanel` measures
+    // it before the browser paints).
+    const horizontal = dropdownHorizontalPosition({
+      align,
+      triggerLeft: rect.left,
+      triggerRight: rect.right,
+      viewportWidth: window.innerWidth,
+      panelWidth: panelRef.current?.getBoundingClientRect().width ?? null,
+      margin: MARGIN
+    });
 
     setPosition({
       ...vertical,
       ...horizontal,
-      maxHeight: Math.max(120, (openUp ? spaceAbove : spaceBelow) - GAP)
+      maxHeight: Math.max(120, (openUp ? spaceAbove : spaceBelow) - GAP),
+      maxWidth: dropdownPanelMaxWidth(window.innerWidth, MARGIN)
     });
   }, [align]);
+
+  /**
+   * The panel mounting: measure it and re-position before the browser paints
+   * (a clamped panel never visibly jumps), and move focus into it when asked.
+   * A new panel element mounts on every open, so this runs once per open.
+   */
+  const attachPanel = useCallback(
+    (node: HTMLDivElement | null) => {
+      panelRef.current = node;
+      if (!node) return;
+      updatePosition();
+      if (focusOnOpen) dropdownFocusTarget(node).focus({ preventScroll: true });
+    },
+    [focusOnOpen, updatePosition]
+  );
 
   // Position before paint to avoid a flash at the wrong spot.
   useLayoutEffect(() => {
@@ -156,7 +254,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setOpen(false);
+        close();
       }
     };
     const onReflow = () => updatePosition();
@@ -172,14 +270,14 @@ export const Dropdown: React.FC<DropdownProps> = ({
       window.removeEventListener("resize", onReflow);
       window.removeEventListener("scroll", onReflow, true);
     };
-  }, [open, updatePosition]);
+  }, [close, open, updatePosition]);
 
   return (
     <>
       <button
         ref={triggerRef}
         type="button"
-        className="inline-flex app-no-drag"
+        className={cn("inline-flex app-no-drag", triggerClassName)}
         onClick={() => {
           // A click is decisive: it must not be undone by a hover timer that
           // was already in flight when the pointer arrived.
@@ -187,11 +285,15 @@ export const Dropdown: React.FC<DropdownProps> = ({
           setOpen((value) => !value);
         }}
         aria-expanded={open}
+        // A dialog says so before it opens; a menu keeps the markup it had.
+        aria-haspopup={role === "dialog" ? "dialog" : undefined}
         // Marks the hover affordance in the DOM: it is the only observable
         // trace of `openOnHover` (handlers are not markup), so a render test
         // can assert the wiring, and a debugger can see why a panel opened
         // without a click.
         data-hover-open={openOnHover ? "true" : undefined}
+        // The same, for a panel that takes focus when it opens.
+        data-focus-on-open={focusOnOpen ? "true" : undefined}
         {...hoverProps}
       >
         {trigger}
@@ -200,8 +302,8 @@ export const Dropdown: React.FC<DropdownProps> = ({
         position &&
         createPortal(
           <div
-            ref={panelRef}
-            role="menu"
+            ref={attachPanel}
+            {...dropdownPanelAttributes({ role, ariaLabel, focusOnOpen })}
             {...hoverProps}
             style={{
               position: "fixed",
@@ -209,13 +311,15 @@ export const Dropdown: React.FC<DropdownProps> = ({
               bottom: position.bottom,
               left: position.left,
               right: position.right,
-              maxHeight: position.maxHeight
+              maxHeight: position.maxHeight,
+              maxWidth: position.maxWidth
             }}
             className={cn(
               // z-[120] so the panel sits above Modal (z-[100]) / BottomSheet
               // (z-[110]) when composed inside one — matches ContextMenu/Tooltip.
               "z-[120] overflow-y-auto rounded-md border border-neutral-800",
               "bg-neutral-900 p-1 shadow-xl shadow-black/40 app-no-drag",
+              focusOnOpen && "focus:outline-none",
               width,
               className
             )}

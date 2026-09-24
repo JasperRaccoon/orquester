@@ -416,6 +416,43 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     assert.equal(rows[0]!.summary, "Testing");
   });
 
+  it("goal progress rows collapse into one, and the goal follows every replacement", async () => {
+    // The same rules the `task.progress` row above lives by: one row, at the
+    // place the first tick took, carrying the newest state — and the fold
+    // derives the thread's goal from the row even when it replaces in place.
+    const { ingestion, sink } = harness();
+    const goal = { objective: "Make CI green", status: "active" as const };
+    await ingestion.ingest(runtimeEvent("thread.goal.updated", { goal, change: "set" }));
+    for (const rounds of [1, 2, 3]) {
+      await ingestion.ingest(
+        runtimeEvent("thread.goal.updated", { goal: { ...goal, rounds }, change: "progress" })
+      );
+      await ingestion.ingest(
+        runtimeEvent("item.started", { itemType: "command_execution", title: `step ${rounds}` }, {
+          itemId: `call-${rounds}`,
+          eventId: `tool-${rounds}`
+        })
+      );
+    }
+    await ingestion.drain();
+    const state = fold(sink.events());
+    const goalRows = activities(state).filter((row) => row.activityKind === "goal.updated");
+    assert.deepEqual(
+      goalRows.map((row) => row.id).filter((id) => id.startsWith("goal-progress:")),
+      [`goal-progress:${THREAD_ID}`],
+      "one progress row, however many ticks"
+    );
+    assert.equal(goalRows.length, 2, "the set row and the one progress row");
+    assert.equal(state.goal?.rounds, 3, "the goal follows the in-place replacement");
+    // Ordering: replaced in place, at the first tick's position — before the
+    // first tool row, not after the last.
+    const ids = activities(state).map((row) => row.id);
+    assert.ok(
+      ids.indexOf(`goal-progress:${THREAD_ID}`) < ids.indexOf("tool-1"),
+      "the row keeps the position its first tick took"
+    );
+  });
+
   it("the compaction marker keeps its token counts through the fold", async () => {
     const { ingestion, sink } = harness();
     await ingestion.ingest(

@@ -10,9 +10,10 @@
  * **Activity-group boundaries are mechanical** (§7.3): a group starts at the
  * first reasoning row or plain tool row of a turn and runs until a non-grouping
  * entry, a turn-id change, or a row the user collapsed out. Errors, answered
- * questions, subagent-spawn rows and compaction markers are hoisted out as
- * their own rows — an error must never hide inside a collapsed summary line —
- * and a run with no reasoning row is a plain tool group, not an activity group.
+ * questions, subagent-spawn rows, compaction markers and a goal's own rows
+ * (goals §8.4) are hoisted out as their own rows — an error must never hide
+ * inside a collapsed summary line — and a run with no reasoning row is a plain
+ * tool group, not an activity group.
  *
  * `isRowUnchanged` is hand-written per variant on purpose: React 18 with no
  * compiler means identity preservation is the whole performance story, and a
@@ -28,6 +29,7 @@
  */
 
 import {
+  GOAL_STATUS_ACTIVITY_KIND,
   startedTurns,
   type Checkpoint,
   type LatestTurnSummary,
@@ -229,7 +231,8 @@ export function isGroupingEntry(entry: TimelineEntry): boolean {
     entry.entry.questionAnswer === undefined &&
     entry.entry.sourceActivityKind !== "context-compaction" &&
     entry.entry.sourceActivityKind !== "thread.state.changed" &&
-    entry.entry.tone !== "error"
+    entry.entry.tone !== "error" &&
+    !isGoalEntry(entry)
   );
 }
 
@@ -238,6 +241,24 @@ function isCompactionEntry(entry: TimelineEntry): boolean {
     entry.kind === "work" &&
     (entry.entry.sourceActivityKind === "context-compaction" ||
       entry.entry.sourceActivityKind === "thread.state.changed")
+  );
+}
+
+/** A goal's landmark (goals §8.4): its own `goal-marker` row, like a compaction. */
+function isGoalMarkerEntry(entry: TimelineEntry): boolean {
+  return entry.kind === "work" && entry.entry.goal !== undefined;
+}
+
+/**
+ * A goal's own row — a marker, or the host's answer to a `/goal` (goals §5.1,
+ * §8.4). Neither is ever grouped: a marker is a landmark, and a status answer
+ * is what the user just asked for, which must not hide inside a collapsed
+ * "Ran 3 commands" or a thinking group.
+ */
+function isGoalEntry(entry: TimelineEntry): boolean {
+  return (
+    isGoalMarkerEntry(entry) ||
+    (entry.kind === "work" && entry.entry.sourceActivityKind === GOAL_STATUS_ACTIVITY_KIND)
   );
 }
 
@@ -407,11 +428,14 @@ function deriveTurnFolds(input: {
     const terminalIndex = group.terminalEntry
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
       : group.entries.length;
-    // Thinking blocks do not count towards "one trailing activity".
+    // Thinking blocks do not count towards "one trailing activity", and
+    // neither does a goal marker: it is never folded, so it must not change
+    // what else is.
     const trailingEntryCount = group.entries.filter(
       (candidate, candidateIndex) =>
         candidateIndex > terminalIndex &&
-        !(candidate.kind === "message" && isGroupMessage(candidate.message))
+        !(candidate.kind === "message" && isGroupMessage(candidate.message)) &&
+        !isGoalMarkerEntry(candidate)
     ).length;
 
     for (const [index, entry] of group.entries.entries()) {
@@ -427,10 +451,14 @@ function deriveTurnFolds(input: {
       if (!isCompaction && !isReasoning && index > terminalIndex && !isSingleTrailingActivity) {
         continue;
       }
-      // User input and subagent batches stay visible after their turn settles.
+      // User input and subagent batches stay visible after their turn settles,
+      // and so do a goal's markers (goals §8.4): the story of the goal — set,
+      // checked, achieved — outlives the work it drove.
       if (
         entry.kind === "work" &&
-        (entry.entry.questionAnswer !== undefined || entry.entry.agentSpawn !== undefined)
+        (entry.entry.questionAnswer !== undefined ||
+          entry.entry.agentSpawn !== undefined ||
+          entry.entry.goal !== undefined)
       ) {
         continue;
       }
@@ -722,6 +750,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       entry.kind !== "work" ||
       entry.entry.questionAnswer !== undefined ||
       isCompactionEntry(entry) ||
+      isGoalEntry(entry) ||
       entry.entry.tone === "error"
     ) {
       break;
@@ -932,14 +961,37 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       continue;
     }
 
+    // ── Goal marker (goals §8.4) ──────────────────────────────────────────
+    if (timelineEntry.kind === "work" && timelineEntry.entry.goal !== undefined) {
+      const goal = timelineEntry.entry.goal;
+      // Only an ending has a cost worth a line; the counters of a set or a
+      // check are the chip's to show, live.
+      const ended = goal.change === "achieved" || goal.change === "failed";
+      rows.push({
+        kind: "goal-marker",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        turnId: timelineEntry.entry.turnId,
+        label: timelineEntry.entry.label,
+        change: goal.change,
+        ...(goal.objective !== undefined ? { objective: goal.objective } : {}),
+        ...(ended && goal.rounds !== undefined ? { rounds: goal.rounds } : {}),
+        ...(ended && goal.elapsedMs !== undefined ? { elapsedMs: goal.elapsedMs } : {}),
+        ...(ended && goal.tokensUsed !== undefined ? { tokensUsed: goal.tokensUsed } : {})
+      });
+      continue;
+    }
+
     // ── Work rows ─────────────────────────────────────────────────────────
     if (timelineEntry.kind === "work") {
-      // Hoisted: an error, an answered question and a spawn row are their own
-      // rows — an error must never hide inside a collapsed summary (§7.3).
+      // Hoisted: an error, an answered question, a spawn row and a host
+      // `/goal` answer are their own rows — an error must never hide inside a
+      // collapsed summary (§7.3), nor an answer the user just asked for.
       if (
         timelineEntry.entry.agentSpawn !== undefined ||
         timelineEntry.entry.questionAnswer !== undefined ||
-        timelineEntry.entry.tone === "error"
+        timelineEntry.entry.tone === "error" ||
+        isGoalEntry(timelineEntry)
       ) {
         const spawn = timelineEntry.entry.agentSpawn;
         if (spawn && entryBelongsToActiveTurn(timelineEntry, index)) {
@@ -967,6 +1019,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           nextEntry.entry.agentSpawn !== undefined ||
           nextEntry.entry.questionAnswer !== undefined ||
           isCompactionEntry(nextEntry) ||
+          isGoalEntry(nextEntry) ||
           nextEntry.entry.tone === "error" ||
           activeWorkEntryIds.has(nextEntry.id) ||
           collapsedEntryIds.has(nextEntry.id) ||
@@ -1464,6 +1517,19 @@ export function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow)
         a.afterTokens === other.afterTokens &&
         a.failed === other.failed &&
         a.detail === other.detail
+      );
+    }
+    case "goal-marker": {
+      const other = b as typeof a;
+      return (
+        a.createdAt === other.createdAt &&
+        a.turnId === other.turnId &&
+        a.label === other.label &&
+        a.change === other.change &&
+        a.objective === other.objective &&
+        a.rounds === other.rounds &&
+        a.elapsedMs === other.elapsedMs &&
+        a.tokensUsed === other.tokensUsed
       );
     }
     case "turn-diff": {

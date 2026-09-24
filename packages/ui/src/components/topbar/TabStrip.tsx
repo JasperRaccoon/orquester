@@ -275,6 +275,7 @@ export const TabStrip: React.FC = () => {
                 sessionId={tab.id}
                 status={session.status}
                 backgroundLiveness={session.backgroundLiveness}
+                goal={session.goal}
                 className="ml-0.5"
               />
             ) : null}

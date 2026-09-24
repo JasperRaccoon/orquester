@@ -29,6 +29,9 @@ import type {
   AdapterContext,
   AdapterFactory,
   AgentAdapter,
+  GoalCommandOptions,
+  GoalCommandResult,
+  HostGoalCommand,
   RollbackTarget,
   SendTurnInput,
   SendTurnResult,
@@ -245,6 +248,23 @@ export const createCodexAdapter: AdapterFactory = async (
     return session;
   };
 
+  /**
+   * Lazy recovery (§4.1): a crashed, OOM-killed or restarted session is
+   * indistinguishable from a fresh one, so a thread with no live session is
+   * not an error the host sees here — the host's ensure-session step starts
+   * one from the persisted cursor BEFORE calling, and a session that died
+   * mid-flight is reported rather than silently restarted without one.
+   */
+  const requireLiveSession = (threadId: string): CodexSession => {
+    const session = sessions.get(threadId);
+    if (session === undefined || !session.isLive) {
+      throw new Error(
+        `codex: thread ${threadId} has no live session; start one from the persisted cursor first`
+      );
+    }
+    return session;
+  };
+
   const startSession = async (input: StartSessionInput): Promise<ProviderSession> => {
     // One live session per thread: stop whatever the thread still holds before
     // starting, so a resume cursor is never advanced by two processes (§3.1).
@@ -269,6 +289,10 @@ export const createCodexAdapter: AdapterFactory = async (
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+      // Goals §4.6, §6.2.2: the fold's goal, so only a real change is a row,
+      // and whether this start is an account switch that must carry it.
+      ...(input.knownGoal !== undefined ? { knownGoal: input.knownGoal } : {}),
+      ...(input.carryGoal === true ? { carryGoal: true } : {}),
       emit: emitFor(input.threadId),
       onClosed: () => {
         if (sessions.get(input.threadId) === session) {
@@ -298,17 +322,7 @@ export const createCodexAdapter: AdapterFactory = async (
     startSession,
 
     async sendTurn(input: SendTurnInput): Promise<SendTurnResult> {
-      // Lazy recovery (§4.1): a crashed, OOM-killed or restarted session is
-      // indistinguishable from a fresh one, so `sendTurn` on a thread with no
-      // live session is not an error — the caller supplies the cursor through
-      // `startSession` before reaching here, and a session that died mid-flight
-      // is reported rather than silently restarted without one.
-      const session = sessions.get(input.threadId);
-      if (session === undefined || !session.isLive) {
-        throw new Error(
-          `codex: thread ${input.threadId} has no live session; start one from the persisted cursor first`
-        );
-      }
+      const session = requireLiveSession(input.threadId);
       const result = await session.sendTurn({
         input: input.input,
         attachments: input.attachments,
@@ -320,7 +334,24 @@ export const createCodexAdapter: AdapterFactory = async (
     },
 
     async interruptTurn(threadId: string, turnId?: string): Promise<void> {
-      await sessions.get(threadId)?.interruptTurn(turnId);
+      // The user's Stop (and the host's watchdog): an active goal is paused
+      // first, or Codex starts its next continuation the moment this turn
+      // settles (goals §6.2.4).
+      await sessions.get(threadId)?.interruptTurn(turnId, { pauseGoal: true });
+    },
+
+    /**
+     * A host-parsed `/goal …` (goals §4.6, §6.2.3). The session is required
+     * exactly as `sendTurn` requires it: the host's ensure-session step runs
+     * first, and a thread with none is refused — as a rejection, never a
+     * synchronous throw — and never started here.
+     */
+    async goalCommand(
+      threadId: string,
+      command: HostGoalCommand,
+      options?: GoalCommandOptions
+    ): Promise<GoalCommandResult> {
+      return requireLiveSession(threadId).goalCommand(command, options);
     },
 
     respondToApproval(

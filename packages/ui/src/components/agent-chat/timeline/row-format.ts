@@ -8,6 +8,8 @@
  */
 
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+import { formatContextTokens } from "../status/context-meter";
+import { formatGoalElapsed } from "../status/goal-chip";
 import { isCompactCommandMessage } from "./row-chrome";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
@@ -32,6 +34,8 @@ export function rowBottomPadding(row: AgentChatTimelineRow): string {
   if (
     (row.kind === "message" && row.message.role === "assistant" && !row.showAssistantMeta) ||
     (row.kind === "message" && row.message.role === "reasoning") ||
+    // A goal's landmark sits among the work it drives, not between turns.
+    row.kind === "goal-marker" ||
     row.kind === "work" ||
     row.kind === "work-live" ||
     row.kind === "work-toggle" ||
@@ -71,6 +75,31 @@ export function compactionLabel(
     return `${row.label} · ${formatTokenCount(beforeTokens)} → ${formatTokenCount(afterTokens)} tokens`;
   }
   return row.label;
+}
+
+/**
+ * The muted line under an ended goal's marker (goals §8.4):
+ * `<rounds> rounds · <elapsed> · <tokens> tokens`, each part only when the
+ * provider reported it, and nothing at all when it reported none. Only an
+ * `achieved` or `failed` marker has one — a set or a check has cost nothing
+ * worth a line yet, and the chip shows the live counters.
+ *
+ * The same token and duration spellings as the goal chip's popover, so one
+ * goal never reads in two units — elapsed left out at zero, `<1s` under a
+ * second (`formatGoalElapsed`).
+ */
+export function goalMarkerStats(
+  row: Pick<Row<"goal-marker">, "change" | "rounds" | "elapsedMs" | "tokensUsed">
+): string | null {
+  if (row.change !== "achieved" && row.change !== "failed") return null;
+  const known = (value: number | undefined): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
+  const parts: string[] = [];
+  if (known(row.rounds)) parts.push(`${row.rounds} ${row.rounds === 1 ? "round" : "rounds"}`);
+  const elapsed = formatGoalElapsed(row.elapsedMs);
+  if (elapsed !== null) parts.push(elapsed);
+  if (known(row.tokensUsed)) parts.push(`${formatContextTokens(row.tokensUsed)} tokens`);
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /**

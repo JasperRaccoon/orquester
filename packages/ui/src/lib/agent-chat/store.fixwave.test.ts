@@ -387,7 +387,8 @@ describe("R7-5 — a returned queued message gives its attachments back as chips
         return true;
       },
       focusAtEnd: () => {},
-      openControl: () => {}
+      openControl: () => {},
+      sendText: () => false
     });
     return { staged, inserted, unregister };
   }

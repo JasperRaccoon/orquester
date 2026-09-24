@@ -15,3 +15,4 @@ export {
 } from "./use-resize-drag";
 export { useUsageResetFormat, useUsageNow } from "./use-usage-display";
 export { useTheme } from "./use-theme";
+export { useKeyboardLayer } from "./use-keyboard-layer";

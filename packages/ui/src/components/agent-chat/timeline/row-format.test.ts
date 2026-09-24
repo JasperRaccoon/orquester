@@ -8,6 +8,7 @@ import { deriveAgentSpawnSummary } from "../roster/spawn-summary";
 import {
   compactionLabel,
   formatTokenCount,
+  goalMarkerStats,
   looksLikeUnifiedDiff,
   planFileName,
   proposedPlanTitle,
@@ -316,4 +317,56 @@ test("the row model shapes the rows depend on are still present", () => {
     queuedAt: "2026-09-21T10:00:00.000Z"
   };
   assert.equal(queued.holdUntilUserAction, false);
+});
+
+// ---------------------------------------------------------------------------
+// Goal markers (goals §8.4)
+// ---------------------------------------------------------------------------
+
+type GoalMarkerRow = Extract<AgentChatTimelineRow, { kind: "goal-marker" }>;
+
+function goalMarker(overrides: Partial<GoalMarkerRow> = {}): GoalMarkerRow {
+  return {
+    kind: "goal-marker",
+    id: "g1",
+    createdAt: "2026-09-24T10:00:00.000Z",
+    turnId: "t1",
+    label: "Goal achieved: Make CI green",
+    change: "achieved",
+    ...overrides
+  };
+}
+
+test("an ended goal's stats line: rounds · elapsed · tokens, each only when known", () => {
+  assert.equal(
+    goalMarkerStats(goalMarker({ rounds: 4, elapsedMs: 725_000, tokensUsed: 1_250_000 })),
+    "4 rounds · 12m 5s · 1.3m tokens"
+  );
+  assert.equal(
+    goalMarkerStats(goalMarker({ change: "failed", rounds: 1, tokensUsed: 900 })),
+    "1 round · 900 tokens"
+  );
+  assert.equal(goalMarkerStats(goalMarker({ elapsedMs: 45_000 })), "45s");
+  assert.equal(goalMarkerStats(goalMarker({ rounds: 0 })), "0 rounds", "zero rounds is a fact");
+  assert.equal(goalMarkerStats(goalMarker()), null, "nothing known ⇒ no line at all");
+});
+
+test("only achieved and failed markers have a stats line", () => {
+  for (const change of ["set", "checked", "paused", "limited", "cleared"] as const) {
+    assert.equal(
+      goalMarkerStats(goalMarker({ change, rounds: 2, elapsedMs: 1_000, tokensUsed: 10 })),
+      null,
+      change
+    );
+  }
+});
+
+test("a goal marker clings to the work around it", () => {
+  assert.equal(rowBottomPadding(goalMarker()), "pb-2");
+});
+
+test("final wave (3): an ended goal's stats leave out a zero elapsed and read `<1s` under a second", () => {
+  assert.equal(goalMarkerStats(goalMarker({ rounds: 2, elapsedMs: 0 })), "2 rounds");
+  assert.equal(goalMarkerStats(goalMarker({ rounds: 2, elapsedMs: 400 })), "2 rounds · <1s");
+  assert.equal(goalMarkerStats(goalMarker({ elapsedMs: 0 })), null, "nothing known ⇒ no line");
 });

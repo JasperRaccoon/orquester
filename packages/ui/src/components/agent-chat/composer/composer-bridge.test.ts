@@ -6,11 +6,12 @@ import {
   insertComposerText,
   openComposerControl,
   registerComposerHandle,
+  sendComposerText,
   stageComposerAttachment,
   type ComposerHandle
 } from "./composer-bridge.ts";
 
-function fakeHandle(log: string[], stageResult = true): ComposerHandle {
+function fakeHandle(log: string[], stageResult = true, sendResult = true): ComposerHandle {
   return {
     insertText: (text, mode) => log.push(`insert:${mode ?? "cursor"}:${text}`),
     stageAttachment: (ref) => {
@@ -18,7 +19,11 @@ function fakeHandle(log: string[], stageResult = true): ComposerHandle {
       return stageResult;
     },
     focusAtEnd: () => log.push("focus"),
-    openControl: (command) => log.push(`open:${command}`)
+    openControl: (command) => log.push(`open:${command}`),
+    sendText: (text) => {
+      log.push(`send:${text}`);
+      return sendResult;
+    }
   };
 }
 
@@ -75,4 +80,21 @@ test("a stale unregister cannot drop the handle that replaced it", () => {
   assert.deepEqual(first, []);
   unregisterSecond();
   assert.equal(composerHandle("s2"), null);
+});
+
+test("goals §8.2: a chip action is sent BY the mounted composer, never around it", () => {
+  const log: string[] = [];
+  const unregister = registerComposerHandle("s5", fakeHandle(log));
+  assert.equal(sendComposerText("s5", "/goal pause"), true);
+  assert.deepEqual(log, ["send:/goal pause"], "the composer's own send path, and nothing else");
+  unregister();
+});
+
+test("goals §8.2: a refused or unmounted send reports false", () => {
+  // The composer says why in its own notice; the caller only learns it did not go.
+  const log: string[] = [];
+  const unregister = registerComposerHandle("s6", fakeHandle(log, true, false));
+  assert.equal(sendComposerText("s6", "/goal clear"), false);
+  unregister();
+  assert.equal(sendComposerText("never-mounted", "/goal clear"), false);
 });

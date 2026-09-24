@@ -382,6 +382,48 @@ describe("thread index: observe", () => {
     assert.deepEqual(markers, [{ seq: 5, kind: "compaction-failed" }]);
   });
 
+  it("a hidden goal progress row keeps its place in the log but never reaches the search", async () => {
+    // Every progress row reads "Goal progress": indexing them flooded the
+    // palette's search. Its POSITION is still indexed — history pages walk
+    // rows by it — and its one stable id moves to the latest write, as any
+    // row replaced in place does.
+    const log = new TestLog();
+    const goalRow = (id: string, change: string, rounds: number) =>
+      activity(id, "goal.updated", {
+        summary: change === "progress" ? "Goal progress" : "Goal set: Ship the parser rewrite",
+        payload: { goal: { objective: "Ship the parser rewrite", status: "active", rounds }, change }
+      });
+    feed(
+      index,
+      log,
+      log.append(
+        created(),
+        goalRow("g-set", "set", 0),
+        goalRow("goal-progress:t1", "progress", 1),
+        goalRow("goal-progress:t1", "progress", 2)
+      )
+    );
+    await index.drain();
+
+    assert.deepEqual(index.search({ q: "progress", limit: 5 }), []);
+    const [set] = index.search({ q: "parser rewrite", limit: 5 });
+    assert.equal(set!.id, "g-set", "only the row the timeline shows is searchable");
+    const items = inspect((db) =>
+      db.prepare("SELECT item_id, seq FROM items ORDER BY seq").all()
+    );
+    assert.deepEqual(items, [
+      { item_id: "g-set", seq: 2 },
+      { item_id: "goal-progress:t1", seq: 4 }
+    ]);
+    const ftsRows = inspect(
+      (db) =>
+        db
+          .prepare("SELECT COUNT(*) AS n FROM activities_fts WHERE activity_id = 'goal-progress:t1'")
+          .get() as { n: number }
+    );
+    assert.equal(ftsRows.n, 0);
+  });
+
   it("a revert drops the removed turns and everything from their first line on, and closes every range", async () => {
     const log = new TestLog();
     feed(index, log, log.append(created()));

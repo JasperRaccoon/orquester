@@ -33,6 +33,27 @@ export interface ClaudeAdapterDeps {
   /** Node binary used for the history worker. */
   nodePath: string;
   /**
+   * Called each time a session's goal transcript work has drained (goals
+   * §6.1.4-5). Those reads run off the message loop by design; this is what a
+   * test waits on instead of a sleep (§9). Production passes nothing.
+   */
+  onGoalWorkIdle?: (threadId: string) => void;
+  /**
+   * Awaited before each goal transcript read (`label` names it: `read`,
+   * `restore`, `tail`, `set-point`), outside the read's own deadline. A test
+   * parks a read here to hold a teardown open; production passes nothing.
+   */
+  goalReadGate?: (threadId: string, label: string) => Promise<void>;
+  /**
+   * Called on every write of a thread's start record — what a lazy recovery
+   * or a rewind restarts from — naming the writer. A test asserts no stale
+   * session writes it; production passes nothing.
+   */
+  onStartRecord?: (
+    threadId: string,
+    writer: "start" | "started" | "send" | "closed" | "rollback"
+  ) => void;
+  /**
    * The §3.1 windows, so a test asserts an expired deadline's behaviour
    * without waiting one out — §9's "nothing waits on a timer".
    */

@@ -286,6 +286,25 @@ export type ProviderCompaction =
   | { type: "native" }
   | { type: "slash-command"; command: `/${string}` };
 
+/** A goal-chip action (goals §4.5, §8.2). */
+export type GoalAction = "continue" | "pause" | "resume" | "clear";
+
+/**
+ * How an adapter surfaces its provider's goal (goals §4.5). Claude
+ * `{command:"provider", actions:["continue","clear"], continuesAcrossTurns:false}`;
+ * Codex `{command:"host", actions:["pause","resume","clear"],
+ * continuesAcrossTurns:true}`; Grok `{command:"provider",
+ * actions:["resume","clear"], continuesAcrossTurns:false}`.
+ */
+export interface AdapterGoalSupport {
+  /** "provider": `/goal …` is forwarded verbatim (Claude, Grok). "host": the host parses it (Codex). */
+  command: "provider" | "host";
+  /** Chip actions this provider honours (goals §8.2). */
+  actions: readonly GoalAction[];
+  /** The provider starts turns by itself while a goal is active (Codex). */
+  continuesAcrossTurns: boolean;
+}
+
 /**
  * §4.1. Two of these are presentation flags in T3
  * (`packages/contracts/src/server.ts:199-201`); Orquester folds both onto the
@@ -319,6 +338,11 @@ export interface AdapterCapabilities {
    * offers no such button.
    */
   supportsBackgroundTasks?: boolean;
+  /**
+   * The provider's goal surface (goals §4.5). Absent means none: no chip, no
+   * tab marker, no goal state (OpenCode).
+   */
+  goals?: AdapterGoalSupport;
 }
 
 // ---------------------------------------------------------------------------

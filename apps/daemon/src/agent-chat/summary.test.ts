@@ -189,6 +189,76 @@ test("NEVER a 'finished' push while background liveness is non-null", () => {
   assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
 });
 
+test("a continuing goal holds the finished stamp and push until the goal stops (goals §4.7)", () => {
+  const h = harness();
+  seedTab(h.chat, "t1");
+  const goal = { objective: "ship it", status: "active" as const, continuing: true };
+  const completed = {
+    turnId: "a",
+    state: "completed" as const,
+    startedAt: "2026-09-21T00:00:00.000Z",
+    completedAt: "2026-09-21T00:00:01.000Z"
+  };
+  h.service.applyFields("t1", {
+    chatSessionStatus: "running",
+    latestTurn: { ...completed, state: "running", completedAt: null },
+    goal
+  });
+  // The turn settles; Codex will start the next one itself.
+  h.service.applyFields("t1", { chatSessionStatus: "ready", latestTurn: completed, goal });
+  assert.deepEqual(h.pushes, [], "no finished push between two of the provider's own turns");
+  assert.equal(h.chat.get("t1")?.activity?.state, "working");
+  assert.equal(h.chat.get("t1")?.activity?.attention, null, "no finished stamp");
+  assert.deepEqual(h.chat.get("t1")?.goal, goal, "the tab carries the goal");
+
+  // The goal is achieved: now it is finished, and now it pushes.
+  h.service.applyFields("t1", { chatSessionStatus: "ready", latestTurn: completed, goal: null });
+  assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
+  assert.equal(h.chat.get("t1")?.goal, null);
+});
+
+test("a goal turn killed by a restart raises no finished stamp or push while its resume is owed (goals §5.5)", () => {
+  // The host settles the orphaned turn as an error but keeps the goal
+  // `continuing` until the resume attempt completes: nothing is finished yet.
+  const h = harness();
+  seedTab(h.chat, "t1");
+  const goal = { objective: "ship it", status: "active" as const, continuing: true };
+  const running = {
+    turnId: "codex-goal-2",
+    state: "running" as const,
+    startedAt: "2026-09-21T00:00:00.000Z",
+    completedAt: null
+  };
+  const failed = { ...running, state: "failed" as const, completedAt: "2026-09-21T00:05:00.000Z" };
+  h.service.applyFields("t1", { chatSessionStatus: "running", latestTurn: running, goal });
+  h.service.applyFields("t1", { chatSessionStatus: "error", latestTurn: failed, goal });
+  assert.deepEqual(h.pushes, [], "no push in the gap");
+  assert.equal(h.chat.get("t1")?.activity?.attention, null, "no finished stamp");
+  assert.equal(h.chat.get("t1")?.activity?.state, "working");
+
+  // The resume failed: the host stops reporting the goal as continuing, and
+  // the error is an error again.
+  h.service.applyFields("t1", {
+    chatSessionStatus: "error",
+    latestTurn: failed,
+    goal: { ...goal, continuing: false }
+  });
+  assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
+  assert.equal(h.chat.get("t1")?.activity?.attention, "finished");
+});
+
+test("a continuing goal never feeds the drain's background-work view (goals §4.7)", () => {
+  // A Codex goal survives a drain-restart — the resume continues it — so it
+  // must never hold a deploy's handover open the way a subagent fleet does.
+  const h = harness();
+  seedTab(h.chat, "t1");
+  h.service.applyFields("t1", {
+    chatSessionStatus: "ready",
+    goal: { objective: "ship it", status: "active", continuing: true }
+  });
+  assert.deepEqual(h.service.threadsWithBackgroundLiveness(), []);
+});
+
 test("an errored thread keeps status 'running' — the TAB is live — and shows the error via activity", () => {
   // E2E E18: `SessionSummary.status` is the tab's liveness, not the thread's.
   // `exited` would make every client drop a tab the user can still recover
@@ -497,6 +567,41 @@ test("hasPolled flips after the first completed poll round, even an empty one", 
   assert.equal(h.service.hasPolled(), false);
   await h.service.refreshAll();
   assert.equal(h.service.hasPolled(), true, "no tabs open is still a completed round");
+});
+
+test("the goal is validated field-wise, with a fallback, before the ladder reads it", () => {
+  // The whole field.
+  assert.deepEqual(
+    sanitizeFields({
+      goal: { objective: "ship it", status: "usage-limited", continuing: false, extra: { big: 1 } }
+    }).goal,
+    { objective: "ship it", status: "usage-limited", continuing: false },
+    "unknown keys are dropped"
+  );
+  assert.equal(sanitizeFields({ goal: null }).goal, null, "no goal is said, not dropped");
+  assert.equal("goal" in sanitizeFields({}), false, "an older host says nothing");
+  // A goal without a usable objective or status is no goal the ladder can trust.
+  for (const goal of [
+    { objective: "", status: "active", continuing: true },
+    { objective: 7, status: "active", continuing: true },
+    { objective: "ship it", status: "running", continuing: true },
+    { objective: "ship it", continuing: true },
+    "ship it",
+    ["ship it"]
+  ]) {
+    assert.equal("goal" in sanitizeFields({ goal }), false, JSON.stringify(goal));
+  }
+  // `continuing` falls back to false: a wrong "finished" beats a tab that
+  // reads as working forever.
+  assert.deepEqual(sanitizeFields({ goal: { objective: "ship it", status: "active" } }).goal, {
+    objective: "ship it",
+    status: "active",
+    continuing: false
+  });
+  assert.deepEqual(
+    sanitizeFields({ goal: { objective: "ship it", status: "active", continuing: "yes" } }).goal,
+    { objective: "ship it", status: "active", continuing: false }
+  );
 });
 
 test("a non-object body yields no fields rather than throwing", () => {

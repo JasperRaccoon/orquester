@@ -7,7 +7,7 @@ import {
   startedTurns,
   TERMINAL_SUBAGENT_STATUSES
 } from "@orquester/api/agent-chat";
-import type { ThreadItem } from "@orquester/api/agent-chat";
+import type { GoalAction, ThreadItem } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -15,7 +15,9 @@ import {
   canSwitchChatAccount,
   chatAccountLabel,
   chatAccountSelectionId,
-  chatAccountSwitchSupported
+  chatAccountSwitchRefusal,
+  chatAccountSwitchSupported,
+  isGoalContinuing
 } from "../../lib/agent-chat/account-switch";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
@@ -39,6 +41,7 @@ import {
   focusComposer,
   insertComposerText,
   openComposerControl,
+  sendComposerText,
   stageComposerAttachment
 } from "./composer/composer-bridge";
 import { rewindPickerEnabled } from "./composer/RewindControl";
@@ -67,6 +70,7 @@ import { ChatBannerDock } from "./banners/ChatBannerDock";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { ChatStatusLine } from "./status/ChatStatusLine";
+import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-chip";
 import { ChatTimeline } from "./timeline/ChatTimeline";
 import {
   nextHeldTimeline,
@@ -590,16 +594,63 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           shortLabel: shortAccountLabel
         })
       : null;
-  const accountSwitchEnabled =
-    !paintOnly &&
-    canSwitchChatAccount({
-      isTurnActive: turnActive,
-      hasPendingRequest: pending.totalCount > 0,
-      queuedCount: slice.queue.length,
-      reverting,
-      connection: slice.connection,
-      backgroundLive: session.backgroundLiveness != null
-    });
+  // Goals §5.5: a goal the provider keeps working on by itself (Codex) holds
+  // the switch — its next turn would start under the old account and die on
+  // the restart — and the chip says to pause it rather than to wait. Only
+  // while it IS continuing: the host's verdict on the tab summary when there
+  // is one, else a coarser form of the host's predicate (`isGoalContinuing`).
+  // A stopped or errored session may switch, except one whose resume mark is
+  // still pending (after a handover it may read `stopped` or `error`), which
+  // reads as continuing.
+  const accountSwitchState = {
+    isTurnActive: turnActive,
+    hasPendingRequest: pending.totalCount > 0,
+    queuedCount: slice.queue.length,
+    reverting,
+    connection: slice.connection,
+    backgroundLive: session.backgroundLiveness != null,
+    goalContinuing: isGoalContinuing({
+      summaryGoal: session.goal,
+      goal: slice.goal,
+      support: provider?.capabilities?.goals,
+      sessionStatus: slice.sessionStatus,
+      resumeGoalAfterRestart: slice.head?.resumeGoalAfterRestart === true
+    }),
+    // The host refuses a switch for a running compaction first (and the chip
+    // then names it, as the host would).
+    compacting: status.isCompacting
+  };
+  const accountSwitchEnabled = !paintOnly && canSwitchChatAccount(accountSwitchState);
+  const accountSwitchRefusal = paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState);
+
+  // --- the goal chip (goals §8.2) -------------------------------------------
+  // The chip shows whatever unfinished goal the fold holds; which actions its
+  // popover offers is the §8.2 matrix over the adapter's own goal block (none
+  // on OpenCode, or from a host that predates goals). "Background live" reads
+  // both copies — the roster this tab derives and the summary the daemon
+  // sends — so a nudge is withheld while either says work is still running.
+  const goalSupport = provider?.capabilities?.goals ?? null;
+  const threadGoal = paintOnly ? null : slice.goal;
+  const goalBackgroundLive = roster.backgroundLiveness !== null || session.backgroundLiveness != null;
+  const { goalActionList, goalNote } = React.useMemo(() => {
+    const input = {
+      goal: threadGoal,
+      support: goalSupport,
+      turnRunning: turnActive,
+      backgroundLive: goalBackgroundLive
+    };
+    return { goalActionList: goalActions(input), goalNote: goalActionsNote(input) };
+  }, [threadGoal, goalSupport, turnActive, goalBackgroundLive]);
+  // An action is the user's message, sent by the composer itself: its guards,
+  // the thread's mode and model, `/turn` (goals §8.2). A refusal is the
+  // composer's own notice, in the composer just below the chip.
+  const sendGoalAction = React.useCallback(
+    (action: GoalAction) => {
+      sendComposerText(sessionId, GOAL_ACTION_TEXT[action]);
+    },
+    [sessionId]
+  );
+
   const latestCheckpoint = slice.checkpoints.length
     ? slice.checkpoints[slice.checkpoints.length - 1]
     : null;
@@ -814,6 +865,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onCompact={paintOnly ? noop : () => dispatch(() => actions.compact())}
                 latestCheckpoint={latestCheckpoint}
                 modelLabel={slice.head?.modelSelection.model ?? session.model ?? null}
+                goal={threadGoal}
+                goalActions={goalActionList}
+                goalActionsNote={goalNote}
+                onGoalAction={paintOnly ? noop : sendGoalAction}
               />
             </div>
             {/* The dock overlaps the composer by 17px so the two read as ONE
@@ -866,6 +921,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 accountOptions={accountOptions}
                 accountId={chatAccountSelectionId(threadAccountId)}
                 accountSwitchEnabled={accountSwitchEnabled}
+                accountSwitchRefusal={accountSwitchRefusal}
                 isTurnActive={!paintOnly && turnActive}
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
                 queue={slice.queue}

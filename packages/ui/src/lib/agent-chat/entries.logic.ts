@@ -29,6 +29,7 @@ import type {
   WorkLogEntry,
   WorkLogToolLifecycleStatus
 } from "./contracts";
+import { goalMarkerOf, goalUpdateOf, isHiddenGoalActivity } from "./goal.logic";
 import { normalizeCompactToolLabel } from "./presentation.logic";
 
 // ---------------------------------------------------------------------------
@@ -371,6 +372,14 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     };
   }
 
+  // Goals §8.4: a goal update is a marker, read through the shared parser. A
+  // row that does not parse gets no `goal` and stays the generic row, with the
+  // summary the host wrote (goals §9).
+  const goalUpdate = goalUpdateOf(activity);
+  if (goalUpdate !== null) {
+    entry.goal = goalMarkerOf(goalUpdate);
+  }
+
   // §3.4's account switch: ids only, the label resolves at render time.
   if (activity.activityKind === IDENTITY_CHANGED_ACTIVITY_KIND) {
     const identity = asRecord(activity.payload);
@@ -582,6 +591,11 @@ export function deriveWorkLogEntries(
       continue;
     }
     if (DROPPED_ACTIVITY_KINDS.has(activity.activityKind)) {
+      continue;
+    }
+    // Goals §8.4: `progress` is the goal's heartbeat — it keeps the chip
+    // current and is not narrative.
+    if (isHiddenGoalActivity(activity)) {
       continue;
     }
     if (activity.activityKind === "task.started" && !isAgentTaskStartedActivity(activity)) {

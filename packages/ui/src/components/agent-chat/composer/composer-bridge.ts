@@ -8,6 +8,11 @@
  * they do not render, so the composer registers a tiny handle per session and
  * they call it by session id.
  *
+ * The goal chip's actions (goals §8.2) are the one caller that SENDS rather
+ * than inserts, and they send through the composer too, never around it: the
+ * action must be the user's message, refused for whatever refuses the user's
+ * own send, with the thread's mode and model riding along.
+ *
  * A handle for a session that is not mounted is simply absent and every call
  * is a no-op — which is the right behaviour for a tab that was closed while a
  * request was in flight.
@@ -37,6 +42,13 @@ export interface ComposerHandle {
    * token — the `data-composer-shortcut` convention (§7.4).
    */
   openControl: (command: ComposerShortcutCommand) => void;
+  /**
+   * Send `text` as the user's message through the composer's own send path —
+   * its guards, the thread's interaction mode and model, `/turn` — leaving the
+   * draft exactly as it is (goals §8.2: a goal chip action). `false` when the
+   * composer refused it; the reason is then the composer's own notice.
+   */
+  sendText: (text: string) => boolean;
 }
 
 const handles = new Map<string, ComposerHandle>();
@@ -84,4 +96,12 @@ export function openComposerControl(sessionId: string, command: ComposerShortcut
 
 export function focusComposer(sessionId: string): void {
   composerHandle(sessionId)?.focusAtEnd();
+}
+
+/**
+ * Send `text` from a session's composer as the user's message (goals §8.2).
+ * `false` when no composer is mounted for that session or it refused.
+ */
+export function sendComposerText(sessionId: string, text: string): boolean {
+  return composerHandle(sessionId)?.sendText(text) ?? false;
 }

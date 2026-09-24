@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { parseGoalUpdatedPayload } from "./goal.ts";
 import {
   MCP_ITEM_KEPT_FIELDS,
   SLIM_MAX_CHANGED_FILES,
@@ -222,6 +223,47 @@ test("the task linkage bundle survives slimming so the roster still folds", () =
   assert.equal(slim.agentKind, "agent");
   assert.equal(slim.title, "Reviewer");
   assert.equal(slim.model, "opus");
+});
+
+test("a goal row's payload survives slimming whole: goal, change and previous (goals §4.3)", () => {
+  // The client folds the thread's goal off the SLIMMED payload of a live
+  // `goal.updated` row (goals §4.4), and the timeline marker reads the same
+  // three fields — so they stay top-level and untouched, never rebuilt.
+  const checked = {
+    goal: {
+      objective: "Make CI green",
+      status: "active",
+      rounds: 2,
+      lastCheck: "lint still fails",
+      tokenBudget: null
+    },
+    change: "checked",
+    previous: { objective: "Old aim", status: "complete" }
+  };
+  assert.equal(slimActivityPayload(checked), checked, "a goal payload that fits is returned by identity");
+  const cleared = { goal: null, change: "cleared", previous: { objective: "Old aim", status: "active" } };
+  assert.equal(slimActivityPayload(cleared), cleared);
+});
+
+test("a goal row's strings meet the same wire cap as every other string, and nothing else moves", () => {
+  const huge = "c".repeat(SLIM_MAX_STRING_BYTES + 500);
+  const slim = record(
+    slimActivityPayload({
+      goal: { objective: "Make CI green", status: "active", rounds: 3, lastCheck: huge },
+      change: "checked",
+      previous: { objective: "Old aim", status: "complete" }
+    })
+  );
+  assert.equal(slim.change, "checked");
+  assert.deepEqual(slim.previous, { objective: "Old aim", status: "complete" });
+  const goal = record(slim.goal);
+  assert.equal(goal.objective, "Make CI green");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.rounds, 3);
+  assert.equal(byteLength(goal.lastCheck as string), SLIM_MAX_STRING_BYTES + byteLength("…"));
+  assert.equal(slim.truncated, true);
+  // Still a goal payload: the client's fold adopts what slimming leaves.
+  assert.notEqual(parseGoalUpdatedPayload(slim), null);
 });
 
 test("a small tool row that loses nothing is not flagged truncated", () => {

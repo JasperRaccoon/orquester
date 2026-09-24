@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
+import { useKeyboardLayer } from "../../hooks/use-keyboard-layer";
 
 export interface ContextMenuItem {
   label: string;
@@ -35,6 +36,9 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
       window.removeEventListener("resize", close);
     };
   }, [onClose]);
+  // Mounted only while open, so a keyboard layer for its whole life: Escape is
+  // the menu's to close (`lib/keyboard-layers.ts`).
+  useKeyboardLayer(true);
 
   const left = Math.min(x, window.innerWidth - WIDTH - 8);
   const top = Math.min(y, window.innerHeight - (items.length * 32 + 16));

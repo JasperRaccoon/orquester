@@ -10,6 +10,10 @@ import type {
   RuntimeEvent
 } from "@orquester/api/agent-chat";
 
+import { CLAUDE_CAPABILITIES } from "../adapters/claude/index.ts";
+import { CODEX_ADAPTER_CAPABILITIES } from "../adapters/codex/index.ts";
+import { GROK_CAPABILITIES } from "../adapters/grok/index.ts";
+import { ADAPTER_PENDING_SNAPSHOTS } from "../adapters/index.ts";
 import {
   createProviderSnapshotRegistry,
   PROVIDER_BIN_CHECK_INTERVAL_MS
@@ -872,4 +876,193 @@ describe("§3.2: a moved CLI binary re-probes itself on the next read", () => {
       assert.equal(after.version, null);
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// goals §5.4 — every served row carries the adapter's CURRENT capabilities
+// ---------------------------------------------------------------------------
+
+/**
+ * A cached row is written by whichever host probed it last, so after a deploy
+ * that adds a capability (`goals`) the correlated cache — which layer two
+ * serves WITHOUT a probe — still describes the old adapter. Capabilities are
+ * the adapter's, not the probe's: every row is served with today's.
+ */
+describe("goals §5.4: capabilities are the adapter's, not the cache's", () => {
+  const withGoals = {
+    sessionModelSwitch: "in-session" as const,
+    showPlanModeToggle: true,
+    reportsContextWindow: true,
+    compaction: { type: "native" as const },
+    goals: {
+      command: "provider" as const,
+      actions: ["continue", "clear"] as const,
+      continuesAcrossTurns: false
+    }
+  };
+  const pendingWithGoals = (checkedAt: string): ProviderSnapshot =>
+    snapshotFor("claude", {
+      installed: false,
+      version: null,
+      status: "unknown",
+      message: "Claude provider status has not been checked in this session yet.",
+      auth: { status: "unknown" },
+      checkedAt,
+      capabilities: withGoals
+    });
+
+  async function withCurrentAdapter<T>(
+    run: (input: {
+      registry: ReturnType<typeof createProviderSnapshotRegistry>;
+      probe: { calls: number; next: ProviderSnapshot };
+      stateDir: string;
+    }) => Promise<T>,
+    stateDir: string
+  ): Promise<T> {
+    const probe = { calls: 0, next: snapshotFor("claude", { capabilities: withGoals }) };
+    const registry = createProviderSnapshotRegistry({
+      probes: [
+        {
+          id: "claude",
+          pending: pendingWithGoals,
+          identity: () => ({ binPath: "/usr/bin/claude" }),
+          refresh: async () => {
+            probe.calls += 1;
+            return probe.next;
+          }
+        }
+      ],
+      stateDir,
+      logger: createRecordingLogger(),
+      clock: createTestClock(0),
+      intervalMs: 1_000,
+      setTimer: () => null,
+      clearTimer: () => undefined
+    });
+    try {
+      return await run({ registry, probe, stateDir });
+    } finally {
+      registry.stop();
+      await registry.flush();
+    }
+  }
+
+  it("a correlated cached row from before `goals` existed is served with today's capabilities", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-capabilities-"));
+    try {
+      // Written by the previous host: a good, correlated row — minus `goals`.
+      await writeCache(stateDir, {
+        claude: {
+          identity: identityFor("claude", { binPath: "/usr/bin/claude" }),
+          snapshot: snapshotFor("claude", { version: "2.1.280" })
+        }
+      });
+      await withCurrentAdapter(async ({ registry, probe }) => {
+        await registry.load();
+        const served = registry.get("claude")!;
+        assert.equal(served.version, "2.1.280", "the cached row is still the one served");
+        assert.equal(served.status, "ready");
+        assert.deepEqual(served.capabilities, withGoals, "…with the adapter's capabilities");
+        assert.deepEqual(registry.all()[0]?.capabilities, withGoals);
+        assert.equal(probe.calls, 0, "no probe was needed to get there");
+
+        // Everything derived from the row keeps them: a turn-time rate-limit
+        // update rebuilds the snapshot from the stored one.
+        registry.applyUsageLimits("claude", {
+          eventId: "e",
+          threadId: "t",
+          createdAt: "1970-01-01T00:00:00.000Z",
+          type: "account.rate-limits.updated",
+          payload: { limits: { windows: [{ id: "weekly", kind: "weekly", label: "W", usedPercent: 5 }] } }
+        } as unknown as RuntimeEvent);
+        assert.deepEqual(registry.get("claude")?.capabilities, withGoals);
+      }, stateDir);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("the pending seed and a live probe's own row serve the adapter's capabilities too", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-capabilities-"));
+    try {
+      await withCurrentAdapter(async ({ registry, probe }) => {
+        assert.deepEqual(registry.get("claude")?.capabilities, withGoals, "pending");
+        const refreshed = await registry.refresh("claude");
+        assert.equal(probe.calls, 1);
+        assert.deepEqual(refreshed.capabilities, withGoals, "the refresh answer");
+        assert.deepEqual(registry.get("claude")?.capabilities, withGoals, "probed");
+      }, stateDir);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("the freshest live statement wins: a probe's capabilities replace the seed's", async () => {
+    // The probe asks the running adapter itself, so what it reports is the
+    // adapter's current word — and a cached row hydrated after it gets that.
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-capabilities-"));
+    try {
+      const probed = {
+        ...withGoals,
+        goals: { command: "host" as const, actions: ["pause"] as const, continuesAcrossTurns: true }
+      };
+      await withCurrentAdapter(async ({ registry, probe }) => {
+        probe.next = snapshotFor("claude", { version: "2.1.281", capabilities: probed });
+        await registry.refresh("claude");
+        assert.deepEqual(registry.get("claude")?.capabilities, probed);
+
+        await writeCache(stateDir, {
+          claude: {
+            identity: identityFor("claude", { binPath: "/usr/bin/claude" }),
+            snapshot: snapshotFor("claude", { version: "2.1.280" })
+          }
+        });
+        await registry.load();
+        assert.deepEqual(registry.get("claude")?.capabilities, probed);
+      }, stateDir);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it("the cache file itself is rewritten with the current capabilities", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-capabilities-"));
+    try {
+      await withCurrentAdapter(async ({ registry }) => {
+        await registry.refresh("claude");
+        await registry.flush();
+        const raw = JSON.parse(
+          await readFile(join(stateDir, "provider-snapshots.json"), "utf8")
+        ) as CacheFile;
+        assert.deepEqual(raw.providers.claude?.snapshot.capabilities, withGoals);
+      }, stateDir);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+});
+
+/**
+ * The overlay's source is each adapter's PENDING seed, so the whole of goals
+ * §5.4 rests on one equality nothing else enforces: the seed carries the very
+ * capability constant the adapter itself serves. Pinned here for every adapter
+ * with a goal surface — a seed that built its own block would silently strip
+ * or fake `goals` on every row the registry serves.
+ */
+describe("goals §5.4: each goal adapter's pending seed carries the adapter's own capabilities", () => {
+  const cases = [
+    ["claude", CLAUDE_CAPABILITIES, "provider", false],
+    ["codex", CODEX_ADAPTER_CAPABILITIES, "host", true],
+    ["grok", GROK_CAPABILITIES, "provider", false]
+  ] as const;
+  for (const [id, constant, command, continuesAcrossTurns] of cases) {
+    it(id, () => {
+      const seed = ADAPTER_PENDING_SNAPSHOTS[id]("1970-01-01T00:00:00.000Z");
+      assert.equal(seed.capabilities, constant, "the same object, not a copy that can drift");
+      // The two fields the host itself keys on: who parses `/goal`, and who
+      // starts the goal's turns.
+      assert.equal(constant.goals?.command, command);
+      assert.equal(constant.goals?.continuesAcrossTurns, continuesAcrossTurns);
+    });
+  }
 });

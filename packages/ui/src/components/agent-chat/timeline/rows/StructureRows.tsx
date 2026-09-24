@@ -1,9 +1,16 @@
 import React from "react";
-import { ClipboardList, Download, Minimize2 } from "lucide-react";
+import { ClipboardList, Download, Minimize2, Target } from "lucide-react";
 
 import { cn } from "../../../../lib/cn";
+import { clipGoalText } from "../../../../lib/agent-chat/goal.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
-import { COMPACTING_LABEL, compactionLabel, planFileName, proposedPlanTitle } from "../row-format";
+import {
+  COMPACTING_LABEL,
+  compactionLabel,
+  goalMarkerStats,
+  planFileName,
+  proposedPlanTitle
+} from "../row-format";
 import { ChatIconButton, CopyButton, DisclosureChevron, WorkingIndicator } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
@@ -77,6 +84,46 @@ export const CompactionRow = React.memo(function CompactionRow({
             </button>
           ) : null}
         </div>
+      ) : null}
+    </div>
+  );
+});
+
+/**
+ * A goal's landmark in the conversation (goals §8.4): set, checked, paused,
+ * resumed, stopped, achieved, failed, cleared. The compaction marker's
+ * hairline, carrying a target — it is the same kind of fact, something about
+ * the thread as a whole that happened HERE — and never `progress`, which only
+ * keeps the chip current.
+ *
+ * The label is the row's own summary, which already quotes the objective and
+ * the last check (cut to 200 characters); a long one wraps and the rules give
+ * way, rather than being clipped off the edge. The objective is one hover
+ * away, capped at 200 characters like every name that quotes it. An ended goal adds one muted line of what it cost, and a goal
+ * that can't be met reads in the danger tone, like every other failed row.
+ */
+export const GoalMarkerRow = React.memo(function GoalMarkerRow({
+  row
+}: {
+  row: Row<"goal-marker">;
+}): React.ReactElement {
+  const failed = row.change === "failed";
+  const stats = goalMarkerStats(row);
+  return (
+    <div className={cn("text-xs", failed ? "text-danger" : "text-neutral-500")}>
+      <div
+        role="separator"
+        aria-label={row.label}
+        title={row.objective !== undefined ? clipGoalText(row.objective) : undefined}
+        className="ac-hairline py-1"
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Target size={12} strokeWidth={1.8} aria-hidden className="shrink-0" />
+          <span className="min-w-0 break-words">{row.label}</span>
+        </span>
+      </div>
+      {stats !== null ? (
+        <p className="ac-tabular pb-0.5 text-center text-[11px] leading-4 text-neutral-500">{stats}</p>
       ) : null}
     </div>
   );

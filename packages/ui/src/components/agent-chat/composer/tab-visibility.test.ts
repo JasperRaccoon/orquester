@@ -45,6 +45,7 @@ function everyEscapeShape(): Array<{
   isTurnActive: boolean;
   drillInOpen: boolean;
   rewindPress: boolean;
+  blockingLayerOpen: boolean;
 }> {
   const shapes = [];
   for (const defaultPrevented of [false, true]) {
@@ -53,16 +54,19 @@ function everyEscapeShape(): Array<{
         for (const isTurnActive of [false, true]) {
           for (const drillInOpen of [false, true]) {
             for (const rewindPress of [false, true]) {
-              // A textarea is by definition inside the shell.
-              if (isTextarea && !insideComposerShell) continue;
-              shapes.push({
-                defaultPrevented,
-                insideComposerShell,
-                isTextarea,
-                isTurnActive,
-                drillInOpen,
-                rewindPress
-              });
+              for (const blockingLayerOpen of [false, true]) {
+                // A textarea is by definition inside the shell.
+                if (isTextarea && !insideComposerShell) continue;
+                shapes.push({
+                  defaultPrevented,
+                  insideComposerShell,
+                  isTextarea,
+                  isTurnActive,
+                  drillInOpen,
+                  rewindPress,
+                  blockingLayerOpen
+                });
+              }
             }
           }
         }
@@ -91,11 +95,25 @@ test("an Escape that stops a running turn is claimed by exactly one owner", () =
   // handled, some owner must take it — otherwise Escape silently does nothing.
   for (const shape of everyEscapeShape()) {
     if (shape.defaultPrevented || !shape.isTurnActive || shape.isTextarea) continue;
+    // An open layer takes the key itself — see the next test.
+    if (shape.blockingLayerOpen) continue;
     assert.equal(
       composerOwnsEscape(shape) || shellOwnsEscape(shape),
       true,
       `nobody claimed ${JSON.stringify(shape)}`
     );
+  }
+});
+
+test("an open layer (a popover, a modal, the palette) takes every Escape — neither owner does", () => {
+  // Fix round 1: the goal popover is portaled outside the composer shell, and
+  // the shell's capture listener used to interrupt the turn instead of letting
+  // the popover close. With a layer open, the layer's own listener closes it
+  // and that is all the Escape does.
+  for (const shape of everyEscapeShape()) {
+    if (!shape.blockingLayerOpen) continue;
+    assert.equal(composerOwnsEscape(shape), false, `composer claimed ${JSON.stringify(shape)}`);
+    assert.equal(shellOwnsEscape(shape), false, `shell claimed ${JSON.stringify(shape)}`);
   }
 });
 

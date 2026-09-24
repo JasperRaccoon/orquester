@@ -19,6 +19,7 @@ import type {
   ProviderSessionStatus,
   RuntimeMode
 } from "./adapter-types.ts";
+import type { AgentGoal, AgentGoalChange, ThreadGoal } from "./goal.ts";
 import type {
   ApprovalOption,
   CanonicalRequestType,
@@ -96,6 +97,17 @@ export interface ThreadHead {
   turnCount: number;
   seq: number;
   continueAfterRestart?: ContinueAfterRestart;
+  /**
+   * Goals §5.5: the deploy handover found this thread's goal CONTINUING —
+   * active on a provider that starts its own turns (Codex) — with a usable
+   * resume cursor. The next host resumes the provider session once its gate is
+   * open, WITHOUT sending a turn, so the provider continues the goal by
+   * itself, and then clears this. Needs no per-project opt-in: setting a goal
+   * is the user's opt-in to autonomous work. Head-only state like
+   * {@link continueAfterRestart}: no domain event carries it, and an older
+   * build ignores it.
+   */
+  resumeGoalAfterRestart?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -288,6 +300,14 @@ export interface ThreadActivityPayloadFields {
   summary?: string;
   /** True when the full payload was truncated and `GET …/items/:itemId` has more. */
   truncated?: boolean;
+  /**
+   * The three fields of a `goal.updated` row (goals §4.3) — its whole
+   * `GoalUpdatedPayload`, on the snapshot, the live stream and history pages
+   * alike. Read them through `parseGoalUpdatedPayload`, never raw.
+   */
+  goal?: AgentGoal | null;
+  change?: AgentGoalChange;
+  previous?: AgentGoal;
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +612,12 @@ export interface ThreadSnapshotPayload {
    * before. See `ThreadHistoryBounds` in `wire.ts`.
    */
   history?: ThreadHistoryBounds;
+  /**
+   * The provider's goal as the fold holds it (goals §4.4), `null` when the
+   * thread has none. Absent from a host that predates goals; a client reads
+   * that as `null` and shows no goal until the drain-restart.
+   */
+  goal?: ThreadGoal | null;
 }
 
 /**

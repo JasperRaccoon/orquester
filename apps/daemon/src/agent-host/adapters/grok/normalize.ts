@@ -21,6 +21,7 @@
  */
 
 import type {
+  AgentGoal,
   ApprovalDecision,
   CanonicalRequestType,
   ProviderThreadTurnSnapshot,
@@ -28,7 +29,9 @@ import type {
   RuntimeEventRaw,
   RuntimeEventRawSource,
   RuntimeItemStatus,
+  RuntimeTaskCompletedStatus,
   RuntimeTaskStatus,
+  RuntimeTaskUsage,
   ThreadTokenUsage,
   TurnTokenUsage,
   UserInputQuestion
@@ -45,6 +48,7 @@ import type {
   XaiSessionUpdate,
   XaiUsage
 } from "./acp/_generated/xai.ts";
+import { GrokGoalTracker } from "./goal.ts";
 import { GrokHistoryCollector } from "./history.ts";
 import {
   nextPlanModeActive,
@@ -82,6 +86,15 @@ export interface GrokNormalizerDeps {
   /** The turn a live frame belongs to, or undefined between turns. */
   activeTurnId(): string | undefined;
   readonly planHost: PlanPathHost;
+  /**
+   * The goal the thread shows (`StartSessionInput.knownGoal`, goals §5.3), so
+   * a goal row goes out only for a real change (goals §6).
+   */
+  readonly knownGoal?: AgentGoal | null;
+  /** The clock the `progress` throttle reads (goals §6). Default `Date.now`. */
+  now?(): number;
+  /** Frames this adapter drops on purpose say why here, never in a warning. */
+  debug?(message: string, detail?: unknown): void;
 }
 
 /** What a settled turn looks like once every source has been consulted. */
@@ -105,10 +118,46 @@ interface ToolTrack extends ToolCallSnapshot {
   readonly toolCallId: string;
   kind?: string;
   rawInput?: unknown;
+  /** `_meta["x.ai/tool"].name`, e.g. `spawn_subagent`. */
+  vendorName?: string;
+  /** The subagent this `spawn_subagent` call launched, once one claimed it. */
+  launchedTaskId?: string;
   itemType: ReturnType<typeof itemTypeFromToolKind>;
   started: boolean;
   lastEmittedProgressLength?: number;
   skippedSinceEmit: number;
+}
+
+/** A live subagent, from `subagent_spawned` to `subagent_finished`. */
+interface SubagentTrack {
+  readonly taskId: string;
+  /** Repeated on every row of the task (§4.2 "linkage on every row"). */
+  readonly linkage: {
+    readonly taskType: "subagent";
+    readonly agentKind: "agent";
+    readonly agentId: string;
+    readonly title?: string;
+    readonly role?: string;
+    readonly model?: string;
+    readonly toolUseId?: string;
+  };
+  readonly turnId: string | undefined;
+}
+
+/** How many finished background shells are remembered, so a stale snapshot cannot reopen one. */
+const MAX_FINISHED_TASK_IDS = 256;
+
+/** How many finished `spawn_subagent` calls wait, by subagent id, for their `subagent_spawned`. */
+const MAX_SPAWN_RESULTS = 256;
+
+/** The `subagent_id: <id>` line of a finished `spawn_subagent` call's result. */
+const SPAWN_RESULT_SUBAGENT_ID = /(?:^|\n)subagent_id:[ \t]*(\S+)/;
+
+/** A `spawn_subagent` call, as the subagent it launched will name it. */
+interface SpawnCall {
+  readonly toolCallId: string;
+  /** The call's `rawInput.run_in_background`. */
+  readonly background?: boolean;
 }
 
 interface BackgroundTrack {
@@ -142,7 +191,17 @@ const KNOWN_XAI_UPDATES = new Set([
   "auto_compact_completed",
   "last_turn_summary",
   "session_summary_generated",
-  "task_backgrounded"
+  "task_backgrounded",
+  // Goals §6.3 item 1: it used to reach the unmapped fallback, one warning row
+  // per frame of a goal run.
+  "goal_updated",
+  // A goal run's other traffic (fixtures README observation 37) — about 120
+  // warning rows per run before these were mapped.
+  "subagent_spawned",
+  "subagent_finished",
+  "retry_state",
+  "compaction_checkpoint",
+  "task_completed"
 ]);
 
 export class GrokNormalizer {
@@ -161,8 +220,20 @@ export class GrokNormalizer {
    */
   private readonly history = new GrokHistoryCollector();
 
+  /** The provider's goal, live and replayed (goals §6.3). */
+  private readonly goals: GrokGoalTracker;
+
   private readonly tools = new Map<string, ToolTrack>();
   private readonly tasks = new Map<string, BackgroundTrack>();
+  /** Background shells `task_completed` closed: a stale roster snapshot must not reopen one. */
+  private readonly finishedTaskIds = new Set<string>();
+  private readonly subagents = new Map<string, SubagentTrack>();
+  /** Finished `spawn_subagent` calls, by the subagent id their result names — until it spawns. */
+  private readonly spawnResults = new Map<string, SpawnCall>();
+  /** A subagent ran in the current turn: its usage then says `hasSubagents`. */
+  private subagentsThisTurn = false;
+  /** The open retry episode's last attempt; `undefined` when none is open. */
+  private retryAttempt: number | undefined;
   private readonly hooks = new Map<string, string>();
 
   /** Slash commands, refreshed from `available_commands_update` (69, not 7). */
@@ -201,6 +272,11 @@ export class GrokNormalizer {
     // the session id, and an item id that collided across the restart would
     // merge two different assistant bubbles.
     this.runtimeId = `${sessionId}:${deps.uuid()}`;
+    this.goals = new GrokGoalTracker({
+      ...(deps.knownGoal === undefined ? {} : { knownGoal: deps.knownGoal }),
+      now: deps.now ?? Date.now,
+      ...(deps.debug === undefined ? {} : { debug: deps.debug })
+    });
   }
 
   // ------------------------------------------------------------------ state
@@ -279,6 +355,7 @@ export class GrokNormalizer {
   beginTurn(): void {
     this.assistantUpdatesOpen = true;
     this.permissionDenied = false;
+    this.retryAttempt = undefined;
     this.resetTurnUsage();
   }
 
@@ -288,6 +365,7 @@ export class GrokNormalizer {
    */
   endTurn(): RuntimeEvent[] {
     this.assistantUpdatesOpen = false;
+    this.retryAttempt = undefined;
     return this.closeAssistantSegment();
   }
 
@@ -303,7 +381,8 @@ export class GrokNormalizer {
    * timeline rather than restore it — and `session/load` replays only a
    * fraction anyway (39 events produced, 5 replayed), so it could never be a
    * reconstruction. A replayed `turn_completed` is still read for its usage
-   * block (see {@link handleXaiNotification}); nothing else is.
+   * block, and a replayed `goal_updated` for the goal it leaves (see
+   * {@link handleXaiNotification}); nothing else is.
    */
   handleSessionUpdate(params: SessionNotification): RuntimeEvent[] {
     if (isReplayFrame(params._meta)) {
@@ -524,10 +603,13 @@ export class GrokNormalizer {
         ? (contentText ?? command ?? title ?? undefined)
         : (command ?? contentText ?? title ?? undefined);
 
+    const vendorName = vendor?.name ?? previous?.vendorName;
     const next: ToolTrack = {
       toolCallId,
       kind: kind ?? undefined,
       rawInput,
+      ...(vendorName === undefined ? {} : { vendorName }),
+      ...(previous?.launchedTaskId === undefined ? {} : { launchedTaskId: previous.launchedTaskId }),
       // `_meta["x.ai/tool"].kind` is Grok's own authoritative discriminant, it
       // is finer-grained than ACP's, and it is present on the FIRST frame of a
       // call where ACP's `kind` is still absent — so it leads.
@@ -590,6 +672,9 @@ export class GrokNormalizer {
     }
 
     if (terminal) {
+      if (next.vendorName === "spawn_subagent") {
+        this.noteSpawnResult(next);
+      }
       // A late update on a finished call must look brand-new, not like a
       // no-op that coalescing would swallow.
       this.tools.delete(toolCallId);
@@ -672,9 +757,26 @@ export class GrokNormalizer {
       // for one it has not, `projectHistory` rebuilds it from here.
       this.history.observeXaiUpdate(update as Record<string, unknown>);
       this.absorbReplayUsage(update);
+      if (update.sessionUpdate === "goal_updated") {
+        // Goals §6.3 item 4: a replayed goal is the past. It is remembered as
+        // the provider's state and compared ONCE, by `reconcileGoal`, when
+        // the load has completed — never emitted as it arrives.
+        this.goals.replayed(update);
+      }
       return [];
     }
     return this.handleXaiUpdate(method, update, params);
+  }
+
+  /**
+   * Goals §6.3 item 4: once the session is up, the provider's goal against
+   * the goal the thread shows. At most one `thread.goal.updated`, live. A
+   * fresh session (`"new"`) has no goal; a load (`"load"`) that replayed no
+   * goal row is no evidence of anything ({@link GrokGoalTracker.reconcile}).
+   */
+  reconcileGoal(opened: "new" | "load"): RuntimeEvent[] {
+    const payload = this.goals.reconcile(opened);
+    return payload === null ? [] : [this.event("thread.goal.updated", payload)];
   }
 
   private absorbReplayUsage(update: XaiSessionUpdate): void {
@@ -788,6 +890,27 @@ export class GrokNormalizer {
         return [];
       case "task_backgrounded":
         return this.taskBackgrounded(update as unknown as Record<string, unknown>, raw);
+      case "subagent_spawned":
+        return this.subagentSpawned(update as unknown as Record<string, unknown>, raw);
+      case "subagent_finished":
+        return this.subagentFinished(update as unknown as Record<string, unknown>, raw);
+      case "retry_state":
+        return this.retryState(update as unknown as Record<string, unknown>, raw);
+      case "compaction_checkpoint":
+        // The CLI's own rewind checkpoint at the compaction boundary, written
+        // 1–36 ms BEFORE `auto_compact_completed`, which carries the boundary
+        // itself (and `10`'s 1.0.34 capture did not even send it live —
+        // observation 37). A row here would mark one compaction twice.
+        return [];
+      case "task_completed":
+        return this.taskCompleted(update as unknown as Record<string, unknown>, raw);
+      case "goal_updated": {
+        // Goals §6.3: the whole goal, on every change and whenever its
+        // counters move. Whatever method carried it — a frame that is not a
+        // replay is live — it becomes at most one goal row, never a warning.
+        const payload = this.goals.live(update);
+        return payload === null ? [] : [this.event("thread.goal.updated", payload, undefined, raw)];
+      }
       default: {
         const name = (update as { sessionUpdate: string }).sessionUpdate;
         if (KNOWN_XAI_UPDATES.has(name)) {
@@ -826,6 +949,10 @@ export class GrokNormalizer {
     const seen = new Set<string>();
     for (const task of tasks) {
       if (typeof task.task_id !== "string" || task.task_id.length === 0) {
+        continue;
+      }
+      if (this.finishedTaskIds.has(task.task_id)) {
+        // `task_completed` closed it; a snapshot still listing it is stale.
         continue;
       }
       seen.add(task.task_id);
@@ -979,12 +1106,290 @@ export class GrokNormalizer {
   }
 
   /**
-   * Close every live background task. Called before `session.exited`, because
-   * a running state must never outlive its process (§3.1) — and because Grok
-   * never reports a completion of its own accord.
+   * `task_completed` — a background shell finished, with its whole snapshot:
+   * exit code, signal, `explicitly_killed`, output. It closes the roster row
+   * `task_backgrounded` / `background_tasks` opened (observation 37: every one
+   * seen was for a shell a turn waited on, `block_waited`, that woke the
+   * agent, `will_wake`, or that the agent killed — none came for the detached
+   * `sleep 25` of observation 29). A shell this session never put on the
+   * roster, or already closed, is nothing to close.
+   */
+  private taskCompleted(update: Record<string, unknown>, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const snapshot = update["task_snapshot"];
+    const record =
+      snapshot !== null && typeof snapshot === "object" && !Array.isArray(snapshot)
+        ? (snapshot as Record<string, unknown>)
+        : undefined;
+    const taskId = nonEmptyText(record?.["task_id"]);
+    const track = taskId === undefined ? undefined : this.tasks.get(taskId);
+    if (record === undefined || taskId === undefined || track === undefined) {
+      return [];
+    }
+    this.tasks.delete(taskId);
+    this.finishedTaskIds.add(taskId);
+    if (this.finishedTaskIds.size > MAX_FINISHED_TASK_IDS) {
+      const oldest = this.finishedTaskIds.values().next().value;
+      if (oldest !== undefined) {
+        this.finishedTaskIds.delete(oldest);
+      }
+    }
+    const exit = record["exit_code"];
+    const exitCode = typeof exit === "number" && Number.isInteger(exit) ? exit : undefined;
+    const status: RuntimeTaskCompletedStatus =
+      record["explicitly_killed"] === true
+        ? "stopped"
+        : exitCode !== undefined
+          ? exitCode === 0
+            ? "completed"
+            : "failed"
+          : nonEmptyText(record["signal"]) !== undefined
+            ? "failed"
+            : "completed";
+    return [
+      this.event(
+        "task.completed",
+        {
+          taskId,
+          taskType: "shell",
+          agentKind: "background",
+          agentId: taskId,
+          title: track.description ?? track.command,
+          status,
+          ...(exitCode === undefined ? {} : { exitCode }),
+          ...(track.toolUseId === undefined ? {} : { toolUseId: track.toolUseId }),
+          ...(track.outputFile === undefined ? {} : { outputFile: track.outputFile })
+        },
+        track.turnId,
+        raw
+      )
+    ];
+  }
+
+  // -------------------------------------------------------------- subagents
+
+  /**
+   * `subagent_spawned` — one of a goal's planner, worker, skeptics or
+   * summarizer, or a subagent the model launched with `spawn_subagent`
+   * (observation 37). Each is its own task on the roster, as Claude's and
+   * Codex's agents are: `taskType: "subagent"` under the agent's own id, which
+   * ingestion stamps an agent. A resumed subagent arrives under a NEW id
+   * (`resumed_from` names the old one), so a resume is simply another agent.
+   */
+  private subagentSpawned(update: Record<string, unknown>, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const taskId = nonEmptyText(update["subagent_id"]);
+    if (taskId === undefined) {
+      this.deps.debug?.("grok: subagent_spawned without a subagent_id; dropped");
+      return [];
+    }
+    if (this.subagents.has(taskId)) {
+      return [];
+    }
+    const description = nonEmptyText(update["description"]);
+    const role = nonEmptyText(update["role"]) ?? nonEmptyText(update["subagent_type"]);
+    const model = nonEmptyText(update["model"]);
+    const launch = this.claimSpawnCall(taskId, description);
+    const linkage: SubagentTrack["linkage"] = {
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: taskId,
+      ...(description === undefined ? {} : { title: description }),
+      ...(role === undefined ? {} : { role }),
+      ...(model === undefined ? {} : { model }),
+      ...(launch === undefined ? {} : { toolUseId: launch.toolCallId })
+    };
+    const turnId = this.deps.activeTurnId();
+    this.subagents.set(taskId, { taskId, linkage, turnId });
+    this.subagentsThisTurn = true;
+    return [
+      this.event(
+        "task.started",
+        {
+          taskId,
+          ...(description === undefined ? {} : { description }),
+          ...(launch?.background === undefined ? {} : { isBackgrounded: launch.background }),
+          ...linkage
+        },
+        turnId,
+        raw
+      )
+    ];
+  }
+
+  /**
+   * The model's `spawn_subagent` call behind a subagent. Naming it lets the
+   * timeline show the agent row instead of both rows. The spawn frame names
+   * no call; the call names its subagent in its result text, and in the real
+   * session that result came FIRST for 14 of 27 model-launched subagents —
+   * the call closed, and gone from the tool map, before `subagent_spawned`.
+   * So: the call whose result named this id ({@link noteSpawnResult}); else
+   * the OLDEST still-open call with the same description that no subagent
+   * has claimed. `undefined` for the goal engine's own agents, which no tool
+   * call launches.
+   */
+  private claimSpawnCall(taskId: string, description: string | undefined): SpawnCall | undefined {
+    const finished = this.spawnResults.get(taskId);
+    if (finished !== undefined) {
+      this.spawnResults.delete(taskId);
+      return finished;
+    }
+    if (description === undefined) {
+      return undefined;
+    }
+    for (const track of this.tools.values()) {
+      const input = track.rawInput;
+      if (
+        track.vendorName !== "spawn_subagent" ||
+        track.launchedTaskId !== undefined ||
+        input === null ||
+        typeof input !== "object" ||
+        (input as Record<string, unknown>)["description"] !== description
+      ) {
+        continue;
+      }
+      track.launchedTaskId = taskId;
+      const background = (input as Record<string, unknown>)["run_in_background"];
+      return { toolCallId: track.toolCallId, ...(typeof background === "boolean" ? { background } : {}) };
+    }
+    return undefined;
+  }
+
+  /**
+   * A `spawn_subagent` call finished: its result text names the subagent it
+   * started (`Subagent started in background.\nsubagent_id: <id>\n…`, in both
+   * `rawOutput.text` and the content). Remembered by that id for
+   * `subagent_spawned` to claim, because the call is about to leave the tool
+   * map. Nothing is remembered for a call the description pairing already
+   * gave to a subagent — even one the result does not name: a mis-assigned
+   * call must not end up shared by two subagents. Entries go on claim, the
+   * oldest past {@link MAX_SPAWN_RESULTS}.
+   */
+  private noteSpawnResult(track: ToolTrack): void {
+    const output = track.rawOutput;
+    const outputText =
+      output !== null && typeof output === "object" && typeof (output as { text?: unknown }).text === "string"
+        ? (output as { text: string }).text
+        : undefined;
+    const subagentId =
+      SPAWN_RESULT_SUBAGENT_ID.exec(outputText ?? "")?.[1] ??
+      SPAWN_RESULT_SUBAGENT_ID.exec(toolContentText(track.content) ?? "")?.[1];
+    if (subagentId === undefined || track.launchedTaskId !== undefined) {
+      return;
+    }
+    const input = track.rawInput;
+    const background =
+      input !== null && typeof input === "object"
+        ? (input as Record<string, unknown>)["run_in_background"]
+        : undefined;
+    this.spawnResults.set(subagentId, {
+      toolCallId: track.toolCallId,
+      ...(typeof background === "boolean" ? { background } : {})
+    });
+    if (this.spawnResults.size > MAX_SPAWN_RESULTS) {
+      const oldest = this.spawnResults.keys().next().value;
+      if (oldest !== undefined) {
+        this.spawnResults.delete(oldest);
+      }
+    }
+  }
+
+  /**
+   * `subagent_finished` — the agent's end, with its output (or the CLI's
+   * reason when it did not finish) and its own counters. Completes the task
+   * in the turn that spawned it. A finish with no spawn this session saw — a
+   * subagent that outlived a restart — still completes its task: the roster
+   * folds a completion without a start, and the result is not lost.
+   */
+  private subagentFinished(update: Record<string, unknown>, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const taskId = nonEmptyText(update["subagent_id"]);
+    if (taskId === undefined) {
+      this.deps.debug?.("grok: subagent_finished without a subagent_id; dropped");
+      return [];
+    }
+    const track = this.subagents.get(taskId);
+    this.subagents.delete(taskId);
+    const status = subagentCompletionStatus(update["status"], this.deps.debug);
+    const output = nonEmptyText(update["output"]);
+    const error = nonEmptyText(update["error"]);
+    const summary = status === "completed" ? (output ?? error) : (error ?? output);
+    const totalTokens = nonNegativeCount(update["tokens_used"]);
+    const toolUses = nonNegativeCount(update["tool_calls"]);
+    const durationMs = nonNegativeCount(update["duration_ms"]);
+    const usage: RuntimeTaskUsage | undefined =
+      totalTokens === undefined
+        ? undefined
+        : {
+            totalTokens,
+            ...(toolUses === undefined ? {} : { toolUses }),
+            ...(durationMs === undefined ? {} : { durationMs })
+          };
+    return [
+      this.event(
+        "task.completed",
+        {
+          taskId,
+          status,
+          ...(summary === undefined ? {} : { summary }),
+          ...(usage === undefined ? {} : { usage }),
+          ...(track?.linkage ?? { taskType: "subagent", agentKind: "agent", agentId: taskId })
+        },
+        track?.turnId,
+        raw
+      )
+    ];
+  }
+
+  // ---------------------------------------------------------------- retries
+
+  /**
+   * `retry_state` — the CLI retrying a failed model request, attempt `n` of
+   * `max_retries` (15). Claude's `api_retry` precedent: a transport retry is a
+   * heartbeat, never a timeline row and never a warning. So it is
+   * `session.state.changed {running}`, which ingestion folds into the state
+   * the turn already has — nothing is written — while the host's turn
+   * watchdog sees the activity. ONE per retry episode: an episode is one
+   * request's attempts and ends when a later frame restarts the count (each
+   * observed episode recovered, its next frame model output, within 3
+   * minutes). Between turns it is nothing: an idle session must not read as
+   * running, and a background agent's failure reports itself when it ends.
+   */
+  private retryState(update: Record<string, unknown>, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const turnId = this.deps.activeTurnId();
+    if (turnId === undefined) {
+      return [];
+    }
+    const attempt = nonNegativeCount(update["attempt"]) ?? 1;
+    const fresh = this.retryAttempt === undefined || attempt <= this.retryAttempt;
+    this.retryAttempt = attempt;
+    if (!fresh) {
+      return [];
+    }
+    const max = nonNegativeCount(update["max_retries"]);
+    const reason = nonEmptyText(update["reason"]);
+    return [
+      this.event(
+        "session.state.changed",
+        {
+          state: "running",
+          reason: `retry_state:${attempt}${max === undefined ? "" : `/${max}`}`,
+          ...(reason === undefined ? {} : { detail: { reason } })
+        },
+        turnId,
+        raw
+      )
+    ];
+  }
+
+  /**
+   * Close every live background task and subagent. Called before
+   * `session.exited`, because a running state must never outlive its process
+   * (§3.1) — and because Grok may never report a completion of its own accord.
    */
   stopBackgroundTasks(): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
+    for (const [taskId, track] of [...this.subagents.entries()]) {
+      this.subagents.delete(taskId);
+      events.push(this.event("task.completed", { taskId, status: "stopped", ...track.linkage }, track.turnId));
+    }
     for (const [taskId, track] of [...this.tasks.entries()]) {
       this.tasks.delete(taskId);
       events.push(
@@ -1113,7 +1518,12 @@ export class GrokNormalizer {
 
   /** `turn.completed`, from whichever sources settled the turn. */
   turnCompleted(turnId: string, outcome: GrokTurnOutcome, errorMessage?: string): RuntimeEvent {
-    const usage = turnTokenUsage(outcome.usage, this.tasks.size > 0);
+    const usage = turnTokenUsage(
+      outcome.usage,
+      this.tasks.size > 0 || this.subagents.size > 0 || this.subagentsThisTurn
+    );
+    // Reset here, not in `beginTurn`: a steer re-opens the SAME turn.
+    this.subagentsThisTurn = false;
     const state = turnStateFromOutcome(outcome, errorMessage);
     const costUsd =
       outcome.usage?.costUsdTicks === undefined ? undefined : outcome.usage.costUsdTicks / 1_000_000_000;
@@ -1159,6 +1569,41 @@ export class GrokNormalizer {
     raw?: RuntimeEventRaw
   ): RuntimeEvent {
     return { ...this.event(type, payload, undefined, raw), itemId } as RuntimeEvent;
+  }
+}
+
+/** A string with something in it, as sent. */
+function nonEmptyText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function nonNegativeCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * `subagent_finished.status` → how the task ended. Observed: `completed`, and
+ * `cancelled` with `error: "Subagent was cancelled"` (the goal engine cancels
+ * the skeptics it no longer needs). A finish in words this adapter does not
+ * know is still a finish: `completed`, the roster's own default, with a debug
+ * line.
+ */
+function subagentCompletionStatus(
+  status: unknown,
+  debug: ((message: string, detail?: unknown) => void) | undefined
+): RuntimeTaskCompletedStatus {
+  const normalized = normalizeTaskStatus(typeof status === "string" ? status : undefined);
+  switch (normalized) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+    case "interrupted":
+      return "stopped";
+    default:
+      debug?.("grok: unknown subagent_finished status; reading it as completed", { status });
+      return "completed";
   }
 }
 

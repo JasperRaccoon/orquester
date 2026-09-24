@@ -7,6 +7,7 @@
  */
 
 import type {
+  AgentGoalChange,
   AgentPanelModel,
   ApprovalDecision,
   AttachmentRef,
@@ -22,6 +23,7 @@ import type {
   RuntimeMode,
   RuntimeSubagent,
   ThreadActivityItem,
+  ThreadGoal,
   ThreadHead,
   ThreadHistoryBounds,
   ThreadHistoryPage,
@@ -190,6 +192,15 @@ export interface AgentChatThreadSlice {
    * *Added with the thread index; `contracts.ts` stays additive-only.*
    */
   history: AgentChatHistoryState;
+  /**
+   * The provider's goal as the fold holds it (goals §8.1): the snapshot's,
+   * then every live `goal.updated` row that parses. `null` when the thread has
+   * none — and from a host that predates goals. The fold's own object, so it
+   * keeps its identity through every event that does not move it.
+   *
+   * *Added with agent goals; `contracts.ts` stays additive-only.*
+   */
+  goal: ThreadGoal | null;
 }
 
 /**
@@ -314,6 +325,22 @@ export interface WorkLogEntry {
     accountId: string;
     previousAccountId?: string;
   };
+  /**
+   * Present on a goal marker (goals §8.4) — a `goal.updated` row that parsed
+   * and is not `progress`. The label is the row's own summary; this is what
+   * the marker needs beyond it, read off the goal the row is about (the
+   * current one, or the one that ended).
+   *
+   * *Added with agent goals; `contracts.ts` stays additive-only.*
+   */
+  goal?: {
+    change: AgentGoalChange;
+    /** The whole objective: the summary cuts it to 200 characters. */
+    objective?: string;
+    rounds?: number;
+    elapsedMs?: number;
+    tokensUsed?: number;
+  };
 }
 
 /**
@@ -336,7 +363,8 @@ export type ToolGroupSummaryKind = "read" | "edit" | "command" | "search" | "oth
  * The twelve row kinds the timeline projects, T3's set verbatim
  * (`apps/web/src/components/chat/MessagesTimeline.logic.ts:329-442`), with
  * `worktree-setup` dropped (per-thread worktrees are a non-goal, §2) and
- * `turn-diff` added for the changed-files card §7.3 names.
+ * `turn-diff` added for the changed-files card §7.3 names — and, with agent
+ * goals, `goal-marker` for a goal's landmarks (goals §8.4).
  */
 export type AgentChatTimelineRow =
   | {
@@ -414,6 +442,33 @@ export type AgentChatTimelineRow =
       summary?: string;
       /** The summary arrived capped by §5.6; the full one is one read away. */
       summaryTruncated?: boolean;
+    }
+  /**
+   * A goal's landmark (goals §8.4): set, checked, paused, stopped, achieved,
+   * failed, cleared — never `progress`, which only keeps the chip current.
+   * Its own row like the compaction marker, never grouped — and, unlike it,
+   * never folded into a settled turn: the story of the goal outlives the work
+   * it drove.
+   *
+   * *Added with agent goals; additive to the contract.*
+   */
+  | {
+      kind: "goal-marker";
+      id: string;
+      createdAt: string;
+      turnId: string | null;
+      /** The row's summary, as ingestion wrote it (goals §4.3). */
+      label: string;
+      change: AgentGoalChange;
+      /** The whole objective, for the tooltip. */
+      objective?: string;
+      /**
+       * Achieved/failed only: what the goal cost, carried raw and formatted
+       * client-side like the compaction marker's counts. Each only when known.
+       */
+      rounds?: number;
+      elapsedMs?: number;
+      tokensUsed?: number;
     }
   | {
       kind: "message";
@@ -682,6 +737,14 @@ export interface AgentChatStatusView {
   reportsContextWindow: boolean;
   activityLabel: string | null;
   turnStartedAt: string | null;
+  /**
+   * The provider is compacting the conversation — the store's own phase, the
+   * one the timeline's live placeholders show. The account chip names it the
+   * way the host's refusal does (goals §5.5, fix round 2).
+   *
+   * *Added with agent goals; `contracts.ts` stays additive-only.*
+   */
+  isCompacting: boolean;
 }
 
 export type UseAgentChatThread = (sessionId: string) => AgentChatThreadView;

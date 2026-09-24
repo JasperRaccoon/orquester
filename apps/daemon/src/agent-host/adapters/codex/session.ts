@@ -23,12 +23,25 @@
  *   hard `-32600 "no active turn to interrupt"` on the wire, not a no-op.
  * - **Plan mode is sticky**, so `collaborationMode` is sent on every turn
  *   including `{mode:"default"}` (fixtures README observation 9).
+ * - **Every interrupt through the adapter pauses an active goal first**
+ *   (goals §6.2.4): `turn/interrupt` alone leaves the goal active and Codex
+ *   starts its next continuation turn at once. That is the user's Stop AND
+ *   the host's turn watchdog, whose stall interrupt goes through the same
+ *   `interruptTurn` — one owner for a goal's turns, so a goal whose turn
+ *   stalls is interrupted and paused, never interrupted and continued. A
+ *   session stop (a deploy's drain-restart) never pauses: Codex continues the
+ *   goal on resume.
+ * - **An active goal's turns belong to the host's watchdog**: this session's
+ *   own liveness watchdog stands down while the tracked goal is active, and
+ *   takes the turn back when it no longer is.
  */
 
 import type {
+  AgentGoal,
   ApprovalDecision,
   ApprovalOption,
   AttachmentRef,
+  GoalUpdatedPayload,
   InteractionMode,
   ModelSelection,
   ProviderSession,
@@ -38,9 +51,20 @@ import type {
   UserInputQuestion
 } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
+import type {
+  AdapterContext,
+  GoalCommandOptions,
+  GoalCommandResult,
+  HostGoalCommand,
+  RollbackTarget
+} from "../../adapter.ts";
 import { isUsableConversationId } from "../../orchestration/resume.ts";
-import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
+import {
+  AGENT_HOST_DEADLINES,
+  DeadlineExceededError,
+  TURN_LIVENESS_WINDOWS,
+  withDeadline
+} from "../../support/deadline.ts";
 import {
   describeExit,
   exitOutcome,
@@ -52,6 +76,8 @@ import { StderrCapture } from "../../support/stderr.ts";
 import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
 import { notificationThreadId } from "./child-routing.ts";
 import type {
+  ClientRequestParamsByMethod,
+  ClientRequestResultsByMethod,
   CodexProtocol,
   ServerNotificationMethod,
   ServerRequestMethod,
@@ -67,6 +93,18 @@ import {
   unknownAvailableDecisions
 } from "./decisions.ts";
 import {
+  CODEX_GOAL_COMMAND_MS,
+  CODEX_GOAL_SETTLE_MS,
+  CodexGoalTracker,
+  GOAL_AT_BUDGET_SUMMARY,
+  GOAL_BUDGET_REACHED_SUMMARY,
+  NO_GOAL_SUMMARY,
+  NO_GOAL_TO_EDIT_SUMMARY,
+  agentGoalFromCodex,
+  codexGoalCarry,
+  codexGoalStatusSummary
+} from "./goal.ts";
+import {
   interactionModeToCollaborationMode,
   normaliseSkillMentions,
   runtimeModeToThreadConfig,
@@ -76,12 +114,14 @@ import {
   CODEX_RAW_REQUEST,
   CodexNormaliser,
   canonicalRequestType,
+  goalUpdatedEvents,
   presentableError,
   type RuntimeEventDraft
 } from "./normalise.ts";
 import {
   CodexPeer,
   CodexRequestRefusal,
+  CodexRpcError,
   describeError,
   isNoActiveTurnError,
   type CodexServerRequest
@@ -143,6 +183,26 @@ export interface CodexSessionOptions {
    * pending" is exercised in milliseconds rather than ten minutes.
    */
   livenessWindows?: { idleMs: number; activeToolMs: number };
+  /**
+   * The fold's goal for this thread (goals §4.6 `knownGoal`), so only a real
+   * change becomes a `thread.goal.updated` — a resume that finds the goal the
+   * thread already shows is no news.
+   */
+  knownGoal?: AgentGoal | null;
+  /**
+   * This start restarts the session for an account switch (goals §4.6
+   * `carryGoal`). A goal lives in `goals_1.sqlite` under the thread's
+   * `CODEX_HOME`, which managed homes do not share, so the new home may not
+   * know it: it is re-created rather than reported cleared (goals §6.2.2).
+   */
+  carryGoal?: boolean;
+  /**
+   * Overrides for the goal windows ({@link CODEX_GOAL_COMMAND_MS},
+   * {@link CODEX_GOAL_SETTLE_MS}, `AGENT_HOST_DEADLINES.goalPauseMs`).
+   * Production passes nothing; a test shrinks them so a wedged goal store is
+   * exercised in milliseconds.
+   */
+  goalDeadlines?: { commandMs?: number; settleMs?: number; pauseMs?: number };
   emit: (draft: RuntimeEventDraft) => void;
   /** Called once the session has settled for good, so the adapter can forget it. */
   onClosed: () => void;
@@ -173,6 +233,14 @@ export class CodexSession {
 
   private readonly options: CodexSessionOptions;
   private readonly usage = new CodexUsageTracker();
+  /**
+   * The thread's goal as this session knows it (goals §6): seeded from the
+   * fold, fed by the normaliser's goal arms and by the replies to this
+   * session's own goal requests, and read by Stop.
+   */
+  private readonly goals: CodexGoalTracker;
+  /** `/goal` commands waiting for {@link CodexGoalTracker.settled} (fix round 1). */
+  private readonly goalSettleWaiters = new Set<() => void>();
   private readonly normaliser: CodexNormaliser;
   /**
    * §3.1 requires the excerpt to be redacted before it leaves the host — home
@@ -247,9 +315,16 @@ export class CodexSession {
     this.runtimeMode = options.runtimeMode;
     // Through the `IdGen` seam, so a captured event log stays byte-stable.
     this.requestEpoch = options.context.ids.uuid();
+    this.goals = new CodexGoalTracker({
+      known: options.knownGoal ?? null,
+      carry: options.carryGoal === true,
+      // The progress throttle runs on the host's clock seam, like every stamp.
+      now: () => options.context.clock.now().getTime()
+    });
     this.normaliser = new CodexNormaliser({
       usage: this.usage,
-      ownThreadId: () => this.providerThreadId
+      ownThreadId: () => this.providerThreadId,
+      goals: this.goals
     });
     this.stderr = new StderrCapture({
       homeDirs: [options.codexHome, options.env.HOME].filter(
@@ -553,14 +628,28 @@ export class CodexSession {
    *   an early return when no turn is active left subagent fleets and watch
    *   loops running with nothing to close them — and the UI's Stop sat on
    *   "Stopping…" for ever because the liveness registry never cleared.
+   *
+   * `pauseGoal` is set by the adapter's `interruptTurn`, which both the
+   * user's Stop and the host's turn watchdog go through: an active goal is
+   * paused before anything else (goals §6.2.4), so a goal whose turn stalls is
+   * interrupted AND paused. Before the settle too — a `cancel` ends the turn
+   * by itself (fixtures README obs. 3), and an active goal's next continuation
+   * starts the moment it does. {@link stop} passes nothing: a deploy's
+   * drain-restart must let Codex continue the goal on resume. This session's
+   * own liveness watchdog passes nothing either, and never fires while the
+   * goal is active ({@link goalOwnsLiveness}).
    */
-  async interruptTurn(turnId?: string): Promise<void> {
+  async interruptTurn(turnId?: string, options: { pauseGoal?: boolean } = {}): Promise<void> {
     const active = this.activeTurnId;
     if (turnId !== undefined && turnId !== active) {
       // Turn-scoped and stale. Enforced HERE because the server answers a
       // stale turn id with a hard `-32600 "no active turn to interrupt"`
       // (fixtures README observation 5).
       return;
+    }
+
+    if (options.pauseGoal === true) {
+      await this.pauseGoalBeforeInterrupt();
     }
 
     this.settlePendingRequests("cancel");
@@ -821,6 +910,423 @@ export class CodexSession {
     return this.readThread();
   }
 
+  // -------------------------------------------------------------------------
+  // Goals (goals §6.2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * A host-parsed `/goal …` (goals §4.6, §5.1, §6.2.3), mapped onto
+   * `thread/goal/*` the way Codex's own TUI maps it. A provider refusal
+   * rejects in the provider's own words.
+   *
+   * ONE deadline ({@link CODEX_GOAL_COMMAND_MS}) covers the whole command, so
+   * a wedged goal store cannot hold the thread's effect queue — Stop, the next
+   * turn — for a deadline per request. Within it the command first waits,
+   * briefly, for this home's goal to settle: a resume snapshot still on its
+   * way or a carry still landing (fix round 1).
+   *
+   * A `pause` skips that wait: pausing is idempotent, and a Stop's pause must
+   * never stall behind a snapshot that may not come, past the host's own
+   * `AGENT_HOST_DEADLINES.goalPauseMs`. A model picked together with the
+   * command is applied before any goal request ({@link applyGoalModelSelection}).
+   *
+   * The goal itself moves only through `thread.goal.updated` rows; the
+   * summary is text only for `status`, for a goal a command found missing (or,
+   * on `resume`, out of budget) and for a `clear` that found nothing to clear.
+   */
+  async goalCommand(
+    command: HostGoalCommand,
+    options: GoalCommandOptions = {}
+  ): Promise<GoalCommandResult> {
+    const peer = this.requirePeer();
+    const threadId = this.requireProviderThreadId();
+    const budget = goalBudget(`codex /goal ${command.kind}`, this.goalDeadline("commandMs"));
+    try {
+      if (command.kind !== "pause") {
+        await this.goalsSettled(Math.min(this.goalDeadline("settleMs"), budget.remaining()));
+      }
+      await this.applyGoalModelSelection(peer, threadId, options.modelSelection, budget);
+      switch (command.kind) {
+        case "status":
+          return {
+            summary: codexGoalStatusSummary(await this.readGoal(peer, threadId, budget))
+          };
+        case "set": {
+          // Replacing a goal — unfinished or complete — is clear, then set, so
+          // the new one starts from zero rather than inheriting the old one's
+          // tokens and time (goals §3.2, the TUI's own rule).
+          if ((await this.readGoal(peer, threadId, budget)) !== null) {
+            await this.clearGoal(peer, threadId, budget);
+          }
+          await this.setGoal(
+            peer,
+            { threadId, objective: command.objective, status: "active" },
+            budget
+          );
+          return { summary: "" };
+        }
+        case "edit":
+          // `set {objective}` with no goal would CREATE one, active — not what
+          // an edit asked for (fix round 1, ruling 1).
+          if ((await this.readGoal(peer, threadId, budget)) === null) {
+            return { summary: NO_GOAL_TO_EDIT_SUMMARY };
+          }
+          await this.setGoal(peer, { threadId, objective: command.objective }, budget);
+          return { summary: "" };
+        case "pause":
+          // Decided on the tracker's latest word, not a `get`: a Stop may be
+          // waiting on this. A goal at its budget stays there whatever is sent.
+          if (this.goals.current?.status === "budget-limited") {
+            return { summary: GOAL_AT_BUDGET_SUMMARY };
+          }
+          // Sent without a `get` — idempotent. A goal that is not there is
+          // Codex's refusal, answered like the rest.
+          return (await this.setGoalUnlessMissing(peer, { threadId, status: "paused" }, budget))
+            ? { summary: "" }
+            : { summary: NO_GOAL_SUMMARY };
+        case "resume": {
+          const goal = await this.readGoal(peer, threadId, budget);
+          if (goal === null) {
+            return { summary: NO_GOAL_SUMMARY };
+          }
+          if (goal.status === "budget-limited") {
+            return { summary: GOAL_BUDGET_REACHED_SUMMARY };
+          }
+          return (await this.setGoalUnlessMissing(peer, { threadId, status: "active" }, budget))
+            ? { summary: "" }
+            : { summary: NO_GOAL_SUMMARY };
+        }
+        case "clear":
+          return {
+            summary: (await this.clearGoal(peer, threadId, budget)) ? "" : NO_GOAL_SUMMARY
+          };
+        default: {
+          const exhaustive: never = command;
+          throw new Error(`codex: unknown goal command ${JSON.stringify(exhaustive)}`);
+        }
+      }
+    } catch (error) {
+      throw goalCommandError(error);
+    }
+  }
+
+  /**
+   * Goals §6.2.4: bounded at `AGENT_HOST_DEADLINES.goalPauseMs` and never in
+   * the interrupt's way — a refusal or an expiry is logged and the interrupt goes
+   * out regardless. Awaited, because the pause must land before the interrupt
+   * does: pause-then-interrupt is ordered per thread (goals §3.2).
+   */
+  private async pauseGoalBeforeInterrupt(): Promise<void> {
+    const peer = this.peer;
+    const providerThreadId = this.providerThreadId;
+    if (
+      this.goals.current?.status !== "active" ||
+      peer === null ||
+      peer.isClosed ||
+      providerThreadId === null
+    ) {
+      return;
+    }
+    try {
+      await this.setGoal(
+        peer,
+        { threadId: providerThreadId, status: "paused" },
+        goalBudget("codex goal pause", this.goalDeadline("pauseMs"))
+      );
+    } catch (error) {
+      this.options.context.logger.warn("codex: could not pause the goal before interrupting", {
+        threadId: this.threadId,
+        error: describeError(goalCommandError(error))
+      });
+    }
+  }
+
+  /**
+   * `thread/goal/get`. A stale reply — a notification observed since, or the
+   * resume snapshot not read yet — is never emitted, and the tracker's latest
+   * word is answered instead (#8615's stale re-emit, goals §6.2.5). Any other
+   * reply is observed: no notification follows a `get`, so a fold that fell
+   * behind the provider catches up only here.
+   */
+  private async readGoal(
+    peer: CodexPeer,
+    threadId: string,
+    budget: GoalBudget
+  ): Promise<AgentGoal | null> {
+    const sentAt = this.goals.notificationCount;
+    const response = await this.goalRequest(peer, "thread/goal/get", { threadId }, budget);
+    if (this.goals.isStale(sentAt)) {
+      return this.goals.current;
+    }
+    const raw: unknown = (response as { goal?: unknown }).goal ?? null;
+    if (raw === null) {
+      this.emitGoal(this.goals.responded(null, sentAt));
+      return null;
+    }
+    const goal = agentGoalFromCodex(raw);
+    if (goal === null) {
+      // Refused rather than read as "no goal": a `set` would then skip the
+      // clear and edit a goal the user never saw.
+      throw new Error("codex answered with a goal this version cannot read");
+    }
+    this.emitGoal(this.goals.responded(goal, sentAt));
+    return goal;
+  }
+
+  /**
+   * `thread/goal/set`. Its reply is NOT read for the goal: the set's own
+   * `thread/goal/updated` follows and says the same — while a notification
+   * queued before the set can trail the reply, so a goal read off the reply
+   * would be overwritten by an older state for a moment, a `paused` → `resumed`
+   * → `paused` flicker (fixtures README observation 19).
+   */
+  private async setGoal(
+    peer: CodexPeer,
+    params: CodexProtocol.v2.ThreadGoalSetParams,
+    budget: GoalBudget
+  ): Promise<void> {
+    await this.goalRequest(peer, "thread/goal/set", params, budget);
+  }
+
+  /**
+   * A status-only set, answered `false` when Codex refuses it for want of a
+   * goal — "cannot update goal for thread …: no goal exists" (fixtures README
+   * observation 19) — so `pause`/`resume` answer `No goal is set.` like every
+   * other command rather than an error row quoting the provider.
+   *
+   * No notification follows a refusal, so it is the only word that the
+   * thread has no goal: read like a `get` that found none. A fold that still
+   * shows one — the chip offering Pause on a goal that is gone — is cleared
+   * exactly as a `thread/goal/cleared` would clear it, unless a notification
+   * since has made the refusal stale.
+   */
+  private async setGoalUnlessMissing(
+    peer: CodexPeer,
+    params: CodexProtocol.v2.ThreadGoalSetParams,
+    budget: GoalBudget
+  ): Promise<boolean> {
+    const sentAt = this.goals.notificationCount;
+    try {
+      await this.setGoal(peer, params, budget);
+      return true;
+    } catch (error) {
+      if (isNoGoalRefusal(error)) {
+        this.emitGoal(this.goals.responded(null, sentAt));
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Goals §4.6 `GoalCommandOptions.modelSelection`: Codex starts the goal's
+   * turns itself, on the thread's own settings, so a model picked together
+   * with the command must reach the thread BEFORE the goal request — the next
+   * turn the user sends would be too late. `thread/settings/update` sets them
+   * for subsequent turns, sticky like `turn/start`'s overrides (fixtures README
+   * observation 10), and is spelled the way `sendTurn` spells those: the model
+   * always, effort and service tier when the selection names them.
+   *
+   * Only when the selection differs from the one this session last applied —
+   * model, effort or tier. Best-effort, inside the command's one deadline but
+   * never more than half of what is left of it, so a wedged update still
+   * leaves the goal request its turn: a refusal or an expiry is logged, the
+   * session keeps the model it has, and the command goes on.
+   */
+  private async applyGoalModelSelection(
+    peer: CodexPeer,
+    threadId: string,
+    selection: ModelSelection | undefined,
+    budget: GoalBudget
+  ): Promise<void> {
+    if (selection === undefined || sameTurnSettings(this.modelSelection, selection)) {
+      return;
+    }
+    const effort = selectedOptionOf(selection, "effort");
+    const serviceTier = selectedOptionOf(selection, "serviceTier");
+    try {
+      await this.goalRequest(
+        peer,
+        "thread/settings/update",
+        {
+          threadId,
+          model: selection.model,
+          ...(effort !== undefined ? { effort } : {}),
+          ...(serviceTier !== undefined ? { serviceTier } : {})
+        },
+        goalBudget(`${budget.label} (model)`, Math.floor(budget.remaining() / 2))
+      );
+      this.modelSelection = selection;
+      this.normaliser.noteThreadSettings(selection.model, effort);
+    } catch (error) {
+      this.options.context.logger.warn("codex: could not apply the model picked with /goal", {
+        threadId: this.threadId,
+        model: selection.model,
+        error: describeError(goalCommandError(error))
+      });
+    }
+  }
+
+  /**
+   * `thread/goal/clear`: true when there was a goal to clear, whose
+   * `thread/goal/cleared` follows and is the row. With nothing to clear no
+   * notification comes, so that reply is the only word that the thread has
+   * no goal — the one clear reply that is read.
+   */
+  private async clearGoal(peer: CodexPeer, threadId: string, budget: GoalBudget): Promise<boolean> {
+    const sentAt = this.goals.notificationCount;
+    const response = await this.goalRequest(peer, "thread/goal/clear", { threadId }, budget);
+    const cleared = (response as { cleared?: unknown }).cleared === true;
+    if (!cleared) {
+      this.emitGoal(this.goals.responded(null, sentAt));
+    }
+    return cleared;
+  }
+
+  /**
+   * One request inside `budget`: it gets what is left of the operation's one
+   * deadline, and an expiry names the whole operation. An expiry fails the
+   * request WITHOUT killing the child: a goal store slow to answer is not a
+   * wedged turn, and killing the child would end the turn it is running.
+   */
+  private async goalRequest<
+    TMethod extends
+      | "thread/goal/get"
+      | "thread/goal/set"
+      | "thread/goal/clear"
+      | "thread/settings/update"
+  >(
+    peer: CodexPeer,
+    method: TMethod,
+    params: ClientRequestParamsByMethod[TMethod],
+    budget: GoalBudget
+  ): Promise<ClientRequestResultsByMethod[TMethod]> {
+    const timeoutMs = budget.remaining();
+    if (timeoutMs <= 0) {
+      throw new DeadlineExceededError(budget.label, budget.totalMs);
+    }
+    try {
+      return await withDeadline(() => peer.request(method, params), {
+        label: budget.label,
+        timeoutMs,
+        signal: this.options.context.signal
+      });
+    } catch (error) {
+      if (error instanceof DeadlineExceededError) {
+        throw new DeadlineExceededError(budget.label, budget.totalMs);
+      }
+      throw error;
+    }
+  }
+
+  private goalDeadline(name: "commandMs" | "settleMs" | "pauseMs"): number {
+    const override = this.options.goalDeadlines?.[name];
+    if (override !== undefined) {
+      return override;
+    }
+    switch (name) {
+      case "commandMs":
+        return CODEX_GOAL_COMMAND_MS;
+      case "settleMs":
+        return CODEX_GOAL_SETTLE_MS;
+      case "pauseMs":
+        return AGENT_HOST_DEADLINES.goalPauseMs;
+    }
+  }
+
+  /**
+   * Resolves once this home's goal has settled (`CodexGoalTracker.settled`)
+   * or `timeoutMs` has passed — never rejects: a snapshot that never comes
+   * (an unreadable goal store) must not fail the command, only stop delaying
+   * it. A reply the command then reads before the snapshot is stale.
+   */
+  private goalsSettled(timeoutMs: number): Promise<void> {
+    if (this.goals.settled || timeoutMs <= 0) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const waiter = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.goalSettleWaiters.delete(waiter);
+        resolve();
+      }, timeoutMs);
+      this.goalSettleWaiters.add(waiter);
+    });
+  }
+
+  /** Wake the waiting commands once settled — or all of them, when the session is gone. */
+  private releaseGoalWaiters(force = false): void {
+    if (this.goalSettleWaiters.size === 0 || (!force && !this.goals.settled)) {
+      return;
+    }
+    const waiters = [...this.goalSettleWaiters];
+    this.goalSettleWaiters.clear();
+    for (const waiter of waiters) {
+      waiter();
+    }
+  }
+
+  private emitGoal(payload: GoalUpdatedPayload | null): void {
+    for (const draft of goalUpdatedEvents(payload)) {
+      this.emit(draft);
+    }
+    this.refreshLivenessWatchdog();
+  }
+
+  /**
+   * Goals §6.2.2: re-create, on this account's home, the unfinished goal the
+   * resume snapshot (or a fresh thread) says it does not know. Only once the
+   * thread is open — the snapshot can be read before the resume's own reply —
+   * and only once.
+   */
+  private maybeCarryGoal(): void {
+    if (this.providerThreadId === null) {
+      return;
+    }
+    const goal = this.goals.takeCarry();
+    if (goal !== null) {
+      void this.carryGoal(goal);
+    }
+  }
+
+  /**
+   * The carried goal comes back through its own `thread/goal/updated`, which
+   * the tracker names `restored` and which settles the carry.
+   */
+  private async carryGoal(goal: AgentGoal): Promise<void> {
+    try {
+      await this.setGoal(
+        this.requirePeer(),
+        { threadId: this.requireProviderThreadId(), ...codexGoalCarry(goal) },
+        goalBudget("codex goal carry", this.goalDeadline("commandMs"))
+      );
+    } catch (error) {
+      const detail = describeError(goalCommandError(error));
+      this.options.context.logger.warn("codex: could not carry the goal to this account", {
+        threadId: this.threadId,
+        error: detail
+      });
+      if (this.exitHandled || this.hostInitiatedClose) {
+        // The session is gone, and nothing more belongs on its stream.
+        return;
+      }
+      // The new home has no goal, so the thread's is cleared — and the user
+      // is told why rather than watching it vanish.
+      this.emit({
+        type: "runtime.warning",
+        payload: {
+          message: "Could not carry this thread's goal over to the new account, so it was cleared.",
+          detail
+        }
+      });
+      this.emitGoal(this.goals.carryFailed());
+      this.releaseGoalWaiters();
+    }
+  }
+
   /** Stop the session on purpose. Settles everything first (§4.1). */
   async stop(): Promise<void> {
     if (this.closedPromise !== null) {
@@ -853,6 +1359,10 @@ export class CodexSession {
     const cursor = parseResumeCursor(this.options.resumeCursor);
 
     if (cursor !== null) {
+      // Every resume sends the thread's goal as a snapshot right after its
+      // reply (fixture 07) — and it can be read off the wire before the reply
+      // itself is, so the tracker is told first (goals §6.2.2).
+      this.goals.expectResumeSnapshot();
       try {
         const resumed = await this.bounded(
           () =>
@@ -872,8 +1382,11 @@ export class CodexSession {
         );
         this.providerThreadId = resumed.thread.id;
         this.announceThread(resumed.thread.id);
+        // A carry the snapshot asked for before this reply was read goes now.
+        this.maybeCarryGoal();
         return;
       } catch (error) {
+        this.goals.cancelResumeSnapshot();
         // A resume that fails falls back to a FRESH thread rather than failing
         // the session (§4.5). T3 decides this with an English-substring
         // matcher over the error message; that matcher was never exercised on
@@ -912,6 +1425,12 @@ export class CodexSession {
     // NOT `{threadId}` — `result.thread.id` (fixtures README observation 1).
     this.providerThreadId = started.thread.id;
     this.announceThread(started.thread.id);
+    // A new thread has no goal and sends no snapshot, so whatever goal the
+    // fold still shows is gone — or, on an account switch, carried (goals
+    // §6.2.2).
+    this.emitGoal(this.goals.freshThread());
+    this.maybeCarryGoal();
+    this.releaseGoalWaiters();
   }
 
   /**
@@ -992,6 +1511,10 @@ export class CodexSession {
       this.activeTurnId = p.turn.id;
       this.setStatus("running");
       this.armLivenessWatchdog();
+      // The resume's goal snapshot goes out before any turn — the server
+      // sends it ahead of its own idle continuation — so a snapshot that has
+      // not come by now is not coming (goals §6.2.2).
+      this.goals.cancelResumeSnapshot();
     } else if (method === "turn/completed" && isOurs) {
       const p = params as CodexProtocol.v2.TurnCompletedNotification;
       if (this.activeTurnId === p.turn.id) {
@@ -1015,6 +1538,14 @@ export class CodexSession {
       // reload (R3 finding 10).
       this.sawMcpServer = true;
     }
+
+    // A resume snapshot read after the thread opened may have asked for a
+    // carry (goals §6.2.2); a goal that stopped being active hands a running
+    // turn back to the watchdog; and a `/goal` waiting for this home's goal to
+    // settle may go now (fix round 1).
+    this.maybeCarryGoal();
+    this.refreshLivenessWatchdog();
+    this.releaseGoalWaiters();
   }
 
   /**
@@ -1419,9 +1950,11 @@ export class CodexSession {
     this.liveTasks.clear();
 
     // 4. Fail every request still parked on the dead transport, and make every
-    //    later call fail fast.
+    //    later call fail fast — a `/goal` still waiting for its home to settle
+    //    included: nothing will settle it now.
     this.peer?.close(describeExit(reason));
     this.failPendingRequests(`codex exited: ${describeExit(reason)}`);
+    this.releaseGoalWaiters(true);
 
     // 5. Only now the exit itself.
     this.setStatus(outcome.status);
@@ -1464,7 +1997,7 @@ export class CodexSession {
    */
   private armLivenessWatchdog(): void {
     this.disarmLivenessWatchdog();
-    if (this.activeTurnId === null || this.hasLivenessPause()) {
+    if (this.activeTurnId === null || this.hasLivenessPause() || this.goalOwnsLiveness()) {
       return;
     }
     const window = this.livenessWindowMs();
@@ -1473,8 +2006,9 @@ export class CodexSession {
       this.livenessTimer = null;
       // Re-check the pause immediately before cancelling: a turn waiting on a
       // human is not a stalled turn, and a watchdog that ignored that would
-      // cancel every request the user left open over lunch (§3.1).
-      if (this.activeTurnId === null || this.hasLivenessPause()) {
+      // cancel every request the user left open over lunch (§3.1). A goal
+      // that went active while we slept stands this watchdog down too.
+      if (this.activeTurnId === null || this.hasLivenessPause() || this.goalOwnsLiveness()) {
         this.armLivenessWatchdog();
         return;
       }
@@ -1508,6 +2042,28 @@ export class CodexSession {
   /** Paused entirely while an approval or user-input request is pending (§3.1). */
   private hasLivenessPause(): boolean {
     return this.pendingApprovals.size > 0 || this.pendingUserInputs.size > 0;
+  }
+
+  /**
+   * While the thread's goal is active, the HOST's turn watchdog owns its turns
+   * — a 60-minute window, and an interrupt that pauses the goal. This one's
+   * interrupt pauses nothing, so firing it would only make Codex continue the
+   * goal in a new turn: it stands down entirely, and takes the turn back the
+   * moment the goal is no longer active (fix round 1, ruling 2).
+   */
+  private goalOwnsLiveness(): boolean {
+    return this.goals.current?.status === "active";
+  }
+
+  /**
+   * A goal that stopped being active hands a running turn back: arm the
+   * watchdog when it is not (the arm itself declines while the goal, or a
+   * pending request, still holds it).
+   */
+  private refreshLivenessWatchdog(): void {
+    if (this.activeTurnId !== null && this.livenessTimer === null) {
+      this.armLivenessWatchdog();
+    }
   }
 
   private disarmIfIdle(): void {
@@ -1668,11 +2224,7 @@ export class CodexSession {
   }
 
   private selectedOption(id: string): string | undefined {
-    const option = this.modelSelection.options?.find((entry) => entry.id === id);
-    if (option === undefined || typeof option.value !== "string" || option.value.length === 0) {
-      return undefined;
-    }
-    return option.value;
+    return selectedOptionOf(this.modelSelection, id);
   }
 
   /**
@@ -1726,6 +2278,63 @@ export class CodexSession {
 }
 
 const HOST_CLIENT_VERSION = "1";
+
+/**
+ * Goals §6.2.3: a provider refusal reads in the provider's own words — "cannot
+ * update goal for thread …: no goal exists", "goals feature is disabled" — not
+ * behind our `thread/goal/set failed:` prefix, and a JSON-string message is
+ * unwrapped (fixtures README obs. 13). Anything else — a deadline, a closed
+ * transport — is already worded by us.
+ */
+function goalCommandError(error: unknown): Error {
+  if (error instanceof CodexRpcError) {
+    return new Error(presentableError(error.providerMessage));
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * One deadline shared by every step of one goal operation — a `/goal`
+ * command, a pause, a carry — on the wall clock the timers run on.
+ */
+interface GoalBudget {
+  /** What an expiry names: the whole operation, not the request that ran out. */
+  readonly label: string;
+  readonly totalMs: number;
+  remaining(): number;
+}
+
+function goalBudget(label: string, totalMs: number): GoalBudget {
+  const deadlineAt = Date.now() + totalMs;
+  return { label, totalMs, remaining: () => deadlineAt - Date.now() };
+}
+
+/**
+ * Codex refusing a goal update because the thread has no goal. Its message is
+ * the only thing that tells this refusal apart — every refusal is `-32600`
+ * (fixtures README observations 13 and 19).
+ */
+function isNoGoalRefusal(error: unknown): boolean {
+  return error instanceof CodexRpcError && /\bno goal exists\b/i.test(error.providerMessage);
+}
+
+/** A selection's option value, when it names a non-empty string. */
+function selectedOptionOf(selection: ModelSelection, id: string): string | undefined {
+  const option = selection.options?.find((entry) => entry.id === id);
+  if (option === undefined || typeof option.value !== "string" || option.value.length === 0) {
+    return undefined;
+  }
+  return option.value;
+}
+
+/** The same model, effort and service tier: what a turn would send Codex. */
+function sameTurnSettings(a: ModelSelection, b: ModelSelection): boolean {
+  return (
+    a.model === b.model &&
+    selectedOptionOf(a, "effort") === selectedOptionOf(b, "effort") &&
+    selectedOptionOf(a, "serviceTier") === selectedOptionOf(b, "serviceTier")
+  );
+}
 
 /**
  * `thread/turns/list` paging: 50 turns a page, 20 pages at most — a thousand

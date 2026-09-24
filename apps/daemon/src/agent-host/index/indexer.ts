@@ -65,7 +65,13 @@
  */
 
 import type { DomainEvent, Turn } from "@orquester/api/agent-chat";
-import { applyTurnEvent, startedTurns } from "@orquester/api/agent-chat";
+import {
+  GOAL_ACTIVITY_KIND,
+  applyTurnEvent,
+  isHiddenGoalChange,
+  parseGoalUpdatedPayload,
+  startedTurns
+} from "@orquester/api/agent-chat";
 
 import type { AdapterLogger, Clock } from "../adapter.ts";
 import type { EventPosition } from "../services.ts";
@@ -1066,7 +1072,9 @@ export function createThreadIndexer(input: {
     }
 
     const kind = toStringOrNull(activity.activityKind) ?? "";
-    const text = activityText(activity);
+    // Its position above is indexed like any row's; its text only when anyone
+    // could be looking for it.
+    const text = isHiddenGoalRow(kind, activity.payload) ? "" : activityText(activity);
     if (text.length > 0) {
       sql.insertActivityFts.run(
         rowid,
@@ -1324,6 +1332,20 @@ function activityText(activity: Record<string, unknown>): string {
     }
   }
   return capText(parts.join("\n"));
+}
+
+/**
+ * A `goal.updated` row the timeline hides (goals §8.4: a `progress` tick). It
+ * reads "Goal progress" every time, so full-text indexing it only flooded the
+ * palette's search; its position is still indexed, as every row's is. A goal
+ * row whose payload does not parse is kept searchable, like any other row.
+ */
+function isHiddenGoalRow(kind: string, payload: unknown): boolean {
+  if (kind !== GOAL_ACTIVITY_KIND) {
+    return false;
+  }
+  const goalRow = parseGoalUpdatedPayload(payload);
+  return goalRow !== null && isHiddenGoalChange(goalRow.change);
 }
 
 /** `compactionMarkerState`'s classification, on the persisted payload. */

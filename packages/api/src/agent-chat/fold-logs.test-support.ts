@@ -10,8 +10,8 @@
  * place over and over (`task-progress:<taskId>`, an agent's
  * `tool-progress:<taskId>`), streamed messages, message-mode questions
  * answered much later, approvals, compaction markers, turns that settle or
- * stop, and rewinds — so every retention class trims many times. The same seed
- * always writes the same log.
+ * stop, rewinds, and provider goal updates — so every retention class trims
+ * many times. The same seed always writes the same log.
  */
 
 import { isDeepStrictEqual } from "node:util";
@@ -26,6 +26,7 @@ import {
 } from "./fold.ts";
 import type { ThreadFoldState } from "./fold.ts";
 import { deserializeFoldState, serializeFoldState } from "./fold-snapshot.ts";
+import { GOAL_ACTIVITY_KIND } from "./goal.ts";
 import type { ThreadActivityItem, ThreadItem } from "./thread.ts";
 import {
   activity,
@@ -85,7 +86,12 @@ export type FleetAction =
   /** A rewind to an earlier turn. */
   | "revert"
   /** A message and an activity sharing an id (the index keeps the LAST position). */
-  | "collide";
+  | "collide"
+  /**
+   * A provider goal update (goals §4.4): mostly one the fold adopts, sometimes
+   * a cleared goal, sometimes a row it must append without adopting.
+   */
+  | "goal";
 
 export interface FleetLogOptions {
   readonly seed: number;
@@ -436,6 +442,35 @@ export function fleetLog(options: FleetLogOptions): DomainEvent[] {
         }
         break;
       }
+      case "goal": {
+        counter += 1;
+        const roll = random();
+        const statuses = ["active", "active", "paused", "blocked", "budget-limited", "complete"];
+        const payload =
+          roll < 0.15
+            ? { goal: null, change: "cleared", previous: { objective: `goal ${counter % 4}`, status: "active" } }
+            : roll < 0.3
+              ? // Does not parse: the row is appended, the goal stays.
+                { goal: { objective: "", status: "active" }, change: "set" }
+              : {
+                  goal: {
+                    objective: `goal ${counter % 4}`,
+                    status: statuses[Math.floor(random() * statuses.length)],
+                    rounds: Math.floor(random() * 4),
+                    ...(random() < 0.5 ? { lastCheck: `not yet ${step}` } : {}),
+                    ...(random() < 0.3 ? { tokenBudget: null } : {})
+                  },
+                  change: random() < 0.5 ? "set" : "checked"
+                };
+        appendRow(
+          activity(GOAL_ACTIVITY_KIND, payload, {
+            id: `goal-${counter}`,
+            // Some rows belong to no turn: a rewind never removes them.
+            turnId: random() < 0.2 ? null : turnId
+          })
+        );
+        break;
+      }
       default:
         void (action satisfies never);
     }
@@ -561,6 +596,16 @@ export const LEAN_PARENT_WEIGHTS: Partial<Record<FleetAction, number>> = {
   agentRow: 1,
   message: 1,
   delta: 1
+};
+
+/**
+ * {@link LEAN_PARENT_WEIGHTS} with provider goal updates: goals set, checked,
+ * cleared and set again, rows the fold must not adopt, goal rows aged out by
+ * retention and removed by rewinds.
+ */
+export const GOAL_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  ...LEAN_PARENT_WEIGHTS,
+  goal: 1.5
 };
 
 /** Past the message window, with streamed deltas and a few activities. */

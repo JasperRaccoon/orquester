@@ -334,7 +334,8 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
     pendingRequestCount: 0,
     queuedTurnCount: 0,
     compacting: false,
-    backgroundLive: false
+    backgroundLive: false,
+    goalContinuing: false
   };
 
   it("passes only when nothing is in flight", () => {
@@ -352,7 +353,8 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
       { ...idle, pendingRequestCount: 1 },
       { ...idle, queuedTurnCount: 1 },
       { ...idle, compacting: true },
-      { ...idle, backgroundLive: true }
+      { ...idle, backgroundLive: true },
+      { ...idle, goalContinuing: true }
     ]) {
       assert.ok(identitySwitchRefusal(state), `refused: ${JSON.stringify(state)}`);
     }
@@ -361,6 +363,24 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
   it("names the compaction first — it is the phase the user can act on", () => {
     assert.match(
       identitySwitchRefusal({ ...idle, compacting: true, status: "running" }) ?? "",
+      /compaction/i
+    );
+  });
+
+  it("refuses a continuing goal in the words the composer mirror shows (goals §5.5)", () => {
+    assert.equal(
+      identitySwitchRefusal({ ...idle, goalContinuing: true }),
+      "Pause the goal before switching accounts."
+    );
+    // Between a continuing goal's turns idle never comes, so the goal's reason
+    // outranks the running turn; a compaction must still finish first, because
+    // a goal command waits for it too.
+    assert.equal(
+      identitySwitchRefusal({ ...idle, goalContinuing: true, status: "running", activeTurnId: "t" }),
+      "Pause the goal before switching accounts."
+    );
+    assert.match(
+      identitySwitchRefusal({ ...idle, goalContinuing: true, compacting: true }) ?? "",
       /compaction/i
     );
   });

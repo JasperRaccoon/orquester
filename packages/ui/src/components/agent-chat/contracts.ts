@@ -27,9 +27,15 @@ import type {
 // `RuntimeMode` of its own (the client platform — `desktop-local` | …) whose
 // local declaration shadows the star re-export, so importing it from there
 // silently types the composer's permission-mode chip as a platform name.
-import type { AgentPanelModel, RuntimeMode } from "@orquester/api/agent-chat";
+import type {
+  AgentGoal,
+  AgentPanelModel,
+  GoalAction,
+  RuntimeMode
+} from "@orquester/api/agent-chat";
 
 import type { ChatAccountOption } from "../../lib/agent-chat/account-switch";
+import type { GoalActionModel } from "./status/goal-chip";
 import type {
   ActivePlanState,
   AgentChatActions,
@@ -218,6 +224,15 @@ export interface ChatComposerProps {
   accountOptions?: readonly ChatAccountOption[] | undefined;
   accountId?: string | undefined;
   accountSwitchEnabled?: boolean | undefined;
+  /**
+   * The reason the picker is closed, in the host's own order and words
+   * (`chatAccountSwitchRefusal`): a running compaction, else a continuing
+   * goal, which only a pause ends (goals §5.5). Absent ⇒ the chip's own
+   * "available when idle".
+   *
+   * *Added with agent goals; additive to the contract.*
+   */
+  accountSwitchRefusal?: string | null | undefined;
   /** A turn is live: Enter steers, Escape interrupts, the primary action is Stop. */
   isTurnActive: boolean;
   /** Blocks a flush and disables submit while a card is open (§7.4). */
@@ -397,4 +412,21 @@ export interface ChatStatusLineProps {
    * `ContextWindowMeter.tsx:136-138`.*
    */
   modelLabel?: string | null;
+  /**
+   * The thread's goal, as the fold holds it (goals §8.2). The chip shows
+   * exactly an unfinished one, in a stable slot before the plan chip; absent
+   * or `null` ⇒ no chip.
+   *
+   * *Added with agent goals; additive to the contract.*
+   */
+  goal?: AgentGoal | null;
+  /** The chip's actions, already gated by the §8.2 matrix (`goalActions`). */
+  goalActions?: readonly GoalActionModel[];
+  /** Why the popover offers no action right now, when that needs saying. */
+  goalActionsNote?: string | null;
+  /**
+   * Send one action as the user's message — through the composer's own send
+   * path, never around it (goals §8.2).
+   */
+  onGoalAction?: (action: GoalAction) => void;
 }

@@ -8,6 +8,7 @@ import {
   buildSlashMenuItems,
   compactCommandAvailable,
   isProviderSkillUserInvocable,
+  menuItemAction,
   menuItemReplacement,
   providerCommandDescription,
   providerCommandsForSlashMenu,
@@ -16,6 +17,11 @@ import {
   slashMenuItemsForPromptPosition,
   type SlashMenuItem
 } from "./composer-menu.ts";
+import {
+  detectComposerTrigger,
+  extendReplacementRangeForTrailingSpace,
+  replaceTextRange
+} from "./composer-trigger.ts";
 
 function skill(name: string, overrides: Partial<Skill> = {}): Skill {
   return { name, path: `/skills/${name}/SKILL.md`, enabled: true, ...overrides };
@@ -285,4 +291,130 @@ test("R2-5: the refusal is Grok-only and never fires on a lookalike", () => {
   assert.equal(blockedProviderCommandMessage(undefined, "/always-approve"), null);
   assert.equal(blockedProviderCommandMessage("grok", "/always-approve-not"), null);
   assert.equal(blockedProviderCommandMessage("grok", "tell me about /always-approve"), null);
+});
+
+// ---------------------------------------------------------------------------
+// Goals §8.5 — `/goal` where the host parses it
+// ---------------------------------------------------------------------------
+
+const isGoalRow = (item: SlashMenuItem): boolean =>
+  (item.type === "host-command" && item.command === "goal") ||
+  (item.type === "provider-command" && item.command.name === "goal");
+
+test("goals §8.5: a host-parsed /goal (Codex) joins the host commands, with its description and hint", () => {
+  const goal = buildSlashMenuItems({ ...BASE, hostGoalCommand: true }).find(isGoalRow);
+  assert.ok(goal && goal.type === "host-command");
+  assert.equal(goal.label, "/goal");
+  assert.equal(goal.description, "Set, check, pause, resume or clear a goal");
+  assert.equal(goal.hint, "<objective> | pause | resume | clear | edit <objective>");
+  assert.equal(
+    buildSlashMenuItems(BASE).some(isGoalRow),
+    false,
+    "no host row where the host does not parse it"
+  );
+});
+
+test("goals §8.5: a provider adapter's own /goal entry is used unchanged", () => {
+  // Claude and Grok forward `/goal` verbatim; the CLI's catalog row is the one.
+  const grokGoal: SlashCommand = {
+    name: "goal",
+    description: "Set, manage, or check an autonomous goal",
+    input: { hint: "<objective> [--budget <tokens>] | status | pause | resume | clear" }
+  };
+  const rows = buildSlashMenuItems({ ...BASE, slashCommands: [grokGoal] }).filter(isGoalRow);
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0]?.type === "provider-command");
+  assert.equal(rows[0].command, grokGoal, "the provider's own entry, untouched");
+});
+
+test("goals §8.5: the host row replaces a provider row of the same name — one /goal, never two", () => {
+  const rows = buildSlashMenuItems({
+    ...BASE,
+    hostGoalCommand: true,
+    slashCommands: [command("goal", "Codex's own"), command("init")]
+  }).filter(isGoalRow);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.type, "host-command");
+});
+
+test("goals §8.5: picking /goal TYPES it — the host parses the sent text, so it must reach the draft", () => {
+  assert.equal(
+    menuItemReplacement({
+      id: "host:goal",
+      type: "host-command",
+      command: "goal",
+      label: "/goal",
+      description: ""
+    }),
+    "/goal "
+  );
+});
+
+test("goals §8.5: /goal is offered only at the start of the prompt — the host recognises nothing else", () => {
+  const midway = buildSlashMenuItems({ ...BASE, hostGoalCommand: true, isAtPromptStart: false });
+  assert.equal(midway.some(isGoalRow), false, "`fix it /goal x` would reach the model as text");
+  assert.equal(
+    midway.some((item) => item.type === "host-command" && item.command === "model"),
+    true,
+    "the client-only host commands still apply from anywhere"
+  );
+});
+
+test("goals §8.5: typing `go` ranks /goal first", () => {
+  const [first] = buildSlashMenuItems({
+    ...BASE,
+    hostGoalCommand: true,
+    slashCommands: [command("init")],
+    query: "go"
+  });
+  assert.ok(first && isGoalRow(first));
+});
+
+test("goals §8.5: picking /goal ACTS on nothing — the insertion is the whole pick, nothing is sent", () => {
+  const goalItem = {
+    id: "host:goal",
+    type: "host-command" as const,
+    command: "goal" as const,
+    label: "/goal",
+    description: ""
+  };
+  assert.equal(menuItemAction(goalItem), null);
+  // The client-only host commands still act, exactly as before.
+  for (const command of ["model", "effort", "plan", "default"] as const) {
+    assert.equal(
+      menuItemAction({ id: `host:${command}`, type: "host-command", command, label: "", description: "" }),
+      command
+    );
+  }
+  // …and every other row only inserts.
+  assert.equal(
+    menuItemAction({ id: "p", type: "provider-command", command: command("init"), label: "", description: "" }),
+    null
+  );
+  assert.equal(menuItemAction({ id: "s", type: "skill", skill: skill("rev"), label: "", description: "" }), null);
+  assert.equal(
+    menuItemAction({ id: "f", type: "path", path: "a.ts", pathKind: "file", label: "", description: "" }),
+    null
+  );
+});
+
+test("goals §8.5: picking /goal replaces the typed trigger with `/goal ` and leaves the caret after the space", () => {
+  const goalItem = buildSlashMenuItems({ ...BASE, hostGoalCommand: true, query: "go" }).find(
+    (item) => item.type === "host-command" && item.command === "goal"
+  );
+  assert.ok(goalItem);
+  // The composer's own pick, step for step: detect, replace, place the caret.
+  const pick = (text: string, cursor: number) => {
+    const trigger = detectComposerTrigger(text, cursor);
+    assert.ok(trigger && trigger.kind === "slash-command", text);
+    const replacement = menuItemReplacement(goalItem);
+    const rangeEnd = extendReplacementRangeForTrailingSpace(text, trigger.rangeEnd, replacement);
+    return replaceTextRange(text, trigger.rangeStart, rangeEnd, replacement);
+  };
+  assert.deepEqual(pick("/go", 3), { text: "/goal ", cursor: 6 }, "typed on, for the objective");
+  assert.deepEqual(
+    pick("/g fix the flaky tests", 2),
+    { text: "/goal fix the flaky tests", cursor: 6 },
+    "a space already after the caret is not doubled, and the caret sits before the objective"
+  );
 });

@@ -14,6 +14,7 @@ import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
 import { useMediaQuery } from "../../../hooks/use-media-query";
+import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
 import { useAppStore } from "../../../store/app";
 import { attachmentPathOf } from "../../../lib/agent-chat/composer.logic";
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
@@ -50,6 +51,7 @@ import {
   buildSkillMenuItems,
   buildSlashMenuItems,
   compactCommandAvailable,
+  menuItemAction,
   menuItemReplacement,
   type ComposerMenuItem
 } from "./composer-menu";
@@ -72,12 +74,17 @@ import {
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
   hasSendableContent,
+  isHostGoalCommandText,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
   pastedTextDisposition,
+  PENDING_REQUEST_REASON,
+  pendingRequestBlocksSend,
+  planExternalSend,
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  REVERT_RUNNING_REASON,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
   uploadsBlockSend
@@ -187,6 +194,7 @@ export function ChatComposer({
   accountOptions,
   accountId,
   accountSwitchEnabled,
+  accountSwitchRefusal = null,
   isTurnActive,
   hasPendingRequest,
   queue,
@@ -632,7 +640,8 @@ export function ChatComposer({
         insertText: (text, mode) => insertText(text, mode, { focus: isTextareaFocused() }),
         stageAttachment,
         focusAtEnd,
-        openControl
+        openControl,
+        sendText: (text) => sendExternalTextRef.current(text)
       }),
     [focusAtEnd, insertText, isTextareaFocused, openControl, sessionId, stageAttachment]
   );
@@ -662,6 +671,9 @@ export function ChatComposer({
     ? workspaceSnapshot.skills
     : (provider?.skills ?? []);
   const models = provider?.models ?? [];
+  // Goals §8.5: where the host parses `/goal` (Codex) the menu advertises it;
+  // a provider that parses its own lists it in the catalog above.
+  const hostGoalCommand = provider?.capabilities?.goals?.command === "host";
   const selectedModel = resolveSelectedModel(models, modelSelection);
   const selectDescriptors = optionDescriptors(selectedModel).filter(
     (descriptor): descriptor is SelectProviderOptionDescriptor => descriptor.type === "select"
@@ -739,12 +751,14 @@ export function ChatComposer({
       }),
       showSkillsInSlashMenu: chatPrefs.showSkillsInSlashMenu,
       isAtPromptStart: isTriggerAtPromptStart(trigger),
-      query: trigger.query
+      query: trigger.query,
+      hostGoalCommand
     });
   }, [
     draft.attachments.length,
     draft.text,
     effortArgument,
+    hostGoalCommand,
     pathSearch.entries,
     chatPrefs.showSkillsInSlashMenu,
     reasoningDescriptor,
@@ -780,12 +794,16 @@ export function ChatComposer({
 
       // §4.6.5(a): a host command never reaches the draft — the trigger is
       // erased above (its replacement is "") and the action happens here.
-      if (item.type !== "host-command") return;
-      if (item.command === "plan" || item.command === "default") {
-        setPlanMode(item.command === "plan" ? "plan" : "default");
+      // Goals §8.5: the host `/goal` is the exception — the replacement above
+      // TYPED it, the host parses the sent text, and the caret already sits
+      // after `/goal ` for the objective or subcommand: no action, nothing sent.
+      const action = menuItemAction(item);
+      if (action === null) return;
+      if (action === "plan" || action === "default") {
+        setPlanMode(action);
         return;
       }
-      if (item.command === "effort" && effortArgument && reasoningDescriptor) {
+      if (action === "effort" && effortArgument && reasoningDescriptor) {
         const next = applyEffortArgument(
           modelSelection ?? { model: selectedModel?.slug ?? "" },
           reasoningDescriptor,
@@ -795,7 +813,7 @@ export function ChatComposer({
         else setNotice(`“${effortArgument}” is not one of this model's ${reasoningDescriptor.label.toLowerCase()} levels.`);
         return;
       }
-      openControl(item.command === "effort" ? "effort" : "model");
+      openControl(action === "effort" ? "effort" : "model");
     },
     [
       applyCaret,
@@ -992,14 +1010,32 @@ export function ChatComposer({
     text: draft.text,
     attachmentCount: draft.attachments.length
   });
+  // An open card holds a send back — but not a `/goal …` the host applies
+  // itself (final fix wave, the same rule as the chip's actions).
+  const cardBlocksSend = pendingRequestBlocksSend({
+    hasPendingRequest,
+    text: draft.text,
+    hostParsesGoal: hostGoalCommand
+  });
   const sendDisabledReason = reverting
-    ? "A revert is running."
-    : hasPendingRequest
-      ? "Answer the request above first."
+    ? REVERT_RUNNING_REASON
+    : cardBlocksSend
+      ? PENDING_REQUEST_REASON
       : uploadBlock;
 
   const runSend = React.useCallback(
-    async (text: string, mode: InteractionMode, refs: AttachmentRef[]) => {
+    async (
+      text: string,
+      mode: InteractionMode,
+      refs: AttachmentRef[],
+      /**
+       * Where a failed send goes. The draft's own text goes back into the
+       * draft; a message another surface handed over (a goal chip action)
+       * never came from it, and writing it there would glue a command onto
+       * whatever the user is typing — its failure is the notice alone.
+       */
+      options?: { returnToDraftOnFailure?: boolean }
+    ) => {
       setSending(true);
       try {
         await actions.sendTurn({
@@ -1015,10 +1051,12 @@ export function ChatComposer({
         // A failed send goes back to the FRONT of the draft, ahead of anything
         // typed since, so nothing the user wrote while it was in flight is
         // reordered behind it.
-        setDraft((state) => ({
-          ...state,
-          text: state.text.trim().length > 0 ? `${text}\n\n${state.text}` : text
-        }));
+        if (options?.returnToDraftOnFailure !== false) {
+          setDraft((state) => ({
+            ...state,
+            text: state.text.trim().length > 0 ? `${text}\n\n${state.text}` : text
+          }));
+        }
         setNotice(error instanceof Error ? error.message : "Could not send the message.");
       } finally {
         setSending(false);
@@ -1026,6 +1064,39 @@ export function ChatComposer({
     },
     [actions, isMobile, modelSelection]
   );
+
+  /**
+   * Send a message another surface hands over — a goal chip action (goals
+   * §8.2) — through THIS send path: the same guards, the thread's mode and
+   * model, the same `actions.sendTurn`, so it lands as the user's message and
+   * reaches the host's `/turn`. The draft is left exactly as it is.
+   *
+   * It is never queued behind a running turn, whatever the follow-up
+   * preference says: a provider-command adapter's actions only exist while no
+   * turn runs, and the host acts on a host-parsed `/goal` without starting one
+   * — queueing a Pause until the goal's own turn ends would defeat it.
+   *
+   * Read through a ref by the registered handle, so the handle stays one
+   * object while the guards it reads change every render.
+   */
+  const sendExternalText = (text: string): boolean => {
+    const plan = planExternalSend({
+      text,
+      reverting,
+      sending,
+      hasPendingRequest,
+      adapterId: provider?.id,
+      hostParsesGoal: hostGoalCommand
+    });
+    // A refusal says why; an accepted send clears the notice, as `submit`
+    // does — a stale "Answer the request above first." must not outlive it.
+    setNotice(plan.notice);
+    if (plan.text === null) return false;
+    void runSend(plan.text, interactionMode, [], { returnToDraftOnFailure: false });
+    return true;
+  };
+  const sendExternalTextRef = React.useRef(sendExternalText);
+  sendExternalTextRef.current = sendExternalText;
 
   const submit = React.useCallback(
     (intent: "foreground" | "alternate") => {
@@ -1099,7 +1170,10 @@ export function ChatComposer({
         followUpBehavior: chatPrefs.followUpBehavior,
         intent,
         // A plan follow-up is the answer to a settled turn: never queued.
-        isRunning: isTurnActive && plan === null
+        isRunning: isTurnActive && plan === null,
+        // Nor is a `/goal …` the host applies itself (goals §5.1): it starts
+        // no turn, so holding it behind the running one only delays it.
+        hostCommand: isHostGoalCommandText(outgoing, hostGoalCommand)
       });
 
       revokeImagePreviews(draft.attachments);
@@ -1138,6 +1212,7 @@ export function ChatComposer({
       applyCaret,
       draft.attachments,
       draft.text,
+      hostGoalCommand,
       interactionMode,
       isTurnActive,
       chatPrefs.followUpBehavior,
@@ -1266,7 +1341,10 @@ export function ChatComposer({
             defaultPrevented: event.defaultPrevented,
             insideComposerShell,
             isTextarea: target === textareaRef.current,
-            isTurnActive
+            isTurnActive,
+            // An open popover, modal or menu closes on this Escape; the turn
+            // keeps running (fix round 1).
+            blockingLayerOpen: anotherLayerOwnsTheKeyboard()
           })
         ) {
           return;
@@ -1330,6 +1408,13 @@ export function ChatComposer({
       }
     }
 
+    // An open popover, modal or menu closes on this Escape and that is all it
+    // does: no interrupt, and not the first half of a rewind (fix round 1,
+    // the same gate the shell and the composer's window listener read).
+    if (event.key === "Escape" && anotherLayerOwnsTheKeyboard()) {
+      escapeSequence.reset();
+      return;
+    }
     if (event.key === "Escape" && isTurnActive) {
       event.preventDefault();
       // This Escape stopped the turn; it is nobody's first press.
@@ -1398,7 +1483,8 @@ export function ChatComposer({
     resolveFollowUpDisposition({
       followUpBehavior: chatPrefs.followUpBehavior,
       intent: "foreground",
-      isRunning: isTurnActive
+      isRunning: isTurnActive,
+      hostCommand: isHostGoalCommandText(draft.text, hostGoalCommand)
     }) === "queue";
 
   return (
@@ -1597,6 +1683,7 @@ export function ChatComposer({
                   {...(accountOptions ? { options: accountOptions } : {})}
                   {...(accountId !== undefined ? { selectedId: accountId } : {})}
                   canSwitch={accountSwitchEnabled === true && !reverting}
+                  disabledReason={accountSwitchRefusal}
                   {...(accountOptions
                     ? {
                         onChange: (next: string) => {

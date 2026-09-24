@@ -25,6 +25,9 @@ import type {
 
 import type {
   AgentAdapter,
+  GoalCommandOptions,
+  GoalCommandResult,
+  HostGoalCommand,
   RollbackTarget,
   SendTurnInput,
   SendTurnResult,
@@ -40,6 +43,7 @@ export interface ScriptedCall {
     | "respondToUserInput"
     | "compact"
     | "backgroundTasks"
+    | "goalCommand"
     | "readThread"
     | "projectHistory"
     | "rollbackThread"
@@ -64,6 +68,16 @@ export interface ScriptedAdapterOptions {
   failInterrupt?: Error | null;
   failApproval?: Error | null;
   version?: string | null;
+  /**
+   * A host-parsed `/goal …` (goals §4.6). Omit to model an adapter with no
+   * `goalCommand` at all — every provider but Codex. Every call is recorded,
+   * as `goalCommand` with the command as its detail, before this runs.
+   */
+  goalCommand?: (
+    threadId: string,
+    command: HostGoalCommand,
+    options?: GoalCommandOptions
+  ) => Promise<GoalCommandResult>;
 }
 
 export interface ScriptedAdapter extends AgentAdapter {
@@ -78,6 +92,8 @@ export interface ScriptedAdapter extends AgentAdapter {
   readonly turnIds: string[];
   /** The last `startSession` input, for restart assertions. */
   readonly lastStart: StartSessionInput | null;
+  /** The options every `goalCommand` call was handed, in call order. */
+  readonly goalCommandOptions: Array<GoalCommandOptions | undefined>;
   readonly lastTurn: SendTurnInput | null;
 }
 
@@ -97,6 +113,7 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
   let turnCounter = 0;
   let lastStart: StartSessionInput | null = null;
   let lastTurn: SendTurnInput | null = null;
+  const goalCommandOptions: Array<GoalCommandOptions | undefined> = [];
 
   const failures: Record<string, Error | null> = {
     failStartSession: options.failStartSession ?? null,
@@ -141,6 +158,7 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
     capabilities,
     calls,
     turnIds,
+    goalCommandOptions,
     events,
 
     get lastStart() {
@@ -241,6 +259,20 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
       calls.push({ kind: "backgroundTasks", threadId, detail: { toolUseId } });
       return true;
     },
+
+    ...(options.goalCommand
+      ? {
+          async goalCommand(
+            threadId: string,
+            command: HostGoalCommand,
+            commandOptions?: GoalCommandOptions
+          ): Promise<GoalCommandResult> {
+            calls.push({ kind: "goalCommand", threadId, detail: command });
+            goalCommandOptions.push(commandOptions);
+            return options.goalCommand!(threadId, command, commandOptions);
+          }
+        }
+      : {}),
 
     async readThread(threadId: string): Promise<ThreadSnapshot> {
       calls.push({ kind: "readThread", threadId });

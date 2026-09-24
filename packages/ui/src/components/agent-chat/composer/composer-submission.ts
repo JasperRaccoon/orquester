@@ -16,6 +16,7 @@ import {
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
+import { blockedProviderCommandMessage } from "./composer-menu";
 import { parseStandaloneComposerSlashCommand } from "./composer-trigger";
 import type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
 
@@ -89,15 +90,33 @@ export function composerSubmissionIntentForEnter(input: {
  * send follows the preference, and holding the mod key with Enter does the
  * opposite for that one message.
  *
+ * **A command the host applies itself is never queued** (`hostCommand`): a
+ * typed `/goal …` where the host parses `/goal` ({@link isHostGoalCommandText},
+ * goals §5.1) starts no turn and never reaches the model, so holding it behind
+ * the running turn — a Pause held until the goal's own turn ends — would only
+ * defeat it. The same rule as the goal chip's actions (goals §8.2).
+ *
  * *T3: `ChatView.tsx:7629-7658` — the XOR.*
  */
 export function resolveFollowUpDisposition(input: {
   followUpBehavior: FollowUpBehavior;
   intent: ComposerSubmissionIntent;
   isRunning: boolean;
+  hostCommand?: boolean;
 }): "send" | "queue" {
-  if (!input.isRunning) return "send";
+  if (!input.isRunning || input.hostCommand === true) return "send";
   return (input.followUpBehavior === "queue") !== (input.intent === "alternate") ? "queue" : "send";
+}
+
+/**
+ * A typed `/goal …` the HOST parses — exactly the host's own recognition rule
+ * (goals §5.1: the trimmed text matches `/^\/goal(\s|$)/i`) — on an adapter
+ * whose `capabilities.goals.command` is `"host"` (Codex). Where the provider
+ * parses `/goal` itself (Claude, Grok) it is an ordinary prompt and queues
+ * like one.
+ */
+export function isHostGoalCommandText(text: string, hostParsesGoal: boolean): boolean {
+  return hostParsesGoal && /^\/goal(\s|$)/i.test(text.trim());
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +333,78 @@ export function uploadsBlockSend(
     return "Waiting for attachments to finish uploading.";
   }
   return null;
+}
+
+/** Why nothing can be sent while a revert rewrites the thread (§7.5). */
+export const REVERT_RUNNING_REASON = "A revert is running.";
+
+/** Why nothing can be sent while an approval or a question is docked (§7.5). */
+export const PENDING_REQUEST_REASON = "Answer the request above first.";
+
+/**
+ * Whether an open approval or question card holds a send back.
+ *
+ * Everything waits for the card — except a `/goal …` the HOST applies itself
+ * ({@link isHostGoalCommandText}, goals §5.1): the host needs no such guard
+ * (it starts no turn for it), and Pause or Clear is exactly what a user
+ * reaches for while an approval waits. Where the provider parses `/goal`
+ * (Claude, Grok) it is an ordinary prompt and waits like one.
+ */
+export function pendingRequestBlocksSend(input: {
+  hasPendingRequest: boolean;
+  text: string;
+  hostParsesGoal: boolean;
+}): boolean {
+  return input.hasPendingRequest && !isHostGoalCommandText(input.text, input.hostParsesGoal);
+}
+
+/**
+ * Why a message another surface hands the composer cannot be sent now, or
+ * `null` when it can — the goal chip's actions (goals §8.2), which go through
+ * the composer's own send path so they are the user's message.
+ *
+ * The composer's own guards, minus the draft's: the text is the caller's, so
+ * uploads still in the tray and the plan follow-up do not apply, and the draft
+ * is never touched. One send at a time, whoever started it.
+ */
+export function externalSendRefusal(input: {
+  text: string;
+  reverting: boolean;
+  sending: boolean;
+  hasPendingRequest: boolean;
+  /** The thread's adapter, for the provider-command refusals (§4.6.5(c)). */
+  adapterId: string | undefined;
+  /** `capabilities.goals.command === "host"` — see {@link pendingRequestBlocksSend}. */
+  hostParsesGoal?: boolean | undefined;
+}): string | null {
+  if (input.reverting) return REVERT_RUNNING_REASON;
+  if (input.sending) return "A message is still being sent.";
+  if (
+    pendingRequestBlocksSend({
+      hasPendingRequest: input.hasPendingRequest,
+      text: input.text,
+      hostParsesGoal: input.hostParsesGoal === true
+    })
+  ) {
+    return PENDING_REQUEST_REASON;
+  }
+  if (input.text.trim().length === 0) return "Nothing to send.";
+  return (
+    blockedProviderCommandMessage(input.adapterId, input.text) ??
+    composerSubmissionValidationMessage({ prompt: input.text, submissionTarget: "provider-turn" })
+  );
+}
+
+/**
+ * What the composer does with a message another surface hands it (a goal chip
+ * action, goals §8.2): send `text` — and clear its notice, exactly as its own
+ * submit does on a send it accepts — or send nothing and say why.
+ */
+export function planExternalSend(
+  input: Parameters<typeof externalSendRefusal>[0]
+): { text: string; notice: null } | { text: null; notice: string } {
+  const refusal = externalSendRefusal(input);
+  return refusal === null ? { text: input.text.trim(), notice: null } : { text: null, notice: refusal };
 }
 
 /** A draft with neither text nor a finished attachment has nothing to send. */

@@ -1,5 +1,5 @@
 import React from "react";
-import { File as FileIcon, Folder, Sparkles, TerminalSquare, Wand2 } from "lucide-react";
+import { File as FileIcon, Folder, Sparkles, Target, TerminalSquare, Wand2 } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
 import type { ComposerMenuItem } from "./composer-menu";
@@ -21,7 +21,8 @@ function iconFor(item: ComposerMenuItem): React.ReactNode {
     case "path":
       return item.pathKind === "dir" ? <Folder size={12} aria-hidden /> : <FileIcon size={12} aria-hidden />;
     case "host-command":
-      return <Wand2 size={12} aria-hidden />;
+      // The goal chip's glyph (goals §8.2), so `/goal` reads as that feature.
+      return item.command === "goal" ? <Target size={12} aria-hidden /> : <Wand2 size={12} aria-hidden />;
     case "provider-command":
       return <TerminalSquare size={12} aria-hidden />;
     case "skill":
@@ -98,7 +99,18 @@ export function ComposerTokenMenu({
                 {iconFor(item)}
               </span>
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="truncate text-sm">{item.label}</span>
+                {item.type === "host-command" && item.hint ? (
+                  // The argument grammar rides beside the name (goals §8.5):
+                  // `/goal` is typed on, so what may follow it is the point.
+                  <span className="flex min-w-0 items-baseline gap-2">
+                    <span className="shrink-0 text-sm">{item.label}</span>
+                    <span className="min-w-0 truncate font-mono text-[11px] text-neutral-500">
+                      {item.hint}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="truncate text-sm">{item.label}</span>
+                )}
                 {item.description ? (
                   <span className="truncate text-[11px] text-neutral-500">{item.description}</span>
                 ) : null}

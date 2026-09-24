@@ -20,6 +20,7 @@ import {
 import {
   CompactRequestRow,
   CompactionRow,
+  GoalMarkerRow,
   ProposedPlanRow,
   ThinkingRow,
   TurnDiffRow,
@@ -41,6 +42,8 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
       return <TurnFoldRow row={row} />;
     case "context-compaction":
       return <CompactionRow row={row} />;
+    case "goal-marker":
+      return <GoalMarkerRow row={row} />;
     case "message":
       // §4.6.5(b): the submission is persisted verbatim as `/compact` and
       // **re-recognised at render time** so it reads as a compaction marker

@@ -11,6 +11,8 @@
  * provider capability change without changing the persisted shape.
  */
 
+import type { GoalUpdatedPayload } from "./goal.ts";
+
 // ---------------------------------------------------------------------------
 // Envelope (§4.2)
 // ---------------------------------------------------------------------------
@@ -854,6 +856,13 @@ export type RuntimeThreadTokenUsageUpdatedEvent = Ev<
   "thread.token-usage.updated",
   ThreadTokenUsageUpdatedPayload
 >;
+/**
+ * The provider's goal moved (goals §4.2). The payload is the WHOLE current
+ * goal, never a patch. Not transient — every update is written to
+ * `raw.ndjson` — and ingestion coalesces nothing: an adapter throttles its own
+ * `change: "progress"` updates (goals §6).
+ */
+export type RuntimeThreadGoalUpdatedEvent = Ev<"thread.goal.updated", GoalUpdatedPayload>;
 export type RuntimeTurnStartedEvent = Ev<"turn.started", TurnStartedPayload>;
 export type RuntimeTurnCompletedEvent = Ev<"turn.completed", TurnCompletedPayload>;
 export type RuntimeTurnAbortedEvent = Ev<"turn.aborted", TurnAbortedPayload>;
@@ -911,6 +920,7 @@ export type RuntimeEvent =
   | RuntimeThreadStateChangedEvent
   | RuntimeThreadMetadataUpdatedEvent
   | RuntimeThreadTokenUsageUpdatedEvent
+  | RuntimeThreadGoalUpdatedEvent
   | RuntimeTurnStartedEvent
   | RuntimeTurnCompletedEvent
   | RuntimeTurnAbortedEvent

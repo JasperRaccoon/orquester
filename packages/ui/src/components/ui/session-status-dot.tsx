@@ -1,8 +1,9 @@
 import React from "react";
-import { Circle } from "lucide-react";
+import { Circle, Target } from "lucide-react";
 import { cn } from "../../lib/cn";
+import { goalSummaryMarker } from "../../lib/agent-chat/goal.logic";
 import { useSessionActivity } from "../../store/app";
-import type { AgentChatBackgroundLiveness } from "@orquester/api";
+import type { AgentChatBackgroundLiveness, AgentChatGoalSummary } from "@orquester/api";
 import type { SessionStatus } from "../../types";
 
 /**
@@ -42,17 +43,48 @@ export const SessionStatusDot: React.FC<{
    * behaves exactly as before.
    */
   unread?: boolean;
+  /**
+   * The thread's unfinished goal, read straight off `SessionSummary` (goals
+   * §8.3): a 9px target before the dot, in the in-motion tone while the goal
+   * is active and the warn tone once it has stopped short. Validated
+   * field-wise — the summary is wire data from a host that may be older or
+   * newer than this client — and a goal it cannot read draws nothing. Without
+   * one the dot renders exactly as it always did, unwrapped.
+   */
+  goal?: AgentChatGoalSummary | null;
   className?: string;
-}> = ({ sessionId, status, backgroundLiveness, unread, className }) => {
+}> = ({ sessionId, status, backgroundLiveness, unread, goal, className }) => {
   const activity = useSessionActivity(sessionId);
+  const marker = goalSummaryMarker(goal);
+  // With a goal the dot and its target travel as one inline unit, and the
+  // caller's class (a margin, usually) moves to that unit.
+  const withGoal = (dot: (dotClassName: string | undefined) => React.ReactElement): React.ReactElement =>
+    marker === null ? (
+      dot(className)
+    ) : (
+      <span className={cn("inline-flex shrink-0 items-center gap-0.5", className)}>
+        <span
+          role="img"
+          aria-label={marker.label}
+          title={marker.label}
+          className={cn(
+            "inline-flex shrink-0",
+            marker.tone === "info" ? "text-info-300" : "text-warn-300"
+          )}
+        >
+          <Target size={9} strokeWidth={2.5} aria-hidden />
+        </span>
+        {dot(undefined)}
+      </span>
+    );
   if (status === "exited") {
-    return (
+    return withGoal((dotClassName) => (
       <Circle
         size={7}
         aria-label="Exited"
-        className={cn("shrink-0 fill-neutral-600 text-neutral-600", className)}
+        className={cn("shrink-0 fill-neutral-600 text-neutral-600", dotClassName)}
       />
-    );
+    ));
   }
   const state = activity?.state ?? "idle";
   const attention = activity?.attention ?? null;
@@ -81,7 +113,7 @@ export const SessionStatusDot: React.FC<{
             : state === "waiting"
               ? "Waiting"
               : "Idle";
-  return (
+  return withGoal((dotClassName) => (
     <Circle
       size={7}
       aria-label={label}
@@ -96,8 +128,8 @@ export const SessionStatusDot: React.FC<{
           !readFinished &&
           (attention !== null || state === "waiting") &&
           "animate-pulse",
-        className
+        dotClassName
       )}
     />
-  );
+  ));
 };

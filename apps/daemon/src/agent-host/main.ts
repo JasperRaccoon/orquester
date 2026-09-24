@@ -550,7 +550,13 @@ export async function startAgentHost(
     isAllowedCwd,
     onStop: async (): Promise<AgentHostStopResponse> => {
       // The intentional stop of §3.3: write every continuation marker for a
-      // running thread with a usable cursor before acknowledging the request.
+      // running thread with a usable cursor — where its project opted in — and,
+      // goals §5.5, the goal resume mark (`resumeGoalAfterRestart`) for every
+      // thread whose goal is continuing on a live session with a usable cursor,
+      // no opt-in needed, so the next host resumes its session after the gate —
+      // all before acknowledging the request. Marking also tells the host it is
+      // going away: a goal resume still owed from the previous boot keeps its
+      // mark rather than start a provider child now.
       // Teardown starts from `afterStopResponse` below; scheduling it here as
       // a microtask raced the route's own `sendJson()` and produced the socket
       // hang-up that forced the 2026-09-23 deploy handover.

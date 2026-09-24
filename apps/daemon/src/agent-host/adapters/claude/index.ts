@@ -15,7 +15,6 @@
  */
 
 import * as nodeOs from "node:os";
-import * as nodePath from "node:path";
 
 import type {
   AccountHome,
@@ -36,6 +35,7 @@ import type {
   StartSessionInput
 } from "../../adapter.ts";
 import { AsyncEventQueue } from "./async-queue.ts";
+import { claudeConfigDir } from "./config-dir.ts";
 import { readClaudeResumeCursor, type ClaudeResumeCursor } from "./cursor.ts";
 import { defaultClaudeAdapterDeps, type ClaudeAdapterDeps } from "./deps.ts";
 import {
@@ -117,6 +117,16 @@ export async function createClaudeAdapterWith(
     events.pushAll(batch);
   };
 
+  /** The one writer of a thread's start record (see `deps.onStartRecord`). */
+  const recordStart = (
+    threadId: string,
+    record: StartRecord,
+    writer: "start" | "started" | "send" | "closed" | "rollback"
+  ): void => {
+    starts.set(threadId, record);
+    deps.onStartRecord?.(threadId, writer);
+  };
+
   /**
    * The probe's environment. With no `home` it runs under the **host's** own
    * identity — it never authenticates and never opens a session (§4.1) — but
@@ -131,9 +141,6 @@ export async function createClaudeAdapterWith(
       home: home ?? { kind: "system", path: "" }
     });
 
-  const configDirOf = (env: Record<string, string>): string =>
-    env.CLAUDE_CONFIG_DIR ?? nodePath.join(nodeOs.homedir(), ".claude");
-
   async function refreshSnapshot(input?: {
     cwd?: string;
     home?: AccountHome;
@@ -141,7 +148,7 @@ export async function createClaudeAdapterWith(
     const cwd = input?.cwd;
     const binaryPath = await context.resolveBin(DEFAULT_REF_ID);
     const env = probeEnv(input?.home);
-    const configDir = configDirOf(env);
+    const configDir = claudeConfigDir(env);
     const key = `${binaryPath ?? ""}\u0000${configDir}\u0000${cwd ?? ""}`;
     const fresh =
       snapshot !== undefined &&
@@ -283,31 +290,46 @@ export async function createClaudeAdapterWith(
       // argv order cannot decide which wins (§4.5).
       ...(input.launchArgs !== undefined ? { launchArgs: input.launchArgs } : {}),
       ...(cursor !== undefined ? { resumeCursor: cursor } : {}),
+      ...(input.knownGoal !== undefined ? { knownGoal: input.knownGoal } : {}),
       scopedLimitNames,
       emit,
       onClosed: (closed) => {
         // §4.1 "cursor per turn", plus Claude's own refresh on every assistant
         // message: the cursor a lazy recovery resumes from is the one the
         // dying session last held, not the one `sendTurn` happened to return.
+        // The same for the goal: the thread now shows the last goal the dying
+        // session reported, not the one the host passed when it started, and
+        // that is what the next session must compare against (goals §6).
+        // Only the thread's CURRENT session writes its record: a session
+        // that was already replaced has nothing left to say about the next
+        // start, and its late write once overwrote the new session's.
+        if (sessions.get(closed.threadId) !== closed) {
+          return;
+        }
         const start = starts.get(closed.threadId);
         const latest = closed.currentCursor();
-        if (start !== undefined && latest !== undefined) {
-          starts.set(closed.threadId, { ...start, cursor: latest });
+        if (start !== undefined) {
+          recordStart(
+            closed.threadId,
+            {
+              input: { ...start.input, knownGoal: closed.trackedGoal },
+              cursor: latest ?? start.cursor
+            },
+            "closed"
+          );
         }
-        if (sessions.get(closed.threadId) === closed) {
-          sessions.delete(closed.threadId);
-        }
+        sessions.delete(closed.threadId);
       },
       onUsageLimitsStale: () => {
         usageStale = true;
       }
     });
     sessions.set(input.threadId, session);
-    starts.set(input.threadId, { input, cursor });
+    recordStart(input.threadId, { input, cursor }, "start");
 
     try {
       const record = await session.start();
-      starts.set(input.threadId, { input, cursor: session.currentCursor() ?? cursor });
+      recordStart(input.threadId, { input, cursor: session.currentCursor() ?? cursor }, "started");
       // The per-cwd skills overlay is refreshed off the session start, forked
       // so it never delays the turn (§4.6.4), under the thread's own home so
       // the user-scope skills are that account's.
@@ -327,7 +349,7 @@ export async function createClaudeAdapterWith(
           workspaceSnapshots,
           await buildClaudeWorkspaceSnapshot({
             cwd,
-            configDir: configDirOf(env),
+            configDir: claudeConfigDir(env),
             checkedAt: context.clock.nowIso(),
             // The machine list rides along, or the client's
             // `overlay.slashCommands ?? provider.slashCommands` resolves to an
@@ -346,6 +368,17 @@ export async function createClaudeAdapterWith(
     const live = sessions.get(threadId);
     if (live?.isAlive === true) {
       return live;
+    }
+    if (live !== undefined) {
+      // Dead, or still dying: its teardown — goal reads settling,
+      // `session.exited`, `onClosed` writing the record this recovery resumes
+      // from — must be OVER before the next session starts. Started in that
+      // gap, the new session's events preceded the old `session.exited`.
+      await live.untilClosed();
+      const next = sessions.get(threadId);
+      if (next?.isAlive === true) {
+        return next;
+      }
     }
     const start = starts.get(threadId);
     if (start === undefined) {
@@ -383,7 +416,7 @@ export async function createClaudeAdapterWith(
     });
     const start = starts.get(input.threadId);
     if (start !== undefined && result.resumeCursor !== undefined) {
-      starts.set(input.threadId, { ...start, cursor: result.resumeCursor });
+      recordStart(input.threadId, { ...start, cursor: result.resumeCursor }, "send");
     }
     return {
       turnId: result.turnId,
@@ -470,8 +503,12 @@ export async function createClaudeAdapterWith(
       const plan = await session.planRollback(numTurns, target);
 
       await session.stop("Rewinding the conversation.");
+      // A rewind never touches the thread's goal (goals §4.4), so the forked
+      // session compares the transcript it resumes with the goal the stopped
+      // one last reported — a cut before the `/goal` ends it (§6.1.5).
+      const input: StartSessionInput = { ...start.input, knownGoal: session.trackedGoal };
       const restarted = await startSession({
-        ...start.input,
+        ...input,
         ...(plan.cursor !== undefined ? { resumeCursor: plan.cursor } : { resumeCursor: undefined })
       });
       void restarted;
@@ -480,7 +517,7 @@ export async function createClaudeAdapterWith(
         throw new Error("The Claude session could not be restarted after the rewind.");
       }
       next.seedTurns(plan.retainedTurns);
-      starts.set(threadId, { input: start.input, cursor: plan.cursor });
+      recordStart(threadId, { input, cursor: plan.cursor }, "rollback");
       return next.readThread();
     },
 

@@ -1,6 +1,7 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
 import type {
   AgentAdapterId,
+  AgentChatGoalSummary,
   BackgroundLiveness as AgentChatBackgroundLiveness,
   CreateAgentChatSessionFields,
   LatestTurnSummary as AgentChatLatestTurnSummary,
@@ -1248,11 +1249,12 @@ export interface SessionSummary {
   legacyAgentTerminal?: boolean;
 
   // --- agent chat (kind "agent-chat") -------------------------------------
-  // The six derived fields of the chat design spec §6.4 / §7.1, so the tab
-  // strip, Attention Center, command palette and push gate render a chat tab's
-  // status without opening a thread stream. This list is the contract those
-  // surfaces read; no surface may invent a name for one of them. Absent for
-  // every other kind and for persisted records.
+  // The seven derived fields of the chat design spec §6.4 / §7.1 (and the
+  // goals spec §4.7 for `goal`), so the tab strip, Attention Center, command
+  // palette and push gate render a chat tab's status without opening a thread
+  // stream. This list is the contract those surfaces read; no surface may
+  // invent a name for one of them. Absent for every other kind and for
+  // persisted records.
 
   /** A tool/command approval is open and needs a decision. */
   hasPendingApprovals?: boolean;
@@ -1270,6 +1272,11 @@ export interface SessionSummary {
   latestTurn?: AgentChatLatestTurnSummary | null;
   /** The session status from the thread head (§5.1). */
   chatSessionStatus?: AgentChatThreadSessionStatus;
+  /**
+   * The thread's unfinished goal — objective, status and whether the provider
+   * keeps starting turns for it — or null when it has none (goals §4.7).
+   */
+  goal?: AgentChatGoalSummary | null;
 }
 
 export interface CreateSessionRequest {

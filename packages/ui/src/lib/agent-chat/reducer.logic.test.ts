@@ -127,6 +127,68 @@ describe("applyFrame — snapshots", () => {
     assert.equal(itemPositionOf(fold, resolved.id), 0);
   });
 
+  it("adopts the snapshot's goal, validated, and reads a missing one as none (goals §4.4)", () => {
+    const goal = {
+      objective: "Make CI green",
+      status: "active" as const,
+      rounds: 1,
+      lastCheck: "lint still fails",
+      updatedAt: stamp(3)
+    };
+    assert.deepEqual(foldStateFromSnapshot(snapshot({ goal, seq: 3 })).goal, goal);
+    assert.equal(foldStateFromSnapshot(snapshot({ goal: null, seq: 3 })).goal, null);
+    // A host that predates goals sends none at all.
+    assert.equal(foldStateFromSnapshot(snapshot({ seq: 3 })).goal, null);
+    // Raw JSON never reaches typed code: a goal that does not validate is none,
+    // and one carrying junk is adopted without it.
+    for (const broken of [
+      { ...goal, status: "done" },
+      { ...goal, objective: "" },
+      { objective: "Make CI green", status: "active" },
+      "Make CI green"
+    ]) {
+      assert.equal(
+        foldStateFromSnapshot(snapshot({ goal: broken as never, seq: 3 })).goal,
+        null,
+        JSON.stringify(broken)
+      );
+    }
+    assert.deepEqual(
+      foldStateFromSnapshot(snapshot({ goal: { ...goal, rounds: -1, junk: 1 } as never, seq: 3 }))
+        .goal,
+      { objective: goal.objective, status: goal.status, lastCheck: goal.lastCheck, updatedAt: goal.updatedAt }
+    );
+  });
+
+  it("the adopted goal is where live goal rows continue from", () => {
+    const goal = { objective: "Make CI green", status: "active" as const, updatedAt: stamp(3) };
+    let state = createReducerState("s1");
+    state = applyFrame(state, { kind: "snapshot", thread: snapshot({ goal, seq: 3 }) });
+    const adopted = state.fold.goal;
+    state = applyFrame(
+      state,
+      eventFrame(ev("thread.meta-updated", { title: "Renamed" }, { seq: 4 }))
+    );
+    assert.equal(state.fold.goal, adopted, "an unrelated event keeps it by identity");
+    state = applyFrame(
+      state,
+      eventFrame(
+        ev(
+          "thread.activity-appended",
+          {
+            activity: activity("goal.updated", {
+              goal: null,
+              change: "achieved",
+              previous: { objective: "Make CI green", status: "complete" }
+            })
+          },
+          { seq: 5 }
+        )
+      )
+    );
+    assert.equal(state.fold.goal, null);
+  });
+
   it("a snapshot's seq is the floor a resume continues from", () => {
     let state = createReducerState("s1");
     state = applyFrame(state, { kind: "snapshot", thread: snapshot({ seq: 42 }) });
@@ -275,5 +337,50 @@ describe("head-derived slice fields", () => {
       })
     });
     assert.equal(state.slice.sessionStatus, "running");
+  });
+});
+
+describe("the slice's goal (goals §8.1)", () => {
+  const goal = { objective: "Make CI green", status: "active" as const, rounds: 1, updatedAt: stamp(3) };
+  const goalEvent = (payload: unknown, seq: number) =>
+    eventFrame(
+      ev("thread.activity-appended", { activity: activity("goal.updated", payload) }, { seq })
+    );
+
+  it("an empty thread has none", () => {
+    assert.equal(createReducerState("s1").slice.goal, null);
+  });
+
+  it("is the snapshot's goal, and none from a host that predates goals", () => {
+    let state = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: snapshot({ goal, seq: 3 })
+    });
+    assert.deepEqual(state.slice.goal, goal);
+    state = applyFrame(state, { kind: "snapshot", thread: snapshot({ seq: 4 }) });
+    assert.equal(state.slice.goal, null);
+  });
+
+  it("follows live goal rows, and keeps its identity through every other event", () => {
+    let state = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: snapshot({ goal, seq: 3 })
+    });
+    const adopted = state.slice.goal;
+    state = applyFrame(state, eventFrame(ev("thread.meta-updated", { title: "Renamed" }, { seq: 4 })));
+    assert.equal(state.slice.goal, adopted, "an unrelated event re-renders nothing that reads the goal");
+
+    state = applyFrame(
+      state,
+      goalEvent({ goal: { objective: "Make CI green", status: "paused", rounds: 1 }, change: "paused" }, 5)
+    );
+    assert.equal(state.slice.goal?.status, "paused");
+    assert.equal(state.slice.goal, state.fold.goal, "the slice reads the fold's goal, not a copy");
+
+    state = applyFrame(
+      state,
+      goalEvent({ goal: null, change: "cleared", previous: { objective: "Make CI green", status: "paused" } }, 6)
+    );
+    assert.equal(state.slice.goal, null);
   });
 });

@@ -17,7 +17,9 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 
 import type {
   AdapterCapabilities,
+  AdapterGoalSupport,
   AgentAdapterId,
+  GoalAction,
   ProviderAuth,
   ProviderSnapshot,
   ProviderUsageLimitsUpdate
@@ -72,6 +74,39 @@ const asArray = <T>(value: unknown): T[] => (Array.isArray(value) ? (value as T[
 const isAuthStatus = (value: unknown): value is ProviderAuth["status"] =>
   value === "authenticated" || value === "unauthenticated" || value === "unknown";
 
+/** Every chip action this client can offer (goals §4.5), in the spec's order. */
+const GOAL_ACTIONS: readonly GoalAction[] = ["continue", "pause", "resume", "clear"];
+
+/**
+ * A provider's goal block, or `undefined` for none (goals §8.1).
+ *
+ * Field-wise, and **a malformed block is absent** rather than half-trusted:
+ * the chip's actions and the composer's `/goal` row both branch on it, and a
+ * guessed `command` would send `/goal …` to a provider that reads it as chat
+ * text. The one leniency is per action: an action this client does not know
+ * is dropped, not the block — a newer host may add one, and the ones this
+ * client does know still work (goals §9's additive rule, from the reading
+ * side).
+ */
+function sanitizeGoalSupport(value: unknown): AdapterGoalSupport | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const { command, actions, continuesAcrossTurns } = value;
+  if (
+    (command !== "provider" && command !== "host") ||
+    !Array.isArray(actions) ||
+    typeof continuesAcrossTurns !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    command,
+    actions: GOAL_ACTIONS.filter((action) => actions.includes(action)),
+    continuesAcrossTurns
+  };
+}
+
 /**
  * Repair one provider row from the wire, or drop it.
  *
@@ -92,13 +127,20 @@ export function sanitizeProviderSnapshot(value: unknown): ProviderSnapshot | nul
     return null;
   }
   const capabilities = isRecord(value.capabilities)
-    ? {
-        ...FALLBACK_CAPABILITIES,
-        ...(value.capabilities as Partial<AdapterCapabilities>),
-        // A present block still has to carry the two the UI branches on.
-        showPlanModeToggle: value.capabilities.showPlanModeToggle === true,
-        reportsContextWindow: value.capabilities.reportsContextWindow === true
-      }
+    ? (() => {
+        // `goals` is taken out of the spread and put back only once it has
+        // been read field-wise (goals §8.1).
+        const { goals: rawGoals, ...rest } = value.capabilities;
+        const goals = sanitizeGoalSupport(rawGoals);
+        return {
+          ...FALLBACK_CAPABILITIES,
+          ...(rest as Partial<AdapterCapabilities>),
+          // A present block still has to carry the two the UI branches on.
+          showPlanModeToggle: value.capabilities.showPlanModeToggle === true,
+          reportsContextWindow: value.capabilities.reportsContextWindow === true,
+          ...(goals !== undefined ? { goals } : {})
+        };
+      })()
     : FALLBACK_CAPABILITIES;
   // An unreadable auth block is `unknown`, never a sign-in verdict: guessing
   // `unauthenticated` here would toast "sign in again" at a provider that is

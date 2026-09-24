@@ -1055,6 +1055,18 @@ describe("rowIdForTurn", () => {
     const rows = rowsOf([message("user", "one", { id: "u1" })]);
     assert.equal(rowIdForTurn(rows, "t7", "u7"), null);
   });
+
+  it("a goal marker is a row its turn owns (goals §8.4)", () => {
+    const rows = rowsOf([
+      message("user", "other", { id: "u0" }),
+      activity(
+        "goal.updated",
+        { goal: { objective: "Make CI green", status: "active" }, change: "set" },
+        { id: "g1", turnId: "t1", tone: "info", summary: "Goal set: Make CI green", createdAt: stamp(20) }
+      )
+    ]);
+    assert.equal(rowIdForTurn(rows, "t1", null), "g1");
+  });
 });
 
 describe("historyErrorMessage", () => {

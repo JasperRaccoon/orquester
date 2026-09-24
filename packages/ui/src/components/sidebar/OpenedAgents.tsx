@@ -107,6 +107,7 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> =
           sessionId={entry.session.id}
           status={entry.session.status}
           backgroundLiveness={entry.session.backgroundLiveness}
+          goal={entry.session.goal}
           unread={unread}
         />
       </button>

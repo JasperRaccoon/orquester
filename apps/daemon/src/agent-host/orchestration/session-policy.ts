@@ -135,7 +135,22 @@ export interface IdentitySwitchState {
   compacting: boolean;
   /** A background shell or task is still reporting. */
   backgroundLive: boolean;
+  /**
+   * The thread's goal is CONTINUING, in the summary's sense (goals §4.7,
+   * §5.5): `active` on an adapter whose provider starts its next turn by
+   * itself (`goals.continuesAcrossTurns`, Codex), with a live session running
+   * a turn or inside the continuation grace, or a restart's resume still owed.
+   * Between its turns the thread only looks idle — a turn the provider starts
+   * under the old account would be killed by the next message's account
+   * restart. A stopped or errored session is not continuing, and may switch —
+   * unless its resume mark is still pending (after a handover the head may
+   * read `stopped` or `error`), which reads as continuing.
+   */
+  goalContinuing: boolean;
 }
+
+/** The refusal for a continuing goal — the composer mirror shows these very words. */
+export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching accounts.";
 
 /**
  * The refusal message for an account switch, or `null` when the thread is idle
@@ -145,6 +160,12 @@ export interface IdentitySwitchState {
 export function identitySwitchRefusal(state: IdentitySwitchState): string | null {
   if (state.compacting) {
     return "Wait for the context compaction to finish before switching accounts.";
+  }
+  // Ahead of the turn check: between a continuing goal's turns idle never
+  // comes, so waiting is the wrong advice — pausing the goal is the one that
+  // works. Behind the compaction, which a goal command waits for too.
+  if (state.goalContinuing) {
+    return GOAL_CONTINUING_SWITCH_REFUSAL;
   }
   if (
     state.activeTurnId !== null ||

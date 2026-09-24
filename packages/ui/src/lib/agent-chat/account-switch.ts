@@ -11,6 +11,11 @@
  */
 
 import { SYSTEM_ACCOUNT_ID, type AgentAccount } from "@orquester/api";
+import type {
+  AdapterGoalSupport,
+  AgentGoal,
+  ThreadSessionStatus
+} from "@orquester/api/agent-chat";
 
 /**
  * Which managed-account family a launcher draws its accounts from.
@@ -102,12 +107,86 @@ export interface ChatAccountSwitchState {
   connection: string;
   /** A background shell or task is still reporting. */
   backgroundLive: boolean;
+  /**
+   * The thread's goal is continuing — {@link isGoalContinuing} (goals §5.5).
+   * Absent reads as no.
+   *
+   * *Added with agent goals; additive.*
+   */
+  goalContinuing?: boolean;
+  /**
+   * The provider is compacting the conversation (the store's
+   * `isCompacting`). The host refuses a switch for it first, ahead of a
+   * continuing goal. Absent reads as no.
+   *
+   * *Added with agent goals (fix round 2); additive.*
+   */
+  compacting?: boolean;
 }
+
+/**
+ * Goals §5.5: the goal is **continuing** — the provider will start the
+ * thread's next turn by itself, so the gaps between its turns are not idle.
+ *
+ * The host computes exactly this for the tab summary
+ * (`SessionSummary.goal.continuing`), and whenever the view has that verdict
+ * it wins: `null` there means the host holds no unfinished goal for the
+ * thread. Without one — a host that predates the field, a summary not yet
+ * received, a malformed one — a coarser form of the host's predicate, with no
+ * running-turn or grace check: an `active` goal, on an adapter that continues
+ * across turns (Codex), with a provider session that is live
+ * (`starting`/`ready`/`running`) or a head marked for a resume after a restart
+ * (`resumeGoalAfterRestart`). A stopped or errored session starts nothing, so
+ * it may switch — unless its resume mark is still pending (after a handover it
+ * may read `stopped` or `error`), which reads as continuing. A paused, blocked
+ * or limited goal may switch too, and so may Claude's and Grok's, which run
+ * inside turns the user sends.
+ */
+export function isGoalContinuing(input: {
+  /** `SessionSummary.goal` for this thread — wire data, read field-wise. */
+  summaryGoal?: unknown;
+  /** The fold's goal. */
+  goal: AgentGoal | null | undefined;
+  /** The adapter's `capabilities.goals`. */
+  support: AdapterGoalSupport | null | undefined;
+  /** The head's session status. */
+  sessionStatus: ThreadSessionStatus | null | undefined;
+  /** The head carries `resumeGoalAfterRestart` (a deploy handover's mark). */
+  resumeGoalAfterRestart?: boolean;
+}): boolean {
+  const summary = input.summaryGoal;
+  if (summary === null) return false;
+  if (typeof summary === "object" && summary !== undefined && !Array.isArray(summary)) {
+    const continuing = (summary as { continuing?: unknown }).continuing;
+    if (typeof continuing === "boolean") return continuing;
+  }
+  const live =
+    input.sessionStatus === "starting" ||
+    input.sessionStatus === "ready" ||
+    input.sessionStatus === "running";
+  return (
+    input.goal?.status === "active" &&
+    input.support?.continuesAcrossTurns === true &&
+    (live || input.resumeGoalAfterRestart === true)
+  );
+}
+
+/** The host's own words for goals §5.5's refusal (`identitySwitchRefusal`). */
+export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching accounts.";
+
+/** The host's own words for a switch refused during a compaction (`identitySwitchRefusal`). */
+export const COMPACTION_SWITCH_REFUSAL =
+  "Wait for the context compaction to finish before switching accounts.";
 
 /**
  * The client half of §3.4's identity gate, mirroring
  * `identitySwitchRefusal` on the host — the daemon is authoritative and
  * answers 409, this only decides whether the chip is offered.
+ *
+ * A continuing goal closes it too (goals §5.5): a turn the provider starts
+ * under the old account would be killed by the next message's account
+ * restart. Pausing the goal opens it again, and the host re-creates the goal
+ * on the new account (`carryGoal`).
  */
 export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
   return (
@@ -116,8 +195,23 @@ export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
     state.queuedCount === 0 &&
     !state.reverting &&
     state.connection === "synchronized" &&
-    !state.backgroundLive
+    !state.backgroundLive &&
+    state.goalContinuing !== true &&
+    state.compacting !== true
   );
+}
+
+/**
+ * The reason the chip names, in the host's own order and words
+ * (`identitySwitchRefusal`), so the chip and a refused switch never disagree:
+ * a running compaction first, then a continuing goal — which only a pause
+ * ends (goals §5.5); between its turns idle never comes, so it outranks a
+ * running turn. `null` otherwise, where the chip's own "available when the
+ * agent is idle" is the truth.
+ */
+export function chatAccountSwitchRefusal(state: ChatAccountSwitchState): string | null {
+  if (state.compacting === true) return COMPACTION_SWITCH_REFUSAL;
+  return state.goalContinuing === true ? GOAL_CONTINUING_SWITCH_REFUSAL : null;
 }
 
 /**

@@ -37,7 +37,13 @@ export interface ChatEscapeInput {
   defaultPrevented: boolean;
   /** This tab is the visible one (every tab stays mounted, §7.1). */
   isActiveTab: boolean;
-  /** A modal, the auth prompt, a close-confirm or the palette owns the screen. */
+  /**
+   * Another layer owns the keyboard (`anotherLayerOwnsTheKeyboard`): Settings,
+   * the auth prompt, a close-confirm or the palette — or any open keyboard
+   * layer (`lib/keyboard-layers.ts`): a dropdown or popover, a modal, a sheet,
+   * a context menu. The Escape is that layer's to close, so this side neither
+   * acts on it nor counts it toward the double press.
+   */
   blockingLayerOpen: boolean;
   /**
    * Focus is inside this thread's composer, which owns Escape there so an open

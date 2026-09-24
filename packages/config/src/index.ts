@@ -831,6 +831,11 @@ export const agentThreadSessionSchema = z.object({
  * `meta.json`. `continueAfterRestart` is a TURN ID, never a boolean (§3.3), so
  * a marker left over from an older turn is ignored rather than replaying the
  * wrong work.
+ *
+ * `resumeGoalAfterRestart` (agent goals §5.5) is the deploy handover's mark on
+ * a thread whose goal was continuing: the next host resumes its provider
+ * session. Additive — an older build strips it — and read with a fallback: a
+ * malformed value is no mark, never an unreadable thread.
  */
 export const agentThreadHeadSchema = z.object({
   id: z.string().min(1),
@@ -849,6 +854,7 @@ export const agentThreadHeadSchema = z.object({
   continueAfterRestart: z
     .object({ turnId: z.string().min(1), prepared: z.boolean().optional() })
     .optional(),
+  resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),
   createdAt: z.string(),
   updatedAt: z.string()
 });

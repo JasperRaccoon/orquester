@@ -13,10 +13,11 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { after, describe, it } from "node:test";
 
-import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import type { AgentGoal, GoalUpdatedPayload, RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
+import { createCodexAdapter } from "./index.ts";
 import { CodexSession, fileChangeDetail, type CodexSessionOptions } from "./session.ts";
 import {
   EventCollector,
@@ -45,6 +46,9 @@ interface Rig {
   received: () => ReturnType<ReturnType<typeof writeMockCodexServer>["received"]>;
   stop(): Promise<void>;
   closed: () => boolean;
+  logs: ReturnType<typeof createFakeContext>["logs"];
+  /** Every frame the session logged, both directions, in the order it read or wrote them. */
+  rawFrames: ReturnType<typeof createFakeContext>["rawFrames"];
 }
 
 function rig(
@@ -60,7 +64,7 @@ function rig(
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   }
 
-  const { context } = createFakeContext();
+  const { context, logs, rawFrames } = createFakeContext();
   const queue = new AsyncEventQueue<RuntimeEvent>();
   const events = new EventCollector(queue);
   let closed = false;
@@ -104,7 +108,9 @@ function rig(
     events,
     received: () => server.received(),
     stop,
-    closed: () => closed
+    closed: () => closed,
+    logs,
+    rawFrames
   };
 }
 
@@ -1521,5 +1527,1066 @@ describe("codex session — raw frame logging", () => {
     assert.ok(fake.rawFrames.every((entry) => entry.threadId === "thread-raw"));
     await session.stop();
     queue.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Goals (goals §6.2)
+// ---------------------------------------------------------------------------
+
+/** The mock's default stored goal, normalised — what the fold would hold. */
+const knownGoal = (overrides: Partial<AgentGoal> = {}): AgentGoal => ({
+  objective: "Make the build green",
+  status: "active",
+  tokensUsed: 0,
+  tokenBudget: null,
+  elapsedMs: 0,
+  setAt: "2026-09-21T00:20:00.000Z",
+  ...overrides
+});
+
+/** The same goal as the mock's goal store holds it. */
+const STORED_GOAL = { objective: "Make the build green", status: "active" };
+
+/** Resumed onto a thread whose fold already holds `knownGoal()`. */
+const RESUMED_WITH_GOAL: Partial<CodexSessionOptions> = {
+  resumeCursor: { threadId: "prior-thread" },
+  knownGoal: knownGoal()
+};
+
+function goalRows(r: Rig): GoalUpdatedPayload[] {
+  return r.events.events
+    .filter((event) => event.type === "thread.goal.updated")
+    .map((event) => event.payload as GoalUpdatedPayload);
+}
+
+function goalRequests(r: Rig): { method: string; params: Record<string, unknown> }[] {
+  return r
+    .received()
+    .filter((frame) => typeof frame.method === "string" && frame.method.startsWith("thread/goal/"))
+    .map((frame) => ({
+      method: frame.method!,
+      params: (frame.params ?? {}) as Record<string, unknown>
+    }));
+}
+
+function waitForGoalRow(r: Rig, change: string): Promise<RuntimeEvent> {
+  return r.events.waitFor(
+    (event) =>
+      event.type === "thread.goal.updated" &&
+      (event.payload as GoalUpdatedPayload).change === change,
+    `thread.goal.updated {${change}}`
+  );
+}
+
+/**
+ * A round trip of our own: once its reply is read, every frame the mock wrote
+ * before it has been read too, and every event that produced has been emitted.
+ * What a "no row" assertion waits on.
+ */
+async function settleWire(r: Rig): Promise<void> {
+  await r.session.readThread();
+}
+
+/** How many `thread/goal/updated` frames the session has read off the wire. */
+function readGoalUpdates(r: Rig): number {
+  return r.rawFrames.filter((entry) => {
+    const logged = entry.frame as { direction?: string; frame?: { method?: string } };
+    return logged.direction === "recv" && logged.frame?.method === "thread/goal/updated";
+  }).length;
+}
+
+function isPause(frame: { method?: string; params?: unknown }): boolean {
+  return (
+    frame.method === "thread/goal/set" && (frame.params as { status?: string }).status === "paused"
+  );
+}
+
+describe("codex session — /goal is mapped onto thread/goal/* (goals §6.2.3)", () => {
+  it("status with no goal says so, and asks only thread/goal/get", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "status" }), {
+      summary: "No goal is set."
+    });
+    assert.deepEqual(goalRequests(r), [
+      { method: "thread/goal/get", params: { threadId: "thread-mock-1" } }
+    ]);
+    await r.stop();
+  });
+
+  it("status names the goal the provider holds", async () => {
+    const r = rig(
+      {
+        goal: { ...STORED_GOAL, status: "paused", tokensUsed: 1_234, timeUsedSeconds: 90 },
+        turns: [{ kind: "silent" }]
+      },
+      {
+        resumeCursor: { threadId: "prior-thread" },
+        knownGoal: knownGoal({ status: "paused", tokensUsed: 1_234, elapsedMs: 90_000 })
+      }
+    );
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "status" }), {
+      summary: "Goal paused: Make the build green — 1,234 tokens, 1m"
+    });
+    await r.stop();
+  });
+
+  it("set with no goal: get, then set it active — and the reply and its notification are ONE `set` row", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    assert.deepEqual(
+      await r.session.goalCommand({ kind: "set", objective: "Make the build green" }),
+      { summary: "" },
+      "the provider's own update tells the story"
+    );
+    assert.deepEqual(goalRequests(r), [
+      { method: "thread/goal/get", params: { threadId: "thread-mock-1" } },
+      {
+        method: "thread/goal/set",
+        params: { threadId: "thread-mock-1", objective: "Make the build green", status: "active" }
+      }
+    ]);
+    const row = await waitForGoalRow(r, "set");
+    assert.deepEqual((row.payload as GoalUpdatedPayload).goal, {
+      objective: "Make the build green",
+      status: "active",
+      tokensUsed: 0,
+      tokenBudget: null,
+      elapsedMs: 0,
+      setAt: "2026-09-21T00:20:01.000Z"
+    });
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => payload.change),
+      ["set"]
+    );
+    await r.stop();
+  });
+
+  it("set over an existing goal clears it first — get, clear, set — and the rows say so", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    await r.session.goalCommand({ kind: "set", objective: "Ship the release" });
+    assert.deepEqual(
+      goalRequests(r).map((request) => request.method),
+      ["thread/goal/get", "thread/goal/clear", "thread/goal/set"]
+    );
+    await waitForGoalRow(r, "set");
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => [
+        payload.change,
+        payload.goal?.objective ?? payload.previous?.objective
+      ]),
+      [
+        ["cleared", "Make the build green"],
+        ["set", "Ship the release"]
+      ]
+    );
+    await r.stop();
+  });
+
+  it("edit changes the objective in place — `replaced`, status kept", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    assert.deepEqual(
+      await r.session.goalCommand({ kind: "edit", objective: "Make the build green, fast" }),
+      { summary: "" }
+    );
+    assert.deepEqual(goalRequests(r), [
+      { method: "thread/goal/get", params: { threadId: "thread-mock-1" } },
+      {
+        method: "thread/goal/set",
+        params: { threadId: "thread-mock-1", objective: "Make the build green, fast" }
+      }
+    ]);
+    const row = await waitForGoalRow(r, "replaced");
+    assert.equal((row.payload as GoalUpdatedPayload).goal?.status, "active");
+    await r.stop();
+  });
+
+  it("edit with no goal says so and changes nothing — never a set", async () => {
+    // A bare `set {objective}` would CREATE an active goal here, which is not
+    // what "edit" asked for (fix round 1, ruling 1).
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "edit", objective: "Ship it" }), {
+      summary: "No goal is set. Use /goal <objective> to set one."
+    });
+    assert.deepEqual(
+      goalRequests(r).map((request) => request.method),
+      ["thread/goal/get"]
+    );
+    await settleWire(r);
+    assert.deepEqual(goalRows(r), []);
+    await r.stop();
+  });
+
+  it("pause and resume set the status and nothing else — resume reads the goal first", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "pause" }), { summary: "" });
+    await waitForGoalRow(r, "paused");
+    assert.deepEqual(await r.session.goalCommand({ kind: "resume" }), { summary: "" });
+    await waitForGoalRow(r, "resumed");
+    assert.deepEqual(goalRequests(r), [
+      { method: "thread/goal/set", params: { threadId: "thread-mock-1", status: "paused" } },
+      { method: "thread/goal/get", params: { threadId: "thread-mock-1" } },
+      { method: "thread/goal/set", params: { threadId: "thread-mock-1", status: "active" } }
+    ]);
+    await r.stop();
+  });
+
+  it("pause with no goal answers `No goal is set.` — never an error row", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "pause" }), {
+      summary: "No goal is set."
+    });
+    await r.stop();
+  });
+
+  it("resume with no goal answers `No goal is set.` and sends no set", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "resume" }), {
+      summary: "No goal is set."
+    });
+    assert.deepEqual(
+      goalRequests(r).map((request) => request.method),
+      ["thread/goal/get"]
+    );
+    await r.stop();
+  });
+
+  it("resume on a goal that reached its budget says so and sends nothing", async () => {
+    // Codex would keep a budget-limited goal budget-limited, silently.
+    const r = rig(
+      { goal: { ...STORED_GOAL, status: "budgetLimited" }, turns: [{ kind: "silent" }] },
+      {
+        resumeCursor: { threadId: "prior-thread" },
+        knownGoal: knownGoal({ status: "budget-limited" })
+      }
+    );
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "resume" }), {
+      summary:
+        "This goal reached its token budget and can't be resumed. Set a new goal or clear it."
+    });
+    assert.deepEqual(
+      goalRequests(r).map((request) => request.method),
+      ["thread/goal/get"]
+    );
+    await r.stop();
+  });
+
+  it("clear clears — and a second clear finds nothing and says so", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "clear" }), { summary: "" });
+    const row = await waitForGoalRow(r, "cleared");
+    assert.deepEqual(row.payload, { goal: null, change: "cleared", previous: knownGoal() });
+    assert.deepEqual(await r.session.goalCommand({ kind: "clear" }), {
+      summary: "No goal is set."
+    });
+    assert.deepEqual(
+      goalRequests(r).map((request) => request.method),
+      ["thread/goal/clear", "thread/goal/clear"]
+    );
+    await settleWire(r);
+    assert.equal(goalRows(r).length, 1, "nothing to clear is no row");
+    await r.stop();
+  });
+
+  it("a provider error rejects with the provider's own message", async () => {
+    const r = rig({
+      goalError: { code: -32600, message: "goals feature is disabled" },
+      turns: [{ kind: "silent" }]
+    });
+    await r.session.start();
+    await assert.rejects(r.session.goalCommand({ kind: "pause" }), {
+      message: "goals feature is disabled"
+    });
+    await r.stop();
+  });
+
+  it("every goal request is bounded, and a slow one never kills the child", async () => {
+    const r = rig(
+      { hangGoalSet: true, turns: [{ kind: "silent" }] },
+      { goalDeadlines: { commandMs: 100 } }
+    );
+    await r.session.start();
+    await assert.rejects(
+      r.session.goalCommand({ kind: "set", objective: "Make the build green" }),
+      /timed out/
+    );
+    assert.equal(r.session.isLive, true);
+    assert.equal(r.session.summary().status, "ready");
+    await r.stop();
+  });
+
+  it("a get a notification overtook is discarded (goals §6.2.5)", async () => {
+    // #8615: re-emitting a stale `get` put an older goal back over a newer one.
+    const r = rig(
+      { goal: STORED_GOAL, goalMovesDuringGet: "paused", turns: [{ kind: "silent" }] },
+      RESUMED_WITH_GOAL
+    );
+    await r.session.start();
+    const { summary } = await r.session.goalCommand({ kind: "status" });
+    assert.match(summary, /^Goal paused: /, "the newer word wins");
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => payload.change),
+      ["paused"],
+      "the stale reply re-emitted nothing"
+    );
+    await r.stop();
+  });
+});
+
+describe("codex session — Stop pauses an active goal first (goals §6.2.4)", () => {
+  it("sends thread/goal/set {status:paused} BEFORE turn/interrupt", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    await r.session.goalCommand({ kind: "set", objective: "Make the build green" });
+    await waitForGoalRow(r, "set");
+    const { turnId } = await r.session.sendTurn({
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await r.events.waitForType("turn.started");
+
+    await r.session.interruptTurn(turnId, { pauseGoal: true });
+
+    const received = r.received();
+    const pauseIndex = received.findIndex(isPause);
+    const interruptIndex = received.findIndex((frame) => frame.method === "turn/interrupt");
+    assert.ok(pauseIndex !== -1, "the goal was paused");
+    assert.ok(interruptIndex !== -1, "the turn was interrupted");
+    assert.ok(
+      pauseIndex < interruptIndex,
+      "paused FIRST: an interrupt alone lets the next continuation start at once (openai/codex #28104)"
+    );
+    assert.deepEqual(received[pauseIndex]!.params, { threadId: "thread-mock-1", status: "paused" });
+    await waitForGoalRow(r, "paused");
+    await r.events.waitForType("turn.completed");
+    await r.stop();
+  });
+
+  it("still interrupts when the pause fails, and logs why", async () => {
+    const r = rig(
+      {
+        goal: STORED_GOAL,
+        goalError: { code: -32600, message: "goals feature is disabled" },
+        turns: [{ kind: "silent" }]
+      },
+      RESUMED_WITH_GOAL
+    );
+    await r.session.start();
+    const { turnId } = await r.session.sendTurn({
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await r.events.waitForType("turn.started");
+
+    await r.session.interruptTurn(turnId, { pauseGoal: true });
+
+    const received = r.received();
+    assert.ok(received.findIndex(isPause) !== -1, "the pause was tried");
+    assert.equal(sentFrames(received, "turn/interrupt").length, 1, "never blocked by the pause");
+    await r.events.waitForType("turn.completed");
+    assert.ok(
+      r.logs.some((log) => log.level === "warn" && /pause/i.test(log.message)),
+      "the failure is logged"
+    );
+    await r.stop();
+  });
+
+  it("still interrupts when the pause times out — and the child lives", async () => {
+    const r = rig(
+      { goal: STORED_GOAL, hangGoalSet: true, turns: [{ kind: "silent" }] },
+      { ...RESUMED_WITH_GOAL, goalDeadlines: { pauseMs: 100 } }
+    );
+    await r.session.start();
+    const { turnId } = await r.session.sendTurn({
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await r.events.waitForType("turn.started");
+
+    await r.session.interruptTurn(turnId, { pauseGoal: true });
+
+    const received = r.received();
+    const pauseIndex = received.findIndex(isPause);
+    const interruptIndex = received.findIndex((frame) => frame.method === "turn/interrupt");
+    assert.ok(pauseIndex !== -1 && interruptIndex !== -1 && pauseIndex < interruptIndex);
+    await r.events.waitForType("turn.completed");
+    assert.equal(r.session.isLive, true, "a slow pause never kills the child");
+    await r.stop();
+  });
+
+  it("asks nothing when the goal is not active", async () => {
+    const r = rig(
+      { goal: { ...STORED_GOAL, status: "paused" }, turns: [{ kind: "silent" }] },
+      { resumeCursor: { threadId: "prior-thread" }, knownGoal: knownGoal({ status: "paused" }) }
+    );
+    await r.session.start();
+    const { turnId } = await r.session.sendTurn({
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await r.events.waitForType("turn.started");
+    await r.session.interruptTurn(turnId, { pauseGoal: true });
+    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0);
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1);
+    await r.stop();
+  });
+
+  it("a session-scoped Stop with no turn running pauses the goal too", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    await r.session.interruptTurn(undefined, { pauseGoal: true });
+    assert.deepEqual(sentFrames(r.received(), "thread/goal/set"), [
+      { threadId: "thread-mock-1", status: "paused" }
+    ]);
+    await r.stop();
+  });
+
+  it("a STALE Stop pauses nothing", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.started");
+    await r.session.interruptTurn("some-other-turn", { pauseGoal: true });
+    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0);
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0);
+    await r.stop();
+  });
+
+  it("stopping the SESSION never pauses — a drain-restart must let Codex continue the goal", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.started");
+    await r.stop();
+    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0);
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "the turn itself still stops");
+  });
+
+});
+
+/**
+ * Let `ms` of wall time pass. Only ever used to prove that something does NOT
+ * happen, and always paired, in the same test, with the case where it does —
+ * so the wait is never vacuous.
+ */
+const elapse = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+describe("codex session — the adapter's own watchdog stands down for an active goal (fix round 1)", () => {
+  it("with no goal it fires as it always did, and pauses nothing", async () => {
+    const r = rig(
+      { turns: [{ kind: "silent" }] },
+      { livenessWindows: { idleMs: 60, activeToolMs: 60 } }
+    );
+    await r.session.start();
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "the watchdog fired");
+    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0);
+    await r.stop();
+  });
+
+  it("an active goal stands it down, and pausing the goal mid-turn hands the turn back", async () => {
+    // The host's watchdog owns a goal's turns (60 min, and its interrupt
+    // pauses): an adapter interrupt that does not pause would only make
+    // Codex continue the goal in a new turn.
+    const r = rig(
+      { goal: STORED_GOAL, turns: [{ kind: "silent" }] },
+      { ...RESUMED_WITH_GOAL, livenessWindows: { idleMs: 50, activeToolMs: 50 } }
+    );
+    await r.session.start();
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.started");
+    await elapse(400);
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0, "eight windows, no interrupt");
+
+    await r.session.goalCommand({ kind: "pause" });
+    await r.events.waitForType("turn.completed");
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "back on its normal window");
+    assert.deepEqual(
+      sentFrames(r.received(), "thread/goal/set"),
+      [{ threadId: "thread-mock-1", status: "paused" }],
+      "only the user's pause: the adapter's watchdog pauses nothing"
+    );
+    await r.stop();
+  });
+
+  it("an open tool does not bring it back either", async () => {
+    // The tool window WIDER than the idle one, as in production (30 vs 10 min):
+    // a tool opening only ever widens the window an armed timer sleeps on.
+    const r = rig(
+      { goal: STORED_GOAL, turns: [{ kind: "open-tool" }] },
+      { ...RESUMED_WITH_GOAL, livenessWindows: { idleMs: 40, activeToolMs: 60 } }
+    );
+    await r.session.start();
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("item.started");
+    await elapse(400);
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0, "eight tool windows, no interrupt");
+
+    await r.session.goalCommand({ kind: "pause" });
+    await r.events.waitForType("turn.completed");
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "the tool window is back");
+    await r.stop();
+  });
+});
+
+describe("codex session — the resume snapshot against the fold's goal (goals §6.2.2)", () => {
+  it("the goal the fold already has is no news, and nothing is asked on session start", async () => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    await settleWire(r);
+    assert.deepEqual(goalRows(r), []);
+    assert.deepEqual(goalRequests(r), [], "no goal request runs on session start");
+    await r.stop();
+  });
+
+  it("moved counters are progress", async () => {
+    const r = rig(
+      { goal: { ...STORED_GOAL, tokensUsed: 5_000, timeUsedSeconds: 60 }, turns: [{ kind: "silent" }] },
+      RESUMED_WITH_GOAL
+    );
+    await r.session.start();
+    const row = await waitForGoalRow(r, "progress");
+    assert.deepEqual(row.payload, {
+      goal: knownGoal({ tokensUsed: 5_000, elapsedMs: 60_000 }),
+      change: "progress"
+    });
+    await r.stop();
+  });
+
+  it("a different goal is `restored`", async () => {
+    const r = rig(
+      { goal: { ...STORED_GOAL, status: "paused" }, turns: [{ kind: "silent" }] },
+      RESUMED_WITH_GOAL
+    );
+    await r.session.start();
+    const row = await waitForGoalRow(r, "restored");
+    assert.equal((row.payload as GoalUpdatedPayload).goal?.status, "paused");
+    await r.stop();
+  });
+
+  it("none, while the fold holds an unfinished goal, is `cleared`", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
+    await r.session.start();
+    const row = await waitForGoalRow(r, "cleared");
+    assert.deepEqual(row.payload, { goal: null, change: "cleared", previous: knownGoal() });
+    await settleWire(r);
+    assert.deepEqual(goalRequests(r), []);
+    await r.stop();
+  });
+
+  it("none, on an account switch, re-creates the goal — paused unless it was active, with its budget — as `restored`", async () => {
+    const r = rig(
+      { turns: [{ kind: "silent" }] },
+      {
+        resumeCursor: { threadId: "prior-thread" },
+        knownGoal: knownGoal({ status: "blocked", tokenBudget: 50_000, tokensUsed: 7_000 }),
+        carryGoal: true
+      }
+    );
+    await r.session.start();
+    const row = await waitForGoalRow(r, "restored");
+    assert.deepEqual(goalRequests(r), [
+      {
+        method: "thread/goal/set",
+        params: {
+          threadId: "thread-mock-1",
+          objective: "Make the build green",
+          status: "paused",
+          tokenBudget: 50_000
+        }
+      }
+    ]);
+    assert.deepEqual((row.payload as GoalUpdatedPayload).goal, {
+      objective: "Make the build green",
+      status: "paused",
+      tokensUsed: 0,
+      tokenBudget: 50_000,
+      elapsedMs: 0,
+      setAt: "2026-09-21T00:20:01.000Z"
+    });
+    const received = r.received();
+    assert.ok(
+      received.findIndex((frame) => frame.method === "thread/resume") <
+        received.findIndex((frame) => frame.method === "thread/goal/set"),
+      "re-created on the resumed thread"
+    );
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => payload.change),
+      ["restored"],
+      "never reported cleared, and the reply and its notification are one row"
+    );
+    await r.stop();
+  });
+
+  it("a carry that fails reports the goal cleared, and says why", async () => {
+    const r = rig(
+      { goalError: { code: -32600, message: "goals feature is disabled" }, turns: [{ kind: "silent" }] },
+      { ...RESUMED_WITH_GOAL, carryGoal: true }
+    );
+    await r.session.start();
+    const row = await waitForGoalRow(r, "cleared");
+    assert.deepEqual(row.payload, { goal: null, change: "cleared", previous: knownGoal() });
+    const warning = await r.events.waitFor(
+      (event) =>
+        event.type === "runtime.warning" &&
+        JSON.stringify(event.payload).includes("goals feature is disabled"),
+      "the carry's warning"
+    );
+    assert.match(String((warning.payload as { message: string }).message), /goal/i);
+    await r.stop();
+  });
+
+  it("a fresh thread clears the fold's unfinished goal", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] }, { knownGoal: knownGoal() });
+    await r.session.start();
+    assert.equal(sentFrames(r.received(), "thread/start").length, 1);
+    const row = await waitForGoalRow(r, "cleared");
+    assert.deepEqual(row.payload, { goal: null, change: "cleared", previous: knownGoal() });
+    await r.stop();
+  });
+
+  it("with no snapshot, the first turn closes the window: a later update is an ordinary one", async () => {
+    const r = rig(
+      {
+        goal: STORED_GOAL,
+        noResumeGoalSnapshot: true,
+        goalMovesDuringGet: "paused",
+        turns: [{ kind: "text", text: "a" }]
+      },
+      RESUMED_WITH_GOAL
+    );
+    await r.session.start();
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+    // The mock moves the goal and announces it BEFORE the reply: a
+    // notification only, so nothing but the window decides what it is.
+    await r.session.goalCommand({ kind: "status" });
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => payload.change),
+      ["paused"],
+      "`restored` would mean the window outlived the turn"
+    );
+    await r.stop();
+  });
+});
+
+describe("codex adapter — the goal surface (goals §4.6)", () => {
+  it("goalCommand needs a live session, exactly as sendTurn does", async () => {
+    const { context } = createFakeContext();
+    const adapter = await createCodexAdapter(context);
+    await assert.rejects(
+      adapter.goalCommand!("thread-nobody", { kind: "status" }),
+      /no live session/
+    );
+    await adapter.stopAll();
+  });
+
+  it("hands the fold's goal and the carry to the session, and Stop pauses before interrupting", async () => {
+    const server = writeMockCodexServer({ turns: [{ kind: "silent" }] });
+    cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
+    const { context } = createFakeContext({ resolveBin: () => Promise.resolve(server.bin) });
+    const adapter = await createCodexAdapter(context);
+    cleanups.push(() => adapter.stopAll());
+    const events = new EventCollector(adapter.events);
+    // Probe this cwd up front, so `startSession` finds it cached and forks no
+    // background probe for the teardown to orphan.
+    await adapter.refreshSnapshot({ cwd: process.cwd() });
+
+    await adapter.startSession({
+      threadId: "thread-1",
+      cwd: process.cwd(),
+      home: { kind: "system", path: "" },
+      modelSelection: { model: "gpt-5.5" },
+      runtimeMode: "approval-required",
+      resumeCursor: { threadId: "prior-thread" },
+      knownGoal: knownGoal(),
+      carryGoal: true
+    });
+    // The resumed thread has no goal on this home, so it is re-created —
+    // which only happens when both fields reached the session.
+    await events.waitFor(
+      (event) =>
+        event.type === "thread.goal.updated" &&
+        (event.payload as GoalUpdatedPayload).change === "restored",
+      "the carried goal"
+    );
+
+    const { turnId } = await adapter.sendTurn({
+      threadId: "thread-1",
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await events.waitForType("turn.started");
+    await adapter.interruptTurn("thread-1", turnId);
+
+    const received = server.received();
+    const pauseIndex = received.findIndex(isPause);
+    const interruptIndex = received.findIndex((frame) => frame.method === "turn/interrupt");
+    assert.ok(pauseIndex !== -1, "the adapter's Stop paused the goal");
+    assert.ok(interruptIndex !== -1 && pauseIndex < interruptIndex);
+
+    // Goals §4.6 `GoalCommandOptions`: the adapter hands the model through.
+    await adapter.goalCommand!(
+      "thread-1",
+      { kind: "status" },
+      { modelSelection: { model: "gpt-5.6-luna" } }
+    );
+    assert.deepEqual(sentFrames(server.received(), "thread/settings/update"), [
+      { threadId: "thread-mock-1", model: "gpt-5.6-luna" }
+    ]);
+    await adapter.stopAll();
+  });
+});
+
+describe("codex session — a /goal right after an account switch waits for the carry (fix round 1)", () => {
+  const SWITCHED: Partial<CodexSessionOptions> = {
+    resumeCursor: { threadId: "prior-thread" },
+    knownGoal: knownGoal({ status: "paused" }),
+    carryGoal: true
+  };
+
+  it("/goal resume issued right after the switch succeeds once the carry lands", async () => {
+    const r = rig({ resumeGoalSnapshotDelayMs: 150, turns: [{ kind: "silent" }] }, SWITCHED);
+    await r.session.start();
+    // The snapshot has not come yet: the command waits for it and the carry.
+    assert.deepEqual(await r.session.goalCommand({ kind: "resume" }), { summary: "" });
+    await waitForGoalRow(r, "resumed");
+    assert.deepEqual(goalRequests(r), [
+      {
+        method: "thread/goal/set",
+        params: {
+          threadId: "thread-mock-1",
+          objective: "Make the build green",
+          status: "paused",
+          tokenBudget: null
+        }
+      },
+      // `resume` reads the goal first — the carried one, by now.
+      { method: "thread/goal/get", params: { threadId: "thread-mock-1" } },
+      { method: "thread/goal/set", params: { threadId: "thread-mock-1", status: "active" } }
+    ]);
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => payload.change),
+      ["restored", "resumed"]
+    );
+    await r.stop();
+  });
+
+  it("a reply read before the snapshot is stale: no `cleared`, and the carry still happens", async () => {
+    // The command gives up waiting after 20 ms, so its `get` is answered —
+    // "no goal", on the new home — while the snapshot is still on its way.
+    const r = rig(
+      { resumeGoalSnapshotDelayMs: 300, turns: [{ kind: "silent" }] },
+      { ...SWITCHED, goalDeadlines: { settleMs: 20 } }
+    );
+    await r.session.start();
+    const { summary } = await r.session.goalCommand({ kind: "status" });
+    assert.match(summary, /^Goal paused: /, "answered from the fold's goal, not from a home still settling");
+    await waitForGoalRow(r, "restored");
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => payload.change),
+      ["restored"],
+      "never `cleared`"
+    );
+    assert.deepEqual(
+      goalRequests(r).map((request) => request.method),
+      ["thread/goal/get", "thread/goal/set"]
+    );
+    await r.stop();
+  });
+});
+
+describe("codex session — replies are read only where no notification follows (fix round 1)", () => {
+  it("a stale update trailing the pause's reply makes no `resumed` flicker", async () => {
+    // Notifications can trail replies: a progress flush queued before the
+    // pause goes out after its reply, still saying `active`.
+    const r = rig(
+      { goal: STORED_GOAL, staleGoalUpdateAfterSet: true, turns: [{ kind: "silent" }] },
+      RESUMED_WITH_GOAL
+    );
+    await r.session.start();
+    const { turnId } = await r.session.sendTurn({
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await r.events.waitForType("turn.started");
+    await r.session.interruptTurn(turnId, { pauseGoal: true });
+    // The resume's snapshot, then the trailing pair — the stale `active` and
+    // the set's own `paused` — all read before anything is asserted.
+    await waitUntil(() => readGoalUpdates(r) >= 3, "the trailing goal updates");
+    await settleWire(r);
+    assert.deepEqual(
+      goalRows(r).map((payload) => payload.change),
+      ["paused"]
+    );
+    await r.stop();
+  });
+});
+
+describe("codex session — one deadline per /goal command (fix round 1)", () => {
+  it("a slow goal store fails the whole command at ONE deadline, and starts nothing after it", async () => {
+    // Each reply takes 150 ms: with a deadline per request, the replace's
+    // three steps (get, clear, set) would take 450 ms and succeed.
+    const r = rig(
+      { goal: STORED_GOAL, goalReplyDelayMs: 150, turns: [{ kind: "silent" }] },
+      { ...RESUMED_WITH_GOAL, goalDeadlines: { commandMs: 250 } }
+    );
+    await r.session.start();
+    const started = Date.now();
+    await assert.rejects(
+      r.session.goalCommand({ kind: "set", objective: "Ship the release" }),
+      /\/goal set timed out after 250ms/
+    );
+    assert.ok(Date.now() - started < 1_000, "bounded by the one deadline");
+    assert.equal(
+      sentFrames(r.received(), "thread/goal/set").length,
+      0,
+      "the replace never got as far as its set"
+    );
+    assert.equal(r.session.isLive, true);
+    await r.stop();
+  });
+});
+
+describe("codex session — the goal tracker runs on the injected clock (fix round 1)", () => {
+  it("the progress throttle reads the context's clock, not the wall clock", async () => {
+    let nowMs = Date.UTC(2026, 8, 24);
+    const clocked = createFakeContext({
+      clock: {
+        now: () => new Date(nowMs),
+        nowIso: () => new Date(nowMs).toISOString()
+      }
+    });
+    const r = rig(
+      { goal: STORED_GOAL, turns: [{ kind: "silent" }] },
+      { ...RESUMED_WITH_GOAL, context: clocked.context }
+    );
+    await r.session.start();
+    await settleWire(r);
+    const update = (tokensUsed: number): void => {
+      r.session.injectNotificationForTest("thread/goal/updated", {
+        threadId: "thread-mock-1",
+        turnId: null,
+        goal: {
+          threadId: "thread-mock-1",
+          objective: "Make the build green",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed,
+          timeUsedSeconds: 0,
+          createdAt: 1_789_950_000,
+          updatedAt: 1_789_950_000
+        }
+      });
+    };
+    update(100);
+    update(200); // held: the injected clock has not moved
+    nowMs += 30_000; // …and the wall clock barely has
+    update(300);
+    await r.events.waitFor(
+      (event) =>
+        event.type === "thread.goal.updated" &&
+        (event.payload as GoalUpdatedPayload).goal?.tokensUsed === 300,
+      "the progress due on the injected clock"
+    );
+    assert.deepEqual(
+      goalRows(r)
+        .filter((payload) => payload.change === "progress")
+        .map((payload) => payload.goal?.tokensUsed),
+      [100, 300]
+    );
+    await r.stop();
+  });
+});
+
+describe("codex session — a model picked with /goal reaches the goal's turns (final fix wave)", () => {
+  const LUNA = { model: "gpt-5.6-luna", options: [{ id: "effort", value: "high" }] };
+
+  it("thread/settings/update goes out BEFORE the goal request, and the session keeps the new model", async () => {
+    // Codex starts the goal's turns itself, on the thread's own settings: the
+    // next turn the user sends would be too late.
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    await r.session.goalCommand(
+      { kind: "set", objective: "Make the build green" },
+      { modelSelection: LUNA }
+    );
+    const sent = r
+      .received()
+      .filter((frame) => frame.method === "thread/settings/update" || frame.method?.startsWith("thread/goal/"))
+      .map((frame) => frame.method);
+    assert.deepEqual(sent, ["thread/settings/update", "thread/goal/get", "thread/goal/set"]);
+    assert.deepEqual(sentFrames(r.received(), "thread/settings/update"), [
+      { threadId: "thread-mock-1", model: "gpt-5.6-luna", effort: "high" }
+    ]);
+    assert.equal(r.session.summary().model, "gpt-5.6-luna");
+    await r.stop();
+  });
+
+  it("the goal's next turn — one Codex starts — reports the new model", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    await r.session.goalCommand({ kind: "status" }, { modelSelection: LUNA });
+    r.session.injectNotificationForTest("turn/started", {
+      threadId: "thread-mock-1",
+      turn: {
+        id: "goal-turn-1",
+        items: [],
+        itemsView: "notLoaded",
+        status: "inProgress",
+        error: null,
+        startedAt: 0,
+        completedAt: null,
+        durationMs: null
+      }
+    });
+    const started = await r.events.waitForType("turn.started");
+    assert.deepEqual(started.payload, { model: "gpt-5.6-luna", effort: "high" });
+    await r.stop();
+  });
+
+  it("the model the session already runs sends nothing", async () => {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    await r.session.goalCommand({ kind: "status" }, { modelSelection: { model: "gpt-5.5" } });
+    assert.equal(sentFrames(r.received(), "thread/settings/update").length, 0);
+    await r.stop();
+  });
+
+  it("a refused settings update is logged and the goal command still runs", async () => {
+    const r = rig({
+      settingsError: { code: -32600, message: "unknown model gpt-5.6-luna" },
+      turns: [{ kind: "silent" }]
+    });
+    await r.session.start();
+    assert.deepEqual(
+      await r.session.goalCommand(
+        { kind: "set", objective: "Make the build green" },
+        { modelSelection: LUNA }
+      ),
+      { summary: "" }
+    );
+    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 1, "the goal was still set");
+    assert.equal(r.session.summary().model, "gpt-5.5", "the session keeps the model it has");
+    assert.ok(
+      r.logs.some((log) => log.level === "warn" && /model/i.test(log.message)),
+      "the failure is logged"
+    );
+    await r.stop();
+  });
+});
+
+describe("codex session — a pause never waits for the goal to settle (final fix wave)", () => {
+  it("answers at once while a resume snapshot is still outstanding", async () => {
+    // Pausing is idempotent, and a Stop's pause must not stall past the
+    // host's own 1.5 s bound behind a snapshot that may never come.
+    const r = rig(
+      { goal: STORED_GOAL, noResumeGoalSnapshot: true, turns: [{ kind: "silent" }] },
+      { ...RESUMED_WITH_GOAL, goalDeadlines: { settleMs: 3_000 } }
+    );
+    await r.session.start();
+    const started = Date.now();
+    assert.deepEqual(await r.session.goalCommand({ kind: "pause" }), { summary: "" });
+    assert.ok(Date.now() - started < 1_500, "no settle wait");
+    assert.deepEqual(sentFrames(r.received(), "thread/goal/set"), [
+      { threadId: "thread-mock-1", status: "paused" }
+    ]);
+    await r.stop();
+  });
+});
+
+describe("codex session — a \"no goal\" answer reconciles a drifted fold (micro-fix)", () => {
+  /**
+   * The tracker holds a goal the provider no longer has: a notification this
+   * session saw, while the mock's goal store has none.
+   */
+  async function drifted(): Promise<Rig> {
+    const r = rig({ turns: [{ kind: "silent" }] });
+    await r.session.start();
+    r.session.injectNotificationForTest("thread/goal/updated", {
+      threadId: "thread-mock-1",
+      turnId: null,
+      goal: {
+        threadId: "thread-mock-1",
+        objective: "Make the build green",
+        status: "active",
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        createdAt: 1_789_950_000,
+        updatedAt: 1_789_950_000
+      }
+    });
+    await waitForGoalRow(r, "set");
+    return r;
+  }
+
+  const cases: [string, Parameters<CodexSession["goalCommand"]>[0], string][] = [
+    ["pause", { kind: "pause" }, "No goal is set."],
+    ["resume", { kind: "resume" }, "No goal is set."],
+    ["edit", { kind: "edit", objective: "Ship it" }, "No goal is set. Use /goal <objective> to set one."],
+    ["clear", { kind: "clear" }, "No goal is set."]
+  ];
+  for (const [name, command, summary] of cases) {
+    it(`${name} with no goal on the provider clears the goal the fold still shows`, async () => {
+      const r = await drifted();
+      assert.deepEqual(await r.session.goalCommand(command), { summary });
+      const row = await waitForGoalRow(r, "cleared");
+      assert.deepEqual(row.payload, { goal: null, change: "cleared", previous: knownGoal() });
+      // Reconciled once: the next answer has nothing left to clear.
+      await r.session.goalCommand({ kind: "status" });
+      await settleWire(r);
+      assert.deepEqual(
+        goalRows(r).map((payload) => payload.change),
+        ["set", "cleared"]
+      );
+      await r.stop();
+    });
+  }
+});
+
+describe("codex session — a typed /goal pause on a goal at its budget (micro-fix)", () => {
+  it("says it already stopped there, and sends nothing", async () => {
+    // Codex would keep it budget-limited, and the unchanged update is no row.
+    const r = rig(
+      { goal: { ...STORED_GOAL, status: "budgetLimited" }, turns: [{ kind: "silent" }] },
+      {
+        resumeCursor: { threadId: "prior-thread" },
+        knownGoal: knownGoal({ status: "budget-limited" })
+      }
+    );
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "pause" }), {
+      summary: "This goal already stopped at its token budget."
+    });
+    assert.deepEqual(goalRequests(r), []);
+    await r.stop();
   });
 });

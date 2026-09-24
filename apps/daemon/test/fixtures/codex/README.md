@@ -602,6 +602,7 @@ Points for the adapter:
 - The resume **did not error**, so §4.5's recoverable-error matcher (the English-substring one the
   spec says not to copy verbatim) was not exercised. Treat it as unverified.
 - `thread/goal/cleared` arrives unprompted right after a resume — a notification T3 does not map.
+  It is the resume's goal snapshot (observation 19).
 - Every launch param (`approvalPolicy`, `sandbox`, `approvalsReviewer`, `model`) is accepted on
   `thread/resume`, which is what makes §4.4's "always send `approvalsReviewer` explicitly, including
   on resume" expressible.
@@ -652,3 +653,59 @@ Points for the adapter:
 - **`configWarning` and `remoteControl/status/changed` arrive before you ask for anything** — both
   land between `initialize` and the first request, so a client that only starts listening after
   `thread/start` will miss them.
+
+## 19. Goals (`thread/goal/*`) — read off the 0.155.1 sources, not captured
+
+No capture here sets a goal. The only goal frame on record is the `thread/goal/cleared` after the
+resume in `07-…` (line 75), and `10-…` lists `goals` as a stable feature, enabled by default
+(`experimentalFeature/list`). Everything below was read off `codex-rs` at `rust-v0.155.1`
+(`app-server/src/request_processors/thread_goal_processor.rs` and `thread_lifecycle.rs`,
+`ext/goal/src/`, `state/src/runtime/goals.rs`, the TUI's `app/thread_goal_actions.rs`). It is what
+the adapter (`goal.ts`, `session.ts`) relies on — goals spec §3.2 and §6.2.
+
+- **The reply first, then the notification — and notifications can trail replies.**
+  `thread/goal/set` answers `{goal}`, then sends `thread/goal/updated {threadId, turnId: null,
+  goal}`. `thread/goal/clear` answers `{cleared}` and sends `thread/goal/cleared` only when it
+  removed something. `thread/goal/get` answers `{goal: ThreadGoal | null}` and sends nothing.
+  - The ordering problem: a reply is written directly, while the goal notifications go out
+    through the thread's listener and event queues. So an `updated` queued BEFORE a set — a
+    progress flush still saying `active` — can arrive AFTER the set's reply.
+  - The adapter's rule: it reads the goal off only the replies no notification follows — a `get`,
+    and a `clear` that found nothing (`cleared: false`). A set's or a successful clear's change is
+    taken from its own notification. Reading it off the reply made a Stop's pause flicker
+    `paused` → `resumed` → `paused`.
+- **The resume snapshot.** After `thread/resume`'s reply (and its token-usage replay) the server
+  sends `updated` when the thread has a goal and `cleared` when it has none — the frame in `07-…`.
+  Then it runs its idle lifecycle, which starts a continuation turn when the goal is active. A goal
+  store that cannot be read sends no snapshot at all. `thread/start` sends none either, because a
+  new thread has no goal.
+- **Continuation is the server's.** While the goal is active, every idle point starts a turn with a
+  hidden prompt and no `userMessage` item: a turn's end (interrupted ones included), right after a
+  resume, and right after a set that leaves it active. `turn/interrupt` does not pause the goal
+  (openai/codex #28104), and the TUI pauses before it interrupts.
+- **Set semantics.**
+  - A set with an `objective` while a goal exists edits it in place: same row, same `createdAt`,
+    counters kept.
+  - With no goal, it creates a new row: `createdAt` is now, the counters start at 0 and the status
+    defaults to `active`.
+  - A missing `status` keeps the current one. A budget-limited goal cannot be paused or blocked; it
+    stays `budgetLimited`. Setting `active` at or over the budget lands `budgetLimited`.
+  - The model's `create_goal` rewrites a COMPLETE goal in place with a fresh `createdAt`, and
+    refuses while a goal is unfinished.
+  - A clean replace is `clear` then `set`, which is the TUI's rule.
+- **Refusals** are `-32600` like everything else (observation 13), and only the message tells them
+  apart: `goals feature is disabled`, `ephemeral thread does not support goals: <id>`,
+  `cannot update goal for thread <id>: no goal exists`, and an objective outside 1–4000
+  characters. The adapter reads exactly one of them, `no goal exists`, to answer `/goal pause`
+  with `No goal is set.` instead of an error.
+- **A goal's turns run on the thread's own settings.**
+  `thread/settings/update {threadId, model?, effort?, serviceTier?, …}` answers `{}` and applies,
+  without a turn, the same sticky overrides `turn/start` carries (observation 10). It is the only
+  way a model picked together with a host `/goal` reaches the turns Codex starts by itself; the
+  adapter sends it before the goal request (goals §4.6).
+- **A collab child's own goal is announced on the child's thread id.** Children get the goal tools
+  too (only review subagents do not), so `child-routing.ts` drops both goal notifications for a
+  child rather than folding them onto the parent's goal.
+- **Times are unix SECONDS**: `createdAt`, `updatedAt` and `timeUsedSeconds`.
+- **Goals live in `goals_1.sqlite` under the thread's `CODEX_HOME`.** Another home is another goal
+  store, which is why an account switch re-creates the goal there (goals spec §6.2.2).

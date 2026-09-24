@@ -160,6 +160,7 @@ export const TabSwitcher: React.FC = () => {
                     sessionId={tab.id}
                     status={tabSession(tab)!.status}
                     backgroundLiveness={tabSession(tab)!.backgroundLiveness}
+                    goal={tabSession(tab)!.goal}
                   />
                 ) : null}
                 <span className="min-w-0 flex-1 truncate">{tabLabel(tab)}</span>

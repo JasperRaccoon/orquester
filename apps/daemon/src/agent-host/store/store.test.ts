@@ -487,6 +487,38 @@ test("saveHead wins over the store's own projection and survives a reopen", asyn
   assert.deepEqual(loaded.continueAfterRestart, { turnId: "T-9", prepared: true });
 });
 
+test("the goal-resume marker is head-only state that survives a reopen (goals §5.5)", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.saveHead({ ...(await headOf(store, "t1")), resumeGoalAfterRestart: true });
+  // The store's own projection carries it forward across appends — no domain
+  // event names it, so only a `saveHead` may move it.
+  await store.append({ threadId: "t1", events: [message("t1", "m1")] });
+  assert.equal((await headOf(store, "t1")).resumeGoalAfterRestart, true);
+  await store.drain();
+  store.close();
+
+  // The boot candidate check reads meta.json alone, like `isOrphanedHead`.
+  const metaOnly = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const persisted = await metaOnly.loadHead("t1", { seedRuntime: false });
+  assert.equal(persisted?.resumeGoalAfterRestart, true);
+  metaOnly.close();
+
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const loaded = await headOf(reopened, "t1");
+  assert.equal(loaded.resumeGoalAfterRestart, true);
+  // Cleared by the next head save that omits it.
+  const { resumeGoalAfterRestart: _cleared, ...cleared } = loaded;
+  void _cleared;
+  await reopened.saveHead(cleared);
+  await reopened.drain();
+  reopened.close();
+  const after = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  assert.equal((await headOf(after, "t1")).resumeGoalAfterRestart, undefined);
+  after.close();
+});
+
 test("deleteThread deletes the thread's checkpoint refs before its directory", async () => {
   const rootDir = await tempRoot();
   const calls: Array<{ threadId: string; cwd: string }> = [];

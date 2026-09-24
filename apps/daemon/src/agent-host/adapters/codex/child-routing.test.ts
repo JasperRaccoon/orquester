@@ -178,6 +178,38 @@ describe("a collab child never hijacks the parent's turn", () => {
     assert.deepEqual(events, [], "dropped, not folded onto the parent");
   });
 
+  it("a child's own goal never becomes the parent's (goals §6.2)", () => {
+    // Collab children get the goal tools too (only review subagents do not),
+    // and a tool-set goal is announced on the CHILD's thread id.
+    const { normaliser } = make();
+    const goal = {
+      threadId: CHILD,
+      objective: "the child's own objective",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: 1_789_950_000,
+      updatedAt: 1_789_950_000
+    };
+    assert.deepEqual(
+      normaliser.notification("thread/goal/updated" as never, {
+        threadId: CHILD,
+        turnId: "child-turn",
+        goal
+      }),
+      []
+    );
+    assert.deepEqual(normaliser.notification("thread/goal/cleared" as never, { threadId: CHILD }), []);
+    // …and the parent's goal is still unset: its first update is `set`.
+    const [own] = normaliser.notification("thread/goal/updated" as never, {
+      threadId: PARENT,
+      turnId: null,
+      goal: { ...goal, threadId: PARENT, objective: "the parent's objective" }
+    });
+    assert.equal((own?.payload as { change?: string } | undefined)?.change, "set");
+  });
+
   it("a child's thread/started does not emit a second thread.started", () => {
     const { normaliser } = make();
     const events = normaliser.notification("thread/started" as never, {

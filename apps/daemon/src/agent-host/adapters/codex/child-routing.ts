@@ -49,7 +49,10 @@ export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
  * `thread/started` are the load-bearing ones: the parent adapter maps them onto
  * the PARENT thread, so a child compacting would rewrite the parent's state.
  *
- * *T3: `CodexSessionRuntime.ts:1097-1119`.*
+ * *T3: `CodexSessionRuntime.ts:1097-1119`* — plus the two goal notifications,
+ * which T3 does not map at all: a collab child has the goal tools too, a goal
+ * it sets is announced on its own thread id, and the parent maps every goal
+ * notification onto the thread's one goal (goals §6.2).
  */
 export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "item/agentMessage/delta",
@@ -67,7 +70,9 @@ export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "thread/archived",
   "thread/unarchived",
   "thread/compacted",
-  "thread/started"
+  "thread/started",
+  "thread/goal/updated",
+  "thread/goal/cleared"
 ]);
 
 export function routeCodexChildNotification(method: string): CodexChildNotificationRoute {

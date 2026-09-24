@@ -64,8 +64,15 @@ export function composerOwnsEscape(input: {
   /** The target is the textarea, which handles Escape on its own. */
   isTextarea: boolean;
   isTurnActive: boolean;
+  /**
+   * A popover, modal, sheet or menu is open (`anotherLayerOwnsTheKeyboard`,
+   * `lib/keyboard-layers.ts`): the Escape is the layer's to close, and neither
+   * owner takes it. Absent reads as no.
+   */
+  blockingLayerOpen?: boolean;
 }): boolean {
   if (input.defaultPrevented) return false;
+  if (input.blockingLayerOpen === true) return false;
   if (!input.isTurnActive) return false;
   // The textarea's own handler runs first and owns the menu-vs-interrupt call.
   if (input.isTextarea) return false;
@@ -89,8 +96,11 @@ export function shellOwnsEscape(input: {
   isTurnActive: boolean;
   drillInOpen: boolean;
   rewindPress?: boolean;
+  /** See `composerOwnsEscape` — `resolveChatEscape`'s `blockingLayerOpen`. */
+  blockingLayerOpen?: boolean;
 }): boolean {
   if (input.defaultPrevented) return false;
+  if (input.blockingLayerOpen === true) return false;
   if (input.insideComposerShell) return false;
   return input.drillInOpen || input.isTurnActive || input.rewindPress === true;
 }

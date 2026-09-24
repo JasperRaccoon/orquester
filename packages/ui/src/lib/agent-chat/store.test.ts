@@ -227,6 +227,65 @@ describe("the per-thread slice", () => {
   });
 });
 
+describe("the thread's goal (goals §8.1)", () => {
+  it("is on the slice the hooks read — the snapshot's, then every live goal row", async () => {
+    const { fake, state } = await store();
+    assert.equal(state().slice.goal, null, "a thread with no snapshot yet has none");
+
+    fake.push({
+      kind: "snapshot",
+      thread: snapshot({
+        seq: 2,
+        goal: { objective: "Make CI green", status: "active", rounds: 1, updatedAt: stamp(2) }
+      })
+    });
+    assert.equal(state().slice.goal?.objective, "Make CI green");
+
+    fake.push({
+      kind: "event",
+      seq: 3,
+      event: ev(
+        "thread.activity-appended",
+        {
+          activity: activity(
+            "goal.updated",
+            { goal: { objective: "Make CI green", status: "active", rounds: 2 }, change: "checked" },
+            { tone: "info", summary: "Goal check 2: not met", turnId: "t1" }
+          )
+        },
+        { seq: 3 }
+      )
+    });
+    assert.equal(state().slice.goal?.rounds, 2);
+    assert.ok(
+      state().rows.some((row) => row.kind === "goal-marker"),
+      "and the same row is the timeline's marker"
+    );
+
+    fake.push({
+      kind: "event",
+      seq: 4,
+      event: ev(
+        "thread.activity-appended",
+        {
+          activity: activity(
+            "goal.updated",
+            { goal: { objective: "Make CI green", status: "active", rounds: 2, phase: "executing" }, change: "progress" },
+            { tone: "info", summary: "Goal progress", turnId: "t1" }
+          )
+        },
+        { seq: 4 }
+      )
+    });
+    assert.equal(state().slice.goal?.phase, "executing", "progress moves the goal…");
+    assert.equal(
+      state().rows.filter((row) => row.kind === "goal-marker").length,
+      1,
+      "…and adds no row"
+    );
+  });
+});
+
 describe("commands", () => {
   it("mints a commandId per command and sends no optimistic row", async () => {
     const { api, fake, state } = await store();

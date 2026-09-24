@@ -14,7 +14,9 @@
  * it (§4.1 "enforced by the orchestration layer").
  *
  * Three rules, all load-bearing:
- * - **10 minutes** with no activity, **30 minutes** while a tool call is open;
+ * - **10 minutes** with no activity, **30 minutes** while a tool call is open —
+ *   and **an hour** while the thread's goal is active (goals §5.2), the longer
+ *   window always winning;
  * - the deadline does not start until the protocol has produced observable
  *   progress;
  * - it is **paused entirely** while an approval or user-input request is
@@ -34,6 +36,17 @@ export interface TurnWatchdogOptions {
   clearTimer: (handle: unknown) => void;
   idleMs?: number;
   activeToolMs?: number;
+  goalMs?: number;
+  /**
+   * Whether the thread's goal is active right now (goals §5.2). While it is,
+   * the window is `max(goalMs, the normal window)`: a goal run's verifier
+   * rounds can go quiet for longer than a turn's idle window, and cancelling
+   * one would end the goal the user left running. No single timer sleeps past
+   * the normal window, and each wake re-reads this, so the answer is honoured
+   * in both directions: a goal that became active after the timer was armed
+   * keeps the turn alive, and one that ended is not granted the hour.
+   */
+  isGoalActive?: () => boolean;
   /** Cancel the provider turn and settle it as failed with this message. */
   onStalled: (input: { threadId: string; turnId: string; elapsedMs: number; windowMs: number }) => void;
 }
@@ -50,6 +63,7 @@ export interface TurnWatchdog {
 export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
   const idleMs = options.idleMs ?? TURN_LIVENESS_WINDOWS.idleMs;
   const activeToolMs = options.activeToolMs ?? TURN_LIVENESS_WINDOWS.activeToolMs;
+  const goalMs = options.goalMs ?? TURN_LIVENESS_WINDOWS.goalMs;
 
   let turnId: string | null = null;
   let observedProgress = false;
@@ -59,7 +73,12 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
   const openRequests = new Set<string>();
 
   const paused = (): boolean => openRequests.size > 0;
-  const windowMs = (): number => (openTools.size > 0 ? activeToolMs : idleMs);
+  const normalWindowMs = (): number => (openTools.size > 0 ? activeToolMs : idleMs);
+  const windowMs = (): number => {
+    const normal = normalWindowMs();
+    // Never shorter than the normal window: a goal only ever buys time.
+    return options.isGoalActive?.() === true ? Math.max(goalMs, normal) : normal;
+  };
 
   const disarm = (): void => {
     if (handle !== null) {
@@ -74,7 +93,12 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
       return;
     }
     const elapsed = options.clock.now().getTime() - lastActivityAt;
-    const remaining = Math.max(0, windowMs() - elapsed);
+    // Never sleep past the NORMAL window on the goal's word (goals §5.2): the
+    // goal row lands after the event that armed this timer — the watchdog
+    // observes an event before ingestion folds it — so a goal that just ended
+    // still reads active here. Every wake re-reads the window; a goal that is
+    // still active simply re-arms.
+    const remaining = Math.min(Math.max(0, windowMs() - elapsed), normalWindowMs());
     handle = options.setTimer(() => {
       handle = null;
       // Re-check the pause immediately before cancelling: a request may have
@@ -85,7 +109,10 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
       }
       const now = options.clock.now().getTime();
       const sinceActivity = now - lastActivityAt;
-      if (sinceActivity < windowMs()) {
+      // The window that expired, read before the open tools are forgotten, so
+      // the message names the limit that actually applied.
+      const expired = windowMs();
+      if (sinceActivity < expired) {
         arm();
         return;
       }
@@ -97,7 +124,7 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
         threadId: options.threadId,
         turnId: stalledTurnId,
         elapsedMs: sinceActivity,
-        windowMs: windowMs()
+        windowMs: expired
       });
     }, remaining);
   };

@@ -14,6 +14,7 @@
 
 import type {
   AccountHome,
+  AgentGoal,
   ApprovalDecision,
   ModelSelection,
   ProviderSession,
@@ -135,6 +136,13 @@ export interface GrokSessionOptions {
   runtimeMode: RuntimeMode;
   modelSelection: ModelSelection;
   resumeCursor?: unknown;
+  /**
+   * The goal the thread shows (goals §5.3). The load's replayed goal is
+   * compared with it once, and live goal frames against what it becomes.
+   */
+  knownGoal?: AgentGoal | null;
+  /** The clock the goal `progress` throttle reads (goals §6). Default `Date.now`. */
+  now?(): number;
   command: string;
   env: Record<string, string>;
   clientInfo: { name: string; version: string };
@@ -234,7 +242,10 @@ export class GrokSession {
         stamp: options.stamp,
         uuid: options.uuid,
         activeTurnId: () => this.activeTurn?.turnId,
-        planHost: this.planHost()
+        planHost: this.planHost(),
+        knownGoal: options.knownGoal ?? null,
+        ...(options.now === undefined ? {} : { now: options.now }),
+        debug: (message, detail) => options.logger.debug(message, detail)
       },
       "pending"
     );
@@ -398,6 +409,12 @@ export class GrokSession {
         })
       );
     }
+    // Goals §6.3 item 4: `session/load` has replayed every goal row the CLI
+    // persisted — silently — and answered, so the goal it left is compared
+    // with the one the thread shows now, once. A load that replayed no goal
+    // row is no evidence and changes nothing; a FRESH session has no goal by
+    // definition, so an unfinished goal the thread still shows is cleared.
+    this.emitAll(this.normalizer.reconcileGoal(cursor === null ? "new" : "load"));
   }
 
   private async openNewSession(): Promise<NewSessionResponse> {

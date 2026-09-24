@@ -1,7 +1,7 @@
 /**
  * The status line that sits between the timeline and the banner dock (§7.6):
- * elapsed time, tokens so far, the current activity label, and the
- * context-window meter.
+ * elapsed time, tokens so far, the current activity label, the thread's goal
+ * (goals §8.2), and the context-window meter.
  *
  * **Anything that changes every second is a self-ticking leaf.** The elapsed
  * readout is an {@link ElapsedTicker} — a DOM write, zero React commits — and
@@ -23,7 +23,13 @@ import { ElapsedTicker, ShimmerText, StatusDot } from "../primitives";
 import { TONE_TEXT } from "../primitives/tone";
 import { ContextMeter } from "./ContextMeter";
 import { deriveContextMeter, formatContextTokens } from "./context-meter";
+import { GoalChip } from "./GoalChip";
+import type { GoalActionModel } from "./goal-chip";
 import { formatPlanProgress, planIsRunning, resolveStatusLine } from "./status-line";
+
+/** Stable empties, so a thread without goal actions never churns the chip's props. */
+const NO_GOAL_ACTIONS: readonly GoalActionModel[] = [];
+const noGoalAction = (): void => {};
 
 export function ChatStatusLine({
   sessionId,
@@ -39,7 +45,11 @@ export function ChatStatusLine({
   activePlan,
   onCompact,
   latestCheckpoint,
-  modelLabel = null
+  modelLabel = null,
+  goal = null,
+  goalActions = NO_GOAL_ACTIONS,
+  goalActionsNote = null,
+  onGoalAction = noGoalAction
 }: ChatStatusLineProps): React.ReactElement {
   const status = resolveStatusLine({ connection, turnStartedAt, activityLabel });
   const meter = React.useMemo(
@@ -86,6 +96,19 @@ export function ChatStatusLine({
           </span>
         ) : null}
 
+        {/* Goals §8.2: the goal's slot, before the plan chip. The chip renders
+            nothing for a finished goal, so the line never keeps a gap. */}
+        {goal !== null ? (
+          <GoalChip
+            sessionId={sessionId}
+            goal={goal}
+            turnRunning={status.ticking}
+            actions={goalActions}
+            actionsNote={goalActionsNote}
+            onAction={onGoalAction}
+          />
+        ) : null}
+
         {planProgress ? (
           <span
             className={cn(
@@ -100,8 +123,10 @@ export function ChatStatusLine({
         ) : null}
 
         {checkpointFiles > 0 && latestCheckpoint ? (
+          // Below `sm` the row has no width to spare: the checkpoint gives its
+          // share back (the changed-files card in the timeline still says it).
           <span
-            className="flex shrink-0 items-center gap-1 font-mono text-neutral-500"
+            className="hidden shrink-0 items-center gap-1 font-mono text-neutral-500 sm:flex"
             title={`Checkpoint at turn ${latestCheckpoint.checkpointTurnCount}`}
           >
             <GitCommitHorizontal size={12} aria-hidden />
@@ -116,7 +141,7 @@ export function ChatStatusLine({
             <span className="ac-tabular shrink-0 font-mono text-neutral-500">
               {formatContextTokens(meter.usedTokens)} tok
             </span>
-            <ContextMeter model={meter} modelLabel={modelLabel} onCompact={onCompact} />
+            <ContextMeter sessionId={sessionId} model={meter} modelLabel={modelLabel} onCompact={onCompact} />
           </>
         ) : null}
       </div>

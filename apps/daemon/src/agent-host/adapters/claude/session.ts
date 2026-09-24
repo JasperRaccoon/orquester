@@ -28,6 +28,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AccountHome,
+  AgentGoal,
   ApprovalDecision,
   AttachmentRef,
   CanonicalRequestType,
@@ -40,7 +41,7 @@ import type {
   Skill,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
-import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES } from "@orquester/api/agent-chat";
+import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES, isUnfinishedGoal } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
 import { TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
@@ -61,6 +62,9 @@ import {
   shouldShortCircuitToAllow
 } from "./decisions.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
+import { transcriptGoalFromLastRow } from "./goal.ts";
+import { claudeConfigDir } from "./config-dir.ts";
+import { ClaudeGoalTranscript } from "./goal-transcript.ts";
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
@@ -114,6 +118,61 @@ export const BACKGROUND_SHELL_TAIL_READ_DEADLINE_MS = 5_000;
 /** The final drain's bound: the per-shell cap divided by one read, plus one. */
 const BACKGROUND_SHELL_DRAIN_MAX_READS = Math.ceil(TAIL_MAX_TOTAL_BYTES / TAIL_MAX_READ_BYTES) + 1;
 
+/**
+ * One incremental read of the CLI's transcript for `goal_status` rows, or one
+ * set-point jump (goals §6.1.4). Local-file work of a turn's worth of bytes;
+ * past this a stuck mount is given up on, like a background shell's tail.
+ */
+export const GOAL_TRANSCRIPT_READ_DEADLINE_MS = 5_000;
+
+/**
+ * The resume scan reads a WHOLE transcript for its last `goal_status` row
+ * (goals §6.1.5) — tens of megabytes on a long thread — so it gets longer.
+ */
+export const GOAL_TRANSCRIPT_SCAN_DEADLINE_MS = 30_000;
+
+/**
+ * How long a stop waits for goal reads already in flight before
+ * `session.exited` goes out. A read that met the goal just before a stop
+ * would otherwise be dropped: nothing may follow `session.exited`.
+ */
+export const GOAL_WORK_SETTLE_DEADLINE_MS = 5_000;
+
+/**
+ * When a turn-end walk found no verdict, the transcript is read again after
+ * these delays, one after the other (~0.3 s and ~1.5 s after the turn end).
+ *
+ * The CLI writes a goal's met / impossible `goal_status` row only to its
+ * transcript, and an SDK session does NOT flush the transcript before
+ * `result`: the hard flush is gated on `CLAUDE_CODE_EAGER_FLUSH` /
+ * `CLAUDE_CODE_IS_COWORK` (never set here — the chat spec keeps the Claude
+ * env to `CLAUDE_CONFIG_DIR`), and the row is queued for the store's 100 ms
+ * write timer (2.1.280). Read at `result` alone, the verdict was missed and
+ * the goal read "active" until the next turn ended.
+ */
+export const GOAL_VERDICT_REREAD_DELAYS_MS = [300, 1_200] as const;
+
+/**
+ * One read of the transcript's new rows, walked chunk by chunk (goals
+ * §6.1.4). What the walk judges by is taken when it is asked for: the turn
+ * that ended, whether background work was live then, and the goal epoch.
+ */
+interface TranscriptWalk {
+  sessionId: string | undefined;
+  turnId?: string;
+  atTurnEnd: boolean;
+  backgroundLive: boolean;
+  epoch: number;
+  /** How many verdict re-reads came before this walk (0: the turn end's own). */
+  reread: number;
+  /**
+   * A met / impossible row may still be on its way: the turn ended with
+   * nothing in the background, so the CLI did evaluate. Such a walk that finds
+   * no verdict schedules the next re-read.
+   */
+  awaitsVerdict: boolean;
+}
+
 interface BackgroundShellTail {
   tail: FileTail;
   timer: NodeJS.Timeout | number | undefined;
@@ -159,6 +218,8 @@ export interface ClaudeSessionOptions {
   onUsageLimitsStale?: () => void;
   launchArgs?: readonly string[];
   autoCompactWindow?: number;
+  /** The fold's goal (goals §5.3); the session reports only what changes from it. */
+  knownGoal?: AgentGoal | null;
 }
 
 export class ClaudeSession {
@@ -194,12 +255,36 @@ export class ClaudeSession {
   /** True when this session was started from a cursor, i.e. it has a past. */
   private readonly startedFromCursor: boolean;
   private resumeSessionAt: string | undefined;
+  /**
+   * The CLI's own transcript, read for what stdout never says about a goal:
+   * met, impossible, cleared by an error (goals §6.1.4), and what `--resume`
+   * re-arms (§6.1.5).
+   */
+  private readonly goalTranscript: ClaudeGoalTranscript;
+  /** Goal transcript work, one item at a time, never on the message loop. */
+  private goalWork: Promise<void> = Promise.resolve();
+  private goalWorkPending = 0;
+  /** A throttled goal `progress`, flushed when its window ends (goals §6). */
+  private goalFlushTimer: NodeJS.Timeout | number | undefined;
+  /** False once `session.exited` is out: nothing may follow it. */
+  private goalOutputOpen = true;
+  /** The one teardown, once it has begun (see {@link teardown}). */
+  private teardownDone: Promise<void> | undefined;
+  /** A transcript walk is under way; the ones asked for behind it wait here. */
+  private transcriptWalking = false;
+  private readonly transcriptWalksWaiting: TranscriptWalk[] = [];
+  /** The pending verdict re-read, if any ({@link GOAL_VERDICT_REREAD_DELAYS_MS}). */
+  private verdictRereadTimer: NodeJS.Timeout | number | undefined;
 
   constructor(options: ClaudeSessionOptions) {
     this.options = options;
     this.threadId = options.threadId;
     this.stderr = new StderrCapture({
       homeDirs: options.home.path.length > 0 ? [options.home.path] : []
+    });
+    this.goalTranscript = new ClaudeGoalTranscript({
+      configDir: claudeConfigDir(options.env),
+      cwd: options.cwd
     });
     this.normalizer = new ClaudeNormalizer({
       threadId: options.threadId,
@@ -209,7 +294,11 @@ export class ClaudeSession {
       onBackgroundShell: (change) => this.onBackgroundShell(change),
       ...(options.onUsageLimitsStale !== undefined
         ? { onUsageLimitsStale: options.onUsageLimitsStale }
-        : {})
+        : {}),
+      ...(options.knownGoal !== undefined ? { knownGoal: options.knownGoal } : {}),
+      onGoalSetPoint: () => this.markGoalSetPoint(),
+      onGoalTranscriptCheck: () => this.checkGoalTranscript({ atTurnEnd: false }),
+      onGoalProgressDeferred: (dueAtMs) => this.scheduleGoalFlush(dueAtMs)
     });
     this.normalizer.scopedLimitNames = options.scopedLimitNames;
     this.resumeSessionId = options.resumeCursor?.resume;
@@ -253,6 +342,14 @@ export class ClaudeSession {
 
   get activeTurnId(): string | undefined {
     return this.normalizer.turnState?.turnId;
+  }
+
+  /**
+   * The goal this session last reported — what the host's fold now holds, and
+   * so the `knownGoal` a restart of this thread must compare against (goals §6).
+   */
+  get trackedGoal(): AgentGoal | null {
+    return this.normalizer.goals.lastEmitted;
   }
 
   // -------------------------------------------------------------------------
@@ -365,6 +462,7 @@ export class ClaudeSession {
         : {})
     };
     this.emit(this.normalizer.sessionStateChanged("ready", "session:started"));
+    this.reconcileGoalOnStart();
     // The meter's denominator used to arrive only with the FIRST `result`
     // (`modelUsage[*].contextWindow`), so the opening turn of every session
     // showed a bare token count and no percentage. Asking the CLI once the
@@ -446,6 +544,12 @@ export class ClaudeSession {
         const meterTurnId = refreshesContextWindow
           ? this.normalizer.turnState?.turnId
           : undefined;
+        // A goal's met / impossible verdict is written to the transcript at
+        // the turn end and nowhere else (goals §6.1.4). Read after the frame,
+        // so the turn's own events are out first, and against the turn that
+        // ended — read before the frame settles it.
+        const endsTurn = (message as { type?: unknown }).type === "result";
+        const endingTurnId = endsTurn ? this.normalizer.turnState?.turnId : undefined;
         try {
           this.emit(this.normalizer.handleMessage(message));
         } catch (error) {
@@ -462,6 +566,12 @@ export class ClaudeSession {
           // this refines it with the CLI's own accounting a moment later, and
           // never blocks the loop.
           void this.refreshContextUsage(meterTurnId);
+        }
+        if (endsTurn) {
+          this.checkGoalTranscript({
+            atTurnEnd: true,
+            ...(endingTurnId !== undefined ? { turnId: endingTurnId } : {})
+          });
         }
         this.noteActivity();
       }
@@ -626,6 +736,366 @@ export class ClaudeSession {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Goals: what only the transcript knows (goals §6.1.4-5)
+  // -------------------------------------------------------------------------
+
+  /** The CLI session whose transcript is current: a fork or a re-init moves it. */
+  private transcriptSessionId(): string | undefined {
+    return this.normalizer.providerSessionId ?? this.resumeSessionId;
+  }
+
+  /**
+   * `--resume` re-arms whatever goal the transcript's last `goal_status` row
+   * left running, and says nothing about it: compare that with the thread's
+   * goal once, now (goals §6.1.5). A new CLI session holds no goal at all, so
+   * a thread goal that a fresh start meets — a rewind to the very start, a
+   * lost cursor — is over.
+   */
+  private reconcileGoalOnStart(): void {
+    if (!this.startedFromCursor) {
+      this.emit(this.normalizer.reconcileTranscriptGoal({ kind: "none" }));
+      return;
+    }
+    const sessionId = this.transcriptSessionId();
+    if (sessionId === undefined) {
+      return;
+    }
+    const epoch = this.normalizer.goalEpoch;
+    this.queueGoalWork({
+      label: "restore",
+      timeoutMs: GOAL_TRANSCRIPT_SCAN_DEADLINE_MS,
+      read: () => this.goalTranscript.readLast(sessionId),
+      apply: (found) => {
+        if (found === undefined) {
+          if (isUnfinishedGoal(this.normalizer.goals.goal)) {
+            this.options.context.logger.debug(
+              `claude: the resumed transcript of thread ${this.threadId} is not there; its goal is left as the thread shows it`,
+              { sessionId }
+            );
+          }
+          return [];
+        }
+        return this.normalizer.reconcileTranscriptGoal(transcriptGoalFromLastRow(found.row), {
+          epoch
+        });
+      }
+    });
+    // A scan that failed or ran out of time placed nothing: reads then start
+    // at the tail, never at the first byte, where an earlier run of the same
+    // goal may have been met. After a good scan this keeps its position.
+    this.queueGoalWork({
+      label: "tail",
+      timeoutMs: GOAL_TRANSCRIPT_READ_DEADLINE_MS,
+      read: () => this.goalTranscript.anchorAtTail(sessionId),
+      apply: () => []
+    });
+  }
+
+  /**
+   * Read what the transcript gained since the last read, after a `result`
+   * (`atTurnEnd`) or an `active_goal: null`, while a goal is running (goals
+   * §6.1.4, §6.1.6). Whether background work was live, and which goal run
+   * this is, are taken NOW: by the time the read lands a task may have
+   * finished and the next goal may have been set.
+   */
+  private checkGoalTranscript(input: { atTurnEnd: boolean; turnId?: string }): void {
+    // A new walk reads on from where the last one stopped, so it supersedes a
+    // re-read still pending for an earlier turn end.
+    this.cancelVerdictReread();
+    if (this.closed || !isUnfinishedGoal(this.normalizer.goals.goal)) {
+      return;
+    }
+    const backgroundLive = this.normalizer.liveTasks().size > 0;
+    this.queueTranscriptWalk({
+      sessionId: this.transcriptSessionId(),
+      ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+      atTurnEnd: input.atTurnEnd,
+      backgroundLive,
+      epoch: this.normalizer.goalEpoch,
+      reread: 0,
+      // With background work live the CLI skipped the evaluation: no verdict
+      // is coming for this turn end.
+      awaitsVerdict: input.atTurnEnd && !backgroundLive
+    });
+  }
+
+  /**
+   * Walks run ONE at a time, in the order they were asked for. A walk queues
+   * its next chunk only once its current one has landed, so two turn ends
+   * close together used to interleave on the goal chain — the first walk's
+   * next chunk behind the second walk's first — and a row one walk read was
+   * stamped with the OTHER turn's id, and the older walk's final phase could
+   * land after the newer one's.
+   */
+  private queueTranscriptWalk(walk: TranscriptWalk): void {
+    if (this.transcriptWalking) {
+      this.transcriptWalksWaiting.push(walk);
+      return;
+    }
+    this.transcriptWalking = true;
+    this.queueTranscriptChunk(walk);
+  }
+
+  /**
+   * A walk is over: start the next one asked for — which reads on from here,
+   * so it supersedes any re-read of this one — or, with none waiting, re-read
+   * later for a verdict this walk did not find yet.
+   */
+  private transcriptWalkEnded(walk: TranscriptWalk): void {
+    const next = this.transcriptWalksWaiting.shift();
+    if (next !== undefined) {
+      this.queueTranscriptChunk(next);
+      return;
+    }
+    this.transcriptWalking = false;
+    this.scheduleVerdictReread(walk);
+  }
+
+  /**
+   * Read the transcript again after the next of
+   * {@link GOAL_VERDICT_REREAD_DELAYS_MS}, for a verdict the CLI had not
+   * written yet when `walk` looked (goals §6.1.4). Bounded, and only while it
+   * can still come: the goal is unfinished, the walk's epoch still current
+   * (no stdout goal news since), and the turn end evaluated at all. The walk
+   * the re-read queues is stamped with the turn that ended, judges no phase
+   * (the turn end already did), and goes through the same serialised walks.
+   */
+  private scheduleVerdictReread(walk: TranscriptWalk): void {
+    const delay = GOAL_VERDICT_REREAD_DELAYS_MS[walk.reread];
+    if (
+      delay === undefined ||
+      !walk.awaitsVerdict ||
+      this.closed ||
+      walk.epoch !== this.normalizer.goalEpoch ||
+      !isUnfinishedGoal(this.normalizer.goals.goal)
+    ) {
+      return;
+    }
+    this.cancelVerdictReread();
+    const timer = this.options.deps.setTimer(() => {
+      if (this.verdictRereadTimer !== timer) {
+        // Superseded — a new walk, a new turn, or the teardown — after this
+        // timer had already been handed to the loop.
+        return;
+      }
+      this.verdictRereadTimer = undefined;
+      if (
+        this.closed ||
+        walk.epoch !== this.normalizer.goalEpoch ||
+        !isUnfinishedGoal(this.normalizer.goals.goal)
+      ) {
+        return;
+      }
+      this.queueTranscriptWalk({ ...walk, atTurnEnd: false, reread: walk.reread + 1 });
+    }, delay);
+    this.verdictRereadTimer = timer;
+  }
+
+  private cancelVerdictReread(): void {
+    if (this.verdictRereadTimer !== undefined) {
+      this.options.deps.clearTimer(this.verdictRereadTimer);
+      this.verdictRereadTimer = undefined;
+    }
+  }
+
+  /**
+   * One chunk of a transcript walk (goals §6.1.4) — one `read()`, its position
+   * committed and its rows applied together — and the next chunk queued
+   * behind it while the transcript has more. Each chunk is its own bounded
+   * step, so a delta too big for one deadline still finishes. The turn-end
+   * phase is judged once, after the last chunk: "still unmet" needs every
+   * row. A goal (re)started meanwhile ends the walk (its epoch moved), and so
+   * does a chunk that could not be read: the next turn end reads on from the
+   * last position committed.
+   *
+   * A walk whose epoch has moved by the time a chunk STARTS ends without
+   * reading at all: the rows it would consume belong to what came after that
+   * stdout news, and a read it then discarded would commit their position —
+   * the next walk would never see them.
+   */
+  private queueTranscriptChunk(walk: TranscriptWalk): void {
+    const { sessionId } = walk;
+    let continued = false;
+    this.queueGoalWork({
+      label: "read",
+      timeoutMs: GOAL_TRANSCRIPT_READ_DEADLINE_MS,
+      read: () => {
+        if (walk.epoch !== this.normalizer.goalEpoch) {
+          return Promise.resolve(null);
+        }
+        return sessionId === undefined
+          ? Promise.resolve(undefined)
+          : this.goalTranscript.readNew(sessionId);
+      },
+      apply: (chunk) => {
+        if (chunk === null) {
+          // Stale: ended without reading, nothing consumed.
+          return [];
+        }
+        if (chunk === undefined) {
+          this.options.context.logger.debug(
+            `claude: no transcript to read the goal of thread ${this.threadId} from`,
+            { sessionId }
+          );
+        }
+        const more = chunk?.more === true && walk.epoch === this.normalizer.goalEpoch;
+        // Without the file the verdict is unknown, but the phase is not: with
+        // background work live the CLI did not evaluate at all.
+        const events = this.normalizer.applyGoalTranscriptRows(chunk?.rows ?? [], {
+          ...(walk.turnId !== undefined ? { turnId: walk.turnId } : {}),
+          backgroundLive: walk.backgroundLive,
+          atTurnEnd: walk.atTurnEnd && !more,
+          epoch: walk.epoch
+        });
+        if (more) {
+          continued = true;
+          this.queueTranscriptChunk(walk);
+        }
+        return events;
+      },
+      settled: () => {
+        if (!continued) {
+          this.transcriptWalkEnded(walk);
+        }
+      }
+    });
+  }
+
+  /** A goal (re)started: judge it by rows written from here on (goals §6.1.4). */
+  private markGoalSetPoint(): void {
+    const sessionId = this.transcriptSessionId();
+    if (this.closed || sessionId === undefined) {
+      return;
+    }
+    this.queueGoalWork({
+      label: "set-point",
+      timeoutMs: GOAL_TRANSCRIPT_READ_DEADLINE_MS,
+      read: () => this.goalTranscript.markSetPoint(sessionId),
+      apply: () => []
+    });
+  }
+
+  /**
+   * One piece of goal transcript work, after every piece before it. The read
+   * is bounded; the normaliser is only touched once it has landed, so a read
+   * that outlived its deadline changes nothing (and moves no read position:
+   * `abandonPending`). A failure is a debug line, never an error (§6.1.4).
+   */
+  private queueGoalWork<T>(work: {
+    label: string;
+    timeoutMs: number;
+    read: () => Promise<T>;
+    apply: (result: T) => RuntimeEvent[];
+    /** Runs last, whatever happened: applied, failed, timed out or skipped. */
+    settled?: () => void;
+  }): void {
+    this.goalWorkPending += 1;
+    this.goalWork = this.goalWork.then(async () => {
+      try {
+        if (!this.goalOutputOpen) {
+          return;
+        }
+        // A test parks a read here; production passes no gate.
+        await this.options.deps.goalReadGate?.(this.threadId, work.label);
+        let result: T;
+        try {
+          result = await withDeadline(work.read, {
+            label: `claude/goal/${work.label}`,
+            timeoutMs: work.timeoutMs,
+            onTimeout: () => this.goalTranscript.abandonPending()
+          });
+        } catch (error) {
+          this.options.context.logger.debug(
+            `claude: the goal transcript ${work.label} for thread ${this.threadId} failed`,
+            { error: errorMessage(error) }
+          );
+          return;
+        }
+        if (this.goalOutputOpen) {
+          this.emit(work.apply(result));
+        }
+      } catch (error) {
+        // The chain must never reject: every later read hangs off it.
+        this.options.context.logger.error(
+          `claude: applying the goal transcript ${work.label} for thread ${this.threadId} failed`,
+          error
+        );
+      } finally {
+        try {
+          work.settled?.();
+        } catch (error) {
+          this.options.context.logger.error(
+            `claude: settling the goal transcript ${work.label} for thread ${this.threadId} failed`,
+            error
+          );
+        }
+        this.goalWorkPending -= 1;
+        if (this.goalWorkPending === 0) {
+          try {
+            this.options.deps.onGoalWorkIdle?.(this.threadId);
+          } catch (error) {
+            // A test hook; a throw from it must not reject the chain every
+            // later goal read hangs off.
+            this.options.context.logger.error(
+              `claude: the goal-work idle hook for thread ${this.threadId} threw`,
+              error
+            );
+          }
+        }
+      }
+    });
+  }
+
+  private scheduleGoalFlush(dueAtMs: number): void {
+    if (this.closed || this.goalFlushTimer !== undefined) {
+      return;
+    }
+    const delay = Math.max(0, dueAtMs - this.options.context.clock.now().getTime());
+    this.goalFlushTimer = this.options.deps.setTimer(() => {
+      this.goalFlushTimer = undefined;
+      if (this.closed || !this.goalOutputOpen) {
+        return;
+      }
+      const due = this.normalizer.goals.pendingProgressDueAtMs;
+      if (due !== undefined && due > this.options.context.clock.now().getTime()) {
+        // The window moved on since this timer was set: wait for its end.
+        this.scheduleGoalFlush(due);
+        return;
+      }
+      this.emit(this.normalizer.flushGoalProgress());
+    }, delay);
+  }
+
+  /**
+   * Let goal work already under way land before `session.exited` does —
+   * ALL of it: a walk queues its next chunk only when the last one lands,
+   * so the chain grows while it is being awaited, and the verdict of a goal
+   * run (well over 1 MiB of transcript since its set point) sits in the
+   * walk's LAST chunk. The chain is re-awaited until it stops changing, all
+   * within one budget; nothing new is queued meanwhile (the session is
+   * closed), only the rest of walks begun before the stop.
+   */
+  private async settleGoalWork(): Promise<void> {
+    const deadline = performance.now() + GOAL_WORK_SETTLE_DEADLINE_MS;
+    for (;;) {
+      const work = this.goalWork;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) {
+        return;
+      }
+      try {
+        await withDeadline(work, { label: "claude/goal/settle", timeoutMs: remaining });
+      } catch {
+        // A read stuck past its own deadline and this one never holds a stop.
+        return;
+      }
+      if (this.goalWork === work) {
+        return;
+      }
+    }
+  }
+
   private onStderr(data: string): void {
     for (const line of this.stderr.push(data)) {
       if (line.class === "drop") {
@@ -648,8 +1118,16 @@ export class ClaudeSession {
    * settled **before** the process is signalled (§4.1 "settle before
    * interrupt"), then every live task is closed `stopped`, then the turn is
    * settled, and `session.exited` is the very last event.
+   *
+   * ONE teardown per session, and every caller waits for all of it: a second
+   * call joins the first. Teardown awaits the goal reads in flight (goals
+   * §6.1.4), so between `closed` and `session.exited` there is time — and a
+   * replacement session started in that gap had the old `session.exited`
+   * land after its own events (the host unbound a live thread on it) and the
+   * old `onClosed` overwrite the new start record. {@link untilClosed} is how
+   * the adapter waits the gap out before it starts anything.
    */
-  async teardown(input: {
+  teardown(input: {
     reason: string;
     status: "stopped" | "error";
     exitKind: "graceful" | "error";
@@ -658,46 +1136,126 @@ export class ClaudeSession {
     turnError?: string;
     emitExit?: boolean;
   }): Promise<void> {
+    if (this.teardownDone !== undefined) {
+      return this.teardownDone;
+    }
     if (this.closed) {
-      return;
+      // Closed without a teardown: the spawn failure in `start`, which emits
+      // its own `session.exited` and runs `onClosed` synchronously.
+      return Promise.resolve();
     }
-    this.closed = true;
-    this.clearWatchdog();
-
-    this.emit(this.cancelPendingRequests());
-    // Nothing is tailed past the session: `closeLiveTasks` below closes each
-    // shell's item, and a poll that outlived its session would emit into a
-    // thread whose turn is already settled.
-    this.stopAllBackgroundShells();
-    this.closeQuery();
-    this.promptQueue.close();
-
-    this.emit(this.normalizer.closeLiveTasks());
-    if (this.normalizer.turnState) {
-      this.emit(
-        this.normalizer.completeTurn(input.turnState ?? "interrupted", input.turnError ?? input.reason)
+    // Never a rejection: a caller waiting to start this thread's next session
+    // would be stuck on it for good (`runTeardown` guards every step anyway).
+    this.teardownDone = this.runTeardown(input).catch((error: unknown) => {
+      this.options.context.logger.error(
+        `claude: the teardown of thread ${this.threadId} failed`,
+        error
       );
-    }
-    this.turnSettled?.resolve();
+    });
+    return this.teardownDone;
+  }
 
-    this.record = {
-      ...this.record,
-      status: input.status,
-      activeTurnId: undefined,
-      updatedAt: this.options.context.clock.nowIso(),
-      ...(input.status === "error" ? { lastError: input.reason } : {})
+  /**
+   * Resolves once this session has fully exited — `session.exited` emitted and
+   * `onClosed` run — or at once for a session that is not closing. Nothing may
+   * start this thread's next session before it resolves. Never rejects.
+   */
+  untilClosed(): Promise<void> {
+    return this.teardownDone ?? Promise.resolve();
+  }
+
+  private async runTeardown(input: {
+    reason: string;
+    status: "stopped" | "error";
+    exitKind: "graceful" | "error";
+    recoverable: boolean;
+    turnState?: "interrupted" | "failed";
+    turnError?: string;
+    emitExit?: boolean;
+  }): Promise<void> {
+    // Synchronous up to the first await: `closed` is set before `teardown`
+    // returns its promise.
+    this.closed = true;
+    // Every step is guarded: one that throws (a normaliser bug, a callback) is
+    // logged and the rest still runs. A teardown that stopped half-way left a
+    // session that never exited, an `onClosed` that never ran, and a thread no
+    // later turn could restart.
+    const step = (label: string, run: () => void): void => {
+      try {
+        run();
+      } catch (error) {
+        this.options.context.logger.error(
+          `claude: the teardown of thread ${this.threadId} failed at ${label}; carrying on`,
+          error
+        );
+      }
     };
+    try {
+      step("the watchdog", () => {
+        this.clearWatchdog();
+        if (this.goalFlushTimer !== undefined) {
+          this.options.deps.clearTimer(this.goalFlushTimer);
+          this.goalFlushTimer = undefined;
+        }
+        this.cancelVerdictReread();
+      });
 
-    if (input.emitExit !== false) {
-      this.emit([
-        this.normalizer.sessionExited({
-          reason: input.reason,
-          recoverable: input.recoverable,
-          exitKind: input.exitKind
-        })
-      ]);
+      step("pending requests", () => this.emit(this.cancelPendingRequests()));
+      // Nothing is tailed past the session: `closeLiveTasks` below closes each
+      // shell's item, and a poll that outlived its session would emit into a
+      // thread whose turn is already settled.
+      step("background shells", () => this.stopAllBackgroundShells());
+      step("the query", () => this.closeQuery());
+      step("the prompt queue", () => this.promptQueue.close());
+
+      step("live tasks", () => this.emit(this.normalizer.closeLiveTasks()));
+      step("the turn", () => {
+        if (this.normalizer.turnState) {
+          this.emit(
+            this.normalizer.completeTurn(
+              input.turnState ?? "interrupted",
+              input.turnError ?? input.reason
+            )
+          );
+        }
+      });
+      step("the turn waiters", () => this.turnSettled?.resolve());
+
+      step("the session record", () => {
+        this.record = {
+          ...this.record,
+          status: input.status,
+          activeTurnId: undefined,
+          updatedAt: this.options.context.clock.nowIso(),
+          ...(input.status === "error" ? { lastError: input.reason } : {})
+        };
+      });
+
+      // A goal met at the turn end that just settled is only in the
+      // transcript; a stop right behind that `result` must not lose it
+      // (goals §6.1.4). Bounded, never rejects, after the turn's own events.
+      await this.settleGoalWork();
+      // The background work a `waiting-background` goal waited on dies with
+      // this process, and a throttled `progress` has no timer left to flush it
+      // (goals §6): both go out now, still before `session.exited`.
+      step("the goal", () => this.emit(this.normalizer.goalAtSessionEnd()));
+      this.goalOutputOpen = false;
+
+      step("session.exited", () => {
+        if (input.emitExit !== false) {
+          this.emit([
+            this.normalizer.sessionExited({
+              reason: input.reason,
+              recoverable: input.recoverable,
+              exitKind: input.exitKind
+            })
+          ]);
+        }
+      });
+    } finally {
+      this.goalOutputOpen = false;
+      step("onClosed", () => this.options.onClosed(this));
     }
-    this.options.onClosed(this);
   }
 
   /** Settle every parked request with `cancel`, and report each resolution. */
@@ -1108,6 +1666,9 @@ export class ClaudeSession {
 
     const turnId = steering?.turnId ?? this.options.context.ids.uuid();
     if (steering === undefined) {
+      // A new turn supersedes a verdict re-read still pending for the last
+      // one: its own turn end walks the transcript on from there.
+      this.cancelVerdictReread();
       this.turnSettled = createDeferred<void>();
       this.emit(
         this.normalizer.beginTurn({
@@ -1259,9 +1820,15 @@ export class ClaudeSession {
     }
   }
 
-  /** A host-initiated stop: the process really does go away. */
+  /**
+   * A host-initiated stop: the process really does go away. On a session
+   * already closing (its stream ended, a watchdog fired, another stop) it
+   * waits for that teardown instead: "stopped" means FULLY exited, because the
+   * caller may be about to start this thread's next session.
+   */
   async stop(reason = "Session stopped."): Promise<void> {
     if (this.closed) {
+      await this.untilClosed();
       return;
     }
     this.hostInitiatedStop = true;
@@ -1608,7 +2175,12 @@ export class ClaudeSession {
   }
 
   private async discoverSkills(): Promise<Skill[]> {
-    const configDir = this.options.env.CLAUDE_CONFIG_DIR ?? this.options.home.path;
+    // The same directory the CLI reads its user-scope skills from. A system
+    // home carries no CLAUDE_CONFIG_DIR, and its `home.path` is the daemon
+    // user's home dir itself (`main.ts`; only the probe's system home has
+    // `""`), so falling back to that path looked in `<home>/skills` rather
+    // than `<home>/.claude/skills` and found none.
+    const configDir = claudeConfigDir(this.options.env);
     try {
       return await discoverClaudeSkills({ configDir, cwd: this.options.cwd });
     } catch {
@@ -1726,6 +2298,9 @@ export class ClaudeSession {
   }
 
   private scheduleWatchdog(): void {
+    // No goal window here, on purpose (goals §5.2 widens only the host's
+    // watchdog): a Claude goal turn ends whenever its evaluation is deferred,
+    // so it is never silent for longer than an ordinary turn.
     const window = this.hasOpenTool
       ? TURN_LIVENESS_WINDOWS.activeToolMs
       : TURN_LIVENESS_WINDOWS.idleMs;
