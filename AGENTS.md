@@ -934,17 +934,29 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   OpenCode roster row read `result: null`. The part now gives the run's end its result — one more
   `task.completed` of the same run, same linkage, `completed`, `summary` the text inside the tool's
   `<task_result>` envelope (`taskResultText`) — once per run (`resultPending`), never for a stale
-  part of an earlier call or a background answer; the roster fold takes a settled row's result
-  from a later completion and reopens nothing. A part that settles first ends the run itself, with
-  the same text. (2) Every running frame of a `bash` part restates ALL its output so far in
-  `state.metadata.output`, which rode only the item row's `data.state` — dropped by the wire
-  slimmer — so nothing showed until the completion. Each frame is cut against the value last seen
-  for the part (`advanceOutputMark`, `OpenCodeSessionState.outputMarks`) into `content.delta
-  {command_output}` of just what it adds, on the call's item and under its owner: past 30 000
-  characters the tool keeps `"...\n\n"` and a sliding tail window, and what follows the window's
-  longest overlap with the last value is new. Never text already shown: a value that rewinds, or
-  of no known shape, adds nothing, and output that repeats itself can overlap further than it
-  really did — a repeat is then lost, not doubled. The completion keeps `state.output`.
+  part of an earlier call; the roster fold takes a settled row's result from a later completion
+  and reopens nothing. A part that settles first ends the run itself, with the same text. A run in
+  the BACKGROUND answers "still working" at once, and 1.18.32 delivers its answer as a prompt to
+  the calling session instead — a user message whose one text part is `synthetic` and wraps it in
+  the same envelope, naming the child — which gives the run its result the same way
+  (`takeBackgroundResult`; carried by the child's own end when it comes first). That prompt is
+  still no row. No result follows an end by `session.error` or a stop. (2) Every running frame of
+  a `bash` part restates ALL its output so far in `state.metadata.output`, which rode only the
+  item row's `data.state` — dropped by the wire slimmer — so nothing showed until the
+  completion. Each frame is cut against the value last seen for the part (`advanceOutputMark`,
+  `OpenCodeSessionState.outputMarks`) into `content.delta {command_output}` of just what it adds,
+  on the call's item and under its owner: past 30 000 characters the tool keeps `"...\n\n"` and a
+  sliding tail window, and what follows the window's longest overlap with the last value is new —
+  only a value carrying that head is searched. Never text already shown: a value that rewinds, or
+  of any other shape, adds nothing, and output that repeats itself can overlap further than it
+  really did — a repeat is then lost, not doubled. The joined chunks are the call's output in the
+  GUI, settled too, and the final `output` is not always the last running value (a timeout's or an
+  abort's `<shell_metadata>` note, a cut behind "Full output saved to", what a missed frame
+  carried): the completion first appends what it holds past the stream (`finalOutputRemainder`: the
+  rest of a final output that extends it, else what follows the LAST place it holds the stream's
+  last 512 characters — no anchor under 64 — else nothing), BEFORE its own item event closes the
+  call's output buffer. A stream that showed nothing adds nothing, and an errored part has no final
+  output.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
