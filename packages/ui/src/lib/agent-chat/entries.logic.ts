@@ -23,6 +23,7 @@
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 import {
+  anchorsCall,
   CALL_CLOSER_KINDS,
   CALL_OPENER_KINDS,
   commandDisplayDetail,
@@ -516,16 +517,18 @@ function inheritedChunkOwner(
  * `adoptedToolEvent`), which is the running call's live row. A rewind of that
  * turn leaves the turnless rows as all there is of the call, and none reads
  * as running: the start is dropped here (superseded by the update, else as
- * turnless and ownerless), and a turnless update still in progress is a
- * neutral row a group hides (`workEntryIsVisibleInGroup`). The MCP's
- * transcript builds no entry from them either.
+ * turnless and ownerless — a start that does not anchor its call,
+ * `anchorsCall` in `@orquester/api`), and a turnless update still in
+ * progress is a neutral row a group hides (`workEntryIsVisibleInGroup`). The
+ * MCP's transcript builds no entry from them either, and a host's first load
+ * writes them no closer, which would bring the call back as a failed row.
  */
 function startIsCallRow(activity: ThreadActivityItem, supersededCalls: ReadonlySet<string>): boolean {
   const callId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
   if (callId === undefined || supersededCalls.has(callId)) {
     return false;
   }
-  return Boolean(activity.turnId) || isAgentOwnedActivity(activity);
+  return anchorsCall(activity);
 }
 
 // ---------------------------------------------------------------------------

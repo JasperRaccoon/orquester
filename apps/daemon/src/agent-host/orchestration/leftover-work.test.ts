@@ -230,6 +230,52 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.equal(LEFTOVER_CALL_DETAIL, "Stopped when the agent host restarted.");
   });
 
+  it("leaves alone an open call no row of the window anchors — the woken call a rewind left — and closes one a row anchors", () => {
+    // A woken Claude parent streams its call before the synthetic turn its own
+    // message opens: its start and an early input update carry no turn and no
+    // owner. The turn adopts the call with one update on it, and a rewind of
+    // that turn takes that update and the call's completion with it
+    // (`reduceReverted` keeps turnless rows): what is left is open, and no
+    // view shows it. A closer would anchor it and bring it back, failed.
+    const bash = (command?: string) => ({ toolName: "Bash", input: command === undefined ? {} : { command } });
+    const state = foldOf([
+      ...turn("turn-1"),
+      event("thread.session-set", { session: { status: "ready", activeTurnId: null } }),
+      row("w-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "toolu_woken",
+        status: "inProgress",
+        title: "Command run",
+        data: bash()
+      }, { status: "inProgress" }),
+      row("w-update", "tool.updated", {
+        itemType: "command_execution",
+        toolUseId: "toolu_woken",
+        status: "inProgress",
+        title: "Command run",
+        data: bash("cat out.txt")
+      }, { status: "inProgress" }),
+      // The same turnless start, but another row of the call names a turn…
+      row("t-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_turned", title: "Bash" }),
+      row("t-chunk", "tool.output", { toolUseId: "toolu_turned", streamKind: "command_output", delta: "x\n" }, {
+        turnId: "turn-1"
+      }),
+      // …or an agent owns it — on the payload, where the views read it too.
+      row("o-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "toolu_owned",
+        title: "Bash",
+        agentId: "agent-1"
+      })
+    ]);
+    assert.deepEqual(
+      openWorkOf(state.activities).calls.map((call) => call.toolUseId),
+      ["toolu_woken", "toolu_turned", "toolu_owned"],
+      "all three read open"
+    );
+    assert.deepEqual(closingsOf(state).map((closing) => closing.key), ["call:toolu_turned", "call:toolu_owned"]);
+  });
+
   it("stops every task the roster shows active — any agent kind — and leaves an idle or a settled one alone", () => {
     const state = foldOf([
       // A background shell the parent launched.
@@ -429,8 +475,11 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
   it("puts every closer in exactly the class the fold gives its opener, whatever the owner's spelling", () => {
     // The fold's owner is any non-empty `agentId` (`fold.ts` `ownerOf`), blank or not.
     const state = foldOf([
+      // On a turn: a blank owner is no owner to the views, and a call no row
+      // anchors gets no closer at all (`anchorsCall`).
       row("odd-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_odd", title: "Bash" }, {
-        agentId: " "
+        agentId: " ",
+        turnId: "turn-1"
       }),
       row("odd-task", "task.started", { taskId: "shell-odd", agentKind: "background", title: "odd" }, {
         agentId: " "
@@ -453,7 +502,9 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
         reasoningKind: "summary"
       }),
       said("assistant:parent", "assistant", "Checking first", true, { turnId: "turn-1", messageKind: "commentary" }),
-      row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" })
+      row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }, {
+        turnId: "turn-1"
+      })
     ]);
     const closings = closingsOf(state);
     assert.deepEqual(closings.map((closing) => closing.key), ["call:toolu_1"]);
@@ -556,9 +607,12 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
 
   it("skips what a caller already closed, and finds nothing in a thread with nothing open", () => {
     const state = foldOf([
-      row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }),
+      row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }, {
+        turnId: "turn-1"
+      }),
       row("t-start", "task.started", { taskId: "task-1", agentKind: "agent", title: "Explorer" })
     ]);
+    assert.deepEqual(closingsOf(state).map((closing) => closing.key), ["call:toolu_1", "task:task-1"]);
     assert.deepEqual(
       closingsOf(state, new Set(["call:toolu_1"])).map((closing) => closing.key),
       ["task:task-1"]

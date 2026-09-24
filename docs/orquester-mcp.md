@@ -722,8 +722,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     turnless. The turn adopts the call as it opens, and the adapter says so with one update on the
     turn, so a running call always has a row that carries it. A rewind of that turn removes that row
     and every later one, leaving the turnless rows as all there is of the call, and that is no
-    running call. A row with a turn or an owner, or the call's completion or denial, makes it a row
-    as before.
+    running call — nor does the agent host's next start close it, which would make it a failed row.
+    A row with a turn or an owner, or the call's completion or denial, makes it a row as before.
   - A tool row carries `outputItemId` where more of the call's output can be read, and
     `read_tool_output` reads it (§6, Tool output):
     - the call's completion (or denial) when its payload was cut on its way to you — the row the

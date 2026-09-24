@@ -42,7 +42,14 @@
  *   call reads open again. The data rides along because a completion carries
  *   a call's final state: the snapshot read drops every `tool.updated` a later
  *   completion supersedes (`dropSupersededToolUpdatedActivities`), so a closer
- *   without it would take a call's input off every cold load.
+ *   without it would take a call's input off every cold load. **Except a call
+ *   no row of the window anchors** ({@link anchorsCall}: every row of it
+ *   turnless and ownerless) — what a rewind leaves of a woken Claude parent's
+ *   call, its start and early input update, or a woken call no turn ever
+ *   adopted. No view shows it (`@orquester/api`'s `call-anchor.ts`, the rule
+ *   the GUI and the MCP hide it by), and a closer would anchor it: the call
+ *   would come back as a failed row after any host start. It stays open in
+ *   the fold, under the open-work caps like any unit.
  * - **Every task the roster shows active** — `pending`, `running`, `waiting`,
  *   the statuses the fold's session-death rule interrupts, any agent kind —
  *   gets a `task.completed {status: "stopped"}`. `idle` is left alone, as that
@@ -80,6 +87,8 @@
 
 import {
   ACTIVE_SUBAGENT_STATUSES,
+  anchorsCall,
+  CALL_ROW_KINDS,
   foldSubagentActivities,
   openWorkOf,
   type OpenCall,
@@ -162,9 +171,10 @@ export function leftoverWorkClosings(
     });
   }
 
+  const anchored = anchoredCallsOf(state.activities);
   for (const call of openWorkOf(state.activities).calls) {
     const key = `call:${call.toolUseId}`;
-    if (closed.has(key)) continue;
+    if (closed.has(key) || !anchored.has(call.toolUseId)) continue;
     closings.push({ key, activity: callCloser(call, input) });
   }
 
@@ -206,6 +216,21 @@ function presentId(value: unknown): string | undefined {
  */
 function ownerOf(activity: ThreadActivityItem): string | undefined {
   return presentId(activity.agentId);
+}
+
+/**
+ * The calls some row of `activities` anchors ({@link anchorsCall}: it names a
+ * turn, an agent owns it, or it closes the call), keyed as `openWorkOf` keys
+ * them — the non-blank `toolUseId`, as written. One pass.
+ */
+function anchoredCallsOf(activities: readonly ThreadActivityItem[]): Set<string> {
+  const anchored = new Set<string>();
+  for (const activity of activities) {
+    if (!CALL_ROW_KINDS.has(activity.activityKind) || !anchorsCall(activity)) continue;
+    const toolUseId = nonBlank(asRecord(activity.payload)?.toolUseId);
+    if (toolUseId !== undefined) anchored.add(toolUseId);
+  }
+  return anchored;
 }
 
 /** `item.completed`'s row, as ingestion writes one, for a call nothing will complete. */

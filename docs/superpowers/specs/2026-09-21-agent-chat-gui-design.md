@@ -3367,7 +3367,10 @@ and any early input update — stays turnless. The turn adopts the call as it op
 on the turn (the Claude normaliser's `adoptedToolEvent`), which is the running call's live row until
 its result; after a rewind of that turn the turnless rows are all there is of the call. None reads
 as running: the start is dropped (superseded by the update, else as turnless and ownerless), and an
-update still in progress is a neutral row a group hides. A Claude start that only names its tool
+update still in progress is a neutral row a group hides. A host's next start writes such a call no
+closer either: no row of it anchors it (`anchorsCall`, `packages/api/src/agent-chat/call-anchor.ts`,
+the one rule the GUI, the MCP and the first load's `leftover-work.ts` read), and a closer would bring
+it back as a failed row. A Claude start that only names its tool
 with an empty input ("Bash: {}", "Write: {}" — the input streams afterwards, and the first update
 comes once it parses whole; a tool that takes no arguments has none until its result) keeps the
 tool's name alone as its detail, so the row reads "Write" or "mcp__x__list" meanwhile; the

@@ -723,7 +723,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `tool.completed {status: "failed"}` with detail "Stopped when the agent host restarted." and its
   latest lifecycle row's item type, title, turn, owner, parent call and data (a completion carries
   a call's final state — the snapshot read drops every `tool.updated` a later completion
-  supersedes); then for every task the roster shows `pending`/`running`/`waiting` (any agent kind —
+  supersedes) — except a call no row of the window anchors (`anchorsCall`,
+  `packages/api/src/agent-chat/call-anchor.ts`: every row of it turnless and ownerless — what a
+  rewind leaves of a woken Claude parent's call, rule (6) below), which no view shows and which a
+  closer would bring back as a failed row after every host start; then for every task the roster shows `pending`/`running`/`waiting` (any agent kind —
   `idle` is left alone, as the fold's session-death rule leaves it) a `task.completed {status:
   "stopped"}` with its latest row's linkage, the roster's `agentKind`, and its start's owner and
   turn (a rewind keeps or drops a row by its turn: a stop on any other turn could go while the start
@@ -837,7 +840,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   a rewind of the turn that is all there is of the call, so neither view shows it running: the GUI
   drops the start (superseded by the update, else as turnless and ownerless — `startIsCallRow`,
   `entries.logic.ts`) and hides an in-progress update as a neutral row, and the MCP transcript
-  builds no entry from a call whose rows are all turnless, ownerless and unclosed. A log a host
+  builds no entry from a call whose rows are all turnless, ownerless and unclosed. That is one
+  rule, `anchorsCall` (`packages/api/src/agent-chat/call-anchor.ts`: a row anchors its call by its
+  turn, its owner, or as its close), and a host's first load follows it too: it writes such a call
+  no closer (`leftover-work.ts`), which would anchor it and bring it back as a failed row. A log a host
   wrote before the stamp — an older host surviving a deploy writes such chunks until its
   drain-restart — is read by the call, on the read side only (no fold change, no version bump): an
   unstamped `tool.output` takes the owner of its call's lifecycle rows in the same derivation input

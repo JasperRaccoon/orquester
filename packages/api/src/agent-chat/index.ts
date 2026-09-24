@@ -13,6 +13,7 @@ export * from "./runtime-events.ts";
 export * from "./adapter-types.ts";
 export * from "./domain-events.ts";
 export * from "./thread.ts";
+export * from "./call-anchor.ts";
 export * from "./compaction.ts";
 export * from "./command-output.ts";
 export * from "./wire.ts";
