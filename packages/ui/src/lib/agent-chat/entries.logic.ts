@@ -412,6 +412,59 @@ export function isAgentInternalActivity(activity: ThreadActivityItem): boolean {
   return ownedByAgent;
 }
 
+// ---------------------------------------------------------------------------
+// Older logs: a subagent's output chunk written without its owner
+// ---------------------------------------------------------------------------
+
+/**
+ * Claude wrote a subagent's command and file-change output with no agent id
+ * while every other row of the call carried one (fixture claude/07; the
+ * adapter stamps the chunk now). Read as it stands, such a chunk is the
+ * PARENT's: a stray "Tool output" row in the parent timeline, and nothing in
+ * the agent's drill-in. So, on the read side only — the fold, its retention
+ * and the history bridge keep mirroring the log — an UNSTAMPED `tool.output`
+ * row inherits the owner of its call's lifecycle rows (`tool.started`,
+ * `tool.updated`, `tool.completed`, `tool.denied` of the same `toolUseId`
+ * with a non-blank `agentId`) found in the same derivation input. A chunk
+ * whose call has no owned row there stays the parent's, as before.
+ */
+const CALL_LIFECYCLE_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
+
+/** A non-blank agent id as written: views compare ids verbatim (`ownedByAgent`). */
+const nonBlankId = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim().length > 0 ? value : undefined;
+
+/** `toolUseId` → the agent that owns the call, read off its lifecycle rows. */
+function callOwnersOf(items: readonly ThreadItem[]): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const item of items) {
+    if (item.kind !== "activity" || !CALL_LIFECYCLE_KINDS.has(item.activityKind)) {
+      continue;
+    }
+    const payload = asRecord(item.payload);
+    const callId = asTrimmedString(payload?.toolUseId);
+    const owner = nonBlankId(item.agentId) ?? nonBlankId(payload?.agentId);
+    if (callId !== undefined && owner !== undefined) {
+      owners.set(callId, owner);
+    }
+  }
+  return owners;
+}
+
+/** A `tool.output` row that names no owner of its own. */
+function isUnstampedOutputChunk(item: ThreadItem): item is ThreadActivityItem {
+  return item.kind === "activity" && item.activityKind === "tool.output" && !isAgentOwnedActivity(item);
+}
+
+/** The agent an unstamped chunk's call belongs to, if the input holds an owned row of it. */
+function inheritedChunkOwner(
+  chunk: ThreadActivityItem,
+  callOwners: ReadonlyMap<string, string>
+): string | undefined {
+  const callId = asTrimmedString(asRecord(chunk.payload)?.toolUseId);
+  return callId === undefined ? undefined : callOwners.get(callId);
+}
+
 /** Activity kinds that never become a work-log row. */
 const DROPPED_ACTIVITY_KINDS = new Set([
   // A `tool.started` row has no output and is always followed by an update.
@@ -513,6 +566,9 @@ export function deriveWorkLogEntries(
     }
   }
 
+  // Older logs: read only once an unstamped output chunk is met.
+  let callOwners: Map<string, string> | undefined;
+
   const derived: DerivedWorkLogEntry[] = [];
   for (const activity of activities) {
     // Hook notifications are provider bookkeeping. Keep failed or cancelled
@@ -540,6 +596,15 @@ export function deriveWorkLogEntries(
     }
     if (isAgentInternalActivity(activity) && !ownedByAgent(activity, options?.ownerAgentId)) {
       continue;
+    }
+    // An older log's unstamped chunk of an agent's call is that agent's, and
+    // renders in its view alone (see `callOwnersOf`).
+    if (isUnstampedOutputChunk(activity)) {
+      callOwners ??= callOwnersOf(activities);
+      const inherited = inheritedChunkOwner(activity, callOwners);
+      if (inherited !== undefined && inherited !== options?.ownerAgentId) {
+        continue;
+      }
     }
     const entry = derivedWorkLogEntry(activity);
     // A native agent launch gets its visible row from `task.started`; defer
@@ -817,9 +882,23 @@ export function splitThreadItems(
   return { messages, activities, proposedPlans };
 }
 
-/** The per-agent drill-in view: that agent's own items, in order (§7.6). */
+/**
+ * The per-agent drill-in view: that agent's own items, in order (§7.6) — and
+ * an older log's unstamped output chunks of this agent's calls, which are its
+ * own too (see `callOwnersOf`).
+ */
 export function itemsForAgent(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
-  return items.filter((item) => item.agentId === agentId);
+  let callOwners: Map<string, string> | undefined;
+  return items.filter((item) => {
+    if (item.agentId === agentId) {
+      return true;
+    }
+    if (!isUnstampedOutputChunk(item)) {
+      return false;
+    }
+    callOwners ??= callOwnersOf(items);
+    return inheritedChunkOwner(item, callOwners) === agentId;
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { slimActivityPayload } from "@orquester/api/agent-chat";
+import { slimActivityPayload, type ThreadItem } from "@orquester/api/agent-chat";
 
+import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import {
   deriveTimelineEntriesFromItems,
   deriveWorkLogEntries,
@@ -488,6 +489,76 @@ describe("drill-in ownership and streamed output", () => {
       drill,
       "same items and owner reuse the projection"
     );
+  });
+
+  /** A subagent's Bash call, its rows as the Claude adapter writes them. */
+  const agentCall = (activityKind: string, status: string) =>
+    activity(
+      activityKind,
+      { itemType: "command_execution", toolUseId: "sub-1", title: "Command run", status, detail: "Bash: ls", agentId: "ag1" },
+      { agentId: "ag1", turnId: "t1" }
+    );
+  const outputChunk = (toolUseId: string, delta: string, agentId?: string) =>
+    activity(
+      "tool.output",
+      { toolUseId, streamKind: "command_output", delta },
+      { turnId: "t1", summary: "Tool output", ...(agentId !== undefined ? { agentId } : {}) }
+    );
+  /** The drill-in's rows, as `useAgentChatDrillIn` derives them and a group joins them. */
+  const drillInRows = (items: readonly ThreadItem[], agentId: string) =>
+    joinLifecycleDetails(
+      deriveTimelineEntriesFromItems(itemsForAgent(items, agentId), null, { ownerAgentId: agentId })
+        .workEntries
+    ).map((entry) => [entry.toolCallId, entry.detail]);
+
+  it("a stamped chunk never enters the parent's entries and joins its agent's completion row", () => {
+    const items = [
+      agentCall("tool.started", "inProgress"),
+      agentCall("tool.updated", "inProgress"),
+      outputChunk("sub-1", "a.txt\n", "ag1"),
+      agentCall("tool.completed", "completed")
+    ];
+    assert.deepEqual(deriveWorkLogEntries(items), [], "the parent timeline stays quiet");
+    assert.deepEqual(drillInRows(items, "ag1"), [["sub-1", "a.txt\n"]], "the output is the row's");
+  });
+
+  it("an UNSTAMPED chunk of an agent's call — an older log — follows its call's owner", () => {
+    // Claude used to write a subagent's Bash result with no agent id while
+    // every other row of the call carried one (fixture claude/07).
+    const items = [
+      agentCall("tool.started", "inProgress"),
+      agentCall("tool.updated", "inProgress"),
+      outputChunk("sub-1", "a.txt\n"),
+      agentCall("tool.completed", "completed")
+    ];
+    assert.deepEqual(deriveWorkLogEntries(items), [], "no stray \"Tool output\" row in the parent");
+    assert.deepEqual(
+      itemsForAgent(items, "ag1").map((item) => item.id),
+      items.map((item) => item.id),
+      "its agent's view takes it"
+    );
+    assert.deepEqual(drillInRows(items, "ag1"), [["sub-1", "a.txt\n"]]);
+    assert.deepEqual(itemsForAgent(items, "ag2"), [], "and no other agent's does");
+    assert.deepEqual(deriveWorkLogEntries(items, { ownerAgentId: "ag2" }), []);
+  });
+
+  it("an unstamped PARENT chunk still joins its parent row", () => {
+    const parentCall = (activityKind: string, status: string) =>
+      activity(
+        activityKind,
+        { itemType: "command_execution", toolUseId: "p-1", title: "Command run", status, detail: "Bash: ls" },
+        { turnId: "t1" }
+      );
+    const items = [
+      parentCall("tool.updated", "inProgress"),
+      outputChunk("p-1", "b.txt\n"),
+      parentCall("tool.completed", "completed")
+    ];
+    assert.deepEqual(
+      joinLifecycleDetails(deriveWorkLogEntries(items)).map((entry) => [entry.toolCallId, entry.detail]),
+      [["p-1", "b.txt\n"]]
+    );
+    assert.deepEqual(itemsForAgent(items, "ag1"), [], "no agent claims the parent's output");
   });
 });
 
