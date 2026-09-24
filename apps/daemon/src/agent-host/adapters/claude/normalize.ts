@@ -101,7 +101,18 @@ interface ToolInFlight {
   lastEmittedInputFingerprint?: string;
   agentId?: string;
   parentToolUseId?: string;
+  /**
+   * The turn the call STARTED in; absent for a call a background agent
+   * started between parent turns. Every event of the call rides it, never the
+   * turn active when the event is emitted: a background subagent's result
+   * lands after the parent's turn has ended, and a call whose rows carry two
+   * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`).
+   */
+  turnId?: string;
 }
+
+/** How far up an agent's launchers `outlivesParentTurn` looks. */
+const MAX_OWNER_DEPTH = 8;
 
 interface TaskAgentState {
   taskId: string;
@@ -761,30 +772,24 @@ export class ClaudeNormalizer {
     }
 
     for (const [index, tool] of [...this.inFlightTools.entries()]) {
-      events.push({
-        ...this.base({
-          turnId: turn.turnId,
-          itemId: tool.itemId,
-          providerItemId: tool.itemId,
-          ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
-          raw: { source: RAW_SDK_MESSAGE, method: "claude/result", payload: result ?? { status } }
-        }),
-        type: "item.completed",
-        payload: {
-          itemType: tool.itemType,
-          status: status === "completed" ? "completed" : "failed",
-          title: tool.title,
-          ...(tool.detail !== undefined ? { detail: tool.detail } : {}),
-          ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
-          ...(tool.parentToolUseId !== undefined
-            ? { parentToolUseId: tool.parentToolUseId }
-            : {}),
-          data: { toolName: tool.toolName, input: tool.input }
-        }
-      });
+      // A BACKGROUND agent works on after the parent's turn ends — the CLI's
+      // default since 2.1.280 — so its calls are not this turn's to settle:
+      // force-completing one reported it "completed" with no result, and
+      // dropped the real one when it arrived (fixtures README observation
+      // 22). It closes by its own tool_result, on its owner's terminal edge
+      // (`closeInFlightToolsOf`) or with the session (`closeLiveTasks`).
+      if (this.outlivesParentTurn(tool)) {
+        continue;
+      }
+      events.push(
+        this.forcedToolCompletion(tool, status === "completed" ? "completed" : "failed", {
+          source: RAW_SDK_MESSAGE,
+          method: "claude/result",
+          payload: result ?? { status }
+        })
+      );
       this.inFlightTools.delete(index);
     }
-    this.inFlightTools.clear();
 
     for (const block of turn.assistantTextBlockOrder) {
       events.push(
@@ -839,6 +844,18 @@ export class ClaudeNormalizer {
       method: "claude/session/closed",
       payload: { reason: "session closed" }
     };
+    // Every call a subagent still has open dies with the session, ahead of
+    // its task's row. A background agent's calls outlive the parent's turn,
+    // and teardown runs this BEFORE `completeTurn` — with no turn to complete
+    // at all between parent turns — so this is the one place sure to settle
+    // them (§3.1). The parent's own calls stay `completeTurn`'s.
+    for (const [index, tool] of [...this.inFlightTools.entries()]) {
+      if (tool.agentId === undefined) {
+        continue;
+      }
+      events.push(this.forcedToolCompletion(tool, "failed", raw));
+      this.inFlightTools.delete(index);
+    }
     for (const taskId of [...this.liveTaskIds]) {
       this.liveTaskIds.delete(taskId);
       const agent = this.taskAgents.get(taskId);
@@ -885,6 +902,56 @@ export class ClaudeNormalizer {
     return this.liveTaskIds;
   }
 
+  /**
+   * True for a call of background work: its owner — or an agent that owner
+   * runs inside — is a live task the CLI runs in the background. A foreground
+   * agent the parent is waiting on (`is_backgrounded: false`, or absent on an
+   * older CLI, fixture 07) ends inside the parent's turn and keeps its turn
+   * end; one nested in a background agent works on with it.
+   */
+  private outlivesParentTurn(tool: ToolInFlight): boolean {
+    let owner = tool.agentId;
+    for (let depth = 0; owner !== undefined && depth < MAX_OWNER_DEPTH; depth += 1) {
+      const agent = this.taskAgents.get(owner);
+      if (agent?.isBackgrounded === true && this.liveTaskIds.has(owner)) {
+        return true;
+      }
+      owner = agent?.owningAgentId;
+    }
+    return false;
+  }
+
+  /**
+   * `item.completed` for a call whose own result never came — its turn, its
+   * owner or its session ended first. Like every event of the call it rides
+   * the call's own turn and carries the call's owner.
+   */
+  private forcedToolCompletion(
+    tool: ToolInFlight,
+    status: RuntimeItemStatus,
+    raw: RuntimeEventRaw
+  ): RuntimeEvent {
+    return {
+      ...this.base({
+        turnId: tool.turnId,
+        itemId: tool.itemId,
+        providerItemId: tool.itemId,
+        ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
+        raw
+      }),
+      type: "item.completed",
+      payload: {
+        itemType: tool.itemType,
+        status,
+        title: tool.title,
+        ...(tool.detail !== undefined ? { detail: tool.detail } : {}),
+        ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
+        ...(tool.parentToolUseId !== undefined ? { parentToolUseId: tool.parentToolUseId } : {}),
+        data: { toolName: tool.toolName, input: tool.input }
+      }
+    };
+  }
+
   // -------------------------------------------------------------------------
   // The demux
   // -------------------------------------------------------------------------
@@ -928,28 +995,7 @@ export class ClaudeNormalizer {
         events.push(...this.handleSystemMessage(message));
         return events;
       case "tool_progress":
-        events.push({
-          ...this.base({
-            turnId: this.activeTurnId,
-            providerItemId: message.tool_use_id,
-            ...(message.task_id !== undefined
-              ? { agentId: message.task_id }
-              : {}),
-            raw: {
-              source: RAW_SDK_MESSAGE,
-              method: "claude/tool_progress",
-              messageType: message.type,
-              payload: message
-            }
-          }),
-          type: "tool.progress",
-          payload: {
-            toolUseId: message.tool_use_id,
-            toolName: message.tool_name,
-            elapsedSeconds: message.elapsed_time_seconds,
-            ...(message.task_id !== undefined ? { taskId: message.task_id } : {})
-          }
-        });
+        events.push(this.toolProgressEvent(message));
         return events;
       case "auth_status":
         events.push({
@@ -994,6 +1040,53 @@ export class ClaudeNormalizer {
         return events;
       }
     }
+  }
+
+  /**
+   * A call's heartbeat, owned by the CALL: the in-flight tool's owner, else
+   * the agent its frame's `parent_tool_use_id` names. On CLI 2.1.280 not one
+   * nested `tool_progress` carries a `task_id` (fixtures README observation
+   * 22), and taking one that does for the owner would file a heartbeat under
+   * whatever it names — a foreground `local_bash` task, say — as an agent.
+   * So `task_id` counts only for a surfaced subagent, and only when neither
+   * the call nor the frame names an owner. A parent call's heartbeat has no
+   * owner, and ingestion persists only agent-owned ones (by design). It rides
+   * the call's own turn, as every event of the call does.
+   */
+  private toolProgressEvent(
+    message: Extract<SDKMessage, { type: "tool_progress" }>
+  ): RuntimeEvent {
+    const tool = this.inFlightEntry(message.tool_use_id)?.[1];
+    const parentToolUseId = message.parent_tool_use_id ?? undefined;
+    const owner =
+      tool !== undefined
+        ? tool.agentId
+        : ((parentToolUseId !== undefined
+            ? this.resolveNestedOwner(parentToolUseId, message)
+            : undefined) ??
+          (message.task_id !== undefined && this.isSurfacedSubagent(message.task_id)
+            ? message.task_id
+            : undefined));
+    return {
+      ...this.base({
+        turnId: tool !== undefined ? tool.turnId : this.activeTurnId,
+        providerItemId: message.tool_use_id,
+        ...(owner !== undefined ? { agentId: owner } : {}),
+        raw: {
+          source: RAW_SDK_MESSAGE,
+          method: "claude/tool_progress",
+          messageType: message.type,
+          payload: message
+        }
+      }),
+      type: "tool.progress",
+      payload: {
+        toolUseId: message.tool_use_id,
+        toolName: message.tool_name,
+        elapsedSeconds: message.elapsed_time_seconds,
+        ...(owner !== undefined ? { taskId: owner } : {})
+      }
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1263,7 +1356,7 @@ export class ClaudeNormalizer {
 
       events.push({
         ...this.base({
-          turnId: this.activeTurnId,
+          turnId: next.turnId,
           itemId: next.itemId,
           providerItemId: next.itemId,
           ...(next.agentId !== undefined ? { agentId: next.agentId } : {}),
@@ -1360,14 +1453,15 @@ export class ClaudeNormalizer {
         ? { lastEmittedInputFingerprint: toolInputFingerprint(toolInput) }
         : {}),
       ...(owningAgentId !== undefined ? { agentId: owningAgentId } : {}),
-      ...(parentToolUseId !== undefined ? { parentToolUseId } : {})
+      ...(parentToolUseId !== undefined ? { parentToolUseId } : {}),
+      ...(this.activeTurnId !== undefined ? { turnId: this.activeTurnId } : {})
     };
     this.inFlightTools.set(event.index, tool);
 
     return [
       {
         ...this.base({
-          turnId: this.activeTurnId,
+          turnId: tool.turnId,
           itemId: tool.itemId,
           providerItemId: tool.itemId,
           ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
@@ -1486,14 +1580,15 @@ export class ClaudeNormalizer {
   ): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     const nestedParent = message.parent_tool_use_id ?? undefined;
+    let nestedOwner: string | undefined;
     if (nestedParent !== undefined) {
       // A subagent's tool_result. Its owner must be known before the result
       // can complete the (attributed) item; otherwise it waits with the rest.
-      const owner = this.resolveNestedOwner(
+      nestedOwner = this.resolveNestedOwner(
         nestedParent,
         message as { task_description?: unknown; subagent_type?: unknown }
       );
-      if (owner === undefined) {
+      if (nestedOwner === undefined) {
         this.bufferNested(nestedParent, message);
         return events;
       }
@@ -1528,14 +1623,21 @@ export class ClaudeNormalizer {
       // starts from here (§4.5). The normaliser never opens the file itself.
       this.noteBackgroundShellLaunch(text);
 
-      const found = [...this.inFlightTools.entries()].find(
-        ([, tool]) => tool.itemId === toolUseId
-      );
+      const found = this.inFlightEntry(toolUseId);
       if (!found) {
         // The CLI can deny a tool the adapter never saw start (a gate that
-        // fired before any content block reached us).
+        // fired before any content block reached us). A subagent's denial is
+        // still its own: the frame's owner is the only one there is.
         if (isCliDenialResult(isError, text)) {
-          events.push(this.toolDeniedEvent({ toolName: "unknown", toolUseId, text, message }));
+          events.push(
+            this.toolDeniedEvent({
+              toolName: "unknown",
+              toolUseId,
+              text,
+              message,
+              ...(nestedOwner !== undefined ? { agentId: nestedOwner } : {})
+            })
+          );
         }
         continue;
       }
@@ -1544,7 +1646,7 @@ export class ClaudeNormalizer {
 
       events.push({
         ...this.base({
-          turnId: this.activeTurnId,
+          turnId: tool.turnId,
           itemId: tool.itemId,
           providerItemId: tool.itemId,
           ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
@@ -1564,13 +1666,21 @@ export class ClaudeNormalizer {
         }
       });
 
+      // The call's output: the CLI never streams a foreground call's, so this
+      // one chunk is all of it. It carries the call's owner and turn, exactly
+      // as the call's item rows do — a subagent's tool_result names only
+      // `parent_tool_use_id`, and an unstamped chunk landed in the PARENT's
+      // timeline and retention window while the agent's drill-in never showed
+      // it (fixture 07, line 45). No turn guard: a background agent's result
+      // lands between parent turns, and its output is output all the same.
       const streamKind = toolResultStreamKind(tool.itemType);
-      if (streamKind !== undefined && text.length > 0 && this.turnState) {
+      if (streamKind !== undefined && text.length > 0) {
         events.push({
           ...this.base({
-            turnId: this.turnState.turnId,
+            turnId: tool.turnId,
             itemId: tool.itemId,
             providerItemId: tool.itemId,
+            ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
             raw: { source: RAW_SDK_MESSAGE, method: "claude/user", payload: message }
           }),
           type: "content.delta",
@@ -1592,7 +1702,7 @@ export class ClaudeNormalizer {
       const itemStatus: RuntimeItemStatus = declined ? "declined" : isError ? "failed" : "completed";
       events.push({
         ...this.base({
-          turnId: this.activeTurnId,
+          turnId: tool.turnId,
           itemId: tool.itemId,
           providerItemId: tool.itemId,
           ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
@@ -1668,12 +1778,15 @@ export class ClaudeNormalizer {
     text: string;
     message: unknown;
     tool?: ToolInFlight;
+    /** The owner of a denied call the adapter never saw start: its frame's. */
+    agentId?: string;
   }): RuntimeEvent {
+    const agentId = input.tool?.agentId ?? input.agentId;
     return {
       ...this.base({
-        turnId: this.activeTurnId,
+        turnId: input.tool !== undefined ? input.tool.turnId : this.activeTurnId,
         providerItemId: input.toolUseId,
-        ...(input.tool?.agentId !== undefined ? { agentId: input.tool.agentId } : {}),
+        ...(agentId !== undefined ? { agentId } : {}),
         raw: { source: RAW_SDK_MESSAGE, method: "claude/user/tool_use_error", payload: input.message }
       }),
       type: "tool.denied",
@@ -1681,9 +1794,23 @@ export class ClaudeNormalizer {
         toolName: input.toolName,
         toolUseId: input.toolUseId,
         reason: cliDenialReason(input.text),
-        ...(input.tool?.agentId !== undefined ? { agentId: input.tool.agentId } : {})
+        ...(agentId !== undefined ? { agentId } : {})
       }
     };
+  }
+
+  /**
+   * The in-flight call with this `tool_use_id`, and its key: a parent call is
+   * keyed by its stream content index, a subagent's by a negative synthetic
+   * key (`nestedToolSeq`), so the id is the only lookup that finds both.
+   */
+  private inFlightEntry(toolUseId: string): [number, ToolInFlight] | undefined {
+    for (const entry of this.inFlightTools) {
+      if (entry[1].itemId === toolUseId) {
+        return entry;
+      }
+    }
+    return undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -2235,9 +2362,7 @@ export class ClaudeNormalizer {
     // A task launched by a tool that itself ran inside a subagent is
     // agent-internal: a subagent's background shell, not parent work.
     const launchingTool =
-      message.tool_use_id !== undefined
-        ? [...this.inFlightTools.values()].find((tool) => tool.itemId === message.tool_use_id)
-        : undefined;
+      message.tool_use_id !== undefined ? this.inFlightEntry(message.tool_use_id)?.[1] : undefined;
     const owningAgentId = launchingTool?.agentId;
 
     if (this.turnState && isAgentFlavoured(message.task_type, owningAgentId)) {
@@ -2519,6 +2644,7 @@ export class ClaudeNormalizer {
       if (this.liveTaskIds.delete(message.task_id)) {
         this.options.onLiveTasksChanged?.(this.liveTaskIds);
       }
+      events.push(...this.closeInFlightToolsOf(message.task_id, raw));
     }
     const endedAt =
       typeof patch.end_time === "number" && Number.isFinite(patch.end_time)
@@ -2571,7 +2697,7 @@ export class ClaudeNormalizer {
     }
     // Same rule as `task_progress`: a task's own total is never the thread's
     // context size.
-    const events: RuntimeEvent[] = [];
+    const events: RuntimeEvent[] = [...this.closeInFlightToolsOf(message.task_id, raw)];
     const exitCode = parseBackgroundShellExitCode(message.summary);
     if (agent !== undefined) {
       // The item settles BEFORE the task row: ingestion flushes the item's
@@ -2663,6 +2789,32 @@ export class ClaudeNormalizer {
       this.options.onLiveTasksChanged?.(this.liveTaskIds);
     }
     return [];
+  }
+
+  /**
+   * A task's terminal edge closes whatever of its own calls is still open,
+   * `failed`, each on its own turn — BEFORE the task's row, as the shell's
+   * item is: a running state never outlives its owner. A background agent's
+   * calls outlive the parent's turn (`completeTurn` keeps them), so once the
+   * agent has ended nothing else would ever settle one whose result never
+   * came.
+   */
+  private closeInFlightToolsOf(taskId: string, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    for (const [index, tool] of [...this.inFlightTools.entries()]) {
+      if (tool.agentId !== taskId) {
+        continue;
+      }
+      events.push(this.forcedToolCompletion(tool, "failed", raw));
+      this.inFlightTools.delete(index);
+    }
+    return events;
+  }
+
+  /** A subagent this adapter put on the roster — never a shell or a suppressed task. */
+  private isSurfacedSubagent(taskId: string): boolean {
+    const agent = this.taskAgents.get(taskId);
+    return agent?.surfaced === true && agent.taskType === "local_agent";
   }
 
   private taskLinkageFor(taskId: string): TaskAgentLinkage {
@@ -2793,7 +2945,10 @@ export class ClaudeNormalizer {
           partialInputJson: "",
           lastEmittedInputFingerprint: toolInputFingerprint(toolInput),
           ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {}),
-          parentToolUseId
+          parentToolUseId,
+          // A nested frame never opens a turn: between parent turns the call
+          // is turnless for its whole life.
+          ...(this.activeTurnId !== undefined ? { turnId: this.activeTurnId } : {})
         };
         // Registered under a synthetic key so the nested `user` tool_result
         // completes it through the ordinary lookup by itemId.
@@ -2801,7 +2956,7 @@ export class ClaudeNormalizer {
         this.inFlightTools.set(this.nestedToolSeq, tool);
         events.push({
           ...this.base({
-            turnId: this.activeTurnId,
+            turnId: tool.turnId,
             itemId: tool.itemId,
             providerItemId: tool.itemId,
             ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),

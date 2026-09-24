@@ -829,6 +829,52 @@ resumed after the compaction) rather than guessed. On a transcript whose summary
 list alone decides, as before. Note that the boundary row *in the transcript* carried no
 `compact_metadata` blocks at all in the 2.1.280 capture above — the metadata rides the live frame.
 
+### 22. A subagent's calls: whose they are, and when they end
+
+Three facts about a subagent's tool calls, from `07-subagent-task.ndjson` and — for what that
+capture predates — from the SDK's types and the live raw windows of three threads on CLI **2.1.280**
+(2026-09-24, content-free counts only). The adapter depends on all three.
+
+**a. A subagent's `tool_result` names only `parent_tool_use_id`.** Line 45 is the whole output of the
+subagent's `ls`, on a nested `user` frame:
+
+```json
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01NF7VUp1VvXRismHVn2CXN4","type":"tool_result","content":"-rw-r--r-- 1 orquester orquester 12 Sep 21 03:35 ~/tmp/agent-chat-fixtures/claude/sandbox/b.txt","is_error":false}]},"parent_tool_use_id":"toolu_018p31vMhM5kEr97n4CL84fN","session_id":"127f6536-…","uuid":"099a5d7a-…","subagent_type":"Explore","task_description":"Read b.txt first word"}
+```
+
+No `task_id` anywhere: `parent_tool_use_id` is the parent's **Agent** call, and only `task_started`
+(line 38) links that call to the task. The adapter already knows the call's owner — it registered the
+call with it from the nested `tool_use` (line 44) — and every event of the call carries it, the
+output chunk included. That chunk once went out without it: it became a parent `tool.output` row (a
+stray "Tool output" row in the parent timeline, counted in the parent's retention window) and the
+agent's drill-in never showed the output. The CLI never streams a foreground call's output — this
+one frame is all of it — so there is no running output to show either; only a background shell's
+is live (observation 18).
+
+**b. Agents run in the background by default, and outlive the parent's `result`.** The SDK's
+`AgentInput.run_in_background`: *"Agents run in the background by default; you will be notified
+when one completes"* (`sdk-tools.d.ts`). A background launch answers the parent's Agent call at
+once (`async_launched`), the parent's turn ends, and the agent works on: every `local_agent`
+`task_started` in the live windows carried `is_backgrounded: true`, and in the biggest thread 97 of
+112 subagents finished after the parent's turn had ended — 85 % of their tool calls ran between
+parent turns. Fixture 07 shows none of it: its Agent call passes `"run_in_background":false`
+explicitly and its `task_started` predates the field. So the adapter keeps a background agent's
+calls open across the parent's `result` (settling them there reported each "completed" with no
+result, and dropped the real one when it came), lets each end by its own `tool_result`, closes what
+is left `failed` on the agent's own terminal edge or with the session, and gives every event of a
+call the turn it started in — a call that starts between parent turns is turnless for its whole
+life, and nested frames never open a turn. A foreground agent (`is_backgrounded: false`, or the
+field absent as in 07) keeps its calls' settle at the parent's turn end. Record a real capture of
+a background agent outliving a parent `result` the next time captures are allowed.
+
+**c. Nested `tool_progress` frames carry no `task_id`.** The live windows held 6 / 10 / 46
+`tool_progress` frames — every one nested (a subagent's `Bash`), and not one with `task_id`; the SDK
+types it `task_id?: string` without a word. Owning a heartbeat by `task_id` therefore dropped every
+subagent heartbeat (ingestion persists only owned ones), and on a CLI that sent a `local_bash` id
+there it would file one under a task that is no agent. The adapter takes the owner from the call —
+the in-flight tool's, else the agent the frame's `parent_tool_use_id` names — and counts `task_id`
+only when it names a subagent already on the roster.
+
 ## Re-capturing
 
 Nothing here is generated; re-capturing means driving the real CLI again. Keep the format above,
