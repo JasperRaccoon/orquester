@@ -514,22 +514,26 @@ outright (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `reconcileT
 
 *T3: `apps/server/src/serverRuntimeStartup.ts:503-544` — the orphan filter runs over `getCommandReadModel()`, rows of the persisted projections, so T3 never folds a log at boot either; `apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2059-2074` — projectors resume from their `projection_state` cursor rather than replaying; differs: Orquester has no persisted read model, so the head (`meta.json`) is the only thing read for every thread, and the fold is deferred to first use and started from `state.json` (§5.1)*
 
-*Built: **a host start closes what a dead process left open.** Step 4's rule — never leave a
-running state without a live process behind it — covers the turn, and the adapters' own teardown
-covers the rest when a session ends cleanly (§3.1). A host that is killed runs no teardown, and the
-log kept that process's calls, tasks and messages open for good: the fold keeps a running call's
-opening row (retention's open-work rule, §5.1), and a roster row with no terminal row reads running
-again once a session is live (§7.6). So a thread's first load in a host lifetime — the
+*Built: **a host start closes the calls and tasks a dead process left open.** Step 4's rule —
+never leave a running state without a live process behind it — covers the turn, and the adapters'
+own teardown covers the rest when a session ends cleanly (§3.1). A host that is killed runs no
+teardown, and the log kept that process's calls and tasks open for good: the fold keeps a running
+call's opening row (retention's open-work rule, §5.1), and a roster row with no terminal row reads
+running again once a session is live (§7.6). So a thread's first load in a host lifetime — the
 `bootSettlePending` settle above, and an orphan's reconcile after the stale-`pending` settle and
-before its turn is settled or continued — appends what that teardown would have written, for the
-rows in the folded window: a `tool.completed {status: "failed"}` reading "Stopped when the agent
-host restarted." for every open call, on its latest lifecycle row's item type, title, turn, owner
-and data; a `task.completed {status: "stopped"}` for every roster task still `pending`, `running`
-or `waiting` — `idle` is left alone, as the session-death rule leaves it; and a `streaming: false`
-settle, text unchanged, for every message still streaming. A shell's item closes before its task,
-every closer rides its opener's owner so it cannot leave a window before the row it closes, and
-nothing is appended for a thread an adapter still lists as live. Best-effort: a failed append is
-logged and the thread still loads; a second load finds nothing left
+before its turn is settled or continued — appends the call and task rows that teardown would have
+written, for the rows in the folded window: a `tool.completed {status: "failed"}` reading "Stopped
+when the agent host restarted." for every open call, on its latest lifecycle row's item type,
+title, turn, owner and data; a `task.completed {status: "stopped"}` for every roster task still
+`pending`, `running` or `waiting`, on its start's owner and turn — `idle` is left alone, as the
+session-death rule leaves it. A shell's item closes before its task, every closer rides its
+opener's owner so it cannot leave a window before the row it closes, and nothing is appended for a
+thread an adapter still lists as live. Best-effort: a failed append is logged and the thread still
+loads; a second load finds nothing left. Two parts of the teardown are not replayed: a message
+still streaming is left as the log has it — a settle moves its span in the thread index to the
+end of the log, and "Load older" then lost every row between its first chunk and the window — and
+a parked request is not failed (an orphan's is cleared by the Stop its error state requires; one on
+a thread at rest stays pending until the session is stopped)
 (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `closeLeftoverWork`,
 `apps/daemon/src/agent-host/orchestration/leftover-work.ts`).*
 
