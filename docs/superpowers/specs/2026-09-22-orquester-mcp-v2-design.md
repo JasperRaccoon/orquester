@@ -869,16 +869,20 @@ snapshot holds an owned lifecycle row of the call (`unstampedChunkOwner`, `trans
 builds no entry from chunks alone.*
 *Built (plan `2026-09-24-subagent-output-long-calls-and-composer-sends`, Task 5): an entry built from a chunk alone is
 titled by the call's lifecycle rows in the view, else — for a background task, which is one command — by the drill-in's
-roster row (`subagentTitle`: the shell's description, or the command itself), else by the call's command, else by the
-chunk's `summary`, "Tool output"; a subagent's roster row names none of the calls it runs and is never used. And a
-`tool.started` with neither a turn nor an owner (`isAgentOwnedActivity`) builds no entry while the view holds no other
-lifecycle row of its call — the GUI's rule (`startIsCallRow`, `entries.logic.ts`): a Claude parent call can start before
-the synthetic turn its own message opens, every later row of the call carries that turn, and a rewind of that turn used
-to leave an `inProgress` entry here that the GUI never showed. The GUI now shows a call's start while no other lifecycle
-row of the call is in its input (a running Codex command's only row); the rules above about the start stand for their
-own reasons: its detail is never taken, because the GUI replaces the start whole with the call's next row while an entry
-here keeps a detail an earlier row gave, and its cut payload is never an `outputItemId`, because what the read cut on a
-start is the call's input, never its output.*
+roster row (`subagentTitle`: the shell's description, or the command itself; never the task's own id, which the roster
+uses when nothing named the task), else by the call's command, else by the chunk's `summary`, "Tool output"; a
+subagent's roster row names none of the calls it runs and is never used. And a call whose rows in the view are all
+turnless, ownerless (`isAgentOwnedActivity`) and unclosed — no `tool.completed` or `tool.denied` — builds no entry, as
+the GUI shows it none: a Claude parent call can start before the synthetic turn its own message opens, what it emits
+before that turn opens — its start and any early input update — stays turnless, and only its later rows carry the turn.
+A rewind of that turn used to leave an `inProgress` entry here that the GUI never showed: it drops the start (superseded
+by the update, else as turnless and ownerless — `startIsCallRow`, `entries.logic.ts`) and hides an update still in
+progress as a neutral row. (Fix round 1: the first build skipped only a lone turnless start, and a start with its early
+input update still made an entry.) The GUI now shows a call's start while no other lifecycle row of the call is in its
+input (a running Codex command's only row); the rules above about the start stand for their own reasons: its detail is
+never taken, because the GUI replaces the start whole with the call's next row while an entry here keeps a detail an
+earlier row gave, and its cut payload is never an `outputItemId`, because what the read cut on a start is the call's
+input, never its output.*
 
 ### 7.7 Waiting
 

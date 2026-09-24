@@ -761,12 +761,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   turns), never the one active when the event is emitted — one call, one `tool:<turn>:<id>` key.
   The one late assignment: a parent call streamed while no turn was open — a woken parent's stream
   precedes the complete frame that opens its synthetic turn — adopts the next turn to open
-  (`beginTurn`: that synthetic turn, or a user turn sent in the window), so the turn's fold holds
-  it and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); its start
-  row stays turnless, so a start with neither a turn nor an owner is never a row on its own: the GUI
-  keeps a keyed start as its call's row only while no other lifecycle row of the call is in its
-  input, and never a bare one (`startIsCallRow`, `entries.logic.ts`), and the MCP transcript builds
-  no entry from one — after a rewind of the turn it is all that is left of the call. A log a host
+  (`beginTurn`: that synthetic turn, or a user turn sent in the window), so the turn's fold holds it
+  and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); what it emitted
+  before the turn opened — its start and any early input update — stays turnless, and after a rewind
+  of the turn that is all there is of the call, so neither view shows it running: the GUI drops the
+  start (superseded by the update, else as turnless and ownerless — `startIsCallRow`,
+  `entries.logic.ts`) and hides an in-progress update as a neutral row, and the MCP transcript
+  builds no entry from a call whose rows are all turnless, ownerless and unclosed. A log a host
   wrote before the stamp — an older host surviving a deploy writes such chunks until its
   drain-restart — is read by the call, on the read side only (no fold change, no version bump): an
   unstamped `tool.output` takes the owner of its call's lifecycle rows in the same derivation input
