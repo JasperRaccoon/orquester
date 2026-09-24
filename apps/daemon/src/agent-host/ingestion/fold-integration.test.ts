@@ -30,6 +30,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { countingIds, fixedClock, replayClaudeFixture } from "../adapters/claude/fixtures.ts";
 import { ClaudeNormalizer } from "../adapters/claude/normalize.ts";
 import { transcriptEntries } from "../../mcp/transcript.ts";
+import { leftoverWorkClosings } from "../orchestration/leftover-work.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createIngestion } from "./index.ts";
 import {
@@ -1137,5 +1138,35 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
       ["tool.updated", null]
     ]);
     assert.deepEqual(entriesOf(reverted), []);
+
+    // The next host start — a deploy's drain-restart is enough — closes what a dead process left open, but not this
+    // call: no row of it anchors it (`anchorsCall`), and a closer would, bringing it back as a failed row in the MCP's
+    // transcript and in the GUI's timeline, which shows the closer in place of the start.
+    let closingIds = 0;
+    const closings = leftoverWorkClosings(reverted, {
+      now: "2026-09-21T11:00:00.000Z",
+      nextId: () => `closing-${(closingIds += 1)}`
+    });
+    assert.deepEqual(closings.map((closing) => closing.key), []);
+    const reloaded = closings.reduce(
+      (state, closing, index) =>
+        applyDomainEvent(state, {
+          seq: reverted.seq + index + 1,
+          eventId: `closing-event-${index}`,
+          threadId: THREAD_ID,
+          occurredAt: "2026-09-21T11:00:00.000Z",
+          commandId: null,
+          causationEventId: null,
+          metadata: {},
+          type: "thread.activity-appended",
+          payload: { activity: closing.activity }
+        }),
+      reverted
+    );
+    assert.deepEqual(rowsOf(reloaded), [
+      ["tool.started", null],
+      ["tool.updated", null]
+    ]);
+    assert.deepEqual(entriesOf(reloaded), []);
   });
 });

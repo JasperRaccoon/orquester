@@ -42,7 +42,21 @@
  *   call reads open again. The data rides along because a completion carries
  *   a call's final state: the snapshot read drops every `tool.updated` a later
  *   completion supersedes (`dropSupersededToolUpdatedActivities`), so a closer
- *   without it would take a call's input off every cold load.
+ *   without it would take a call's input off every cold load. Ingestion
+ *   stores a `tool.updated` already slimmed (§5.6, `truncated`), and the data
+ *   counts as cut only when it holds a cut OUTPUT ({@link closerData}): an
+ *   identity-only cut (Claude's `{command, toolName}`) rides unmarked — marked,
+ *   it offered "Load full output" and an MCP `outputItemId` that read the same
+ *   row back — while an output preview (Grok's `rawOutput`) never passes for
+ *   the whole output: the opening row's whole data rides instead, and the cut
+ *   copy rides marked only when no row holds whole data. **Except a call
+ *   no row of the window anchors** ({@link anchorsCall}: every row of it
+ *   turnless and ownerless) — what a rewind leaves of a woken Claude parent's
+ *   call, its start and early input update, or a woken call no turn ever
+ *   adopted. No view shows it (`@orquester/api`'s `call-anchor.ts`, the rule
+ *   the GUI and the MCP hide it by), and a closer would anchor it: the call
+ *   would come back as a failed row after any host start. It stays open in
+ *   the fold, under the open-work caps like any unit.
  * - **Every task the roster shows active** — `pending`, `running`, `waiting`,
  *   the statuses the fold's session-death rule interrupts, any agent kind —
  *   gets a `task.completed {status: "stopped"}`. `idle` is left alone, as that
@@ -70,16 +84,20 @@
  * may be an old one, and the index then grows that turn's range over it — the
  * late-reference rule, bounded at `MAX_LATE_REFERENCE_BYTES` past the next
  * turn's start (`extendReferenced` in `index/indexer.ts`), which pages over
- * without losing a row. As with every late reference, a later rewind that
- * keeps that turn and drops the ones after it brings the dropped turns' rows
- * inside the stretch back onto a history page: the revert-cut filter
- * (`eventsOutsideRevertCuts`) keeps whatever lies in a surviving turn's range.
+ * without losing a row. A later rewind that keeps that turn and drops the ones
+ * after it clips the range at its cut (`clipAtCut`), as it clips every
+ * surviving range: no history page serves the dropped turns' rows, and the
+ * closer, past the cut, leaves the history with them — the fold keeps it by
+ * its turn, and the window shows it while retention does.
  *
  * Pure: no clock, no ids, no I/O of its own — the caller hands in both.
  */
 
 import {
   ACTIVE_SUBAGENT_STATUSES,
+  anchorsCall,
+  CALL_ROW_KINDS,
+  commandOutputText,
   foldSubagentActivities,
   openWorkOf,
   type OpenCall,
@@ -162,9 +180,10 @@ export function leftoverWorkClosings(
     });
   }
 
+  const anchored = anchoredCallsOf(state.activities);
   for (const call of openWorkOf(state.activities).calls) {
     const key = `call:${call.toolUseId}`;
-    if (closed.has(key)) continue;
+    if (closed.has(key) || !anchored.has(call.toolUseId)) continue;
     closings.push({ key, activity: callCloser(call, input) });
   }
 
@@ -208,6 +227,54 @@ function ownerOf(activity: ThreadActivityItem): string | undefined {
   return presentId(activity.agentId);
 }
 
+/**
+ * The calls some row of `activities` anchors ({@link anchorsCall}: it names a
+ * turn, an agent owns it, or it closes the call), keyed as `openWorkOf` keys
+ * them — the non-blank `toolUseId`, as written. One pass.
+ */
+function anchoredCallsOf(activities: readonly ThreadActivityItem[]): Set<string> {
+  const anchored = new Set<string>();
+  for (const activity of activities) {
+    if (!CALL_ROW_KINDS.has(activity.activityKind) || !anchorsCall(activity)) continue;
+    const toolUseId = nonBlank(asRecord(activity.payload)?.toolUseId);
+    if (toolUseId !== undefined) anchored.add(toolUseId);
+  }
+  return anchored;
+}
+
+/** A payload that carries `data` at all. */
+function hasData(payload: Record<string, unknown>): boolean {
+  return payload.data !== undefined && payload.data !== null;
+}
+
+/**
+ * The data a call's closer carries, and whether it is marked cut: the latest
+ * lifecycle row's, else the opening row's — ingestion stores a `tool.updated`
+ * already slimmed (§5.6, `truncated`), and what that cut means depends on
+ * what the data holds. An identity only (Claude's `{command, toolName}`, its
+ * input projected to the command) holds nothing more anywhere: it rides
+ * unmarked, the command kept, and no "Load full output" or `outputItemId`
+ * points at a read that finds nothing more. An OUTPUT cut to its preview
+ * (`commandOutputText` finds one: Grok's `rawOutput`, the result on a Claude
+ * update whose completion never landed) must not pass for the whole output —
+ * `read_tool_output` answers a command's output from an unmarked completion —
+ * so the opening row's whole data rides instead, unmarked, and only when no
+ * row holds whole data does the cut copy ride, with its `truncated`.
+ */
+function closerData(
+  latest: Record<string, unknown>,
+  opening: Record<string, unknown>
+): { data: unknown; truncated: boolean } {
+  const source = hasData(latest) ? latest : opening;
+  if (source.truncated !== true || commandOutputText(source.data) === undefined) {
+    return { data: source.data, truncated: false };
+  }
+  if (source !== opening && hasData(opening) && opening.truncated !== true) {
+    return { data: opening.data, truncated: false };
+  }
+  return { data: source.data, truncated: true };
+}
+
 /** `item.completed`'s row, as ingestion writes one, for a call nothing will complete. */
 function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityItem {
   const latest = call.latestLifecycle;
@@ -215,7 +282,7 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
   const opening = asRecord(call.opening.payload) ?? {};
   const itemType = nonBlank(payload.itemType) ?? nonBlank(opening.itemType);
   const title = nonBlank(payload.title) ?? nonBlank(opening.title);
-  const data = payload.data ?? opening.data;
+  const { data, truncated } = closerData(payload, opening);
   const owner = ownerOf(latest);
   const parentToolUseId = presentId(latest.parentToolUseId) ?? presentId(payload.parentToolUseId);
   return {
@@ -231,6 +298,7 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
       ...(title !== undefined ? { title } : {}),
       detail: LEFTOVER_CALL_DETAIL,
       ...(data !== undefined ? { data } : {}),
+      ...(truncated ? { truncated: true } : {}),
       ...(owner !== undefined ? { agentId: owner } : {}),
       ...(parentToolUseId !== undefined ? { parentToolUseId } : {})
     },

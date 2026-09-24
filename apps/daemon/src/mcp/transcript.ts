@@ -1,4 +1,4 @@
-import { ACTIVE_SUBAGENT_STATUSES, commandDisplayDetail, compactionMarkerState, isAgentOwnedActivity, isCompactionActivity, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { ACTIVE_SUBAGENT_STATUSES, anchorsCall, CALL_ROW_KINDS, commandDisplayDetail, compactionMarkerState, isAgentOwnedActivity, isCompactionActivity, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { capText } from "./result.ts";
 
 export type TranscriptInclude = "reasoning" | "tools" | "activity";
@@ -421,12 +421,13 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     // with one update on it (the Claude normaliser's `adoptedToolEvent`), so a running call always has a row that
     // carries its turn; a rewind of that turn removes it with the rest, leaving the turnless rows as all there is of the
     // call, which the GUI hides (the start as superseded, `startIsCallRow` in packages/ui entries.logic.ts; an update
-    // still in progress as a neutral row) — no running call. The calls a row of the view anchors — by its turn, its
-    // owner, or as the call's close:
+    // still in progress as a neutral row) — no running call, and a host's first load writes it no closer either. The
+    // calls a row of the view anchors — by its turn, its owner, or as the call's close (`anchorsCall`, the one rule in
+    // `@orquester/api`'s call-anchor.ts):
     const anchoredCalls = new Set<string>();
     for (const item of snap.items) {
-      if (item.kind !== "activity" || (item.activityKind !== "tool.output" && !TOOL_KINDS.has(item.activityKind)) || !inScope(item)) continue;
-      if (!item.turnId && !isAgentOwnedActivity(item) && item.activityKind !== "tool.completed" && item.activityKind !== "tool.denied") continue;
+      if (item.kind !== "activity" || !CALL_ROW_KINDS.has(item.activityKind) || !inScope(item)) continue;
+      if (!anchorsCall(item)) continue;
       anchoredCalls.add(str(asRecord(item.payload)?.toolUseId) ?? item.id);
     }
     const inTurns = (item: ThreadItem): boolean => {

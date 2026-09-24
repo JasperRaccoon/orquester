@@ -197,6 +197,21 @@ statement, so the version is the only thing that keeps its rows from being trust
 and rebuilt from the logs by the ordinary version-mismatch path — the version is bumped for a
 change to what the indexer derives as much as for a statement change.
 
+*Built (schema 4):* a `thread.reverted` also clips every surviving turn's range at its cut — the
+first removed turn's first line, where the rows the revert drops from the index begin
+(`clipAtCut` in `indexer.ts`). A late event naming a turn grows its range past the next turn's
+start, within `MAX_LATE_REFERENCE_BYTES` (`extendReferenced`: a turn-end capture that landed after
+the next prompt, a first-load closer, every row of a call a background agent started in the turn
+and finished later — the Claude normaliser stamps all of a call's rows with the turn it started
+in), and the revert sealed a surviving turn with whatever it had grown: its range reached into the
+removed turns, history paging folds whatever lies in a turn's range (`eventsOutsideRevertCuts`),
+and "Load older" served the removed turns' rows again. The late rows past the cut go with them,
+as their item positions and text already went; the fold keeps them by their turn and the window
+shows them while retention does. The index records no revert's cut (only `revert_seq`, the latest
+revert's own line), so no rule at query time could find it: the clip is stored in `turns`, no
+statement changed, and `INDEX_SCHEMA_VERSION` went 3 → 4 so that a version-3 file, whose ranges may
+still reach past a cut, is rebuilt from the logs at the deploy.
+
 Maintenance. The orchestrator's `commit` hands every appended event, with the byte position the
 store returns for it, to `index.observe(...)`. The indexer keeps, per thread, a tiny **turn fold**
 (`applyTurnEvent` exported from `fold.ts` — the existing turn reducer, unchanged in behaviour) to

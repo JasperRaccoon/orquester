@@ -26,11 +26,13 @@
  * earlier turn after the next one began — a slow turn-end capture, say —
  * still extends that turn's range, so its page holds its own diff card (the
  * reader dedupes by item id). A `thread.reverted` closes every range: the
- * surviving turns keep the bytes they had and are sealed — nothing, not even
- * a late event naming them, extends a range across a revert, because folding
- * a slice that holds the revert re-applies it against the slice's own,
- * shorter turn list. The reverted turns' bytes and the revert itself belong
- * to nobody, and nothing grows until the next turn starts.
+ * surviving turns keep the bytes they had before the first removed turn's
+ * first line — a range a late event stretched over the removed turns is
+ * clipped there (`clipAtCut`) — and are sealed: nothing, not even a late
+ * event naming them, extends a range across a revert, because folding a
+ * slice that holds the revert re-applies it against the slice's own, shorter
+ * turn list. The reverted turns' bytes and the revert itself belong to
+ * nobody, and nothing grows until the next turn starts.
  *
  * Messages are indexed when they finish (`streaming: false`), with the fold's
  * own text rule; activities on every write (last write wins, like
@@ -800,7 +802,8 @@ export function createThreadIndexer(input: {
   /**
    * §5.5 by turn ORDER: the turn fold keeps the first `turnCount` started
    * turns, and every row from the first removed turn's first line on goes —
-   * its turn rows, its text, its item positions, its markers.
+   * its turn rows, its text, its item positions, its markers — and so does
+   * every surviving turn's range past that line (`clipAtCut`).
    */
   function applyRevert(
     memory: ThreadMemory,
@@ -812,19 +815,23 @@ export function createThreadIndexer(input: {
     const kept = new Set(startedTurns(next).map((turn) => turn.turnId));
     const seen = new Set<string>();
     const removed: string[] = [];
-    let cut: number | null = null;
-    prev.forEach((turn, index) => {
-      if (turn.turnId === null || seen.has(turn.turnId)) {
-        return;
+    // The first removed turn's first line: its seq, and where it starts.
+    let cut: Position | null = null;
+    for (let index = 0; index < prev.length; index += 1) {
+      const turnId = prev[index]!.turnId;
+      if (turnId === null || seen.has(turnId)) {
+        continue;
       }
-      seen.add(turn.turnId);
-      if (kept.has(turn.turnId)) {
-        return;
+      seen.add(turnId);
+      if (kept.has(turnId)) {
+        continue;
       }
-      removed.push(turn.turnId);
-      const firstSeq = memory.rows[index]!.span.firstSeq;
-      cut = cut === null ? firstSeq : Math.min(cut, firstSeq);
-    });
+      removed.push(turnId);
+      const span = memory.rows[index]!.span;
+      if (cut === null || span.firstSeq < cut.seq) {
+        cut = { seq: span.firstSeq, byteOffset: span.firstByte };
+      }
+    }
 
     memory.rows = carryRows(memory, prev, next, here, end);
     memory.turns = next;
@@ -834,6 +841,9 @@ export function createThreadIndexer(input: {
     // revert against a slice's own, shorter turn list.
     memory.openTurnId = null;
     memory.revertSeq = here.seq;
+    if (cut !== null) {
+      clipAtCut(memory, cut);
+    }
 
     const threadId = memory.threadId;
     for (const turnId of removed) {
@@ -843,12 +853,43 @@ export function createThreadIndexer(input: {
       // A stream's doc row may be among the deleted; none runs across an
       // idle-only revert anyway.
       memory.streams.clear();
-      sql.truncateMessageFts.run(threadId, cut);
-      sql.truncateMessageDocs.run(threadId, cut);
-      sql.truncateActivityFts.run(threadId, cut);
-      sql.truncateItems.run(threadId, cut);
-      sql.truncateMarkers.run(threadId, cut);
+      sql.truncateMessageFts.run(threadId, cut.seq);
+      sql.truncateMessageDocs.run(threadId, cut.seq);
+      sql.truncateActivityFts.run(threadId, cut.seq);
+      sql.truncateItems.run(threadId, cut.seq);
+      sql.truncateMarkers.run(threadId, cut.seq);
     }
+  }
+
+  /**
+   * A surviving turn's range ends where the first removed turn began. A late
+   * event naming a turn grows its range past the next turn's start
+   * (`extendReferenced`) — a turn-end capture, a first-load closer, every row
+   * of a call a background agent started in it and finished later — so a
+   * turn a rewind keeps can reach into the turns it removes; history planning
+   * folds whatever lies in a turn's range (`eventsOutsideRevertCuts` in
+   * `orchestrator.ts`), and "Load older" served the removed turns' rows again.
+   * Cut back to the line before the cut, as the removed turn's start once cut
+   * it (`openTurn`). What goes with it lies past the cut like the rest this
+   * revert drops from the index — its items, text and markers — so its late
+   * rows leave the history with them; the fold keeps them by their turn
+   * (`reduceReverted`), and the window shows them while retention does. The
+   * range is sealed from here on (`revertSeq`), so nothing grows it back.
+   */
+  function clipAtCut(memory: ThreadMemory, cut: Position): void {
+    memory.turns.forEach((turn, index) => {
+      const row = memory.rows[index];
+      if (turn.turnId === null || row === undefined) {
+        return;
+      }
+      const { span } = row;
+      if (span.firstSeq < cut.seq && span.lastSeq >= cut.seq) {
+        span.lastSeq = cut.seq - 1;
+        span.endByte = cut.byteOffset;
+        row.dirty = true;
+        row.lastReference = null;
+      }
+    });
   }
 
   /** Write every started turn whose stored row is stale. */

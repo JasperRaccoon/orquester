@@ -738,6 +738,52 @@ describe("thread index: page ranges", () => {
     );
   });
 
+  it("a revert clips a surviving turn at the cut: a late event's stretch never brings the removed turns back", async () => {
+    const log = new TestLog();
+    feed(index, log, log.append(created())); // 1
+    feed(index, log, log.append(userMessage("u1", "first"), turnStart("u1"))); // 2, 3
+    feed(index, log, log.append(session("running", "t1"))); // 4
+    feed(index, log, log.append(done("a1", "t1", "answer one"))); // 5
+    feed(index, log, log.append(session("ready", null, "t1"))); // 6
+    feed(index, log, log.append(userMessage("u2", "second"), turnStart("u2"))); // 7, 8
+    feed(index, log, log.append(session("running", "t2"))); // 9
+    feed(index, log, log.append(done("a2", "t2", "answer two"))); // 10
+    // A call a background agent started in t1 completes now, stamped with the
+    // turn it started in: a late reference, which stretches t1 over t2.
+    feed(
+      index,
+      log,
+      log.append(activity("late", "tool.completed", { summary: "Command run", turnId: "t1", agentId: "agent-1" }))
+    ); // 11
+    feed(index, log, log.append(session("ready", null, "t2"))); // 12
+    await index.drain();
+    const second = turn(index, log.threadId, 2);
+    assert.equal(turn(index, log.threadId, 1).lastSeq, 11, "stretched over t2's first lines");
+
+    feed(index, log, log.append(reverted(1))); // 13
+    await index.drain();
+    const first = turn(index, log.threadId, 1);
+    assert.deepEqual(
+      [first.firstSeq, first.lastSeq, first.firstByte, first.endByte],
+      [2, 6, log.at(2).byteOffset, second.firstByte],
+      "t1 ends where t2 began"
+    );
+    const kept = page(log, first);
+    assert.equal(holdsPrompt(kept, "u1"), true, "t1's page still holds its own prompt");
+    assert.deepEqual(
+      kept.filter((event) => event.seq >= second.firstSeq).map((event) => event.seq),
+      [],
+      "and nothing from t2's first line on"
+    );
+
+    // The clip is the stored row: a restart reads it back, and the seal holds.
+    index.close();
+    index = createThreadIndex({ filePath, logger });
+    feed(index, log, log.append(activity("later", "checkpoint.captured", { summary: "Late", turnId: "t1" }))); // 14
+    await index.drain();
+    assert.deepEqual(turn(index, log.threadId, 1), first);
+  });
+
   it("a late event far past the next turn's start does not stretch the earlier turn", async () => {
     const log = new TestLog();
     feed(

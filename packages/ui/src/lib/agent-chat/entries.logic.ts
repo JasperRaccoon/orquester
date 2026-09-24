@@ -23,6 +23,7 @@
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 import {
+  anchorsCall,
   CALL_CLOSER_KINDS,
   CALL_OPENER_KINDS,
   commandDisplayDetail,
@@ -184,8 +185,8 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     ? taskDetailAsLabel
       ? undefined
       : asTrimmedString(payload?.detail)
-    : activity.activityKind === "tool.started"
-      ? startDetail(asTrimmedString(payload?.detail))
+    : CALL_LIFECYCLE_KINDS.has(activity.activityKind)
+      ? callRowDetail(asTrimmedString(payload?.detail), asTrimmedString(data?.toolName))
       : asTrimmedString(payload?.detail);
   const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
   // A command row shows the output its provider data carries where `detail`
@@ -361,18 +362,24 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
 }
 
 /**
- * A start's detail. Claude's start frame names its tool before any of its
- * input has streamed — `summarizeToolRequest(name, {})`, "Write: {}" — and the
- * call's first update comes only once that input parses whole: seconds later
- * for a `Write` or a subagent's prompt, and never for a tool that takes no
- * arguments, whose start is its only row until its result. The empty input
- * names nothing, so the detail keeps the tool's name alone — "Write",
- * "Agent", "mcp__x__list" — which the row reads meanwhile. A nested (subagent)
- * frame carries its whole input from the start.
+ * A lifecycle row's detail. Claude names a call's tool with its input echoed
+ * — `summarizeToolRequest(name, input)` — and its start frame does so before
+ * any of that input has streamed: "Write: {}". The call's first update comes
+ * only once the input parses whole, seconds later for a `Write` or a
+ * subagent's prompt, and never for a tool that takes no arguments: its start
+ * is its only row until its result, and its completion echoes the same empty
+ * input. The empty input names nothing, so a lifecycle row of the call
+ * (start, update, completion) keeps the tool's name alone — "Write", "Agent",
+ * "mcp__x__list": a start reads it meanwhile, and a no-argument call's label
+ * never gains ": {}" as it completes. Only an echo of the row's OWN tool, the
+ * `data.toolName` Claude writes on every row of a call: another provider's
+ * detail can be the tool's own output — OpenCode's completion is — and an
+ * output that reads "config: {}" is kept whole. A nested (subagent) frame
+ * carries its whole input from the start.
  */
-function startDetail(detail: string | undefined): string | undefined {
+function callRowDetail(detail: string | undefined, toolName: string | undefined): string | undefined {
   const echo = detail === undefined ? null : /^([^\s:]+): \{\}$/.exec(detail);
-  return echo === null ? detail : echo[1];
+  return echo !== null && echo[1] === toolName ? echo[1] : detail;
 }
 
 /**
@@ -516,16 +523,18 @@ function inheritedChunkOwner(
  * `adoptedToolEvent`), which is the running call's live row. A rewind of that
  * turn leaves the turnless rows as all there is of the call, and none reads
  * as running: the start is dropped here (superseded by the update, else as
- * turnless and ownerless), and a turnless update still in progress is a
- * neutral row a group hides (`workEntryIsVisibleInGroup`). The MCP's
- * transcript builds no entry from them either.
+ * turnless and ownerless — a start that does not anchor its call,
+ * `anchorsCall` in `@orquester/api`), and a turnless update still in
+ * progress is a neutral row a group hides (`workEntryIsVisibleInGroup`). The
+ * MCP's transcript builds no entry from them either, and a host's first load
+ * writes them no closer, which would bring the call back as a failed row.
  */
 function startIsCallRow(activity: ThreadActivityItem, supersededCalls: ReadonlySet<string>): boolean {
   const callId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
   if (callId === undefined || supersededCalls.has(callId)) {
     return false;
   }
-  return Boolean(activity.turnId) || isAgentOwnedActivity(activity);
+  return anchorsCall(activity);
 }
 
 // ---------------------------------------------------------------------------

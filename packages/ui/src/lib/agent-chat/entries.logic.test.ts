@@ -438,16 +438,78 @@ describe("a started call's own row", () => {
       assert.equal(entry.detail, name, name);
       assert.equal(workEntryDisplayLabel(entry), name, name);
     }
-    // Only a start's, and only an empty input: a nested frame's start carries its whole input, and an update's
-    // detail is the request as it stands.
+    // Only an empty input: a nested frame's start carries its whole input, and so does the row of a call whose input
+    // parsed into something.
     const withInput = activity(
       "tool.started",
       { itemType: "command_execution", toolUseId: "call-x", title: "Command run", detail: "Bash: ls -la", status: "inProgress" },
       { turnId: "t1" }
     );
     assert.equal(workLogEntryFromActivity(withInput).detail, "Bash: ls -la");
-    const update = activity("tool.updated", { itemType: "file_change", toolUseId: "call-y", title: "File change", detail: "Write: {}", status: "inProgress" }, { turnId: "t1" });
-    assert.equal(workLogEntryFromActivity(update).detail, "Write: {}");
+  });
+
+  it("a tool that takes no arguments reads its name on every row of its call — its label never gains \": {}\" as it completes", () => {
+    // Claude echoes the empty input on each of them, naming its own tool in the row's data: its start, which is its
+    // only row until its result, and its completion — an update would say the same.
+    const row = (activityKind: string, status: string) =>
+      activity(
+        activityKind,
+        {
+          itemType: "mcp_tool_call",
+          toolUseId: "call-list",
+          title: "MCP tool call",
+          detail: "mcp__x__list: {}",
+          status,
+          data: { toolName: "mcp__x__list", input: {} }
+        },
+        { turnId: "t1" }
+      );
+    for (const [activityKind, status] of [
+      ["tool.started", "inProgress"],
+      ["tool.updated", "inProgress"],
+      ["tool.completed", "completed"]
+    ] as const) {
+      const entry = workLogEntryFromActivity(row(activityKind, status));
+      assert.deepEqual([entry.detail, workEntryDisplayLabel(entry)], ["mcp__x__list", "mcp__x__list"], activityKind);
+    }
+    // A row of the call whose input is not empty says what it asked for.
+    const update = activity(
+      "tool.updated",
+      { itemType: "file_change", toolUseId: "call-y", title: "File change", detail: "Write: {\"file_path\":\"a.ts\"}", status: "inProgress" },
+      { turnId: "t1" }
+    );
+    assert.equal(workLogEntryFromActivity(update).detail, "Write: {\"file_path\":\"a.ts\"}");
+  });
+
+  it("a detail that only looks like the echo is kept whole: an OpenCode completion's output, \"config: {}\"", () => {
+    // OpenCode's completion detail is the tool's own output, and its data names the tool as `tool`, never as the
+    // `toolName` Claude's echo repeats: nothing here is the call's name.
+    const completion = activity(
+      "tool.completed",
+      {
+        itemType: "command_execution",
+        toolUseId: "call-oc",
+        title: "bash",
+        detail: "config: {}",
+        status: "completed",
+        data: {
+          tool: "bash",
+          toolUseId: "call-oc",
+          command: "cat settings.yaml",
+          state: { status: "completed", output: "config: {}" },
+          result: "config: {}"
+        }
+      },
+      { turnId: "t1" }
+    );
+    assert.equal(workLogEntryFromActivity(completion).detail, "config: {}");
+    // Nor is a Claude echo of ANOTHER name: the captured name must be the row's own tool.
+    const otherName = activity(
+      "tool.completed",
+      { itemType: "dynamic_tool_call", toolUseId: "call-z", title: "Tool call", detail: "config: {}", status: "completed", data: { toolName: "Read", input: {} } },
+      { turnId: "t1" }
+    );
+    assert.equal(workLogEntryFromActivity(otherName).detail, "config: {}");
   });
 
   it("a start never offers Load full output: what the read cut there is the call's input, not its output", () => {

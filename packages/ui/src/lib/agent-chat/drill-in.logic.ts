@@ -98,7 +98,10 @@ export function projectAgentDrillIn(
       expandedTurnIds,
       expandedWorkGroupIds: new Set(input.disclosures?.expandedGroupIds ?? []),
       // A child timeline offers no rewind: §5.5 rolls back the thread, and
-      // a subagent has no turn of the thread's own to roll back to.
+      // a subagent has no turn of the thread's own to roll back to. Nor the
+      // thread's `turns`: a fold here is timed by the agent's own rows — a
+      // background agent works long past the parent turn its rows ride, and
+      // that turn's seconds say nothing of it (`deriveTurnFolds`).
       supportsConversationRollback: false,
       messageStreaming: input.messageStreaming
     },

@@ -15,7 +15,9 @@
  * - `threads.open_turn_id` names the started turn whose byte range still grows
  *   with every event, and `threads.revert_seq` the latest `thread.reverted`:
  *   a range that began before it is sealed, because a revert must never be
- *   folded into a surviving turn's range (`indexer.ts`).
+ *   folded into a surviving turn's range (`indexer.ts`). Nor may a removed
+ *   turn's lines: the revert clips every surviving range at its cut
+ *   (`clipAtCut`), which is stored in `turns` and needs no column.
  * - `threads.inflight` is what the thread has in flight that no `turns` row
  *   can hold — `turns.turn_id` is NOT NULL, and a turn has no id until the
  *   provider starts it: the requested-but-unstarted turns, each with its
@@ -42,6 +44,14 @@
 import type { CompactionMarkerState } from "@orquester/api/agent-chat";
 
 /**
+ * 4: a revert clips every surviving turn's range at its cut — the first
+ * removed turn's first line (`clipAtCut` in `indexer.ts`). A late event naming
+ * a turn stretches its range past the next turn's start (a turn-end capture,
+ * a first-load closer, every row of a call a background agent started there),
+ * and a rewind that kept such a turn left it reaching into the turns it
+ * removed, whose rows "Load older" then served again. No statement changed; a
+ * version-3 file's `turns` rows may still reach past a cut, so it is rebuilt.
+ *
  * 3: `markers` follows the compaction-marker rule the UI and the MCP share
  * ({@link IndexedMarkerKind}) — the legacy `thread.state.changed` marker
  * counts, a subagent's own compaction does not. No statement changed; a
@@ -51,7 +61,7 @@ import type { CompactionMarkerState } from "@orquester/api/agent-chat";
  * behind must read as "another version" — deleted and rebuilt — rather than
  * as a file whose statements fail to prepare.
  */
-export const INDEX_SCHEMA_VERSION = 3;
+export const INDEX_SCHEMA_VERSION = 4;
 
 /** The `meta` key that carries {@link INDEX_SCHEMA_VERSION}. */
 export const SCHEMA_VERSION_KEY = "schema_version";

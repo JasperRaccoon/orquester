@@ -84,7 +84,9 @@ prototypes next to each); where a report and this plan differ, **this plan decid
 2. A dev server started in the background runs for hours with thousands of chunks: its roster row, its drill-in row
    titled with the command, and its live output stay; the MCP pages its whole output cheaply (Tasks 3, 5, 6).
 3. A Codex build streams thousands of lines: the GUI shows one "Running <command>" row, then "Ran 1 command"; the MCP
-   has one entry with an `outputItemId` while it runs (Tasks 3, 5).
+   has one entry with an `outputItemId` while it runs (Tasks 3, 5). *(Planned so; ruled otherwise at Task 5's review,
+   minor 4: once done, the command renders exactly as one that streamed nothing — its row, labelled with its command —
+   never a "Ran 1 command" toggle hiding its one row. The GUI spec §7.3 `*Built:*` note says so.)*
 4. The host is killed mid-work: after it starts again no call, shell, agent or message is left "running" forever
    (Task 4).
 5. The owner switches project mid-send and comes back: the composer reads "Sending" and refuses a second send; a
@@ -401,7 +403,10 @@ orphaned threads").
   `row-chrome.ts`'s `isToolOutputRow` re-exports; a chunk entry whose call has a non-chunk entry in the same list never
   breaks the live streak, never supplies the live row's label, and never counts as a tool or a hidden row in a
   group's summary — while `groupedEntries` still carries it so `joinLifecycleDetails` joins the output. A running
-  command reads "Running <command>"; once done, "Ran 1 command".
+  command reads "Running <command>"; once done, "Ran 1 command". *(Planned so; ruled otherwise at Task 5's review,
+  minor 4: the single-row branch decides on the list without the call's own output, so a settled streamed command
+  renders exactly as one without chunks — its row, labelled with its command, e.g. "npm run build" — and not as a
+  "Ran 1 command" toggle; GUI spec §7.3 `*Built:*` note.)*
 - **G-3:** orphan chunks of one call join into ONE row (the first carries the joined text; nothing is lost);
   `backgroundShellRows(items, agentId, fallbackTitle?)` titles the shell's row from the roster row (`AgentDrillIn`
   passes `agent?.title`) when no lifecycle frame of the shell is left.
@@ -418,7 +423,8 @@ orphaned threads").
   and is dropped once an update, completion or denial of the call exists.
 - [ ] `rows.logic.test.ts`: a running command plus N chunks is ONE `work-live` row labelled "Running npm"; a chunk
   reading "No such file or directory" neither splits the run nor marks it failed; a settled call plus 3 chunks reads
-  "Ran 1 command" with `hiddenCount` 1.
+  "Ran 1 command" with `hiddenCount` 1. *(Superseded by the same ruling: the test pins that a settled call and its
+  chunks render exactly as the call would without them — its row, labelled with its command.)*
 - [ ] `row-chrome.test.ts`: several orphan chunks of one call join into one row with no text lost.
 - [ ] `background-shell.test.ts`: with no lifecycle frame left, one row titled from `fallbackTitle`, with the joined
   output.

@@ -16,12 +16,17 @@ import { createThreadIndex, INDEX_SCHEMA_VERSION } from "./index.ts";
 import { INDEX_TABLES } from "./schema.ts";
 import { defaultSqliteDriver, type SqliteDriver } from "./sqlite.ts";
 import {
+  checkpoint,
   created,
+  done,
   legacyCompaction,
   liveTurn,
   recordingLogger,
+  reverted,
+  session,
   subagentCompaction,
   TestLog,
+  turnStart,
   userMessage
 } from "./testing.ts";
 
@@ -313,6 +318,62 @@ describe("thread index file", () => {
     }));
     assert.equal(version, String(INDEX_SCHEMA_VERSION));
     assert.deepEqual(markers, [{ seq: seqOf("legacy"), kind: "compacted" }]);
+  });
+
+  it("rebuilds a version-3 file — a surviving turn's range left reaching past a revert's cut — and re-derives it", async () => {
+    // Turn 1's capture landed after turn 2 began, stretching turn 1's range
+    // over turn 2's first lines; a rewind to turn 1 then removed turn 2.
+    // Version 3 left turn 1 reaching into turn 2's lines, and history
+    // planning served them again; version 4 clips it at the cut.
+    const log = new TestLog();
+    log.append(
+      created(), // 1
+      userMessage("u1", "first"), // 2
+      turnStart("u1"), // 3
+      session("running", "t1"), // 4
+      done("a1", "t1", "answer one"), // 5
+      session("ready", null, "t1"), // 6
+      userMessage("u2", "second"), // 7
+      turnStart("u2"), // 8
+      session("running", "t2"), // 9
+      checkpoint("t1", 1), // 10 — names t1
+      done("a2", "t2", "answer two"), // 11
+      session("ready", null, "t2"), // 12
+      reverted(1) // 13
+    );
+    const catchUp = {
+      threadId: log.threadId,
+      projectPath: "/w/p",
+      title: "T",
+      logSeq: log.lastSeq,
+      read: log.readEventsFrom
+    };
+    const first = createThreadIndex({ filePath, logger: recordingLogger() });
+    await first.catchUp(catchUp);
+    const clipped = first.turnByOrdinal(log.threadId, 1);
+    first.close();
+    assert.deepEqual([clipped?.lastSeq, clipped?.endByte], [6, log.at(7).byteOffset]);
+    // What version 3 left behind: the same statements, turn 1 still stretched.
+    const writable = new Database(filePath);
+    writable
+      .prepare("UPDATE turns SET last_seq = 10, end_byte = ? WHERE thread_id = ? AND turn_id = 't1'")
+      .run(log.endOf(10), log.threadId);
+    writable.prepare("UPDATE meta SET value = '3' WHERE key = 'schema_version'").run();
+    writable.close();
+
+    const logger = recordingLogger();
+    const second = createThreadIndex({ filePath, logger });
+    assert.notEqual(INDEX_SCHEMA_VERSION, 3, "the premise: v3 is another version");
+    assert.equal(second.available, true);
+    assert.equal(second.cursor(log.threadId), null, "nothing of the version-3 file is trusted");
+    assert.ok(
+      logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
+      "rebuilt by the version check"
+    );
+    // The boot catch-up re-derives the thread from its log, clipped.
+    await second.catchUp(catchUp);
+    assert.deepEqual(second.turnByOrdinal(log.threadId, 1), clipped);
+    second.close();
   });
 
   it("runs unavailable when the file can be neither opened nor recreated", () => {
