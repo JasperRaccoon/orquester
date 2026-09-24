@@ -530,7 +530,9 @@ the head's running turn), never a provider's "resolved"/"submitted", which would
 answered (a message-mode question stays pending, where a Stop would cancel it too: it parked no
 request and accepts a later message, §6.2); a `tool.completed {status:
 "failed"}` reading "Stopped when the agent host restarted." for every open call, on its latest
-lifecycle row's item type, title, turn, owner and data; a `task.completed {status: "stopped"}` for
+lifecycle row's item type, title, turn, owner and data (an output an update stored cut never passes
+for whole: the opening row's whole data rides instead, else the cut copy marked `truncated`; an
+identity-only cut rides unmarked); a `task.completed {status: "stopped"}` for
 every roster task still `pending`, `running` or `waiting`, on its start's owner and turn — `idle`
 is left alone, as the session-death rule leaves it. A shell's item closes before its task, every
 closer rides its opener's owner so it cannot leave a window before the row it closes, and nothing

@@ -16,11 +16,17 @@ import {
   foldSubagentActivities,
   foldThread,
   openWorkOf,
+  slimActivityPayload,
+  toThreadSnapshot,
   type DomainEvent,
   type ThreadActivityItem,
-  type ThreadFoldState
+  type ThreadFoldState,
+  type ThreadItem,
+  type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
+import { transcriptEntries } from "../../mcp/transcript.ts";
+import { projectSnapshotActivities } from "../ingestion/coalesce.ts";
 import { LEFTOVER_CALL_DETAIL, leftoverWorkClosings, type LeftoverClosing } from "./leftover-work.ts";
 
 const THREAD = "thread-lw";
@@ -137,6 +143,30 @@ function applied(state: ThreadFoldState, closings: readonly LeftoverClosing[]): 
   return events.reduce(applyDomainEvent, state);
 }
 
+/** A `tool.updated` row as ingestion stores one: already slimmed (§5.6, `maybeSlim`). */
+function asStored(id: string, activityKind: string, payload: Record<string, unknown>): Unsequenced {
+  return row(id, activityKind, slimActivityPayload(payload) as Record<string, unknown>, {
+    turnId: "turn-1",
+    status: "inProgress"
+  });
+}
+
+/** A snapshot read of `state`, as the host serves one: superseded updates dropped, every payload slimmed. */
+function wireRead(state: ThreadFoldState): ThreadSnapshotPayload {
+  const snapshot = toThreadSnapshot(state);
+  const projected = new Map(
+    projectSnapshotActivities(
+      snapshot.items.filter((item): item is ThreadActivityItem => item.kind === "activity")
+    ).map((activity) => [activity.id, activity])
+  );
+  return {
+    ...snapshot,
+    items: snapshot.items.flatMap((item): ThreadItem[] =>
+      item.kind !== "activity" ? [item] : projected.has(item.id) ? [projected.get(item.id)!] : []
+    )
+  };
+}
+
 /** `state` rewound to its first `turnCount` started turns (§5.5). */
 const rewound = (state: ThreadFoldState, turnCount: number): ThreadFoldState =>
   applyDomainEvent(state, sequenced([event("thread.reverted", { turnCount })], state.seq)[0]!);
@@ -230,57 +260,186 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.equal(LEFTOVER_CALL_DETAIL, "Stopped when the agent host restarted.");
   });
 
-  it("says the data it copies is cut when the row it copies it from was stored cut", () => {
-    // Ingestion stores a `tool.updated` already slimmed (§5.6): a Grok command's
-    // update carries its output as a one-line `rawOutput` preview, `truncated`.
-    const cutUpdate = {
+  it("keeps a crash-closed Claude call's command, unmarked: no Load full output, no outputItemId", () => {
+    // Claude's start names the call before its input streamed; every update is
+    // stored slimmed (`maybeSlim`), its input projected to the command — cut,
+    // but it holds no output: nothing more than this is anywhere to read.
+    const start = row("c-start", "tool.started", {
       itemType: "command_execution",
+      toolUseId: "toolu_c",
       status: "inProgress",
-      title: "Run npm test",
-      data: { command: "npm test", rawOutput: { content: "PASS a.test.ts" } },
-      truncated: true
+      title: "Command run",
+      detail: "Bash: {}",
+      data: { toolName: "Bash", input: {} }
+    }, { turnId: "turn-1", status: "inProgress" });
+    const update = asStored("c-update", "tool.updated", {
+      itemType: "command_execution",
+      toolUseId: "toolu_c",
+      status: "inProgress",
+      title: "Command run",
+      detail: "Bash: npm test",
+      data: { toolName: "Bash", input: { command: "npm test" } }
+    });
+    const state = foldOf([...turn("turn-1"), start, update]);
+    const [closing] = closingsOf(state);
+    const payload = activityOf(closing).payload as Record<string, unknown>;
+    assert.deepEqual(payload.data, { command: "npm test", toolName: "Bash" }, "the update's data, all there is");
+    assert.equal("truncated" in payload, false);
+
+    // A snapshot read: the update the closer supersedes dropped, every payload
+    // slimmed — what the GUI and the MCP read.
+    const read = wireRead(applied(state, [closing!]));
+    const closer = read.items.find((item) => item.id === closing!.activity.id);
+    assert.ok(closer?.kind === "activity");
+    assert.notEqual((closer.payload as Record<string, unknown>).truncated, true, "no Load full output");
+    assert.equal(read.items.some((item) => item.id === "c-update"), false, "the update is superseded");
+    const [entry] = transcriptEntries(read, {
+      turns: 5,
+      include: new Set(["tools"] as const),
+      maxChars: 100_000
+    }).entries.filter((candidate) => candidate.kind === "tool");
+    assert.deepEqual(
+      [entry?.tool?.command, entry?.tool?.status, entry?.outputItemId],
+      ["npm test", "failed", undefined],
+      "the MCP's entry names the command, and no outputItemId"
+    );
+  });
+
+  it("never passes a cut output for whole: it takes the opening row's whole data instead, unmarked", () => {
+    // Grok's update carries its output cut to a one-line `rawOutput` preview;
+    // its first frame, stored whole, names the command and holds no output.
+    const firstFrame = {
+      toolUseId: "call-grok",
+      kind: "execute",
+      command: "npm test",
+      vendorTool: "bash",
+      readOnly: false,
+      rawInput: { command: "npm test" }
     };
+    // A Claude call whose result the host wrote but not its completion — the
+    // two ship in one append unless the update's 50 ms coalescing window ran
+    // out first — is the same shape: its update holds the result's preview.
     const state = foldOf([
-      row("g-start", "tool.started", { itemType: "command_execution", toolUseId: "call-grok", title: "Run npm test" }, {
-        turnId: "turn-1"
-      }),
-      row("g-update", "tool.updated", { ...cutUpdate, toolUseId: "call-grok" }, { turnId: "turn-1" }),
-      // The data comes from the opening row when the latest has none: its marker with it.
-      row("o-start", "tool.started", {
+      ...turn("turn-1"),
+      row("g-start", "tool.started", {
         itemType: "command_execution",
-        toolUseId: "call-opening",
-        title: "Bash",
-        data: { toolName: "Bash", input: { command: "npm run build" } },
-        truncated: true
+        toolUseId: "call-grok",
+        status: "inProgress",
+        title: "Run npm test",
+        detail: "npm test",
+        data: firstFrame
       }, { turnId: "turn-1" }),
-      row("o-update", "tool.updated", { itemType: "command_execution", toolUseId: "call-opening", title: "Bash" }, {
+      asStored("g-update", "tool.updated", {
+        itemType: "command_execution",
+        toolUseId: "call-grok",
+        status: "inProgress",
+        title: "Run npm test",
+        detail: "npm test",
+        data: { ...firstFrame, rawOutput: { content: "PASS a.test.ts\nPASS b.test.ts\n" } }
+      }),
+      row("r-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "toolu_r",
+        status: "inProgress",
+        title: "Command run",
+        detail: "Bash: {}",
+        data: { toolName: "Bash", input: {} }
+      }, { turnId: "turn-1" }),
+      asStored("r-update", "tool.updated", {
+        itemType: "command_execution",
+        toolUseId: "toolu_r",
+        status: "inProgress",
+        title: "Command run",
+        detail: "Bash: cat out.txt",
+        data: {
+          toolName: "Bash",
+          input: { command: "cat out.txt" },
+          result: { type: "tool_result", tool_use_id: "toolu_r", content: "done\n" }
+        }
+      })
+    ]);
+    const payloads = closingsOf(state).map((closing) => activityOf(closing).payload as Record<string, unknown>);
+    assert.deepEqual(
+      payloads.map((payload) => [payload.toolUseId, payload.data, "truncated" in payload]),
+      [
+        ["call-grok", firstFrame, false],
+        ["toolu_r", { toolName: "Bash", input: {} }, false]
+      ]
+    );
+  });
+
+  it("keeps a cut output marked when no row holds whole data: the cut copy, with its truncated", () => {
+    const cutOutput = (id: string, toolUseId: string) =>
+      asStored(id, "tool.updated", {
+        itemType: "command_execution",
+        toolUseId,
+        status: "inProgress",
+        title: "Run npm test",
+        detail: "npm test",
+        data: {
+          toolUseId,
+          kind: "execute",
+          command: "npm test",
+          rawOutput: { content: "PASS a.test.ts\nPASS b.test.ts\n" }
+        }
+      });
+    const state = foldOf([
+      ...turn("turn-1"),
+      // Its start holds no data at all…
+      row("n-start", "tool.started", { itemType: "command_execution", toolUseId: "call-bare", title: "Run npm test" }, {
         turnId: "turn-1"
       }),
-      // Whole data says nothing — and a cut row whose data is not the one copied neither.
+      cutOutput("n-update", "call-bare"),
+      // …or the window holds no row of it but the cut update (its opening row past retention's cap).
+      cutOutput("o-update", "call-only-cut")
+    ]);
+    const payloads = closingsOf(state).map((closing) => activityOf(closing).payload as Record<string, unknown>);
+    assert.deepEqual(
+      payloads.map((payload) => [
+        payload.toolUseId,
+        (payload.data as Record<string, unknown>).rawOutput,
+        payload.truncated
+      ]),
+      [
+        ["call-bare", { content: "PASS a.test.ts" }, true],
+        ["call-only-cut", { content: "PASS a.test.ts" }, true]
+      ]
+    );
+  });
+
+  it("carries whole data as it is — the latest row's, else the opening row's — unmarked", () => {
+    const state = foldOf([
+      ...turn("turn-1"),
       row("w-start", "tool.started", {
         itemType: "command_execution",
         toolUseId: "call-whole",
         title: "Bash",
-        data: { toolName: "Bash", input: {} },
-        truncated: true
+        data: { command: "ls" }
       }, { turnId: "turn-1" }),
       row("w-update", "tool.updated", {
         itemType: "command_execution",
         toolUseId: "call-whole",
         title: "Bash",
-        data: { toolName: "Bash", input: { command: "ls" } }
-      }, { turnId: "turn-1" })
+        data: { command: "ls -la" }
+      }, { turnId: "turn-1" }),
+      row("s-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "call-start",
+        title: "Bash",
+        data: { command: "pwd" }
+      }, { turnId: "turn-1" }),
+      row("s-update", "tool.updated", { itemType: "command_execution", toolUseId: "call-start", title: "Bash" }, {
+        turnId: "turn-1"
+      })
     ]);
-    const payloads = closingsOf(state).map((closing) => closing.activity.payload as Record<string, unknown>);
+    const payloads = closingsOf(state).map((closing) => activityOf(closing).payload as Record<string, unknown>);
     assert.deepEqual(
-      payloads.map((payload) => [payload.toolUseId, payload.data, payload.truncated]),
+      payloads.map((payload) => [payload.toolUseId, payload.data, "truncated" in payload]),
       [
-        ["call-grok", cutUpdate.data, true],
-        ["call-opening", { toolName: "Bash", input: { command: "npm run build" } }, true],
-        ["call-whole", { toolName: "Bash", input: { command: "ls" } }, undefined]
+        ["call-whole", { command: "ls -la" }, false],
+        ["call-start", { command: "pwd" }, false]
       ]
     );
-    assert.equal("truncated" in payloads[2]!, false, "no marker at all on whole data");
   });
 
   it("leaves alone an open call no row of the window anchors — the woken call a rewind left — and closes one a row anchors", () => {

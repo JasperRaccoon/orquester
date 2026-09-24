@@ -42,12 +42,14 @@
  *   call reads open again. The data rides along because a completion carries
  *   a call's final state: the snapshot read drops every `tool.updated` a later
  *   completion supersedes (`dropSupersededToolUpdatedActivities`), so a closer
- *   without it would take a call's input off every cold load. So does the
- *   `truncated` of the row it came from: ingestion stores a `tool.updated`
- *   already slimmed (§5.6), and a closer carrying its preview unmarked would
- *   pass it off as the call's whole output — the MCP's `read_tool_output`
- *   answers a command's output from a completion's data unless it is cut, and
- *   the GUI offers "Load full output" only on a cut row. **Except a call
+ *   without it would take a call's input off every cold load. Ingestion
+ *   stores a `tool.updated` already slimmed (§5.6, `truncated`), and the data
+ *   counts as cut only when it holds a cut OUTPUT ({@link closerData}): an
+ *   identity-only cut (Claude's `{command, toolName}`) rides unmarked — marked,
+ *   it offered "Load full output" and an MCP `outputItemId` that read the same
+ *   row back — while an output preview (Grok's `rawOutput`) never passes for
+ *   the whole output: the opening row's whole data rides instead, and the cut
+ *   copy rides marked only when no row holds whole data. **Except a call
  *   no row of the window anchors** ({@link anchorsCall}: every row of it
  *   turnless and ownerless) — what a rewind leaves of a woken Claude parent's
  *   call, its start and early input update, or a woken call no turn ever
@@ -95,6 +97,7 @@ import {
   ACTIVE_SUBAGENT_STATUSES,
   anchorsCall,
   CALL_ROW_KINDS,
+  commandOutputText,
   foldSubagentActivities,
   openWorkOf,
   type OpenCall,
@@ -239,6 +242,39 @@ function anchoredCallsOf(activities: readonly ThreadActivityItem[]): Set<string>
   return anchored;
 }
 
+/** A payload that carries `data` at all. */
+function hasData(payload: Record<string, unknown>): boolean {
+  return payload.data !== undefined && payload.data !== null;
+}
+
+/**
+ * The data a call's closer carries, and whether it is marked cut: the latest
+ * lifecycle row's, else the opening row's — ingestion stores a `tool.updated`
+ * already slimmed (§5.6, `truncated`), and what that cut means depends on
+ * what the data holds. An identity only (Claude's `{command, toolName}`, its
+ * input projected to the command) holds nothing more anywhere: it rides
+ * unmarked, the command kept, and no "Load full output" or `outputItemId`
+ * points at a read that finds nothing more. An OUTPUT cut to its preview
+ * (`commandOutputText` finds one: Grok's `rawOutput`, the result on a Claude
+ * update whose completion never landed) must not pass for the whole output —
+ * `read_tool_output` answers a command's output from an unmarked completion —
+ * so the opening row's whole data rides instead, unmarked, and only when no
+ * row holds whole data does the cut copy ride, with its `truncated`.
+ */
+function closerData(
+  latest: Record<string, unknown>,
+  opening: Record<string, unknown>
+): { data: unknown; truncated: boolean } {
+  const source = hasData(latest) ? latest : opening;
+  if (source.truncated !== true || commandOutputText(source.data) === undefined) {
+    return { data: source.data, truncated: false };
+  }
+  if (source !== opening && hasData(opening) && opening.truncated !== true) {
+    return { data: opening.data, truncated: false };
+  }
+  return { data: source.data, truncated: true };
+}
+
 /** `item.completed`'s row, as ingestion writes one, for a call nothing will complete. */
 function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityItem {
   const latest = call.latestLifecycle;
@@ -246,13 +282,7 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
   const opening = asRecord(call.opening.payload) ?? {};
   const itemType = nonBlank(payload.itemType) ?? nonBlank(opening.itemType);
   const title = nonBlank(payload.title) ?? nonBlank(opening.title);
-  // The latest row's data, else the opening row's — with that row's own word
-  // on whether it is whole: ingestion stores a `tool.updated` already slimmed
-  // (§5.6, `truncated`), so its data may be a preview, and a completion that
-  // does not say so claims it is the call's whole output.
-  const source = payload.data !== undefined && payload.data !== null ? payload : opening;
-  const data = source.data;
-  const truncated = data !== undefined && source.truncated === true;
+  const { data, truncated } = closerData(payload, opening);
   const owner = ownerOf(latest);
   const parentToolUseId = presentId(latest.parentToolUseId) ?? presentId(payload.parentToolUseId);
   return {
