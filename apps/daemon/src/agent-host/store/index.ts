@@ -1171,6 +1171,13 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       if ((window?.size ?? 0) < byteOffset) {
         return stale;
       }
+      // The line at a cursor past the log's start is the next one the store
+      // wrote — never empty, as the store writes none. A rewritten log can put
+      // a newline exactly there, and skipping it as an empty line would take
+      // the line after it for the cursor's next one.
+      if (byteOffset > 0 && window?.bytes[0] === 0x0a) {
+        return stale;
+      }
       const decoded = await decodeWindow(window?.bytes ?? Buffer.alloc(0), byteOffset);
       // The first complete line decides: it must decode AND carry afterSeq + 1.
       if (decoded.lines > 0 && decoded.events[0]?.seq !== afterSeq + 1) {

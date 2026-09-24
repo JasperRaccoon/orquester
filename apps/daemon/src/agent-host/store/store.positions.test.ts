@@ -468,6 +468,25 @@ test("a cursor into a rewritten log is a mismatch, never a misread", async () =>
   assert.deepEqual(tail.events, []);
 });
 
+test("a cursor on a newline of a rewritten log is a mismatch: an empty line is never the next line the store wrote", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const old = await store.append({ threadId: "t1", events: [created(), say("t1", "m1", "a"), say("t1", "m2", "x")] });
+  const cursor = { byteOffset: old.positions[2]!.byteOffset, afterSeq: 2 };
+
+  // The same thread id, and a log one byte longer at line two: the old cursor sits on that line's newline, and the
+  // line after it carries the cursor's seq + 1 — read as an empty line and a continuation, it would pass for one.
+  await store.deleteThread("t1");
+  const rewritten = await store.append({ threadId: "t1", events: [created(), say("t1", "m1", "ab"), say("t1", "m2", "y")] });
+  assert.equal(rewritten.positions[2]!.byteOffset, cursor.byteOffset + 1, "precondition: a newline lands exactly on the cursor");
+
+  const tail = await store.readEventsFrom("t1", cursor);
+  assert.equal(tail.mismatch, true);
+  assert.deepEqual(tail.events, []);
+  // From the log's start, an empty line is only a line every reader skips.
+  assert.equal((await store.readEventsFrom("t1", { byteOffset: 0, afterSeq: 0 })).events.length, 3);
+});
+
 test("an offset inside a line is a mismatch", async () => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
