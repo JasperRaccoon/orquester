@@ -42,6 +42,7 @@ import {
   EMPTY_PERSISTED_DRAFT,
   loadComposerDraft,
   persistedDraftsEqual,
+  readyChip,
   type DraftPersistScheduler
 } from "./composer-draft";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
@@ -74,6 +75,7 @@ import {
 import {
   attachmentCountBlockSend,
   attachmentRejectionReason,
+  composerStatusText,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
@@ -333,10 +335,11 @@ export function ChatComposer({
     draftRef.current = next;
     setDraft(next);
     setCursor(next.text.length);
-    // A draft files came back into over the eight loads whole and says why it
-    // cannot be sent (§7.4). Nothing else is reset here: whether this thread
+    // A draft files came back into over the eight loads whole, and the status
+    // line says why it cannot be sent — worked out from the draft itself
+    // (`composerStatusText`). Nothing else is reset here: whether this thread
     // has a send in flight is the registry's to say, not this instance's.
-    setNotice(attachmentCountBlockSend(loaded.attachments));
+    setNotice(null);
     setMenuDismissed(false);
     // A half-finished double Escape belongs to the thread it was pressed in.
     escapeSequenceRef.current?.reset();
@@ -626,15 +629,7 @@ export function ChatComposer({
       setNotice(decision.reason);
       return false;
     }
-    const entry: StagedAttachment = {
-      key: decision.key,
-      name: decision.name,
-      sizeBytes: decision.sizeBytes,
-      mimeType: decision.mimeType,
-      status: "ready",
-      progress: 1,
-      ref
-    };
+    const entry = readyChip(decision, ref);
     draftRef.current = { ...current, attachments: [...current.attachments, entry] };
     setDraft((state) =>
       state.attachments.some((existing) => existing.key === entry.key)
@@ -665,8 +660,9 @@ export function ChatComposer({
    * Batch-safe, like `insertText`: a Stop returns every queued message in one
    * tick, each merged over the draft the previous one left in `draftRef`.
    * Places the caret at the end without taking focus, as every bridge insert
-   * does. Answers the refs a bound still refused, which the caller writes into
-   * the draft as their paths.
+   * does; a draft it takes over the eight says so on the status line, worked
+   * out from the draft. Answers the refs a bound still refused, which the
+   * caller writes into the draft as their paths.
    */
   const returnMessage = React.useCallback(
     (message: ComposerDraft): AttachmentRef[] => {
@@ -688,8 +684,6 @@ export function ChatComposer({
         ]
       }));
       applyCaret(next.text.length, { focus: isTextareaFocused() });
-      const over = attachmentCountBlockSend(next.attachments);
-      if (over !== null) setNotice(over);
       return next.unstaged;
     },
     [applyCaret, isTextareaFocused]
@@ -728,17 +722,14 @@ export function ChatComposer({
     (thread: string, restore: FailedSendRestore<StagedAttachment>): boolean => {
       if (liveThreadRef.current !== thread) return false;
       // Every chip comes back — the ones it carried ahead of any staged while
-      // it was in flight — so the draft may be over the eight, and the notice
-      // says so beside the failure. Worked out now, over the live ref every
-      // insert writes first: the updater below runs only when the flush renders.
-      const restored = draftAfterSend({ outcome: restore.outcome, sent: restore.sent, draft: draftRef.current });
-      const over = attachmentCountBlockSend(restored?.attachments ?? draftRef.current.attachments);
+      // it was in flight — so the draft may be over the eight; the status line
+      // adds that to the failure's notice, worked out from the draft.
       flushSync(() => {
         setDraft((state) => {
           const next = draftAfterSend({ outcome: restore.outcome, sent: restore.sent, draft: state });
           return next === null ? state : { ...state, ...next };
         });
-        setNotice(over === null ? restore.outcome.notice : `${restore.outcome.notice} ${over}`);
+        setNotice(restore.outcome.notice);
       });
       return true;
     },
@@ -1134,11 +1125,15 @@ export function ChatComposer({
   });
   // A draft files came back into may hold more than the eight: every one stays,
   // and it is neither sent nor queued until the user removes enough (§7.4).
+  const countBlock = attachmentCountBlockSend(draft.attachments);
   const sendDisabledReason = reverting
     ? "A revert is running."
     : hasPendingRequest
       ? "Answer the request above first."
-      : (uploadBlock ?? attachmentCountBlockSend(draft.attachments));
+      : (uploadBlock ?? countBlock);
+  // The count part is never held in `notice`: rendered from the draft, it can
+  // never disagree with the button it disables.
+  const statusText = composerStatusText({ notice, attachments: draft.attachments });
 
   const runSend = React.useCallback(
     async (
@@ -1251,7 +1246,9 @@ export function ChatComposer({
         return;
       }
       if (sendDisabledReason) {
-        setNotice(sendDisabledReason);
+        // The count gate is on the status line already, worked out from the
+        // draft; every other reason is said here, once.
+        if (sendDisabledReason !== countBlock) setNotice(sendDisabledReason);
         return;
       }
 
@@ -1327,6 +1324,7 @@ export function ChatComposer({
       planFollowUp,
       actions,
       applyCaret,
+      countBlock,
       draft.attachments,
       draft.text,
       interactionMode,
@@ -1694,9 +1692,9 @@ export function ChatComposer({
             )}
           />
 
-          {notice ? (
+          {statusText ? (
             <p className="pt-1 text-[11px] leading-snug text-warn-300" role="status">
-              {notice}
+              {statusText}
             </p>
           ) : null}
 

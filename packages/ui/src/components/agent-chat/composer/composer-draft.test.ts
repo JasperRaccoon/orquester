@@ -239,6 +239,30 @@ describe("a message coming back to a draft no composer shows (§7.4)", () => {
     ]);
     assert.equal(loadComposerDraft(next).attachments.length, 16, "and the next mount loads all of them");
   });
+
+  it("writes a returned file a bound refuses into the text as its path, so no later mount drops a file", () => {
+    // The same bounds and the same fallback as a mounted composer: a type or a
+    // size it never stages. Kept as a ref, the next mount's load dropped it.
+    const vector: AttachmentRef = {
+      type: "image",
+      id: "vector",
+      name: "diagram.svg",
+      mimeType: "image/svg+xml",
+      sizeBytes: 12,
+      path: "/w/p/.att/diagram.svg"
+    };
+    const next = persistedDraftAfterReturn({
+      persisted: { text: "typed since", attachments: [ref("mine")], context: [] },
+      message: { text: "the diagram [Image #1] and the notes", attachments: [vector, ref("notes")], context: [] }
+    });
+    assert.deepEqual(next.attachments.map((entry) => entry.id), ["mine", "notes"]);
+    assert.equal(next.text, "typed since\n\nthe diagram and the notes /w/p/.att/diagram.svg");
+    assert.equal(
+      loadComposerDraft(next).attachments.length,
+      next.attachments.length,
+      "the next mount stages every ref the draft holds"
+    );
+  });
 });
 
 describe("when the persisted draft is written", () => {

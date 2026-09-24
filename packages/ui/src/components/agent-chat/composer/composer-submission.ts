@@ -288,6 +288,25 @@ export function stagedAttachmentKeyForRef(ref: { id: string }): string {
   return `ref:${ref.id}`;
 }
 
+/**
+ * The chip fields an uploaded ref stages with — keyed by its id, and a ref
+ * with no declared `mimeType` measured as a file (see below). One spelling for
+ * every place a ref becomes a chip, bounded or not.
+ */
+export function stagedFieldsForRef(ref: AttachmentRef): {
+  key: string;
+  name: string;
+  sizeBytes: number;
+  mimeType: string;
+} {
+  return {
+    key: stagedAttachmentKeyForRef(ref),
+    name: ref.name,
+    sizeBytes: ref.sizeBytes ?? 0,
+    mimeType: ref.mimeType ?? "application/octet-stream"
+  };
+}
+
 export function decideStagedAttachmentForRef(input: {
   existing: readonly StagedAttachmentLike[];
   ref: AttachmentRef;
@@ -298,22 +317,20 @@ export function decideStagedAttachmentForRef(input: {
    */
   enforceCount?: boolean;
 }): StageRefDecision {
-  const key = stagedAttachmentKeyForRef(input.ref);
-  if (input.existing.some((entry) => entry.key === key || entry.ref?.id === input.ref.id)) {
-    return { kind: "duplicate", key };
+  const fields = stagedFieldsForRef(input.ref);
+  if (input.existing.some((entry) => entry.key === fields.key || entry.ref?.id === input.ref.id)) {
+    return { kind: "duplicate", key: fields.key };
   }
-  const mimeType = input.ref.mimeType ?? "application/octet-stream";
-  const sizeBytes = input.ref.sizeBytes ?? 0;
   const counted = input.enforceCount !== false;
   const reason = attachmentRejectionReason({
-    name: input.ref.name,
-    sizeBytes,
-    mimeType,
+    name: fields.name,
+    sizeBytes: fields.sizeBytes,
+    mimeType: fields.mimeType,
     stagedCount: counted ? input.existing.filter((entry) => entry.status === "ready").length : 0,
     preparingCount: counted ? input.existing.filter((entry) => entry.status !== "ready").length : 0
   });
   if (reason) return { kind: "rejected", reason };
-  return { kind: "staged", key, name: input.ref.name, sizeBytes, mimeType };
+  return { kind: "staged", ...fields };
 }
 
 /** §7.4: **uploads must finish before send.** */
@@ -341,6 +358,23 @@ export function attachmentCountBlockSend(attachments: readonly unknown[]): strin
   const over = attachments.length - MAX_TURN_ATTACHMENTS;
   if (over <= 0) return null;
   return `A message can carry ${MAX_TURN_ATTACHMENTS} attachments — remove ${over} before sending.`;
+}
+
+/**
+ * What the composer's status line says (§7.4): its notice — a failure, a
+ * refusal, a hint — and, while the draft holds more than the eight, the count
+ * gate beside it. The count part is worked out from the draft on every
+ * render, never held in the notice: a held copy went on saying "remove 8"
+ * after the user had removed them, over a send button that was enabled again.
+ * It moves with every chip removed and goes once the draft fits.
+ */
+export function composerStatusText(input: {
+  notice: string | null;
+  attachments: readonly unknown[];
+}): string | null {
+  const over = attachmentCountBlockSend(input.attachments);
+  if (input.notice === null || input.notice.length === 0) return over;
+  return over === null ? input.notice : `${input.notice} ${over}`;
 }
 
 /** A draft with neither text nor a finished attachment has nothing to send. */
@@ -511,9 +545,12 @@ const IMAGE_PLACEHOLDER = /\[Image #(\d+)\]/g;
  * draft holds (`appendToDraft` in the thread store, through
  * `draftAfterReturn` and `persistedDraftAfterReturn`).
  *
- * Whichever goes first keeps its text and chips as they are; the other's
- * follow, its text after one blank line — none when either side has no text —
- * and its chips after the first's. Chips merge by `key`, or by the upload's
+ * Whichever goes first keeps its chips as they are; the other's follow, its
+ * text after one blank line — none when either side has no text — and its
+ * chips after the first's. A message's text is kept exactly as it was, and so
+ * is the draft's, except that a draft a message goes BEHIND loses its trailing
+ * whitespace, so the blank line is the only gap between them (the rule the
+ * store's own append always had). Chips merge by `key`, or by the upload's
  * ref id as {@link decideStagedAttachmentForRef} has it, so a file both sides
  * hold is one chip. An image's `[Image #N]` is its position among the staged
  * images, so the first's text keeps naming its images, and each placeholder
@@ -552,12 +589,14 @@ export function mergeMessageIntoDraft<A extends RestorableAttachment>(input: {
     return ordinal === null ? placeholder : imagePlaceholder(ordinal);
   });
 
+  // Only a draft is trimmed at the join: a failed send's text comes back as it was sent.
+  const firstText = input.at === "back" ? first.text.trimEnd() : first.text;
   const text =
     secondText.trim().length === 0
       ? first.text
       : first.text.trim().length === 0
         ? secondText
-        : `${first.text.trimEnd()}\n\n${secondText}`;
+        : `${firstText}\n\n${secondText}`;
   return { text, attachments };
 }
 

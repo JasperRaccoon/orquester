@@ -532,19 +532,39 @@ describe("rewindTo", () => {
   });
 
   it("settles when its store is destroyed mid-wait, handing the message back to the persisted draft", async () => {
-    const { api, state } = await rewindable();
-    const rewinding = api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
-    await settle();
+    const backing: Record<string, string> = {};
+    (globalThis as unknown as { localStorage: unknown }).localStorage = {
+      getItem: (key: string) => backing[key] ?? null,
+      setItem: (key: string, value: string) => {
+        backing[key] = value;
+      },
+      removeItem: (key: string) => {
+        delete backing[key];
+      }
+    };
+    try {
+      const { api, state } = await rewindable();
+      const rewinding = api.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
+      await settle();
 
-    // No frame can reach a destroyed generation; the wait ends with it rather
-    // than at its timeout. The user asked for this message back, and losing
-    // it would be unrecoverable if the host goes on to rewind.
-    (api as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({
-      retain: false
-    });
-    await rewinding;
-    assert.equal(state().reverting, false);
-    assert.equal(state().draft.text, REWOUND_TEXT);
+      // No frame can reach a destroyed generation; the wait ends with it rather
+      // than at its timeout. The user asked for this message back, and losing
+      // it would be unrecoverable if the host goes on to rewind. It goes to the
+      // thread's persisted draft — no slice of it is open — never into the
+      // destroyed slice's own copy, which nothing will show again.
+      (api as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({
+        retain: false
+      });
+      await rewinding;
+      assert.equal(state().reverting, false);
+      const stored = JSON.parse(backing["orquester:agent-chat-drafts"] ?? "{}") as Record<
+        string,
+        { text: string }
+      >;
+      assert.equal(stored.s1?.text, REWOUND_TEXT);
+    } finally {
+      delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+    }
   });
 });
 
@@ -861,10 +881,15 @@ describe("a send outlives its store generation", () => {
   }
 
   /** A transport whose every command attempt answers only when the test says so. */
-  function gatedTransport(): { transport: AgentChatTransport; attempts: Attempt[] } {
+  function gatedTransport(): {
+    transport: AgentChatTransport;
+    attempts: Attempt[];
+    push(frame: AgentChatStreamFrame): void;
+  } {
     const attempts: Attempt[] = [];
+    const base = fakeTransport();
     const transport: AgentChatTransport = {
-      ...fakeTransport().transport,
+      ...base.transport,
       command(_sessionId, name, body, signal) {
         return new Promise((resolve, reject) => {
           attempts.push({
@@ -877,7 +902,7 @@ describe("a send outlives its store generation", () => {
         });
       }
     };
-    return { transport, attempts };
+    return { transport, attempts, push: base.push };
   }
 
   const ids = (): (() => string) => {
@@ -1021,6 +1046,11 @@ describe("a send outlives its store generation", () => {
       [["queued follow-up", true, ["f1"]]],
       "held at the front of the queue the user sees, not of the destroyed one"
     );
+    assert.equal(
+      second.getState().slice.errorBanner,
+      "no",
+      "and its reason with it: a held row with no banner never says why it waits"
+    );
   });
 
   it("with no live generation, a queued send that fails after the teardown goes back to the persisted draft", async () => {
@@ -1038,6 +1068,38 @@ describe("a send outlives its store generation", () => {
     await assert.rejects(sending);
     assert.equal(persisted().Q?.text, "typed since\n\nqueued follow-up");
     assert.deepEqual(persisted().Q?.attachments.map((attachment) => attachment.id), ["f1"]);
+  });
+
+  it("a rewind torn down before the host answered merges into the thread's live slice, never over its newer draft", async () => {
+    const { transport, attempts, push } = gatedTransport();
+    const deps = { transport, delay: async () => {} };
+    const first = retainThreadStore("W", deps);
+    await flush();
+    push({
+      kind: "snapshot",
+      thread: snapshot({
+        items: [
+          message("user", "first", { id: "u1", createdAt: stamp(1) }),
+          message("user", "try it the other way", { id: "u2", createdAt: stamp(2) })
+        ],
+        seq: 3
+      })
+    });
+    const rewinding = first.getState().actions.rewindTo({ messageId: "u2", targetTurnCount: 1 });
+    await settle();
+    assert.equal(attempts[0]?.name, "revert");
+
+    // The project switch lands while the `/revert` is still out, and the user
+    // is back — typing — before the host answers it.
+    tearDown("W");
+    const second = retainThreadStore("W", deps);
+    second.getState().actions.saveDraft({ text: "typed since", attachments: [], context: [] });
+
+    attempts[0]!.answer();
+    await rewinding;
+    const expected = "typed since\n\ntry it the other way";
+    assert.equal(second.getState().draft.text, expected, "the draft the user sees now");
+    assert.equal(persisted().W?.text, expected, "and the one the thread's next slice seeds from");
   });
 
   it("an answer in flight across a teardown never locks the next generation's card", async () => {

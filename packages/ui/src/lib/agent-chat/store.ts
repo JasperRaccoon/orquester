@@ -870,7 +870,7 @@ function attemptCommand(run: (signal: AbortSignal) => Promise<unknown>): Promise
 
 /** A generation's hook for the thread's other generations (§7.4) — see `holdQueuedMessageInThread`. */
 type HoldingThreadStore = ThreadStore & {
-  holdQueuedAtFront?: (message: QueuedComposerMessage) => void;
+  holdQueuedAtFront?: (message: QueuedComposerMessage, reason?: string) => void;
 };
 
 export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): ThreadStore {
@@ -1069,10 +1069,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * it: the composer saves its own whole draft back, so anything left here
      * was invisible until its next mount and overwritten by its next save
      * (fix-wave R7-5). With no composer mounted the same merge runs over the
-     * persisted draft (`persistedDraftAfterReturn`), every file kept, where
-     * the next mount loads it. A queued message returned by an interrupt while
-     * the user is on another tab must not be lost, and two live drafts would
-     * disagree.
+     * persisted draft (`persistedDraftAfterReturn`), every file kept — a file
+     * a bound refuses as its path — where the next mount loads it; from a
+     * torn-down generation, over the thread's live slice or storage, never its
+     * own stale copy. A queued message returned by an interrupt while the user
+     * is on another tab must not be lost, and two live drafts would disagree.
      */
     const appendToDraft = (message: QueuedComposerMessage): void => {
       const returned: ComposerDraft = {
@@ -1091,14 +1092,35 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
         return;
       }
-      setDraft(persistedDraftAfterReturn({ persisted: get().draft, message: returned }));
+      const merge = (draft: ComposerDraft): ComposerDraft =>
+        persistedDraftAfterReturn({ persisted: draft, message: returned });
+      if (closed) {
+        // A generation torn down before the append ran — a rewind whose
+        // `/revert` was still out when the tab's slice went — holds a stale
+        // draft, and a newer slice of the thread keeps its own copy: merged
+        // through the thread's live slice, or with none into its storage, as
+        // `holdQueuedMessageInThread` does. Never over this one's copy.
+        updateThreadDraft(sessionId, merge);
+        return;
+      }
+      setDraft(merge(get().draft));
     };
 
-    /** Guard 2's hold (§7.4): the failed message goes back to the FRONT, held for the user. */
-    const holdQueuedAtFront = (message: QueuedComposerMessage): void => {
+    /**
+     * Guard 2's hold (§7.4): the failed message goes back to the FRONT, held
+     * for the user. `reason` is the failure's banner, for a message another
+     * generation sent: its own banner went to that generation, and a held row
+     * with no banner never says why it waits. A banner the user closed for
+     * this thread stays closed, as `withCommandRetries` has it.
+     */
+    const holdQueuedAtFront = (message: QueuedComposerMessage, reason?: string): void => {
       update((state) => {
         const queue = holdAtFront(state.queue, message);
-        const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
+        const banner =
+          reason === undefined || dismissedErrorBanners.has(`${sessionId}\u0000${reason}`)
+            ? {}
+            : { errorBanner: reason };
+        const reducer = patchSlice(state.reducer, { queue: [...queue.messages], ...banner });
         return { ...state, queue, reducer, slice: reducer.slice };
       });
     };
@@ -1491,7 +1513,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           // will ever show again: the thread's live generation holds it, or,
           // with none, its persisted draft takes it.
           if (closed) {
-            holdQueuedMessageInThread(sessionId, message);
+            holdQueuedMessageInThread(sessionId, message, errorMessage(error));
           } else {
             holdQueuedAtFront(message);
           }
@@ -2194,15 +2216,20 @@ export function updateThreadDraft(
  * Hold a queued message whose send failed after the generation that sent it
  * was torn down (§7.4) — its turn retries past the teardown — where the user
  * will see it: at the front of the thread's live generation's queue, held for
- * the user's action like any failed queued send, or, with no slice of the
- * thread open, merged into the persisted draft the next one seeds from. Never
- * in the destroyed queue: the next generation was seeded from a snapshot taken
- * after the message had already left it, so nobody would show it again.
+ * the user's action like any failed queued send and with the failure's banner
+ * (`reason`) beside it, or, with no slice of the thread open, merged into the
+ * persisted draft the next one seeds from. Never in the destroyed queue: the
+ * next generation was seeded from a snapshot taken after the message had
+ * already left it, so nobody would show it again.
  */
-function holdQueuedMessageInThread(sessionId: string, message: QueuedComposerMessage): void {
+function holdQueuedMessageInThread(
+  sessionId: string,
+  message: QueuedComposerMessage,
+  reason: string
+): void {
   const live = registry.get(sessionId)?.store as HoldingThreadStore | undefined;
   if (live?.holdQueuedAtFront) {
-    live.holdQueuedAtFront(message);
+    live.holdQueuedAtFront(message, reason);
     return;
   }
   updateThreadDraft(sessionId, (draft) => persistedDraftAfterReturn({ persisted: draft, message }));

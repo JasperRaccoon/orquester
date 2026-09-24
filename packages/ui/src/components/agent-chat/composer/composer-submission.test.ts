@@ -8,6 +8,7 @@ import {
   buildPlanImplementationPrompt,
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
+  composerStatusText,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
   draftAfterSend,
@@ -411,6 +412,28 @@ test("a file coming back is never refused for the count, and every other bound s
   assert.equal(decideStagedAttachmentForRef({ existing: [], ref: huge, enforceCount: false }).kind, "rejected");
   const vector = { type: "image", id: "/tmp/v.svg", name: "v.svg", mimeType: "image/svg+xml", sizeBytes: 12 } as const;
   assert.equal(decideStagedAttachmentForRef({ existing: [], ref: vector, enforceCount: false }).kind, "rejected");
+});
+
+test("the status line works the count out from the draft, so it follows every chip removed and goes once the draft fits", () => {
+  // The count part is never held in the notice: a held copy said "remove 8"
+  // after the user had removed them, over a Send button that was enabled.
+  const chips = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ key: `k${index}`, status: "ready" as const }));
+  const failed = "The agent host is restarting.";
+  assert.equal(
+    composerStatusText({ notice: failed, attachments: chips(16) }),
+    `${failed} A message can carry 8 attachments — remove 8 before sending.`
+  );
+  assert.equal(
+    composerStatusText({ notice: failed, attachments: chips(13) }),
+    `${failed} A message can carry 8 attachments — remove 5 before sending.`
+  );
+  assert.equal(composerStatusText({ notice: failed, attachments: chips(8) }), failed, "fits: the failure alone");
+  assert.equal(
+    composerStatusText({ notice: null, attachments: chips(9) }),
+    "A message can carry 8 attachments — remove 1 before sending."
+  );
+  assert.equal(composerStatusText({ notice: null, attachments: chips(8) }), null);
 });
 
 test("a draft over the eight cannot be sent, and says how many to remove", () => {
@@ -858,14 +881,18 @@ test("a returned message joins the draft's text with one blank line, and no blan
   );
 });
 
-test("a failed send is the same merge with the message in front", () => {
+test("a failed send comes back ahead of the draft exactly as it was sent, the draft's own images renumbered behind it", () => {
+  // The merge in front: the restored text is kept as it was — trailing
+  // whitespace included — and only the draft behind it moves.
   const before = imageChip("before");
   const pasted = imageChip("pasted");
-  const outcome = failedWith("compare [Image #1]");
-  const draft = { text: "then crop [Image #1]", attachments: [pasted] };
   assert.deepEqual(
-    draftAfterSend({ outcome, sent: [before], draft }),
-    mergeMessageIntoDraft({ draft, message: { text: "compare [Image #1]", attachments: [before] }, at: "front" })
+    draftAfterSend({
+      outcome: failedWith("compare [Image #1]  "),
+      sent: [before],
+      draft: { text: "then crop [Image #1]", attachments: [pasted] }
+    }),
+    { text: "compare [Image #1]  \n\nthen crop [Image #2]", attachments: [before, pasted] }
   );
 });
 

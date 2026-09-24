@@ -3462,32 +3462,36 @@ in a module-level registry (`composer-sends.ts`: one token per send, each settle
 token only, after any restore has landed), and every reader of "is this thread sending" reads it
 through `useComposerSending`: the send button and Enter (`submit` checks the live registry), the
 rewind picker, "Rewind to here" and the shell's Esc Esc (`rewindPickerEnabled`'s `isSending`), and
-the account chip. A remounted composer's "Sending" spinner is the whole notice. The post is
-bounded: every command attempt is aborted after 25 s (`COMMAND_ATTEMPT_TIMEOUT_MS` in
+the account chip. A remounted composer's "Sending" spinner is the whole notice. The post is bounded:
+every command attempt is aborted after 25 s (`COMMAND_ATTEMPT_TIMEOUT_MS` in
 `lib/agent-chat/store.ts`, past the daemon's own 20 s host timeout) and retried as a lost response,
 and a `turn` or an `answer` keeps retrying with the same `commandId` after its store generation is
 gone — giving up there turned a response the host may already have accepted into a failed send the
-user resent. What that generation still had in flight never strands the next one: a queued send
-that fails after the teardown is held at the front of the thread's live generation, or with none
-merged into its persisted draft (`holdQueuedMessageInThread`), and the request ids with an answer
-in flight do not ride the retained snapshot (`cachedThreadState`), so a settled answer never leaves
-its card locked.*
+user resent. What that generation still had in flight never strands the next one: a queued send that
+fails after the teardown is held at the front of the thread's live generation with the failure's
+banner, or with none merged into its persisted draft (`holdQueuedMessageInThread`); a message it
+hands back to the draft after the teardown — a rewind whose `/revert` was still out — merges through
+the thread's live slice or storage, never over its own stale copy (`updateThreadDraft`); and the
+request ids with an answer in flight do not ride the retained snapshot (`cachedThreadState`), so a
+settled answer never leaves its card locked.*
 
 *Built: **a draft keeps every file that comes back to it, and holds the send over the eight.** A
 failed send's chips come back ahead of the ones staged while it was in flight, a Stop returns every
 queued message, a rewind returns its message: each file was part of a message once, so none is
 refused for the count (`decideStagedAttachmentForRef`'s `enforceCount: false`) and
 `loadComposerDraft` no longer keeps only the first eight while the text still names the rest. A
-draft over `MAX_TURN_ATTACHMENTS` is neither sent nor queued until trimmed — "A message can carry
-8 attachments — remove N before sending." (`attachmentCountBlockSend`, part of
-`sendDisabledReason`) — which the live and bridge restores add to their notice and a mount that
-loads such a draft shows; new picks are still refused at eight. A returned message merges behind
-the draft through the merge a failed send makes the other way round (`mergeMessageIntoDraft`), so
-its `[Image #N]` keeps naming its own images, never the draft's. With a composer mounted the whole
-message goes to it through the bridge (`returnMessage`, `draftAfterReturn` in `composer-draft.ts`),
-and a file it still refuses for a type or a size is written into its draft as its path — never
-parked in the store's draft behind it, where its next save wrote over it; with none mounted the
-merge runs over the persisted draft (`persistedDraftAfterReturn`), every file kept.*
+draft over `MAX_TURN_ATTACHMENTS` is neither sent nor queued until trimmed — "A message can carry 8
+attachments — remove N before sending." (`attachmentCountBlockSend`, part of `sendDisabledReason`) —
+and the composer's status line says so beside any notice, worked out from the draft on every render
+(`composerStatusText`), so it follows every chip the user removes and never disagrees with the
+button; new picks are still refused at eight. A returned message merges behind the draft through the
+merge a failed send makes the other way round (`mergeMessageIntoDraft`), so its `[Image #N]` keeps
+naming its own images, never the draft's. With a composer mounted the whole message goes to it
+through the bridge (`returnMessage`, `draftAfterReturn` in `composer-draft.ts`), and a file it still
+refuses for a type or a size is written into its draft as its path — never parked in the store's
+draft behind it, where its next save wrote over it. With none mounted the same merge, bounds and
+fallback run over the persisted draft (`persistedDraftAfterReturn`), so no target drops a file: the
+next mount stages every ref the merge wrote.*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind
