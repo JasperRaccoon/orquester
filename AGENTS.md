@@ -927,6 +927,24 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
   `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
   a surfaced subagent.
+- **OpenCode: a subagent's answer arrives after its run ended, and a running command restates its
+  output.** (fixtures README observations 27-28, `adapters/opencode/normalize.ts`.) (1) The
+  child's own `session.idle` ends a run just BEFORE the parent's `task` part completes with the
+  answer (fixture 12, lines 179-180), and the once-per-run end guard dropped that part: every
+  OpenCode roster row read `result: null`. The part now gives the run's end its result — one more
+  `task.completed` of the same run, same linkage, `completed`, `summary` the text inside the tool's
+  `<task_result>` envelope (`taskResultText`) — once per run (`resultPending`), never for a stale
+  part of an earlier call or a background answer; the roster fold takes a settled row's result
+  from a later completion and reopens nothing. A part that settles first ends the run itself, with
+  the same text. (2) Every running frame of a `bash` part restates ALL its output so far in
+  `state.metadata.output`, which rode only the item row's `data.state` — dropped by the wire
+  slimmer — so nothing showed until the completion. Each frame is cut against the value last seen
+  for the part (`advanceOutputMark`, `OpenCodeSessionState.outputMarks`) into `content.delta
+  {command_output}` of just what it adds, on the call's item and under its owner: past 30 000
+  characters the tool keeps `"...\n\n"` and a sliding tail window, and what follows the window's
+  longest overlap with the last value is new. Never text already shown: a value that rewinds, or
+  of no known shape, adds nothing, and output that repeats itself can overlap further than it
+  really did — a repeat is then lost, not doubled. The completion keeps `state.output`.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission

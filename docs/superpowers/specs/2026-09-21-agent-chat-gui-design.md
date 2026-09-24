@@ -1473,6 +1473,19 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   its own work with `agentId` — §7.6's roster shows what the provider actually reports while
   §7.2's re-homing keeps it out of the parent timeline. The ancestry-resolution retry loop above is
   kept (`apps/daemon/src/agent-host/adapters/opencode/normalize.ts`).*
+  *Built (2026-09-24): the child's own `session.idle` ends its run just BEFORE the parent's `task`
+  part completes with the answer, so the part gives that run's end its result — one more
+  `task.completed` of the same run, `completed`, carrying the text inside the tool's
+  `<task_result>` envelope — once per run, never for a stale part of an earlier call; §7.6's fold
+  takes a settled row's result from a later completion and reopens nothing. Before it, every
+  OpenCode roster row read `result: null`. And a running command's output, which each `running`
+  frame restates whole in `state.metadata.output` and which reached nobody (it rode the item
+  row's `data.state`, slimmed off the wire), streams as §5.6's `command_output` chunks of what each
+  frame adds, cut against a per-part high-water mark and owned like the call's rows. Past the
+  tool's 30 000 characters the value is `"...\n\n"` and a sliding tail window; what follows the
+  window's longest overlap with the last value is new, and a value that cannot prove what it adds
+  adds nothing — never text already shown (`adapters/opencode/normalize.ts`, `state.ts`; fixtures
+  README observations 27-28).*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

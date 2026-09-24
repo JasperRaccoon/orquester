@@ -476,9 +476,9 @@ the roster shows whatever the provider reports. The mapping this capture support
 | the parent's `task` part going `running` (next frame) | `task.started` with `toolUseId` = the part's `callID`, the launch id a relaunch is told apart by (observation 26), then `task.progress` |
 | child `session.updated` | `task.progress` on a real title change (an unchanged title is re-stated on every recompute — observation 25) |
 | child `session.status` | `task.updated {status: running \| idle}` |
-| child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal |
+| child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal; the parent's `task` part that follows it gives that end its result (observation 27) |
 | child `session.error` | `task.completed {status:"failed"}` |
-| child `message.part.updated` (tool) | `task.progress {lastToolName}` **and** an `item.*` row stamped `agentId` |
+| child `message.part.updated` (tool) | `task.progress {lastToolName}` **and** an `item.*` row stamped `agentId`; while a command runs, its output as `command_output` chunks stamped the same (observation 28) |
 | child text / reasoning parts | `content.delta` stamped `agentId` |
 | child `todo.updated` | `task.progress` with an `n/m steps done` summary — a child's plan is its own, and must not overwrite the thread's `turn.plan` |
 
@@ -699,13 +699,79 @@ What the normaliser makes of it (`linkChildFromTaskPart`):
   retention").
 - A live part naming a **settled** child under a `callID` never seen for it is a relaunch: a
   new `task.started` naming it, before any row of the new run; the child's own
-  `session.idle` ends it.
+  `session.idle` ends it, and the part's own end then gives that run its result
+  (observation 27).
 - Any other part whose `callID` is not the child's current launch — a frame of any call
   seen for it before (an earlier launch, a call handed over while it worked), a call on a
   child that is still working — emits no task row: it can neither start a run nor end one.
 - A `completed` part with `metadata.background: true` does not settle the child.
 
 A capture of a real `task_id` resume would confirm the frame order; none has been made.
+
+### 27. A child's run ends before the part that carries its answer
+
+Fixture 12, lines 177-180: the child settles, and only THEN does the parent's `task` part
+complete with what the child said:
+
+```jsonc
+{"type":"session.status","properties":{"sessionID":"ses_f3dfd3d8…","status":{"type":"busy"}}}
+{"type":"session.status","properties":{"sessionID":"ses_f3dfd3d8…","status":{"type":"idle"}}}
+{"type":"session.idle","properties":{"sessionID":"ses_f3dfd3d8…"}}
+{"type":"message.part.updated","properties":{"part":{"tool":"task","callID":"call_107260",
+  "state":{"status":"completed","output":"<task id=\"ses_f3dfd3d8…\" state=\"completed\">\n<task_result>\nThe files in the current directory are:\n\n- README.md\n- a.ts\n</task_result>\n</task>",…}}}}
+```
+
+The child's `session.idle` is its run's end (observation 19), so that end carries no result,
+and a second end was never written: every OpenCode roster row read `result: null`. The part
+now gives the run's end its result — one more `task.completed` of the same run, same linkage,
+`status: "completed"`, `summary` the text inside `<task_result>` — which the roster fold takes
+the way it takes a result from any later completion of a settled row: status and times kept,
+nothing reopened. Once per run: a repeated frame of the part, a stale part of an earlier call
+(observation 26) and a background answer (`metadata.background`, "still working") add nothing.
+A part that errors after the idle gives its error text the same way; the run's end stays the
+child's `completed`. A part that settles FIRST ends the run itself, with the same text.
+
+The envelope is the `task` tool's wrapping for the parent's model: `<task id="…" state="…">`,
+an optional `<summary>` line, then `<task_result>` (or `<task_error>`) around the text. 1.18.5
+writes it as above; 1.18.32's `TaskTool` builds the same one (`Ur`, read from the source, not
+captured). An output of any other shape is the result as it stands.
+
+### 28. A running `bash` part restates its whole output on every frame
+
+Fixtures 03, 04 and 12: after an opening `running` frame with no metadata, every `running`
+frame carries `state.metadata.output` — `""` first, then everything printed so far — and the
+`completed` frame repeats it in `metadata.output` and `output` (fixture 04, lines 110-114):
+
+```jsonc
+{"part":{"tool":"bash","callID":"tool_bash_ScHQ…","state":{"status":"running","metadata":{"output":""},…}}}
+{"part":{"tool":"bash","callID":"tool_bash_ScHQ…","state":{"status":"running","metadata":{"output":"two\n"},…}}}
+{"part":{"tool":"bash","callID":"tool_bash_ScHQ…","state":{"status":"completed","output":"two\n",
+  "metadata":{"output":"two\n","exit":0,"truncated":false},"title":"echo two",…}}}
+```
+
+Identical frames repeat (fixture 04, lines 153-154). **Read from 1.18.32's source, not
+captured:** `ShellTool.run` writes `metadata.output` once per chunk the process prints and
+keeps at most 30 000 characters of it — past that the value is `"...\n\n"` and the last 30 000
+(`Ze`), a window that slides instead of growing; the final `output` is cut on its own (by lines
+and bytes, behind a note naming the file holding the whole of it).
+
+Nothing showed that output while the command ran: it rode the item row inside `data.state`,
+which the wire slimmer drops. The normaliser now cuts each running frame of a command-like
+part against the value it last saw for that part and emits what it adds as `content.delta
+{command_output}` on the call's item, under the call's owner (a child's carry its `agentId`)
+— the chunks ingestion joins onto the call's row (`advanceOutputMark`, `emitRunningOutput`):
+
+| The new value | Emits |
+|---|---|
+| extends the last one (every captured frame) | the appended text |
+| is a prefix of it, `""` included | nothing; the mark stays — a snapshot never rewinds output |
+| a `"...\n\n"` window | what follows its longest overlap with the end of the last value |
+| such a window keeping nothing of it (a burst longer than the window) | the whole window, its head marking the gap |
+| anything else (no window head, no overlap) | nothing: it proves nothing about what it adds |
+
+Never text already shown: output that repeats itself can overlap further than it really did,
+and then a repeat is lost, not doubled. The completion keeps `state.output`, as before, and a
+settled part drops its mark.
 
 ---
 
