@@ -139,7 +139,7 @@ import {
   threadNotFound
 } from "./errors.ts";
 import { applyEventsChunked, DEFAULT_FOLD_OPS, type FoldOps } from "./fold-ops.ts";
-import { leftoverWorkClosings } from "./leftover-work.ts";
+import { legacyLaunchStarts, leftoverWorkClosings } from "./leftover-work.ts";
 import {
   createMemoryLaunchConfigStore,
   launchConfigFromRequest,
@@ -1134,17 +1134,36 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     (left.providerThreadId ?? null) === (right.providerThreadId ?? null) &&
     left.resumeCursor === right.resumeCursor;
 
+  /**
+   * `occurredAt` is the clock's unless given — only a settle of a turn whose
+   * process died before the host could see it end gives one
+   * ({@link crashSettleAt}).
+   *
+   * `force` appends the session even when it is unchanged: the one caller is
+   * a settle whose whole point is the turn it ends, not a new session state
+   * — a stale `pending` turn behind a session that already reads `stopped`
+   * (`settleStalePendingTurns`); any session-set that leaves `running`
+   * settles every unsettled turn (`sessionSetTurns` in `fold.ts`).
+   */
   const persistSession = async (
     runtime: ThreadRuntime,
-    session: ThreadSessionState
+    session: ThreadSessionState,
+    options: { occurredAt?: string; force?: boolean } = {}
   ): Promise<void> => {
     const next = coerceSessionForPendingTurn(runtime, session);
     // An unchanged republish is pure noise on every open stream, and it is the
     // republish — not a real transition — that produced the phantom row above.
-    if (sessionStateEquals(currentSession(runtime), next)) {
+    if (options.force !== true && sessionStateEquals(currentSession(runtime), next)) {
       return;
     }
-    await append(runtime, [buildEvent(runtime.id, "thread.session-set", { session: next })]);
+    await append(runtime, [
+      buildEvent(
+        runtime.id,
+        "thread.session-set",
+        { session: next },
+        options.occurredAt !== undefined ? { occurredAt: options.occurredAt } : {}
+      )
+    ]);
   };
 
   const currentSession = (runtime: ThreadRuntime): ThreadSessionState =>
@@ -4153,19 +4172,85 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
-  const settleAsError = async (runtime: ThreadRuntime, message: string): Promise<void> => {
+  /**
+   * When the thread's log was last written: the `occurredAt` of its last
+   * event, which the fold stamps on the head (`updatedAt`) for every event, so
+   * nothing is read for it. The clock's time for a head with no usable stamp.
+   *
+   * The time a turn whose process died is settled at (§3.3). That process
+   * wrote nothing after this line, so its turn was over by then; the host
+   * notices only at its next start, and a settle stamped with that restart —
+   * the fold settles a turn at its settling `thread.session-set`'s
+   * `occurredAt` — counted the whole downtime in the turn's duration. It is
+   * read right before the settle is appended, so a settle is never stamped
+   * earlier than the line above it and the log's times stay non-decreasing: a
+   * caller settles FIRST, before any row of its own, and that settle carries
+   * the dead process's last write; every row it appends after — a notice, a
+   * closing — keeps the clock's time, which is when it was noticed.
+   */
+  const lastWriteAt = (runtime: ThreadRuntime): string => {
+    const stamp = runtime.state.head?.updatedAt;
+    return typeof stamp === "string" && Number.isFinite(Date.parse(stamp)) ? stamp : clock.nowIso();
+  };
+
+  /**
+   * The time a crash settle is stamped with: {@link lastWriteAt}, or the
+   * start of a turn it settles when that is later — for a turn that never
+   * started, its request. The log's times are not strictly in order:
+   * ingestion stamps a flushed message with its first delta's time, so the
+   * last line can read seconds before the start of the very turn it belongs
+   * to, and a settle stamped there ended the turn before it began (the GUI
+   * shows no duration for it). Never earlier than the line above it either
+   * way: the latest of that line's time and those.
+   */
+  const crashSettleAt = (runtime: ThreadRuntime): string => {
+    let settleAt = lastWriteAt(runtime);
+    let settleMs = Date.parse(settleAt);
+    for (const turn of runtime.state.turns ?? []) {
+      // The turns the settle ends: every one still unsettled.
+      if (SETTLED_TURN_STATES.has(turn.state)) continue;
+      for (const began of [turn.startedAt, turn.requestedAt]) {
+        const beganMs = typeof began === "string" ? Date.parse(began) : Number.NaN;
+        if (Number.isFinite(beganMs) && beganMs > settleMs) {
+          settleAt = began as string;
+          settleMs = beganMs;
+        }
+      }
+    }
+    return settleAt;
+  };
+
+  /**
+   * `settledAt` stamps the settling `thread.session-set`. The reconcile's
+   * settle of an orphaned turn it does not continue gives
+   * {@link crashSettleAt}: it is the reconcile's first row. Every other caller
+   * settles at the clock's time: a continuation that was sent and failed ran
+   * in this host's lifetime, and a prepare that could not reach disk comes
+   * after the repairs the reconcile has already appended at the clock's time
+   * (`repairLeftovers`), so a settle stamped with the dead process's last
+   * write would go back past them.
+   */
+  const settleAsError = async (
+    runtime: ThreadRuntime,
+    message: string,
+    options: { settledAt?: string } = {}
+  ): Promise<void> => {
     await writeMarker(runtime, undefined);
     // The binding follows the session (`status`), never the cursor: a thread
     // that could not be continued is still resumable by hand from the same
     // cursor, so clearing it here would throw away the conversation the user
     // is about to send into (*T3: `serverRuntimeStartup.ts:588-604`*).
     await upsertBinding(runtime, { status: "stopped" });
-    await persistSession(runtime, {
-      ...currentSession(runtime),
-      status: "error",
-      activeTurnId: null,
-      lastError: message
-    });
+    await persistSession(
+      runtime,
+      {
+        ...currentSession(runtime),
+        status: "error",
+        activeTurnId: null,
+        lastError: message
+      },
+      options.settledAt !== undefined ? { occurredAt: options.settledAt } : {}
+    );
     await appendActivity(runtime, {
       kind: "runtime.error",
       summary: "Session did not survive a restart",
@@ -4179,6 +4264,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * (the provider produced no frames at all), so the reconcile does, bounded
    * by {@link PENDING_TURN_GRACE_MS} so a turn that is merely slow to start on
    * a live session is left alone.
+   *
+   * The settle comes first, at {@link crashSettleAt}: nothing sent the turn
+   * after that line, and an orphan's running turn — which the same
+   * `stopped` settles — ended there too. The notice follows, at the time it
+   * was noticed. The settle is written even when the session already reads
+   * `stopped` (a message sent to a stopped session, the host dead before the
+   * send): it is what ends the turn, and a settle skipped as an unchanged
+   * session left the turn `pending` for good — the thread read "working"
+   * forever and every later first load wrote the notice again.
    */
   const settleStalePendingTurns = async (runtime: ThreadRuntime): Promise<void> => {
     const head = headOf(runtime);
@@ -4190,17 +4284,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return !Number.isFinite(requestedAt) || now - requestedAt > PENDING_TURN_GRACE_MS;
     });
     if (!stale) return;
+    // The notice rides the turn the head says is running, as it always did:
+    // read before the settle clears it.
+    const runningTurnId = currentSession(runtime).activeTurnId;
+    // Settling is by session status (§5.1): `stopped` folds the pending turn
+    // to `interrupted` without claiming the session itself failed.
+    await persistSession(
+      runtime,
+      {
+        ...currentSession(runtime),
+        status: "stopped",
+        activeTurnId: null
+      },
+      { occurredAt: crashSettleAt(runtime), force: true }
+    );
     await appendActivity(runtime, {
       kind: "provider.turn.start.failed",
       summary: "Queued message was not sent",
-      detail: CONTINUATION_FAILED_MESSAGE
-    });
-    // Settling is by session status (§5.1): `stopped` folds the pending turn
-    // to `interrupted` without claiming the session itself failed.
-    await persistSession(runtime, {
-      ...currentSession(runtime),
-      status: "stopped",
-      activeTurnId: null
+      detail: CONTINUATION_FAILED_MESSAGE,
+      turnId: runningTurnId
     });
   };
 
@@ -4228,11 +4330,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * writes (`settlePendingRequests`); for a call or a task what that teardown
    * would have written — through the one write path, before anyone can read
    * the thread: inside `loadRuntime` before the runtime is published, or in the
-   * reconcile behind the readiness gate, before an orphaned turn is settled or
-   * continued (`leftover-work.ts` derives them from the folded window, and
-   * says why a message-mode question and a message still streaming are left as
-   * they are). Never for a thread an adapter lists as live: what a live
-   * session runs is its own.
+   * reconcile behind the readiness gate — after an orphaned turn is settled,
+   * before one is continued (`leftover-work.ts` derives them from the folded
+   * window, and says why a message-mode question and a message still
+   * streaming are left as they are). Never for a thread an adapter lists as
+   * live: what a live session runs is its own.
+   *
+   * `runningTurnId` is the turn a parked request is cancelled in — the one
+   * the head said was running — for a caller that settled it first; the
+   * head's own when absent.
    *
    * In passes, because the roster lists at most `ROSTER_LIMIT` rows, live
    * ones first — past that many running tasks the rest come into view only
@@ -4240,7 +4346,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * so the loop ends. Best-effort, like the settle: a failure is logged and
    * the thread still loads; a later load finds nothing left to close.
    */
-  const closeLeftoverWork = async (runtime: ThreadRuntime): Promise<void> => {
+  const closeLeftoverWork = async (
+    runtime: ThreadRuntime,
+    runningTurnId?: string | null
+  ): Promise<void> => {
     try {
       if (!headOf(runtime) || runtime.deleted || hasLiveSession(runtime.id)) return;
       const closed = new Set<string>();
@@ -4249,7 +4358,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const closings = leftoverWorkClosings(runtime.state, {
           now: occurredAt,
           nextId: () => ids.eventId(),
-          closed
+          closed,
+          ...(runningTurnId !== undefined ? { runningTurnId } : {})
         });
         if (closings.length === 0) return;
         for (const closing of closings) closed.add(closing.key);
@@ -4279,10 +4389,53 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
+   * The start that names a launch id for every settled agent an older host
+   * launched with none (`legacyLaunchStarts` in `leftover-work.ts`, which
+   * says which agents and why the row changes nothing but that). The roster
+   * reopens a settled agent only on a start naming a launch id different from
+   * its last, so without one the first relaunch a host with the relaunch fix
+   * writes for such an agent reads as a late delivery, and the agent stays
+   * settled while it works. The paths and guards of the closings — a first
+   * load, never a thread an adapter lists as live — and best-effort likewise.
+   * Once per agent: the row names a launch id, so a later load finds none.
+   */
+  const recordLegacyLaunches = async (runtime: ThreadRuntime): Promise<void> => {
+    try {
+      if (!headOf(runtime) || runtime.deleted || hasLiveSession(runtime.id)) return;
+      const launches = legacyLaunchStarts(runtime.state, { nextId: () => ids.eventId() });
+      if (launches.length === 0) return;
+      const occurredAt = clock.nowIso();
+      await append(
+        runtime,
+        launches.map((activity) =>
+          buildEvent(runtime.id, "thread.activity-appended", { activity }, { occurredAt })
+        )
+      );
+    } catch (error) {
+      logger.warn(`agent-host: failed to name the launches of ${runtime.id}'s legacy agents`, error);
+    }
+  };
+
+  /**
+   * What a thread's first load in a host lifetime owes the rows its last
+   * process wrote: the work it left open, closed ({@link closeLeftoverWork}),
+   * then the launch ids an older host never wrote
+   * ({@link recordLegacyLaunches}) — after the closings, so an agent they
+   * just stopped reads as the settled agent it is.
+   */
+  const repairLeftovers = async (
+    runtime: ThreadRuntime,
+    runningTurnId?: string | null
+  ): Promise<void> => {
+    await closeLeftoverWork(runtime, runningTurnId);
+    await recordLegacyLaunches(runtime);
+  };
+
+  /**
    * A1: the settle a thread the reconcile did not fold is owed, on its first
-   * load — and the work its last process left running, closed. Best-effort,
-   * exactly as it was at boot — a failure is logged and the thread still
-   * loads, rather than a transient write error making it unreadable.
+   * load — and what its last process left, repaired. Best-effort, exactly as
+   * it was at boot — a failure is logged and the thread still loads, rather
+   * than a transient write error making it unreadable.
    */
   const settleOnFirstLoad = async (runtime: ThreadRuntime): Promise<void> => {
     try {
@@ -4290,7 +4443,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     } catch (error) {
       logger.warn(`agent-host: failed to settle ${runtime.id} on its first load`, error);
     }
-    await closeLeftoverWork(runtime);
+    await repairLeftovers(runtime);
   };
 
   const reconcile = async (): Promise<void> => {
@@ -4363,20 +4516,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // is owed what `settleOnFirstLoad` does: no live session serves it
       // (`live`, above), so nothing can own what its log still shows running.
       await settleStalePendingTurns(runtime);
-      await closeLeftoverWork(runtime);
+      await repairLeftovers(runtime);
       return;
     }
 
-    // §3.4's bounded grace window. A `/turn` commits its message and its
-    // pending turn row BEFORE the effect runs, so a host that dies in that
-    // window leaves a `pending` turn with an idle head: not "orphaned" by the
-    // filter above, but `deriveLatestTurn` reports it forever and the status
-    // line shows the thread working with nothing behind it.
-    await settleStalePendingTurns(runtime);
-    // What the dead process still had running is closed before its turn is
-    // settled or continued: a continuation's process owns none of it.
-    await closeLeftoverWork(runtime);
-
+    // Decided before anything is written — every input is a read — because
+    // an orphan that is not continued is settled before anything else.
     const closed = runtime.deleted || (await options.isThreadClosed?.(threadId)) === true;
     const markerMatches =
       marker !== undefined &&
@@ -4387,22 +4532,45 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       !closed &&
       hasCursor &&
       (markerMatches || (optIn && session.status === "running" && session.activeTurnId !== null));
+    // The turn a continuation continues: the running one, else the marker's.
+    const turnId = session.activeTurnId ?? marker?.turnId;
 
-    if (!continuable) {
+    // §3.4's bounded grace window. A `/turn` commits its message and its
+    // pending turn row BEFORE the effect runs, so a host that dies in that
+    // window leaves a `pending` turn with an idle head: not "orphaned" by the
+    // filter above, but `deriveLatestTurn` reports it forever and the status
+    // line shows the thread working with nothing behind it. Its settle is the
+    // reconcile's first row when it writes one, and ends this orphan's running
+    // turn with the pending one.
+    await settleStalePendingTurns(runtime);
+
+    if (!continuable || typeof turnId !== "string") {
       // Archived and deleted threads, threads whose project opted out, and
-      // threads with no cursor are settled, never continued (§3.3).
-      await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
+      // threads with no cursor are settled, never continued (§3.3) — at the
+      // time the dead process last wrote (`crashSettleAt`: that line, or the
+      // turn's start when a line flushed out of order reads before it), not
+      // at this restart. That is honest: the turn ended when its process
+      // died, and nothing it did ran past that process's last line; the host
+      // notices only now, so what it then writes — the error, and the closing
+      // of the work the process left open — carries the clock's time. The
+      // settle comes first, so the log's times never go back.
+      await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE, {
+        settledAt: crashSettleAt(runtime)
+      });
+      // A parked request's cancellation rides the turn the head said was
+      // running, as a Stop's does, though the settle has just cleared it.
+      await repairLeftovers(runtime, session.activeTurnId);
       return;
     }
+
+    // What the dead process still had running is closed before its turn is
+    // continued — and its legacy agents' launches named: a continuation's
+    // process owns none of it, and may relaunch any of them.
+    await repairLeftovers(runtime, session.activeTurnId);
 
     // 1/2. The marker is written AGAIN, with `prepared`, immediately before the
     // continuation is sent: that is what makes recovery survive a host that
     // dies between resuming and sending.
-    const turnId = session.activeTurnId ?? marker?.turnId;
-    if (typeof turnId !== "string") {
-      await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
-      return;
-    }
     // Durable first, dispatched second: the marker and the binding's
     // `starting` both reach disk BEFORE any send, so a host that dies between
     // resuming and sending is recovered by the next boot rather than looking

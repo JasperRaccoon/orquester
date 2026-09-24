@@ -435,7 +435,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `bootSettlePending`: §3.4's stale-`pending`-turn settle, which the reconcile used to run on every
   idle thread at boot, runs on the thread's **first load**, inside `loadRuntime` before the runtime
   is published — and so does the closing of the requests, calls and tasks its last process left
-  open (`closeLeftoverWork`, see "A running state never outlives its process"), which an orphan gets in
+  open and the naming of its legacy agents' launches (`repairLeftovers`, see "A running state never
+  outlives its process" and "Agent rows must survive resumes and retention"), which an orphan gets in
   the reconcile itself — so no read, stream snapshot or command can see the thread unsettled — and
   never at boot. A head that cannot be read is folded, as before. Measured before, on the owner's VPS
   (2026-09-23): 16 s of folding for 78 MB of logs, all of it on the readiness path — an 18 s
@@ -728,7 +729,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   request the fold shows pending but a message-mode question, cancelled with the host's own Stop
   rows (`settlePendingRequests`, one builder: `cancelledRequestActivity` in `events.ts` — "Request
   cancelled" `approval.resolved {decision: "cancel"}` / "Question cancelled" `user-input.resolved`,
-  on the turn the head says is running), which close it for good (`closedRequestIds`), never the
+  on the turn the head says is running — or said, when the orphan reconcile settled it first:
+  `runningTurnId`), which close it for good (`closedRequestIds`), never the
   provider's "resolved"/"submitted" rows, which would say someone answered; a message-mode question
   (`responseMode: "message"`) stays pending, where a Stop would cancel it too, since it parked no
   request and a later user message answers it; then for every open call a
@@ -740,7 +742,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   rides unmarked, the command kept — marked, it offered "Load full output" and an MCP `outputItemId`
   that read the same row back — while an output preview, Grok's `rawOutput` or a Claude update's
   result whose completion never landed, never passes for the whole output: the opening row's whole
-  data rides instead, and the cut copy rides marked `truncated` only when no row holds whole data) —
+  data rides instead, and the cut copy rides marked `truncated` only when no row holds whole data),
+  and the files that row names at its top level (`changedFiles`, the slimmer's promotion out of the
+  data: a Codex patch update is stored as `data: {}` beside them, so a closer that copied the data
+  alone listed no files in the GUI's row or the MCP's entry) —
   except a call no row of the window anchors (`anchorsCall`,
   `packages/api/src/agent-chat/call-anchor.ts`: every row of it turnless and ownerless — what a
   rewind leaves of a woken Claude parent's call, rule (6) below), which no view shows and which a
@@ -758,11 +763,28 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   log, so the first "Load older" page ended at its first chunk and every row between it and the
   window was on neither; its readers read it as settled instead (below). It runs in
   `settleOnFirstLoad` (the `bootSettlePending` settle, before the runtime is published) and in
-  `reconcileThread` after `settleStalePendingTurns` — for an orphan before its turn is settled or
-  continued, since a continuation's process owns none of it — never for a thread an adapter lists
-  as live (`listSessions()`); best-effort (a failed append is logged, the thread still loads); in
-  passes that skip what an earlier one closed, because the roster lists 100 rows, live first. A
-  second load finds nothing to close. A closer on an old turn is a late reference: the index grows
+  `reconcileThread` — for an orphan AFTER its turn is settled, BEFORE it is continued, since a
+  continuation's process owns none of it — never for a thread an adapter lists as live
+  (`listSessions()`); best-effort (a failed append is logged, the thread still loads); in passes
+  that skip what an earlier one closed, because the roster lists 100 rows, live first. A second load
+  finds nothing to close. **The turn that process was running ends when the process died, not at
+  the restart:** the fold settles a turn at its settling `thread.session-set`'s `occurredAt`, and a
+  reconcile that stamped its settle with the restart counted the whole downtime in the turn's
+  duration. So the reconcile's settle — `settleAsError` for an orphan it does not continue,
+  `settleStalePendingTurns` for a stale `pending` turn (and the running turn the same `stopped`
+  settles) — is its FIRST row, stamped `crashSettleAt`: the `occurredAt` of the log's last line
+  (`lastWriteAt`, which the fold keeps as `head.updatedAt`, so nothing is read for it), or the
+  start of a turn it settles — for a turn that never started, its request — when that is later:
+  ingestion stamps a flushed message with its first delta's time, so the last line can read seconds
+  before its own turn's start, and a settle there ended the turn before it began. Every row after
+  it — the notice, the closings, the launch names — keeps the clock's time, which is when the host
+  noticed, and the log's times never go back (a settle is never stamped earlier than the line
+  above it). The stale settle is written even when the session already reads `stopped`
+  (`persistSession`'s `force`): skipped there as an unchanged session, it left the turn `pending`
+  for good — the thread read "working" forever and every later first load wrote the notice again.
+  A continuation that fails later settles at its own time (it ran in this host's lifetime), and so
+  does a prepare that could not reach disk (the repairs before it are already at the clock's time).
+  A closer on an old turn is a late reference: the index grows
   that turn's range over it, within `MAX_LATE_REFERENCE_BYTES` of the next turn's start
   (`extendReferenced`), and "Load older" still serves every row; a later rewind that keeps that turn
   and drops the ones after it clips the range at its cut, as it clips every surviving range (the
@@ -831,9 +853,22 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `turn/started` after a settled run, or for a child this session never saw launched
   (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no end, and
   `interacted` carries no status — neither is evidence about the run in progress. An agent first
-  launched by a host older than this change has no launch id on its first start (such logs are
-  written until the deploy), so a relaunch from a terminal state does not reopen it; that would
-  need a fold change weakening the late-delivery guard, and is not made.
+  launched by a host older than this change has no launch id on its first start, so a relaunch from
+  a terminal state could not reopen it; rather than weaken the late-delivery guard in the fold, a
+  thread's first load in a host lifetime gives each settled one — OpenCode and Codex threads only
+  (the head's adapter): Claude always launched with an id, and Grok surfaced no agents before it did
+  so with ids — one appended `task.started` naming `legacy-launch:<taskId>` (`legacyLaunchStarts`
+  in `leftover-work.ts`, `recordLegacyLaunches`, after the leftover closings so an agent they stop
+  counts as settled). It rides the agent's first start's turn (a rewind keeps or drops the two
+  together) and owner, carries its newest row's linkage like a closer, and its row's
+  `createdAt`/`updatedAt` are the roster's own `updatedAt` for the agent (the event is stamped with
+  the load's time), so the roster reads exactly as before — a row stamped with the load's time
+  would rank every legacy agent newest among the settled rows and let the 100-row cap drop the
+  agents that really are — and only the launch id moves; it is that agent's anchor, merged into its
+  spawn row, never a row of its own. An `idle` agent gets none (any start reopens it, and this one
+  would), an active one is the closings' to settle first, and one with no start in the window gets
+  none (a start would create it in the roster, running, once retention dropped its other rows).
+  Once per agent: the next load finds a launch id and names nothing.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
