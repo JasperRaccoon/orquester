@@ -18,6 +18,7 @@ import {
   ACTIVITY_RETENTION_SLACK,
   applyDomainEvent,
   itemsDroppedByRetention,
+  messageStreamingContext,
   type ThreadActivityItem,
   type ThreadFoldState,
   type ThreadHistoryBounds,
@@ -1325,6 +1326,73 @@ describe("page rows above the live window", () => {
       toggled.rows.map((row, index) => row === first.rows[index]),
       [true, true, true, true]
     );
+  });
+
+  describe("a page's words stream only while the rule says so (isMessageStreaming)", () => {
+    /** Turn t1 on a page, its answer still flagged: the host streaming it was killed. */
+    const stuckPage = () =>
+      historyPage({
+        items: [
+          message("user", "first", { id: "u1", createdAt: stamp(1) }),
+          activity(
+            "tool.completed",
+            { itemType: "command_execution", toolUseId: "call-1", title: "ls", command: "ls", status: "completed" },
+            { id: "x1", turnId: "t1", createdAt: stamp(2) }
+          ),
+          message("assistant", "Half an answer", { id: "a1", turnId: "t1", streaming: true, createdAt: stamp(3) })
+        ],
+        turns: [historyTurn("t1", 1, { userMessageId: "u1" })]
+      });
+    const context = (activeTurnId: string | null, roster: { id: string; status: "running" | "completed" }[] = []) =>
+      messageStreamingContext({ head: { session: { status: "running", activeTurnId } }, roster });
+    const answer = (rows: readonly AgentChatTimelineRow[]) =>
+      rows.find((row): row is Extract<AgentChatTimelineRow, { kind: "message" }> => row.kind === "message" && row.id === "a1");
+
+    it("an old turn's stuck answer reads settled, and its turn folds", () => {
+      const { input } = conversation();
+      const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, {
+        ...withPages(input, [stuckPage()]),
+        unsettledTurnId: "t3",
+        isWorking: true,
+        messageStreaming: context("t3")
+      }).rows;
+      assert.equal(answer(rows)?.streaming, undefined);
+      assert.ok(
+        rows.some((row) => row.kind === "turn-fold" && row.turnId === "t1"),
+        `t1 folds: ${rows.map((row) => row.kind).join(", ")}`
+      );
+    });
+
+    it("a running turn's answer up here still streams", () => {
+      // A turn so long its early rows went to the history.
+      const { input } = conversation();
+      const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, {
+        ...withPages(input, [stuckPage()]),
+        unsettledTurnId: "t1",
+        isWorking: true,
+        messageStreaming: context("t1")
+      }).rows;
+      assert.equal(answer(rows)?.streaming, true);
+    });
+
+    it("nothing streams without a context", () => {
+      const { input } = conversation();
+      const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, withPages(input, [stuckPage()])).rows;
+      assert.equal(answer(rows)?.streaming, undefined);
+    });
+
+    it("no roster change re-projects the history: the parent's words have no owner to ask about", () => {
+      const { input } = conversation();
+      const base = { ...withPages(input, [stuckPage()]), unsettledTurnId: "t3", isWorking: true };
+      const first = projectHistoryRows(EMPTY_HISTORY_ROWS, { ...base, messageStreaming: context("t3") });
+      const agentStarted = projectHistoryRows(first, {
+        ...base,
+        messageStreaming: context("t3", [{ id: "agent-1", status: "running" }])
+      });
+      assert.equal(agentStarted, first);
+      const turnEnded = projectHistoryRows(first, { ...base, messageStreaming: context(null) });
+      assert.notEqual(turnEnded, first, "the running turn is the history's to ask about");
+    });
   });
 
   describe("rewind to a page row", () => {

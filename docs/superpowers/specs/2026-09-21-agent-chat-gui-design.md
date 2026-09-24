@@ -539,7 +539,9 @@ the thread still loads; a second load finds nothing left. One part of the teardo
 a message still streaming is left as the log has it — a settle moves its span in the thread index
 to the end of the log, and "Load older" then lost every row between its first chunk and the window
 (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `closeLeftoverWork`,
-`apps/daemon/src/agent-host/orchestration/leftover-work.ts`).*
+`apps/daemon/src/agent-host/orchestration/leftover-work.ts`). Its readers decide instead: it
+reads as streaming only while a live session runs its turn or its agent is still at work (§7.3,
+`isMessageStreaming`), so a stream no process can continue reads as settled.*
 
 ### 3.4 Session restart policy
 
@@ -3276,6 +3278,18 @@ Row kinds and behaviour:
   Every nonempty trace can open, including a single long line; the expanded body uses the same
   Markdown renderer as assistant text and is height-limited. Inside an expanded activity group,
   consecutive reasoning blocks have their own disclosure and a short preview, as in T3.
+  *Built: "Thinking" and its shimmer, and an answer's streaming text, are the rule's, never a
+  message's bare `streaming` flag — the log keeps that flag `true` for good on words no process
+  can finish: an agent's turnless words from before ingestion closed them on their own completion
+  (one live thread held 5 479, each shimmering in its drill-in forever), and a stream a killed host
+  left (§3.3's first load does not settle one: a settle would stretch the message's span in the
+  thread index). A message streams only while its flag says so, the session is live — the roster's
+  session-death notion — and it belongs to the running turn or to an agent the roster shows
+  pending, running or waiting (`isMessageStreaming`, `packages/api/src/agent-chat/message-liveness.ts`).
+  The rows derivation stamps the rule's verdict on the message row (`streaming`) and holds a turn's
+  fold open only for an assistant message that streams by it, in the timeline, the history and the
+  drill-in alike (`messageStreamingContext` of the thread, `drill-in.logic.ts`); the fold, the
+  index and ingestion keep the flag as the log wrote it.*
 - **Activity group**: all activities between two assistant texts collapse into one line showing
   the live tool label while running and `summarizeToolGroup()` output when settled ("Read 3
   files, ran 2 commands"). Expanded, each tool shows its command with streamed output, file

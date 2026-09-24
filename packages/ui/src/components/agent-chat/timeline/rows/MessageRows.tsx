@@ -243,6 +243,9 @@ export const UserMessageRow = React.memo(function UserMessageRow({
  *
  * Codex commentary is the narration between tool calls. It remains a visible
  * message while the turn runs and after the history is reloaded.
+ *
+ * Streaming is the row's `streaming` — the rule's answer, never the message's
+ * bare flag, which a dead host leaves `true` for good (`isMessageStreaming`).
  */
 export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row
@@ -250,13 +253,14 @@ export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   row: Row<"message">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
-  const text = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const streaming = row.streaming === true;
+  const text = row.message.text || (streaming ? "" : "(empty response)");
   return (
     <div className="group/assistant relative min-w-0 px-1 py-0.5">
       <AuthorHeading>Agent</AuthorHeading>
       <ChatMarkdown
         text={text}
-        streaming={row.message.streaming}
+        streaming={streaming}
         onOpenFile={ctx.onOpenFile}
       />
     </div>
@@ -298,6 +302,10 @@ function firstLine(text: string): string {
  * "summary" label would be a claim about the provider's output we cannot make —
  * and on the providers that hand over a summary *instead of* the reasoning, it
  * is the one thing worth saying.
+ *
+ * "Thinking" and its shimmer are the row's `streaming`, never the message's
+ * bare flag: a subagent's words no turn carried stayed `streaming: true` for
+ * good, thousands to a thread, and each shimmered in its drill-in forever.
  */
 export const ReasoningRow = React.memo(function ReasoningRow({
   row
@@ -307,7 +315,7 @@ export const ReasoningRow = React.memo(function ReasoningRow({
   const ctx = useTimelineRowContext();
   const id = row.message.id;
   const text = row.message.text;
-  const live = row.message.streaming;
+  const live = row.streaming === true;
   const summary = firstLine(text);
   // Codex can emit an empty reasoning item. Keep its one-line status, while
   // every nonempty trace can open even when it has only one long line.

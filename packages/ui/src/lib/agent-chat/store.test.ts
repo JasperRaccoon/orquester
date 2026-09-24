@@ -26,7 +26,8 @@ import {
   type ThreadStore
 } from "./store";
 import { AgentChatCommandError, type AgentChatTransport } from "./transport";
-import { activity, ev, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
+import type { AgentChatTimelineRow } from "./contracts";
+import { activity, ev, foldTurn, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 interface Posted {
   /** `"account"` is the daemon-owned §3.4 route, not a §6.2 command name. */
@@ -235,6 +236,51 @@ describe("the per-thread slice", () => {
     });
     const secondRows = state().rows;
     assert.equal(secondRows[0], firstRows[0], "the user row keeps its identity");
+  });
+
+  it("reads a message's liveness through the rule: a stuck answer is settled, the running turn's streams", async () => {
+    const { fake, state } = await store();
+    type MessageRow = Extract<AgentChatTimelineRow, { kind: "message" }>;
+    const answer = (id: string): MessageRow | undefined =>
+      state().rows.find((row): row is MessageRow => row.kind === "message" && row.id === id);
+    fake.push({
+      kind: "snapshot",
+      thread: snapshot({
+        head: head({ session: { status: "running", activeTurnId: "t2" } }),
+        items: [
+          message("user", "first", { id: "u1", createdAt: stamp(1) }),
+          activity(
+            "tool.completed",
+            { itemType: "command_execution", toolUseId: "call-1", title: "ls", command: "ls", status: "completed" },
+            { id: "x1", turnId: "t1", createdAt: stamp(2) }
+          ),
+          // The host streaming it was killed; the log still says `streaming: true`.
+          message("assistant", "Half an answer", { id: "a1", turnId: "t1", streaming: true, createdAt: stamp(3) }),
+          message("user", "second", { id: "u2", createdAt: stamp(4) }),
+          message("assistant", "Now answer", { id: "a2", turnId: "t2", streaming: true, createdAt: stamp(5) })
+        ],
+        turns: [
+          foldTurn("t1", "u1"),
+          { ...foldTurn("t2", "u2"), state: "running", completedAt: null }
+        ],
+        seq: 5
+      })
+    });
+    assert.equal(answer("a1")?.streaming, undefined, "the dead host's answer reads settled");
+    assert.ok(
+      state().rows.some((row) => row.kind === "turn-fold" && row.turnId === "t1"),
+      "and no longer holds its turn's fold open"
+    );
+    assert.equal(answer("a2")?.streaming, true, "the running turn's answer streams");
+    const stored = state().slice.entries.find((item) => item.id === "a1");
+    assert.ok(stored?.kind === "message" && stored.streaming, "the fold keeps the flag as the log wrote it");
+
+    fake.push({
+      kind: "event",
+      seq: 6,
+      event: ev("thread.session-set", { session: { status: "stopped", activeTurnId: null } }, { seq: 6 })
+    });
+    assert.equal(answer("a2")?.streaming, undefined, "no process is left to finish it");
   });
 });
 

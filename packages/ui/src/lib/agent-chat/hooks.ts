@@ -25,7 +25,8 @@ import type {
 import {
   deriveAgentPanelModel,
   emptyAgentPanelModel,
-  isSettledTurnState
+  isSettledTurnState,
+  messageStreamingContext
 } from "@orquester/api/agent-chat";
 
 import { useApi } from "../../context/orquester-context";
@@ -42,19 +43,7 @@ import type {
   UseProviderSnapshot,
   DisclosureState
 } from "./contracts";
-import {
-  deriveTimelineEntriesFromItems,
-  EMPTY_TIMELINE_PROJECTION,
-  itemsForAgent,
-  type ThreadTimelineProjection
-} from "./entries.logic";
-import {
-  computeStableRows,
-  deriveTimelineRowsWithState,
-  EMPTY_STABLE_ROWS,
-  type StableRowsState,
-  type TimelineRowsProjection
-} from "./rows.logic";
+import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn, type AgentDrillInProjection } from "./drill-in.logic";
 import { loadProviders, providerForRefId, providersStore } from "./providers";
 import { resolveActivityLabel } from "./status.logic";
 import {
@@ -234,7 +223,9 @@ export function turnStartedAt(
  * rendered with the same row components, **read-only**. The parent's slice is
  * reused rather than opened again, which is what keeps the composer and roster
  * mounted so the parent can be steered while watching a child — and the child
- * view dispatches no commands, so no actions are returned.
+ * view dispatches no commands, so no actions are returned. The rows are
+ * `projectAgentDrillIn`'s (`drill-in.logic.ts`); a word streams while the
+ * thread's `messageStreamingContext` says it can still be written.
  */
 export function useAgentChatDrillIn(
   sessionId: string,
@@ -249,62 +240,28 @@ export function useAgentChatDrillIn(
   const store = useThreadStore(sessionId);
   const entries = useThreadState(store, (state) => state.slice.entries);
   const roster = useThreadState(store, (state) => state.slice.roster);
+  // Memoised by the roster and the session, so this selector is stable.
+  const messageStreaming = useThreadState(store, (state) => messageStreamingContext(state.slice));
 
   // One projection per drill-in, held across renders so a streamed token in
   // the child's timeline changes one row object, exactly as in the parent.
-  const projections = useRef<{
-    agentId: string | null;
-    timeline: ThreadTimelineProjection;
-    rows: TimelineRowsProjection | null;
-    stable: StableRowsState;
-  }>({ agentId: null, timeline: EMPTY_TIMELINE_PROJECTION, rows: null, stable: EMPTY_STABLE_ROWS });
+  const projection = useRef<AgentDrillInProjection>(EMPTY_AGENT_DRILL_IN);
 
   return useMemo(() => {
     if (agentId === null) {
       return { rows: [], agent: null };
     }
-    const held = projections.current;
-    // A different child is a different timeline: never reuse the previous
-    // agent's projection as the fast path's baseline.
-    const previous = held.agentId === agentId ? held : null;
-    const timeline = deriveTimelineEntriesFromItems(
-      itemsForAgent(entries, agentId),
-      previous?.timeline ?? null,
-      // The agent's own rows are agent-internal to the parent, not to itself.
-      { ownerAgentId: agentId }
-    );
-    const expandedTurnIds = new Set<string>(disclosures?.expandedTurnIds ?? []);
-    for (const entry of timeline.entries) {
-      const turnId =
-        entry.kind === "message"
-          ? entry.message.turnId
-          : entry.kind === "work"
-            ? entry.entry.turnId
-            : null;
-      if (typeof turnId === "string" && turnId.length > 0) {
-        expandedTurnIds.add(turnId);
-      }
-    }
-    const rows = deriveTimelineRowsWithState(
-      {
-        timelineEntries: timeline.entries,
-        isWorking: false,
-        activeTurnStartedAt: null,
-        expandedTurnIds,
-        expandedWorkGroupIds: new Set(disclosures?.expandedGroupIds ?? []),
-        // A child timeline offers no rewind: §5.5 rolls back the thread, and
-        // a subagent has no turn of the thread's own to roll back to.
-        supportsConversationRollback: false
-      },
-      previous?.rows ?? null
-    );
-    const stable = computeStableRows(rows.rows, previous?.stable ?? EMPTY_STABLE_ROWS);
-    projections.current = { agentId, timeline, rows, stable };
+    projection.current = projectAgentDrillIn(projection.current, {
+      items: entries,
+      agentId,
+      messageStreaming,
+      disclosures
+    });
     return {
-      rows: stable.result,
+      rows: projection.current.stable.result,
       agent: roster.find((candidate) => candidate.id === agentId) ?? null
     };
-  }, [agentId, entries, roster, disclosures]);
+  }, [agentId, entries, roster, messageStreaming, disclosures]);
 }
 
 // ---------------------------------------------------------------------------

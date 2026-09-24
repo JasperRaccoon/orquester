@@ -30,6 +30,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   ACTIVE_SUBAGENT_STATUSES,
   DEFAULT_INTERACTION_MODE,
+  messageStreamingContext,
   THREAD_HISTORY_DEFAULT_TURNS,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
@@ -624,6 +625,10 @@ function project(state: InternalState): InternalState {
       ? timeline
       : deriveTimelineEntriesFromItems(liveSplit.rowItems, state.rowTimeline);
   const runningTurnId = slice.head?.session.activeTurnId ?? null;
+  // Whether a message can still be streaming: the rule, never the bare flag a
+  // dead host or an unclosed agent left `true` for good. Memoised by the
+  // roster and the session, so a streamed token keeps the rows' fast path.
+  const messageStreaming = messageStreamingContext(slice);
   const latestTurn = slice.turns.at(-1) ?? null;
   const latestTurnSummary = latestTurn
     ? {
@@ -670,7 +675,8 @@ function project(state: InternalState): InternalState {
     isCompacting,
     activeTurnStartedAt,
     activeTurnHeaderHere: activeTurnHeaderInHistory,
-    liveAgentTaskIds: sets.liveAgentTaskIds
+    liveAgentTaskIds: sets.liveAgentTaskIds,
+    messageStreaming
   });
   const rowsProjection = deriveTimelineRowsWithState(
     {
@@ -692,6 +698,7 @@ function project(state: InternalState): InternalState {
       // snapshot has not loaded means withheld, never offered-and-failing.
       supportsConversationRollback: supportsRollback ?? false,
       liveAgentTaskIds: sets.liveAgentTaskIds,
+      messageStreaming,
       queuedMessages: state.queue.messages,
       // Split with the history above: where the running turn's header went,
       // and whether a live row up there already shows the turn working.

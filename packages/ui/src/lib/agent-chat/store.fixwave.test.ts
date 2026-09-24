@@ -16,9 +16,10 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import { registerComposerHandle } from "../../components/agent-chat/composer/composer-bridge";
+import type { AgentChatTimelineRow } from "./contracts";
 import { createThreadStore, resetDismissedErrorBanners, type AgentChatThreadState } from "./store";
 import { AgentChatCommandError, type AgentChatTransport } from "./transport";
-import { activity, ev, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
+import { activity, ev, foldTurn, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 interface Posted {
   name: string;
@@ -303,6 +304,64 @@ describe("Q2-4 — the layer-2 row memo is reachable", () => {
     const third = api.getState().rows;
     assert.equal(third[0], second[0], "the user row survives a second token");
     assert.notEqual(third[1], second[1], "the streaming row is the one that changed");
+  });
+
+  it("keeps the fast path for a running turn's own stream, whose row reads streaming", async () => {
+    // The two tests above stream a turnless message: the liveness rule reads
+    // it as settled, and the rows' fast path lets a turnless message through
+    // without consulting the rule. These tokens belong to the RUNNING turn, so
+    // the rule's turn clause is what keeps the row streaming, and the context
+    // being the same object token after token (memoised by the roster) is what
+    // keeps `shallowEqualInput` — and so the fast path — alive.
+    const { fake, api } = await store();
+    type Row = AgentChatTimelineRow;
+    const rows = (): readonly Row[] => layer2(api) as readonly Row[];
+    const isAnswer = (row: Row): row is Extract<Row, { kind: "message" }> =>
+      row.kind === "message" && row.id === "a1";
+    fake.push({
+      kind: "snapshot",
+      thread: snapshot({
+        head: head({ session: { status: "running", activeTurnId: "t1" } }),
+        items: [message("user", "hi", { id: "u1", createdAt: stamp(1) })],
+        turns: [{ ...foldTurn("t1", "u1"), state: "running", completedAt: null }],
+        seq: 1
+      })
+    });
+    const token = (seq: number, text: string): void =>
+      fake.push({
+        kind: "event",
+        seq,
+        event: ev(
+          "thread.message-sent",
+          { messageId: "a1", role: "assistant", text, streaming: true, turnId: "t1" },
+          { seq }
+        )
+      });
+
+    // The first token also stamps the turn's `assistantMessageId`: a new
+    // `turns` array, so a full derive. Every token after it is text only.
+    token(2, "par");
+    const seen = [rows()];
+    token(3, "tial");
+    seen.push(rows());
+    token(4, " answer");
+    seen.push(rows());
+
+    for (let step = 1; step < seen.length; step += 1) {
+      const [previous, next] = [seen[step - 1]!, seen[step]!];
+      assert.equal(next.length, previous.length);
+      assert.ok(next.some((row) => row.kind === "working"), "the turn is running: its rows include the working row");
+      next.forEach((row, index) => {
+        if (isAnswer(row)) {
+          assert.notEqual(row, previous[index], "the token rebuilt exactly its own row");
+        } else {
+          assert.equal(row, previous[index], `layer 2 reused ${row.kind} ${row.id}: no full re-derive`);
+        }
+      });
+    }
+    const answer = seen.at(-1)!.find(isAnswer);
+    assert.equal(answer?.message.text, "partial answer");
+    assert.equal(answer?.streaming, true, "the running turn's own words read streaming");
   });
 });
 

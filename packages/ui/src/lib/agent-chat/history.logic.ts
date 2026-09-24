@@ -61,9 +61,11 @@
 
 import {
   itemsDroppedByRetention,
+  NOTHING_STREAMS,
   startedTurns,
   type Checkpoint,
   type DomainEvent,
+  type MessageStreamingContext,
   type ThreadFoldState,
   type ThreadHistoryBounds,
   type ThreadHistoryPage,
@@ -1081,7 +1083,8 @@ const SETTLED: Required<HistoryLiveInput> = {
   isCompacting: false,
   activeTurnStartedAt: null,
   activeTurnHeaderHere: false,
-  liveAgentTaskIds: NO_TASK_IDS
+  liveAgentTaskIds: NO_TASK_IDS,
+  messageStreaming: NOTHING_STREAMS
 };
 
 export const EMPTY_HISTORY_ROWS: HistoryRowsState = {
@@ -1126,6 +1129,13 @@ export interface HistoryLiveInput {
    * running turn's spawn row here is a live activity row.
    */
   liveAgentTaskIds?: ReadonlySet<string>;
+  /**
+   * The thread's `messageStreamingContext`: a word here streams only while the
+   * rule says it can still be written (`isMessageStreaming`), never by its bare
+   * flag — an old page is exactly where the flags a dead host left sit.
+   * Absent, `NOTHING_STREAMS`: nothing streams.
+   */
+  messageStreaming?: MessageStreamingContext;
 }
 
 function sameTaskIds(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -1148,7 +1158,10 @@ function sameTaskIds(left: ReadonlySet<string>, right: ReadonlySet<string>): boo
  * when nothing moved — so an unchanged running turn never re-projects the
  * history, and a roster change that leaves the same agents working neither.
  * The task ids matter only while the turn's header is here; otherwise they
- * are dropped, and no roster change touches the history at all.
+ * are dropped, and no roster change touches the history at all. The message
+ * context keeps the session and its running turn only: the parent's timeline
+ * holds no word an agent owns (`splitThreadItems`), so no agent can decide
+ * one here, and the roster never re-projects the history through it either.
  */
 function liveInputOf(
   input: HistoryLiveInput,
@@ -1157,20 +1170,28 @@ function liveInputOf(
   const isWorking = input.isWorking === true;
   const activeTurnHeaderHere = isWorking && input.activeTurnHeaderHere === true;
   const tasks = activeTurnHeaderHere ? (input.liveAgentTaskIds ?? NO_TASK_IDS) : NO_TASK_IDS;
+  const sessionLive = input.messageStreaming?.sessionLive === true;
+  const activeTurnId = sessionLive ? (input.messageStreaming?.activeTurnId ?? null) : null;
   const next: Required<HistoryLiveInput> = {
     unsettledTurnId: input.unsettledTurnId ?? null,
     isWorking,
     isCompacting: isWorking && input.isCompacting === true,
     activeTurnStartedAt: isWorking ? (input.activeTurnStartedAt ?? null) : null,
     activeTurnHeaderHere,
-    liveAgentTaskIds: sameTaskIds(previous.liveAgentTaskIds, tasks) ? previous.liveAgentTaskIds : tasks
+    liveAgentTaskIds: sameTaskIds(previous.liveAgentTaskIds, tasks) ? previous.liveAgentTaskIds : tasks,
+    messageStreaming:
+      previous.messageStreaming.sessionLive === sessionLive &&
+      previous.messageStreaming.activeTurnId === activeTurnId
+        ? previous.messageStreaming
+        : { sessionLive, activeTurnId, activeAgentIds: NO_TASK_IDS }
   };
   return next.unsettledTurnId === previous.unsettledTurnId &&
     next.isWorking === previous.isWorking &&
     next.isCompacting === previous.isCompacting &&
     next.activeTurnStartedAt === previous.activeTurnStartedAt &&
     next.activeTurnHeaderHere === previous.activeTurnHeaderHere &&
-    next.liveAgentTaskIds === previous.liveAgentTaskIds
+    next.liveAgentTaskIds === previous.liveAgentTaskIds &&
+    next.messageStreaming === previous.messageStreaming
     ? previous
     : next;
 }
@@ -1350,6 +1371,7 @@ export function projectHistoryRows(
       turns: input.turns,
       supportsConversationRollback: rewindOffered,
       liveAgentTaskIds: live.liveAgentTaskIds,
+      messageStreaming: live.messageStreaming,
       continuesBelow: true,
       activeTurnHeader: live.activeTurnHeaderHere ? "here" : "below"
     },

@@ -225,9 +225,10 @@ export function createEmptyThreadState(): ThreadFoldState {
 /**
  * A session is live while a provider process is attached to it. `idle` means
  * "no session yet", so it is NOT live — orphaned background work must not read
- * as working (§7.6).
+ * as working (§7.6). The roster's session-death pass reads it, and so does a
+ * message's liveness (`message-liveness.ts`): no process, no stream.
  */
-function isSessionLive(status: ThreadSessionStatus | undefined): boolean {
+export function isSessionLive(status: ThreadSessionStatus | undefined): boolean {
   return status === "starting" || status === "ready" || status === "running";
 }
 

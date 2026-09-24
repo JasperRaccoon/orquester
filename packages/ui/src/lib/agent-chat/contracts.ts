@@ -422,6 +422,14 @@ export type AgentChatTimelineRow =
       showAssistantMeta: boolean;
       /** Offered only where `supportsConversationRollback` (§6.3). */
       revertTurnCount?: number;
+      /**
+       * Set only while the message reads as streaming — `isMessageStreaming`
+       * (`@orquester/api/agent-chat`), never its bare flag: the log keeps
+       * `streaming: true` for good on words a dead host or an unclosed agent
+       * left, and those read as settled (no "Thinking" shimmer, no streaming
+       * text). The rows derivation decides it; the row components only read it.
+       */
+      streaming?: boolean;
     }
   | {
       kind: "assistant-meta";

@@ -734,7 +734,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   true` is left as the log has it — every `thread.message-sent` moves the message's span in the
   thread index, a history page never splits a message (`outsideMessages`), and a settle appended
   here stretched an old message to the end of the log, so the first "Load older" page ended at its
-  first chunk and every row between it and the window was on neither. It runs in
+  first chunk and every row between it and the window was on neither; its readers read it as
+  settled instead (below). It runs in
   `settleOnFirstLoad` (the `bootSettlePending` settle, before the runtime is published) and in
   `reconcileThread` after `settleStalePendingTurns` — for an orphan before its turn is settled or
   continued, since a continuation's process owns none of it — never for a thread an adapter lists
@@ -747,7 +748,25 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   inside the stretch back on a history page (the revert-cut filter keeps whatever lies in a
   surviving turn's range). On the owner's host (2026-09-24) the three big threads' first loads
   would append 1–9 rows each (their live work at the time; no request was pending) and leave the
-  270–1 800 messages still streaming in each window as they are.
+  270–1 800 messages still flagged streaming in each window as they are. **Their readers decide
+  instead, by one rule:** a message reads as streaming only by `isMessageStreaming`
+  (`packages/api/src/agent-chat/message-liveness.ts`) — its flag says so, the session is live
+  (`isSessionLive`, the roster's session-death notion), and its `turnId` is the head's
+  `activeTurnId` or its `agentId` an agent the roster shows `pending`/`running`/`waiting`; anything
+  else reads as settled — a dead host's stream, an agent's turnless words from before ingestion
+  closed them, a turnless message nobody owns. Every reader that shows liveness goes through it:
+  the GUI's rows derivation stamps it on a message row (`streaming`), which the reasoning row's
+  "Thinking" shimmer and an answer's streaming text read, and only an answer that streams by it
+  holds its turn's fold open — the window (`store.ts`), the history (`liveInputOf` keeps the
+  session and the running turn only: the parent's timeline holds no agent's words, so no roster
+  change re-projects it) and the drill-in (`drill-in.logic.ts`) all pass the thread's
+  `messageStreamingContext` (`messageStreaming` on `TimelineRowsInput`; memoised by the roster
+  array, so a streamed token keeps the fast path — except a token of a flagged message WITH a turn
+  that reads settled, answer or thinking block alike, which rebuilds: its turn may fold, and a
+  fold's "Worked for …" is timed by its terminal answer's and its last row's `updatedAt`; a turnless
+  message joins no fold and keeps the fast path). Pure and read-side: the fold, its snapshot, the
+  index, ingestion and the GUI's streamed-text fast path keep reading the flag, no version moves and
+  nothing is written; the MCP reports no message liveness at all.
 - **The agent host is a protected kill target but its children are not.** `system-status.ts` takes
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a
@@ -872,7 +891,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   turnless for its whole life. (2) Ingestion closes a turnless `assistant_message`/`reasoning`
   message on its own `item.completed` (`handleTurnlessCompletion`, the ids `handleContentDelta`
   mints with no turn): nothing else closed it but a session stop — after a host restart, nothing
-  at all — and one live thread held 5 479 agent messages still "Thinking". (3) A `tool_progress`
+  at all — and one live thread held 5 479 agent messages still "Thinking". A log written before
+  keeps them flagged; they read as settled once their agent is no longer at work
+  (`isMessageStreaming`, see "A running state never outlives its process"). (3) A `tool_progress`
   heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
   `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
   a surfaced subagent.
