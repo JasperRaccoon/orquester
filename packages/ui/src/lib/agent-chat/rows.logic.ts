@@ -47,6 +47,7 @@ import {
   summarizeToolGroup,
   toolGroupAction,
   toolGroupSummaryKind,
+  withoutOwnedOutput,
   workEntryDisplayIndicatesToolFailure,
   workEntryIndicatesToolSuccess,
   workEntryIsActiveTurnActivity,
@@ -330,6 +331,35 @@ function deriveActiveVisualResponseTurnIds(input: {
 
 /** *T3: `MessagesTimeline.logic.ts:614-620`.* */
 export { workEntryIsActiveTurnActivity };
+
+type WorkTimelineEntry = Extract<TimelineEntry, { kind: "work" }>;
+
+/**
+ * The live tool run from its last failing row on: a failure ends the run, as
+ * its first row. A chunk of a call whose own row is in the run is that row's
+ * output (`withoutOwnedOutput`), so a line it prints never ends the run. A
+ * cut can leave a chunk behind without its call's row, a row of its own from
+ * then on — so the rest is judged again, and the loop ends because every cut
+ * shortens the run.
+ */
+function fromLastFailingRow(run: readonly WorkTimelineEntry[]): readonly WorkTimelineEntry[] {
+  let from = run;
+  for (;;) {
+    const rows = withoutOwnedOutput(from, (entry) => entry.entry);
+    let failing: WorkTimelineEntry | undefined;
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      if (workEntryDisplayIndicatesToolFailure(rows[index]!.entry)) {
+        failing = rows[index];
+        break;
+      }
+    }
+    const at = failing === undefined ? 0 : from.indexOf(failing);
+    if (at <= 0) {
+      return from;
+    }
+    from = from.slice(at);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Turn folds
@@ -713,8 +743,8 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
 
   // The live tool run: the trailing streak of work entries in the active turn
   // — at the timeline's end, so never in a projection the timeline continues
-  // below.
-  const activeToolEntries: Array<Extract<TimelineEntry, { kind: "work" }>> = [];
+  // below — from its last failing row on (`fromLastFailingRow`).
+  const trailingWorkEntries: WorkTimelineEntry[] = [];
   for (let index = entries.length - 1; tailHere && index >= activeTurnHeaderIndex; index -= 1) {
     const entry = entries[index]!;
     if (
@@ -726,18 +756,19 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     ) {
       break;
     }
-    activeToolEntries.unshift(entry);
-    if (workEntryDisplayIndicatesToolFailure(entry.entry)) {
-      break;
-    }
+    trailingWorkEntries.push(entry);
   }
+  const activeToolEntries = fromLastFailingRow(trailingWorkEntries.reverse());
   const visibleActiveToolEntries = omitSupersededLifecycleMarkers(
     activeToolEntries.filter((entry) => workEntryIsVisibleInGroup(entry.entry, true)),
     (entry) => entry.entry
   );
   const activeWorkAnchor = activeToolEntries[0];
-  const latestVisibleToolEntry = visibleActiveToolEntries.at(-1);
-  const latestRunningToolEntry = [...visibleActiveToolEntries]
+  // The live row names, and is judged by, a call's own row, never one of the
+  // chunks it absorbs; it still carries them all (`groupedEntries`).
+  const activeRowEntries = withoutOwnedOutput(visibleActiveToolEntries, (entry) => entry.entry);
+  const latestVisibleToolEntry = activeRowEntries.at(-1);
+  const latestRunningToolEntry = [...activeRowEntries]
     .reverse()
     .find((entry) => {
       const spawn = entry.entry.agentSpawn;
@@ -982,7 +1013,10 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
         (entry) => entry
       );
       if (visibleGroupedEntries.length > 0) {
-        const activeInProgress = visibleGroupedEntries.filter(workEntryIsInActiveRun);
+        // What the group counts, names and judges: its rows without the chunks
+        // their own calls absorb. The rows it renders still carry them all.
+        const rowEntries = withoutOwnedOutput(visibleGroupedEntries, (entry) => entry);
+        const activeInProgress = rowEntries.filter(workEntryIsInActiveRun);
         if (activeInProgress.length > 0) {
           const groupId = workGroupId(timelineEntry.id, timelineEntry.entry);
           const expanded = input.expandedWorkGroupIds?.has(groupId) ?? false;
@@ -1021,21 +1055,21 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
             singleEntry !== null &&
             workLogEntryIsToolLike(singleEntry) &&
             toolGroupAction(singleEntry) !== "edit";
-          const latestToolEntry = [...visibleGroupedEntries].reverse().find(workLogEntryIsToolLike);
+          const latestToolEntry = [...rowEntries].reverse().find(workLogEntryIsToolLike);
           rows.push({
             kind: "work-toggle",
             id: `work-toggle:${timelineEntry.id}`,
             createdAt: timelineEntry.createdAt,
             turnId: timelineEntry.entry.turnId,
             groupId,
-            hiddenCount: visibleGroupedEntries.length,
+            hiddenCount: rowEntries.length,
             expanded,
             summary: usesSingleToolCallLabel
               ? singleToolCallLabel(singleEntry)
               : singleEntry !== null && !workLogEntryIsToolLike(singleEntry)
                 ? singleEntry.label
-                : summarizeToolGroup(visibleGroupedEntries),
-            summaryKind: toolGroupSummaryKind(visibleGroupedEntries),
+                : summarizeToolGroup(rowEntries),
+            summaryKind: toolGroupSummaryKind(rowEntries),
             hasFailure:
               latestToolEntry !== undefined && workEntryDisplayIndicatesToolFailure(latestToolEntry)
           });

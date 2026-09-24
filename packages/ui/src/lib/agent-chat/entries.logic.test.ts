@@ -340,6 +340,75 @@ describe("deriveWorkLogEntries", () => {
   });
 });
 
+describe("a started call's own row", () => {
+  /** A Codex command's rows: its start names it, and nothing but output chunks follows until it completes. */
+  const commandRow = (activityKind: string, extra: Record<string, unknown> = {}) =>
+    activity(
+      activityKind,
+      { itemType: "command_execution", toolUseId: "call-1", title: "npm test", command: "npm test", status: "inProgress", ...extra },
+      { turnId: "t1", ...(activityKind === "tool.denied" ? { tone: "error" as const } : {}) }
+    );
+  const chunk = (delta: string) =>
+    activity("tool.output", { toolUseId: "call-1", streamKind: "command_output", delta }, { turnId: "t1", summary: "Tool output" });
+
+  it("a keyed start with no other lifecycle row is its call's entry, and its chunks join it", () => {
+    const start = commandRow("tool.started");
+    const output = chunk("PASS a.test.ts\n");
+    const entries = deriveWorkLogEntries([start, output]);
+    assert.deepEqual(
+      entries.map((entry) => [entry.id, entry.command, entry.toolLifecycleStatus]),
+      [
+        [start.id, "npm test", "inProgress"],
+        [output.id, undefined, undefined]
+      ]
+    );
+    assert.deepEqual(
+      joinLifecycleDetails(entries).map((entry) => [entry.id, entry.detail]),
+      [[start.id, "PASS a.test.ts\n"]],
+      "the running command is the row its output renders in"
+    );
+  });
+
+  it("is dropped once an update, a completion or a denial of the call is in the input, before or after it", () => {
+    for (const [kind, extra] of [
+      ["tool.updated", {}],
+      ["tool.completed", { status: "completed" }],
+      ["tool.denied", { status: "declined" }]
+    ] as const) {
+      const start = commandRow("tool.started");
+      const later = commandRow(kind, extra);
+      assert.deepEqual(deriveWorkLogEntries([start, later]).map((entry) => entry.id), [later.id], kind);
+      // Grok forgets a call at its terminal update, so a frame after it comes out as a fresh start behind it.
+      assert.deepEqual(deriveWorkLogEntries([later, start]).map((entry) => entry.id), [later.id], `${kind}, first`);
+    }
+  });
+
+  it("an unkeyed start, and a start with neither a turn nor an owner, are dropped as before", () => {
+    const unkeyed = activity("tool.started", { itemType: "command_execution", command: "ls", status: "inProgress" }, { turnId: "t1" });
+    // A Claude parent call can start before the synthetic turn its own message opens: its later rows carry that turn,
+    // and a rewind that cut the turn leaves the start alone — never a running call.
+    const turnless = activity("tool.started", { itemType: "command_execution", toolUseId: "call-2", command: "ls", status: "inProgress" });
+    assert.deepEqual(deriveWorkLogEntries([unkeyed, turnless]), []);
+    // An agent's call started while no parent turn was open has an owner: in its own view, it is its row.
+    const owned = activity(
+      "tool.started",
+      { itemType: "command_execution", toolUseId: "call-3", command: "ls", status: "inProgress", agentId: "ag1" },
+      { agentId: "ag1" }
+    );
+    assert.deepEqual(deriveWorkLogEntries([owned], { ownerAgentId: "ag1" }).map((entry) => entry.id), [owned.id]);
+  });
+
+  it("an ExitPlanMode start is a plan boundary like the call's other rows, not a tool row", () => {
+    // Claude's start frame, before the plan streams into the call's input.
+    const start = activity(
+      "tool.started",
+      { itemType: "dynamic_tool_call", toolUseId: "call-4", title: "Tool call", detail: "ExitPlanMode: {}", status: "inProgress" },
+      { turnId: "t1" }
+    );
+    assert.deepEqual(deriveWorkLogEntries([start]), []);
+  });
+});
+
 describe("compaction classification", () => {
   it("recognises both spellings", () => {
     assert.equal(isCompactionActivity(activity("context-compaction", {})), true);

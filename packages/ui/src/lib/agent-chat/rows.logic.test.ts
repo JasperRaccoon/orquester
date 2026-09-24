@@ -3,12 +3,18 @@ import { beforeEach, describe, it } from "node:test";
 
 import type { Turn } from "@orquester/api/agent-chat";
 
+import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { AgentChatTimelineRow, WorkLogEntry } from "./contracts";
 import {
   deriveTimelineEntriesFromItems,
   EMPTY_TIMELINE_PROJECTION,
   type TimelineEntry
 } from "./entries.logic";
+import {
+  liveWorkEntryLabel,
+  omitSupersededLifecycleMarkers,
+  workEntryDisplayIndicatesToolFailure
+} from "./presentation.logic";
 import {
   computeStableRows,
   deriveTimelineRows,
@@ -636,6 +642,89 @@ describe("the live rows", () => {
     assert.equal(queued.length, 2);
     assert.equal(queued[0]?.kind === "queued-message" && queued[0].isNext, true);
     assert.equal(queued[1]?.kind === "queued-message" && queued[1].isNext, false);
+  });
+});
+
+describe("a command's streamed output is the inside of its row", () => {
+  // A Codex command as ingestion writes it: its start, then one `tool.output` row per flush of its output, then —
+  // once it exits — its completion. No update comes in between.
+  const prompt = () => message("user", "build it", { id: "u1", createdAt: stamp(1) });
+  const call = (activityKind: string, id: string, at: number, status: string) =>
+    activity(
+      activityKind,
+      { itemType: "command_execution", toolUseId: "call-1", title: "npm run build", command: "npm run build", status },
+      { id, turnId: "t1", createdAt: stamp(at) }
+    );
+  const chunk = (n: number, delta = `line ${n}\n`) =>
+    activity("tool.output", { toolUseId: "call-1", streamKind: "command_output", delta }, {
+      id: `c${n}`,
+      turnId: "t1",
+      summary: "Tool output",
+      createdAt: stamp(2 + n)
+    });
+  const running = {
+    isWorking: true,
+    runningTurnId: "t1",
+    latestTurn: { turnId: "t1", state: "running" as const, startedAt: stamp(1), completedAt: null },
+    activeTurnStartedAt: stamp(1)
+  };
+  const liveRows = (rows: readonly AgentChatTimelineRow[]) =>
+    rows.flatMap((row) => (row.kind === "work-live" ? [row] : []));
+
+  it("a running command and its N chunks are ONE live row, labelled with the command", () => {
+    const chunks = Array.from({ length: 40 }, (_, index) => chunk(index + 1));
+    const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), call("tool.started", "start", 2, "inProgress"), ...chunks]), running));
+    assert.deepEqual(kinds(rows), ["message", "working", "work-live"]);
+    const [live] = liveRows(rows);
+    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Running npm", "never the text of its latest chunk");
+    assert.equal(live!.active, true);
+    // The row still carries every chunk: expanded, they are its output.
+    assert.equal(live!.groupedEntries.length, 41);
+    assert.deepEqual(
+      joinLifecycleDetails(live!.groupedEntries).map((entry) => [entry.id, entry.detail]),
+      [["start", chunks.map((row) => (row.payload as { delta: string }).delta).join("")]]
+    );
+  });
+
+  it("a chunk that reads like a failure neither splits the run nor marks it failed", () => {
+    for (const failingAt of [2, 3]) {
+      const chunks = [1, 2, 3].map((n) => chunk(n, n === failingAt ? "cat: x: No such file or directory\n" : `line ${n}\n`));
+      const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), call("tool.started", "start", 2, "inProgress"), ...chunks]), running));
+      assert.deepEqual(kinds(rows), ["message", "working", "work-live"], `failing chunk ${failingAt}: one run`);
+      const [live] = liveRows(rows);
+      assert.equal(live!.entry.id, "start");
+      assert.equal(workEntryDisplayIndicatesToolFailure(live!.entry), false, `failing chunk ${failingAt}: not failed`);
+      assert.equal(live!.groupedEntries.length, 4);
+    }
+  });
+
+  it("a settled call and its chunks read \"Ran 1 command\", one hidden row, which still joins every chunk", () => {
+    const items = [
+      prompt(),
+      call("tool.started", "start", 2, "inProgress"),
+      chunk(1),
+      chunk(2),
+      chunk(3),
+      call("tool.completed", "done", 9, "completed"),
+      message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })
+    ];
+    const settled = {
+      latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(1), completedAt: stamp(10) },
+      expandedTurnIds: new Set(["t1"])
+    };
+    const rows = deriveTimelineRows(baseInput(entriesFrom(items), settled));
+    const toggle = rows.find((row) => row.kind === "work-toggle");
+    assert.ok(toggle?.kind === "work-toggle");
+    assert.deepEqual([toggle.summary, toggle.hiddenCount, toggle.summaryKind, toggle.hasFailure], ["Ran 1 command", 1, "command", false]);
+
+    const expanded = deriveTimelineRows(
+      baseInput(entriesFrom(items), { ...settled, expandedWorkGroupIds: new Set([toggle.groupId]) })
+    ).find((row) => row.kind === "work" && row.isExpandedToolGroup);
+    assert.ok(expanded?.kind === "work");
+    assert.deepEqual(
+      joinLifecycleDetails(omitSupersededLifecycleMarkers(expanded.groupedEntries, (entry) => entry)).map((entry) => [entry.id, entry.detail]),
+      [["done", "line 1\nline 2\nline 3\n"]]
+    );
   });
 });
 

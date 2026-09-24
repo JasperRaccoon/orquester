@@ -4,12 +4,14 @@ import { describe, it } from "node:test";
 import type { WorkLogEntry } from "./contracts";
 import {
   commandProgramName,
+  isStreamedOutputEntry,
   liveWorkEntryLabel,
   normalizeCompactToolLabel,
   omitSupersededLifecycleMarkers,
   summarizeToolGroup,
   toolGroupAction,
   toolGroupSummaryKind,
+  withoutOwnedOutput,
   workEntryIconName,
   workEntryIndicatesToolNeutralStatus,
   workEntryIsProviderDenial,
@@ -204,6 +206,45 @@ describe("misc helpers", () => {
       liveWorkEntryLabel(entry({ command: "pnpm test", toolLifecycleStatus: "failed" }), true),
       "Failed pnpm"
     );
+  });
+});
+
+describe("a call's streamed output", () => {
+  const chunk = (id: string, toolCallId: string, detail: string): WorkLogEntry =>
+    entry({ id, toolCallId, detail, label: "Tool output", sourceActivityKind: "tool.output" });
+
+  it("isStreamedOutputEntry names a tool.output chunk, and nothing else", () => {
+    assert.equal(isStreamedOutputEntry(chunk("c1", "call-1", "one\n")), true);
+    assert.equal(isStreamedOutputEntry(entry({ toolCallId: "call-1", sourceActivityKind: "tool.started" })), false);
+    assert.equal(isStreamedOutputEntry(entry({})), false);
+  });
+
+  it("withoutOwnedOutput drops the chunks a row of their own call absorbs, wherever it sits, and keeps an orphan's", () => {
+    const start = entry({ id: "s", toolCallId: "call-1", command: "npm test", sourceActivityKind: "tool.started" });
+    const completion = entry({ id: "d", toolCallId: "call-2", command: "make", sourceActivityKind: "tool.completed" });
+    const rows = [
+      start,
+      chunk("c1", "call-1", "one\n"),
+      chunk("c2", "call-2", "two\n"),
+      completion,
+      chunk("c3", "call-9", "orphan\n"),
+      chunk("c4", "call-1", "No such file or directory\n")
+    ];
+    assert.deepEqual(
+      withoutOwnedOutput(rows, (row) => row).map((row) => row.id),
+      ["s", "d", "c3"]
+    );
+    // Any list shape, through the accessor.
+    const wrapped = rows.map((row) => ({ entry: row }));
+    assert.deepEqual(
+      withoutOwnedOutput(wrapped, (row) => row.entry).map((row) => row.entry.id),
+      ["s", "d", "c3"]
+    );
+  });
+
+  it("withoutOwnedOutput hands a list with no chunk back as it is", () => {
+    const rows = [entry({ id: "a", toolCallId: "call-1" }), entry({ id: "b" })];
+    assert.equal(withoutOwnedOutput(rows, (row) => row), rows);
   });
 });
 

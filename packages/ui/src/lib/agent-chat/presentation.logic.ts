@@ -348,6 +348,55 @@ export function omitSupersededLifecycleMarkers<T>(
 }
 
 /**
+ * A streamed output chunk of a tool call (`tool.output`) — the inside of its
+ * call's row, not a call of its own: `joinLifecycleDetails` folds it onto the
+ * row that owns the call. The one definition; `row-chrome.ts` re-exports it as
+ * `isToolOutputRow`.
+ */
+export function isStreamedOutputEntry(entry: WorkLogEntry): boolean {
+  return entry.sourceActivityKind === "tool.output";
+}
+
+/**
+ * `entries` without the chunks a row of their own call absorbs: each streamed
+ * chunk whose call (`toolCallId`) has a non-chunk entry in the same list. What
+ * a run's live row and a group's summary read, while the rows they render
+ * still carry every chunk for `joinLifecycleDetails` to fold — read with them,
+ * a command's output counted as a tool per flush ("Used 548 tools and ran 1
+ * command"), named the live row with its latest line, and failed the run on a
+ * line that merely printed "No such file or directory". A chunk whose call has
+ * no row in the list renders as a row of its own, and stays.
+ *
+ * `entries` itself when it holds no chunk.
+ */
+export function withoutOwnedOutput<T>(
+  entries: readonly T[],
+  workEntryFor: (entry: T) => WorkLogEntry
+): readonly T[] {
+  const calls = new Set<string>();
+  let chunks = false;
+  for (const entry of entries) {
+    const workEntry = workEntryFor(entry);
+    if (isStreamedOutputEntry(workEntry)) {
+      chunks = true;
+    } else if (workEntry.toolCallId !== undefined) {
+      calls.add(workEntry.toolCallId);
+    }
+  }
+  if (!chunks) {
+    return entries;
+  }
+  return entries.filter((entry) => {
+    const workEntry = workEntryFor(entry);
+    return !(
+      isStreamedOutputEntry(workEntry) &&
+      workEntry.toolCallId !== undefined &&
+      calls.has(workEntry.toolCallId)
+    );
+  });
+}
+
+/**
  * `"Read 3 files, ran 2 commands"` — the settled label of a collapsed activity
  * group (§7.3). Buckets by {@link toolGroupAction} and joins with an Oxford
  * comma, after dropping superseded markers.

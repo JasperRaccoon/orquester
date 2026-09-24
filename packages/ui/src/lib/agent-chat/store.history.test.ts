@@ -1416,9 +1416,10 @@ describe("the history bridge", () => {
     const prompt = message("user", "go", { id: "uR", createdAt: stamp((clock.at += 1)) });
     const word = message("assistant", "on it", { id: "aR", turnId: "tR", createdAt: stamp((clock.at += 1)) });
     // The call in flight: its start, which retention keeps while the call runs (`openWorkOf`), and its latest update,
-    // an ordinary row that goes to the bridge. A `tool.started` renders in neither timeline (`DROPPED_ACTIVITY_KINDS`),
-    // so what the kept start shows here is only that it stays in the window, older than every row the bridge took,
-    // and changes nothing the timeline draws.
+    // an ordinary row that goes to the bridge. The start follows its call into the history's input (their lifecycle
+    // key), where the update supersedes it (`startIsCallRow`, entries.logic.ts): it renders in neither timeline, so
+    // what the kept start shows here is only that it stays in the window, older than every row the bridge took, and
+    // changes nothing the timeline draws.
     const opening = activity("tool.started", { toolUseId: "call-live", status: "inProgress" }, {
       id: "xR-open",
       turnId: "tR",

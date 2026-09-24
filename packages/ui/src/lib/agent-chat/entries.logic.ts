@@ -23,6 +23,8 @@
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 import {
+  CALL_CLOSER_KINDS,
+  CALL_OPENER_KINDS,
   commandDisplayDetail,
   compactionMarkerState,
   IDENTITY_CHANGED_ACTIVITY_KIND,
@@ -430,7 +432,7 @@ export function isAgentInternalActivity(activity: ThreadActivityItem): boolean {
  * with a non-blank `agentId`) found in the same derivation input. A chunk
  * whose call has no owned row there stays the parent's, as before.
  */
-const CALL_LIFECYCLE_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
+const CALL_LIFECYCLE_KINDS: ReadonlySet<string> = new Set([...CALL_OPENER_KINDS, ...CALL_CLOSER_KINDS]);
 
 /** A non-blank agent id as written: views compare ids verbatim (`ownedByAgent`). */
 const nonBlankId = (value: unknown): string | undefined =>
@@ -467,10 +469,39 @@ function inheritedChunkOwner(
   return callId === undefined ? undefined : callOwners.get(callId);
 }
 
+// ---------------------------------------------------------------------------
+// A started call's own row
+// ---------------------------------------------------------------------------
+
+/**
+ * A call's `tool.started` is its row while the derivation input holds no other
+ * lifecycle row of the call (`tool.updated`, `tool.completed`, `tool.denied`):
+ * each of those says at least what the start says, and supersedes it. T3 drops
+ * every start ("always followed by an update"), which holds for none of
+ * Codex's commands — a start, output chunks, then the completion — nor for a
+ * Claude tool whose input is empty, so a running command showed no title, only
+ * the text of its latest chunk. The fold keeps a running call's opening row
+ * whatever its age, within a cap (`open-work.ts`), and the rows of one call
+ * are derived together wherever they lie — the history's pages and bridge are
+ * one input, and a window row of a call the history began joins it
+ * (`splitLiveItems`) — so the row that closes a call is in its start's input.
+ *
+ * Still dropped: an unkeyed start, which nothing ties to its call; and a start
+ * with neither a turn nor an owner. A Claude PARENT call can start before the
+ * synthetic turn its own message opens, and its later rows carry that turn —
+ * so alone such a start is never a running call, and a rewind that cut the
+ * turn must not bring it back.
+ */
+function startIsCallRow(activity: ThreadActivityItem, supersededCalls: ReadonlySet<string>): boolean {
+  const callId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
+  if (callId === undefined || supersededCalls.has(callId)) {
+    return false;
+  }
+  return Boolean(activity.turnId) || isAgentOwnedActivity(activity);
+}
+
 /** Activity kinds that never become a work-log row. */
 const DROPPED_ACTIVITY_KINDS = new Set([
-  // A `tool.started` row has no output and is always followed by an update.
-  "tool.started",
   // Fold input only; a status patch is not narrative.
   "task.updated",
   "tool.progress",
@@ -494,9 +525,17 @@ function isNoContentRuntimeWarning(activity: ThreadActivityItem): boolean {
   );
 }
 
-/** `ExitPlanMode` is a plan boundary, not a tool the user cares about. *T3: `:528-540`.* */
+/**
+ * `ExitPlanMode` is a plan boundary, not a tool the user cares about. *T3:
+ * `:528-540`; differs: a start is a row too (`startIsCallRow`), and Claude's
+ * reads `ExitPlanMode: {}` until the plan streams into the call's input.*
+ */
 function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
-  if (activity.activityKind !== "tool.updated" && activity.activityKind !== "tool.completed") {
+  if (
+    activity.activityKind !== "tool.started" &&
+    activity.activityKind !== "tool.updated" &&
+    activity.activityKind !== "tool.completed"
+  ) {
     return false;
   }
   const detail = asRecord(activity.payload)?.detail;
@@ -554,7 +593,16 @@ export function deriveWorkLogEntries(
   // A launch tool and its task lifecycle describe the same run. Only hide the
   // launch row once its tool-use id has an agent row to replace it.
   const agentLaunchToolIds = new Set<string>();
+  // The calls whose start another of their lifecycle rows supersedes (`startIsCallRow`).
+  const supersededCalls = new Set<string>();
   for (const activity of activities) {
+    if (activity.activityKind !== "tool.started" && CALL_LIFECYCLE_KINDS.has(activity.activityKind)) {
+      const toolUseId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
+      if (toolUseId) {
+        supersededCalls.add(toolUseId);
+      }
+      continue;
+    }
     if (
       (activity.activityKind === "task.started" ||
         activity.activityKind === "task.progress" ||
@@ -587,6 +635,9 @@ export function deriveWorkLogEntries(
       continue;
     }
     if (DROPPED_ACTIVITY_KINDS.has(activity.activityKind)) {
+      continue;
+    }
+    if (activity.activityKind === "tool.started" && !startIsCallRow(activity, supersededCalls)) {
       continue;
     }
     if (activity.activityKind === "task.started" && !isAgentTaskStartedActivity(activity)) {
