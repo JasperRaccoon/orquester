@@ -2947,27 +2947,28 @@ host's rules are the only ones: an empty or repeated `offset` is its 400, a repe
 takes its first value.*
 
 *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, task 4): the timeline reads
-it too. A row showed only the chunks the window still held, and offered "Load full output" only
-where §5.6 had cut its own payload — which a Codex command's completion was not (its detail a
-180-character preview, its output only streamed), nor a background shell's — so once the window
-evicted a long command's early chunks they were unreadable in the GUI, and the button, where it did
-show, read the payload back as JSON. Now a row whose command streamed its output offers it whether
-or not its payload was cut (`fullOutputSourceOf`, `lib/agent-chat/full-output.ts`) — a running
-command's start, its call's only row, included, since what it reads is the join, never the start's
-payload. `streamedOutput` marks such a row: a `tool.output` chunk of `command_output`, every
-lifecycle row of a call whose chunks the derivation input holds — wherever they fall, as the MCP's
-transcript counts them — and the row `joinLifecycleDetails` puts them on (`entries.logic.ts`,
-`timeline/row-chrome.ts`). The viewer reads the join through the chat transport's `readItemOutput`:
-one window at a time, `THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide, from 0 to the end, every window
-starting where the last ended and naming its end as the next — else the read fails rather than
-stitch a text the call never printed. Above the text it says that a running call's output is its
-output so far, and that a join past the 8 MiB cap is its head. A host from before windows answers
-the whole join, taken as it comes; a 404 (`ITEM_NOT_FOUND`, or a host from before the route) or an
-empty join falls back to the item read, never an error. A file change is never read through the
-join: its chunks are its result text, no command's output (the MCP's rule). The subagent drill-in,
-whose window keeps an agent's 200 rows, opens the same viewer — a read, not a command. Still out of
-reach: a call none of whose chunks the window or the loaded history holds offers the button only
-where its own payload was cut, since nothing else in the snapshot says it streamed.*
+it too. A row showed only the chunks the window still held, and its "Load full output" — offered
+only where §5.6 stamped `truncated`, so never on a running command's start — read the row's own item
+back as JSON: a command's streamed output is in no item, so the viewer showed a completion's payload
+(a Codex command's 180-character preview, a background shell's command and exit code), never what
+the command printed, and the chunks the window had evicted were unreadable in the GUI. Now a row
+whose command streamed its output offers it whether or not its payload was cut
+(`fullOutputSourceOf`, `lib/agent-chat/full-output.ts`) — a running command's start, its call's only
+row, included, since what it reads is the join, never the start's payload. `streamedOutput` marks
+such a row: a `tool.output` chunk of `command_output`, every lifecycle row of a call whose chunks
+the derivation input holds — wherever they fall, as the MCP's transcript counts them — and the row
+`joinLifecycleDetails` puts them on (`entries.logic.ts`, `timeline/row-chrome.ts`). The viewer reads
+the join through the chat transport's `readItemOutput`: one window at a time,
+`THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide, from 0 to the end, every window starting where the last
+ended and naming its end as the next — else the read fails rather than stitch a text the call never
+printed. Above the text it says that a running call's output is its output so far, and that a join
+past the 8 MiB cap is its head. A host from before windows answers the whole join, taken as it
+comes; a 404 (`ITEM_NOT_FOUND`, or a host from before the route) or an empty join falls back to the
+item read, never an error. A file change is never read through the join: its chunks are its result
+text, no command's output (the MCP's rule). The subagent drill-in, whose window keeps an agent's 200
+rows, opens the same viewer — a read, not a command. Still out of reach: a call none of whose chunks
+the window or the loaded history holds offers the button only where its own payload was cut, since
+nothing else in the snapshot says it streamed.*
 
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured

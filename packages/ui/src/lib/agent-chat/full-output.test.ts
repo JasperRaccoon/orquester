@@ -68,8 +68,8 @@ describe("the row's Load full output", () => {
 
 describe("the full-output viewer's read", () => {
   it("shows the whole output of a command whose early chunks the window evicted — not what the window still holds", async () => {
-    // 600 lines streamed (a Codex command: its completion's detail is a preview, and nothing cut its payload); the
-    // window kept the completion and the call's last two chunks.
+    // 600 lines streamed; the window kept the call's completion — its detail a preview, its own payload not marked
+    // cut — and its last two chunks.
     const whole = Array.from({ length: 600 }, (_, index) => `line ${index + 1}\n`).join("");
     const completion = activity(
       "tool.completed",
