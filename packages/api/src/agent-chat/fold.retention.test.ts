@@ -7,10 +7,11 @@
  * here is a reference model written from the rules alone: it follows the
  * window event by event, recounts the droppable rows from scratch after each
  * step, and when its trigger fires applies today's `activitiesToDrop` and
- * message cut — copied below as they stood before batching, with the one rule
+ * message cut — copied below as they stood before batching, with the two rules
  * changed since: the compaction-marker exemption reads both spellings
- * (`FOLD_SNAPSHOT_VERSION` 3) — to the pre-trim window. The fold must agree
- * with it at every step: same rows, same objects, same dropped rows.
+ * (`FOLD_SNAPSHOT_VERSION` 3), and the opening rows of running work are kept
+ * (4) — to the pre-trim window. The fold must agree with it at every step:
+ * same rows, same objects, same dropped rows.
  */
 
 import assert from "node:assert/strict";
@@ -26,6 +27,9 @@ import {
   AGENT_ACTIVITY_TOTAL_SLACK,
   MESSAGE_RETENTION_LIMIT,
   MESSAGE_RETENTION_SLACK,
+  OPEN_WORK_RETENTION_LIMIT,
+  OPEN_WORK_TOTAL_RETENTION_LIMIT,
+  __foldCacheConsistency,
   applyDomainEvent,
   createEmptyThreadState,
   foldThread,
@@ -39,9 +43,12 @@ import {
   AGENT_WEIGHTS,
   FLEET_WEIGHTS,
   LEGACY_FLEET_WEIGHTS,
+  LONG_CALL_CEILING_WEIGHTS,
+  LONG_CALL_WEIGHTS,
   MESSAGE_WEIGHTS,
   fleetLog,
-  legacyStateFate
+  legacyStateFate,
+  openWorkFate
 } from "./fold-logs.test-support.ts";
 import type { ThreadActivityItem, ThreadItem } from "./thread.ts";
 import {
@@ -95,17 +102,93 @@ function isMarker(row: ThreadActivityItem): boolean {
   );
 }
 
+type ReferenceUnit = { opening: ThreadActivityItem; openedAt: number; activeAt: number };
+
+/**
+ * The work still running, by its opening row, read from the definitions — grouping each unit's rows, not
+ * `open-work.ts`'s single pass — so the reference stays a second reading of the rule (`FOLD_SNAPSHOT_VERSION` 4). A
+ * call (a non-blank `toolUseId` on `tool.*` rows) is open when its rows hold a `tool.started`/`tool.updated` and no
+ * `tool.completed`/`tool.denied`, and opens with the first of those; a background task (a non-blank `taskId` on
+ * `task.*` rows) when its rows hold a `task.started` not stamped `agentKind: "agent"` and no `task.completed`, and
+ * opens with the first such start. A unit is active as of its newest row — any of the call's rows; any of the task's,
+ * or any row stamped with its id as the owner.
+ */
+function referenceUnits(activities: readonly ThreadActivityItem[]): Map<ThreadActivityItem, ReferenceUnit> {
+  const payloadOf = (row: ThreadActivityItem): Record<string, unknown> =>
+    row.payload !== null && typeof row.payload === "object" && !Array.isArray(row.payload)
+      ? (row.payload as Record<string, unknown>)
+      : {};
+  const idOf = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() !== "" ? value : null;
+  const push = <T>(groups: Map<string, T[]>, key: string, value: T): void => {
+    const group = groups.get(key);
+    if (group) group.push(value);
+    else groups.set(key, [value]);
+  };
+  // Every row of each call, of each task, and of each owner, with its position.
+  const callRows = new Map<string, Array<[ThreadActivityItem, number]>>();
+  const taskRows = new Map<string, Array<[ThreadActivityItem, number]>>();
+  const ownedAt = new Map<string, number[]>();
+  activities.forEach((row, at) => {
+    const payload = payloadOf(row);
+    const call = row.activityKind.startsWith("tool.") ? idOf(payload.toolUseId) : null;
+    if (call !== null) push(callRows, call, [row, at]);
+    const task = row.activityKind.startsWith("task.") ? idOf(payload.taskId) : null;
+    if (task !== null) push(taskRows, task, [row, at]);
+    const owner = ownerOf(row);
+    if (owner !== null) push(ownedAt, owner, at);
+  });
+  const units = new Map<ThreadActivityItem, ReferenceUnit>();
+  for (const rows of callRows.values()) {
+    if (rows.some(([row]) => row.activityKind === "tool.completed" || row.activityKind === "tool.denied")) continue;
+    const opener = rows.find(([row]) => row.activityKind === "tool.started" || row.activityKind === "tool.updated");
+    if (opener !== undefined) units.set(opener[0], { opening: opener[0], openedAt: opener[1], activeAt: rows.at(-1)![1] });
+  }
+  for (const [taskId, rows] of taskRows) {
+    if (rows.some(([row]) => row.activityKind === "task.completed")) continue;
+    const start = rows.find(([row]) => row.activityKind === "task.started" && payloadOf(row).agentKind !== "agent");
+    if (start === undefined) continue;
+    const activeAt = Math.max(rows.at(-1)![1], ownedAt.get(taskId)?.at(-1) ?? -1);
+    units.set(start[0], { opening: start[0], openedAt: start[1], activeAt });
+  }
+  return units;
+}
+
+/**
+ * The openings among `rows` a cut keeps: the `limit` most recently active, a tie going to the one opened later. Each
+ * window's cut ranks only the rows it would drop — those before its newest `limit` rows — and the ceiling only the
+ * rows that survived their own window.
+ */
+function referenceKept(
+  units: ReadonlyMap<ThreadActivityItem, ReferenceUnit>,
+  rows: readonly ThreadActivityItem[],
+  limit: number
+): Set<ThreadActivityItem> {
+  return new Set(
+    rows
+      .filter((row) => units.has(row))
+      .map((row) => units.get(row)!)
+      .sort((left, right) => right.activeAt - left.activeAt || right.openedAt - left.openedAt)
+      .slice(0, limit)
+      .map((unit) => unit.opening)
+  );
+}
+
 /**
  * `activitiesToDrop` as it stood before batch retention — the cross-agent
  * ceiling still sorting with `localeCompare`, which orders the ISO-8601 stamps
  * these logs carry exactly as the fold's `<` does, ties included — with the
  * parent window's marker exemption as it stands since `FOLD_SNAPSHOT_VERSION`
- * 3: either spelling ({@link isMarker}).
+ * 3: either spelling ({@link isMarker}); and, since 4, every window's and the
+ * ceiling's exemption for the opening rows of running work ({@link referenceUnits},
+ * {@link referenceKept}): 16 per window among the rows its cut would drop, 64
+ * under the ceiling among the agents' rows that survived their own windows.
  */
 function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): Set<ThreadActivityItem> {
   if (activities.length <= ACTIVITY_RETENTION_LIMIT) {
     return new Set();
   }
+  const units = referenceUnits(activities);
   const pendingById = new Map<string, ThreadActivityItem>();
   const parentRows: ThreadActivityItem[] = [];
   const agentRows = new Map<string, ThreadActivityItem[]>();
@@ -131,9 +214,10 @@ function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): S
   const retainedByQuestion = new Set(pendingById.values());
   const drop = new Set<ThreadActivityItem>();
   const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
+  const keptByParent = referenceKept(units, parentRows.slice(0, Math.max(0, parentStart)), 16);
   for (let index = 0; index < parentStart; index += 1) {
     const row = parentRows[index]!;
-    if (retainedByQuestion.has(row) || isAnchor(row) || isMarker(row)) {
+    if (retainedByQuestion.has(row) || keptByParent.has(row) || isAnchor(row) || isMarker(row)) {
       continue;
     }
     drop.add(row);
@@ -141,18 +225,20 @@ function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): S
   const survivingAgentRows: ThreadActivityItem[] = [];
   for (const rows of agentRows.values()) {
     const start = rows.length - AGENT_ACTIVITY_RETENTION_LIMIT;
+    const keptByAgent = referenceKept(units, rows.slice(0, Math.max(0, start)), 16);
     rows.forEach((row, index) => {
-      if (index < start && !isAnchor(row)) drop.add(row);
+      if (index < start && !isAnchor(row) && !keptByAgent.has(row)) drop.add(row);
       else survivingAgentRows.push(row);
     });
   }
   if (survivingAgentRows.length > AGENT_ACTIVITY_TOTAL_LIMIT) {
+    const keptByCeiling = referenceKept(units, survivingAgentRows, 64);
     survivingAgentRows.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     const excess = survivingAgentRows.length - AGENT_ACTIVITY_TOTAL_LIMIT;
     let dropped = 0;
     for (const row of survivingAgentRows) {
       if (dropped === excess) break;
-      if (isAnchor(row)) continue;
+      if (isAnchor(row) || keptByCeiling.has(row)) continue;
       drop.add(row);
       dropped += 1;
     }
@@ -367,7 +453,8 @@ function compareWithReference(events: readonly DomainEvent[]): ReferenceRun {
     }
     // A step either stays within every class's limit plus slack or trims back
     // inside it, so between trims no class holds more (no log here keeps a
-    // slack's worth of old open questions, the one exception).
+    // slack's worth of old open questions, the one exception: the openings of
+    // running work count in their class too, but at most 16 per window).
     if (trim !== null && trim.after.length > 0) {
       return { ...run, mismatch: `${where}: left past its slack (${trim.after.join(", ")})` };
     }
@@ -790,6 +877,311 @@ test("an older log's thread-state rows trim exactly as the rules say, over a fle
   assert.ok(fate.droppedOtherStates >= 10, `other thread-state rows dropped: ${fate.droppedOtherStates}`);
   assert.ok(fate.droppedAgentMarkers >= 2, `agents' legacy markers dropped: ${fate.droppedAgentMarkers}`);
   assert.ok(fate.movedInPlace >= 5, `rows moved across the exemption in place: ${fate.movedInPlace}`);
+});
+
+// ---------------------------------------------------------------------------
+// Running work keeps its opening row (`FOLD_SNAPSHOT_VERSION` 4)
+// ---------------------------------------------------------------------------
+
+const appended = (row: ThreadActivityItem): DomainEvent => ev("thread.activity-appended", { activity: row });
+
+/** A lifecycle row of the call `toolUseId` (its start, an update, its end). */
+function callRow(kind: string, toolUseId: string, id: string, agentId?: string): ThreadActivityItem {
+  return activity(kind, { itemType: "command_execution", toolUseId, title: "npm run build" }, {
+    id,
+    tone: "tool",
+    ...(agentId !== undefined ? { agentId } : {})
+  });
+}
+
+/** Output chunk `index` of the call `toolUseId`: one `tool.output` row per ingestion flush, a fresh id each. */
+function chunkRow(toolUseId: string, index: number, agentId?: string): DomainEvent {
+  return appended(
+    activity("tool.output", { toolUseId, streamKind: "command_output", delta: `line ${index}\n` }, {
+      id: `${toolUseId}-chunk-${index}`,
+      tone: "tool",
+      summary: "Tool output",
+      ...(agentId !== undefined ? { agentId } : {})
+    })
+  );
+}
+
+const running = (): DomainEvent => ev("thread.session-set", { session: session("running", "T-1") });
+
+/** The first step at or after `from` whose state no longer holds `row`, or -1. */
+function lostAt(states: readonly ThreadFoldState[], row: ThreadActivityItem, from: number): number {
+  return states.findIndex((state, step) => step >= from && !state.activities.includes(row));
+}
+
+test("running work keeps at most 16 opening rows behind each window's cut and 64 under the ceiling, below every slack", () => {
+  assert.equal(OPEN_WORK_RETENTION_LIMIT, 16);
+  assert.equal(OPEN_WORK_TOTAL_RETENTION_LIMIT, 64);
+  // So a trim still frees at least its slack minus the cap — less any old open questions, which count too.
+  assert.ok(OPEN_WORK_RETENTION_LIMIT < ACTIVITY_RETENTION_SLACK);
+  assert.ok(OPEN_WORK_RETENTION_LIMIT < AGENT_ACTIVITY_RETENTION_SLACK);
+  assert.ok(OPEN_WORK_TOTAL_RETENTION_LIMIT < AGENT_ACTIVITY_TOTAL_SLACK);
+});
+
+test("a running parent call keeps its opening row through 1 200 of its own chunks, and the window stays bounded", () => {
+  reset();
+  const opening = callRow("tool.started", "build", "build-start");
+  const events: DomainEvent[] = [created(), running(), appended(opening)];
+  for (let index = 1; index <= 1_200; index += 1) events.push(chunkRow("build", index));
+  const states = statesOf(events);
+  const lost = lostAt(states, opening, 2);
+  assert.equal(lost, -1, `the opening row was dropped on chunk ${lost - 2}`);
+  assert.ok(states.every((state) => state.activities.length <= 552), "the limit, its slack and the kept row");
+  const trims = states.filter((state) => itemsDroppedByRetention(state).length > 0).length;
+  assert.ok(trims >= 12, `trims: ${trims}`);
+  const last = states.at(-1)!;
+  assert.equal(last.activities[0], opening, "still the oldest row");
+  assert.equal(__foldCacheConsistency(last), null);
+});
+
+test("a running agent-owned call keeps its opening row through 1 200 of its own chunks in a busy thread", () => {
+  reset();
+  const events: DomainEvent[] = [created(), running()];
+  // Past the gate first: the agent's own window trims from its 251st row.
+  for (let index = 0; index < 520; index += 1) events.push(parentRow(index));
+  const opening = callRow("tool.started", "bgshell:sh1", "shell-call", "sh1");
+  const from = events.push(appended(opening)) - 1;
+  for (let index = 1; index <= 1_200; index += 1) events.push(chunkRow("bgshell:sh1", index, "sh1"));
+  const states = statesOf(events);
+  const lost = lostAt(states, opening, from);
+  assert.equal(lost, -1, `the opening row was dropped on chunk ${lost - from}`);
+  const owned = (state: ThreadFoldState): number => state.activities.filter((row) => row.agentId === "sh1").length;
+  assert.ok(
+    states.every((state) => owned(state) <= AGENT_ACTIVITY_RETENTION_LIMIT + AGENT_ACTIVITY_RETENTION_SLACK),
+    "the agent's window stays within its limit and slack"
+  );
+  assert.ok(states.filter((state) => itemsDroppedByRetention(state).length > 0).length >= 15);
+  assert.equal(__foldCacheConsistency(states.at(-1)!), null);
+});
+
+test("a running agent-owned call keeps its opening row under the ceiling across agents, where its older chunk goes", () => {
+  reset();
+  const opening = callRow("tool.started", "bgshell:sh1", "shell-call", "sh1");
+  const events: DomainEvent[] = [created(), running(), appended(opening), chunkRow("bgshell:sh1", 1, "sh1")];
+  // Twelve agents, each inside its own window, together past the ceiling.
+  const agents = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+  for (let round = 0; round < AGENT_ACTIVITY_RETENTION_LIMIT; round += 1) {
+    for (const id of agents) events.push(agentRow(id, round));
+  }
+  const states = statesOf(events);
+  const lost = lostAt(states, opening, 2);
+  assert.equal(lost, -1, `the opening row was dropped at step ${lost}`);
+  const firstTrim = states.findIndex((state) => itemsDroppedByRetention(state).length > 0);
+  assert.ok(firstTrim > 0, "the ceiling trims");
+  assert.ok(
+    itemsDroppedByRetention(states[firstTrim]!).some((item) => item.id === "bgshell:sh1-chunk-1"),
+    "the ceiling reached past the opening row: the call's own chunk, the next oldest row, went"
+  );
+  const agentRows = (state: ThreadFoldState): number => state.activities.filter((row) => row.agentId !== undefined).length;
+  assert.ok(states.every((state) => agentRows(state) <= AGENT_ACTIVITY_TOTAL_LIMIT + AGENT_ACTIVITY_TOTAL_SLACK));
+  assert.equal(__foldCacheConsistency(states.at(-1)!), null);
+});
+
+for (const closer of ["tool.completed", "tool.denied"] as const) {
+  test(`once a ${closer} closes the call, the next trim drops its opening row, and no trim before it did`, () => {
+    reset();
+    const opening = callRow("tool.started", "build", "build-start");
+    const events: DomainEvent[] = [created(), running(), appended(opening)];
+    for (let index = 1; index <= 700; index += 1) events.push(chunkRow("build", index));
+    const closedAt = events.push(appended(callRow(closer, "build", "build-end"))) - 1;
+    for (let index = 0; index < ACTIVITY_RETENTION_SLACK + 10; index += 1) events.push(parentRow(index));
+    const states = statesOf(events);
+    const trimSteps = states.flatMap((state, step) => (itemsDroppedByRetention(state).length > 0 ? [step] : []));
+    assert.ok(trimSteps.filter((step) => step < closedAt).length >= 3, "trims reached past it while it ran");
+    const droppedAt = states.findIndex((state) => itemsDroppedByRetention(state).includes(opening));
+    assert.equal(droppedAt, trimSteps.find((step) => step >= closedAt), "dropped by the first trim once it closed");
+    assert.equal(lostAt(states, opening, 2), droppedAt, "and held until then");
+  });
+}
+
+for (const window of ["parent", "agent"] as const) {
+  test(`the ${window} window keeps the openings of the 16 most recently active open calls behind its cut: a streaming call outranks 40 opened after it and left quiet, and every trim frees its slack minus 16`, () => {
+    reset();
+    const agentId = window === "agent" ? "ag" : undefined;
+    const [limit, slack] =
+      window === "parent"
+        ? [ACTIVITY_RETENTION_LIMIT, ACTIVITY_RETENTION_SLACK]
+        : [AGENT_ACTIVITY_RETENTION_LIMIT, AGENT_ACTIVITY_RETENTION_SLACK];
+    const events: DomainEvent[] = [created(), running()];
+    if (agentId !== undefined) {
+      for (let index = 0; index < 520; index += 1) events.push(parentRow(index));
+    }
+    // The streaming call opened FIRST: ranked by its opening it would be the
+    // first pushed out; ranked by its last activity it is the one kept.
+    const stream = callRow("tool.started", "stream", "stream-start", agentId);
+    const from = events.push(appended(stream)) - 1;
+    const quiet: ThreadActivityItem[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      const row = callRow("tool.started", `quiet-${index}`, `quiet-start-${index}`, agentId);
+      quiet.push(row);
+      events.push(appended(row));
+    }
+    for (let index = 1; index <= 1_200; index += 1) events.push(chunkRow("stream", index, agentId));
+    const states = statesOf(events);
+    const lost = lostAt(states, stream, from);
+    assert.equal(lost, -1, `the streaming call's opening row was dropped at step ${lost}`);
+    const rowsOf = (state: ThreadFoldState): ThreadActivityItem[] =>
+      state.activities.filter((row) => row.agentId === agentId);
+    let trims = 0;
+    let previousTrim = Number.NEGATIVE_INFINITY;
+    states.forEach((state, step) => {
+      const dropped = itemsDroppedByRetention(state).filter((item) => item.kind === "activity" && item.agentId === agentId);
+      if (dropped.length === 0) return;
+      trims += 1;
+      assert.ok(dropped.length >= slack - OPEN_WORK_RETENTION_LIMIT, `step ${step}: the trim freed ${dropped.length} rows`);
+      assert.ok(step - previousTrim >= slack - OPEN_WORK_RETENTION_LIMIT, `step ${step}: a trim ${step - previousTrim} steps after the last`);
+      previousTrim = step;
+      // All the trim kept past the window's newest rows: at most 16 openings.
+      const rows = rowsOf(state);
+      const keptPast = rows.slice(0, rows.length - limit);
+      assert.ok(keptPast.length <= OPEN_WORK_RETENTION_LIMIT, `step ${step}: ${keptPast.length} rows kept past the window`);
+      assert.ok(keptPast.every((row) => row.activityKind === "tool.started"), `step ${step}: only openings`);
+    });
+    assert.ok(trims >= 15, `trims: ${trims}`);
+    assert.deepEqual(
+      rowsOf(states.at(-1)!)
+        .filter((row) => row.activityKind === "tool.started")
+        .map((row) => row.id),
+      ["stream-start", ...quiet.slice(-15).map((row) => row.id)],
+      "the openings kept: the streaming call's, then those of the 15 quiet calls opened last"
+    );
+  });
+}
+
+test("a burst of calls in flight inside the window takes no slot from an old quiet shell's start: a window's cap ranks only the openings its cut would drop", () => {
+  reset();
+  // A dev server started first and went quiet; its start is a parent row.
+  const shellStart = activity(
+    "task.started",
+    { taskId: "sh1", agentKind: "background", taskType: "local_bash", isBackgrounded: true, description: "npm run dev" },
+    { id: "shell-start" }
+  );
+  const events: DomainEvent[] = [created(), running(), appended(shellStart)];
+  for (let index = 0; index < 520; index += 1) events.push(parentRow(index));
+  // Twenty calls in flight at once, each more recently active than the shell.
+  const burst: ThreadActivityItem[] = [];
+  for (let index = 0; index < 20; index += 1) {
+    const row = callRow("tool.started", `burst-${index}`, `burst-start-${index}`);
+    burst.push(row);
+    events.push(appended(row));
+  }
+  // Enough rows to take the parent past its limit plus slack once, the burst inside its newest 500.
+  for (let index = 520; index < 530; index += 1) events.push(parentRow(index));
+  const states = statesOf(events);
+  const trimAt = states.findIndex((state) => itemsDroppedByRetention(state).length > 0);
+  assert.equal(trimAt, events.length - 1, "one trim, at the last row");
+  const trimmed = states[trimAt]!;
+  assert.ok(trimmed.activities.includes(shellStart), "the shell's start is kept: the one opening the cut would drop");
+  assert.ok(burst.every((row) => trimmed.activities.includes(row)), "the burst is inside the window anyway");
+  assert.deepEqual(trimmed.roster.map((row) => row.id), ["sh1"], "the shell stays on the roster");
+});
+
+test("the ceiling's slots go to openings that survived their own window: those an agent's own cap dropped take none", () => {
+  reset();
+  const events: DomainEvent[] = [created(), running()];
+  // Sixty calls four agents opened first and left open, each inside its own window: the oldest rows the ceiling reaches.
+  const quiet: ThreadActivityItem[] = [];
+  for (const agentId of ["b0", "b1", "b2", "b3"]) {
+    for (let index = 0; index < 15; index += 1) {
+      const row = callRow("tool.started", `${agentId}-call-${index}`, `${agentId}-start-${index}`, agentId);
+      quiet.push(row);
+      events.push(appended(row));
+    }
+  }
+  // Thirty calls agent `a` opened next, all more recently active than the quiet ones by the end.
+  const busy: ThreadActivityItem[] = [];
+  for (let index = 0; index < 30; index += 1) {
+    const row = callRow("tool.started", `a-call-${index}`, `a-start-${index}`, "a");
+    busy.push(row);
+    events.push(appended(row));
+  }
+  // Twelve more agents, each inside its own window.
+  const others = Array.from({ length: 12 }, (_, index) => `c${index}`);
+  for (let round = 0; round < 150; round += 1) {
+    for (const id of others) events.push(agentRow(id, round));
+  }
+  // Agent `a`'s own rows put its thirty openings behind its newest 200; then its calls print, and its 251st row trims
+  // its window — its cap keeps sixteen openings — with the rows across agents past the ceiling.
+  for (let index = 0; index < AGENT_ACTIVITY_RETENTION_LIMIT; index += 1) events.push(agentRow("a", 1_000 + index));
+  for (let index = 0; index < 21; index += 1) events.push(chunkRow(`a-call-${index}`, index, "a"));
+  const states = statesOf(events);
+  const trimAt = states.findIndex((state) => itemsDroppedByRetention(state).length > 0);
+  assert.equal(trimAt, events.length - 1, "one trim, at the last row");
+  const trimmed = states[trimAt]!;
+  const held = (rows: readonly ThreadActivityItem[]): number => rows.filter((row) => trimmed.activities.includes(row)).length;
+  assert.equal(held(busy), OPEN_WORK_RETENTION_LIMIT, "agent a's own cap kept sixteen of its thirty openings");
+  assert.equal(
+    held(quiet),
+    OPEN_WORK_TOTAL_RETENTION_LIMIT - OPEN_WORK_RETENTION_LIMIT,
+    "the ceiling's other 48 slots went to the quiet agents' openings, not to the fourteen agent a's cap dropped"
+  );
+});
+
+test("a running background shell keeps its task.started through 600 parent rows, so the roster keeps it; once it ends, a trim drops it", () => {
+  reset();
+  const start = activity(
+    "task.started",
+    { taskId: "sh1", agentKind: "background", taskType: "local_bash", isBackgrounded: true, description: "npm run dev" },
+    { id: "shell-start" }
+  );
+  const call = callRow("tool.started", "bgshell:sh1", "shell-call", "sh1");
+  const events: DomainEvent[] = [created(), running(), appended(start), appended(call)];
+  for (let index = 0; index < 600; index += 1) {
+    events.push(parentRow(index));
+    // The shell's own output, in its own window.
+    if (index % 10 === 0) events.push(chunkRow("bgshell:sh1", index, "sh1"));
+  }
+  const states = statesOf(events);
+  assert.ok(states.filter((state) => itemsDroppedByRetention(state).length > 0).length >= 1, "the parent window trims");
+  const rosterLost = states.findIndex((state, step) => step >= 2 && !state.roster.some((row) => row.id === "sh1"));
+  assert.equal(rosterLost, -1, `the roster lost the shell at step ${rosterLost}`);
+  assert.equal(lostAt(states, start, 2), -1);
+  assert.equal(lostAt(states, call, 3), -1);
+  const whileRunning = states.at(-1)!;
+  assert.deepEqual(
+    whileRunning.roster.map((row) => [row.id, row.agentKind, row.status]),
+    [["sh1", "background", "running"]]
+  );
+
+  // Ended, its start is an ordinary row again: the next trim drops it, and the roster reads the end.
+  let state = applyDomainEvent(
+    whileRunning,
+    appended(activity("task.completed", { taskId: "sh1", agentKind: "background", status: "completed" }, { id: "shell-end" }))
+  );
+  state = applyDomainEvent(state, appended(callRow("tool.completed", "bgshell:sh1", "shell-call-end", "sh1")));
+  let droppedStart = false;
+  for (let index = 600; index < 600 + ACTIVITY_RETENTION_SLACK + 10; index += 1) {
+    state = applyDomainEvent(state, parentRow(index));
+    if (itemsDroppedByRetention(state).includes(start)) droppedStart = true;
+  }
+  assert.ok(droppedStart, "a trim dropped the ended shell's start");
+  assert.deepEqual(state.roster.map((row) => [row.id, row.status]), [["sh1", "completed"]]);
+});
+
+test("a log of long-running calls and shells trims exactly as the rules say, and exercised them", () => {
+  const events = fleetLog({ seed: 12, steps: 6_000, weights: LONG_CALL_WEIGHTS, maxAgents: 6 });
+  const run = compareWithReference(events);
+  assert.equal(run.mismatch, null);
+  assert.ok(run.trimSteps >= 20, `trim steps: ${run.trimSteps}`);
+  // What the log really exercised.
+  const fate = openWorkFate(events);
+  assert.ok(fate.callsKeptPastATrim >= 10, `calls' openings a trim reached past and kept: ${fate.callsKeptPastATrim}`);
+  assert.ok(fate.tasksKeptPastATrim >= 2, `shells' starts a trim reached past and kept: ${fate.tasksKeptPastATrim}`);
+  assert.ok(fate.droppedAfterClose >= 10, `openings dropped once their work ended: ${fate.droppedAfterClose}`);
+  assert.ok(fate.droppedWhileOpen >= 5, `openings a cap pushed out: ${fate.droppedWhileOpen}`);
+});
+
+test("many agents past the ceiling across them, with long-running calls, trim exactly as the rules say", () => {
+  const events = fleetLog({ seed: 8, steps: 8_000, weights: LONG_CALL_CEILING_WEIGHTS, maxAgents: 14 });
+  const run = compareWithReference(events);
+  assert.equal(run.mismatch, null);
+  assert.ok(run.trims.agents >= 3, `ceiling-triggered trims: ${run.trims.agents}`);
+  const fate = openWorkFate(events);
+  assert.ok(fate.keptPastTheCeiling >= 10, `openings the ceiling reached past and kept: ${fate.keptPastTheCeiling}`);
 });
 
 // ---------------------------------------------------------------------------

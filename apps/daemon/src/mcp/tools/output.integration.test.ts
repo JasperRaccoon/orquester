@@ -24,7 +24,7 @@ import { outputTools } from "./output.ts";
  * (`slimItemsForRead`), its item read and its join of a call's streamed output — one window of it
  * (`readToolOutputWindow`), or the whole join (`readToolOutput`) from a host that ignores the window — over the in-memory
  * store the host's own tests use; then over the REAL store, whose cache serves the windows. A Claude background shell
- * seeded as ingestion writes it.
+ * seeded as ingestion writes it, and a subagent's command whose start retention dropped past the cap.
  */
 
 const THREAD = "thread-1";
@@ -108,6 +108,18 @@ function shellRow(host: TestHost, id: string, activityKind: string, payload: Rec
   const at = host.clock.nowIso();
   return sinkEvent(host, `ev-${id}`, "thread.activity-appended", {
     activity: { kind: "activity", id, tone: "tool", activityKind, summary: activityKind === "tool.output" ? "Tool output" : "Background shell", payload: { toolUseId: SHELL, ...payload }, turnId: "turn-1", agentId: "task-1", createdAt: at, updatedAt: at }
+  });
+}
+
+/** The subagent whose window a test fills past its cap. */
+const AGENT = "agent-1";
+
+/** One of {@link AGENT}'s rows of the call `toolUseId`, as ingestion writes it. */
+function agentCallRow(host: TestHost, id: string, toolUseId: string, activityKind: string, payload: Record<string, unknown>): AppendableDomainEvent {
+  host.clock.advance(1);
+  const at = host.clock.nowIso();
+  return sinkEvent(host, `ev-${id}`, "thread.activity-appended", {
+    activity: { kind: "activity", id, tone: "tool", activityKind, summary: activityKind === "tool.output" ? "Tool output" : "Command run", payload: { toolUseId, ...payload }, turnId: "turn-1", agentId: AGENT, createdAt: at, updatedAt: at }
   });
 }
 
@@ -207,37 +219,53 @@ describe("a background shell's output through read_transcript and read_tool_outp
     assert.ok(api.paths.includes(agentChatRoutes.itemOutput(THREAD, "shell-done")), "the join was asked, and its miss read as none");
     await host.stop();
   });
+});
 
-  it("a shell that printed past its agent's 200-row window: its start is gone, its latest chunk is the entry and the id", async () => {
+describe("a subagent's command pushed past the cap, through read_transcript and read_tool_output, against the real orchestrator", () => {
+  it("past the cap a running command loses its start — sixteen later calls of its agent, all more recently active, hold the slots — so its latest chunk is the entry and the id, and its whole output reads back from the log", async () => {
     const host = createTestHost();
     await host.createThread({ threadId: THREAD });
     for (const event of [
-      sinkEvent(host, "ask:sent", "thread.message-sent", { messageId: "ask", role: "user", text: "start the dev server", streaming: false, turnId: null }),
+      sinkEvent(host, "ask:sent", "thread.message-sent", { messageId: "ask", role: "user", text: "start the dev server, then build every part", streaming: false, turnId: null }),
       sinkEvent(host, "ask:start", "thread.turn-start-requested", { turnId: null, messageId: "ask", interactionMode: "default" }),
       sinkEvent(host, "turn-1:running", "thread.session-set", { session: { status: "running", activeTurnId: "turn-1" } })
     ]) await host.orchestrator.ingestionSink(THREAD, [event]);
-    await host.orchestrator.ingestionSink(THREAD, [shellRow(host, "shell-start", "tool.started", { itemType: "command_execution", title: "Background shell", status: "inProgress", agentId: "task-1", data: DATA })]);
-    // 300 chunks of the shell's output, and 300 rows of the parent's own work between them.
-    const lines = Array.from({ length: 300 }, (_, i) => `request ${i} served\n`);
-    for (const [i, delta] of lines.entries()) {
+    // 300 rows of the parent's own work: the window's gate (500 activities) is past once the agent's rows come.
+    await host.orchestrator.ingestionSink(THREAD, Array.from({ length: 300 }, (_, i) => {
       host.clock.advance(1);
       const at = host.clock.nowIso();
-      await host.orchestrator.ingestionSink(THREAD, [
-        shellRow(host, `chunk-${i}`, "tool.output", { streamKind: "command_output", delta }),
-        sinkEvent(host, `parent-${i}`, "thread.activity-appended", { activity: { kind: "activity", id: `parent-${i}`, tone: "info", activityKind: "runtime.warning", summary: `parent row ${i}`, payload: { message: `parent row ${i}` }, turnId: "turn-1", createdAt: at, updatedAt: at } })
-      ]);
-    }
+      return sinkEvent(host, `parent-${i}`, "thread.activity-appended", { activity: { kind: "activity", id: `parent-${i}`, tone: "info", activityKind: "runtime.warning", summary: `parent row ${i}`, payload: { message: `parent row ${i}` }, turnId: "turn-1", createdAt: at, updatedAt: at } });
+    }));
+    // The agent's dev server starts and prints, then goes quiet...
+    const lines: string[] = [];
+    const served = (id: string, delta: string): AppendableDomainEvent => {
+      lines.push(delta);
+      return agentCallRow(host, id, "serve", "tool.output", { streamKind: "command_output", delta });
+    };
+    await host.orchestrator.ingestionSink(THREAD, [
+      agentCallRow(host, "serve-start", "serve", "tool.started", { itemType: "command_execution", title: "npm run dev", status: "inProgress", data: { command: "npm run dev" } }),
+      ...Array.from({ length: 10 }, (_, i) => served(`serve-${i}`, `ready ${i}\n`))
+    ]);
+    // ...while sixteen builds the agent starts after it print on. Its 251st row trims its window: all seventeen openings
+    // lie behind the cut, and the builds, more recently active, hold the cap's sixteen slots.
+    await host.orchestrator.ingestionSink(THREAD, [
+      ...Array.from({ length: 16 }, (_, k) => agentCallRow(host, `build-${k}-start`, `build-${k}`, "tool.started", { itemType: "command_execution", title: `make part-${k}`, status: "inProgress" })),
+      ...Array.from({ length: 224 }, (_, n) => agentCallRow(host, `build-out-${n}`, `build-${n % 16}`, "tool.output", { streamKind: "command_output", delta: `built ${n}\n` }))
+    ]);
+    // Then the server prints again.
+    await host.orchestrator.ingestionSink(THREAD, Array.from({ length: 5 }, (_, i) => served(`serve-late-${i}`, `request ${i} served\n`)));
     await host.settle();
     const snap = await host.orchestrator.readThread(THREAD);
     assert.ok(snap.kind === "snapshot");
-    assert.equal(snap.thread.items.some((item) => item.id === "shell-start"), false, "retention dropped the shell's start");
-    assert.ok(snap.thread.items.some((item) => item.id === "chunk-299"));
+    const held = (id: string): boolean => snap.thread.items.some((item) => item.id === id);
+    assert.deepEqual([held("serve-start"), held("serve-0"), held("build-0-start"), held("build-15-start"), held("serve-late-4")], [false, false, true, true, true], "past the cap the server's start went, the builds' stayed");
 
     const api = hostApi(host);
-    const entry = await shellEntry(api);
+    const read = await transcriptTool.run(parse(transcriptTool, { sessionId: THREAD, agentId: AGENT }), ctx(api));
+    const entry = (read.entries as { kind: string; outputItemId?: string }[]).find((e) => e.kind === "tool" && e.outputItemId === "serve-late-4");
     assert.deepEqual(entry, {
-      turn: 1, turnId: "turn-1", kind: "tool", createdAt: (snap.thread.items.find((item) => item.id === "chunk-299") as ThreadActivityItem).createdAt, agentId: "task-1",
-      tool: { type: "command_execution", title: "Tool output", status: "inProgress" }, outputItemId: "chunk-299"
+      turn: 1, turnId: "turn-1", kind: "tool", createdAt: (snap.thread.items.find((item) => item.id === "serve-late-4") as ThreadActivityItem).createdAt, agentId: AGENT,
+      tool: { type: "command_execution", title: "Tool output", status: "inProgress" }, outputItemId: "serve-late-4"
     });
     // The whole output, from the log — the chunks the window dropped included.
     const whole = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId! }), ctx(api));
@@ -257,6 +285,8 @@ describe("a background shell's output through read_transcript and read_tool_outp
       const windowed = await pages(api);
       assert.deepEqual(windowed, await pages(older), `maxBytes ${maxBytes}`);
       assert.equal(windowed.map((page) => page.text).join(""), lines.join(""), `maxBytes ${maxBytes}`);
+      // All ASCII: every window but the last is full, so the pages are really several below the output's size.
+      assert.equal(windowed.length, Math.ceil(Buffer.byteLength(lines.join("")) / maxBytes), `maxBytes ${maxBytes}: pages`);
     }
     await host.stop();
   });

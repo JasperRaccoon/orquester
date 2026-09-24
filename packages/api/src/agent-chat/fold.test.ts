@@ -657,7 +657,7 @@ test("activities are retained at the window, keeping an unresolved async questio
   for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK; i += 1) {
     events.push(
       ev("thread.activity-appended", {
-        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+        activity: activity("tool.completed", { toolUseId: `t${i}` }, { id: `noise-${i}` })
       })
     );
   }
@@ -694,7 +694,7 @@ test("a compaction marker never ages out of the window", () => {
   for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK + 1; i += 1) {
     events.push(
       ev("thread.activity-appended", {
-        activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
+        activity: activity("tool.completed", { toolUseId: `t${i}` }, { id: `noise-${i}` })
       })
     );
   }

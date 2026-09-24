@@ -732,7 +732,7 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       is listed in `subagents` and its rows are in its own drill-in (`read_transcript` with its
       `agentId`), as in the GUI.
     - In a drill-in, a command with no row of the call in the range (e.g. retention evicted its
-      start: a long-running background shell's own chunks push it out of its agent's 200-row window)
+      start: it keeps running calls' opening rows, 16 at most behind each window's cut)
       is still an entry, built from its latest chunk in the range: `tool.type` `command_execution`
       and `outputItemId` that chunk. Title, command and status come from its rows elsewhere in the
       view — else the title is the chunk's own, "Tool output", and the status `inProgress`. The

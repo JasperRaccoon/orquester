@@ -74,13 +74,14 @@ import type {
 
 /**
  * The `state.json` format. **Bump it whenever the fold** (`fold.ts` and what it
- * calls: `compaction.ts`, `pending.ts`, `roster.ts`, `turn-state.ts`,
- * `turns.ts`) **changes what it produces from the same log.** A load folds only
- * the tail on top of a snapshot, so a snapshot written by the old code would
- * carry the old fold's answer forward for every event before its `seq`; a
- * bumped version makes the next load discard it and fold from byte 0, once.
+ * calls: `compaction.ts`, `open-work.ts`, `pending.ts`, `roster.ts`,
+ * `turn-state.ts`, `turns.ts`) **changes what it produces from the same log.**
+ * A load folds only the tail on top of a snapshot, so a snapshot written by the
+ * old code would carry the old fold's answer forward for every event before its
+ * `seq`; a bumped version makes the next load discard it and fold from byte 0,
+ * once.
  */
-export const FOLD_SNAPSHOT_VERSION = 3;
+export const FOLD_SNAPSHOT_VERSION = 4;
 
 // 2: batch retention (design `2026-09-23-fold-performance-design.md`) — the
 // window now grows past each limit by its slack before a trim, so a state
@@ -91,6 +92,14 @@ export const FOLD_SNAPSHOT_VERSION = 3;
 // (`isCompactionActivity`). Version 2 read it as an ordinary parent row: a
 // state it folded may have evicted the marker for good, and trimmed at other
 // steps, the marker having counted toward the parent's trigger.
+// 4: the trim keeps the opening row of running work (`open-work.ts`) — a tool
+// call no row has closed, a background task with no `task.completed` — for the
+// 16 most recently active among those each window's cut would drop, and under
+// the ceiling across agents the 64 most recently active among the openings
+// that survived their own window (`OPEN_WORK_RETENTION_LIMIT`). Version 3
+// dropped it like any row, so a state it folded may lack the opening row of a
+// call still running, and holds other rows at the steps where the kept row now
+// leaves less to drop.
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from

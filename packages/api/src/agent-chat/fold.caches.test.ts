@@ -30,10 +30,12 @@ import type { ThreadFoldState } from "./fold.ts";
 import {
   FLEET_WEIGHTS,
   LEAN_PARENT_WEIGHTS,
+  LONG_CALL_WEIGHTS,
   PARENT_WEIGHTS,
   TASK_WEIGHTS,
   activitiesMatchItems,
   fleetLog,
+  openWorkFate,
   seededRandom,
   withoutCaches
 } from "./fold-logs.test-support.ts";
@@ -141,6 +143,30 @@ test("a task-heavy log: the roster is the whole-list roster fold at every step, 
   assert.ok(tasks.size > 100, `tasks: ${tasks.size} — past the roster's cap`);
   assert.equal(whole.roster.length, 100, "the roster is capped");
   assert.ok(events.some((event) => event.type === "thread.reverted"), "the log rewinds");
+});
+
+test("a log of long-running calls and shells: the caches, the roster engine included, equal their rebuild at every step, and the roster is the whole-list fold", () => {
+  const events = fleetLog({ seed: 12, steps: 3_000, weights: LONG_CALL_WEIGHTS, maxAgents: 4 });
+  let trims = 0;
+  let step = 0;
+  const failure = everyStep(events, (state) => {
+    step += 1;
+    if (itemsDroppedByRetention(state).length > 0) trims += 1;
+    if (!isDeepStrictEqual(state.roster, foldSubagentActivities(state.activities, { sessionLive: sessionLive(state) }))) {
+      return "the roster is not the fold of the activity list";
+    }
+    return (
+      __foldCacheConsistency(state, { roster: step % 25 === 0 }) ??
+      (activitiesMatchItems(state) ? null : "the activity list drifted")
+    );
+  });
+  assert.equal(failure, null);
+  assert.ok(trims >= 10, `trims: ${trims}`);
+  // What the log really exercised: trims that kept the openings of running
+  // work — a shell's `task.started` among them, which keeps it on the roster.
+  const fate = openWorkFate(events);
+  assert.ok(fate.callsKeptPastATrim >= 5, `calls' openings a trim reached past and kept: ${fate.callsKeptPastATrim}`);
+  assert.ok(fate.tasksKeptPastATrim >= 1, `shells' starts a trim reached past and kept: ${fate.tasksKeptPastATrim}`);
 });
 
 // ---------------------------------------------------------------------------

@@ -393,6 +393,54 @@ test("a child resumed after its end, as OpenCode resumes one — its launch and 
   assert.equal(historyCalls(api).length, 0);
 });
 
+/**
+ * The opening row of work still running in turn `n`, which the fold keeps whatever its age (`openWorkOf`): a call's
+ * `tool.started` no row has closed, or a background task's `task.started` with no `task.completed`.
+ */
+const openCall = (t: ReturnType<typeof thread>, toolUseId: string, n: number, over: Partial<ThreadActivityItem> = {}): ThreadItem =>
+  activity("tool.started", { itemType: "command_execution", toolUseId, status: "inProgress", title: "npm run build" }, { turnId: `t${n}`, createdAt: inTurn(t, n, 6), tone: "tool", ...over });
+const openShell = (t: ReturnType<typeof thread>, taskId: string, n: number): ThreadItem =>
+  activity("task.started", { taskId, agentKind: "background", title: "npm run dev" }, { turnId: `t${n}`, createdAt: inTurn(t, n, 5) });
+/** Streamed output of the call `toolUseId` in turns `from`..`to`, one chunk a turn. */
+function chunks(t: ReturnType<typeof thread>, toolUseId: string, from: number, to: number, agentId?: string): ThreadItem[] {
+  const rows: ThreadItem[] = [];
+  for (let n = from; n <= to; n += 1) {
+    rows.push(activity("tool.output", { toolUseId, streamKind: "command_output", delta: `turn ${n}\n` }, { turnId: `t${n}`, createdAt: inTurn(t, n, 15), tone: "tool", ...(agentId === undefined ? {} : { agentId }) }));
+  }
+  return rows;
+}
+
+test("the opening row of work still running says nothing about where the parent's window begins: the fold keeps it whatever its age", async () => {
+  const t = thread(10);
+  const api = host([]);
+  // A command started in turn 2 and still streaming, and a background shell started there too: the fold keeps both
+  // opening rows while the window's other rows begin in turn 8.
+  const running = [openCall(t, "build", 2), openShell(t, "sh1", 2), ...t.rowsOf(8, 10), ...chunks(t, "build", 8, 10)];
+  const read = async (items: ThreadItem[]) => (await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items, history: BEHIND }), { start: 3, end: 10 })).unavailable;
+  assert.deepEqual(await read(running), { turns: [3, 8], reason: "unavailable" }, "the window begins in turn 8, not at an opening kept from turn 2");
+  assert.equal(historyCalls(api).length, 0);
+});
+
+test("the opening row of work still running says nothing about where a drill-in's rows begin, nor where the rows every agent kept do", async () => {
+  const t = thread(10);
+  const api = host([]);
+  // sh1, a background shell started in turn 2: its task row, its own call's opening row, and output it kept from turn 6
+  // on. a1, launched in turn 2, started a long command in turn 3 and kept its rows from turn 7 on. a4, launched in turn
+  // 2, kept nothing: the rows any agent kept bound it, and an opening kept whatever its age is none of them.
+  const items = [
+    openShell(t, "sh1", 2), openCall(t, "bgshell:sh1", 2, { agentId: "sh1" }), agentTask(t, "task.started", "a1", 2), agentTask(t, "task.started", "a4", 2),
+    openCall(t, "a1-build", 3, { agentId: "a1" }), ...t.rowsOf(3, 10), ...chunks(t, "bgshell:sh1", 6, 10, "sh1"), ...servedCalls(t, "a1", 7, 10), ...chunks(t, "a1-build", 7, 10, "a1")
+  ];
+  for (const bounds of [UNINDEXED, BEHIND]) {
+    const read = async (agentId: string) => (await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items, history: bounds }), { start: 1, end: 10 }, { agentId })).unavailable;
+    const how = `indexed: ${bounds.indexed}`;
+    assert.deepEqual(await read("sh1"), { turns: [2, 6], reason: "unavailable" }, `${how}: sh1's rows begin in turn 6, not at its opening in turn 2`);
+    assert.deepEqual(await read("a1"), { turns: [2, 7], reason: "unavailable" }, `${how}: a1's rows begin in turn 7, not at its opening in turn 3`);
+    assert.deepEqual(await read("a4"), { turns: [2, 6], reason: "unavailable" }, `${how}: the oldest row any agent kept is sh1's output in turn 6`);
+  }
+  assert.equal(historyCalls(api).length, 0);
+});
+
 test("an empty page with a null cursor at the window's boundary or at a host's cursor — what a host answers where it could not plan a block or read one back whole — is a failed read in both views, never the thread's first turn reached", async () => {
   const t = thread(10);
   const snap = windowed(t, 8);

@@ -465,7 +465,7 @@ test("snapshot + tail stays exact across the retention window and in-place updat
   for (let index = 0; index < rows; index += 1) {
     events.push(
       ev("thread.activity-appended", {
-        activity: activity("tool.started", { toolUseId: `t${index}` }, { id: `row-${index}` })
+        activity: activity("tool.completed", { toolUseId: `t${index}` }, { id: `row-${index}` })
       })
     );
     if (index % 100 === 0) {
@@ -491,7 +491,7 @@ test("snapshot + tail stays exact across the retention window and in-place updat
       // is replaced where it stands, and then leaves with that trim.
       events.push(
         ev("thread.activity-appended", {
-          activity: activity("tool.updated", { toolUseId: "t110" }, { id: "row-110" })
+          activity: activity("tool.completed", { toolUseId: "t110", status: "failed" }, { id: "row-110" })
         })
       );
     }
@@ -500,7 +500,7 @@ test("snapshot + tail stays exact across the retention window and in-place updat
   // end; rows 5 and 110 are gone, so their updates are new rows.
   events.push(
     ev("thread.activity-appended", {
-      activity: activity("tool.completed", { toolUseId: "t200" }, { id: "row-200" })
+      activity: activity("tool.completed", { toolUseId: "t200", status: "completed" }, { id: "row-200" })
     }),
     ev("thread.activity-appended", {
       activity: activity("tool.completed", { toolUseId: "t5" }, { id: "row-5" })
@@ -541,7 +541,16 @@ test("snapshot + tail stays exact across the retention window and in-place updat
   const kindsOf = (id: string): string[] =>
     whole.activities.filter((row) => row.id === id).map((row) => row.activityKind);
   assert.deepEqual(kindsOf("row-5"), ["tool.completed"], "a long-gone row's update is a new row");
-  assert.deepEqual(kindsOf("row-200"), ["tool.completed"], "the in-place update replaced its row");
+  assert.deepEqual(
+    whole.activities.filter((row) => row.id === "row-200").map((row) => row.payload),
+    [{ toolUseId: "t200", status: "completed" }],
+    "the in-place update replaced its row"
+  );
+  assert.equal(
+    whole.activities.findIndex((row) => row.id === "row-200") + 1,
+    whole.activities.findIndex((row) => row.id === "row-201"),
+    "…where it stood"
+  );
   assert.deepEqual(kindsOf("row-110"), ["tool.completed"], "the replaced row left with the trim");
   assert.equal(whole.activities.at(-12)?.id, "row-110", "…and its next update came back at the end");
   assert.deepEqual(whole.pending.approvals, [], "the replayed request stays closed");
@@ -751,6 +760,65 @@ test("a state.json folded by version 2, whose retention evicted the legacy compa
   // the store folds the whole log — which keeps the marker.
   assert.ok(FOLD_SNAPSHOT_VERSION > 2, "the retention that keeps the legacy marker is a new version");
   const file = onDisk(snapshotFile(version2State, { version: 2 }));
+  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null);
+  assert.notEqual(
+    parseFoldSnapshotFile({ ...file, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
+    null,
+    "the stamp is all that refuses it: the same file under this build's version would parse"
+  );
+  // This build's own snapshot of the same prefix folds forward to the whole log.
+  assert.deepEqual(foldOnto(throughDisk(foldThread(events.slice(0, split))), events.slice(split)), whole);
+});
+
+test("a state.json folded by version 3, whose trim dropped a running call's opening row, is discarded, never folded forward", () => {
+  reset();
+  // A long command's start, then enough of its own output chunks for three trims.
+  const opening = activity(
+    "tool.started",
+    { itemType: "command_execution", toolUseId: "build", title: "npm run build" },
+    { id: "build-start", tone: "tool" }
+  );
+  const events: DomainEvent[] = [created(), ev("thread.activity-appended", { activity: opening })];
+  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.output", { toolUseId: "build", streamKind: "command_output", delta: `line ${index}\n` }, {
+          id: `chunk-${index}`,
+          tone: "tool"
+        })
+      })
+    );
+  }
+  const whole = foldThread(events);
+  assert.equal(whole.activities[0]?.id, "build-start", "this build keeps a running call's opening row whatever its age");
+
+  // Version 3 kept no opening row. The same log with the opening's call id
+  // blanked is exactly what version 3 folded: the row in the same class, so
+  // the same trims, and no call left open to keep it — gone with the first.
+  const asVersion3Read = events.map((event) =>
+    event.type === "thread.activity-appended" && event.payload.activity === opening
+      ? { ...event, payload: { activity: { ...opening, payload: { itemType: "command_execution", toolUseId: "" } } } }
+      : event
+  );
+  let probe = createEmptyThreadState();
+  const firstTrim = asVersion3Read.findIndex((event) => {
+    probe = applyDomainEvent(probe, event);
+    return itemsDroppedByRetention(probe).length > 0;
+  });
+  assert.ok(firstTrim > 0);
+  const split = firstTrim + 10;
+  const version3State = foldThread(asVersion3Read.slice(0, split));
+  assert.ok(!version3State.items.some((item) => item.id === "build-start"), "version 3 had evicted it");
+
+  // Trusted, that snapshot would carry the eviction forward for good.
+  const trusted = foldOnto(throughDisk(version3State), events.slice(split));
+  assert.ok(!trusted.activities.some((row) => row.id === "build-start"));
+  assert.notDeepEqual(trusted, whole);
+
+  // It is not: a file stamped version 3 never parses, whatever it holds, so
+  // the store folds the whole log — which keeps the opening row.
+  assert.ok(FOLD_SNAPSHOT_VERSION > 3, "the retention that keeps the opening row of running work is a new version");
+  const file = onDisk(snapshotFile(version3State, { version: 3 }));
   assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null);
   assert.notEqual(
     parseFoldSnapshotFile({ ...file, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),

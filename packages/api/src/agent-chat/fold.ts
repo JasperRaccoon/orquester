@@ -19,9 +19,10 @@
  *   activities (agent-owned rows have their own window, see
  *   {@link AGENT_ACTIVITY_RETENTION_LIMIT}),
  *   plus every unresolved async question and any long-lived singleton row
- *   regardless of age — in BATCHES: a class grows past its limit by its slack
- *   before one pass cuts every class back to its limit (design
- *   `2026-09-23-fold-performance-design.md`, B);
+ *   regardless of age, and the opening row of the most recently active work
+ *   still running ({@link OPEN_WORK_RETENTION_LIMIT}) — in BATCHES: a class
+ *   grows past its limit by its slack before one pass cuts every class back to
+ *   its limit (design `2026-09-23-fold-performance-design.md`, B);
  * - a revert (§5.5) keeps the first `turnCount` STARTED turns, by turn ORDER
  *   (`turns.ts`) — the checkpoint list decides only for a log that recorded no
  *   started turn at all, the legacy fallback;
@@ -49,6 +50,7 @@ import type {
   ThreadMessageSentPayload,
   ThreadTurnDiffCompletedPayload
 } from "./domain-events.ts";
+import { openWorkOf } from "./open-work.ts";
 import { derivePendingRequests } from "./pending.ts";
 import {
   createRosterEngine,
@@ -106,6 +108,35 @@ export const ACTIVITY_RETENTION_SLACK = 50;
 export const AGENT_ACTIVITY_RETENTION_SLACK = 50;
 export const AGENT_ACTIVITY_TOTAL_SLACK = 200;
 export const MESSAGE_RETENTION_SLACK = 200;
+
+/**
+ * Running work keeps its opening row (`open-work.ts`): a trim keeps, whatever
+ * their age, the opening rows of the most recently active open units — tool
+ * calls and background tasks together, ranked by their last activity — up to
+ * this many among the rows each window's cut would drop (the parent's, each
+ * agent's: an opening among the window's newest rows survives anyway and takes
+ * no slot), and under the ceiling across agents up to
+ * {@link OPEN_WORK_TOTAL_RETENTION_LIMIT} among the agents' openings that
+ * survived their own window ({@link activitiesToDrop}).
+ *
+ * A long command writes one `tool.output` row per ingestion flush, each a
+ * newer row of its call's own class, so the trim dropped the call's start —
+ * its title and command — on its 550th chunk in the parent's window, on its
+ * 250th in an agent's, and under the ceiling after 2 200 rows of other
+ * agents; and a background shell's `task.started`, a parent row, aged out
+ * after 550 parent rows and took the shell off the roster while it ran.
+ *
+ * Capped, because a crash can leave work open for good; ranked by last
+ * activity, a stream's chunks included, because ranked by their opening the
+ * calls a crash left open crowded a command still printing out of the cap.
+ * Both caps sit below their slacks (50, 50, 200). A kept row still counts in
+ * its class, as an open question does, so a trim frees at least its slack
+ * minus the cap — and, in the parent's window, minus the old open message-mode
+ * questions, which count and are kept too ({@link retentionClassOf}).
+ */
+export const OPEN_WORK_RETENTION_LIMIT = 16;
+/** The opening rows of running work the ceiling across agents keeps ({@link OPEN_WORK_RETENTION_LIMIT}). */
+export const OPEN_WORK_TOTAL_RETENTION_LIMIT = 64;
 
 /**
  * What retention has ever dropped from a fold. Serialized with the state (it
@@ -240,12 +271,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  * the window evicted like any row until `FOLD_SNAPSHOT_VERSION` 3. In an
  * agent's own window a marker is an ordinary row.
  *
+ * Running work keeps its opening row in every window, and under the ceiling
+ * across agents ({@link OPEN_WORK_RETENTION_LIMIT}, {@link openingsKept}),
+ * since `FOLD_SNAPSHOT_VERSION` 4: exactly like an open question, the row is
+ * exempt here and still counts in its class for the trigger. A window's cut
+ * ranks only the openings behind its newest rows, so one those rows hold,
+ * which survives anyway, never takes a slot; the ceiling ranks only the
+ * openings that survived their own window, so one an agent's cap dropped
+ * never takes one of its slots.
+ *
  * *T3: `projector.ts:63-87` (`retainThreadActivities`).*
  */
 function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<ThreadActivityItem> {
   if (activities.length <= ACTIVITY_RETENTION_LIMIT) {
     return new Set();
   }
+  const openWork = openWorkRanks(activities);
   const pendingById = new Map<string, ThreadActivityItem>();
   const parentRows: ThreadActivityItem[] = [];
   const agentRows = new Map<string, ThreadActivityItem[]>();
@@ -272,13 +313,15 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
   const drop = new Set<ThreadActivityItem>();
 
   // The parent window: the last ACTIVITY_RETENTION_LIMIT rows the parent
-  // timeline renders, plus every open async question, every agent anchor and
-  // every compaction marker.
+  // timeline renders, plus every open async question, every agent anchor,
+  // every compaction marker and the kept openings of running work.
   const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
+  const parentOpenings = openingsKept(openWork, parentRows, parentStart, OPEN_WORK_RETENTION_LIMIT);
   for (let index = 0; index < parentStart; index += 1) {
     const activity = parentRows[index]!;
     if (
       retainedByQuestion.has(activity) ||
+      parentOpenings.has(activity) ||
       isAgentAnchorRow(activity) ||
       isCompactionActivity(activity)
     ) {
@@ -291,9 +334,10 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
   const survivingAgentRows: ThreadActivityItem[] = [];
   for (const rows of agentRows.values()) {
     const start = rows.length - AGENT_ACTIVITY_RETENTION_LIMIT;
+    const agentOpenings = openingsKept(openWork, rows, start, OPEN_WORK_RETENTION_LIMIT);
     for (let index = 0; index < rows.length; index += 1) {
       const activity = rows[index]!;
-      if (index < start && !isAgentAnchorRow(activity)) {
+      if (index < start && !isAgentAnchorRow(activity) && !agentOpenings.has(activity)) {
         drop.add(activity);
       } else {
         survivingAgentRows.push(activity);
@@ -301,6 +345,13 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
     }
   }
   if (survivingAgentRows.length > AGENT_ACTIVITY_TOTAL_LIMIT) {
+    // Its slots go to the openings that survived their own window.
+    const ceilingOpenings = openingsKept(
+      openWork,
+      survivingAgentRows,
+      survivingAgentRows.length,
+      OPEN_WORK_TOTAL_RETENTION_LIMIT
+    );
     // A plain code-point comparison, not `localeCompare` (design B): ISO-8601
     // stamps order lexicographically, ICU collation is the slow way to learn
     // that, and `sort` is stable, so ties keep the order built above.
@@ -311,12 +362,72 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
     let dropped = 0;
     for (const activity of survivingAgentRows) {
       if (dropped === excess) break;
-      if (isAgentAnchorRow(activity)) continue;
+      if (isAgentAnchorRow(activity) || ceilingOpenings.has(activity)) continue;
       drop.add(activity);
       dropped += 1;
     }
   }
   return drop;
+}
+
+/** What ranks an open unit ({@link openWorkRanks}): its opening row, and where it opened and was last active. */
+interface OpenUnitRank {
+  readonly opening: ThreadActivityItem;
+  readonly openedAt: number;
+  readonly activeAt: number;
+}
+
+const NO_OPEN_WORK: ReadonlyMap<ThreadActivityItem, OpenUnitRank> = new Map();
+const NO_OPENINGS: ReadonlySet<ThreadActivityItem> = new Set();
+
+/**
+ * Every unit `openWorkOf` finds open — calls and background tasks together —
+ * by its opening row. A pure function of `activities`, like the open-question
+ * exemption, so a snapshot folded forward still trims exactly as the whole log
+ * does; and the walk runs inside a trim only, never per event.
+ */
+function openWorkRanks(activities: readonly ThreadActivityItem[]): ReadonlyMap<ThreadActivityItem, OpenUnitRank> {
+  const { calls, tasks } = openWorkOf(activities);
+  if (calls.length === 0 && tasks.length === 0) {
+    return NO_OPEN_WORK;
+  }
+  const units = new Map<ThreadActivityItem, OpenUnitRank>();
+  for (const call of calls) {
+    units.set(call.opening, { opening: call.opening, openedAt: call.openingIndex, activeAt: call.lastActiveIndex });
+  }
+  for (const task of tasks) {
+    units.set(task.start, { opening: task.start, openedAt: task.startIndex, activeAt: task.lastActiveIndex });
+  }
+  return units;
+}
+
+/**
+ * The openings among `rows[0..end)` — the rows a cut would drop — that it
+ * keeps whatever their age: the first `limit` by last activity, newest first
+ * (one row can be the newest of a call and of a task — a shell's own output —
+ * and then the one opened later goes first; two units never share an opening
+ * row, so the order is strict). An opening the cut would keep anyway takes no
+ * slot.
+ */
+function openingsKept(
+  units: ReadonlyMap<ThreadActivityItem, OpenUnitRank>,
+  rows: readonly ThreadActivityItem[],
+  end: number,
+  limit: number
+): ReadonlySet<ThreadActivityItem> {
+  if (units.size === 0 || end <= 0) {
+    return NO_OPENINGS;
+  }
+  const candidates: OpenUnitRank[] = [];
+  for (let index = 0; index < end; index += 1) {
+    const unit = units.get(rows[index]!);
+    if (unit !== undefined) candidates.push(unit);
+  }
+  if (candidates.length > limit) {
+    candidates.sort((left, right) => right.activeAt - left.activeAt || right.openedAt - left.openedAt);
+    candidates.length = limit;
+  }
+  return candidates.length === 0 ? NO_OPENINGS : new Set(candidates.map((unit) => unit.opening));
 }
 
 /**
@@ -398,9 +509,11 @@ const PARENT_CLASS: unique symbol = Symbol("parent");
  * An open message-mode question counts in its class although the trim keeps
  * it: whether it is still open depends on rows anywhere in the list, and a
  * class must be a property of the row alone for the counts to move by one per
- * row. Worst case — more than a slack's worth of open questions in the old
- * part of the window — the trim runs without dropping them: time, never
- * correctness (design B).
+ * row. So does the opening row of running work the trim keeps
+ * ({@link OPEN_WORK_RETENTION_LIMIT}), for the same reason. Worst case — more
+ * than a slack's worth of open questions and kept openings together in the old
+ * part of the window (the openings are at most 16) — the trim runs without
+ * dropping them: time, never correctness (design B).
  */
 type RetentionClass = typeof PARENT_CLASS | string | null;
 
