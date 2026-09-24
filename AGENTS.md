@@ -313,7 +313,7 @@ older host ignores both, and a newer one re-derives from the log whatever it can
 |---|---|
 | Commands (POST, JSON, every body carries a client-minted `commandId`) | `/api/sessions/:id/{turn,interrupt,approval,answer,dismiss,revert,compact,mode,session/stop}` → `{seq}` |
 | Daemon-owned, command-shaped (NOT proxied verbatim) | `POST /api/sessions/:id/account` `{commandId, accountId}` → `{seq}` — §3.4's account switch; see the gotcha below |
-| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
+| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output[?offset=&maxBytes=]` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log: with a window query, one UTF-8 window `{toolUseId, offset, text, totalBytes, nextOffset?, complete, truncated}` from the host store's tool-output cache; without, the whole join, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
 | Host level | `GET /api/agent/providers` · `POST /api/agent/providers/:id/refresh` · `POST /api/agent-host/stop` · `GET /api/agent/search?q=&limit=&projectPath=` (full-text over every open chat; 200 `indexed:false` without an index) |
 
 Everything is built in one place — `agentChatRoutes` in `packages/api/src/agent-chat/wire.ts`; use
@@ -451,7 +451,7 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `foldForward`), and decoding a log yields every 8 ms (`DECODE_SLICE_MS`: `readLog`,
   `decodeWindow`): a multi-second fold or parse starved the 15 s health probe (5 s timeout), and
   two consecutive misses restart a healthy host.
-- **The fold snapshot and the thread index are caches, never authorities.** `events.ndjson` stays
+- **The fold snapshot, the thread index and the tool-output cache are caches, never authorities.** `events.ndjson` stays
   the record; any doubt — another version, a seq or byte offset that does not line up, a file that
   does not parse — is resolved by discarding the cache and re-deriving from the log, never the
   reverse. Rules that must not be broken: (1) **bump `FOLD_SNAPSHOT_VERSION`**
@@ -487,7 +487,27 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   only in memory, a restart between the prompt and the turn's start re-anchored the turn at the
   adopting `session-set` and gave its prompt to the previous turn's range. A host stop calls
   `ThreadIndex.stop()` — queued observes applied, the boot catch-up ended at its next check, file
-  closed — never `drain()`, which waits for every catch-up and would hold a deploy.
+  closed — never `drain()`, which waits for every catch-up and would hold a deploy. (6) The host
+  store's **tool-output cache** (`store/tool-output-cache.ts`, memory only) serves
+  `GET …/items/:itemId/output?offset=&maxBytes=` and `readItem`'s activities: an item cursor per
+  `(thread, item)` — its newest write, the line and the call it names, so an activity read is the
+  log's tail plus one `pread` of its line (checked by `seq` and id; a message is never the store's
+  to answer while the thread's resident fold holds it — the orchestrator's `readItem` returns the
+  fold's copy, unslimmed and merged as the store's whole-log fold would merge it — and only one
+  retention dropped folds the whole log) — and an incremental join per `(thread, call)`, keyed by CALL so an item re-pointed at
+  another call never rebuilds one (`ToolOutputJoin`, the same step as `joinToolOutput`; the
+  split-point property test in `tool-output.test.ts` holds them equal). Every entry is extended by
+  the COMMITTED log past its cursor (`entry.logBytes` — never an append in flight, which a rollback
+  may undo) with `readLog`'s rules: a line that does not decode, or whose seq does not climb, stops
+  that cursor for good, as it stops every reader. A log that does not continue the cursor — shorter,
+  or its next line empty, undecodable or not `seq + 1` — rebuilds the entry from byte 0;
+  `deleteThread` drops the thread's entries and bumps its generation, so a scan already running
+  publishes nothing; a revert invalidates nothing (the join reads the raw log). One scan per key at a
+  time; bounded at 32 MiB of join buffers and 1 024 item cursors (and as many joins), LRU, an entry
+  idle 10 minutes expiring when next touched — no timer; an evicted entry is rebuilt, slower, never
+  wrong. A window counts in the whole join's UTF-8 as it stands (a lone surrogate reads as U+FFFD),
+  the same bytes on every host, so offsets carry across a host restart; the no-query answer stays
+  the whole join on the whole-log path, for a daemon from before windows.
 - **The fold's work per event must not grow with the window.** The fold is shared by the host and
   the browser, and it used to cost ~1.8 ms per event on a big thread: every event rescanned,
   regrouped and sorted the whole retained window (`activitiesToDrop`), copied the id→position map,
@@ -929,8 +949,14 @@ output from the places the row's preview reads (`commandOutputText`, one list wi
 that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
 command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
 and answered with `running`/`truncated`; never a file change's (Claude streams its result text as
-`file_change_output`, which is no command's output). `read_transcript` offers such a call's latest
-command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
+`file_change_output`, which is no command's output). The tool asks the host for ONE window
+(`?offset=&maxBytes=`, the caller's own, the offset stopped one byte past 8 MiB), cut from the
+host store's tool-output cache — a page costs the log's tail, not two whole-log reads and an 8 MiB
+body — and trims it to the result's room by the rule it windows a whole text with, so the pages are
+byte-identical whichever host cut them; a window outside the host's own rules is `INTERNAL`. A host
+from before windows ignores the query and answers the whole join, which the tool windows itself
+(`isThreadItemOutputWindow` tells the two bodies apart). `read_transcript` offers such a call's
+latest command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
 entry built from its latest chunk — and a host from before the route (its route-miss 404) falls
 back to the item's own text, never an error. A result is one JSON object capped at 60 000 bytes
 (`result.ts`); every tool that can outgrow it bounds itself first and says what it cut (`truncated`,

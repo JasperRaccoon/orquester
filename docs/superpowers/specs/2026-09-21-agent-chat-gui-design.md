@@ -2878,6 +2878,31 @@ so a reader can tell the two apart until that host's drain-restart. The daemon p
 as it does `…/items/:itemId`. Its reader today is the MCP's `read_tool_output`; the timeline keeps
 joining the chunks it holds.*
 
+*Built (plan `2026-09-24-subagent-output-long-calls-and-composer-sends`, task 6): the same route
+answers **one window** when `?offset=&maxBytes=` asks for one (either alone does) →
+`ThreadItemOutputWindowResponse {toolUseId, offset, text, totalBytes, nextOffset?, complete,
+truncated}`: UTF-8 bytes of the whole join as it stands (a lone surrogate reads as U+FFFD, the bytes
+`Buffer.from(output)` gives), the offset clamped to the end and moved back to the character it falls
+in, whole characters within `maxBytes` (clamped to 1 MiB, 64 KiB when absent or unparseable), at
+least one; a malformed `offset` is 400 `INVALID_COMMAND`, one past the end answers the end, empty,
+with no `nextOffset`. Without either parameter the answer is the whole join, on the whole-log path,
+exactly as above. Paging a long output used to read and decode the whole log twice per page (the item
+read, then the join) and ship the whole join: 151 MiB of log and 8 MiB of output were ~3.4 s and
+8 MiB per page. The windows come from the host store's in-memory **tool-output cache**
+(`store/tool-output-cache.ts`): an item cursor per item — its newest write, whose activity is then
+read back as one line (`readItem` rides it too; a message the resident fold still holds is the
+orchestrator's to answer, from the fold, and never reaches the store) — and an incremental join per
+CALL, each extended by the committed log past its cursor with `readLog`'s rules, rebuilt from byte 0
+on any doubt, dropped by `deleteThread`, untouched by a revert; 32 MiB of join buffers, 1 024 item
+cursors, LRU, 10 minutes idle. The first page of that log now costs ~2.2 s and every later one a few
+milliseconds. No `AGENT_HOST_PROTOCOL_VERSION` bump: the query is additive both ways — a host from
+before windows matches the route on its path and answers the whole join (the MCP tells the two
+bodies apart, `isThreadItemOutputWindow`, and windows that one itself), and a daemon from before
+windows sends no query — and a bump would also have thrown away the provider-snapshot disk cache.
+The daemon forwards `offset`/`maxBytes` verbatim — an empty or a repeated value included — so the
+host's rules are the only ones: an empty or repeated `offset` is its 400, a repeated `maxBytes`
+takes its first value.*
+
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
 *over this thread's rows alone*, is ≤ 1 000 events **and** ≤ 8 MiB of payload; past either it sends

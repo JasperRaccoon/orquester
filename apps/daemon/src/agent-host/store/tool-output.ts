@@ -1,6 +1,7 @@
 /**
  * A tool call's streamed output, joined from its thread's log — the answer of
- * `GET …/items/:itemId/output` ({@link ThreadItemOutputResponse}).
+ * `GET …/items/:itemId/output` ({@link ThreadItemOutputResponse}), or one
+ * window of it ({@link ThreadItemOutputWindowResponse}).
  *
  * Some output exists only as `tool.output` chunks: ingestion's §5.6
  * command-output buffer writes a row per flush, `payload.delta` carrying the
@@ -11,8 +12,14 @@
  * snapshot cannot give them back whole (per-agent windows evict chunks, the
  * wire caps every string, history pages are slimmed), so the log is read.
  *
- * Pure over the decoded events: the store runs it after its one `readLog`, the
- * orchestrator over `readAll` for a store without it.
+ * Pure over the decoded events, two ways: {@link joinToolOutput} over a whole
+ * log (the store runs it after its one `readLog` for the whole join, the
+ * orchestrator over `readAll` for a store without it), and
+ * {@link ToolOutputJoin} + {@link nextItemWrite}, the same join and the same
+ * call built one event at a time — what the store's cache
+ * (`tool-output-cache.ts`) keeps and extends by the log's tail, so a window
+ * never reads the whole log again. Both take the ONE step, {@link joinStep}:
+ * the cap's accounting cannot drift between them.
  *
  * It reads the RAW log, and a `thread.reverted` does not filter it: a chunk
  * written in a turn a rewind later removed is still joined. Chunks written
@@ -27,14 +34,25 @@
 
 import {
   THREAD_ITEM_OUTPUT_MAX_BYTES,
+  THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES,
+  THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
+  utf8SequenceLength,
   type DomainEvent,
-  type ThreadItemOutputResponse
+  type ThreadItemOutputResponse,
+  type ThreadItemOutputWindowQuery,
+  type ThreadItemOutputWindowResponse
 } from "@orquester/api/agent-chat";
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+
+/** A write's `payload.toolUseId` when it names a call: a non-empty string. */
+function toolUseIdOf(payload: unknown): string | undefined {
+  const toolUseId = asRecord(payload)?.toolUseId;
+  return typeof toolUseId === "string" && toolUseId.length > 0 ? toolUseId : undefined;
+}
 
 /**
  * The call an item belongs to: its NEWEST write's `payload.toolUseId`, as
@@ -46,14 +64,52 @@ function callOf(events: readonly DomainEvent[], itemId: string): string | undefi
     const event = events[index]!;
     if (event.type === "thread.activity-appended") {
       if (event.payload.activity.id !== itemId) continue;
-      const toolUseId = asRecord(event.payload.activity.payload)?.toolUseId;
-      return typeof toolUseId === "string" && toolUseId.length > 0 ? toolUseId : undefined;
+      return toolUseIdOf(event.payload.activity.payload);
     }
     if (event.type === "thread.message-sent" && event.payload.messageId === itemId) {
       return undefined;
     }
   }
   return undefined;
+}
+
+/**
+ * The newest write of one item in a log read forward so far — what `callOf`
+ * and `readItem` find reading the whole log backwards: an activity (with its
+ * line, which the store reads back alone, and the call it names), a message
+ * (whose body only a fold rebuilds), or nothing yet.
+ */
+export type ItemWrite =
+  | { kind: "none" }
+  | { kind: "message" }
+  | { kind: "activity"; seq: number; byteOffset: number; byteLength: number; toolUseId?: string };
+
+/**
+ * {@link ItemWrite} after one more event, at `position` in the log: the
+ * forward continuation of `callOf`, so the item's write over a prefix extended
+ * by the rest is the item's write over the whole log.
+ */
+export function nextItemWrite(
+  write: ItemWrite,
+  event: DomainEvent,
+  itemId: string,
+  position: { byteOffset: number; byteLength: number }
+): ItemWrite {
+  if (event.type === "thread.activity-appended") {
+    if (event.payload.activity.id !== itemId) return write;
+    const toolUseId = toolUseIdOf(event.payload.activity.payload);
+    return {
+      kind: "activity",
+      seq: event.seq,
+      byteOffset: position.byteOffset,
+      byteLength: position.byteLength,
+      ...(toolUseId !== undefined ? { toolUseId } : {})
+    };
+  }
+  if (event.type === "thread.message-sent" && event.payload.messageId === itemId) {
+    return { kind: "message" };
+  }
+  return write;
 }
 
 /** The UTF-8 size of one code point (a lone surrogate encodes as U+FFFD: 3). */
@@ -70,6 +126,51 @@ function utf8Head(text: string, budget: number): string {
     end += char.length;
   }
   return text.slice(0, end);
+}
+
+/**
+ * A join's running counts: `bytes` is the sum of each joined chunk's own
+ * UTF-8 size — the counter the cap is decided on, which can run ahead of the
+ * join's real size (a surrogate pair split across two chunks counts 3 + 3 and
+ * encodes as 4) — and the two flags.
+ */
+interface JoinCounters {
+  bytes: number;
+  complete: boolean;
+  truncated: boolean;
+}
+
+/**
+ * One event's part in the join of `toolUseId`: the text it appends — cut on a
+ * character boundary when it crosses `maxBytes` — or undefined. A completion
+ * sets `complete`; nothing is appended once the join is `truncated`, but the
+ * scan goes on so a completion after the cut is still reported.
+ */
+function joinStep(
+  counters: JoinCounters,
+  event: DomainEvent,
+  toolUseId: string,
+  maxBytes: number
+): string | undefined {
+  if (event.type !== "thread.activity-appended") return undefined;
+  const { activity } = event.payload;
+  const payload = asRecord(activity.payload);
+  if (payload?.toolUseId !== toolUseId) return undefined;
+  if (activity.activityKind === "tool.completed") {
+    counters.complete = true;
+    return undefined;
+  }
+  const delta = payload.delta;
+  if (activity.activityKind !== "tool.output" || counters.truncated || typeof delta !== "string") {
+    return undefined;
+  }
+  const size = Buffer.byteLength(delta, "utf8");
+  if (counters.bytes + size <= maxBytes) {
+    counters.bytes += size;
+    return delta;
+  }
+  counters.truncated = true;
+  return utf8Head(delta, maxBytes - counters.bytes);
 }
 
 /**
@@ -90,29 +191,178 @@ export function joinToolOutput(
   if (toolUseId === undefined) {
     return null;
   }
+  const counters: JoinCounters = { bytes: 0, complete: false, truncated: false };
   const chunks: string[] = [];
-  let bytes = 0;
-  let complete = false;
-  let truncated = false;
   for (const event of events) {
-    if (event.type !== "thread.activity-appended") continue;
-    const { activity } = event.payload;
-    const payload = asRecord(activity.payload);
-    if (payload?.toolUseId !== toolUseId) continue;
-    if (activity.activityKind === "tool.completed") {
-      complete = true;
-      continue;
-    }
-    const delta = payload.delta;
-    if (activity.activityKind !== "tool.output" || truncated || typeof delta !== "string") continue;
-    const size = Buffer.byteLength(delta, "utf8");
-    if (bytes + size <= maxBytes) {
-      chunks.push(delta);
-      bytes += size;
-    } else {
-      chunks.push(utf8Head(delta, maxBytes - bytes));
-      truncated = true;
-    }
+    const piece = joinStep(counters, event, toolUseId, maxBytes);
+    if (piece !== undefined) chunks.push(piece);
   }
-  return { toolUseId, output: chunks.join(""), complete, truncated };
+  return { toolUseId, output: chunks.join(""), complete: counters.complete, truncated: counters.truncated };
+}
+
+/**
+ * One window of UTF-8 `bytes`: from `offset` — clamped to the end, then moved
+ * back to the lead byte of the character it falls in (at most 3 bytes) — to
+ * the end of the most whole characters that fit in `maxBytes`, and always at
+ * least one, so paging through `end` advances whatever `maxBytes` is. At (or
+ * past) the end the window is empty. The MCP's `read_tool_output` windows a
+ * whole text by the same rule, so a page is the same bytes whichever side cut
+ * it.
+ */
+export function utf8Window(bytes: Uint8Array, offset: number, maxBytes: number): { start: number; end: number } {
+  const total = bytes.length;
+  const at = Math.min(offset, total);
+  let start = at;
+  // A continuation byte is 10xxxxxx, and a character's lead byte is at most 3 bytes before any of them.
+  while (start > 0 && start < total && at - start < 3 && (bytes[start]! & 0xc0) === 0x80) start -= 1;
+  let end = start;
+  while (end < total) {
+    const size = Math.min(utf8SequenceLength(bytes[end]!), total - end);
+    if (end > start && end + size - start > maxBytes) break;
+    end += size;
+  }
+  return { start, end };
+}
+
+/**
+ * A window query as {@link utf8Window} takes it: `offset` a whole number of
+ * bytes from 0 (the start when absent), `maxBytes` clamped to
+ * `[1, THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES]` (the default when absent).
+ */
+function windowBounds(query: ThreadItemOutputWindowQuery): { offset: number; maxBytes: number } {
+  const offset =
+    query.offset === undefined || Number.isNaN(query.offset) || query.offset < 0
+      ? 0
+      : Math.floor(Math.min(query.offset, Number.MAX_SAFE_INTEGER));
+  const maxBytes =
+    query.maxBytes === undefined || Number.isNaN(query.maxBytes)
+      ? THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES
+      : Math.min(THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES, Math.max(1, Math.floor(query.maxBytes)));
+  return { offset, maxBytes };
+}
+
+/** The window of a join's `bytes` a query asks for. */
+function windowOf(
+  bytes: Buffer,
+  query: ThreadItemOutputWindowQuery,
+  join: { toolUseId: string; complete: boolean; truncated: boolean }
+): ThreadItemOutputWindowResponse {
+  const { offset, maxBytes } = windowBounds(query);
+  const { start, end } = utf8Window(bytes, offset, maxBytes);
+  return {
+    toolUseId: join.toolUseId,
+    offset: start,
+    text: bytes.toString("utf8", start, end),
+    totalBytes: bytes.length,
+    ...(end < bytes.length ? { nextOffset: end } : {}),
+    complete: join.complete,
+    truncated: join.truncated
+  };
+}
+
+/** One window of a whole join — the answer of a store that keeps no cache (the orchestrator's fallback). */
+export function toolOutputWindow(
+  joined: ThreadItemOutputResponse,
+  query: ThreadItemOutputWindowQuery
+): ThreadItemOutputWindowResponse {
+  return windowOf(Buffer.from(joined.output, "utf8"), query, joined);
+}
+
+const isHighSurrogate = (unit: number): boolean => unit >= 0xd800 && unit <= 0xdbff;
+
+/** The first capacity a join's buffer grows to. */
+const INITIAL_JOIN_CAPACITY = 4 * 1024;
+
+/**
+ * The join of ONE call, built one event at a time: {@link joinToolOutput}'s
+ * output for that call over the events pushed so far, kept as its UTF-8 bytes
+ * so a window is a slice. The bytes are always `Buffer.from(output)` of the
+ * join as it stands: a trailing lone high surrogate is held back, reading as
+ * U+FFFD (3 bytes) until its low half arrives and the two encode as one
+ * 4-byte character — what `Buffer.from` of the longer join says.
+ *
+ * Keyed by call, never by item: which call an item names is its own question
+ * ({@link nextItemWrite}), so an item re-pointed at another call, or first
+ * seen in a log's tail, never makes a join rebuild — the other call's join is
+ * a join of its own.
+ */
+export class ToolOutputJoin {
+  private buffer: Buffer = Buffer.alloc(0);
+  private length = 0;
+  /** A high surrogate that ended the text so far: its low half may start the next piece. */
+  private pendingHigh = "";
+  private readonly counters: JoinCounters = { bytes: 0, complete: false, truncated: false };
+
+  constructor(
+    readonly toolUseId: string,
+    private readonly maxBytes: number = THREAD_ITEM_OUTPUT_MAX_BYTES
+  ) {}
+
+  push(event: DomainEvent): void {
+    const piece = joinStep(this.counters, event, this.toolUseId, this.maxBytes);
+    if (piece !== undefined) this.append(piece);
+  }
+
+  get complete(): boolean {
+    return this.counters.complete;
+  }
+
+  get truncated(): boolean {
+    return this.counters.truncated;
+  }
+
+  /** UTF-8 bytes of the join as it stands. */
+  get totalBytes(): number {
+    return this.length + (this.pendingHigh === "" ? 0 : 3);
+  }
+
+  /** The bytes this join holds in memory — its buffer, grown ahead of its text — for the cache's budget. */
+  get capacity(): number {
+    return this.buffer.length;
+  }
+
+  /**
+   * The join's bytes: exactly `Buffer.from(output, "utf8")`. A view of the
+   * join's own buffer, valid until the next {@link push}.
+   */
+  bytes(): Buffer {
+    if (this.pendingHigh === "") return this.buffer.subarray(0, this.length);
+    // U+FFFD in the spare room past the text: the next piece overwrites it.
+    this.reserve(this.length + 3);
+    this.buffer[this.length] = 0xef;
+    this.buffer[this.length + 1] = 0xbf;
+    this.buffer[this.length + 2] = 0xbd;
+    return this.buffer.subarray(0, this.length + 3);
+  }
+
+  /** The window of the join a query asks for (`utf8Window`). */
+  window(query: ThreadItemOutputWindowQuery): ThreadItemOutputWindowResponse {
+    return windowOf(this.bytes(), query, this);
+  }
+
+  private append(piece: string): void {
+    let text = this.pendingHigh + piece;
+    this.pendingHigh = "";
+    if (text.length > 0 && isHighSurrogate(text.charCodeAt(text.length - 1))) {
+      // Lone for now: a high surrogate before it would have paired with it.
+      this.pendingHigh = text.slice(-1);
+      text = text.slice(0, -1);
+    }
+    if (text.length === 0) return;
+    this.reserve(this.length + Buffer.byteLength(text, "utf8"));
+    this.length += this.buffer.write(text, this.length, "utf8");
+  }
+
+  /**
+   * Room for `needed` bytes, doubling. The join's real size never passes the
+   * cap it is counted against (a split pair only makes it smaller), so this
+   * stops growing within a few bytes of `maxBytes`.
+   */
+  private reserve(needed: number): void {
+    if (needed <= this.buffer.length) return;
+    const doubled = Math.max(INITIAL_JOIN_CAPACITY, this.buffer.length * 2);
+    const grown = Buffer.alloc(Math.max(needed, Math.min(doubled, this.maxBytes + 3)));
+    this.buffer.copy(grown, 0, 0, this.length);
+    this.buffer = grown;
+  }
 }

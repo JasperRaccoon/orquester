@@ -1,9 +1,10 @@
 import { open, opendir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { utf8SequenceLength } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { ToolError } from "./errors.ts";
-import { utf8SequenceLength, wholeUtf8Length } from "./result.ts";
+import { wholeUtf8Length } from "./result.ts";
 
 export const MAX_FS_ENTRIES = 500;
 export const DEFAULT_READ_BYTES = 64 * 1024;

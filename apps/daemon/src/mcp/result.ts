@@ -1,3 +1,4 @@
+import { utf8SequenceLength } from "@orquester/api/agent-chat";
 import { FsSandboxError } from "@orquester/config/fs";
 import { TodoError } from "../todos.ts";
 import { ToolError } from "./errors.ts";
@@ -60,11 +61,6 @@ export function fitJsonBytes(text: string, budget: number): { text: string; trun
     else hi = mid - 1;
   }
   return { text: capText(text, lo).text, truncated: true };
-}
-
-/** How many bytes the UTF-8 character a lead byte starts takes (1 for ASCII, or for a byte no character starts with). */
-export function utf8SequenceLength(lead: number): number {
-  return lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
 }
 
 /**

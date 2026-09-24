@@ -23,6 +23,8 @@ import {
   MAX_TURN_FILE_BYTES,
   THREAD_HISTORY_DEFAULT_TURNS,
   THREAD_HISTORY_MAX_TURNS,
+  THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES,
+  THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   THREAD_SEARCH_MAX_RESULTS,
   type AgentChatCommandName,
@@ -32,6 +34,8 @@ import {
   type RefreshProviderResponse,
   type ThreadHistoryPage,
   type ThreadItemOutputResponse,
+  type ThreadItemOutputWindowQuery,
+  type ThreadItemOutputWindowResponse,
   type ThreadItemResponse,
   type ThreadSearchResponse,
   type TurnDiffResponse
@@ -248,6 +252,39 @@ function parseAfter(url: URL): number | undefined {
     throw new AgentChatCommandError("INVALID_COMMAND", "`after` must be a non-negative integer.");
   }
   return value;
+}
+
+/**
+ * The window `GET …/items/:itemId/output` is asked for, or null when neither
+ * `offset` nor `maxBytes` is present — the whole join, as the route answered
+ * before windows. `offset` must be decimal digits, given once (a 400
+ * otherwise: an empty or a repeated one names no place to start); one too
+ * large to be a safe integer is past any join's end, and reads as the end.
+ * `maxBytes` is a preference, clamped and defaulted like a page size — a
+ * repeated one takes its first value, as every page size here does. The
+ * daemon forwards both verbatim, so these rules are the only ones.
+ */
+export function parseItemOutputWindow(url: URL): ThreadItemOutputWindowQuery | null {
+  const offsets = url.searchParams.getAll("offset");
+  if (offsets.length === 0 && !url.searchParams.has("maxBytes")) return null;
+  if (offsets.length > 1) {
+    throw new AgentChatCommandError("INVALID_COMMAND", "`offset` must be given once.");
+  }
+  const rawOffset = offsets[0];
+  let offset = 0;
+  if (rawOffset !== undefined) {
+    if (!/^\d+$/.test(rawOffset)) {
+      throw new AgentChatCommandError("INVALID_COMMAND", "`offset` must be a non-negative integer.");
+    }
+    const value = Number(rawOffset);
+    offset = Number.isSafeInteger(value) ? value : Number.MAX_SAFE_INTEGER;
+  }
+  const maxBytes = clampedIntParam(url, "maxBytes", {
+    min: 1,
+    max: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
+    fallback: THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES
+  });
+  return { offset, maxBytes };
 }
 
 export function createAgentHostServer(options: AgentHostServerOptions): AgentHostServer {
@@ -615,13 +652,22 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     }
 
     // The streamed output of the tool call the item belongs to, joined from
-    // the log. Its 404 is `ITEM_NOT_FOUND`, never `THREAD_NOT_FOUND`: that is
+    // the log: one window of it when `?offset=`/`?maxBytes=` ask for one
+    // (from the store's cache — the log's tail, not the whole log, per page),
+    // else the whole join, exactly as before windows, for a daemon that asks
+    // for none. Its 404 is `ITEM_NOT_FOUND`, never `THREAD_NOT_FOUND`: that is
     // what a host predating this route answers for it (the route miss below),
-    // and a reader must tell "no such item" from "no such route".
+    // and a reader must tell "no such item" from "no such route". A host that
+    // predates windows matches this route on the path alone and answers the
+    // whole join whatever the query says; readers tell the two bodies apart.
     const itemOutputMatch = /^\/items\/([^/]+)\/output$/.exec(rest);
     if (itemOutputMatch && method === "GET") {
       const itemId = decodeURIComponent(itemOutputMatch[1]!);
-      const body: ThreadItemOutputResponse | null = await orchestrator.readToolOutput(threadId, itemId);
+      const window = parseItemOutputWindow(url);
+      const body: ThreadItemOutputResponse | ThreadItemOutputWindowResponse | null =
+        window === null
+          ? await orchestrator.readToolOutput(threadId, itemId)
+          : await orchestrator.readToolOutputWindow(threadId, itemId, window);
       if (!body) {
         sendJson(response, 404, {
           error: {

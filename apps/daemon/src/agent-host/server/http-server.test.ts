@@ -392,6 +392,93 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     await h.stop();
   });
 
+  /** A thread whose shell streamed "one\n" then "  two\n" (10 bytes), beside a row that is no tool call. */
+  async function shellThread(h: Harness): Promise<string> {
+    const threadId = await h.host.createThread();
+    const at = h.host.clock.nowIso();
+    const row = (id: string, activityKind: string, payload: Record<string, unknown>) => ({
+      eventId: `ev-${id}`,
+      threadId,
+      type: "thread.activity-appended" as const,
+      payload: {
+        activity: { kind: "activity" as const, id, tone: "tool" as const, activityKind, summary: activityKind, payload, turnId: null, createdAt: at, updatedAt: at }
+      },
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    });
+    await h.host.orchestrator.ingestionSink(threadId, [
+      row("start", "tool.started", { itemType: "command_execution", toolUseId: "bgshell:task-1" }),
+      row("o1", "tool.output", { toolUseId: "bgshell:task-1", streamKind: "command_output", delta: "one\n" }),
+      row("o2", "tool.output", { toolUseId: "bgshell:task-1", streamKind: "command_output", delta: "  two\n" }),
+      row("warn", "runtime.warning", { message: "not a tool call" })
+    ]);
+    await h.host.settle();
+    return threadId;
+  }
+
+  it("answers one window of the join when offset or maxBytes asks for it, and the whole join without either", async () => {
+    const h = await harness();
+    const threadId = await shellThread(h);
+    const output = (query: string) => h.call("GET", `${agentHostRoutes.itemOutput(threadId, "start")}${query}`);
+    const first = await output("?offset=0&maxBytes=4");
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.body, { toolUseId: "bgshell:task-1", offset: 0, text: "one\n", totalBytes: 10, nextOffset: 4, complete: false, truncated: false });
+    // Chained through nextOffset, the windows are the join.
+    let text = "";
+    for (let offset: number | undefined = 0; offset !== undefined;) {
+      const page = (await output(`?offset=${offset}&maxBytes=4`)).body as { text: string; nextOffset?: number };
+      text += page.text;
+      offset = page.nextOffset;
+    }
+    assert.equal(text, "one\n  two\n");
+    // Either parameter alone asks for a window: maxBytes from the start, offset at the default size.
+    assert.deepEqual((await output("?maxBytes=3")).body, { toolUseId: "bgshell:task-1", offset: 0, text: "one", totalBytes: 10, nextOffset: 3, complete: false, truncated: false });
+    assert.deepEqual((await output("?offset=4")).body, { toolUseId: "bgshell:task-1", offset: 4, text: "  two\n", totalBytes: 10, complete: false, truncated: false });
+    // Neither: the whole join, exactly as a host before windows answered it.
+    assert.deepEqual((await output("")).body, { toolUseId: "bgshell:task-1", output: "one\n  two\n", complete: false, truncated: false });
+    await h.stop();
+  });
+
+  it("refuses a malformed offset, clamps maxBytes, and answers an offset past the end as the end", async () => {
+    const h = await harness();
+    const threadId = await shellThread(h);
+    const output = (query: string, itemId = "start", thread = threadId) => h.call("GET", `${agentHostRoutes.itemOutput(thread, itemId)}${query}`);
+    for (const offset of ["abc", "-1", "1.5", "1e3", ""]) {
+      const refused = await output(`?offset=${offset}&maxBytes=4`);
+      assert.equal(refused.status, 400, offset);
+      assert.deepEqual(refused.body, { error: { code: "INVALID_COMMAND", message: "`offset` must be a non-negative integer." } }, offset);
+    }
+    // A repeated offset names no one place to start: refused, whatever the values. A repeated maxBytes is a preference
+    // like any page size here: its first value.
+    const twice = await output("?offset=1&offset=2");
+    assert.equal(twice.status, 400);
+    assert.deepEqual(twice.body, { error: { code: "INVALID_COMMAND", message: "`offset` must be given once." } });
+    assert.equal(((await output("?offset=0&maxBytes=3&maxBytes=100")).body as { text: string }).text, "one");
+    // A window's size is a preference: below 1 it is one character, unparseable it is the default, huge it is the widest.
+    assert.deepEqual([(await output("?offset=0&maxBytes=0")).body], [{ toolUseId: "bgshell:task-1", offset: 0, text: "o", totalBytes: 10, nextOffset: 1, complete: false, truncated: false }]);
+    for (const maxBytes of ["abc", "99999999999"]) {
+      assert.equal(((await output(`?offset=0&maxBytes=${maxBytes}`)).body as { text: string }).text, "one\n  two\n", maxBytes);
+    }
+    // At or past the end — however far, a safe integer or not — the window is the end: empty, no nextOffset.
+    for (const offset of ["10", "11", "99999999999999999999999"]) {
+      const end = await output(`?offset=${offset}`);
+      assert.equal(end.status, 200, offset);
+      assert.deepEqual(end.body, { toolUseId: "bgshell:task-1", offset: 10, text: "", totalBytes: 10, complete: false, truncated: false }, offset);
+    }
+    // The same 404s as the whole join: the item's own, then the thread's.
+    for (const itemId of ["warn", "nope"]) {
+      const missing = await output("?offset=0", itemId);
+      assert.equal(missing.status, 404, itemId);
+      assert.equal((missing.body as { error: { code: string } }).error.code, "ITEM_NOT_FOUND", itemId);
+    }
+    const gone = await output("?offset=0", "start", "thread-gone");
+    assert.equal(gone.status, 404);
+    assert.equal((gone.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+    await h.stop();
+  });
+
   it("serves the provider snapshots with the host instance id", async () => {
     const h = await harness();
     const result = await h.call("GET", agentHostRoutes.providers);
