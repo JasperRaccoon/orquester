@@ -286,6 +286,13 @@ export interface OpenCodeChildAgent {
   lastStatus?: RuntimeTaskStatus;
   started: boolean;
   completed: boolean;
+  /**
+   * The child's own `session.idle` ended the current run with no result: the
+   * parent's `task` part that settles right after it carries the answer
+   * (fixture 12, lines 179-180), and gives it to this run's end once
+   * (`linkChildFromTaskPart`). Cleared by that, and by a relaunch.
+   */
+  resultPending?: boolean;
 }
 
 export interface OpenCodeCancellation {

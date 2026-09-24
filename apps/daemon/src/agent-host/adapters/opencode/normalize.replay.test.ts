@@ -20,11 +20,26 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import {
+  applyDomainEvent,
+  createEmptyThreadState,
+  type DomainEvent,
+  type RuntimeEvent,
+  type RuntimeSubagent
+} from "@orquester/api/agent-chat";
 
+import { createIngestion } from "../../ingestion/index.ts";
+import {
+  FakeClock,
+  FakeTimers,
+  RecordingLiveness,
+  RecordingSink,
+  counterIdGen
+} from "../../ingestion/test-harness.ts";
 import {
   closeLiveChildAgents,
   normalizeOpenCodeEvent,
+  taskResultText,
   type NormalizeContext,
   type NormalizerSignal
 } from "./normalize.ts";
@@ -202,6 +217,56 @@ function firstOfType<T extends RuntimeEvent["type"]>(
   type: T
 ): Extract<RuntimeEvent, { type: T }> | undefined {
   return eventsOfType(events, type)[0];
+}
+
+/**
+ * Run runtime events through the host's REAL ingestion and fold what it writes
+ * with the real thread fold: the roster the user reads.
+ */
+async function rosterOf(events: readonly RuntimeEvent[]): Promise<RuntimeSubagent[]> {
+  const clock = new FakeClock();
+  const timers = new FakeTimers(clock);
+  const sink = new RecordingSink();
+  const ingestion = createIngestion({
+    sink: sink.sink,
+    liveness: new RecordingLiveness(),
+    clock,
+    idGen: counterIdGen(),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer
+  });
+  for (const event of events) {
+    await ingestion.ingest(event);
+  }
+  await ingestion.drain();
+  // `thread.created` is the host's, not ingestion's.
+  let state = applyDomainEvent(createEmptyThreadState(), {
+    seq: 1,
+    eventId: "created",
+    threadId: "thread-1",
+    occurredAt: "2026-09-21T00:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    metadata: {},
+    type: "thread.created",
+    payload: {
+      projectPath: "/repo",
+      cwd: "/repo",
+      title: "New thread",
+      adapter: "opencode",
+      refId: "opencode",
+      accountId: "",
+      home: "system",
+      modelSelection: { model: "openrouter/google/gemini-3.1-flash-lite" },
+      runtimeMode: "approval-required"
+    }
+  });
+  let seq = 1;
+  for (const event of sink.events()) {
+    seq += 1;
+    state = applyDomainEvent(state, { ...event, seq } as DomainEvent);
+  }
+  return state.roster;
 }
 
 function sseTypes(name: string): Set<string> {
@@ -586,6 +651,12 @@ test("12: a co-tenant session's frames are dropped, not mixed into this thread",
 
 const CHILD_FIXTURE = "12-two-sessions-one-server-and-a-child-session.ndjson";
 const CHILD_SESSION_ID = "ses_f3dfd3d8fffeHrM6kT1FcC9I6q";
+/**
+ * What the child answered: the parent `task` part's output (line 180) inside
+ * the `<task id="…" state="completed"><task_result>` envelope the tool wraps
+ * it in for the parent's model.
+ */
+const CHILD_RESULT = "The files in the current directory are:\n\n- README.md\n- a.ts";
 
 function replayChildParent(): Replay {
   const parent = sessionIds(readFixture(CHILD_FIXTURE))[2];
@@ -627,9 +698,12 @@ const CHILD_LAUNCH_CALL = "call_107260";
  * names that child before the child's own frames begin. Cloned from the
  * capture's lines 140/142/180 (the part), 148 and 156-160 (busy, then one
  * `bash` call) and 177-179 (the settle), with every call, part and message id
- * new.
+ * new — and any text in `edits` swapped too (the answer, say).
  */
-function resumeFrames(callId: string): {
+function resumeFrames(
+  callId: string,
+  edits: Readonly<Record<string, string>> = {}
+): {
   pending: OpenCodeRawEvent;
   running: OpenCodeRawEvent;
   /** Busy, then a `bash` call's pending → running → completed. */
@@ -644,7 +718,8 @@ function resumeFrames(callId: string): {
     msg_0c202b215001elzGd6pT1U41EE: `msg_parent_${callId}`,
     call_174911: `call_bash_${callId}`,
     prt_0c202c732001AGeN2DzE72amve: `prt_bash_${callId}`,
-    msg_0c202c2b2001xGlEiTF0IJjyd6: `msg_child_${callId}`
+    msg_0c202c2b2001xGlEiTF0IJjyd6: `msg_child_${callId}`,
+    ...edits
   };
   const [pending, running, completed] = childFixtureFrames([140, 142, 180], renames);
   assert.ok(pending && running && completed);
@@ -707,20 +782,30 @@ test("12: every emitted event belongs to this thread", () => {
   assert.ok(events.length > 0);
 });
 
-test("12: a child session becomes a roster task, started once and completed once", () => {
+test("12: a child session becomes a roster task, started once and ended once, then given its result", () => {
   const { events } = replayChildParent();
   const started = eventsOfType(events, "task.started");
   const completed = eventsOfType(events, "task.completed");
   assert.equal(started.length, 1, "exactly one subagent ran in this capture");
-  assert.equal(completed.length, 1);
 
   const start = started[0];
   assert.equal(start?.payload.taskId, CHILD_SESSION_ID, "the task id IS the child session id");
   assert.equal(start?.payload.agentId, CHILD_SESSION_ID);
   assert.equal(start?.agentId, CHILD_SESSION_ID, "and it is stamped on the envelope too");
   assert.equal(start?.payload.taskType, "subagent");
-  assert.equal(completed[0]?.payload.status, "completed");
-  assert.equal(completed[0]?.payload.taskId, CHILD_SESSION_ID);
+  // The child's own `session.idle` (line 179) ends the run; the parent's part
+  // that follows it (line 180) adds the result to that end, and ends nothing.
+  assert.deepEqual(
+    completed.map((event) => [event.payload.status, event.payload.summary]),
+    [
+      ["completed", undefined],
+      ["completed", CHILD_RESULT]
+    ]
+  );
+  for (const event of completed) {
+    assert.equal(event.payload.taskId, CHILD_SESSION_ID);
+    assert.equal(event.payload.toolUseId, CHILD_LAUNCH_CALL, "one run, the capture's own");
+  }
 });
 
 test("12: the child's first task.started names the call that launched it", () => {
@@ -968,12 +1053,18 @@ test("a `task_id` resume of a settled child launches it again, and its own idle 
   assert.equal(rows.at(-1), "task.completed:completed");
   const idle = resume.settle.at(-1);
   assert.ok(idle !== undefined);
+  const settledBy = eventsOfType(perFrame[frames.indexOf(idle)] ?? [], "task.completed");
   assert.deepEqual(
-    taskRows(perFrame[frames.indexOf(idle)] ?? []),
-    ["task.completed:completed"],
+    settledBy.map((event) => [event.payload.status, event.payload.summary]),
+    [["completed", undefined]],
     "settled by the child's own session.idle"
   );
-  assert.deepEqual(taskRows(perFrame.at(-1) ?? []), [], "the part's own end adds no second end");
+  // The part's own end ends nothing: it gives the run its result.
+  const result = eventsOfType(perFrame.at(-1) ?? [], "task.completed");
+  assert.deepEqual(
+    result.map((event) => [event.payload.status, event.payload.summary]),
+    [["completed", CHILD_RESULT]]
+  );
   for (const event of events) {
     if (event.type.startsWith("task.")) {
       assert.equal((event.payload as { toolUseId?: string }).toolUseId, "call_resume", event.type);
@@ -1093,6 +1184,135 @@ test("a task part answered in the background does not settle the child it launch
 
   const idle = feed(run, childFixtureFrames([179], renames)).flat();
   assert.deepEqual(taskRows(idle), ["task.completed:completed"]);
+  // Its part's answer said the child was still working: never the run's result.
+  assert.deepEqual(taskRows(feed(run, [inBackground(completed)]).flat()), []);
+});
+
+// ---------------------------------------------------------------------------
+// A run's result: the parent part that settles after the child's own idle
+// ---------------------------------------------------------------------------
+
+/** A parent `task` part frame turned into its `error` state, as the tool fails. */
+function erroredPart(frame: OpenCodeRawEvent, error: string): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: Record<string, unknown> } };
+  };
+  const state = copy.properties.part.state;
+  delete state.output;
+  delete state.title;
+  state.status = "error";
+  state.error = error;
+  return copy;
+}
+
+test("12 end to end: the child's roster row ends with the parent part's output as its result", async () => {
+  const roster = await rosterOf(replayChildParent().events);
+  const child = roster.find((row) => row.id === CHILD_SESSION_ID);
+  assert.ok(child, `roster had ${JSON.stringify(roster.map((row) => row.id))}`);
+  assert.equal(child.status, "completed");
+  assert.equal(child.activationCount, 1);
+  assert.equal(child.result, CHILD_RESULT);
+  assert.equal(child.error, null);
+});
+
+test("a run gets its result once: the same part again adds nothing", () => {
+  const run = replayChildParent();
+  assert.deepEqual(taskRows(feed(run, childFixtureFrames([180])).flat()), []);
+});
+
+test("a resumed run's result is its own, and a late part of the first call adds nothing", async () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume", {
+    "The files in the current directory are:": "On a second look, the files are:"
+  });
+  const second = "On a second look, the files are:\n\n- README.md\n- a.ts";
+  const perFrame = feed(run, [
+    resume.pending,
+    resume.running,
+    ...resume.work,
+    ...resume.settle,
+    resume.completed
+  ]);
+  assert.deepEqual(
+    eventsOfType(perFrame.at(-1) ?? [], "task.completed").map((event) => [
+      event.payload.toolUseId,
+      event.payload.summary
+    ]),
+    [["call_resume", second]]
+  );
+  const late = feed(run, childFixtureFrames([180])).flat();
+  assert.deepEqual(taskRows(late), [], "the first run's part is stale");
+
+  const roster = await rosterOf([...run.events, ...perFrame.flat(), ...late]);
+  const child = roster.find((row) => row.id === CHILD_SESSION_ID);
+  assert.ok(child);
+  assert.equal(child.status, "completed");
+  assert.equal(child.activationCount, 2, "the resumed run");
+  assert.equal(child.result, second);
+});
+
+test("a part that errors after the child's own idle gives the run its error text, and ends nothing", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work, ...resume.settle]);
+  const failure = `Subagent failed (task_id: ${CHILD_SESSION_ID}): the last tool call failed`;
+  const ends = eventsOfType(
+    feed(run, [erroredPart(resume.completed, failure)]).flat(),
+    "task.completed"
+  );
+  // The run's end is the child's own; the parent's verdict rides it as text.
+  assert.deepEqual(
+    ends.map((event) => [event.payload.status, event.payload.summary, event.payload.toolUseId]),
+    [["completed", failure, "call_resume"]]
+  );
+});
+
+test("a result is the text inside the task tool's envelope, and any other output as it stands", () => {
+  const [completed] = childFixtureFrames([180]);
+  const part = (completed?.properties as { part: { state: { output: string } } }).part;
+  assert.equal(taskResultText(part.state.output), CHILD_RESULT);
+  // 1.18.32's `TaskTool` may put a summary line before the result.
+  assert.equal(
+    taskResultText(
+      [
+        '<task id="ses_x" state="completed">',
+        "<summary>Background task completed: list files</summary>",
+        "<task_result>",
+        "two lines\n</task_result> quoted inside",
+        "</task_result>",
+        "</task>"
+      ].join("\n")
+    ),
+    "two lines\n</task_result> quoted inside"
+  );
+  assert.equal(taskResultText("plain words"), "plain words");
+  const unclosed = '<task id="ses_x" state="completed">\nno result';
+  assert.equal(taskResultText(unclosed), unclosed);
+  assert.equal(taskResultText(undefined), undefined);
+});
+
+test("a part that settles BEFORE the child's idle ends the run itself, with the same result", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  const ends = eventsOfType(
+    feed(run, [
+      resume.pending,
+      resume.running,
+      ...resume.work,
+      resume.completed,
+      ...resume.settle
+    ]).flat(),
+    "task.completed"
+  );
+  assert.deepEqual(
+    ends.map((event) => [event.payload.status, event.payload.summary]),
+    [["completed", CHILD_RESULT]],
+    "one end, the part's, and the idle after it adds nothing"
+  );
 });
 
 test("a co-tenant session that is NOT a child of this thread is still dropped", () => {

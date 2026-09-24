@@ -971,6 +971,36 @@ function emitTaskCompleted(
 }
 
 /**
+ * A result for a run that already ended: one more `task.completed` of that
+ * run, the same linkage and the same `completed` its end had (the child's own
+ * `session.idle` is the only thing that leaves a result pending), carrying the
+ * result. The roster fold keeps a settled row's status and times and takes
+ * the result from a later completion (`roster.ts`, the `task.completed` arm),
+ * so it reopens nothing and every reader still reads `completed`.
+ */
+function emitTaskResult(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  raw: unknown,
+  out: Emitter,
+  result: string | undefined
+): void {
+  if (result === undefined || result.length === 0) {
+    return;
+  }
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.completed",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      status: "completed",
+      summary: result
+    }
+  });
+}
+
+/**
  * §3.1: "a dead child never leaves a running turn" — closing every live task
  * with `task.completed {status: "stopped"}`, which the roster folds to
  * `interrupted` (§7.6). Called by `session.ts` before `session.exited`, and
@@ -1013,6 +1043,12 @@ export function hasLiveChildAgents(state: OpenCodeSessionState): boolean {
  * A `task` call with `task_id` resumes a child: it re-prompts the existing
  * session with no `session.created`, and its `running` frame names that child
  * under a NEW call (fixtures README observation 26).
+ *
+ * Its terminal frame carries the child's answer. The child's own
+ * `session.idle` ends the run just BEFORE it (fixture 12, lines 179-180), so
+ * the part gives that end its result — one more `task.completed` of the run,
+ * once (`emitTaskResult`, fixtures README observation 27); a part that settles
+ * first ends the run itself, with the result.
  */
 function linkChildFromTaskPart(
   state: OpenCodeSessionState,
@@ -1048,6 +1084,7 @@ function linkChildFromTaskPart(
     known.started = false;
     known.completed = false;
     known.lastStatus = undefined;
+    known.resultPending = false;
   }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;
@@ -1069,19 +1106,62 @@ function linkChildFromTaskPart(
   });
   rememberCall(agent, part.callID);
 
-  if (part.state.status === "completed") {
+  if (part.state.status === "completed" || part.state.status === "error") {
     // A call run in the BACKGROUND (`metadata.background: true`) completes at
-    // once while the child works on; the child's own `session.idle` settles it.
-    if (metadata?.background !== true) {
-      emitTaskCompleted(state, agent, "completed", raw, out, part.state.output);
+    // once while the child works on; the child's own `session.idle` settles
+    // it, and this answer ("still working") is no run's result.
+    if (part.state.status === "completed" && metadata?.background === true) {
+      return;
+    }
+    const text =
+      part.state.status === "completed" ? taskResultText(part.state.output) : part.state.error;
+    if (!agent.completed) {
+      emitTaskCompleted(
+        state,
+        agent,
+        part.state.status === "completed" ? "completed" : "failed",
+        raw,
+        out,
+        text
+      );
+      return;
+    }
+    // The child's own idle ended the run first (fixture 12, lines 179-180):
+    // the part gives that end its result, and ends nothing itself.
+    if (agent.resultPending === true) {
+      agent.resultPending = false;
+      emitTaskResult(state, agent, raw, out, text);
     }
     return;
   }
-  if (part.state.status === "error") {
-    emitTaskCompleted(state, agent, "failed", raw, out, part.state.error);
-    return;
-  }
   emitTaskProgress(state, agent, raw, out, { status: "running" });
+}
+
+/**
+ * The envelope the `task` tool wraps a child's answer in for the parent's
+ * model: `<task id="…" state="…">`, an optional `<summary>`, then the text
+ * inside `<task_result>` (`<task_error>` for a failure). Fixture 12 line 180
+ * shows it on 1.18.5; 1.18.32's `TaskTool` builds the same one (`Ur`, read
+ * from the source).
+ */
+const TASK_OUTPUT_ENVELOPE = new RegExp(
+  String.raw`^<task id="[^"\n]*" state="[^"\n]*">\n` +
+    String.raw`(?:<summary>[\s\S]*?</summary>\n)?` +
+    String.raw`<(task_result|task_error)>\n([\s\S]*)\n</\1>\n</task>\s*$`
+);
+
+/**
+ * What a child answered, out of its parent `task` part's output: the text
+ * inside {@link TASK_OUTPUT_ENVELOPE}, because the roster shows what the child
+ * said, not how the tool wrapped it. An output of any other shape is the
+ * result as it stands — never dropped.
+ */
+export function taskResultText(output: string | undefined): string | undefined {
+  if (output === undefined) {
+    return undefined;
+  }
+  const match = TASK_OUTPUT_ENVELOPE.exec(output);
+  return match === null ? output : match[2];
 }
 
 /** Record a `task` call that named `agent` (`OpenCodeChildAgent.seenCallIds`). */
@@ -1170,10 +1250,14 @@ function demuxChild(
     }
 
     case "session.idle": {
-      // The child's terminal signal. Its parent `task` tool part settles at
-      // the same moment and carries the result text.
+      // The child's terminal signal. Its parent `task` tool part settles
+      // right AFTER it (fixture 12, lines 179-180) and carries the result
+      // text, which that part gives this run's end (`linkChildFromTaskPart`).
       const agent = ensureChildAgent(state, childSessionId);
-      emitTaskCompleted(state, agent, "completed", raw, out);
+      if (!agent.completed) {
+        emitTaskCompleted(state, agent, "completed", raw, out);
+        agent.resultPending = true;
+      }
       return;
     }
 
