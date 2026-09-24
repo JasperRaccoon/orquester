@@ -16,13 +16,12 @@ import {
   type DomainEvent,
   type ThreadActivityItem
 } from "@orquester/api/agent-chat";
+import { parseAgentDomainEvent } from "@orquester/config";
 
 import { backgroundShellItemId } from "../adapters/claude/normalize.ts";
 import { BATCH_INTERVAL_MS, createIngestion } from "../ingestion/index.ts";
 import { FakeClock, FakeTimers, RecordingLiveness, counterIdGen, runtimeEvent } from "../ingestion/test-harness.ts";
 import type { AppendableDomainEvent } from "../services.ts";
-import { parseAgentDomainEvent } from "@orquester/config";
-
 import { createThreadStore } from "./index.ts";
 import { createToolOutputCache } from "./tool-output-cache.ts";
 import { ToolOutputJoin, joinToolOutput, nextItemWrite, toolOutputWindow, utf8Window, type ItemWrite } from "./tool-output.ts";
@@ -757,15 +756,17 @@ test("a line that does not decode ends the join for good, as it ends readLog: no
   assert.equal(await store.readItem("t1", "o3"), null, "an item written past it does not exist for any reader");
 });
 
-test("a log that does not continue an entry's cursor — rewritten, or shorter — is read again from its start", async (t) => {
-  const rootDir = await tempRoot();
-  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  const file = path.join(rootDir, "events.ndjson");
-  const write = (events: DomainEvent[]) => fs.writeFile(file, events.map((event) => `${JSON.stringify(event)}\n`).join(""));
-  const reads: number[] = [];
-  const cache = createToolOutputCache({
+/** Write a whole log file, one decoded event per line. */
+const writeLog = (file: string, events: readonly DomainEvent[]): Promise<void> => fs.writeFile(file, events.map((event) => `${JSON.stringify(event)}\n`).join(""));
+
+/**
+ * The tool-output cache over one log file a test writes itself — so its committed length is simply the file's — with
+ * the store's own line decoding. What the store never does to its log (rewrite it, replace it mid-scan) is what these
+ * tests do.
+ */
+function fileCache(file: string, overrides: Partial<Parameters<typeof createToolOutputCache>[0]> = {}): ReturnType<typeof createToolOutputCache> {
+  return createToolOutputCache({
     eventsPath: () => file,
-    // The committed length is the file's: this test IS the writer.
     committedLength: async () => (await fs.stat(file)).size,
     decodeLine: (line) => {
       try {
@@ -780,8 +781,17 @@ test("a log that does not continue an entry's cursor — rewritten, or shorter �
     idleMs: 60_000,
     decodeSliceMs: 8,
     yieldToLoop: () => new Promise((resolve) => setImmediate(resolve)),
-    onLogRead: (_threadId, from) => reads.push(from)
+    ...overrides
   });
+}
+
+test("a log that does not continue an entry's cursor — rewritten, or shorter — is read again from its start", async (t) => {
+  const rootDir = await tempRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const file = path.join(rootDir, "events.ndjson");
+  const write = (events: DomainEvent[]) => writeLog(file, events);
+  const reads: number[] = [];
+  const cache = fileCache(file, { onLogRead: (_threadId, from) => reads.push(from) });
   seq = 0;
   const start = row("start", "tool.started", SHELL, { itemType: "command_execution" });
   await write([start, chunk("o1", SHELL, "old\n")]);
@@ -802,4 +812,123 @@ test("a log that does not continue an entry's cursor — rewritten, or shorter �
   // Shorter than the cursor: not the log it read either.
   await write([start]);
   assert.deepEqual(await cache.window("t1", "start", {}), { toolUseId: SHELL, offset: 0, text: "", totalBytes: 0, complete: false, truncated: false });
+});
+
+test("a thread deleted while one of its entries is read publishes nothing from the old log: the read starts over on the new one", async (t) => {
+  const rootDir = await tempRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const file = path.join(rootDir, "events.ndjson");
+  seq = 0;
+  const start = row("start", "tool.started", SHELL, { itemType: "command_execution" });
+  const oldLog = [start, chunk("o1", SHELL, "old one\n"), chunk("o2", SHELL, "old two\n"), chunk("o3", SHELL, "old three\n")];
+  seq = 1;
+  const newLog = [start, chunk("n1", SHELL, "new\n")];
+  // A scan yields after every line here, so the seam runs mid-scan: the `at`-th time, the thread is deleted and its
+  // id recreated — the log replaced by a new file under the same name, then `dropThread`, as `deleteThread` does.
+  // The old log has four lines: yields 1-4 are the item's scan, 5-8 the join's.
+  for (const [phase, at] of [["during the item's scan", 1], ["during the join's scan", 5]] as const) {
+    await writeLog(file, oldLog);
+    let yields = 0;
+    let replaced = false;
+    const cache: ReturnType<typeof createToolOutputCache> = fileCache(file, {
+      decodeSliceMs: 0,
+      yieldToLoop: async () => {
+        yields += 1;
+        if (yields === at) {
+          await fs.rm(file);
+          await writeLog(file, newLog);
+          cache.dropThread("t1");
+          replaced = true;
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    });
+    const window = await cache.window("t1", "start", {});
+    assert.ok(replaced, `${phase}: precondition, the log was replaced mid-scan`);
+    assert.deepEqual(window, { toolUseId: SHELL, offset: 0, text: "new\n", totalBytes: 4, complete: false, truncated: false }, phase);
+  }
+});
+
+test("a read whose thread is deleted under it on every attempt gives up after three, rather than answer from two logs", async (t) => {
+  const rootDir = await tempRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const file = path.join(rootDir, "events.ndjson");
+  seq = 0;
+  await writeLog(file, [row("start", "tool.started", SHELL, { itemType: "command_execution" }), chunk("o1", SHELL, "one\n")]);
+  let scans = 0;
+  const cache: ReturnType<typeof createToolOutputCache> = fileCache(file, {
+    decodeSliceMs: 0,
+    onLogRead: () => {
+      scans += 1;
+    },
+    yieldToLoop: async () => {
+      cache.dropThread("t1");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+  await assert.rejects(cache.window("t1", "start", {}), /thread t1 was deleted while its log was read/);
+  assert.equal(scans, 3, "three attempts, each fenced off before its item's scan could publish");
+  await assert.rejects(cache.itemWrite("t1", "start"), /thread t1 was deleted while its log was read/);
+  assert.equal(scans, 6);
+});
+
+test("a line whose seq does not climb ends a cold build's join for good, as it ends readLog", async (t) => {
+  const rootDir = await tempRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const eventsPath = path.join(rootDir, "threads", "t1", "events.ndjson");
+  await fs.mkdir(path.dirname(eventsPath), { recursive: true });
+  seq = 0;
+  const log = [row("start", "tool.started", SHELL, { itemType: "command_execution" }), chunk("o1", SHELL, "before\n")];
+  seq = 1;
+  log.push(chunk("o2", SHELL, "a repeated seq\n"));
+  log.push(chunk("o3", SHELL, "after it\n"));
+  await writeLog(eventsPath, log);
+  const reads: Array<[string, number, number]> = [];
+  const store = createThreadStore({ rootDir, sweepIntervalMs: 0, onLogRead: (threadId, from, to) => reads.push([threadId, from, to]) });
+  t.after(() => store.close());
+  assert.equal((await store.readToolOutput("t1", "start"))?.output, "before\n", "readLog stops there");
+  assert.equal((await store.readToolOutputWindow("t1", "start", {}))?.text, "before\n");
+  await store.append({ threadId: "t1", events: [streamed("t1", "o4", SHELL, "appended later\n")] });
+  reads.length = 0;
+  assert.equal((await store.readToolOutputWindow("t1", "start", {}))?.text, "before\n");
+  assert.deepEqual(reads, [], "a cursor stopped at the regression never reads past it");
+});
+
+test("an append that fails and is rolled back never reaches the cache — not even read while its bytes were on disk", async (t) => {
+  const { store, rootDir, reads } = await recordingStore(t);
+  await store.append({ threadId: "t1", events: [created("t1"), appendable("t1", "start", "tool.started", SHELL, { itemType: "command_execution" }), streamed("t1", "o1", SHELL, "one\n")] });
+  assert.equal((await store.readToolOutputWindow("t1", "start", {}))?.text, "one\n");
+  const eventsPath = path.join(rootDir, "threads", "t1", "events.ndjson");
+  const committed = (await fs.stat(eventsPath)).size;
+
+  // The batch lands on disk, then its fsync fails: while the append is still in flight, a window and the whole join
+  // are read. The window reads only what appends have reported; `readLog` reads to the end of the file.
+  const probe = await fs.open(path.join(rootDir, "probe"), "w");
+  const fileHandleProto = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+  await probe.close();
+  const realSync = fileHandleProto.sync;
+  let during: { window: Window | null; whole: string | undefined } | null = null;
+  fileHandleProto.sync = async () => {
+    during = {
+      window: await store.readToolOutputWindow("t1", "start", {}),
+      whole: (await store.readToolOutput("t1", "start"))?.output
+    };
+    throw Object.assign(new Error("EIO: fsync failed"), { code: "EIO" });
+  };
+  try {
+    await assert.rejects(store.append({ threadId: "t1", events: [streamed("t1", "o2", SHELL, "never acknowledged\n")] }), /EIO/);
+  } finally {
+    fileHandleProto.sync = realSync;
+  }
+  const seen = during as { window: Window | null; whole: string | undefined } | null;
+  assert.equal(seen?.whole, "one\nnever acknowledged\n", "precondition: the batch was on disk while it was read");
+  assert.equal(seen?.window?.text, "one\n", "an append in flight is not committed: the cache never saw it");
+  assert.equal((await fs.stat(eventsPath)).size, committed, "the failed batch was rolled back");
+
+  // What lands next continues the cursor: read by the tail, never from the start.
+  reads.length = 0;
+  await store.append({ threadId: "t1", events: [streamed("t1", "o3", SHELL, "two\n")] });
+  assert.equal((await store.readToolOutputWindow("t1", "start", {}))?.text, "one\ntwo\n");
+  assert.equal(coldReads(reads), 0);
+  assert.equal((await store.readToolOutput("t1", "start"))?.output, "one\ntwo\n");
 });
