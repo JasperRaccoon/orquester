@@ -1,4 +1,4 @@
-import { agentChatRoutes, decodeHistoryCursor, encodeHistoryCursor, isCompactionActivity, startedTurns, THREAD_HISTORY_MAX_TURNS, type Checkpoint, type StartedTurn, type ThreadActivityItem, type ThreadHistoryBounds, type ThreadHistoryPage, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, decodeHistoryCursor, encodeHistoryCursor, isCompactionActivity, openWorkOf, startedTurns, THREAD_HISTORY_MAX_TURNS, type Checkpoint, type StartedTurn, type ThreadActivityItem, type ThreadHistoryBounds, type ThreadHistoryPage, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "./daemon-api.ts";
 import { itemTurnId } from "./transcript.ts";
 
@@ -150,26 +150,42 @@ function sinceLaunch(span: HistoryUnavailable, snap: ThreadSnapshotPayload, orde
  * A row retention keeps whatever its age (`activitiesToDrop`, packages/api fold.ts), so it says nothing about where the
  * window begins: a subagent's own row (each agent keeps a window of its own), an agent's launch or end
  * (`agentKind: "agent"`), a compaction marker in either spelling (`isCompactionActivity`: a `context-compaction` row,
- * or the legacy `thread.state.changed {state: "compacted"}` an older log recorded), and an async question
- * (`responseMode: "message"`), kept while open.
+ * or the legacy `thread.state.changed {state: "compacted"}` an older log recorded), an async question
+ * (`responseMode: "message"`), kept while open, and the opening row of work still running (`openings`, `openingsOf`).
  */
-function keptWhateverItsAge(activity: ThreadActivityItem): boolean {
+function keptWhateverItsAge(activity: ThreadActivityItem, openings: ReadonlySet<ThreadActivityItem>): boolean {
   const payload = isRecord(activity.payload) ? activity.payload : {};
   if (typeof activity.agentId === "string" && activity.agentId.length > 0) return true;
   if (isAgentAnchor(activity)) return true;
   if (isCompactionActivity(activity)) return true;
+  if (openings.has(activity)) return true;
   return activity.activityKind === "user-input.requested" && payload.responseMode === "message";
 }
 
 /**
+ * The opening rows of the work `snap` shows still running (`openWorkOf`): each call's first `tool.started` or
+ * `tool.updated` that no `tool.completed` or `tool.denied` has closed, each background task's `task.started` with no
+ * `task.completed`. The fold keeps them whatever their age — the 16 most recently active per window, the 64 among the
+ * agents' under the ceiling across them (`OPEN_WORK_RETENTION_LIMIT`, packages/api fold.ts) — so a long command's start
+ * outlives its own output. Every one counts here, not only those the fold kept: that can only name more turns partial
+ * than are, never read a partial turn as whole.
+ */
+function openingsOf(snap: ThreadSnapshotPayload): ReadonlySet<ThreadActivityItem> {
+  const { calls, tasks } = openWorkOf(snap.items.filter((item): item is ThreadActivityItem => item.kind === "activity"));
+  return new Set([...calls.map((call) => call.opening), ...tasks.map((task) => task.start)]);
+}
+
+/**
  * The turn of the window's oldest activity row — where the window begins, as far as the snapshot alone can tell. The
- * rows retention keeps whatever their age are passed over (`keptWhateverItsAge`): a thread's first agent launch or an
- * early compaction marker would otherwise name an early turn and hide every partial one after it. Else the oldest
- * activity row of any kind; null when the window holds none. A row with no turn is placed by its time (`turnOfRow`).
+ * rows retention keeps whatever their age are passed over (`keptWhateverItsAge`): a thread's first agent launch, an
+ * early compaction marker or the start of a command still running would otherwise name an early turn and hide every
+ * partial one after it. Else the oldest activity row of any kind; null when the window holds none. A row with no turn
+ * is placed by its time (`turnOfRow`).
  */
 function windowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly StartedTurn[]): number | null {
   const activities = snap.items.filter((item): item is ThreadActivityItem => item.kind === "activity");
-  const oldest = activities.find((a) => !keptWhateverItsAge(a)) ?? activities[0];
+  const openings = openingsOf(snap);
+  const oldest = activities.find((a) => !keptWhateverItsAge(a, openings)) ?? activities[0];
   return oldest ? turnOfRow(oldest, ordered) : null;
 }
 
@@ -197,10 +213,12 @@ function agentWindowOldestTurn(snap: ThreadSnapshotPayload, ordered: readonly St
   let own: ThreadActivityItem | undefined;
   let floor: ThreadActivityItem | undefined;
   let lastTask: ThreadActivityItem | undefined;
+  // The opening row of work still running is kept whatever its age too (`openingsOf`): it says nothing either.
+  const openings = openingsOf(snap);
   for (const item of snap.items) {
     if (item.kind !== "activity") continue;
     if (isTaskRowOf(item, agentId)) lastTask = item;
-    if (typeof item.agentId !== "string" || item.agentId.length === 0 || isAgentAnchor(item)) continue;
+    if (typeof item.agentId !== "string" || item.agentId.length === 0 || isAgentAnchor(item) || openings.has(item)) continue;
     if (own === undefined && item.agentId === agentId) own = item;
     if (floor === undefined || item.createdAt < floor.createdAt) floor = item;
   }
