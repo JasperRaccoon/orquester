@@ -230,6 +230,52 @@ test("fixture 10: a replayed prompt loses the `Attached files:` block the adapte
   );
 });
 
+test("fixture 10: a synthetic user text part replays as nothing, never as the user's words", () => {
+  // 1.18.32 prompts a background `task` call's session with the child's answer
+  // (`TaskTool.injectBackgroundResult`, read from the source, not captured): a
+  // user message whose one text part is `synthetic` — here the capture's first
+  // prompt, rewritten that way. Live, no user text part is ever a row.
+  const messages = structuredClone(historyFor(FIXTURE_10, ROOT_SESSION));
+  const envelope = [
+    '<task id="ses_child" state="completed">',
+    "<summary>Background task completed: list files</summary>",
+    "<task_result>",
+    "Found README.md and a.ts.",
+    "</task_result>",
+    "</task>"
+  ].join("\n");
+  const injected = messages[0]!.parts.find((part) => part.type === "text");
+  assert.ok(injected !== undefined);
+  Object.assign(injected, { text: envelope, synthetic: true });
+  // A prompt that carries the user's own text beside server-written text keeps
+  // only the user's.
+  const trailing = messages[2]!;
+  trailing.parts = [
+    ...trailing.parts,
+    {
+      ...trailing.parts[0]!,
+      id: "prt_server_written",
+      text: "written by the server",
+      synthetic: true
+    }
+  ] as typeof trailing.parts;
+
+  const events = project("thread-1", messages);
+  assert.deepEqual(
+    itemsOf(events).map((item) => [item.payload.itemType, item.payload.detail]),
+    [
+      // The injected prompt's turn keeps the parent's reply to it, and no "You".
+      ["assistant_message", "alpha"],
+      ["user_message", "Say the single word: bravo."]
+    ]
+  );
+  assert.equal(
+    events.some((event) => event.type.startsWith("task.")),
+    false,
+    "history replays no roster rows: the child's run and its result are the live path's"
+  );
+});
+
 test("fixture 3: a completed tool call replays under its lifecycle type with its callID", () => {
   const fixture = "03-permission-ask-reply-once.ndjson";
   const messages = historyFor(fixture, "ses_f3e621707ffej6ZWX9gnB3hIjM");

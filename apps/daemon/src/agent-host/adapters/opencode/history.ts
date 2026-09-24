@@ -203,8 +203,17 @@ function projectPart(
   base: (input: { itemId?: string; createdAt?: string; payload: unknown }) => RuntimeEventBase
 ): RuntimeEvent | null {
   if (part.type === "text") {
-    const text = (part as Extract<OpenCodePart, { type: "text" | "reasoning" }>).text;
+    const textPart = part as Extract<OpenCodePart, { type: "text" | "reasoning" }>;
+    const text = textPart.text;
     if (typeof text !== "string" || text.length === 0) {
+      return null;
+    }
+    // A user message's SYNTHETIC text is the server's own, never typed by the
+    // user — in 1.18.32 the answer a background `task` call prompts its session
+    // with (fixtures README observation 27). Live, no user text part is ever a
+    // row; replayed, it is none either, and a prompt made only of such parts
+    // replays no "You" row at all.
+    if (role === "user" && textPart.synthetic === true) {
       return null;
     }
     // OpenCode stores a prompt as the adapter SENT it, with any
