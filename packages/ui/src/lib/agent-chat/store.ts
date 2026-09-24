@@ -138,6 +138,11 @@ import {
   returnComposerMessage
 } from "../../components/agent-chat/composer/composer-bridge";
 import { persistedDraftAfterReturn } from "../../components/agent-chat/composer/composer-draft";
+import {
+  beginQueuedSend,
+  isQueuedSendInFlight,
+  subscribeQueuedSends
+} from "../../components/agent-chat/composer/composer-sends";
 import { nudgeProjectGit } from "../../components/git/git-watch";
 import { composerTextForDelivery } from "../composer-inbox";
 import {
@@ -897,8 +902,12 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
   let stream: AgentChatStreamHandle | null = null;
   let closed = false;
-  /** In-flight latch for the §7.4 queue drive loop: one send per boundary. */
-  let sending = false;
+  /**
+   * The §7.4 queue's drive loop re-checks when a queued send of this thread
+   * settles — this generation's or one a torn-down generation still had out
+   * (`beginQueuedSend`, which is also its in-flight latch).
+   */
+  let unsubscribeQueuedSends: (() => void) | null = null;
   /** Decided inside a zustand updater, acted on after `set` returns (Q2-9). */
   let resyncWanted = false;
   /**
@@ -1505,6 +1514,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           appendToDraft(message);
           return;
         }
+        // On its way from here until it settles, holding the thread's queue
+        // in every generation of it (§7.4): the one a project switch tears
+        // down meanwhile, and the next, seeded without this message.
+        const settleQueued = beginQueuedSend(sessionId);
         try {
           await actions.sendTurn({
             text: message.text,
@@ -1518,13 +1531,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           // queue the user sees. Its turn keeps retrying after this generation
           // is torn down, so this may be a destroyed one, whose queue nobody
           // will ever show again: the thread's live generation holds it, or,
-          // with none, its persisted draft takes it.
+          // with none, its persisted draft takes it. Held BEFORE the queue is
+          // let go (`finally`), so the next message never slips ahead of it.
           if (closed) {
             holdQueuedMessageInThread(sessionId, message, errorMessage(error));
           } else {
             holdQueuedAtFront(message);
           }
           throw error;
+        } finally {
+          settleQueued();
         }
       },
 
@@ -1902,15 +1918,20 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * **exactly one** message. Taking it re-anchors the rest, so the next
      * boundary sends the next one rather than the whole queue draining at once.
      *
-     * `sending` is the in-flight latch: without it a burst of frames would
-     * dispatch the same head twice (`takeQueued` would answer `null` for the
-     * second, but the send path would still have run).
+     * The in-flight latch is the thread's, not this generation's
+     * (`isQueuedSendInFlight`): without one a burst of frames would dispatch
+     * the same head twice, and with only this generation's the thread's next
+     * generation sent the next message while a torn-down one was still
+     * posting the head — landing it first, or overtaking the head when that
+     * failed and was held at the front. A queued send settling, in any
+     * generation, re-runs this loop (`subscribeQueuedSends` below): a boundary
+     * may have moved while it was out.
      *
      * *T3: `apps/web/src/components/ChatView.tsx:8604-8642` — the same loop and
      * the same pending-request gates.*
      */
     const driveQueue = (): void => {
-      if (sending || closed) {
+      if (closed || isQueuedSendInFlight(sessionId)) {
         return;
       }
       const state = get();
@@ -1924,19 +1945,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       if (!due) {
         return;
       }
-      sending = true;
-      void actions
-        .sendQueuedNow(due.id)
-        .catch(() => {
-          /* `sendQueuedNow` already held it at the front and banner'd it. */
-        })
-        .finally(() => {
-          sending = false;
-          // A boundary may have moved while this send was in flight; re-check
-          // once rather than waiting for the next frame.
-          driveQueue();
-        });
+      void actions.sendQueuedNow(due.id).catch(() => {
+        /* `sendQueuedNow` already held it at the front and banner'd it. */
+      });
     };
+    unsubscribeQueuedSends = subscribeQueuedSends((changed) => {
+      if (changed === sessionId) {
+        driveQueue();
+      }
+    });
 
     // A provider snapshot arriving after the thread did changes one row input
     // (`supportsConversationRollback`), so re-project when the catalog moves.
@@ -2038,6 +2055,8 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     stream = null;
     unsubscribeProviders?.();
     unsubscribeProviders = null;
+    unsubscribeQueuedSends?.();
+    unsubscribeQueuedSends = null;
     // The live subscription is gone; the VALUE survives for the idle TTL so a
     // remount paints it instantly and resumes by cursor (§6.5, §7.2). Refused
     // outright when a newer generation already claimed this key.
@@ -2099,9 +2118,10 @@ const registry = new Map<string, RegistryEntry>();
  * in development; a zero grace would close and re-open every stream on every
  * mount. What a torn-down generation still had in flight settles into it, not
  * into its successor: a turn or an answer retries past the teardown, the
- * composer's own "Sending" lives in `composer-sends.ts`, and a queued send
- * that fails there is held by the thread's live generation
- * (`holdQueuedMessageInThread`).
+ * composer's own "Sending" lives in `composer-sends.ts`, a queued send holds
+ * the thread's queue in every generation until it settles
+ * (`beginQueuedSend`), and one that fails there is held by the thread's live
+ * generation (`holdQueuedMessageInThread`).
  */
 // A short grace, because the LIVE subscription is the expensive half and T3
 // gives it TTL 0 — released as soon as its last consumer leaves. What makes a
@@ -2223,11 +2243,12 @@ export function updateThreadDraft(
  * Hold a queued message whose send failed after the generation that sent it
  * was torn down (§7.4) — its turn retries past the teardown — where the user
  * will see it: at the front of the thread's live generation's queue, held for
- * the user's action like any failed queued send and with the failure's banner
- * (`reason`) beside it, or, with no slice of the thread open, merged into the
- * persisted draft the next one seeds from. Never in the destroyed queue: the
- * next generation was seeded from a snapshot taken after the message had
- * already left it, so nobody would show it again.
+ * the user's action like any failed queued send — nothing queued behind it
+ * went meanwhile: the queue waited for it (`beginQueuedSend`) — and with the
+ * failure's banner (`reason`) beside it, or, with no slice of the thread open,
+ * merged into the persisted draft the next one seeds from. Never in the
+ * destroyed queue: the next generation was seeded from a snapshot taken after
+ * the message had already left it, so nobody would show it again.
  */
 function holdQueuedMessageInThread(
   sessionId: string,
