@@ -761,8 +761,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   session and the running turn only: the parent's timeline holds no agent's words, so no roster
   change re-projects it) and the drill-in (`drill-in.logic.ts`) all pass the thread's
   `messageStreamingContext` (`messageStreaming` on `TimelineRowsInput`; memoised by the roster
-  array, so a streamed token keeps the fast path, which rebuilds for a flagged answer that reads
-  settled, since its turn's fold is timed by it). Pure and read-side: the fold, its snapshot, the
+  array, so a streamed token keeps the fast path — except a token of a flagged message WITH a turn
+  that reads settled, answer or thinking block alike, which rebuilds: its turn may fold, and a
+  fold's "Worked for …" is timed by its terminal answer's and its last row's `updatedAt`; a turnless
+  message joins no fold and keeps the fast path). Pure and read-side: the fold, its snapshot, the
   index, ingestion and the GUI's streamed-text fast path keep reading the flag, no version moves and
   nothing is written; the MCP reports no message liveness at all.
 - **The agent host is a protected kill target but its children are not.** `system-status.ts` takes

@@ -36,6 +36,7 @@
 
 import {
   isMessageStreaming,
+  NOTHING_STREAMS,
   startedTurns,
   type Checkpoint,
   type LatestTurnSummary,
@@ -66,13 +67,6 @@ import {
 
 const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 const WORKING_ROW_ID = "working-indicator-row";
-
-/** No live session to name: nothing reads as streaming ({@link TimelineRowsInput.messageStreaming}). */
-const NOTHING_STREAMS: MessageStreamingContext = {
-  sessionLive: false,
-  activeTurnId: null,
-  activeAgentIds: new Set()
-};
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -656,9 +650,10 @@ export interface TimelineRowsInput {
    * `streaming` and the fold a streaming answer keeps open read
    * `isMessageStreaming` against it, never the bare flag, which the log keeps
    * `true` for good on words a dead host or an unclosed agent left. Absent,
-   * nothing reads as streaming: a caller that names no live session has no
-   * stream to show. Compared by identity, like the sets above; the context is
-   * memoised by the roster, so a streamed token keeps the fast path.
+   * `NOTHING_STREAMS`: nothing reads as streaming — a caller that names no
+   * live session has no stream to show. Compared by identity, like the sets
+   * above; the context is memoised by the roster, so a streamed token keeps
+   * the fast path.
    */
   messageStreaming?: MessageStreamingContext;
   /** The client's own undispatched queue, rendered as ghost bubbles (§7.4). */
@@ -1406,9 +1401,15 @@ function replaceStreamingMessageRows(
     if (!isStreamingMessageTextUpdate(previousEntry.message, entry.message)) {
       return null;
     }
-    // A flagged message that reads as settled lets its turn fold, and the
-    // fold's "Worked for …" is timed by its `updatedAt`, so it rebuilds. A
-    // live one keeps its turn unfolded, and a turnless one joins no fold.
+    // A token of a flagged message WITH a turn that reads as settled rebuilds,
+    // an answer or a thinking block alike: its turn may fold (such an answer
+    // no longer holds it open; a thinking block never did), and a fold's
+    // "Worked for …" is timed by its terminal answer's and its last row's
+    // `updatedAt`. A turnless message joins no fold and keeps the fast path,
+    // as does one that reads as streaming — a streaming answer holds its turn
+    // unfolded; a streaming thinking block does not, and a fold it ends (in a
+    // drill-in, where no turn is unfolded as running) keeps its label until
+    // the next row, as it always did.
     if (
       entry.message.turnId !== null &&
       !isMessageStreaming(entry.message, input.messageStreaming ?? NOTHING_STREAMS)

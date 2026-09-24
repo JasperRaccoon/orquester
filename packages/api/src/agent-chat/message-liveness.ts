@@ -54,6 +54,17 @@ export interface MessageStreamingContext {
   readonly activeAgentIds: ReadonlySet<string>;
 }
 
+/**
+ * The context with no live session: nothing reads as streaming. What a reader
+ * falls back to when it was handed no thread to ask — a caller that names no
+ * live session has no stream to show.
+ */
+export const NOTHING_STREAMS: MessageStreamingContext = {
+  sessionLive: false,
+  activeTurnId: null,
+  activeAgentIds: new Set()
+};
+
 /** What the context is read from: a fold state, a snapshot and the GUI's thread slice all are one. */
 export interface MessageStreamingSource {
   readonly head: { readonly session: Pick<ThreadSessionState, "status" | "activeTurnId"> } | null;
@@ -61,11 +72,13 @@ export interface MessageStreamingSource {
 }
 
 /**
- * The last context built over each roster array. The roster is immutable and
- * kept by identity until a task row moves it (the fold's re-derive), so a
- * streamed token finds its context here and a derivation that compares the
- * context by identity keeps its fast path. A cache, never state: a context is
- * a function of the roster and two session fields alone.
+ * The last context built over each roster array. The roster is immutable, and
+ * the fold keeps it by identity until it re-derives it — on a task row, a
+ * change of session liveness or a retention drop (`commit` in `fold.ts`) — or
+ * a snapshot replaces it, so a streamed token finds its context here and a
+ * derivation that compares the context by identity keeps its fast path. A
+ * cache, never state: a context is a function of the roster and two session
+ * fields alone.
  */
 const contextByRoster = new WeakMap<object, MessageStreamingContext>();
 

@@ -5,6 +5,7 @@ import { foldThread, type ThreadFoldState } from "./fold.ts";
 import {
   isMessageStreaming,
   messageStreamingContext,
+  NOTHING_STREAMS,
   type MessageStreamingContext
 } from "./message-liveness.ts";
 import { activity, agentTask, created, ev, resetActivityIds, resetSeq, session } from "./test-helpers.ts";
@@ -119,6 +120,9 @@ test("nothing reads streaming while the session is not live", () => {
   assert.equal(isMessageStreaming(message(running, "p2"), dead), false);
   assert.equal(isMessageStreaming(message(running, "live-words"), dead), false);
   assert.equal(messageStreamingContext({ head: null, roster: [] }).sessionLive, false, "no head, no session");
+  // The fallback of a reader handed no thread to ask.
+  assert.equal(isMessageStreaming(message(running, "p2"), NOTHING_STREAMS), false);
+  assert.equal(isMessageStreaming(message(running, "live-words"), NOTHING_STREAMS), false);
 });
 
 test("an agent is active while pending, running or waiting — never idle or settled", () => {

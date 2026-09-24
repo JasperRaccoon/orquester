@@ -61,6 +61,7 @@
 
 import {
   itemsDroppedByRetention,
+  NOTHING_STREAMS,
   startedTurns,
   type Checkpoint,
   type DomainEvent,
@@ -1075,13 +1076,6 @@ export interface HistoryRowsState {
 
 const NO_TASK_IDS: ReadonlySet<string> = new Set();
 
-/** No live session: no word here can still be written. */
-const NOTHING_STREAMS: MessageStreamingContext = {
-  sessionLive: false,
-  activeTurnId: null,
-  activeAgentIds: NO_TASK_IDS
-};
-
 /** A thread with nothing running. */
 const SETTLED: Required<HistoryLiveInput> = {
   unsettledTurnId: null,
@@ -1139,7 +1133,7 @@ export interface HistoryLiveInput {
    * The thread's `messageStreamingContext`: a word here streams only while the
    * rule says it can still be written (`isMessageStreaming`), never by its bare
    * flag — an old page is exactly where the flags a dead host left sit.
-   * Absent, nothing streams.
+   * Absent, `NOTHING_STREAMS`: nothing streams.
    */
   messageStreaming?: MessageStreamingContext;
 }
