@@ -2877,14 +2877,16 @@ subagent-fleet turn runs to thousands of events, more than the window, and a tur
 back exactly what the window already shows. `turns` (default 20, at most 100) is only a soft cap.
 The bytes are read by range, folded from empty and projected like a snapshot (§5.6); both
 boundaries move back to a streamed message's first chunk, so no message is split; a revert's cut —
-the removed turns' lines and the `thread.reverted` itself — is never folded into a page; and
-`turns` lists every indexed turn the block meets, with `rewindable` (no settled compaction after
-its prompt), so one turn can appear on two pages. The cursor is `base64url(JSON {t, a, i, s?})` —
-thread, anchor `requestedAt`, turn id, optional in-turn sequence bound — derived from content, so
-it survives an index rebuild and a revert; a malformed or foreign one is a first-page request. No
-usable index is a 503 `INDEX_UNAVAILABLE`. The daemon forwards the page without noting its `seq` as
-the tab's reconnect cursor: that is the thread's CURRENT sequence while the page holds only old
-turns, and moving the cursor to it would let a reconnect skip live events.
+the removed turns' lines and the `thread.reverted` itself — is never folded into a page, but the
+late rows a turn it kept wrote there are, on the page that holds the cut, counted against its 400
+(`historyBlockEvents`); and `turns` lists every indexed turn the block meets — and such a row's
+turn when it meets no later one — with `rewindable` (no settled compaction after its prompt), so
+one turn can appear on two pages. The cursor is `base64url(JSON {t, a, i, s?})` — thread, anchor
+`requestedAt`, turn id, optional in-turn sequence bound — derived from content, so it survives an
+index rebuild and a revert; a malformed or foreign one is a first-page request. No usable index is
+a 503 `INDEX_UNAVAILABLE`. The daemon forwards the page without noting its `seq` as the tab's
+reconnect cursor: that is the thread's CURRENT sequence while the page holds only old turns, and
+moving the cursor to it would let a reconnect skip live events.
 (3) **`GET /api/agent/search?q=&limit=&projectPath=`** → `{query, hits, truncated, indexed}`: FTS5
 over the message and activity text of every thread on the host, `bm25`-ranked, `«…»` snippets,
 `limit` 20 by default and at most 50, `q` at most 200 code points and quoted as a phrase per

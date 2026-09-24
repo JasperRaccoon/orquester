@@ -576,14 +576,23 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   rewind that kept such a turn left it reaching into the turns it removed, and "Load older" served
   their rows again. A revert now clips every surviving range at its cut, the first removed turn's
   first line (`clipAtCut` in `index/indexer.ts`, `INDEX_SCHEMA_VERSION` 4). The late rows past the
-  cut leave the history with them, as their item positions and search rows leave the index at the
-  revert; the fold keeps them by their turn (`reduceReverted`), and the window shows them while
-  retention does. A deploy of the bump deletes a version-3 `index.sqlite` and rebuilds it once, in
-  the background, by the boot catch-up (one thread at a time, never on the readiness path): until a
-  thread's catch-up reaches it, it offers nothing older and search misses it — and a tab snapshotted
-  before then, until its next snapshot. The window boundary behind `hasOlder` is the newest first
-  row of any FULL retention class (the parent's 500, an agent's 200, the 2 000 across agents —
-  `windowBoundary`), never simply the oldest activity the fold holds: anchors, open
+  cut lose their item positions and search rows with the removed turns', never their page: a block
+  that holds a cut folds out of it every line naming a turn the index still has that began before
+  the line (`historyBlockEvents` in `orchestrator.ts`, by `referencedTurnId` — the index's own rule
+  for a line that belongs to a turn), which is a kept turn's late row the fold keeps by its turn
+  (`reduceReverted`) — never a removed turn's line, a turnless one or the revert — and lists the
+  newest such turn when it lists no later one (a rewind that removes it removes every later turn,
+  so the client still drops the page; beside a later turn it would cut a search reveal short). The
+  index counts none of those rows, so the page does: its late rows count against its 400
+  (`indexedActivityBudget` plans the block again from the same end with that many fewer indexed
+  activities), and a cut holding more of them than a page folds beside one activity is served
+  without them, with a warning, whenever folding them would evict. Query time only: nothing the
+  index derives changed. A deploy of the bump deletes a version-3 `index.sqlite` and rebuilds it
+  once, in the background, by the boot catch-up (one thread at a time, never on the readiness path):
+  until a thread's catch-up reaches it, it offers nothing older and search misses it — and a tab
+  snapshotted before then, until its next snapshot. The window boundary behind `hasOlder` is the
+  newest first row of any FULL retention class (the parent's 500, an agent's 200, the 2 000 across
+  agents — `windowBoundary`), never simply the oldest activity the fold holds: anchors, open
   questions and the opening rows of running work survive out of age order, and a fleet
   whose agents lost their early rows would read as having nothing older. The client
   projects rows over the CONCATENATION of every loaded page (memoised by the pages array —
@@ -765,8 +774,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   second load finds nothing to close. A closer on an old turn is a late reference: the index grows
   that turn's range over it, within `MAX_LATE_REFERENCE_BYTES` of the next turn's start
   (`extendReferenced`), and "Load older" still serves every row; a later rewind that keeps that turn
-  and drops the ones after it clips the range at its cut, as it clips every surviving range (the
-  history-pages gotcha), and the closer leaves the history with the dropped turns. On the owner's
+  and drops the ones after it clips the range at its cut, as it clips every surviving range; the
+  closer, past the cut, is then served by the page that holds the cut, by the turn it names (the
+  history-pages gotcha: a kept turn's late rows are folded out of a revert's cut). On the owner's
   host (2026-09-24) the three big threads' first loads would append 1–9 rows each (their live work
   at the time; no request was pending) and leave the 270–1 800 messages still flagged streaming in
   each window as they are. **Their readers decide instead, by one rule:** a message reads as
