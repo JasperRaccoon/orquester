@@ -4,6 +4,7 @@ import {
   agentChatRoutes,
   commandOutputText,
   isThreadItemOutputWindow,
+  utf8SequenceLength,
   type ThreadItem,
   type ThreadItemOutputResponse,
   type ThreadItemOutputWindowResponse,
@@ -12,7 +13,7 @@ import {
 import type { DaemonApi } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { requireChatSession } from "../reads.ts";
-import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, utf8SequenceLength } from "../result.ts";
+import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 
 /** A window's default size, in UTF-8 bytes of the text. */

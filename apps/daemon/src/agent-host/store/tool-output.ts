@@ -36,6 +36,7 @@ import {
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
+  utf8SequenceLength,
   type DomainEvent,
   type ThreadItemOutputResponse,
   type ThreadItemOutputWindowQuery,
@@ -198,10 +199,6 @@ export function joinToolOutput(
   }
   return { toolUseId, output: chunks.join(""), complete: counters.complete, truncated: counters.truncated };
 }
-
-/** How many bytes the UTF-8 character a lead byte starts takes (1 for ASCII, or for a byte no character starts with). */
-const utf8SequenceLength = (lead: number): number =>
-  lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
 
 /**
  * One window of UTF-8 `bytes`: from `offset` — clamped to the end, then moved
