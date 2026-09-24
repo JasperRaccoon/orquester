@@ -126,9 +126,12 @@ describe("a collab child never hijacks the parent's turn", () => {
       "parent-turn",
       "the child must not overwrite activeTurnId"
     );
+    // A child this session never saw launched (a resume after a host restart)
+    // starts on its own turn, so the roster can reopen it
+    // (`collab-relaunch.test.ts`).
     assert.deepEqual(
       events.map((event) => event.type),
-      ["task.progress"],
+      ["task.started", "task.progress"],
       "a child's turn is a roster row, never a turn row"
     );
   });

@@ -26,3 +26,4 @@ export * from "./roster.ts";
 export * from "./slim.ts";
 export * from "./turn-state.ts";
 export * from "./turns.ts";
+export * from "./utf8.ts";

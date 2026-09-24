@@ -21,7 +21,12 @@ import type {
 import type { ThreadIndex } from "../../index/index.ts";
 import type { ProviderSnapshotRegistry } from "../../services.ts";
 import { createLivenessRegistry } from "../liveness.ts";
-import { createOrchestrator, type Orchestrator, type OrchestratorOptions } from "../orchestrator.ts";
+import {
+  createOrchestrator,
+  type HostThreadStore,
+  type Orchestrator,
+  type OrchestratorOptions
+} from "../orchestrator.ts";
 import {
   createFakeCheckpointService,
   createFakeIngestion,
@@ -44,10 +49,15 @@ import {
 } from "../launch-config.ts";
 import { createScriptedAdapter, type ScriptedAdapter } from "./scripted-adapter.ts";
 
-export interface TestHostOptions {
+/**
+ * `S` is the store the orchestrator runs on: the in-memory fake unless a test
+ * hands in another — an earlier host's fake, or the real one
+ * (`createThreadStore`) where what is under test is the store's own path.
+ */
+export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   adapters?: Partial<Record<AgentAdapterId, ScriptedAdapter>>;
-  /** Reuse a store from an earlier host, to assert a restart (§3.3). */
-  store?: FakeThreadStore;
+  /** Reuse a store from an earlier host, to assert a restart (§3.3), or run on the real one. */
+  store?: S;
   continuationEnabled?: (projectPath: string) => boolean;
   isThreadClosed?: (threadId: string) => boolean;
   minimumVersions?: OrchestratorOptions["minimumVersions"];
@@ -59,11 +69,11 @@ export interface TestHostOptions {
   index?: ThreadIndex;
 }
 
-export interface TestHost {
+export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
   orchestrator: Orchestrator;
   adapter: ScriptedAdapter;
   adapters: Map<AgentAdapterId, ScriptedAdapter>;
-  store: FakeThreadStore;
+  store: S;
   ingestion: FakeIngestion;
   checkpoints: FakeCheckpointService;
   snapshots: ProviderSnapshotRegistry & {
@@ -119,12 +129,15 @@ function createStubSnapshotRegistry(): ProviderSnapshotRegistry & {
   };
 }
 
-export function createTestHost(options: TestHostOptions = {}): TestHost {
+export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
+  options: TestHostOptions<S> = {}
+): TestHost<S> {
   const clock = createTestClock(1_700_000_000_000);
   const timers = createTestTimers();
   const ids = createTestIdGen();
   const logger = createRecordingLogger();
-  const store = options.store ?? createFakeThreadStore();
+  // Without one handed in, `S` is the default: the fake.
+  const store = options.store ?? (createFakeThreadStore() as HostThreadStore as S);
   const checkpoints = createFakeCheckpointService();
   const snapshots = createStubSnapshotRegistry();
   const launchConfigs = options.launchConfigs ?? createMemoryLaunchConfigStore();
@@ -184,7 +197,7 @@ export function createTestHost(options: TestHostOptions = {}): TestHost {
 
   const published: DomainEvent[] = [];
 
-  const host: TestHost = {
+  const host: TestHost<S> = {
     orchestrator,
     adapter,
     adapters,

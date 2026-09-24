@@ -15,7 +15,7 @@ import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { useAppStore } from "../../../store/app";
-import { attachmentPathOf } from "../../../lib/agent-chat/composer.logic";
+import { attachmentPathOf, type ComposerDraft } from "../../../lib/agent-chat/composer.logic";
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
@@ -38,15 +38,19 @@ import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachment
 import {
   composerDraftToPersist,
   createDraftPersistScheduler,
+  draftAfterReturn,
   EMPTY_PERSISTED_DRAFT,
   loadComposerDraft,
   persistedDraftsEqual,
+  readyChip,
   type DraftPersistScheduler
 } from "./composer-draft";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
 import { registerComposerHandle } from "./composer-bridge";
 import { restoreFailedSendDraft } from "./composer-failed-send";
+import { beginComposerSend, isComposerSending } from "./composer-sends";
+import { useComposerSending } from "./use-composer-sending";
 import {
   blockedProviderCommandMessage,
   buildSkillMenuItems,
@@ -69,7 +73,9 @@ import {
   type ComposerShortcutCommand
 } from "./composer-shortcuts";
 import {
+  attachmentCountBlockSend,
   attachmentRejectionReason,
+  composerStatusText,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
@@ -223,7 +229,8 @@ export function ChatComposer({
   /**
    * The thread store's persisted draft — the durable copy of everything the
    * user has not sent yet, and the only one that outlives this component.
-   * Read on mount and on a thread swap, written back on every change.
+   * Read on mount (and, defensively, on a thread swap), written back on every
+   * change.
    */
   const { draft: storeDraft, actions: storeDraftActions } = useAgentChatDraft(sessionId);
   /**
@@ -273,7 +280,14 @@ export function ChatComposer({
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
   const [menuDismissed, setMenuDismissed] = React.useState(false);
   const [notice, setNotice] = React.useState<string | null>(null);
-  const [sending, setSending] = React.useState(false);
+  /**
+   * A send from THIS thread is in flight — from this composer, or from one a
+   * project switch unmounted while the post kept retrying (§7.4). Read from
+   * the registry (`composer-sends.ts`), never held here: a flag in component
+   * state started every new instance at `false`, and the user could send the
+   * same message twice.
+   */
+  const sending = useComposerSending(sessionId);
 
   /**
    * The CLI's double Escape — "press Esc twice to jump to a previous message"
@@ -321,8 +335,11 @@ export function ChatComposer({
     draftRef.current = next;
     setDraft(next);
     setCursor(next.text.length);
+    // A draft files came back into over the eight loads whole, and the status
+    // line says why it cannot be sent — worked out from the draft itself
+    // (`composerStatusText`). Nothing else is reset here: whether this thread
+    // has a send in flight is the registry's to say, not this instance's.
     setNotice(null);
-    setSending(false);
     setMenuDismissed(false);
     // A half-finished double Escape belongs to the thread it was pressed in.
     escapeSequenceRef.current?.reset();
@@ -595,8 +612,9 @@ export function ChatComposer({
   }, []);
 
   /**
-   * Stage an attachment whose bytes are already on the daemon — a browser
-   * element pick, a chat-targeted drop, a queued message coming back.
+   * Stage a NEW attachment whose bytes are already on the daemon — a browser
+   * element pick, a chat-targeted drop. It counts against the eight; a file
+   * coming BACK goes through `returnMessage` below instead.
    *
    * The optimistic write to `draftRef` is what makes a *batch* of these
    * correct: a delivery carrying three files calls this three times in one
@@ -611,15 +629,7 @@ export function ChatComposer({
       setNotice(decision.reason);
       return false;
     }
-    const entry: StagedAttachment = {
-      key: decision.key,
-      name: decision.name,
-      sizeBytes: decision.sizeBytes,
-      mimeType: decision.mimeType,
-      status: "ready",
-      progress: 1,
-      ref
-    };
+    const entry = readyChip(decision, ref);
     draftRef.current = { ...current, attachments: [...current.attachments, entry] };
     setDraft((state) =>
       state.attachments.some((existing) => existing.key === entry.key)
@@ -638,6 +648,46 @@ export function ChatComposer({
     }
     return true;
   }, [insertText, isTextareaFocused]);
+
+  /**
+   * A message coming BACK into this draft (§7.4) — a queued message returned,
+   * the queue a Stop drained, a rewound message — through the bridge's
+   * `returnMessage`: behind what the draft holds, its files staged as
+   * returning chips (never refused for the count) and its `[Image #N]`
+   * following its own images, never naming one of the draft's
+   * (`draftAfterReturn`). Its context records ride with the draft.
+   *
+   * Batch-safe, like `insertText`: a Stop returns every queued message in one
+   * tick, each merged over the draft the previous one left in `draftRef`.
+   * Places the caret at the end without taking focus, as every bridge insert
+   * does; a draft it takes over the eight says so on the status line, worked
+   * out from the draft. Answers the refs a bound still refused, which the
+   * caller writes into the draft as their paths.
+   */
+  const returnMessage = React.useCallback(
+    (message: ComposerDraft): AttachmentRef[] => {
+      const current = draftRef.current;
+      const next = draftAfterReturn({ draft: current, message });
+      if (message.context.length > 0) {
+        carriedContextRef.current = [...carriedContextRef.current, ...message.context];
+      }
+      const added = next.attachments.filter(
+        (chip) => !current.attachments.some((entry) => entry.key === chip.key)
+      );
+      draftRef.current = { text: next.text, attachments: next.attachments };
+      caretRef.current = next.text.length;
+      setDraft((state) => ({
+        text: next.text,
+        attachments: [
+          ...state.attachments,
+          ...added.filter((chip) => !state.attachments.some((entry) => entry.key === chip.key))
+        ]
+      }));
+      applyCaret(next.text.length, { focus: isTextareaFocused() });
+      return next.unstaged;
+    },
+    [applyCaret, isTextareaFocused]
+  );
 
   /**
    * R8-m12: §7.8 suppresses autofocus **on mobile only** — "a keyboard on every
@@ -671,6 +721,9 @@ export function ChatComposer({
   const restoreIntoLiveDraft = React.useCallback(
     (thread: string, restore: FailedSendRestore<StagedAttachment>): boolean => {
       if (liveThreadRef.current !== thread) return false;
+      // Every chip comes back — the ones it carried ahead of any staged while
+      // it was in flight — so the draft may be over the eight; the status line
+      // adds that to the failure's notice, worked out from the draft.
       flushSync(() => {
         setDraft((state) => {
           const next = draftAfterSend({ outcome: restore.outcome, sent: restore.sent, draft: state });
@@ -698,6 +751,7 @@ export function ChatComposer({
         // explicitly (`focusAtEnd` / `focusComposer`).
         insertText: (text, mode) => insertText(text, mode, { focus: isTextareaFocused() }),
         stageAttachment,
+        returnMessage,
         focusAtEnd,
         openControl,
         restoreFailedSend: (restore) => restoreIntoLiveDraft(sessionId, restore)
@@ -708,6 +762,7 @@ export function ChatComposer({
       isTextareaFocused,
       openControl,
       restoreIntoLiveDraft,
+      returnMessage,
       sessionId,
       stageAttachment
     ]
@@ -1068,11 +1123,17 @@ export function ChatComposer({
     text: draft.text,
     attachmentCount: draft.attachments.length
   });
+  // A draft files came back into may hold more than the eight: every one stays,
+  // and it is neither sent nor queued until the user removes enough (§7.4).
+  const countBlock = attachmentCountBlockSend(draft.attachments);
   const sendDisabledReason = reverting
     ? "A revert is running."
     : hasPendingRequest
       ? "Answer the request above first."
-      : uploadBlock;
+      : (uploadBlock ?? countBlock);
+  // The count part is never held in `notice`: rendered from the draft, it can
+  // never disagree with the button it disables.
+  const statusText = composerStatusText({ notice, attachments: draft.attachments });
 
   const runSend = React.useCallback(
     async (
@@ -1085,7 +1146,11 @@ export function ChatComposer({
       // draft, whichever thread — if any — this composer shows by the time
       // the send settles.
       const sentFrom = sessionId;
-      setSending(true);
+      // Registered under that thread, synchronously — still inside the event
+      // that submitted it — so every composer that shows the thread before the
+      // send settles, a remounted one included, reads it as sending. Settled
+      // (its own entry only) once any restore below has landed.
+      const settle = beginComposerSend(sentFrom);
       try {
         const refs = attachmentRefs(attachments);
         const outcome = await sendComposerTurn({
@@ -1130,7 +1195,9 @@ export function ChatComposer({
           restoreLive: (restore) => restoreIntoLiveDraft(sentFrom, restore)
         });
       } finally {
-        setSending(false);
+        // After the restore: no frame shows an enabled, empty composer that is
+        // about to be refilled.
+        settle();
       }
     },
     [actions, isMobile, modelSelection, restoreIntoLiveDraft, sessionId]
@@ -1138,7 +1205,9 @@ export function ChatComposer({
 
   const submit = React.useCallback(
     (intent: "foreground" | "alternate") => {
-      if (reverting || sending) return;
+      // The live registry, not this render's snapshot: a send another
+      // composer of this thread started is in flight too (§7.4).
+      if (reverting || isComposerSending(sessionId)) return;
       const text = draft.text;
 
       // §4.6.5(a): `/plan` and `/default` are re-recognised on submit, but only
@@ -1177,7 +1246,9 @@ export function ChatComposer({
         return;
       }
       if (sendDisabledReason) {
-        setNotice(sendDisabledReason);
+        // The count gate is on the status line already, worked out from the
+        // draft; every other reason is said here, once.
+        if (sendDisabledReason !== countBlock) setNotice(sendDisabledReason);
         return;
       }
 
@@ -1253,6 +1324,7 @@ export function ChatComposer({
       planFollowUp,
       actions,
       applyCaret,
+      countBlock,
       draft.attachments,
       draft.text,
       interactionMode,
@@ -1263,7 +1335,7 @@ export function ChatComposer({
       runSend,
       sendDisabledReason,
       sendable,
-      sending,
+      sessionId,
       setPlanMode
     ]
   );
@@ -1293,7 +1365,8 @@ export function ChatComposer({
     targetCount: rewindTargets.length,
     isTurnActive,
     reverting,
-    hasPendingRequest
+    hasPendingRequest,
+    isSending: sending
   });
 
   /** Drop the "Press Esc again…" hint — only that hint, never another notice. */
@@ -1619,9 +1692,9 @@ export function ChatComposer({
             )}
           />
 
-          {notice ? (
+          {statusText ? (
             <p className="pt-1 text-[11px] leading-snug text-warn-300" role="status">
-              {notice}
+              {statusText}
             </p>
           ) : null}
 
@@ -1664,6 +1737,7 @@ export function ChatComposer({
                 isTurnActive={isTurnActive}
                 reverting={reverting}
                 hasPendingRequest={hasPendingRequest}
+                isSending={sending}
                 onRewind={onRewind}
                 returnFocusTo={() => textareaRef.current}
               />

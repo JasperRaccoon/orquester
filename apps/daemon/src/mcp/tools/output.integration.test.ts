@@ -10,6 +10,7 @@ import { createIngestion } from "../../agent-host/ingestion/index.ts";
 import { FakeClock, FakeTimers, RecordingLiveness, counterIdGen } from "../../agent-host/ingestion/test-harness.ts";
 import { isAgentChatCommandError } from "../../agent-host/orchestration/errors.ts";
 import { createTestHost, type TestHost } from "../../agent-host/orchestration/testing/index.ts";
+import { parseItemOutputWindow } from "../../agent-host/server/http-server.ts";
 import type { AppendableDomainEvent } from "../../agent-host/services.ts";
 import { createThreadStore } from "../../agent-host/store/index.ts";
 import type { DaemonApi, DaemonMethod, DaemonResponse } from "../daemon-api.ts";
@@ -20,8 +21,10 @@ import { outputTools } from "./output.ts";
 
 /*
  * read_transcript's `outputItemId` and read_tool_output against the REAL orchestrator: its fold and snapshot slimming
- * (`slimItemsForRead`), its item read and its join of a call's streamed output (`readToolOutput`, over the in-memory
- * store the host's own tests use) — a Claude background shell seeded as ingestion writes it.
+ * (`slimItemsForRead`), its item read and its join of a call's streamed output — one window of it
+ * (`readToolOutputWindow`), or the whole join (`readToolOutput`) from a host that ignores the window — over the in-memory
+ * store the host's own tests use; then over the REAL store, whose cache serves the windows. A Claude background shell
+ * seeded as ingestion writes it, and a subagent's command whose start retention dropped past the cap.
  */
 
 const THREAD = "thread-1";
@@ -29,19 +32,35 @@ const SHELL = "bgshell:task-1";
 const ITEM_ROUTE = /^\/api\/sessions\/([^/]+)\/items\/([^/]+)(\/output)?$/;
 
 /**
+ * The item-output route as the host's HTTP server answers it (agent-host/server/http-server.ts): one window of the join
+ * when the query asks for one (`parseItemOutputWindow`, the server's own rules), else the whole join — and a host from
+ * before windows (`olderHostWithRoute`) answers the whole join whatever the query says.
+ */
+async function itemOutputAnswer(
+  read: { window(itemId: string, window: NonNullable<ReturnType<typeof parseItemOutputWindow>>): Promise<unknown>; whole(itemId: string): Promise<unknown> },
+  itemId: string,
+  query: Record<string, string> | undefined,
+  olderHostWithRoute = false
+): Promise<unknown> {
+  const window = olderHostWithRoute ? null : parseItemOutputWindow(new URL(`http://agent-host.localhost/?${new URLSearchParams(query ?? {})}`));
+  return window === null ? read.whole(itemId) : read.window(itemId, window);
+}
+
+/**
  * The daemon routes the two tools read, answered as the host's HTTP server answers them (agent-host/server/
  * http-server.ts): `…/thread` is `readThread`; `…/items/:itemId` is `readItem`, a miss 404 `THREAD_NOT_FOUND`;
- * `…/items/:itemId/output` is `readToolOutput`, a miss 404 `ITEM_NOT_FOUND` — or, on a host that predates the route,
- * its generic route miss. Every body crosses JSON, as it crosses the socket.
+ * `…/items/:itemId/output` is `readToolOutputWindow` (or, for no window, `readToolOutput`), a miss 404
+ * `ITEM_NOT_FOUND` — or, on a host that predates the route, its generic route miss; on a host from before windows, the
+ * whole join whatever the query asks. Every body crosses JSON, as it crosses the socket.
  */
-function hostApi(host: TestHost, options: { olderHost?: boolean } = {}): DaemonApi & { paths: string[] } {
+function hostApi(host: TestHost, options: { olderHost?: boolean; olderHostWithRoute?: boolean } = {}): DaemonApi & { paths: string[] } {
   const wire = (status: number, body: unknown): DaemonResponse => ({ status, body: JSON.parse(JSON.stringify(body)) as unknown });
   const paths: string[] = [];
   return {
     fsRoot: "/work",
     workspacesDir: "/work",
     paths,
-    async request(method: DaemonMethod, path: string): Promise<DaemonResponse> {
+    async request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string> }): Promise<DaemonResponse> {
       paths.push(path);
       try {
         if (method === "GET" && path === "/api/sessions") return wire(200, [chatSummary({ id: THREAD })]);
@@ -56,7 +75,10 @@ function hostApi(host: TestHost, options: { olderHost?: boolean } = {}): DaemonA
           if (options.olderHost) {
             return wire(404, { error: { code: "THREAD_NOT_FOUND", message: `No route for GET /threads/${THREAD}/items/${match[2]}/output.` } });
           }
-          const joined = await host.orchestrator.readToolOutput(THREAD, itemId);
+          const joined = await itemOutputAnswer({
+            window: (id, window) => host.orchestrator.readToolOutputWindow(THREAD, id, window),
+            whole: (id) => host.orchestrator.readToolOutput(THREAD, id)
+          }, itemId, opts?.query, options.olderHostWithRoute);
           return joined ? wire(200, joined) : wire(404, { error: { code: "ITEM_NOT_FOUND", message: `No tool call behind item '${itemId}'.` } });
         }
       } catch (error) {
@@ -153,6 +175,36 @@ describe("a background shell's output through read_transcript and read_tool_outp
     assert.deepEqual([entry.tool.status, entry.outputItemId], ["inProgress", "shell-start"]);
     const soFar = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: "shell-start" }), ctx(api));
     assert.deepEqual([soFar.kind, soFar.text, soFar.running], ["command-output", CHUNKS.join(""), true]);
+    // The host was asked for one window, and answered one.
+    assert.ok(api.paths.includes(agentChatRoutes.itemOutput(THREAD, "shell-start")));
+    await host.stop();
+  });
+
+  it("a running shell grows between two pages: the next page continues at the last one's end, until it finishes", async () => {
+    const host = await shellThread(false);
+    const api = hostApi(host);
+    const page = (offset: number, maxBytes = 1_000) => outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: "shell-start", offset, maxBytes }), ctx(api));
+    const soFar = CHUNKS.join("");
+    const first = await page(0);
+    assert.deepEqual(first, { itemId: "shell-start", kind: "command-output", text: soFar, offset: 0, totalBytes: Buffer.byteLength(soFar), running: true });
+    // Two more chunks land while the caller reads; the next page starts where the first one ended.
+    await host.orchestrator.ingestionSink(THREAD, ["  [ 99%] cc z.o\n", "installed \u{1F4E6}\n"].map((delta, i) => shellRow(host, `late-${i}`, "tool.output", { streamKind: "command_output", delta })));
+    await host.settle();
+    const grown = `  [ 99%] cc z.o\ninstalled \u{1F4E6}\n`;
+    const second = await page(first.totalBytes as number);
+    assert.deepEqual(second, { itemId: "shell-start", kind: "command-output", text: grown, offset: first.totalBytes, totalBytes: Buffer.byteLength(soFar + grown), running: true });
+    // Narrow windows over the same span join to the same bytes, the 4-byte character never split.
+    let text = "";
+    for (let offset: number | undefined = first.totalBytes as number; offset !== undefined;) {
+      const narrow = await page(offset, 3);
+      text += narrow.text as string;
+      offset = narrow.nextOffset as number | undefined;
+    }
+    assert.equal(text, grown);
+    await host.orchestrator.ingestionSink(THREAD, [shellRow(host, "shell-done", "tool.completed", { itemType: "command_execution", title: "Background shell", status: "completed", agentId: "task-1", data: { ...DATA, exitCode: 0 } })]);
+    await host.settle();
+    const done = await page(Buffer.byteLength(soFar + grown));
+    assert.deepEqual(done, { itemId: "shell-start", kind: "command-output", text: "", offset: Buffer.byteLength(soFar + grown), totalBytes: Buffer.byteLength(soFar + grown) });
     await host.stop();
   });
 
@@ -216,8 +268,26 @@ describe("a subagent's command pushed past the cap, through read_transcript and 
       tool: { type: "command_execution", title: "Tool output", status: "inProgress" }, outputItemId: "serve-late-4"
     });
     // The whole output, from the log — the chunks the window dropped included.
-    const whole = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry!.outputItemId! }), ctx(api));
+    const whole = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId! }), ctx(api));
     assert.deepEqual([whole.kind, whole.text, whole.running, "nextOffset" in whole], ["command-output", lines.join(""), true, false]);
+    // Read in small windows, from a windowing host and from one that answers the whole join: the same pages, byte for byte.
+    const older = hostApi(host, { olderHostWithRoute: true });
+    for (const maxBytes of [7, 100, 1_001]) {
+      const pages = async (from: DaemonApi): Promise<Record<string, unknown>[]> => {
+        const all: Record<string, unknown>[] = [];
+        for (let offset: number | undefined = 0; offset !== undefined;) {
+          const next = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId!, offset, maxBytes }), ctx(from));
+          all.push(next);
+          offset = next.nextOffset as number | undefined;
+        }
+        return all;
+      };
+      const windowed = await pages(api);
+      assert.deepEqual(windowed, await pages(older), `maxBytes ${maxBytes}`);
+      assert.equal(windowed.map((page) => page.text).join(""), lines.join(""), `maxBytes ${maxBytes}`);
+      // All ASCII: every window but the last is full, so the pages are really several below the output's size.
+      assert.equal(windowed.length, Math.ceil(Buffer.byteLength(lines.join("")) / maxBytes), `maxBytes ${maxBytes}: pages`);
+    }
     await host.stop();
   });
 });
@@ -233,7 +303,7 @@ describe("fixture claude/14a through the real ingestion and store: a file change
       fsRoot: "/work",
       workspacesDir: "/work",
       paths,
-      async request(method: DaemonMethod, path_: string): Promise<DaemonResponse> {
+      async request(method: DaemonMethod, path_: string, opts?: { query?: Record<string, string> }): Promise<DaemonResponse> {
         paths.push(path_);
         if (method === "GET" && path_ === "/api/sessions") return wire(200, [chatSummary({ id: FIXTURE_THREAD })]);
         const match = method === "GET" ? ITEM_ROUTE.exec(path_) : null;
@@ -243,7 +313,10 @@ describe("fixture claude/14a through the real ingestion and store: a file change
             const item = await store.readItem(FIXTURE_THREAD, itemId);
             return item ? wire(200, { item }) : wire(404, { error: { code: "THREAD_NOT_FOUND", message: `No item '${itemId}'.` } });
           }
-          const joined = await store.readToolOutput(FIXTURE_THREAD, itemId);
+          const joined = await itemOutputAnswer({
+            window: (id, window) => store.readToolOutputWindow(FIXTURE_THREAD, id, window),
+            whole: (id) => store.readToolOutput(FIXTURE_THREAD, id)
+          }, itemId, opts?.query);
           return joined ? wire(200, joined) : wire(404, { error: { code: "ITEM_NOT_FOUND", message: `No tool call behind item '${itemId}'.` } });
         }
         return wire(404, { error: { code: "NOT_FOUND", message: `${method} ${path_}` } });
@@ -292,5 +365,17 @@ describe("fixture claude/14a through the real ingestion and store: a file change
     assert.ok(!api.paths.some((p_) => p_.endsWith("/output")), "a file change never asks for the join");
     const b = await outputTool.run(parse(outputTool, { sessionId: FIXTURE_THREAD, itemId: bash.id }), ctx(api));
     assert.equal(b.kind, "command-output");
+    // The Bash call's own result is its output: its streamed copy, read through the store's cache one window at a time,
+    // is the same text as its whole join.
+    const joined = await store.readToolOutput(FIXTURE_THREAD, bash.id);
+    assert.ok(joined !== null && joined.output.length > 0, "the Bash call streamed its result");
+    let windowed = "";
+    for (let offset: number | undefined = 0; offset !== undefined;) {
+      const window = await store.readToolOutputWindow(FIXTURE_THREAD, bash.id, { offset, maxBytes: 5 });
+      assert.ok(window !== null);
+      windowed += window.text;
+      offset = window.nextOffset;
+    }
+    assert.equal(windowed, joined.output);
   });
 });

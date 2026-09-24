@@ -658,9 +658,11 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     fact be whole: without an index the MCP cannot tell, so on a host without one they are named on
     every read. A subagent with no row left is bounded by the turn of the oldest row any subagent
     kept — or, when its last launch or end is a Claude end, by the turn it ended in, since a Claude
-    subagent that resumes launches again. Codex and OpenCode record a subagent's launch and end
-    once, and one they resume after its end works on with no new launch, so there an end bounds
-    nothing. After a history page failed, or the page limit below ran out, a subagent's turns are
+    subagent that resumes launches again. Codex and OpenCode now launch a subagent again too when
+    they resume it after its end, but a conversation recorded by an older host can hold one that
+    worked on after its end with no new launch, and the snapshot cannot tell the two apart — so
+    there an end bounds nothing. After a history page failed, or the page limit below ran out, a
+    subagent's turns are
     likewise named from the one it was launched in. Without `agentId`, any turn of the range still
     without a single row after the history pages were read is named the same way, unless the page
     limit ran out; a subagent's view has no such check, since a subagent has no rows in the turns it
@@ -734,8 +736,13 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       is still an entry, built from its latest chunk in the range: `tool.type` `command_execution`
       and `outputItemId` that chunk. Title, command and status come from its rows elsewhere in the
       view — else the title is the chunk's own, "Tool output", and the status `inProgress`. The
-      parent view builds no entry from chunks alone: a subagent's command result can stream into the
-      parent's rows with no agent id (Claude's does), and it is the subagent's call.
+      parent view builds no entry from chunks alone.
+    - A subagent's command output is the subagent's: it counts in its drill-in, where the command
+      offers `outputItemId` like any other, and never in the parent view. An older agent host
+      wrote a subagent's Bash result with no agent id, and one that survives a deploy keeps doing
+      so until it restarts. In such a log the chunk counts for the agent the call's other rows
+      name, whenever the read still holds one of them — once retention has dropped them all it
+      cannot be told from the parent's own, and builds no entry there.
 
     The snapshot keeps only an allow-list of each call's provider data, so most finished calls
     that carry any have an id. A row without one has nothing more the snapshot knows of.
@@ -797,8 +804,9 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
     2. **The call's streamed output**, when the item is a command's — a `command_execution` row,
        or a chunk of a command's output — and the call streamed any: output that is in no item's
        data at all — a Claude background shell's, a command's output while it runs — joined by the
-       agent host from the chunks it arrived in, in order
-       (`GET /api/sessions/:id/items/:itemId/output`). A file change is never read this way:
+       agent host from the chunks it arrived in, in order, and handed over a window at a time
+       (`GET /api/sessions/:id/items/:itemId/output?offset=&maxBytes=`: the window this call asks
+       for, which the host cuts from a join it keeps and extends as the call prints). A file change is never read this way:
        Claude streams an Edit's or a Write's result text too, and its payload — the edit itself —
        is what the GUI shows for it. `running: true` says the call has not
        completed, so `text` is its output so far: read again later for the rest. It only ever
@@ -815,9 +823,11 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
     comes back this way.)
 
   Right after a deploy, the agent host may still be the one from before it (it is replaced once no
-  turn and no background work is running), and it cannot join streamed output: the item answers
-  as above without step 2 — usually its payload — and never an error. Read again once the host has
-  been replaced.
+  turn and no background work is running). One from before the join cannot join streamed output:
+  the item answers as above without step 2 — usually its payload — and never an error; read again
+  once the host has been replaced. One that joins but predates windows answers the whole join
+  whatever window is asked for, and this tool windows it itself: the pages are the same, byte for
+  byte, only slower to come.
 
   It pages by byte offset, as `read_file` does. `totalBytes` is the text's size in UTF-8 bytes, and
   `nextOffset` is present while more remains: read again with `offset` set to it, never
@@ -830,8 +840,12 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   it is refused with `INVALID_ARGUMENT` naming `totalBytes`. An item the host does not have is
   `NOT_FOUND`: `No item "<id>" in this session: it is gone, or it never existed. Item ids come from
   read_transcript — a tool row's outputItemId.` Every call reads the item afresh, and a streamed
-  output's chunks too (the host reads both back from the thread's log), so page with large windows
-  rather than many small ones.
+  output's window too, but neither reads the thread's log whole again: the host keeps each item's
+  newest write and each call's joined output in memory, and extends them by what the log gained
+  since — the first page of a long thread's output costs a read of its log, every later one a few
+  milliseconds, and only the window asked for crosses to the daemon. (A message comes from the
+  thread the host holds in memory; only one old enough to have left it — past the newest 2 000 —
+  folds the thread's log for its text, on every page.)
 
 ```jsonc
 // The transcript shows a test run's first line — and where the whole of it is.
@@ -1336,6 +1350,8 @@ still not for polling loops.
 | `NOT_FOUND` (`No todo list with id …`) | The list was deleted, or the id is mistyped — `list_todos` shows the ids. |
 | `NOT_FOUND` (`No item … in this session`) | `read_tool_output` was given an id the session's host does not have: take a tool row's `outputItemId` from `read_transcript` for the same `sessionId`. |
 | `read_tool_output` answers `kind: "payload"` for a background shell or a running command | The agent host is still the one from before a deploy, which cannot join streamed output: it is replaced once no turn and no background work is running. Read again then. |
+| `read_tool_output`'s first page of a long thread's output is slow; later pages are quick | Expected: the host reads the thread's log once to find the item and join the call's output, then keeps both and extends them by what the log gained. A host restart (a deploy), or ten minutes without a read, starts that over. Every page is slow while the host is still the one from before windows — see the row above. |
+| `INTERNAL` (`Expected a window of a tool call's streamed output.`) | The host answered a window its own rules could not have cut (out of place, wider than asked, past the output's end). Nothing was returned; read again, and report it with the session and item ids if it persists. |
 | `HOST_UNAVAILABLE` | The agent host is restarting (for example after a deploy). A command has already been retried three times — try again shortly. |
 | `search_sessions` answers `indexed: false` | The agent host has no usable thread index right now: its SQLite driver did not load or the index file could not be opened (the host's log says which), or the host is stopping or being replaced (a deploy). Try again later; `read_transcript` still reads each session. |
 | `send_message` ends in `timeout` and `read_transcript` shows "Attachment rejected" | The host refused an attachment when starting the turn, so the turn never started. Check the file against §9. |

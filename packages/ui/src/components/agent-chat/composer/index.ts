@@ -54,9 +54,18 @@ export {
   openComposerControl,
   registerComposerHandle,
   restoreComposerFailedSend,
+  returnComposerMessage,
   stageComposerAttachment,
   type ComposerHandle
 } from "./composer-bridge";
+
+export {
+  beginComposerSend,
+  isComposerSending,
+  resetComposerSends,
+  subscribeComposerSends
+} from "./composer-sends";
+export { useComposerSending } from "./use-composer-sending";
 
 export {
   detectComposerTrigger,
@@ -90,6 +99,7 @@ export {
 } from "./composer-menu";
 
 export {
+  attachmentCountBlockSend,
   attachmentRejectionReason,
   buildPlanImplementationPrompt,
   composerPromptLengthValidationMessage,
@@ -99,6 +109,7 @@ export {
   hasSendableContent,
   isPasteAsTextShortcut,
   isSupportedAttachmentImage,
+  mergeMessageIntoDraft,
   nextPastedTextFileName,
   pastedTextDisposition,
   PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES,
@@ -122,9 +133,11 @@ export {
   composerDraftToPersist,
   createDraftPersistScheduler,
   DRAFT_PERSIST_DELAY_MS,
+  draftAfterReturn,
   EMPTY_PERSISTED_DRAFT,
   loadComposerDraft,
   persistableAttachmentRefs,
+  persistedDraftAfterReturn,
   persistedDraftAfterSend,
   persistedDraftsEqual,
   type DraftPersistScheduler,

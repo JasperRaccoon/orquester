@@ -81,6 +81,7 @@ export const SUBAGENT_TEXT_CHARS = 200;
 
 type P = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+const nonBlank = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
 const asRecord = (v: unknown): P | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as P) : undefined);
 /** `text` cut to at most `max` code points, the last of them a "…" when anything was cut. */
 const capped = (text: string, max: number): string => (capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text);
@@ -345,6 +346,39 @@ export function transcriptRange(turnCount: number, turns: number, beforeTurn?: n
   return { start: Math.max(1, end - Math.max(1, Math.floor(turns)) + 1), end };
 }
 
+const CALL_LIFECYCLE_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
+
+/**
+ * The owner an older log's UNSTAMPED output chunk takes. Claude wrote a subagent's command and file-change output with
+ * no agent id while every other row of the call carried one (fixture claude/07); the adapter stamps the chunk now, but
+ * a log keeps what a host from before that wrote, and an older host surviving a deploy writes such chunks until its
+ * drain-restart. As it stands, such a chunk reads as the parent's. It takes the owner of its call's lifecycle rows —
+ * `tool.started`, `tool.updated`, `tool.completed`, `tool.denied` of the same `toolUseId` with a non-blank `agentId` —
+ * in the same snapshot, as the GUI's drill-in reads it (`callOwnersOf`, packages/ui entries.logic.ts). Undefined for any
+ * other item, and for a chunk whose call has no owned row there. The owners are read once per read, at the first
+ * unstamped chunk — and the parent's own command output is unstamped too, so that is nearly every read: one more pass
+ * over the snapshot.
+ */
+function unstampedChunkOwner(items: readonly ThreadItem[]): (item: ThreadItem) => string | undefined {
+  let owners: Map<string, string> | undefined;
+  return (item) => {
+    if (item.kind !== "activity" || item.activityKind !== "tool.output" || isAgentOwnedActivity(item)) return undefined;
+    const callId = str(asRecord(item.payload)?.toolUseId);
+    if (!callId) return undefined;
+    if (!owners) {
+      owners = new Map();
+      for (const row of items) {
+        if (row.kind !== "activity" || !CALL_LIFECYCLE_KINDS.has(row.activityKind)) continue;
+        const p = asRecord(row.payload);
+        const call = str(p?.toolUseId);
+        const owner = nonBlank(row.agentId) ?? nonBlank(p?.agentId);
+        if (call && owner) owners.set(call, owner);
+      }
+    }
+    return owners.get(callId);
+  };
+}
+
 /**
  * The turn an item belongs to: its own `turnId`, else — for a turn's opening message, which the host writes with the
  * idle session's null turnId — the turn that names it back as `userMessageId` (fold.ts), its only link.
@@ -377,7 +411,10 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     // An AGENT's task row anchors it in the parent view even when it carries an agentId (Codex, OpenCode
     // and Grok stamp the task's own id on it); a stamped background shell's row stays out, as in the GUI.
     const isAgentAnchor = (item: ThreadItem): boolean => item.kind === "activity" && item.activityKind.startsWith("task.") && ((item.payload ?? {}) as P).agentKind === "agent";
-    const inScope = (item: ThreadItem): boolean => (opts.agentId ? item.agentId === opts.agentId : !item.agentId || isAgentAnchor(item));
+    // A row's owner: its own stamp, else — an older log's unstamped output chunk — its call's (`unstampedChunkOwner`).
+    const inheritedOwner = unstampedChunkOwner(snap.items);
+    const ownerOf = (item: ThreadItem): string | undefined => item.agentId || inheritedOwner(item);
+    const inScope = (item: ThreadItem): boolean => (opts.agentId ? ownerOf(item) === opts.agentId : !ownerOf(item) || isAgentAnchor(item));
     const inTurns = (item: ThreadItem): boolean => {
       const id = turnIdOf(item);
       return id ? selected.has(id) : item.createdAt >= earliest && (beyond === null || item.createdAt < beyond);
@@ -396,7 +433,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     const latestCommandRow = new Map<string, string>();
     const callFacts = new Map<string, { title?: string; command?: string; ended?: string }>();
     // An anchor names its agent in `subagent.id`; it carries no owner stamp.
-    const base = (item: ThreadItem, kind: TranscriptEntry["kind"]): TranscriptEntry => ({ turn: turnOf(item), turnId: turnIdOf(item), kind, createdAt: item.createdAt, ...(item.agentId && kind !== "subagent" ? { agentId: item.agentId } : {}) });
+    const base = (item: ThreadItem, kind: TranscriptEntry["kind"]): TranscriptEntry => { const owner = ownerOf(item); return { turn: turnOf(item), turnId: turnIdOf(item), kind, createdAt: item.createdAt, ...(owner && kind !== "subagent" ? { agentId: owner } : {}) }; };
     for (const item of snap.items) {
       if (!inScope(item)) continue;
       if (item.kind === "activity" && (item.activityKind === "tool.output" || TOOL_KINDS.has(item.activityKind))) {
@@ -528,9 +565,9 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       }
       // No row of the call in the range: an entry of its own, built from its latest chunk there — a long-running
       // background shell's start is the first row its own chunks evict from its agent's 200-row window. In a drill-in
-      // only: there a chunk carries its agent's own id, while the parent's scope also holds chunks of subagents'
-      // commands (Claude streams a subagent's Bash result with no agent id, fixture claude/07) whose rows are the
-      // subagent's, and which are no parent entry.
+      // only: there every chunk in scope is its agent's own, while the parent's scope can still hold a subagent's — an
+      // older log's unstamped one (Claude wrote a subagent's Bash result with no agent id, fixture claude/07) whose
+      // call's rows are gone, so no owner can be read for it — which is no parent entry.
       const chunk = latestChunk.get(callId);
       if (!opts.agentId || chunk === undefined || !opts.include.has("tools")) continue;
       const facts = callFacts.get(callId) ?? {};

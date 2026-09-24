@@ -15,8 +15,17 @@
  *  - {@link loadComposerDraft} — a persisted draft turned back into chips.
  *  - {@link persistedDraftAfterSend} — a failed send put back into a persisted
  *    draft, when no composer shows the thread it was sent from any more.
+ *  - {@link draftAfterReturn} / {@link persistedDraftAfterReturn} — a message
+ *    coming back (a queued message returned, a Stop's drain, a rewind) merged
+ *    behind the live draft, or behind the persisted one when no composer is
+ *    mounted.
  *  - {@link createDraftPersistScheduler} — one write per window while typing,
  *    a synchronous flush for an unmount, a tab switch or a reload.
+ *
+ * A file coming back is never dropped: every one of these keeps every file —
+ * as a chip, or, where a type or a size bound refuses it, as its path in the
+ * text — and a draft over the eight is held at the send gate
+ * (`attachmentCountBlockSend`) until the user removes enough.
  *
  * Pure and component-free on purpose: the component is untestable here (the
  * package's test glob only walks `*.test.ts`), so everything that can be
@@ -25,10 +34,19 @@
 
 import type { AttachmentRef, ComposerContextRecord } from "@orquester/api/agent-chat";
 
-import { EMPTY_DRAFT, type ComposerDraft } from "../../../lib/agent-chat/composer.logic";
+import {
+  attachmentPathOf,
+  EMPTY_DRAFT,
+  type ComposerDraft
+} from "../../../lib/agent-chat/composer.logic";
+import { composerTextForDelivery } from "../../../lib/composer-inbox";
+import { textNamesPath } from "./composer-files";
+import { removeImagePlaceholder } from "./composer-images";
 import {
   decideStagedAttachmentForRef,
   draftAfterSend,
+  mergeMessageIntoDraft,
+  stagedFieldsForRef,
   type ComposerSendOutcome
 } from "./composer-submission";
 import type { StagedAttachment } from "./ComposerAttachments";
@@ -111,34 +129,55 @@ export interface LoadedComposerDraft {
 }
 
 /**
+ * A chip for a ref whose bytes are already on the daemon, so ready at once —
+ * with a staged decision's fields, or a stored ref's own (`stagedFieldsForRef`).
+ */
+export function readyChip(
+  fields: { key: string; name: string; sizeBytes: number; mimeType: string },
+  ref: AttachmentRef
+): StagedAttachment {
+  return {
+    key: fields.key,
+    name: fields.name,
+    sizeBytes: fields.sizeBytes,
+    mimeType: fields.mimeType,
+    status: "ready",
+    progress: 1,
+    ref
+  };
+}
+
+/**
  * Turn a persisted draft back into a live one.
  *
- * It reuses {@link decideStagedAttachmentForRef}, so a reloaded chip obeys
- * exactly the bounds a live drop does (eight per message, one chip per ref) —
- * but it deliberately does **not** go through the composer's `stageAttachment`:
+ * It reuses {@link decideStagedAttachmentForRef}, so a reloaded chip obeys the
+ * bounds a live drop does (one chip per ref, the MIME and size bounds) — but
+ * it deliberately does **not** go through the composer's `stageAttachment`:
  * that one also writes an `[Image #N]` placeholder at the caret, and the text
  * being restored alongside already contains the placeholders the user saw.
  * Staging through it would duplicate every one of them. The same holds for a
  * file's path: the restored text already carries it.
  *
- * An entry the bounds refuse is dropped rather than reported: there is no
- * composer notice to render into yet at load time, and the file itself is
- * still on the daemon.
+ * **Never the count** (`enforceCount: false`): every file here was in a
+ * message once — a failed send restored ahead of the files staged while it was
+ * in flight, two queued messages a Stop returned — and a load that kept the
+ * first eight dropped the rest without a word while the text still named
+ * them. A draft over the eight loads whole and is held at the send gate
+ * (`attachmentCountBlockSend`), which the composer's status line names.
+ *
+ * Every write of a persisted draft stages only what the MIME and size bounds
+ * accept — a returned file they refuse goes into the text as its path
+ * ({@link persistedDraftAfterReturn}) — so an entry they refuse here is one a
+ * draft written before that rule carried. It is dropped rather than reported:
+ * there is no composer notice to render into yet at load time, and the file
+ * itself is still on the daemon.
  */
 export function loadComposerDraft(persisted: ComposerDraft): LoadedComposerDraft {
   const attachments: StagedAttachment[] = [];
   for (const ref of persisted.attachments) {
-    const decision = decideStagedAttachmentForRef({ existing: attachments, ref });
+    const decision = decideStagedAttachmentForRef({ existing: attachments, ref, enforceCount: false });
     if (decision.kind !== "staged") continue;
-    attachments.push({
-      key: decision.key,
-      name: decision.name,
-      sizeBytes: decision.sizeBytes,
-      mimeType: decision.mimeType,
-      status: "ready",
-      progress: 1,
-      ref
-    });
+    attachments.push(readyChip(decision, ref));
   }
   return { text: persisted.text, attachments, context: [...persisted.context] };
 }
@@ -171,6 +210,100 @@ export function persistedDraftAfterSend(input: {
     attachments: next.attachments,
     context: loaded.context
   });
+}
+
+/**
+ * A message coming BACK into the composer's live draft (§7.4) — a queued
+ * message returned, the queue a Stop drained, a rewound message — behind what
+ * the draft holds: `mergeMessageIntoDraft` at the back, the merge a failed send
+ * makes the other way round, so its `[Image #N]` keep naming its own images
+ * and never one the draft already had.
+ *
+ * Its files come back as chips staged as RETURNING (`enforceCount: false`):
+ * each was part of a message once, so the eight never refuse it, and a draft
+ * that ends up over them is held at the send gate until the user trims it. A
+ * file a bound still refuses — a type or a size the composer never stages — is
+ * taken out of the message the way its chip's X would take it (an image's
+ * placeholder goes, and the later ones close the gap) and handed back in
+ * `unstaged`, for the caller to write into the draft as its path; a file whose
+ * path the text already names is in the draft already. Nothing is parked
+ * behind the composer: a mounted composer owns its draft, and its next save
+ * would write over anything left there.
+ */
+export function draftAfterReturn(input: {
+  draft: { text: string; attachments: readonly StagedAttachment[] };
+  message: { text: string; attachments: readonly AttachmentRef[] };
+}): { text: string; attachments: StagedAttachment[]; unstaged: AttachmentRef[] } {
+  let text = input.message.text;
+  const chips: StagedAttachment[] = [];
+  const refused: AttachmentRef[] = [];
+  for (const ref of input.message.attachments) {
+    // Measured against the message's own chips: a file the draft already
+    // holds is the merge's to fold into that chip, its placeholder with it.
+    const decision = decideStagedAttachmentForRef({ existing: chips, ref, enforceCount: false });
+    if (decision.kind === "duplicate") continue;
+    if (decision.kind === "rejected") {
+      if ((ref.mimeType ?? "").startsWith("image/")) {
+        const ordinal = chips.filter((chip) => chip.mimeType.startsWith("image/")).length + 1;
+        text = removeImagePlaceholder(text, ordinal);
+      }
+      refused.push(ref);
+      continue;
+    }
+    chips.push(readyChip(decision, ref));
+  }
+  const merged = mergeMessageIntoDraft({
+    draft: input.draft,
+    message: { text, attachments: chips },
+    at: "back"
+  });
+  const unstaged = refused.filter((ref) => {
+    const path = attachmentPathOf(ref);
+    return path === undefined || !textNamesPath(merged.text, path);
+  });
+  return { ...merged, unstaged };
+}
+
+/** A stored ref as a chip, keyed and typed as `loadComposerDraft` stages it, no bound applied. */
+function storedChip(ref: AttachmentRef): StagedAttachment {
+  return readyChip(stagedFieldsForRef(ref), ref);
+}
+
+/**
+ * `refs` written at the end of `text` as their paths — their ids when the
+ * host named none — the way a mounted composer's caller appends them
+ * (`composerTextForDelivery` through the bridge's `insertText(…, "append")`).
+ */
+function withPathsAppended(text: string, refs: readonly AttachmentRef[]): string {
+  const paths = composerTextForDelivery({ text: "", attachments: [...refs] });
+  if (paths.length === 0) return text;
+  return text.length > 0 && !/\s$/.test(text) ? `${text} ${paths}` : `${text}${paths}`;
+}
+
+/**
+ * A message coming back into a thread's PERSISTED draft (§7.4), when no
+ * composer is mounted to take it: {@link draftAfterReturn} over the stored
+ * refs, with the same bounds and the same fallback a mounted composer's
+ * caller applies — a returned file a type or a size bound refuses is written
+ * into the text as its path. So no file of the message is dropped here, the
+ * count included, nor later: the next mount stages every ref this merge wrote
+ * ({@link loadComposerDraft}), and the send gate holds a draft over the eight.
+ * The draft's own refs are kept as they are, and the message's context records
+ * ride along after the draft's.
+ */
+export function persistedDraftAfterReturn(input: {
+  persisted: ComposerDraft;
+  message: ComposerDraft;
+}): ComposerDraft {
+  const next = draftAfterReturn({
+    draft: { text: input.persisted.text, attachments: input.persisted.attachments.map(storedChip) },
+    message: input.message
+  });
+  return {
+    text: withPathsAppended(next.text, next.unstaged),
+    attachments: persistableAttachmentRefs(next.attachments),
+    context: [...input.persisted.context, ...input.message.context]
+  };
 }
 
 // ---------------------------------------------------------------------------

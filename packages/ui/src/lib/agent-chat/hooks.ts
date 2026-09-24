@@ -7,8 +7,10 @@
  *
  * Each hook reads the per-thread zustand slice `store.ts` owns. The slice is
  * created on tab open and dropped on tab close (§7.2); the registry is
- * refcounted so one `AgentChatView` instance serving every chat tab in a
- * project (§7.1) never re-opens a stream on a tab switch.
+ * refcounted, so every consumer of a thread — each chat tab owns its
+ * `AgentChatView` and composer (§7.1's placement note in `AgentChatView.tsx`)
+ * — shares one stream, and a tab remounted within the dispose grace re-opens
+ * none.
  */
 
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
@@ -349,11 +351,11 @@ export function useProviderSnapshots(): ProviderSnapshot[] {
  * The thread's **persisted** draft, and the actions that write it.
  *
  * This is the durable copy of everything unsent: W13's `ChatComposer` loads it
- * on mount and on a thread swap, and saves it back on every change, so a
- * half-typed message outlives the component. It is also where a queued message
- * returned by an interrupt lands while no composer is mounted, and where a
- * failed send goes back once no composer shows its thread (`updateThreadDraft`)
- * — the next mount finds either there.
+ * on mount (and, defensively, on a thread swap), and saves it back on every
+ * change, so a half-typed message outlives the component. It is also where a
+ * queued message returned by an interrupt lands while no composer is mounted,
+ * and where a failed send goes back once no composer shows its thread
+ * (`updateThreadDraft`) — the next mount finds either there.
  */
 export function useAgentChatDraft(sessionId: string): {
   draft: AgentChatThreadState["draft"];

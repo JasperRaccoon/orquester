@@ -313,7 +313,7 @@ older host ignores both, and a newer one re-derives from the log whatever it can
 |---|---|
 | Commands (POST, JSON, every body carries a client-minted `commandId`) | `/api/sessions/:id/{turn,interrupt,approval,answer,dismiss,revert,compact,mode,session/stop}` → `{seq}` |
 | Daemon-owned, command-shaped (NOT proxied verbatim) | `POST /api/sessions/:id/account` `{commandId, accountId}` → `{seq}` — §3.4's account switch; see the gotcha below |
-| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
+| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output[?offset=&maxBytes=]` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log: with a window query, one UTF-8 window `{toolUseId, offset, text, totalBytes, nextOffset?, complete, truncated}` from the host store's tool-output cache; without, the whole join, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
 | Host level | `GET /api/agent/providers` · `POST /api/agent/providers/:id/refresh` · `POST /api/agent-host/stop` · `GET /api/agent/search?q=&limit=&projectPath=` (full-text over every open chat; 200 `indexed:false` without an index) |
 
 Everything is built in one place — `agentChatRoutes` in `packages/api/src/agent-chat/wire.ts`; use
@@ -451,7 +451,7 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `foldForward`), and decoding a log yields every 8 ms (`DECODE_SLICE_MS`: `readLog`,
   `decodeWindow`): a multi-second fold or parse starved the 15 s health probe (5 s timeout), and
   two consecutive misses restart a healthy host.
-- **The fold snapshot and the thread index are caches, never authorities.** `events.ndjson` stays
+- **The fold snapshot, the thread index and the tool-output cache are caches, never authorities.** `events.ndjson` stays
   the record; any doubt — another version, a seq or byte offset that does not line up, a file that
   does not parse — is resolved by discarding the cache and re-deriving from the log, never the
   reverse. Rules that must not be broken: (1) **bump `FOLD_SNAPSHOT_VERSION`**
@@ -487,7 +487,27 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   only in memory, a restart between the prompt and the turn's start re-anchored the turn at the
   adopting `session-set` and gave its prompt to the previous turn's range. A host stop calls
   `ThreadIndex.stop()` — queued observes applied, the boot catch-up ended at its next check, file
-  closed — never `drain()`, which waits for every catch-up and would hold a deploy.
+  closed — never `drain()`, which waits for every catch-up and would hold a deploy. (6) The host
+  store's **tool-output cache** (`store/tool-output-cache.ts`, memory only) serves
+  `GET …/items/:itemId/output?offset=&maxBytes=` and `readItem`'s activities: an item cursor per
+  `(thread, item)` — its newest write, the line and the call it names, so an activity read is the
+  log's tail plus one `pread` of its line (checked by `seq` and id; a message is never the store's
+  to answer while the thread's resident fold holds it — the orchestrator's `readItem` returns the
+  fold's copy, unslimmed and merged as the store's whole-log fold would merge it — and only one
+  retention dropped folds the whole log) — and an incremental join per `(thread, call)`, keyed by CALL so an item re-pointed at
+  another call never rebuilds one (`ToolOutputJoin`, the same step as `joinToolOutput`; the
+  split-point property test in `tool-output.test.ts` holds them equal). Every entry is extended by
+  the COMMITTED log past its cursor (`entry.logBytes` — never an append in flight, which a rollback
+  may undo) with `readLog`'s rules: a line that does not decode, or whose seq does not climb, stops
+  that cursor for good, as it stops every reader. A log that does not continue the cursor — shorter,
+  or its next line empty, undecodable or not `seq + 1` — rebuilds the entry from byte 0;
+  `deleteThread` drops the thread's entries and bumps its generation, so a scan already running
+  publishes nothing; a revert invalidates nothing (the join reads the raw log). One scan per key at a
+  time; bounded at 32 MiB of join buffers and 1 024 item cursors (and as many joins), LRU, an entry
+  idle 10 minutes expiring when next touched — no timer; an evicted entry is rebuilt, slower, never
+  wrong. A window counts in the whole join's UTF-8 as it stands (a lone surrogate reads as U+FFFD),
+  the same bytes on every host, so offsets carry across a host restart; the no-query answer stays
+  the whole join on the whole-log path, for a daemon from before windows.
 - **The fold's work per event must not grow with the window.** The fold is shared by the host and
   the browser, and it used to cost ~1.8 ms per event on a big thread: every event rescanned,
   regrouped and sorted the whole retained window (`activitiesToDrop`), copied the id→position map,
@@ -696,7 +716,24 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   relaunched run's progress row — already naming the new call — sits before the killed run's
   `stopped` row, and reading the call off it kept every relaunched agent `interrupted` for as long
   as it worked (2026-09-23). Anything that folds activities by position must remember that order
-  is first-emission order, not time.
+  is first-emission order, not time. **Every adapter that surfaces agents keeps the contract this
+  rule reads:** an agent's FIRST `task.started` carries a launch id; re-engaging an agent that is
+  not live emits a NEW `task.started` under a different one before any row of the new run; the run
+  ends with the adapter's usual end row, and no stale end of an earlier run follows; and the
+  adapter's own live set reopens, so Stop and exit close the new run `stopped`. A status-only
+  reopen is not enough: an appended `task.updated {running}` is an ordinary row of the agent's
+  window, and once retention drops it the roster reads the old end mid-run. OpenCode — a `task`
+  call with `task_id` re-prompts the existing child, no `session.created` — starts every run from
+  the parent's `running` `task` part under its `callID`; a live part naming a settled child under a
+  call never seen for it is the relaunch; a frame of any call seen before, or a call on a live
+  child, emits no task row (`linkChildFromTaskPart`). Codex starts under `codex-launch:<item id>`
+  at `subAgentActivity started` and again under `codex-run:<turn id>` at a child's own
+  `turn/started` after a settled run, or for a child this session never saw launched
+  (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no end, and
+  `interacted` carries no status — neither is evidence about the run in progress. An agent first
+  launched by a host older than this change has no launch id on its first start (such logs are
+  written until the deploy), so a relaunch from a terminal state does not reopen it; that would
+  need a fold change weakening the late-delivery guard, and is not made.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
@@ -714,6 +751,25 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   close the parent's thinking block. `splitThreadItems(items, ownerAgentId)` is the client mirror
   — the parent's view drops agent-owned messages, the drill-in keeps its own — and the Claude
   normaliser projects a nested `thinking` block as the agent's reasoning row, which it used to drop.
+  (6) **A call's rows are one owner's and one turn's — its output chunks included.** A subagent's
+  `tool_result` names only `parent_tool_use_id`, and the Claude normaliser's `content.delta
+  {command_output|file_change_output}` left out the `agentId` the call's `item.*` rows carried: the
+  chunk folded as a PARENT `tool.output` row — a stray "Tool output" in the parent timeline, one
+  more row in the parent's 500-row window — and the drill-in never showed the output (fixture
+  `claude/07`, fixtures README observation 22). Every event of a call now carries the call's owner
+  and rides `ToolInFlight.turnId`, the turn active when the call STARTED (absent between parent
+  turns), never the one active when the event is emitted — one call, one `tool:<turn>:<id>` key.
+  The one late assignment: a parent call streamed while no turn was open — a woken parent's stream
+  precedes the complete frame that opens its synthetic turn — adopts the next turn to open
+  (`beginTurn`: that synthetic turn, or a user turn sent in the window), so the turn's fold holds
+  it and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); its start
+  row stays turnless. A log a host wrote before the stamp — an older host surviving a deploy writes
+  such chunks until its drain-restart — is read by the call, on the read side only (no fold change,
+  no version bump): an unstamped `tool.output` takes the owner of its call's lifecycle rows in the
+  same derivation input — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its
+  owner's drill-in, `deriveWorkLogEntries` keeps it out of every other view) and
+  `unstampedChunkOwner` in `mcp/transcript.ts`. One whose call's rows are gone stays the parent's;
+  the fold, its retention and the history bridge keep mirroring the log.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
@@ -743,6 +799,27 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   would drop (`OPEN_WORK_RETENTION_LIMIT`, `FOLD_SNAPSHOT_VERSION` 4) — before that the start aged
   out after 550 parent rows and the shell left the roster while it ran, and a trickling shell's own
   output evicted its call's opening row (title, command) after 250 chunks.
+- **Background agents (Claude) outlive the parent's turn.** Since CLI 2.1.280 `run_in_background`
+  defaults to true: the parent's Agent call answers at once, its `result` ends the turn, and the
+  agent works on — in the biggest live thread 97 of 112 subagents finished after their parent's
+  turn (fixtures README observation 22; no capture yet). (1) `completeTurn` — and the auto-close of
+  a stale synthetic turn, which goes through it — neither settles nor forgets an in-flight call
+  whose owner, or an agent that owner runs inside, is a live task with `is_backgrounded: true`
+  (`outlivesParentTurn`): settling it reported the call "completed" with no result and dropped the
+  real one when it came. Such a call ends by its own `tool_result`; else `failed`, on its own turn,
+  at its owner's terminal edge (`closeInFlightToolsOf`, from `task_notification` and a terminal
+  `task_updated`, BEFORE the task row) or with the session (`closeLiveTasks` closes every call a
+  subagent still has open: teardown runs it before `completeTurn`, and between parent turns there
+  is no turn to complete). A foreground agent (`is_backgrounded` false or absent — fixture 07,
+  older CLIs) keeps the settle at the parent's turn end. Nested frames never open a turn and the
+  output chunk has no turn guard, so a subagent's call that starts between parent turns is
+  turnless for its whole life. (2) Ingestion closes a turnless `assistant_message`/`reasoning`
+  message on its own `item.completed` (`handleTurnlessCompletion`, the ids `handleContentDelta`
+  mints with no turn): nothing else closed it but a session stop — after a host restart, nothing
+  at all — and one live thread held 5 479 agent messages still "Thinking". (3) A `tool_progress`
+  heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
+  `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
+  a surfaced subagent.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
@@ -892,8 +969,14 @@ output from the places the row's preview reads (`commandOutputText`, one list wi
 that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
 command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
 and answered with `running`/`truncated`; never a file change's (Claude streams its result text as
-`file_change_output`, which is no command's output). `read_transcript` offers such a call's latest
-command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
+`file_change_output`, which is no command's output). The tool asks the host for ONE window
+(`?offset=&maxBytes=`, the caller's own, the offset stopped one byte past 8 MiB), cut from the
+host store's tool-output cache — a page costs the log's tail, not two whole-log reads and an 8 MiB
+body — and trims it to the result's room by the rule it windows a whole text with, so the pages are
+byte-identical whichever host cut them; a window outside the host's own rules is `INTERNAL`. A host
+from before windows ignores the query and answers the whole join, which the tool windows itself
+(`isThreadItemOutputWindow` tells the two bodies apart). `read_transcript` offers such a call's
+latest command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
 entry built from its latest chunk — and a host from before the route (its route-miss 404) falls
 back to the item's own text, never an error. A result is one JSON object capped at 60 000 bytes
 (`result.ts`); every tool that can outgrow it bounds itself first and says what it cut (`truncated`,

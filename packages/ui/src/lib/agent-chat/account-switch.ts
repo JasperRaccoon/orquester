@@ -102,12 +102,21 @@ export interface ChatAccountSwitchState {
   connection: string;
   /** A background shell or task is still reporting. */
   backgroundLive: boolean;
+  /**
+   * A composer send from this thread is still on its way (§7.4,
+   * `composer-sends.ts`) — possibly retrying after the composer that sent it
+   * was unmounted. The host has not seen the turn yet, so its own gate cannot
+   * refuse the switch; a switch racing that turn would leave it unclear which
+   * identity runs the message.
+   */
+  isSending: boolean;
 }
 
 /**
  * The client half of §3.4's identity gate, mirroring
  * `identitySwitchRefusal` on the host — the daemon is authoritative and
- * answers 409, this only decides whether the chip is offered.
+ * answers 409, this only decides whether the chip is offered. One clause the
+ * host cannot mirror: a send the client has not finished posting.
  */
 export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
   return (
@@ -116,7 +125,8 @@ export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
     state.queuedCount === 0 &&
     !state.reverting &&
     state.connection === "synchronized" &&
-    !state.backgroundLive
+    !state.backgroundLive &&
+    !state.isSending
   );
 }
 

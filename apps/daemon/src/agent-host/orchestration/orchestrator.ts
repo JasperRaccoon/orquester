@@ -64,6 +64,8 @@ import {
   type ThreadHistoryTurn,
   type ThreadItem,
   type ThreadItemOutputResponse,
+  type ThreadItemOutputWindowQuery,
+  type ThreadItemOutputWindowResponse,
   type ThreadReadResponse,
   type ThreadSearchResponse,
   type ThreadSessionState,
@@ -116,7 +118,7 @@ import {
 import type { IndexedItemPosition, IndexedTurn, ThreadIndex } from "../index/index.ts";
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
-import { joinToolOutput } from "../store/tool-output.ts";
+import { joinToolOutput, toolOutputWindow } from "../store/tool-output.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { attachedFileLine } from "../adapters/attachment-lines.ts";
@@ -202,18 +204,24 @@ export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
 };
 
 /**
- * The store plus the three optional members W2's implementation adds beyond the
+ * The store plus the four optional members W2's implementation adds beyond the
  * `ThreadStore` seam: the parse message for a thread that could not be read,
- * the backwards log scan that serves a `GET …/items/:id` for a row the fold's
- * retention window already dropped, and the join of a tool call's streamed
- * output that serves `GET …/items/:id/output`. Without the last two the
- * orchestrator reads `readAll` itself.
+ * the item read that serves a `GET …/items/:id` for a row the fold's retention
+ * window already dropped, and the join of a tool call's streamed output that
+ * serves `GET …/items/:id/output` — whole, or one window of it. Without the
+ * last three the orchestrator reads `readAll` itself.
  */
 export type HostThreadStore = ThreadStore & {
   threadError?(threadId: string): string | null;
   readItem?(threadId: string, itemId: string): Promise<ThreadItem | null>;
   /** One `readLog` joining a call's `tool.output` chunks (`store/tool-output.ts`). */
   readToolOutput?(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
+  /** One window of that join, from the store's incremental cache (`store/tool-output-cache.ts`). */
+  readToolOutputWindow?(
+    threadId: string,
+    itemId: string,
+    window: ThreadItemOutputWindowQuery
+  ): Promise<ThreadItemOutputWindowResponse | null>;
 };
 
 export interface OrchestratorOptions {
@@ -483,6 +491,15 @@ export interface Orchestrator {
    * belongs to, joined from the log; null when the item names no call.
    */
   readToolOutput(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
+  /**
+   * `GET …/items/:itemId/output?offset=&maxBytes=`: one UTF-8 window of that
+   * join; null when the item names no call.
+   */
+  readToolOutputWindow(
+    threadId: string,
+    itemId: string,
+    window: ThreadItemOutputWindowQuery
+  ): Promise<ThreadItemOutputWindowResponse | null>;
   readTurnDiff(
     threadId: string,
     turnCount: number,
@@ -3530,14 +3547,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
       requireHead(runtime);
+      const inFold = (runtime.state.items ?? []).find((item) => item.id === itemId);
+      // A message the resident fold still holds is answered from it: the fold
+      // merges a message's deltas exactly as the store's whole-log fold does
+      // (the snapshot's own invariant: snapshot + tail folds to the whole log),
+      // and it slims nothing — only a read's activities are slimmed (§5.6).
+      // The store would scan the log to learn the id is a message, then read
+      // and fold the whole log for its body.
+      if (inFold?.kind === "message") {
+        return inFold;
+      }
       // Retention drops the oldest 500 activities from the fold, and a
       // `tool.updated` row is persisted already slimmed while its
       // `tool.completed` carries the full payload — so the LOG, read
       // backwards, is the authoritative answer, not the projection (§5.6).
+      // So is it for a message retention dropped from the fold.
       if (store.readItem) {
         return store.readItem(threadId, itemId);
       }
-      const inFold = (runtime.state.items ?? []).find((item) => item.id === itemId);
       if (inFold) {
         return inFold;
       }
@@ -3564,6 +3591,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         return store.readToolOutput(threadId, itemId);
       }
       return joinToolOutput((await store.readAll(threadId)).events, itemId);
+    });
+
+  const readToolOutputWindow = async (
+    threadId: string,
+    itemId: string,
+    window: ThreadItemOutputWindowQuery
+  ): Promise<ThreadItemOutputWindowResponse | null> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      requireHead(runtime);
+      // The store's cache extends the join by the log's tail alone; a store
+      // without one windows the whole join — the same bytes either way.
+      if (store.readToolOutputWindow) {
+        return store.readToolOutputWindow(threadId, itemId, window);
+      }
+      const joined = joinToolOutput((await store.readAll(threadId)).events, itemId);
+      return joined === null ? null : toolOutputWindow(joined, window);
     });
 
   const readTurnDiff = async (
@@ -4409,6 +4453,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     searchThreads,
     readItem,
     readToolOutput,
+    readToolOutputWindow,
     readTurnDiff,
     summary,
     subscribe,

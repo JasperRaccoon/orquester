@@ -48,7 +48,8 @@ const idle: ChatAccountSwitchState = {
   queuedCount: 0,
   reverting: false,
   connection: "synchronized",
-  backgroundLive: false
+  backgroundLive: false,
+  isSending: false
 };
 
 describe("the option list", () => {
@@ -139,7 +140,10 @@ describe("the idle gate", () => {
       { reverting: true },
       { connection: "connecting" },
       { connection: "reconnecting" },
-      { backgroundLive: true }
+      { backgroundLive: true },
+      // A composer send still on its way (§7.4): a switch racing its retried
+      // turn would leave it unclear which identity runs that message.
+      { isSending: true }
     ];
     for (const patch of closed) {
       assert.equal(

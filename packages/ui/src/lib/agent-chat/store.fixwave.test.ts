@@ -426,8 +426,10 @@ describe("R7-5 — a returned queued message gives its attachments back as chips
    * writes its own back on every change. So parking a returned attachment
    * there while a composer is already mounted shows the user nothing until its
    * next mount — the user hits Stop, the message comes back, and the thing
-   * they attached is simply not in the tray. Only what the composer refuses
-   * may fall back, where the next mount finds it.
+   * they attached is simply not in the tray — and the composer's next save
+   * writes over it. The whole message goes to the composer instead
+   * (`returnMessage`), and a file it still refuses comes back into its draft
+   * as the path the user can see.
    */
   const attachment = (id: string): AttachmentRef => ({
     type: "file",
@@ -437,29 +439,34 @@ describe("R7-5 — a returned queued message gives its attachments back as chips
   });
 
   function mountComposer(sessionId: string, refuse: string[] = []): {
+    returned: Array<{ text: string; attachments: string[] }>;
     staged: string[];
     inserted: string[];
     unregister: () => void;
   } {
+    const returned: Array<{ text: string; attachments: string[] }> = [];
     const staged: string[] = [];
     const inserted: string[] = [];
     const unregister = registerComposerHandle(sessionId, {
       insertText: (text) => inserted.push(text),
+      // A NEW pick's door: a file coming back must never go through it, where
+      // the eight would refuse it.
       stageAttachment: (ref) => {
-        if (refuse.includes(ref.id)) {
-          return false;
-        }
         staged.push(ref.id);
         return true;
+      },
+      returnMessage: (message) => {
+        returned.push({ text: message.text, attachments: message.attachments.map((ref) => ref.id) });
+        return message.attachments.filter((ref) => refuse.includes(ref.id));
       },
       focusAtEnd: () => {},
       openControl: () => {},
       restoreFailedSend: () => false
     });
-    return { staged, inserted, unregister };
+    return { returned, staged, inserted, unregister };
   }
 
-  it("stages every accepted attachment as a chip and leaves the draft alone", async () => {
+  it("hands the composer the whole message, its attachments with its text, and leaves the draft alone", async () => {
     const { api, fake, state } = await store();
     const composer = mountComposer("s1");
     try {
@@ -472,8 +479,9 @@ describe("R7-5 — a returned queued message gives its attachments back as chips
       const queued = state().slice.queue[0]!;
 
       api.getState().actions.returnQueuedToComposer(queued.id);
-      assert.deepEqual(composer.staged, ["a1", "a2"], "both went back as chips");
-      assert.deepEqual(composer.inserted, ["with a file"], "and the text went to the composer");
+      assert.deepEqual(composer.returned, [{ text: "with a file", attachments: ["a1", "a2"] }]);
+      assert.deepEqual(composer.staged, [], "never as NEW picks, which the eight would refuse");
+      assert.deepEqual(composer.inserted, [], "nothing refused, so no path to write");
       assert.deepEqual(state().draft.attachments, [], "nothing was parked in the fallback draft");
       assert.equal(state().draft.text, "", "the composer owns the visible draft");
     } finally {
@@ -481,25 +489,28 @@ describe("R7-5 — a returned queued message gives its attachments back as chips
     }
   });
 
-  it("falls back to the draft for exactly the attachments the composer refuses", async () => {
+  it("writes a file the composer still refuses into its draft as its path, never parks it behind it", async () => {
     const { api, fake, state } = await store();
     const composer = mountComposer("s1", ["a2"]);
     try {
       fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
       api.getState().actions.queueMessage({
-        ...draft("over the budget"),
-        attachments: [attachment("a1"), attachment("a2")]
+        ...draft("one refused"),
+        attachments: [
+          attachment("a1"),
+          { type: "file", id: "a2", name: "a2.txt", sizeBytes: 10, path: "/w/p/.att/a2.txt" }
+        ]
       });
       await flush();
       const queued = state().slice.queue[0]!;
 
       api.getState().actions.returnQueuedToComposer(queued.id);
-      assert.deepEqual(composer.staged, ["a1"]);
       assert.deepEqual(
-        state().draft.attachments.map((ref) => ref.id),
-        ["a2"],
-        "a refused file is visible in the fallback, never dropped"
+        composer.inserted,
+        ["/w/p/.att/a2.txt"],
+        "a refused file is visible in the draft as its path, never dropped"
       );
+      assert.deepEqual(state().draft.attachments, [], "and never parked where the composer's next save drops it");
     } finally {
       composer.unregister();
     }

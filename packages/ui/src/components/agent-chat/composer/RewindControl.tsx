@@ -95,18 +95,25 @@ export function rewindTargetHint(target: Pick<RewindTarget, "createdAt" | "dropp
 /**
  * Whether the picker can act: something to go back to, and nothing in flight
  * that a rewind would race — a running turn (the host refuses it, §5.5), a
- * revert already rewriting history (§7.5), or a docked request waiting on the
- * user. One expression, shared by the button, the composer's double Escape and
- * the shell's, so the hint is never shown for a picker that will not open.
+ * revert already rewriting history (§7.5), a docked request waiting on the
+ * user, or a composer send still on its way (§7.4, `composer-sends.ts`): its
+ * turn would start against the history the rewind is about to cut. One
+ * expression, shared by the button, the composer's double Escape and the
+ * shell's, so the hint is never shown for a picker that will not open.
  */
 export function rewindPickerEnabled(input: {
   targetCount: number;
   isTurnActive: boolean;
   reverting: boolean;
   hasPendingRequest: boolean;
+  isSending: boolean;
 }): boolean {
   return (
-    input.targetCount > 0 && !input.isTurnActive && !input.reverting && !input.hasPendingRequest
+    input.targetCount > 0 &&
+    !input.isTurnActive &&
+    !input.reverting &&
+    !input.hasPendingRequest &&
+    !input.isSending
   );
 }
 
@@ -367,6 +374,8 @@ export interface RewindControlProps {
   isTurnActive: boolean;
   reverting: boolean;
   hasPendingRequest: boolean;
+  /** A composer send from this thread is still on its way (§7.4). */
+  isSending: boolean;
   onRewind: (target: RewindTarget) => void;
   /** Focus returns here when the picker closes — the composer, like every chip. */
   returnFocusTo?: () => HTMLElement | null;
@@ -383,6 +392,7 @@ export function RewindControl({
   isTurnActive,
   reverting,
   hasPendingRequest,
+  isSending,
   onRewind,
   returnFocusTo
 }: RewindControlProps): React.ReactElement | null {
@@ -391,7 +401,8 @@ export function RewindControl({
     targetCount: targets.length,
     isTurnActive,
     reverting,
-    hasPendingRequest
+    hasPendingRequest,
+    isSending
   });
   return (
     <ComposerPopover
