@@ -23,14 +23,25 @@
 /**
  * What to do with a notification whose `threadId` is not the session's own.
  *
- * - `agent-event` — the child's own lifecycle; becomes `task.*` rows on the
- *   child's agent id, never the parent's turn.
+ * - `agent-event` — the child's own lifecycle and its own calls; becomes
+ *   `task.*` rows and item rows on the child's agent id, never the parent's
+ *   turn.
  * - `drop` — child chatter that would rewrite parent state if forwarded.
  * - `parent` — parent-owned or unknown; forwarded unchanged.
  */
 export type CodexChildNotificationRoute = "agent-event" | "parent" | "drop";
 
-/** The child's own lifecycle. *T3: `CodexSessionRuntime.ts:1084-1095`.* */
+/**
+ * The child's own lifecycle, and the rows of its own calls.
+ *
+ * *T3: `CodexSessionRuntime.ts:1084-1095`* — T3 stops at `item/started` and
+ * `item/completed`, which it reads as progress; here a child's call is its own
+ * tool row (`normalise.ts` `childItemEvents`), so the four notifications that
+ * move a call — a file change's patch updates, both output streams and an MCP
+ * call's progress — are the child's too: dropped as chatter, a Codex drill-in
+ * never showed a command's output, and passed to the parent, a child's MCP
+ * progress named the child's raw item id and no owner, and wrote nothing.
+ */
 export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
   "turn/started",
   "turn/completed",
@@ -40,6 +51,10 @@ export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
   "model/rerouted",
   "item/started",
   "item/completed",
+  "item/fileChange/patchUpdated",
+  "item/commandExecution/outputDelta",
+  "item/fileChange/outputDelta",
+  "item/mcpToolCall/progress",
   "thread/closed",
   "error"
 ]);
@@ -48,17 +63,17 @@ export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
  * Child chatter. The three `thread/*` lifecycle entries and the repeat
  * `thread/started` are the load-bearing ones: the parent adapter maps them onto
  * the PARENT thread, so a child compacting would rewrite the parent's state.
+ * The child's text streams stay here: its message and reasoning items are no
+ * rows of its drill-in.
  *
- * *T3: `CodexSessionRuntime.ts:1097-1119`.*
+ * *T3: `CodexSessionRuntime.ts:1097-1119`* — less the three call
+ * notifications above that T3 drops.
  */
 export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "item/agentMessage/delta",
   "item/reasoning/textDelta",
   "item/reasoning/summaryTextDelta",
   "item/reasoning/summaryPartAdded",
-  "item/commandExecution/outputDelta",
-  "item/fileChange/outputDelta",
-  "item/fileChange/patchUpdated",
   "item/plan/delta",
   "turn/plan/updated",
   "turn/diff/updated",
@@ -69,6 +84,18 @@ export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "thread/compacted",
   "thread/started"
 ]);
+
+/**
+ * A collab child's item, as the host knows it: the provider's own item id
+ * namespaced by the child's thread. A child is a separate thread on the same
+ * connection with ids of its own, so its `call_1` must never be taken for the
+ * parent's `call_1` — ingestion, the fold and the host's output join all key a
+ * call on its item id (`toolUseId`). Opaque everywhere: nothing parses it, and
+ * the provider's own id stays in `providerRefs.providerItemId`.
+ */
+export function childItemId(childThreadId: string, itemId: string): string {
+  return `codex-child:${childThreadId}:${itemId}`;
+}
 
 export function routeCodexChildNotification(method: string): CodexChildNotificationRoute {
   if (CHILD_AGENT_EVENT_METHODS.has(method)) {

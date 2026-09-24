@@ -639,6 +639,15 @@ export interface ItemLifecyclePayload {
   /** Owning agent when the item ran inside a subagent. */
   agentId?: string;
   parentToolUseId?: string;
+  /**
+   * The adapter bounded the item's output and `data` holds only a head of it —
+   * Codex keeps a command's `aggregatedOutput` up to 64 KiB. Ingestion carries
+   * it onto the row as the payload's `truncated` (§5.6), the mark every reader
+   * already takes for "the stored item is cut": the MCP's `read_tool_output`
+   * then reads the call's streamed join instead of answering the head as the
+   * whole output. Absent when nothing was cut.
+   */
+  truncated?: boolean;
 }
 
 export interface ContentDeltaPayload {

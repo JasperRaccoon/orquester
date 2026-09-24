@@ -916,7 +916,27 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in,
   `deriveWorkLogEntries` keeps it out of every other view) and `unstampedChunkOwner` in
   `mcp/transcript.ts`. One whose call's rows are gone stays the parent's; the fold, its retention
-  and the history bridge keep mirroring the log.
+  and the history bridge keep mirroring the log. **A Codex collab child keeps the rule too**
+  (`childItemEvents`, `adapters/codex/normalise.ts`): its `item/*` became only the roster's
+  `task.progress` tick and its output deltas were dropped as chatter, so a Codex drill-in showed
+  ticks and never a command. A child's call is now the child's own rows — `agentId` on the envelope
+  (ingestion reads a row's author there: stamped on the payload alone, a child's call starting would
+  end the parent's thinking block) and on the payload — under `codex-child:<thread>:<item>`
+  (`childItemId`: a child's `call_1` is not the parent's), riding the parent turn live when the call
+  started; its own `turn/completed`, its `thread/closed`, a Stop or the exit closes what it
+  abandons, never the parent's settling turn (a Stop closes calls before tasks, as the exit does).
+  Its approvals stay the parent's card — no owner, on the parent turn live as the request arrives
+  (`requestTurnId`), like the call — joined to the namespaced call in the child's OWN request
+  bookkeeping (`requestsOf`, `session.ts`), which only the child's own turn end, its thread's close,
+  a Stop or the exit clears: cleared by the parent's settle, a decline on a card still open when a
+  parent's `wait` returned read "you were not asked", and a file change's card lost its diff. A
+  child's QUESTION rides no turn at all (`questionTurnId`): a turn's end dismisses the
+  native-callback questions on it (`settleStrandedQuestions`, in the log only — the adapter is
+  never answered), which on the parent's turn swept the child's open card while the child stayed
+  blocked, and a turn the thread never had (the child's own) is dropped by every rewind; nothing
+  settles an approval by its turn, so approvals stay on the parent's. A child's MCP progress is
+  its heartbeat (`tool.progress` on its task); its message and reasoning items stay ticks (codex
+  fixtures README observation 20).
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
@@ -1136,7 +1156,9 @@ it cannot read whole is named in `unavailableTurns` with a hint, and a failed pa
 error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
 row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
 output from the places the row's preview reads (`commandOutputText`, one list with
-`commandDisplayDetail`), unless the item is stored already cut (an update). A command's output
+`commandDisplayDetail`), unless the item is stored already cut (`truncated`: an update, or a Codex
+command's completion, which keeps its `aggregatedOutput` in `data.item` up to 64 KiB and past that
+only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`). A command's output
 that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
 command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
 and answered with `running`/`truncated`; never a file change's (Claude streams its result text as

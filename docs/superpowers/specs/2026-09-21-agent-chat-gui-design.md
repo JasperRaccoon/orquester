@@ -1318,6 +1318,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `turn.completed {state:"interrupted"}`. A Codex `cancel` ends the turn as `status:"interrupted"`
   with `items: []`, so a fold that trusts `turn.items` erases the turn — the fold must not
   (`apps/daemon/src/agent-host/adapters/codex/normalise.ts`, `…/session.ts`).*
+  *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a command's
+  completion keeps its output. It arrives whole in `aggregatedOutput` and a short command never
+  streams it (fixtures README observation 18), while `detail` is cut to a 180-character preview at
+  ingestion — so the completion carries it in `data.item.aggregatedOutput`, where
+  `commandOutputText` and the slimmer already read Codex's output, up to 64 KiB of UTF-8; past that
+  the head, cut on a character boundary, and `truncated` on the item (`ItemLifecyclePayload`),
+  which ingestion carries onto the row, so the MCP's `read_tool_output` reads the call's streamed
+  join instead of answering a head as the whole (`adapters/codex/items.ts`,
+  `COMMAND_OUTPUT_MAX_BYTES`).*
 - **Two question paths.** The RPC path (`item/tool/requestUserInput`) filters **hard**: a question
   is dropped unless it has id, header, prompt **and** at least one option whose label *and*
   description are both non-empty, and `multiSelect` is hard-coded `false`; if every question is
@@ -1398,6 +1407,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   calls itself. And `developer_instructions: null` is sent explicitly (§4.4). Unverified because no
   capture produced them: `item/permissions/requestApproval`, `item/tool/call`,
   `account/chatgptAuthTokens/refresh` and `attestation/generate` — all answered, none exercised.*
+  *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a child's calls
+  are not chatter. T3 routes a child's `item/*` as lifecycle, drops both output deltas and the patch
+  updates, and passes an MCP call's progress to the parent; here all six are the child's
+  (`child-routing.ts`) and become its own rows — the child's thread id as `agentId` on envelope and
+  payload, the item id namespaced by that thread (`codex-child:<thread>:<item>`), every row of a
+  call on the parent turn live when it started, its MCP progress the child's heartbeat — while the
+  child's text streams stay chatter, so its messages stay roster ticks. A child's approval is still
+  the parent's card, on the parent turn live as it arrives, joined to the child's namespaced call in
+  the child's own request bookkeeping, which the parent's settle never clears. A child's question is
+  the parent's card on NO turn: a turn's end dismisses the native-callback questions on it (§6.2), so
+  on the parent's turn a parent whose `wait` returned swept the card while the child still waited
+  for its answer (fixtures README observation 20).*
 
 #### OpenCode
 
@@ -3939,6 +3960,15 @@ the owner of its call's lifecycle rows in the same derivation input — `callOwn
 `lib/agent-chat/entries.logic.ts`, through which `itemsForAgent` includes it in its owner's drill-in
 and `deriveWorkLogEntries` leaves it out of every other view. A chunk whose call has no owned row in
 the input stays the parent's, as before.*
+
+*Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a Codex drill-in
+held the child's progress ticks and never a call — the adapter wrote a child's `item/*` only as the
+roster's `task.progress` and dropped its output deltas as chatter. A collab child's call is now its
+own rows by the same rule: its start, its output chunks and its end carry the child's thread id as
+`agentId` and one turn, the parent's turn live when the call started, under an item id namespaced by
+the child's thread, so it renders in the child's drill-in as one call with its output joined and
+never in the parent's timeline (`adapters/codex/normalise.ts` `childItemEvents`; codex fixtures
+README observation 20).*
 
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind

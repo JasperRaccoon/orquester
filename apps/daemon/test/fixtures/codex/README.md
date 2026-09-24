@@ -624,8 +624,9 @@ Points for the adapter:
   approval, `"source":"unifiedExecStartup"` once running. Output arrives whole in
   `item/completed.aggregatedOutput` for short commands — `item/commandExecution/outputDelta` never
   fired in these captures — so `content.delta {command_output}` cannot be the only path to command
-  output. `commandActions` is the parsed command (`{"type":"listFiles","command":"ls -1","path":null}`,
-  or `{"type":"unknown","command":"sleep 30 && ls -1"}` when it cannot parse).
+  output, and the completion keeps it (observation 20). `commandActions` is the parsed command
+  (`{"type":"listFiles","command":"ls -1","path":null}`, or
+  `{"type":"unknown","command":"sleep 30 && ls -1"}` when it cannot parse).
 - **`turn/diff/updated` is cumulative and repeats.** `11-…` has five notifications for two
   distinct diffs; the diff is a full `diff --git` blob including index hashes, and each one
   supersedes the last. De-duplicate on content, not on arrival.
@@ -689,3 +690,57 @@ The last one is guarded: a `completed` or `interrupted` record arriving during a
 opened is taken to be about the run before (`relaunchedTurns`) — it marks the child settled but
 writes no `task.completed`, which would settle the new run, and that run ends at its own
 `turn/completed`.
+
+## 20. A collab child's calls are its own rows, and a command's completion keeps its output — read from the bindings, not captured
+
+**Not captured.** No file in this set spawns a collab child, and no command in it printed more than
+a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`, 0.154.0), for plan
+`2026-09-24-follow-ups-adapters-output-composer-history`, Task 3.
+
+- A child's items arrive on the parent's connection under the child's `threadId`: `item/started` and
+  `item/completed` (`{item, threadId, turnId, …}`), `item/commandExecution/outputDelta` and
+  `item/fileChange/outputDelta` (`{threadId, turnId, itemId, delta}` — the file-change stream is
+  documented as "Deprecated legacy notification for `apply_patch` textual output. The server no
+  longer emits this notification."), `item/fileChange/patchUpdated` and `item/mcpToolCall/progress`
+  (`{threadId, turnId, itemId, message}`). The item ids are the child's own; nothing in the
+  bindings makes them unique across threads.
+- The normaliser (`normalise.ts`, `childItemEvents`) makes a child's **call** — an item of a
+  tool-lifecycle type — the child's own rows: `item.*` and `content.delta` events carrying
+  `agentId: <child thread id>` on the envelope **and** the payload, under
+  `codex-child:<child thread id>:<item id>` (`childItemId`, `child-routing.ts`), each riding the
+  PARENT turn that was live when the call started (none, when it started between parent turns),
+  the child's own turn and item id kept in `providerRefs`. The roster's `task.progress` tick stays,
+  and a child's MCP progress is the child's heartbeat: `tool.progress` on the namespaced call,
+  carrying the child's `taskId` (and the call's title as `toolName`), which ingestion persists as
+  the agent's current activity — passed to the parent, it named the raw id and wrote nothing.
+  The child's message, reasoning, plan, compaction and `subAgentActivity` items stay ticks: their
+  text streams are still chatter, and the parent-only extras those items carry would rewrite the
+  parent's thread.
+- A child's call ends at its own `item/completed`. One the child abandons is closed by the child's
+  own `turn/completed` (by the parent's rule: `failed` when the turn was interrupted, else
+  `completed`), by its `thread/closed` (`failed`), or by a Stop or the process's exit — never by the
+  parent's `turn/completed`, which a child works on past. A Stop closes the calls before the tasks.
+- A child's approval stays the parent's card: the request names the child's `threadId`, `turnId`
+  and raw `itemId`. Its rows carry no owner and ride the parent turn live as the request arrives
+  (none between parent turns), as the child's call does; the child's turn stays in `providerRefs`.
+  The session joins the card to the child's namespaced call in the child's own request bookkeeping
+  (`requestsOf`, `session.ts`), so a decline is not read as a policy deny and a file change's card
+  carries the child's diff — kept apart from the parent's because a parent whose `wait` returned
+  settles its turn while the child's card is still open, and cleared only by the child's own
+  `turn/completed` or `thread/closed`, a Stop or the exit. A child's item declined with no request
+  behind it is a `tool.denied` owned by the child.
+- A child's question (`item/tool/requestUserInput`) is the parent's card too, but it rides NO turn
+  (`questionTurnId`, `session.ts`; the child's turn stays in `providerRefs`), and that is where it
+  differs from an approval: nothing settles an approval by its turn, while the host dismisses every
+  native-callback question on a turn when that turn ends (`settleStrandedQuestions`, §6.2 — in the
+  log only, never an answer to the adapter). On the parent's turn, a parent whose `wait` returned
+  swept the child's open card away and the child stayed blocked until a Stop; on the child's own
+  turn, a turn the thread never had, every rewind dropped it. Turnless, it is answered or cancelled
+  like any card, and a Stop or the exit settles it.
+- `commandExecution.aggregatedOutput` is "The command's output, aggregated from stdout and stderr";
+  the bindings document no bound. The completion keeps it in `data.item.aggregatedOutput` — where
+  `commandOutputText` and the wire slimmer's `projectCommandData` already read Codex's output — up
+  to 64 KiB of UTF-8 (`COMMAND_OUTPUT_MAX_BYTES`, `items.ts`). Past that it keeps the head, cut on a
+  character boundary, and the item carries `truncated: true`, so the MCP's `read_tool_output` reads
+  the call's streamed join (when it streamed) instead of answering the head as the whole output.
+  The row's `detail` is still the output cut to ingestion's 180-character preview.
