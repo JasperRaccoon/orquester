@@ -3158,9 +3158,12 @@ the folded state plus the sequence it was folded to — held in memory for a 5-m
 that value, paints it before anything is fetched, and opens its stream with `after=<retained seq>`
 (§6.5). `cachedThreadState` keeps a retained `synchronized` connection **as-is**, so no sync label
 flashes over a timeline that is already on screen and correct; anything else falls back to the
-cold-start path. The in-flight command flags (`reverting`, `stopping`) and the thread-level error
-banner are dropped with the generation that owned them; the queue, drafts, disclosures and scroll
-position survive. Every write is guarded by an **owner token** minted per live generation, so a
+cold-start path. The in-flight command flags (`reverting`, `stopping`), the request ids with a
+decision in flight (`respondingRequestIds`) and the thread-level error banner are dropped with the
+generation that owned them — a command still in flight settles into that generation, never into the
+next (§7.4 names the two that must not be lost with it: a turn and an answer retry past the teardown,
+and a queued send failing there is held by the live generation); the queue, drafts, disclosures and
+scroll position survive. Every write is guarded by an **owner token** minted per live generation, so a
 teardown that lands after a newer store has claimed the same thread cannot clobber the newer
 cache. The alternative first shipped here — holding the live stream open for fifteen minutes per
 recently-viewed tab — bought the same instant repaint at the cost of one live connection and one
@@ -3369,8 +3372,8 @@ message". It lists the thread's rewindable user messages newest first (`deriveRe
 with `revertTurnCount`, so the picker and the per-row button can never disagree), each naming how
 many turns it drops, and confirms in the same panel as the per-row button. The picker is also a
 composer control next to the attach button (`data-composer-shortcut="rewind"`, deliberately no
-chord), hidden when nothing can be rewound and disabled while a turn, a request or a revert is in
-flight. The first Escape shows "Press Esc again to rewind to an earlier message" for a moment; the
+chord), hidden when nothing can be rewound and disabled while a turn, a request, a revert or a send
+is in flight. The first Escape shows "Press Esc again to rewind to an earlier message" for a moment; the
 second, inside the 600 ms window of `createEscapeSequence`, opens the control. An idle Escape
 outside the composer goes through the shell's resolver (`escape-action.ts`), which returns
 `"rewind"` for the same double press and opens the control through the composer bridge.*
@@ -3401,7 +3404,8 @@ message. The conversation is kept.") — and it carries the `account` token so t
 address it, but it still gets **no chord**: it is changed rarely, and every chord spent is one the
 terminal surfaces cannot have. It is offered only while the thread is idle — the client half of
 §3.4's gate, `canSwitchChatAccount` in `lib/agent-chat/account-switch.ts`, mirroring the host's
-`identitySwitchRefusal` — and disabled otherwise with "Available when the agent is idle"; the
+`identitySwitchRefusal`, plus the one clause the host cannot mirror: a composer send of the thread
+still on its way — and disabled otherwise with "Available when the agent is idle"; the
 daemon is authoritative and answers 409 to anything else. An OpenCode thread keeps the plain label
 it always had, because its server owns the identity and a control that could only refuse is worse
 than no control. `/effort <id>` is a narrow client-side bridge that writes the current `ModelSelection`'s
@@ -3448,6 +3452,46 @@ its bridge handle in the commit that loads the thread's draft — so a settle ne
 draft missing its last keystrokes, and never misses a composer that has just mounted for the thread.
 The live write is a `flushSync`, so the restore is committed and its write scheduled before any
 later swap or unmount renders.*
+
+*Built: **a send belongs to its thread, not to the composer that sent it.** A project switch
+unmounts the composer while its post keeps retrying, and the thread store's generation that posted
+it is torn down 2 s later; a "sending" flag in component state started the remounted composer idle
+and empty, and a retyped message went out again under a new `commandId` no receipt dedupes. So a
+send registers under the thread it left from — synchronously, inside the event that submitted it —
+in a module-level registry (`composer-sends.ts`: one token per send, each settle closing its own
+token only, after any restore has landed), and every reader of "is this thread sending" reads it
+through `useComposerSending`: the send button and Enter (`submit` checks the live registry), the
+rewind picker, "Rewind to here" and the shell's Esc Esc (`rewindPickerEnabled`'s `isSending`), and
+the account chip. A remounted composer's "Sending" spinner is the whole notice. The post is bounded:
+every command attempt is aborted after 25 s (`COMMAND_ATTEMPT_TIMEOUT_MS` in
+`lib/agent-chat/store.ts`, past the daemon's own 20 s host timeout) and retried as a lost response,
+and a `turn` or an `answer` keeps retrying with the same `commandId` after its store generation is
+gone — giving up there turned a response the host may already have accepted into a failed send the
+user resent. What that generation still had in flight never strands the next one: a queued send that
+fails after the teardown is held at the front of the thread's live generation with the failure's
+banner, or with none merged into its persisted draft (`holdQueuedMessageInThread`); a message it
+hands back to the draft after the teardown — a rewind whose `/revert` was still out — merges through
+the thread's live slice or storage, never over its own stale copy (`updateThreadDraft`); and the
+request ids with an answer in flight do not ride the retained snapshot (`cachedThreadState`), so a
+settled answer never leaves its card locked.*
+
+*Built: **a draft keeps every file that comes back to it, and holds the send over the eight.** A
+failed send's chips come back ahead of the ones staged while it was in flight, a Stop returns every
+queued message, a rewind returns its message: each file was part of a message once, so none is
+refused for the count (`decideStagedAttachmentForRef`'s `enforceCount: false`) and
+`loadComposerDraft` no longer keeps only the first eight while the text still names the rest. A
+draft over `MAX_TURN_ATTACHMENTS` is neither sent nor queued until trimmed — "A message can carry 8
+attachments — remove N before sending." (`attachmentCountBlockSend`, part of `sendDisabledReason`) —
+and the composer's status line says so beside any notice, worked out from the draft on every render
+(`composerStatusText`), so it follows every chip the user removes and never disagrees with the
+button; new picks are still refused at eight. A returned message merges behind the draft through the
+merge a failed send makes the other way round (`mergeMessageIntoDraft`), so its `[Image #N]` keeps
+naming its own images, never the draft's. With a composer mounted the whole message goes to it
+through the bridge (`returnMessage`, `draftAfterReturn` in `composer-draft.ts`), and a file it still
+refuses for a type or a size is written into its draft as its path — never parked in the store's
+draft behind it, where its next save wrote over it. With none mounted the same merge, bounds and
+fallback run over the persisted draft (`persistedDraftAfterReturn`), so no target drops a file: the
+next mount stages every ref the merge wrote.*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind

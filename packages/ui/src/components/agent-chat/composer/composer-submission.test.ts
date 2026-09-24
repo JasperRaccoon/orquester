@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 
 import {
+  attachmentCountBlockSend,
   attachmentRejectionReason,
   buildPlanImplementationPrompt,
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
+  composerStatusText,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
   draftAfterSend,
@@ -14,6 +16,7 @@ import {
   hasSendableContent,
   implementationTextResolver,
   isPasteAsTextShortcut,
+  mergeMessageIntoDraft,
   nextPastedTextFileName,
   pastedTextDisposition,
   PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES,
@@ -384,6 +387,70 @@ test("a staged ref does not block send: it is already uploaded", () => {
   assert.equal(uploadsBlockSend([{ status: "ready" }]), null);
 });
 
+test("a file coming back is never refused for the count, and every other bound still applies", () => {
+  // A failed send's files, a returned queued message's, a rewound message's,
+  // a persisted draft's: each was part of a message once, so the eight never
+  // refuse it — the send gate holds the draft instead.
+  const eight: StagedAttachmentLike[] = Array.from({ length: 8 }, (_, index) => ({
+    key: `k${index}`,
+    status: "ready" as const,
+    ref: { id: `/tmp/${index}` }
+  }));
+  const back = { type: "file", id: "/tmp/back", name: "back.txt", mimeType: "text/plain", sizeBytes: 12 } as const;
+  assert.equal(decideStagedAttachmentForRef({ existing: eight, ref: back }).kind, "rejected", "a new pick is refused at eight");
+  assert.equal(decideStagedAttachmentForRef({ existing: eight, ref: back, enforceCount: false }).kind, "staged");
+  assert.equal(
+    decideStagedAttachmentForRef({
+      existing: [...eight, { key: "picked:back", status: "ready", ref: { id: back.id } }],
+      ref: back,
+      enforceCount: false
+    }).kind,
+    "duplicate",
+    "one chip per file still"
+  );
+  const huge = { ...back, id: "/tmp/huge", sizeBytes: 60 * 1024 * 1024 };
+  assert.equal(decideStagedAttachmentForRef({ existing: [], ref: huge, enforceCount: false }).kind, "rejected");
+  const vector = { type: "image", id: "/tmp/v.svg", name: "v.svg", mimeType: "image/svg+xml", sizeBytes: 12 } as const;
+  assert.equal(decideStagedAttachmentForRef({ existing: [], ref: vector, enforceCount: false }).kind, "rejected");
+});
+
+test("the status line works the count out from the draft, so it follows every chip removed and goes once the draft fits", () => {
+  // The count part is never held in the notice: a held copy said "remove 8"
+  // after the user had removed them, over a Send button that was enabled.
+  const chips = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ key: `k${index}`, status: "ready" as const }));
+  const failed = "The agent host is restarting.";
+  assert.equal(
+    composerStatusText({ notice: failed, attachments: chips(16) }),
+    `${failed} A message can carry 8 attachments — remove 8 before sending.`
+  );
+  assert.equal(
+    composerStatusText({ notice: failed, attachments: chips(13) }),
+    `${failed} A message can carry 8 attachments — remove 5 before sending.`
+  );
+  assert.equal(composerStatusText({ notice: failed, attachments: chips(8) }), failed, "fits: the failure alone");
+  assert.equal(
+    composerStatusText({ notice: null, attachments: chips(9) }),
+    "A message can carry 8 attachments — remove 1 before sending."
+  );
+  assert.equal(composerStatusText({ notice: null, attachments: chips(8) }), null);
+});
+
+test("a draft over the eight cannot be sent, and says how many to remove", () => {
+  const chips = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ key: `k${index}`, status: "ready" as const }));
+  assert.equal(attachmentCountBlockSend(chips(0)), null);
+  assert.equal(attachmentCountBlockSend(chips(8)), null, "eight is the cap, not over it");
+  assert.equal(
+    attachmentCountBlockSend(chips(9)),
+    "A message can carry 8 attachments — remove 1 before sending."
+  );
+  assert.equal(
+    attachmentCountBlockSend(chips(16)),
+    "A message can carry 8 attachments — remove 8 before sending."
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Fix wave
 // ---------------------------------------------------------------------------
@@ -747,6 +814,86 @@ test("a send that went out, a refusal and a failed Implement all leave the draft
   );
   // Wave D1: Implement's prompt is the composer's, and it never carries a chip.
   assert.equal(draftAfterSend({ outcome: failedWith(null), sent: [], draft: typedSince }), null);
+});
+
+// ---------------------------------------------------------------------------
+// A message coming back BEHIND the draft: the same merge, the other way round
+// ---------------------------------------------------------------------------
+
+test("a message returned behind the draft keeps naming its own images, never the draft's", () => {
+  // A queued message returned (or a Stop's drain, or a rewind) into a draft
+  // that already holds an image of its own: its `[Image #1]` named ITS first
+  // image, which now sits second.
+  const own = imageChip("own");
+  const queued = imageChip("queued");
+  assert.deepEqual(
+    mergeMessageIntoDraft({
+      draft: { text: "[Image #1] is mine", attachments: [own] },
+      message: { text: "queued: look at [Image #1]", attachments: [queued] },
+      at: "back"
+    }),
+    { text: "[Image #1] is mine\n\nqueued: look at [Image #2]", attachments: [own, queued] }
+  );
+
+  // A returned image the draft already holds IS that chip: its placeholder
+  // follows it there, and no chip is doubled.
+  const pick = imageChip("pick");
+  const other = imageChip("other");
+  assert.deepEqual(
+    mergeMessageIntoDraft({
+      draft: { text: "", attachments: [own, pick] },
+      message: {
+        text: "[Image #1] then [Image #2], not [Image #9]",
+        attachments: [{ ...pick, key: "ref:att-pick" }, other]
+      },
+      at: "back"
+    }),
+    { text: "[Image #2] then [Image #3], not [Image #9]", attachments: [own, pick, other] }
+  );
+});
+
+test("a returned message joins the draft's text with one blank line, and no blank lines when either side is empty", () => {
+  const report = fileChip("report");
+  assert.deepEqual(
+    mergeMessageIntoDraft({
+      draft: { text: "typed since  \n", attachments: [] },
+      message: { text: "the queued one", attachments: [] },
+      at: "back"
+    }),
+    { text: "typed since\n\nthe queued one", attachments: [] }
+  );
+  assert.deepEqual(
+    mergeMessageIntoDraft({
+      draft: { text: "typed since", attachments: [] },
+      message: { text: "", attachments: [report] },
+      at: "back"
+    }),
+    { text: "typed since", attachments: [report] },
+    "a message of files alone brings no blank lines"
+  );
+  assert.deepEqual(
+    mergeMessageIntoDraft({
+      draft: { text: "  ", attachments: [] },
+      message: { text: "the queued one", attachments: [] },
+      at: "back"
+    }),
+    { text: "the queued one", attachments: [] }
+  );
+});
+
+test("a failed send comes back ahead of the draft exactly as it was sent, the draft's own images renumbered behind it", () => {
+  // The merge in front: the restored text is kept as it was — trailing
+  // whitespace included — and only the draft behind it moves.
+  const before = imageChip("before");
+  const pasted = imageChip("pasted");
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("compare [Image #1]  "),
+      sent: [before],
+      draft: { text: "then crop [Image #1]", attachments: [pasted] }
+    }),
+    { text: "compare [Image #1]  \n\nthen crop [Image #2]", attachments: [before, pasted] }
+  );
 });
 
 // ---------------------------------------------------------------------------

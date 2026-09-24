@@ -15,6 +15,7 @@
 
 import type { AttachmentRef } from "@orquester/api/agent-chat";
 
+import type { ComposerDraft } from "../../../lib/agent-chat/composer.logic";
 import type { StagedAttachment } from "./ComposerAttachments";
 import type { ComposerShortcutCommand } from "./composer-shortcuts";
 import type { FailedSendRestore } from "./composer-submission";
@@ -23,7 +24,8 @@ export interface ComposerHandle {
   /** Insert text into the draft at the caret (or append it); focus stays where it is (§7.4). */
   insertText: (text: string, mode?: "cursor" | "append") => void;
   /**
-   * Stage an **already-uploaded** attachment as a real chip.
+   * Stage a NEW **already-uploaded** attachment as a real chip — a browser
+   * pick, a chat-targeted drop.
    *
    * Everything a picked file gets — a place in the eight, a removable chip,
    * the upload-complete gate — minus the upload, which already happened.
@@ -32,6 +34,16 @@ export interface ComposerHandle {
    * Re-staging the same ref is idempotent and returns `true`.
    */
   stageAttachment: (ref: AttachmentRef) => boolean;
+  /**
+   * Merge a message coming BACK into the live draft (§7.4) — a queued message
+   * returned, the queue a Stop drained, a rewound message — behind what it
+   * holds (`draftAfterReturn`): its text after a blank line, its `[Image #N]`
+   * following its own images, every file staged as a returning chip (never
+   * refused for the count — the send gate holds a draft over the eight) and
+   * its context records carried with the draft. Answers the refs a bound
+   * still refused, for the caller to write into the draft as their paths.
+   */
+  returnMessage: (message: ComposerDraft) => AttachmentRef[];
   /** Focus the textarea with the caret at the end. */
   focusAtEnd: () => void;
   /**
@@ -43,9 +55,9 @@ export interface ComposerHandle {
    * Put a failed send's draft back into this composer's live draft (§7.4) —
    * `draftAfterSend` over what it holds now, the send's notice with it — for
    * a send from this thread that the composer it left from can no longer put
-   * back itself (a project switch unmounted it, or it shows another thread).
-   * `false` when this composer does not show that thread either, so the
-   * caller writes the thread's persisted draft instead.
+   * back itself (a project switch unmounted it — or, defensively, it shows
+   * another thread). `false` when this composer does not show that thread
+   * either, so the caller writes the thread's persisted draft instead.
    */
   restoreFailedSend: (restore: FailedSendRestore<StagedAttachment>) => boolean;
 }
@@ -89,10 +101,27 @@ export function stageComposerAttachment(sessionId: string, ref: AttachmentRef): 
 }
 
 /**
+ * Hand a message coming back to the composer that shows its thread (§7.4).
+ * `null` when none is mounted — the caller merges it into the thread's
+ * persisted draft instead, where the next mount loads it — else the refs the
+ * composer could not stage, which the caller writes into the draft as their
+ * paths (`composerTextForDelivery`). Nothing goes into the persisted draft
+ * behind a mounted composer: it owns the one visible draft, and its next save
+ * would write over it.
+ */
+export function returnComposerMessage(
+  sessionId: string,
+  message: ComposerDraft
+): AttachmentRef[] | null {
+  return composerHandle(sessionId)?.returnMessage(message) ?? null;
+}
+
+/**
  * Hand a failed send's draft to the composer that shows its thread (§7.4).
- * `false` when none takes it — nothing is mounted for that thread, or what is
- * no longer shows it — and the caller then writes the thread's persisted
- * draft, where the next composer to show the thread loads it.
+ * `false` when none takes it — nothing is mounted for that thread, or
+ * (defensively) the one registered no longer shows it — and the caller then
+ * writes the thread's persisted draft, where the next composer to show the
+ * thread loads it.
  */
 export function restoreComposerFailedSend(
   sessionId: string,

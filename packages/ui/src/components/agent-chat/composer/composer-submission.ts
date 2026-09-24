@@ -260,8 +260,11 @@ export interface StagedAttachmentLike {
  * A browser element pick, a chat-targeted file drop and a queued message
  * coming back to the composer all arrive as an `AttachmentRef` whose bytes are
  * already on the daemon. They still have to behave exactly like a file the
- * user picked here: count against the eight, show a chip, and be removable.
- * Only the upload is skipped, because it already happened.
+ * user picked here: show a chip, be removable, and — a NEW file — count
+ * against the eight. Only the upload is skipped, because it already happened.
+ * A file coming BACK (`enforceCount: false`) is never refused for the count:
+ * it was part of a message once, so dropping it would lose it, and
+ * {@link attachmentCountBlockSend} holds the send instead.
  *
  * Three outcomes, so the caller can react honestly:
  *  - `duplicate` — this ref is already staged. Delivering the same pick twice
@@ -285,25 +288,49 @@ export function stagedAttachmentKeyForRef(ref: { id: string }): string {
   return `ref:${ref.id}`;
 }
 
+/**
+ * The chip fields an uploaded ref stages with — keyed by its id, and a ref
+ * with no declared `mimeType` measured as a file (see below). One spelling for
+ * every place a ref becomes a chip, bounded or not.
+ */
+export function stagedFieldsForRef(ref: AttachmentRef): {
+  key: string;
+  name: string;
+  sizeBytes: number;
+  mimeType: string;
+} {
+  return {
+    key: stagedAttachmentKeyForRef(ref),
+    name: ref.name,
+    sizeBytes: ref.sizeBytes ?? 0,
+    mimeType: ref.mimeType ?? "application/octet-stream"
+  };
+}
+
 export function decideStagedAttachmentForRef(input: {
   existing: readonly StagedAttachmentLike[];
   ref: AttachmentRef;
+  /**
+   * `false` for a file coming BACK — a persisted draft loaded, a message
+   * returned: the eight never refuse it (§7.4). The MIME and size bounds
+   * still apply, and so does de-duplication. Defaults to `true`, a new file.
+   */
+  enforceCount?: boolean;
 }): StageRefDecision {
-  const key = stagedAttachmentKeyForRef(input.ref);
-  if (input.existing.some((entry) => entry.key === key || entry.ref?.id === input.ref.id)) {
-    return { kind: "duplicate", key };
+  const fields = stagedFieldsForRef(input.ref);
+  if (input.existing.some((entry) => entry.key === fields.key || entry.ref?.id === input.ref.id)) {
+    return { kind: "duplicate", key: fields.key };
   }
-  const mimeType = input.ref.mimeType ?? "application/octet-stream";
-  const sizeBytes = input.ref.sizeBytes ?? 0;
+  const counted = input.enforceCount !== false;
   const reason = attachmentRejectionReason({
-    name: input.ref.name,
-    sizeBytes,
-    mimeType,
-    stagedCount: input.existing.filter((entry) => entry.status === "ready").length,
-    preparingCount: input.existing.filter((entry) => entry.status !== "ready").length
+    name: fields.name,
+    sizeBytes: fields.sizeBytes,
+    mimeType: fields.mimeType,
+    stagedCount: counted ? input.existing.filter((entry) => entry.status === "ready").length : 0,
+    preparingCount: counted ? input.existing.filter((entry) => entry.status !== "ready").length : 0
   });
   if (reason) return { kind: "rejected", reason };
-  return { kind: "staged", key, name: input.ref.name, sizeBytes, mimeType };
+  return { kind: "staged", ...fields };
 }
 
 /** §7.4: **uploads must finish before send.** */
@@ -317,6 +344,37 @@ export function uploadsBlockSend(
     return "Waiting for attachments to finish uploading.";
   }
   return null;
+}
+
+/**
+ * §4.1's eight, as a send gate (§7.4). New files are refused at the eighth,
+ * but a draft that files came BACK into — a failed send's ahead of the ones
+ * staged while it was in flight, two queued messages a Stop returned, a
+ * persisted draft an older build wrote — keeps every one of them, visible and
+ * removable, and cannot be sent (or queued) until enough are removed: the
+ * host would refuse it anyway.
+ */
+export function attachmentCountBlockSend(attachments: readonly unknown[]): string | null {
+  const over = attachments.length - MAX_TURN_ATTACHMENTS;
+  if (over <= 0) return null;
+  return `A message can carry ${MAX_TURN_ATTACHMENTS} attachments — remove ${over} before sending.`;
+}
+
+/**
+ * What the composer's status line says (§7.4): its notice — a failure, a
+ * refusal, a hint — and, while the draft holds more than the eight, the count
+ * gate beside it. The count part is worked out from the draft on every
+ * render, never held in the notice: a held copy went on saying "remove 8"
+ * after the user had removed them, over a send button that was enabled again.
+ * It moves with every chip removed and goes once the draft fits.
+ */
+export function composerStatusText(input: {
+  notice: string | null;
+  attachments: readonly unknown[];
+}): string | null {
+  const over = attachmentCountBlockSend(input.attachments);
+  if (input.notice === null || input.notice.length === 0) return over;
+  return over === null ? input.notice : `${input.notice} ${over}`;
 }
 
 /** A draft with neither text nor a finished attachment has nothing to send. */
@@ -480,6 +538,69 @@ export interface RestorableAttachment {
 const IMAGE_PLACEHOLDER = /\[Image #(\d+)\]/g;
 
 /**
+ * One message merged into a draft (§7.4) — the one merge every message that
+ * comes back to the composer goes through: a failed send AHEAD of what was
+ * typed or staged while it was in flight ({@link draftAfterSend}), and a
+ * returned queued message, a Stop's drain or a rewound message BEHIND what the
+ * draft holds (`appendToDraft` in the thread store, through
+ * `draftAfterReturn` and `persistedDraftAfterReturn`).
+ *
+ * Whichever goes first keeps its chips as they are; the other's follow, its
+ * text after one blank line — none when either side has no text — and its
+ * chips after the first's. A message's text is kept exactly as it was, and so
+ * is the draft's, except that a draft a message goes BEHIND loses its trailing
+ * whitespace, so the blank line is the only gap between them (the rule the
+ * store's own append always had). Chips merge by `key`, or by the upload's
+ * ref id as {@link decideStagedAttachmentForRef} has it, so a file both sides
+ * hold is one chip. An image's `[Image #N]` is its position among the staged
+ * images, so the first's text keeps naming its images, and each placeholder
+ * the second's text wrote for one of its OWN images follows that image to
+ * where it lands — never to an image of the other side. A number that names
+ * none of its images is the user's own text and stays as typed.
+ *
+ * No count here: a message coming back keeps every file, and the send gate
+ * ({@link attachmentCountBlockSend}) holds a draft over the eight.
+ */
+export function mergeMessageIntoDraft<A extends RestorableAttachment>(input: {
+  draft: { text: string; attachments: readonly A[] };
+  message: { text: string; attachments: readonly A[] };
+  /** `front`: a failed send, ahead of the draft. `back`: a message returned behind it. */
+  at: "front" | "back";
+}): { text: string; attachments: A[] } {
+  const [first, second] =
+    input.at === "front" ? [input.message, input.draft] : [input.draft, input.message];
+
+  const firstCopyOf = (entry: A): A | undefined =>
+    first.attachments.find(
+      (candidate) =>
+        candidate.key === entry.key ||
+        (candidate.ref !== undefined && candidate.ref.id === entry.ref?.id)
+    );
+  const attachments = [
+    ...first.attachments,
+    ...second.attachments.filter((entry) => firstCopyOf(entry) === undefined)
+  ];
+
+  const secondImages = second.attachments.filter((entry) => entry.mimeType.startsWith("image/"));
+  const secondText = second.text.replace(IMAGE_PLACEHOLDER, (placeholder, digits: string) => {
+    const image = secondImages[Number(digits) - 1];
+    if (image === undefined) return placeholder;
+    const ordinal = imageOrdinal(attachments, (firstCopyOf(image) ?? image).key);
+    return ordinal === null ? placeholder : imagePlaceholder(ordinal);
+  });
+
+  // Only a draft is trimmed at the join: a failed send's text comes back as it was sent.
+  const firstText = input.at === "back" ? first.text.trimEnd() : first.text;
+  const text =
+    secondText.trim().length === 0
+      ? first.text
+      : first.text.trim().length === 0
+        ? secondText
+        : `${firstText}\n\n${secondText}`;
+  return { text, attachments };
+}
+
+/**
  * What a settled send does to the draft: the draft to show next, or `null`
  * to leave it as it is.
  *
@@ -492,14 +613,11 @@ const IMAGE_PLACEHOLDER = /\[Image #(\d+)\]/g;
  * into a plain send.
  *
  * What was typed or staged while the send was in flight stays, behind what
- * comes back: its text after the restored text, its chips after the restored
- * chips. Chips merge by `key`, or by the upload's ref id as
- * {@link decideStagedAttachmentForRef} has it, so a chip delivered again
- * meanwhile is not staged twice. An image's `[Image #N]` is its position among
- * the staged images, so the restored text keeps naming its images, and each
- * placeholder the meanwhile text wrote for one of its own images follows that
- * image to where it lands. A number that names none of them is the user's own
- * text and stays as typed.
+ * comes back ({@link mergeMessageIntoDraft}, the message in front): its text
+ * after the restored text, its chips after the restored chips, a chip
+ * delivered again meanwhile not staged twice, and each placeholder the
+ * meanwhile text wrote for one of its own images following that image. Every
+ * chip comes back, over the eight or not: the send gate holds the draft.
  */
 export function draftAfterSend<A extends RestorableAttachment>(input: {
   outcome: ComposerSendOutcome;
@@ -510,34 +628,7 @@ export function draftAfterSend<A extends RestorableAttachment>(input: {
 }): { text: string; attachments: A[] } | null {
   const { outcome, sent, draft } = input;
   if (outcome.kind !== "failed" || outcome.text === null) return null;
-
-  const sentCopyOf = (entry: A): A | undefined =>
-    sent.find(
-      (candidate) =>
-        candidate.key === entry.key ||
-        (candidate.ref !== undefined && candidate.ref.id === entry.ref?.id)
-    );
-  const attachments = [
-    ...sent,
-    ...draft.attachments.filter((entry) => sentCopyOf(entry) === undefined)
-  ];
-
-  const meanwhileImages = draft.attachments.filter((entry) => entry.mimeType.startsWith("image/"));
-  const meanwhileText = draft.text.replace(IMAGE_PLACEHOLDER, (placeholder, digits: string) => {
-    const image = meanwhileImages[Number(digits) - 1];
-    if (image === undefined) return placeholder;
-    const ordinal = imageOrdinal(attachments, (sentCopyOf(image) ?? image).key);
-    return ordinal === null ? placeholder : imagePlaceholder(ordinal);
-  });
-
-  const restored = outcome.text;
-  const text =
-    meanwhileText.trim().length === 0
-      ? restored
-      : restored.trim().length === 0
-        ? meanwhileText
-        : `${restored}\n\n${meanwhileText}`;
-  return { text, attachments };
+  return mergeMessageIntoDraft({ draft, message: { text: outcome.text, attachments: sent }, at: "front" });
 }
 
 /**
@@ -555,8 +646,10 @@ export interface FailedSendRestore<A extends RestorableAttachment = RestorableAt
 /**
  * Which draft a send that did not go out comes back to (§7.4) — always a
  * draft of **the thread it was sent FROM**, decided when the send settles: by
- * then a project switch may have unmounted the composer that sent it, or that
- * composer may show another thread, whose draft is not this one's.
+ * then a project switch may have unmounted the composer that sent it. (That
+ * composer showing another thread instead is defensive only — each chat tab
+ * owns its composer, keyed by the session id — and would change nothing:
+ * that thread's draft is not this one's.)
  *
  *  - `live` — the composer that sent it is still mounted and still shows that
  *    thread: its own live draft, as a restore always went.

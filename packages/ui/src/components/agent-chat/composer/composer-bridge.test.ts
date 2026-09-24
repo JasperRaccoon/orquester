@@ -7,6 +7,7 @@ import {
   openComposerControl,
   registerComposerHandle,
   restoreComposerFailedSend,
+  returnComposerMessage,
   stageComposerAttachment,
   type ComposerHandle
 } from "./composer-bridge.ts";
@@ -19,6 +20,10 @@ function fakeHandle(log: string[], stageResult = true, showsThread = true): Comp
     stageAttachment: (ref) => {
       log.push(`stage:${ref.id}`);
       return stageResult;
+    },
+    returnMessage: (message) => {
+      log.push(`return:${message.text}`);
+      return stageResult ? [] : [...message.attachments];
     },
     focusAtEnd: () => log.push("focus"),
     openControl: (command) => log.push(`open:${command}`),
@@ -89,6 +94,24 @@ test("a failed send is refused when no composer shows its thread, so the caller 
   const unregister = registerComposerHandle("s6", fakeHandle(log, true, false));
   assert.equal(restoreComposerFailedSend("s6", FAILED), false);
   unregister();
+});
+
+test("a message coming back reaches the mounted composer whole, and the refs it refused come back to the caller", () => {
+  const message = { text: "queued", attachments: [REF], context: [] };
+  const log: string[] = [];
+  const unregister = registerComposerHandle("s7", fakeHandle(log));
+  assert.deepEqual(returnComposerMessage("s7", message), []);
+  assert.deepEqual(log, ["return:queued"], "one call, the whole message: its placeholders need the live tray");
+  unregister();
+
+  // A ref a bound still refuses comes back, for the caller to write as its path.
+  const refusing = registerComposerHandle("s8", fakeHandle([], false));
+  assert.deepEqual(returnComposerMessage("s8", message), [REF]);
+  refusing();
+});
+
+test("a message coming back with no composer mounted says so, so the caller merges the persisted draft", () => {
+  assert.equal(returnComposerMessage("never-mounted", { text: "queued", attachments: [REF], context: [] }), null);
 });
 
 test("a stale unregister cannot drop the handle that replaced it", () => {
