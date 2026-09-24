@@ -815,7 +815,10 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
        is usually, not always, the text the preview was cut from: the snapshot's cut can leave a
        different place first (Grok's preview is its content blocks' first line, its whole output
        `output_for_prompt`). A running call's update is stored already cut, so its own data is
-       never read as its output.
+       never read as its output — nor is a Codex command's completion whose output passed 64 KiB:
+       the completion keeps only the first 64 KiB and says it was cut, so the output is read from
+       step 2 when the command streamed it, and otherwise the item answers as its `payload`, the
+       first 64 KiB inside it.
     2. **The call's streamed output**, when the item is a command's — a `command_execution` row,
        or a chunk of a command's output — and the call streamed any: output that is in no item's
        data at all — a Claude background shell's, a command's output while it runs — joined by the

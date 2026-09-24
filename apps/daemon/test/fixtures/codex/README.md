@@ -624,8 +624,9 @@ Points for the adapter:
   approval, `"source":"unifiedExecStartup"` once running. Output arrives whole in
   `item/completed.aggregatedOutput` for short commands — `item/commandExecution/outputDelta` never
   fired in these captures — so `content.delta {command_output}` cannot be the only path to command
-  output. `commandActions` is the parsed command (`{"type":"listFiles","command":"ls -1","path":null}`,
-  or `{"type":"unknown","command":"sleep 30 && ls -1"}` when it cannot parse).
+  output, and the completion keeps it (observation 20). `commandActions` is the parsed command
+  (`{"type":"listFiles","command":"ls -1","path":null}`, or
+  `{"type":"unknown","command":"sleep 30 && ls -1"}` when it cannot parse).
 - **`turn/diff/updated` is cumulative and repeats.** `11-…` has five notifications for two
   distinct diffs; the diff is a full `diff --git` blob including index hashes, and each one
   supersedes the last. De-duplicate on content, not on arrival.
@@ -690,10 +691,10 @@ opened is taken to be about the run before (`relaunchedTurns`) — it marks the 
 writes no `task.completed`, which would settle the new run, and that run ends at its own
 `turn/completed`.
 
-## 20. A collab child's calls are its own rows — read from the bindings, not captured
+## 20. A collab child's calls are its own rows, and a command's completion keeps its output — read from the bindings, not captured
 
-**Not captured.** No file in this set spawns a collab child. This is read from the generated
-bindings (`_generated/protocol/v2/`, 0.154.0), for plan
+**Not captured.** No file in this set spawns a collab child, and no command in it printed more than
+a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`, 0.154.0), for plan
 `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3.
 
 - A child's items arrive on the parent's connection under the child's `threadId`: `item/started` and
@@ -719,3 +720,10 @@ bindings (`_generated/protocol/v2/`, 0.154.0), for plan
   and raw `itemId`. The session joins it to the child's namespaced call (`rowItemId`, `session.ts`),
   so a decline is not read as a policy deny and a file change's card carries the child's diff; a
   child's item declined with no request behind it is a `tool.denied` owned by the child.
+- `commandExecution.aggregatedOutput` is "The command's output, aggregated from stdout and stderr";
+  the bindings document no bound. The completion keeps it in `data.item.aggregatedOutput` — where
+  `commandOutputText` and the wire slimmer's `projectCommandData` already read Codex's output — up
+  to 64 KiB of UTF-8 (`COMMAND_OUTPUT_MAX_BYTES`, `items.ts`). Past that it keeps the head, cut on a
+  character boundary, and the item carries `truncated: true`, so the MCP's `read_tool_output` reads
+  the call's streamed join (when it streamed) instead of answering the head as the whole output.
+  The row's `detail` is still the output cut to ingestion's 180-character preview.

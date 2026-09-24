@@ -166,6 +166,32 @@ describe("item lifecycle is gated on isToolLifecycleItemType (§5.1)", () => {
     assert.equal(row.parentToolUseId, "parent-1");
     assert.equal(row.status, "failed");
   });
+
+  it("an item whose adapter stored only a head of its output says so on the row (`truncated`, §5.6)", () => {
+    // Codex keeps a command's output in the completion, bounded: past the
+    // bound its data holds a head, and the row must not pass it off as whole.
+    const [cut] = runtimeEventToActivities(
+      runtimeEvent(
+        "item.completed",
+        {
+          itemType: "command_execution",
+          status: "completed",
+          data: { item: { aggregatedOutput: "head" } },
+          truncated: true
+        },
+        { itemId: "call-1" }
+      )
+    );
+    assert.equal(payloadOf(cut!).truncated, true);
+    const [whole] = runtimeEventToActivities(
+      runtimeEvent(
+        "item.completed",
+        { itemType: "command_execution", status: "completed", data: { item: { aggregatedOutput: "all" } } },
+        { itemId: "call-2" }
+      )
+    );
+    assert.equal("truncated" in payloadOf(whole!), false);
+  });
 });
 
 describe("token usage and compaction (§5.1)", () => {

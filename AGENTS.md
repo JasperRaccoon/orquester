@@ -1082,7 +1082,9 @@ it cannot read whole is named in `unavailableTurns` with a hint, and a failed pa
 error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
 row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
 output from the places the row's preview reads (`commandOutputText`, one list with
-`commandDisplayDetail`), unless the item is stored already cut (an update). A command's output
+`commandDisplayDetail`), unless the item is stored already cut (`truncated`: an update, or a Codex
+command's completion, which keeps its `aggregatedOutput` in `data.item` up to 64 KiB and past that
+only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`). A command's output
 that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
 command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
 and answered with `running`/`truncated`; never a file change's (Claude streams its result text as

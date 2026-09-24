@@ -1451,7 +1451,9 @@ export function providerRequestKind(
 
 /**
  * An `item.*` payload from its classification — the parent's own items and a
- * collab child's alike, the child's with its `agentId`.
+ * collab child's alike, the child's with its `agentId`. `truncated` says the
+ * item's `data` keeps only a head of its output (`items.ts`,
+ * `COMMAND_OUTPUT_MAX_BYTES`).
  */
 function itemPayload(classified: ClassifiedItem, agentId?: string): ItemLifecyclePayload {
   return {
@@ -1460,6 +1462,7 @@ function itemPayload(classified: ClassifiedItem, agentId?: string): ItemLifecycl
     ...(classified.title !== undefined ? { title: classified.title } : {}),
     ...(classified.detail !== undefined ? { detail: classified.detail } : {}),
     ...(classified.data !== undefined ? { data: classified.data } : {}),
+    ...(classified.truncated === true ? { truncated: true } : {}),
     ...(agentId !== undefined ? { agentId } : {})
   };
 }

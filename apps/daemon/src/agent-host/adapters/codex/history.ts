@@ -166,7 +166,10 @@ function projectItem(
         status: classified.status === "declined" ? "declined" : terminalStatus(classified.status),
         ...(classified.title !== undefined ? { title: classified.title } : {}),
         ...(classified.detail !== undefined ? { detail: classified.detail } : {}),
-        ...(classified.data !== undefined ? { data: classified.data } : {})
+        ...(classified.data !== undefined ? { data: classified.data } : {}),
+        // A replayed command keeps its output as a live one does, bounded and
+        // marked the same way (`items.ts`).
+        ...(classified.truncated === true ? { truncated: true } : {})
       },
       ...base
     };

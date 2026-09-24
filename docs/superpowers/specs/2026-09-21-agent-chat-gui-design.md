@@ -1287,6 +1287,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `turn.completed {state:"interrupted"}`. A Codex `cancel` ends the turn as `status:"interrupted"`
   with `items: []`, so a fold that trusts `turn.items` erases the turn — the fold must not
   (`apps/daemon/src/agent-host/adapters/codex/normalise.ts`, `…/session.ts`).*
+  *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a command's
+  completion keeps its output. It arrives whole in `aggregatedOutput` and a short command never
+  streams it (fixtures README observation 18), while `detail` is cut to a 180-character preview at
+  ingestion — so the completion carries it in `data.item.aggregatedOutput`, where
+  `commandOutputText` and the slimmer already read Codex's output, up to 64 KiB of UTF-8; past that
+  the head, cut on a character boundary, and `truncated` on the item (`ItemLifecyclePayload`),
+  which ingestion carries onto the row, so the MCP's `read_tool_output` reads the call's streamed
+  join instead of answering a head as the whole (`adapters/codex/items.ts`,
+  `COMMAND_OUTPUT_MAX_BYTES`).*
 - **Two question paths.** The RPC path (`item/tool/requestUserInput`) filters **hard**: a question
   is dropped unless it has id, header, prompt **and** at least one option whose label *and*
   description are both non-empty, and `multiSelect` is hard-coded `false`; if every question is
