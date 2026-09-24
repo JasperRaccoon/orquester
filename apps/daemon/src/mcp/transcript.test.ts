@@ -1035,15 +1035,42 @@ test("a chunk-built entry takes the call's title, command and end from its rows 
   assert.equal(read([started, out]).outputItemId, out.id);
 });
 
-test("the parent view builds no entry from a chunk alone: a subagent's command result streams unstamped", () => {
-  // Claude sends a subagent's Bash result as a delta without the agent's id (fixture claude/07): the chunk lands in the
-  // parent's scope while the call's rows are the subagent's. It is never a parent entry.
+/** A subagent's Bash call, its rows as the Claude adapter writes them, and one chunk of its output. */
+const subagentCall = (chunkAgentId: string | undefined) => {
   const call = (activityKind: string, status: string) => activity(activityKind, { itemType: "command_execution", toolUseId: "sub-1", title: "Bash", status, agentId: "agent-a" }, { turnId: "t1", agentId: "agent-a", tone: "tool" });
-  const unstamped = activity("tool.output", { toolUseId: "sub-1", streamKind: "command_output", delta: "a.txt\n" }, { turnId: "t1", tone: "tool" });
-  const items = [message("user", "look around", { turnId: "t1", id: "u1" }), call("tool.started", "inProgress"), unstamped, call("tool.completed", "completed")];
-  assert.equal(transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.some((e) => e.kind === "tool"), false);
-  // Nor once the subagent's own rows are gone.
-  assert.equal(transcriptEntries(snapshot({ items: [items[0]!, unstamped] }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.some((e) => e.kind === "tool"), false);
+  const chunk = activity("tool.output", { toolUseId: "sub-1", streamKind: "command_output", delta: "a.txt\n" }, { turnId: "t1", tone: "tool", ...(chunkAgentId !== undefined ? { agentId: chunkAgentId } : {}) });
+  const completed = call("tool.completed", "completed");
+  return { items: [message("user", "look around", { turnId: "t1", id: "u1" }), call("tool.started", "inProgress"), call("tool.updated", "inProgress"), chunk, completed], chunk, completed };
+};
+
+test("in a drill-in, a subagent's command with a streamed chunk offers its completion as outputItemId", () => {
+  // The Claude adapter stamps a subagent's output with the agent, as every other row of the call.
+  const { items, completed } = subagentCall("agent-a");
+  const drill = transcriptEntries(snapshot({ items }), { turns: 5, agentId: "agent-a", include: ALL, maxChars: 100_000 });
+  const tools = drill.entries.filter((e) => e.kind === "tool");
+  assert.deepEqual(tools.map((e) => [e.tool!.status, e.agentId, e.outputItemId]), [["completed", "agent-a", completed.id]]);
+});
+
+test("an older log's UNSTAMPED chunk of a subagent's call is that subagent's: its drill-in offers the completion", () => {
+  // Claude used to write a subagent's Bash result with no agent id (fixture claude/07) while every other row of the
+  // call carried one. The chunk takes its call's owner, as the GUI's drill-in reads it.
+  const { items, completed } = subagentCall(undefined);
+  const drill = transcriptEntries(snapshot({ items }), { turns: 5, agentId: "agent-a", include: ALL, maxChars: 100_000 });
+  const tools = drill.entries.filter((e) => e.kind === "tool");
+  assert.deepEqual(tools.map((e) => [e.tool!.status, e.agentId, e.outputItemId]), [["completed", "agent-a", completed.id]]);
+  // Another agent's drill-in never takes it.
+  assert.deepEqual(transcriptEntries(snapshot({ items }), { turns: 5, agentId: "agent-b", include: ALL, maxChars: 100_000 }).entries, []);
+});
+
+test("the parent view builds no entry from a chunk alone, stamped or not", () => {
+  // A subagent's chunk is its call's owner's, never a parent entry — and an older log's unstamped one still falls in
+  // the parent's scope once the subagent's own rows are gone, where no owner can be read for it.
+  const read = (items: ThreadItem[]) => transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.some((e) => e.kind === "tool");
+  for (const chunkAgentId of ["agent-a", undefined]) {
+    const { items, chunk } = subagentCall(chunkAgentId);
+    assert.equal(read(items), false, String(chunkAgentId));
+    assert.equal(read([items[0]!, chunk]), false, `${chunkAgentId}: nor once the subagent's rows are gone`);
+  }
 });
 
 test("hooks: a failed completion is an error row, a cancelled one a warning row; starts, progress and successes are no row", () => {

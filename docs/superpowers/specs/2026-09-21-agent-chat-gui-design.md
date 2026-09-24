@@ -3669,6 +3669,18 @@ drill-in refuses the write outright, and the timeline's `mod+J` additionally req
 own scroller to have a layout box. Several surfaces could trip on this, not just those two.
 *T3: `apps/web/src/components/AgentsPanel.tsx:139-140` — `/** Flat, non-interactive agent status line. No unfold. */`; `:550-567` — every row renders, with no "+N more" and no removal of finished rows; only the fold's silent 100-row cap bounds it; `:313-317` — a workflow section "keeps that shape as it settles so completion never yanks rows out from under the user"; `apps/web/src/components/chat/MessagesTimeline.tsx:4654-4660` — the closest T3 equivalent of a drill-in, an "Open Agents panel ›" link into a right-panel surface. differs on three counts: T3's roster is a right-panel surface rather than a dock under the composer; its rows are not clickable and there is no per-agent timeline, no `agentId` filter and no breadcrumb; and it neither collapses nor removes settled rows. Our collapse-past-five, fade-on-turn-end and the live-background exemption from both are new, so they must not fight the "never reshuffle what stays visible" rule above, and the drill-in is new surface with no precedent to lean on*
 
+*Built: "its items filtered by `agentId`" holds because a call's rows are stamped as one. Claude's
+normaliser gives a call's output chunk (`tool.output`) the owner — and the turn — its `item.*` rows
+carry: a subagent's `tool_result` names only `parent_tool_use_id` (Claude fixtures README observation
+22), and the unstamped chunk rendered as a stray "Tool output" row in the parent timeline while the
+drill-in never showed the output. A log a host wrote before that stamp — an older host surviving a
+deploy writes such chunks until its drain-restart — is read by the call, on the client only (the
+fold, its retention and the history bridge still mirror the log): an unstamped chunk takes
+the owner of its call's lifecycle rows in the same derivation input — `callOwnersOf` in
+`lib/agent-chat/entries.logic.ts`, through which `itemsForAgent` includes it in its owner's drill-in
+and `deriveWorkLogEntries` leaves it out of every other view. A chunk whose call has no owned row in
+the input stays the parent's, as before.*
+
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind
 "N more" breaks T3's "a workflow section keeps that shape as it settles" rule that the paragraph

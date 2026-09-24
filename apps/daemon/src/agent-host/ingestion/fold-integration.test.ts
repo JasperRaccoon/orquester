@@ -23,6 +23,10 @@ import {
   type ThreadMessageItem
 } from "@orquester/api/agent-chat";
 
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+
+import { countingIds, fixedClock, replayClaudeFixture } from "../adapters/claude/fixtures.ts";
+import { ClaudeNormalizer } from "../adapters/claude/normalize.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createIngestion } from "./index.ts";
 import {
@@ -870,5 +874,246 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
     assert.equal(evicted.status, "completed", "the old end reads again, mid-run");
     assert.equal(evicted.activationCount, 1);
     assert.equal(evicted.result, "first result");
+  });
+});
+
+describe("a Claude subagent's calls, from the normaliser through the real fold", () => {
+  /** Every tool row of each call, keyed by `payload.toolUseId`. */
+  function callRows(state: ReturnType<typeof fold>): Map<string, ThreadActivityItem[]> {
+    const calls = new Map<string, ThreadActivityItem[]>();
+    for (const row of activities(state)) {
+      if (!row.activityKind.startsWith("tool.")) continue;
+      const callId = (row.payload as { toolUseId?: unknown } | null)?.toolUseId;
+      if (typeof callId !== "string") continue;
+      calls.set(callId, [...(calls.get(callId) ?? []), row]);
+    }
+    return calls;
+  }
+
+  const LIFECYCLE = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
+
+  it("07: every output row of an agent-owned call carries the call's agentId", async () => {
+    const { ingestion, sink } = harness();
+    for (const event of replayClaudeFixture("07-subagent-task.ndjson").events) {
+      await ingestion.ingest({ ...event, threadId: THREAD_ID });
+    }
+    await ingestion.drain();
+
+    let checked = 0;
+    for (const [callId, rows] of callRows(fold(sink.events()))) {
+      const owner = rows.find((row) => LIFECYCLE.has(row.activityKind) && row.agentId)?.agentId;
+      if (owner === undefined) continue;
+      for (const row of rows.filter((entry) => entry.activityKind === "tool.output")) {
+        assert.equal(row.agentId, owner, `${callId}'s output is its agent's, not the parent's`);
+        checked += 1;
+      }
+    }
+    assert.equal(checked, 1, "the capture's one subagent Bash result");
+  });
+
+  it("a background agent's call keeps one turn and one owner past the parent's result, and its words settle", async () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: THREAD_ID,
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    const events = [...normalizer.beginTurn({ turnId: "turn-1" })];
+    const feed = (frame: Record<string, unknown>): void => {
+      events.push(...normalizer.handleMessage({ uuid: "u", session_id: "s", ...frame } as unknown as SDKMessage));
+    };
+    const nested = (content: unknown[], type: "assistant" | "user" = "assistant") =>
+      feed({
+        type,
+        parent_tool_use_id: "toolu_A",
+        message: { role: type, ...(type === "assistant" ? { model: "claude-sonnet-5" } : {}), content }
+      });
+    // The parent launches a BACKGROUND agent (CLI 2.1.280's default): its
+    // Agent call answers at once, and the agent works on after the result.
+    feed({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_A", name: "Agent", input: { description: "bg", prompt: "p" } }
+      }
+    });
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-A",
+      tool_use_id: "toolu_A",
+      description: "bg",
+      task_type: "local_agent",
+      is_backgrounded: true
+    });
+    feed({
+      type: "user",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_A", content: "Async agent launched." }] }
+    });
+    nested([{ type: "tool_use", id: "toolu_X", name: "Bash", input: { command: "sleep 5; echo x" } }]);
+    feed({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "",
+      stop_reason: "end_turn",
+      num_turns: 1,
+      usage: {},
+      modelUsage: {},
+      total_cost_usd: 0,
+      duration_ms: 1,
+      duration_api_ms: 1,
+      permission_denials: []
+    });
+    // Everything below lands between parent turns.
+    nested([{ type: "tool_result", tool_use_id: "toolu_X", content: "x\n" }], "user");
+    nested([{ type: "tool_use", id: "toolu_Y", name: "Bash", input: { command: "ls" } }]);
+    nested([{ type: "tool_result", tool_use_id: "toolu_Y", content: "a.txt\nb.txt\n" }], "user");
+    nested([{ type: "thinking", thinking: "Both files are there." }]);
+    nested([{ type: "text", text: "Found a.txt and b.txt." }]);
+    feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-A",
+      tool_use_id: "toolu_A",
+      status: "completed",
+      output_file: "",
+      summary: "Found both."
+    });
+
+    const { ingestion, sink } = harness();
+    for (const event of events) {
+      await ingestion.ingest(event);
+    }
+    await ingestion.drain();
+    const state = fold(sink.events());
+    const calls = callRows(state);
+
+    for (const [callId, turnId] of [
+      ["toolu_X", "turn-1"],
+      ["toolu_Y", null]
+    ] as const) {
+      const rows = calls.get(callId) ?? [];
+      assert.deepEqual(
+        rows.map((row) => row.activityKind),
+        ["tool.started", "tool.updated", "tool.output", "tool.completed"],
+        `${callId}: started, its result, its output, its end — once each`
+      );
+      assert.deepEqual(
+        [...new Set(rows.map((row) => `${row.turnId}|${row.agentId}`))],
+        [`${turnId}|task-A`],
+        `${callId}: one call, one turn key, one owner`
+      );
+      const completed = rows.at(-1)!;
+      assert.equal(completed.status, "completed", `${callId} finished for real`);
+      assert.ok(
+        (completed.payload as { data?: { result?: unknown } }).data?.result !== undefined,
+        `${callId}'s completion carries its real result`
+      );
+    }
+
+    const agentMessages = messages(state).filter((message) => message.agentId === "task-A");
+    assert.deepEqual(
+      agentMessages.map((message) => [message.role, message.text, message.turnId, message.streaming]),
+      [
+        ["reasoning", "Both files are there.", null, false],
+        ["assistant", "Found a.txt and b.txt.", null, false]
+      ],
+      "a background agent's words settle between parent turns"
+    );
+  });
+
+  it("a woken parent's call rides its synthetic turn, so a rewind to before that turn removes it", async () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: THREAD_ID,
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    const result = {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "",
+      stop_reason: "end_turn",
+      num_turns: 1,
+      usage: {},
+      modelUsage: {},
+      total_cost_usd: 0,
+      duration_ms: 1,
+      duration_api_ms: 1,
+      permission_denials: []
+    };
+    const events = [...normalizer.beginTurn({ turnId: "turn-1" })];
+    const feed = (frame: Record<string, unknown>): void => {
+      events.push(...normalizer.handleMessage({ uuid: "u", session_id: "s", ...frame } as unknown as SDKMessage));
+    };
+    feed(result);
+    // Woken between prompts, the parent streams a tool_use BEFORE the complete
+    // frame that opens its synthetic turn.
+    feed({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      event: { type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } }
+    });
+    feed({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }
+      }
+    });
+    feed({
+      type: "assistant",
+      uuid: "u-wake",
+      parent_tool_use_id: null,
+      message: {
+        id: "msg_wake",
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }]
+      }
+    });
+    feed({
+      type: "user",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_P", content: "done\n" }] }
+    });
+    feed(result);
+
+    const { ingestion, sink } = harness();
+    for (const event of events) {
+      await ingestion.ingest(event);
+    }
+    await ingestion.drain();
+    const state = fold(sink.events());
+    const synthetic = state.turns.find((turn) => turn.turnId !== "turn-1");
+    assert.ok(synthetic?.turnId, "the woken parent's answer is a turn of its own");
+    const rowsOf = (folded: ReturnType<typeof fold>) =>
+      (callRows(folded).get("toolu_P") ?? []).map((row) => [row.activityKind, row.turnId]);
+    assert.deepEqual(rowsOf(state), [
+      ["tool.started", null],
+      ["tool.updated", synthetic.turnId],
+      ["tool.output", synthetic.turnId],
+      ["tool.completed", synthetic.turnId]
+    ]);
+
+    // Rewind to turn 1: the synthetic turn goes, and the call with it. Its
+    // start row went out before the turn existed and stays, as it always has.
+    const reverted = applyDomainEvent(state, {
+      seq: state.seq + 1,
+      eventId: "revert",
+      threadId: THREAD_ID,
+      occurredAt: "2026-09-21T10:05:00.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {},
+      type: "thread.reverted",
+      payload: { turnCount: 1 }
+    });
+    assert.deepEqual(rowsOf(reverted), [["tool.started", null]]);
   });
 });

@@ -39,6 +39,17 @@ function allOf<T extends RuntimeEvent["type"]>(
   >;
 }
 
+/** The chunks a call's `tool_result` becomes: command and file-change output. */
+function outputDeltas(
+  events: readonly RuntimeEvent[]
+): Array<Extract<RuntimeEvent, { type: "content.delta" }>> {
+  return allOf(events, "content.delta").filter(
+    (event) =>
+      event.payload.streamKind === "command_output" ||
+      event.payload.streamKind === "file_change_output"
+  );
+}
+
 const UNHANDLED_MARKER = "is not handled";
 
 describe("claude normaliser — fixture replay", () => {
@@ -66,6 +77,27 @@ describe("claude normaliser — fixture replay", () => {
         assert.equal(typeof event.eventId, "string");
         assert.equal(event.threadId, "thread-fixture");
         assert.equal(typeof event.createdAt, "string");
+      }
+    });
+
+    it(`${fixture}: a call's output carries the owner its item rows carry`, () => {
+      // A subagent's tool_result names only `parent_tool_use_id` (fixtures
+      // README observation 22). An output chunk without the owner lands in the
+      // PARENT's timeline and retention window while its call's rows are the
+      // subagent's, and the drill-in never shows the output.
+      const { events } = replayClaudeFixture(fixture);
+      const owners = new Map<string, string | undefined>();
+      for (const event of allOf(events, "item.started")) {
+        if (event.itemId !== undefined && !owners.has(event.itemId)) {
+          owners.set(event.itemId, event.agentId);
+        }
+      }
+      for (const event of outputDeltas(events)) {
+        assert.equal(
+          event.agentId,
+          owners.get(event.itemId ?? ""),
+          `${fixture}: ${event.itemId}'s output names another owner than its item`
+        );
       }
     });
   }
@@ -211,6 +243,29 @@ describe("claude normaliser — fixture replay", () => {
 
     // The turn knows it had subagents.
     assert.ok(allOf(events, "turn.completed").some((e) => e.payload.tokenUsage?.hasSubagents));
+  });
+
+  it("07: the subagent's Bash output carries its task; the parent's background launch carries none", () => {
+    const { events } = replayClaudeFixture("07-subagent-task.ndjson");
+    const agent = allOf(events, "task.started").find(
+      (event) => event.payload.taskType === "local_agent"
+    );
+    assert.ok(agent);
+    const outputOf = (itemId: string) =>
+      outputDeltas(events).filter((event) => event.itemId === itemId);
+
+    // Line 45: the subagent's `ls` result, on a nested `user` frame that names
+    // only the parent's Agent call — no task id anywhere on it.
+    const subagent = outputOf("toolu_01NF7VUp1VvXRismHVn2CXN4");
+    assert.equal(subagent.length, 1);
+    assert.equal(subagent[0]!.agentId, agent.payload.taskId);
+    assert.ok(subagent[0]!.payload.delta.startsWith("-rw-r--r--"));
+
+    // Line 87: the parent's own `run_in_background` placeholder stays the
+    // parent's — the shell's chunks ride the shell's own item and id.
+    const launch = outputOf("toolu_01GhZ3hhWWdJYQ15ru7U9Gob");
+    assert.equal(launch.length, 1);
+    assert.equal(launch[0]!.agentId, undefined);
   });
 
   it("08: the step list is TaskCreate/TaskUpdate, not TodoWrite", () => {
@@ -1988,5 +2043,751 @@ describe("claude normaliser — the compaction marker carries the CLI's summary"
       summary?.startsWith("This session is being continued from a previous conversation"),
       "the CLI's own summary, verbatim"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A subagent's calls: their owner and their turn
+// ---------------------------------------------------------------------------
+
+/** The parent's Agent call that launched `task-A`. */
+const AGENT_CALL = "toolu_agent_A";
+const AGENT_TASK_ID = "task-A";
+
+/** `system/task_started` for the subagent `task-A`, launched by {@link AGENT_CALL}. */
+function agentStartedFrame(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    type: "system",
+    subtype: "task_started",
+    task_id: AGENT_TASK_ID,
+    tool_use_id: AGENT_CALL,
+    description: "Survey the packages",
+    subagent_type: "Explore",
+    task_type: "local_agent",
+    uuid: "u-task",
+    session_id: "s",
+    ...extra
+  };
+}
+
+/** A subagent's `tool_use`: a COMPLETE nested `assistant` frame (fixture 07, line 44). */
+function nestedToolUseFrame(
+  id: string,
+  name: string,
+  input: Record<string, unknown>,
+  parent = AGENT_CALL
+): Record<string, unknown> {
+  return {
+    type: "assistant",
+    parent_tool_use_id: parent,
+    uuid: `u-use-${id}`,
+    session_id: "s",
+    message: {
+      role: "assistant",
+      model: "claude-sonnet-5",
+      content: [{ type: "tool_use", id, name, input }]
+    }
+  };
+}
+
+/**
+ * A subagent's `tool_result`: a nested `user` frame that names only
+ * `parent_tool_use_id` — no task id anywhere on it (fixture 07, line 45).
+ */
+function nestedToolResultFrame(
+  id: string,
+  content: string,
+  options: { isError?: boolean; parent?: string } = {}
+): Record<string, unknown> {
+  return {
+    type: "user",
+    parent_tool_use_id: options.parent ?? AGENT_CALL,
+    uuid: `u-result-${id}`,
+    session_id: "s",
+    message: {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: id, content, is_error: options.isError === true }
+      ]
+    }
+  };
+}
+
+describe("claude normaliser — a subagent's call output carries the call's owner", () => {
+  function subagentInTurn(): ReturnType<typeof feedable> {
+    const context = feedable();
+    context.normalizer.beginTurn({ turnId: "turn-1" });
+    context.feed(agentStartedFrame());
+    return context;
+  }
+
+  it("a nested Bash and a nested Write stamp their output with the owning task", () => {
+    const { feed } = subagentInTurn();
+    feed(nestedToolUseFrame("toolu_ls", "Bash", { command: "ls" }));
+    const bash = outputDeltas(feed(nestedToolResultFrame("toolu_ls", "a.txt\nb.txt\n")));
+    assert.deepEqual(
+      bash.map((event) => [event.payload.streamKind, event.agentId, event.turnId]),
+      [["command_output", AGENT_TASK_ID, "turn-1"]]
+    );
+
+    feed(nestedToolUseFrame("toolu_write", "Write", { file_path: "/w/c.txt", content: "c" }));
+    const write = outputDeltas(
+      feed(nestedToolResultFrame("toolu_write", "File created successfully at: /w/c.txt"))
+    );
+    assert.deepEqual(
+      write.map((event) => [event.payload.streamKind, event.agentId, event.turnId]),
+      [["file_change_output", AGENT_TASK_ID, "turn-1"]]
+    );
+  });
+
+  it("a frame held for its owner and a resumed agent's later frames both carry the owner", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    // A resumed subagent: its new task names no description yet, and its frames
+    // still name the ORIGINAL session's Agent call.
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-r",
+      tool_use_id: "toolu_new",
+      task_type: "local_agent",
+      uuid: "u0",
+      session_id: "s"
+    });
+    const resumed = { task_description: "Audit PM sheet", subagent_type: "general-purpose" };
+    const held = [
+      feed({ ...nestedToolUseFrame("toolu_1", "Bash", { command: "ls" }, "toolu_old"), ...resumed }),
+      feed({ ...nestedToolResultFrame("toolu_1", "one\n", { parent: "toolu_old" }), ...resumed })
+    ].flat();
+    assert.deepEqual(held, [], "both frames wait for an owner");
+
+    // The first progress names the task: the held frames replay through
+    // `flushPendingNested`.
+    const flushed = feed({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "task-r",
+      tool_use_id: "toolu_new",
+      description: "Audit PM sheet",
+      usage: { total_tokens: 10, tool_uses: 1, duration_ms: 5 },
+      uuid: "u1",
+      session_id: "s"
+    });
+    assert.deepEqual(
+      outputDeltas(flushed).map((event) => [event.itemId, event.agentId]),
+      [["toolu_1", "task-r"]]
+    );
+
+    // A later frame resolves through the remembered alias.
+    feed({ ...nestedToolUseFrame("toolu_2", "Bash", { command: "pwd" }, "toolu_old"), ...resumed });
+    const aliased = feed({
+      ...nestedToolResultFrame("toolu_2", "/w\n", { parent: "toolu_old" }),
+      ...resumed
+    });
+    assert.deepEqual(
+      outputDeltas(aliased).map((event) => [event.itemId, event.agentId]),
+      [["toolu_2", "task-r"]]
+    );
+  });
+
+  it("a depth-2 agent's output carries the innermost agent, as the call's rows do", () => {
+    const { feed } = subagentInTurn();
+    // task-A launches task-B; task-B's frames name task-B's own launching call.
+    feed(nestedToolUseFrame("toolu_B", "Agent", { description: "Inner", prompt: "p" }));
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-B",
+      tool_use_id: "toolu_B",
+      description: "Inner",
+      task_type: "local_agent",
+      uuid: "u-b",
+      session_id: "s"
+    });
+    const started = feed(nestedToolUseFrame("toolu_C", "Bash", { command: "ls" }, "toolu_B"));
+    const item = allOf(started, "item.started").find((event) => event.itemId === "toolu_C");
+    assert.equal(item?.agentId, "task-B");
+    const done = feed(nestedToolResultFrame("toolu_C", "x\n", { parent: "toolu_B" }));
+    assert.deepEqual(
+      outputDeltas(done).map((event) => [event.itemId, event.agentId]),
+      [["toolu_C", "task-B"]]
+    );
+  });
+
+  it("a subagent's background launch: its placeholder carries the subagent, the shell's chunks the shell", () => {
+    const { normalizer, feed } = subagentInTurn();
+    feed(nestedToolUseFrame("toolu_S", "Bash", { command: "pnpm dev", run_in_background: true }));
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "bsh",
+      tool_use_id: "toolu_S",
+      description: "Start the dev server",
+      task_type: "local_bash",
+      is_backgrounded: true,
+      uuid: "u-bsh",
+      session_id: "s"
+    });
+    const placeholder = feed(
+      nestedToolResultFrame(
+        "toolu_S",
+        "Command running in background with ID: bsh. Output is being written to: /var/lib/orquester/tmp/claude-999/x/tasks/bsh.output. You will be notified when it completes."
+      )
+    );
+    assert.deepEqual(
+      outputDeltas(placeholder).map((event) => [event.itemId, event.agentId]),
+      [["toolu_S", AGENT_TASK_ID]]
+    );
+    const [chunk] = normalizer.backgroundShellOutput("bsh", "ready on :5173\n");
+    assert.equal(chunk?.itemId, "bgshell:bsh");
+    assert.equal(chunk?.agentId, "bsh", "the shell's own chunks keep the shell's id");
+  });
+
+  it("a CLI-denied subagent Bash carries its owner on the output and on the denial", () => {
+    const { feed } = subagentInTurn();
+    feed(nestedToolUseFrame("toolu_D", "Bash", { command: "sleep 120 && echo woke" }));
+    const denied = feed(
+      nestedToolResultFrame(
+        "toolu_D",
+        "<tool_use_error>Blocked: sleep 120 followed by: echo woke.</tool_use_error>",
+        { isError: true }
+      )
+    );
+    assert.deepEqual(
+      outputDeltas(denied).map((event) => event.agentId),
+      [AGENT_TASK_ID]
+    );
+    const denial = allOf(denied, "tool.denied")[0];
+    assert.ok(denial);
+    assert.equal(denial.agentId, AGENT_TASK_ID);
+    assert.equal(denial.payload.agentId, AGENT_TASK_ID);
+  });
+
+  it("a denial for a call the adapter never saw still names the subagent that raised it", () => {
+    const { feed } = subagentInTurn();
+    const denied = feed(
+      nestedToolResultFrame("toolu_unseen", "<tool_use_error>Blocked: rm -rf /</tool_use_error>", {
+        isError: true
+      })
+    );
+    const denial = allOf(denied, "tool.denied")[0];
+    assert.ok(denial, "the CLI can deny a call before any block of it reached us");
+    assert.equal(denial.payload.toolName, "unknown");
+    assert.equal(denial.agentId, AGENT_TASK_ID);
+    assert.equal(denial.payload.agentId, AGENT_TASK_ID);
+  });
+
+  it("the parent's own output and approvals carry no owner", () => {
+    for (const fixture of [
+      "02-tool-read-auto-allowed.ndjson",
+      "03-bash-approval-accept.ndjson",
+      "16-errors.ndjson"
+    ]) {
+      const { events } = replayClaudeFixture(fixture);
+      const output = outputDeltas(events);
+      assert.ok(output.length > 0, `${fixture} streams the parent's output`);
+      assert.ok(output.every((event) => event.agentId === undefined), fixture);
+      assert.ok(
+        allOf(events, "request.opened").every((event) => event.agentId === undefined),
+        `${fixture}: an approval stays on the parent's thread`
+      );
+    }
+    assert.equal(
+      allOf(replayClaudeFixture("03-bash-approval-accept.ndjson").events, "request.opened").length,
+      1
+    );
+  });
+});
+
+describe("claude normaliser — a background subagent outlives the parent's turn", () => {
+  /** The `result` that ends the parent's turn — the agent is still working. */
+  const PARENT_RESULT = {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    stop_reason: "end_turn",
+    num_turns: 1,
+    session_id: "s",
+    uuid: "u-result",
+    usage: {},
+    modelUsage: {},
+    total_cost_usd: 0,
+    duration_ms: 1,
+    duration_api_ms: 1,
+    permission_denials: []
+  };
+
+  /**
+   * The CLI 2.1.280 default: the parent's Agent call answers at once with an
+   * `async_launched` placeholder, and the agent runs on after the parent's
+   * turn ends (`AgentInput.run_in_background` defaults to true).
+   */
+  function launched(
+    taskStarted: Record<string, unknown> = { is_backgrounded: true }
+  ): ReturnType<typeof feedable> {
+    const context = feedable();
+    context.normalizer.beginTurn({ turnId: "turn-1" });
+    context.feed({
+      type: "stream_event",
+      uuid: "u-stream",
+      session_id: "s",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: AGENT_CALL,
+          name: "Agent",
+          input: { description: "Survey the packages", prompt: "p", run_in_background: true }
+        }
+      }
+    });
+    context.feed(agentStartedFrame(taskStarted));
+    context.feed({
+      type: "user",
+      parent_tool_use_id: null,
+      uuid: "u-launched",
+      session_id: "s",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: AGENT_CALL, content: "Async agent launched successfully." }]
+      }
+    });
+    return context;
+  }
+
+  const completionsOf = (events: readonly RuntimeEvent[], itemId: string) =>
+    allOf(events, "item.completed").filter((event) => event.itemId === itemId);
+
+  it("a nested tool_result with no parent turn emits its output, stamped and turnless", () => {
+    const { feed } = feedable();
+    feed(agentStartedFrame({ is_backgrounded: true }));
+    feed(nestedToolUseFrame("toolu_Y", "Bash", { command: "ls" }));
+    const done = feed(nestedToolResultFrame("toolu_Y", "a.txt\n"));
+    const [delta, ...rest] = outputDeltas(done);
+    assert.deepEqual(rest, []);
+    assert.ok(delta, "a subagent's output between parent turns is still output");
+    assert.equal(delta.agentId, AGENT_TASK_ID);
+    assert.equal(delta.turnId, undefined, "nested frames never open a turn");
+  });
+
+  it("the parent's result leaves the agent's call open; its own result lands whole, on the call's turn", () => {
+    const { feed } = launched();
+    feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5; echo x" }));
+    const ended = feed(PARENT_RESULT);
+    assert.equal(allOf(ended, "turn.completed").length, 1, "the parent's turn ends");
+    assert.deepEqual(completionsOf(ended, "toolu_X"), [], "a running call is never reported done");
+
+    const done = feed(nestedToolResultFrame("toolu_X", "x\n"));
+    const rows = done.filter((event) => event.itemId === "toolu_X");
+    assert.deepEqual(
+      rows.map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", "turn-1", AGENT_TASK_ID],
+        ["content.delta", "turn-1", AGENT_TASK_ID],
+        ["item.completed", "turn-1", AGENT_TASK_ID]
+      ],
+      "one call, one turn, one owner"
+    );
+    const completed = completionsOf(done, "toolu_X")[0]!;
+    assert.equal(completed.payload.status, "completed");
+    assert.ok(
+      (completed.payload.data as { result?: unknown }).result !== undefined,
+      "the real result, not a forced completion"
+    );
+  });
+
+  it("neither does the auto-close of a stale synthetic turn", () => {
+    const { normalizer, feed } = launched();
+    feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
+    feed(PARENT_RESULT);
+    normalizer.beginTurn({ turnId: "turn-syn", synthetic: true });
+    // `sendTurn` closes a stale synthetic turn exactly like this.
+    assert.deepEqual(completionsOf(normalizer.completeTurn("completed"), "toolu_X"), []);
+    const done = feed(nestedToolResultFrame("toolu_X", "x\n"));
+    assert.equal(completionsOf(done, "toolu_X")[0]?.turnId, "turn-1");
+  });
+
+  it("the owner's task_notification first closes its open calls, failed, each on its own turn", () => {
+    const { feed } = launched();
+    feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
+    feed(PARENT_RESULT);
+    // Started between parent turns: turnless for its whole life.
+    feed(nestedToolUseFrame("toolu_Y", "Bash", { command: "sleep 9" }));
+    const ended = feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: AGENT_TASK_ID,
+      tool_use_id: AGENT_CALL,
+      status: "completed",
+      output_file: "",
+      summary: "Surveyed.",
+      uuid: "u-note",
+      session_id: "s"
+    });
+    assert.deepEqual(
+      ended
+        .filter((event) => event.type === "item.completed" || event.type === "task.completed")
+        .map((event) => [
+          event.type,
+          event.itemId,
+          event.turnId,
+          event.agentId,
+          (event.payload as { status?: string }).status
+        ]),
+      [
+        ["item.completed", "toolu_X", "turn-1", AGENT_TASK_ID, "failed"],
+        ["item.completed", "toolu_Y", undefined, AGENT_TASK_ID, "failed"],
+        ["task.completed", undefined, undefined, undefined, "completed"]
+      ],
+      "a running state never outlives its owner, and the rows settle before the task's"
+    );
+    // A result that arrives after all has nothing left to complete.
+    assert.deepEqual(completionsOf(feed(nestedToolResultFrame("toolu_X", "late\n")), "toolu_X"), []);
+  });
+
+  it("a terminal task_updated closes them too, before its row", () => {
+    const { feed } = launched();
+    feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
+    feed(PARENT_RESULT);
+    const ended = feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: AGENT_TASK_ID,
+      patch: { status: "killed", end_time: 1789955074758 },
+      uuid: "u-upd",
+      session_id: "s"
+    });
+    assert.deepEqual(
+      ended.map((event) => [event.type, event.itemId]),
+      [
+        ["item.completed", "toolu_X"],
+        ["task.updated", undefined]
+      ]
+    );
+    assert.equal(completionsOf(ended, "toolu_X")[0]?.payload.status, "failed");
+  });
+
+  it("a running status patch closes nothing", () => {
+    const { feed } = launched();
+    feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
+    const updated = feed({
+      type: "system",
+      subtype: "task_updated",
+      task_id: AGENT_TASK_ID,
+      patch: { status: "running" },
+      uuid: "u-upd",
+      session_id: "s"
+    });
+    assert.deepEqual(completionsOf(updated, "toolu_X"), []);
+  });
+
+  it("closeLiveTasks closes every call a subagent still has open, before the task rows", () => {
+    const { normalizer, feed } = launched();
+    feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
+    feed(PARENT_RESULT);
+    feed(nestedToolUseFrame("toolu_Y", "Bash", { command: "sleep 9" }));
+    const closed = normalizer.closeLiveTasks();
+    assert.deepEqual(
+      closed.map((event) => [event.type, event.itemId, event.turnId, event.agentId]),
+      [
+        ["item.completed", "toolu_X", "turn-1", AGENT_TASK_ID],
+        ["item.completed", "toolu_Y", undefined, AGENT_TASK_ID],
+        ["task.completed", undefined, undefined, undefined]
+      ]
+    );
+    for (const event of allOf(closed, "item.completed")) {
+      assert.equal(event.payload.status, "failed");
+    }
+  });
+
+  it("a foreground agent's calls are still settled at the parent's turn end", () => {
+    // `is_backgrounded: false`, and the field absent: fixture 07 and older CLIs.
+    for (const taskStarted of [{ is_backgrounded: false }, {}]) {
+      const { feed } = launched(taskStarted);
+      feed(nestedToolUseFrame("toolu_X", "Bash", { command: "ls" }));
+      const ended = feed(PARENT_RESULT);
+      const forced = completionsOf(ended, "toolu_X");
+      assert.equal(forced.length, 1, JSON.stringify(taskStarted));
+      assert.equal(forced[0]!.turnId, "turn-1");
+      assert.equal(forced[0]!.agentId, AGENT_TASK_ID);
+    }
+  });
+
+  it("a foreground agent running inside a background one works on with it", () => {
+    const { feed } = launched();
+    // task-A (background) waits on task-B: B is foreground to A, not to the
+    // parent, whose turn ends while both work on.
+    feed(nestedToolUseFrame("toolu_B", "Agent", { description: "Inner", prompt: "p" }));
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-B",
+      tool_use_id: "toolu_B",
+      description: "Inner",
+      task_type: "local_agent",
+      is_backgrounded: false,
+      uuid: "u-b",
+      session_id: "s"
+    });
+    feed(nestedToolUseFrame("toolu_C", "Bash", { command: "sleep 5" }, "toolu_B"));
+    const ended = feed(PARENT_RESULT);
+    assert.deepEqual(completionsOf(ended, "toolu_C"), [], "B's call runs on inside A");
+    assert.deepEqual(completionsOf(ended, "toolu_B"), [], "and so does A's call that launched B");
+    const done = feed(nestedToolResultFrame("toolu_C", "x\n", { parent: "toolu_B" }));
+    const completed = completionsOf(done, "toolu_C")[0];
+    assert.deepEqual(
+      [completed?.payload.status, completed?.turnId, completed?.agentId],
+      ["completed", "turn-1", "task-B"]
+    );
+  });
+
+  it("a parent call streamed before its synthetic turn opens rides that turn from then on", () => {
+    const { feed } = feedable();
+    // A background agent works between prompts, one call of its own in flight.
+    feed(agentStartedFrame({ is_backgrounded: true }));
+    feed(nestedToolUseFrame("toolu_sub", "Bash", { command: "sleep 9" }));
+    // Its finishing wakes the parent: the parent's stream begins BEFORE the
+    // complete assistant frame that opens the synthetic turn, so a tool_use
+    // streamed first registers with no turn.
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
+    const early = [
+      stream({ type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } }),
+      stream({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: {} }
+      }),
+      stream({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"command":"cat out.txt"}' }
+      })
+    ].flat();
+    assert.deepEqual(
+      early.filter((event) => event.itemId === "toolu_P").map((event) => [event.type, event.turnId]),
+      [
+        ["item.started", undefined],
+        ["item.updated", undefined]
+      ],
+      "what went out before the turn opened stays turnless"
+    );
+    const opened = feed({
+      type: "assistant",
+      uuid: "u-wake",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: {
+        id: "msg_wake",
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }]
+      }
+    });
+    const turnId = allOf(opened, "turn.started")[0]?.turnId;
+    assert.ok(turnId, "the complete frame opens the synthetic turn");
+
+    const done = feed({
+      type: "user",
+      uuid: "u-r",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_P", content: "done\n" }] }
+    });
+    assert.deepEqual(
+      done
+        .filter((event) => event.itemId === "toolu_P")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", turnId, undefined],
+        ["content.delta", turnId, undefined],
+        ["item.completed", turnId, undefined]
+      ],
+      "the call rides the turn that opened under it, so a rewind before it removes it"
+    );
+
+    // The subagent's call is its own: the parent's turn never adopts it.
+    const sub = feed(nestedToolResultFrame("toolu_sub", "slept\n"));
+    assert.deepEqual(
+      sub
+        .filter((event) => event.itemId === "toolu_sub")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", undefined, AGENT_TASK_ID],
+        ["content.delta", undefined, AGENT_TASK_ID],
+        ["item.completed", undefined, AGENT_TASK_ID]
+      ]
+    );
+  });
+
+  it("a parent call streamed before a USER turn opens in that window rides the user turn", () => {
+    const { normalizer, feed } = feedable();
+    feed(agentStartedFrame({ is_backgrounded: true }));
+    feed(nestedToolUseFrame("toolu_sub", "Bash", { command: "sleep 9" }));
+    // The woken parent's stream begins…
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
+    stream({ type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } });
+    const started = stream({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }
+    });
+    assert.equal(allOf(started, "item.started")[0]?.turnId, undefined);
+    // …and the user sends a message before its complete frame arrives: `sendTurn`
+    // opens a USER turn, so the complete frame finds a turn open and no
+    // synthetic turn opens under the call.
+    normalizer.beginTurn({ turnId: "turn-user" });
+    const frame = feed({
+      type: "assistant",
+      uuid: "u-wake",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: {
+        id: "msg_wake",
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }]
+      }
+    });
+    assert.deepEqual(allOf(frame, "turn.started"), [], "no synthetic turn: one is already open");
+
+    const done = feed({
+      type: "user",
+      uuid: "u-r",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_P", content: "done\n" }] }
+    });
+    assert.deepEqual(
+      done
+        .filter((event) => event.itemId === "toolu_P")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", "turn-user", undefined],
+        ["content.delta", "turn-user", undefined],
+        ["item.completed", "turn-user", undefined]
+      ],
+      "the call rides the turn that opened under it, whoever opened it"
+    );
+
+    // The subagent's call is its own: no parent turn adopts it.
+    const sub = feed(nestedToolResultFrame("toolu_sub", "slept\n"));
+    assert.deepEqual(
+      sub
+        .filter((event) => event.itemId === "toolu_sub")
+        .map((event) => [event.type, event.turnId, event.agentId]),
+      [
+        ["item.updated", undefined, AGENT_TASK_ID],
+        ["content.delta", undefined, AGENT_TASK_ID],
+        ["item.completed", undefined, AGENT_TASK_ID]
+      ]
+    );
+  });
+
+  it("a subagent's tool_progress is its owner's heartbeat, on the call's own turn", () => {
+    const { feed } = launched();
+    feed(nestedToolUseFrame("toolu_X", "Bash", { command: "sleep 5" }));
+    // CLI 2.1.280: every nested tool_progress, and not one carries `task_id`.
+    const progress = (toolUseId: string, extra: Record<string, unknown> = {}) =>
+      allOf(
+        feed({
+          type: "tool_progress",
+          tool_use_id: toolUseId,
+          tool_name: "Bash",
+          parent_tool_use_id: AGENT_CALL,
+          elapsed_time_seconds: 3,
+          uuid: `u-progress-${toolUseId}`,
+          session_id: "s",
+          ...extra
+        }),
+        "tool.progress"
+      )[0];
+    const inTurn = progress("toolu_X");
+    assert.deepEqual(
+      [inTurn?.payload.taskId, inTurn?.agentId, inTurn?.turnId],
+      [AGENT_TASK_ID, AGENT_TASK_ID, "turn-1"]
+    );
+    feed(PARENT_RESULT);
+    const later = progress("toolu_X");
+    assert.deepEqual(
+      [later?.payload.taskId, later?.agentId, later?.turnId],
+      [AGENT_TASK_ID, AGENT_TASK_ID, "turn-1"],
+      "the heartbeat rides the call's turn, not the one active when it arrives"
+    );
+    // A call this adapter never registered is still its frame's agent's.
+    const unseen = progress("toolu_unseen");
+    assert.deepEqual([unseen?.payload.taskId, unseen?.agentId], [AGENT_TASK_ID, AGENT_TASK_ID]);
+  });
+
+  it("a tool_progress task_id counts only when it names a surfaced local_agent task", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed(agentStartedFrame({ is_backgrounded: true }));
+    // The parent's own foreground Bash, whose `local_bash` task is suppressed.
+    feed({
+      type: "stream_event",
+      uuid: "u-stream",
+      session_id: "s",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "ls" } }
+      }
+    });
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "fg-bash",
+      tool_use_id: "toolu_P",
+      task_type: "local_bash",
+      is_backgrounded: false,
+      uuid: "u-fg",
+      session_id: "s"
+    });
+    const heartbeat = (toolUseId: string, taskId: string) =>
+      allOf(
+        feed({
+          type: "tool_progress",
+          tool_use_id: toolUseId,
+          tool_name: "Bash",
+          parent_tool_use_id: null,
+          elapsed_time_seconds: 1,
+          task_id: taskId,
+          uuid: `u-hb-${taskId}`,
+          session_id: "s"
+        }),
+        "tool.progress"
+      )[0];
+    const parent = heartbeat("toolu_P", "fg-bash");
+    assert.ok(parent);
+    assert.equal(parent.payload.taskId, undefined, "a parent tool's progress is never persisted");
+    assert.equal(parent.agentId, undefined);
+    const named = heartbeat("toolu_elsewhere", AGENT_TASK_ID);
+    assert.deepEqual([named?.payload.taskId, named?.agentId], [AGENT_TASK_ID, AGENT_TASK_ID]);
+
+    // With no call in flight and no parent_tool_use_id, `task_id` alone is
+    // read — and only a surfaced SUBAGENT's counts: not a suppressed
+    // foreground shell's, nor a surfaced background shell's.
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "bg-bash",
+      tool_use_id: "toolu_Q",
+      task_type: "local_bash",
+      is_backgrounded: true,
+      uuid: "u-bg",
+      session_id: "s"
+    });
+    assert.equal(normalizer.liveTasks().has("bg-bash"), true, "the shell is on the roster");
+    for (const taskId of ["fg-bash", "bg-bash"]) {
+      const orphan = heartbeat("toolu_gone", taskId);
+      assert.ok(orphan);
+      assert.deepEqual([orphan.payload.taskId, orphan.agentId], [undefined, undefined], taskId);
+    }
   });
 });
