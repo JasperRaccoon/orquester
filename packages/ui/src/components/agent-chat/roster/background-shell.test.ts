@@ -179,3 +179,11 @@ test("with no lifecycle frame left, the shell is ONE row titled from its roster 
   const untitled = backgroundShellRows(chunks, TASK)[0];
   assert.equal(untitled?.kind === "work" ? untitled.displayLabel : null, undefined);
 });
+
+test("a roster title that is only the shell's own id — the roster's fallback when none was given — names nothing", () => {
+  const chunks = [output("one\n", "o1"), output("two\n", "o2")];
+  const row = backgroundShellRows(chunks, TASK, TASK)[0];
+  assert.equal(row?.kind === "work" ? row.displayLabel : null, undefined);
+  const spaced = backgroundShellRows(chunks, TASK, `  ${TASK} `)[0];
+  assert.equal(spaced?.kind === "work" ? spaced.displayLabel : null, undefined);
+});

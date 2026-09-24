@@ -378,7 +378,7 @@ describe("spawnGroupKeyOf", () => {
 
 describe("lifecycleKeyOf", () => {
   it("keys a call's lifecycle rows by turn and tool use id", () => {
-    for (const kind of ["tool.started", "tool.updated", "tool.completed", "tool.output"]) {
+    for (const kind of ["tool.started", "tool.updated", "tool.completed", "tool.denied", "tool.output"]) {
       assert.equal(
         lifecycleKeyOf(activity(kind, { toolUseId: " T " }, { turnId: "t5" })),
         "tool:t5:T",
@@ -436,6 +436,19 @@ describe("splitLiveItems", () => {
     const split = splitLiveItems(EMPTY_LIVE_SPLIT, items, pagesHold([], ["tool:t5:T", "task:K"]));
     assert.deepEqual(ids(split.shared), ["tc", "kc"]);
     assert.deepEqual(ids(split.rowItems), ["uc", "jc", "a5"]);
+  });
+
+  it("hands over a denial that closes a call a page began, so its start never renders running in the history", () => {
+    // The call's only close is a denial: it must join the start's input, where it supersedes the start.
+    const items: ThreadItem[] = [
+      activity("tool.denied", { toolUseId: "T", toolName: "Bash" }, { id: "td", turnId: "t5", tone: "error" }),
+      message("assistant", "denied", { id: "a5", turnId: "t5" })
+    ];
+    const split = splitLiveItems(EMPTY_LIVE_SPLIT, items, pagesHold([], ["tool:t5:T"]));
+    assert.deepEqual(ids(split.shared), ["td"]);
+    assert.deepEqual(ids(split.rowItems), ["a5"]);
+    const page = historyPage({ items: [activity("tool.started", { toolUseId: "T" }, { id: "ts", turnId: "t5" })] });
+    assert.ok(collectHistoryItems(EMPTY_HISTORY_ITEMS, [page], [items[0]!]).lifecycleKeys.has("tool:t5:T"));
   });
 
   it("keeps the shared list's identity while its items did not move", () => {

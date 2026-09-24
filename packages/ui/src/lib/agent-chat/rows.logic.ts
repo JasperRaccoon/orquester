@@ -47,7 +47,7 @@ import {
   summarizeToolGroup,
   toolGroupAction,
   toolGroupSummaryKind,
-  withoutOwnedOutput,
+  withoutJoinedOutput,
   workEntryDisplayIndicatesToolFailure,
   workEntryIndicatesToolSuccess,
   workEntryIsActiveTurnActivity,
@@ -336,16 +336,17 @@ type WorkTimelineEntry = Extract<TimelineEntry, { kind: "work" }>;
 
 /**
  * The live tool run from its last failing row on: a failure ends the run, as
- * its first row. A chunk of a call whose own row is in the run is that row's
- * output (`withoutOwnedOutput`), so a line it prints never ends the run. A
- * cut can leave a chunk behind without its call's row, a row of its own from
+ * its first row. It is judged by the rows it renders (`withoutJoinedOutput`):
+ * a chunk of a call whose own row is in the run is that row's output, so a
+ * line it prints never ends the run, and an orphan call's chunks are one row.
+ * A cut can leave chunks behind without their call's row, an orphan row from
  * then on — so the rest is judged again, and the loop ends because every cut
  * shortens the run.
  */
 function fromLastFailingRow(run: readonly WorkTimelineEntry[]): readonly WorkTimelineEntry[] {
   let from = run;
   for (;;) {
-    const rows = withoutOwnedOutput(from, (entry) => entry.entry);
+    const rows = withoutJoinedOutput(from, (entry) => entry.entry);
     let failing: WorkTimelineEntry | undefined;
     for (let index = rows.length - 1; index >= 0; index -= 1) {
       if (workEntryDisplayIndicatesToolFailure(rows[index]!.entry)) {
@@ -766,7 +767,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
   const activeWorkAnchor = activeToolEntries[0];
   // The live row names, and is judged by, a call's own row, never one of the
   // chunks it absorbs; it still carries them all (`groupedEntries`).
-  const activeRowEntries = withoutOwnedOutput(visibleActiveToolEntries, (entry) => entry.entry);
+  const activeRowEntries = withoutJoinedOutput(visibleActiveToolEntries, (entry) => entry.entry);
   const latestVisibleToolEntry = activeRowEntries.at(-1);
   const latestRunningToolEntry = [...activeRowEntries]
     .reverse()
@@ -1013,9 +1014,11 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
         (entry) => entry
       );
       if (visibleGroupedEntries.length > 0) {
-        // What the group counts, names and judges: its rows without the chunks
-        // their own calls absorb. The rows it renders still carry them all.
-        const rowEntries = withoutOwnedOutput(visibleGroupedEntries, (entry) => entry);
+        // What the group counts, names, judges and is shaped by: the rows it
+        // renders, its chunks joined away (`withoutJoinedOutput`) — so a call
+        // that streamed renders exactly as one that did not. The rows it
+        // renders still carry every chunk for the join.
+        const rowEntries = withoutJoinedOutput(visibleGroupedEntries, (entry) => entry);
         const activeInProgress = rowEntries.filter(workEntryIsInActiveRun);
         if (activeInProgress.length > 0) {
           const groupId = workGroupId(timelineEntry.id, timelineEntry.entry);
@@ -1034,8 +1037,8 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           if (expanded) {
             rows.push(expandedWorkGroupRow(groupId, timelineEntry.createdAt, visibleGroupedEntries));
           }
-        } else if (visibleGroupedEntries.length === 1 && workLogEntryIsToolLike(visibleGroupedEntries[0]!)) {
-          const singleEntry = visibleGroupedEntries[0]!;
+        } else if (rowEntries.length === 1 && workLogEntryIsToolLike(rowEntries[0]!)) {
+          const singleEntry = rowEntries[0]!;
           rows.push({
             kind: "work",
             id: timelineEntry.id,
@@ -1044,13 +1047,13 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
             isExpandedToolGroup: false,
             displayLabel:
               toolGroupAction(singleEntry) === "edit"
-                ? summarizeToolGroup(visibleGroupedEntries)
+                ? summarizeToolGroup(rowEntries)
                 : singleToolCallLabel(singleEntry)
           });
         } else {
           const groupId = workGroupId(timelineEntry.id, timelineEntry.entry);
           const expanded = input.expandedWorkGroupIds?.has(groupId) ?? false;
-          const singleEntry = visibleGroupedEntries.length === 1 ? visibleGroupedEntries[0]! : null;
+          const singleEntry = rowEntries.length === 1 ? rowEntries[0]! : null;
           const usesSingleToolCallLabel =
             singleEntry !== null &&
             workLogEntryIsToolLike(singleEntry) &&

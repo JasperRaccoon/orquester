@@ -772,7 +772,10 @@ const TOOL_LIFECYCLE_KINDS = new Set([
   "tool.updated",
   "tool.progress",
   "tool.output",
-  "tool.completed"
+  "tool.completed",
+  // A call's only close can be its denial, and it must render with the call's
+  // start: in the window alone, it left the start reading as running above it.
+  "tool.denied"
 ]);
 
 /** The rows the timeline folds into ONE row per task (its spawn row). */

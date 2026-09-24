@@ -3,6 +3,7 @@ import { beforeEach, describe, it } from "node:test";
 import { slimActivityPayload, type ThreadItem } from "@orquester/api/agent-chat";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
+import { workEntryDisplayLabel } from "./presentation.logic";
 import {
   deriveTimelineEntriesFromItems,
   deriveWorkLogEntries,
@@ -359,7 +360,8 @@ describe("a started call's own row", () => {
       entries.map((entry) => [entry.id, entry.command, entry.toolLifecycleStatus]),
       [
         [start.id, "npm test", "inProgress"],
-        [output.id, undefined, undefined]
+        // The chunk is headed like its call (see below); it has no lifecycle of its own.
+        [output.id, "npm test", undefined]
       ]
     );
     assert.deepEqual(
@@ -385,8 +387,8 @@ describe("a started call's own row", () => {
 
   it("an unkeyed start, and a start with neither a turn nor an owner, are dropped as before", () => {
     const unkeyed = activity("tool.started", { itemType: "command_execution", command: "ls", status: "inProgress" }, { turnId: "t1" });
-    // A Claude parent call can start before the synthetic turn its own message opens: its later rows carry that turn,
-    // and a rewind that cut the turn leaves the start alone — never a running call.
+    // A Claude parent call can start before the synthetic turn its own message opens: what it emits before that turn
+    // opens (its start, an early input update) stays turnless, and a rewind of the turn leaves those alone.
     const turnless = activity("tool.started", { itemType: "command_execution", toolUseId: "call-2", command: "ls", status: "inProgress" });
     assert.deepEqual(deriveWorkLogEntries([unkeyed, turnless]), []);
     // An agent's call started while no parent turn was open has an owner: in its own view, it is its row.
@@ -406,6 +408,61 @@ describe("a started call's own row", () => {
       { turnId: "t1" }
     );
     assert.deepEqual(deriveWorkLogEntries([start]), []);
+  });
+
+  it("a Claude start that only names its tool with an empty input carries no detail: its row reads its title", () => {
+    // Claude's `content_block_start`: the input streams afterwards, and the call's first update comes once it parses
+    // whole — for a Write or a subagent prompt, seconds later.
+    const claudeStart = (name: string, itemType: string, title: string) =>
+      activity(
+        "tool.started",
+        { itemType, toolUseId: `call-${name}`, title, detail: `${name}: {}`, status: "inProgress", data: { toolName: name, input: {} } },
+        { turnId: "t1" }
+      );
+    for (const [name, itemType, title] of [
+      ["Bash", "command_execution", "Command run"],
+      ["Write", "file_change", "File change"],
+      ["Agent", "collab_agent_tool_call", "Subagent task"],
+      ["mcp__github__create_issue", "mcp_tool_call", "MCP tool call"]
+    ] as const) {
+      const entry = workLogEntryFromActivity(claudeStart(name, itemType, title));
+      assert.equal(entry.detail, undefined, name);
+      assert.equal(workEntryDisplayLabel(entry), title, name);
+    }
+    // Only a start's, and only an empty input: a nested frame's start carries its whole input, and an update's
+    // detail is the request as it stands.
+    const withInput = activity(
+      "tool.started",
+      { itemType: "command_execution", toolUseId: "call-x", title: "Command run", detail: "Bash: ls -la", status: "inProgress" },
+      { turnId: "t1" }
+    );
+    assert.equal(workLogEntryFromActivity(withInput).detail, "Bash: ls -la");
+    const update = activity("tool.updated", { itemType: "file_change", toolUseId: "call-y", title: "File change", detail: "Write: {}", status: "inProgress" }, { turnId: "t1" });
+    assert.equal(workLogEntryFromActivity(update).detail, "Write: {}");
+  });
+
+  it("a start never offers Load full output: what the read cut there is the call's input, not its output", () => {
+    const cutStart = activity(
+      "tool.started",
+      { itemType: "command_execution", toolUseId: "call-1", title: "npm test", command: "npm test", status: "inProgress", truncated: true },
+      { turnId: "t1" }
+    );
+    assert.equal(workLogEntryFromActivity(cutStart).truncated, undefined);
+    const cutCompletion = activity("tool.completed", { itemType: "command_execution", toolUseId: "call-1", status: "completed", truncated: true }, { turnId: "t1" });
+    assert.equal(workLogEntryFromActivity(cutCompletion).truncated, true);
+  });
+
+  it("a chunk is headed like its call's row when a lifecycle row of the call is in the input: its command and title", () => {
+    // A running command whose output a hoisted error row splits off its own row: the chunks after it render apart.
+    const start = commandRow("tool.started");
+    const output = chunk("PASS a.test.ts\n");
+    const [, titled] = deriveWorkLogEntries([start, output]);
+    assert.deepEqual([titled?.id, titled?.command, titled?.toolTitle, titled?.detail], [output.id, "npm test", "npm test", "PASS a.test.ts\n"]);
+    // The same object on every derivation that names the same call, so a settled group's rows keep their memos.
+    assert.equal(deriveWorkLogEntries([start, output])[1], titled);
+    // A chunk whose call has no row in the input is headed "Tool output" (its own summary), never with its text.
+    const [orphan] = deriveWorkLogEntries([output]);
+    assert.deepEqual([orphan?.command, orphan?.toolTitle, orphan && workEntryDisplayLabel(orphan)], [undefined, undefined, "Tool output"]);
   });
 });
 

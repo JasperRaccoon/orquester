@@ -26,8 +26,8 @@ import { escapeRegExp } from "../../../lib/regexp";
  * only so existing imports keep resolving. **These are not second copies** —
  * there is exactly one implementation, in `presentation.logic.ts`. So is
  * `isToolOutputRow`, a streamed output chunk of a tool call: the run's live
- * row and a group's summary read past the ones a row absorbs, by the same
- * definition this join folds them with.
+ * row and a group's summary read the rows this join renders
+ * (`withoutJoinedOutput`), by the same definition of a chunk.
  */
 export {
   isStreamedOutputEntry as isToolOutputRow,

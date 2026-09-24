@@ -184,7 +184,9 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     ? taskDetailAsLabel
       ? undefined
       : asTrimmedString(payload?.detail)
-    : asTrimmedString(payload?.detail);
+    : activity.activityKind === "tool.started" && isEmptyInputEcho(asTrimmedString(payload?.detail))
+      ? undefined
+      : asTrimmedString(payload?.detail);
   const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
   // A command row shows the output its provider data carries where `detail`
   // only echoes the command or repeats the title — one rule in
@@ -310,8 +312,10 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   }
 
   // Gates the row's "Load full output": the rest is behind
-  // `GET …/items/:itemId` (§5.6, §6.3).
-  if (payload?.truncated === true) {
+  // `GET …/items/:itemId` (§5.6, §6.3). Never a start's: what the read cut
+  // there is the call's input, not its output — the MCP names no start as a
+  // call's `outputItemId` for the same reason.
+  if (payload?.truncated === true && activity.activityKind !== "tool.started") {
     entry.truncated = true;
   }
 
@@ -354,6 +358,18 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   }
   derivedByActivity.set(activity, entry);
   return entry;
+}
+
+/**
+ * Claude's start frame names its tool before any of its input has streamed —
+ * `summarizeToolRequest(name, {})`, "Write: {}" — and the call's first update
+ * comes only once that input parses whole: seconds later for a `Write` or a
+ * subagent's prompt. That names no input, so it is no detail, and the row
+ * reads the call's title meanwhile. A nested (subagent) frame carries its
+ * whole input from the start, and only a start is ever this.
+ */
+function isEmptyInputEcho(detail: string | undefined): boolean {
+  return detail !== undefined && /^[^\s:]+: \{\}$/.test(detail);
 }
 
 /**
@@ -483,14 +499,22 @@ function inheritedChunkOwner(
  * the text of its latest chunk. The fold keeps a running call's opening row
  * whatever its age, within a cap (`open-work.ts`), and the rows of one call
  * are derived together wherever they lie — the history's pages and bridge are
- * one input, and a window row of a call the history began joins it
- * (`splitLiveItems`) — so the row that closes a call is in its start's input.
+ * one input, and a window row of a call the history began joins it, its
+ * denial included (`splitLiveItems`) — so the row that closes a call is in
+ * its start's input whenever both are loaded. The fold's own limit aside: a
+ * close written in another owner's window can age out before the opening row
+ * it closes (`open-work.ts`), and the call then reads as running again.
  *
  * Still dropped: an unkeyed start, which nothing ties to its call; and a start
  * with neither a turn nor an owner. A Claude PARENT call can start before the
- * synthetic turn its own message opens, and its later rows carry that turn —
- * so alone such a start is never a running call, and a rewind that cut the
- * turn must not bring it back.
+ * synthetic turn its own message opens: what it emits before that turn opens
+ * — its start and any early input update — stays turnless, and only its rows
+ * after that carry the turn. A rewind of that turn leaves those turnless rows
+ * as all there is of the call, and none reads as running: the start is
+ * dropped here (superseded by the update, else as turnless and ownerless),
+ * and a turnless update still in progress is a neutral row a group hides
+ * (`workEntryIsVisibleInGroup`). The MCP's transcript builds no entry from
+ * them either.
  */
 function startIsCallRow(activity: ThreadActivityItem, supersededCalls: ReadonlySet<string>): boolean {
   const callId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
@@ -498,6 +522,63 @@ function startIsCallRow(activity: ThreadActivityItem, supersededCalls: ReadonlyS
     return false;
   }
   return Boolean(activity.turnId) || isAgentOwnedActivity(activity);
+}
+
+// ---------------------------------------------------------------------------
+// A chunk headed like its call
+// ---------------------------------------------------------------------------
+
+/** What a call's lifecycle rows name it: the latest command and title they give. */
+interface CallHeading {
+  command?: string;
+  title?: string;
+}
+
+function noteCallHeading(
+  headings: Map<string, CallHeading>,
+  callId: string,
+  payload: Record<string, unknown> | null
+): void {
+  const command = asTrimmedString(payload?.command) ?? asTrimmedString(asRecord(payload?.data)?.command);
+  const title = asTrimmedString(payload?.title);
+  if (command === undefined && title === undefined) {
+    return;
+  }
+  const heading = headings.get(callId) ?? {};
+  if (command !== undefined) {
+    heading.command = command;
+  }
+  if (title !== undefined) {
+    heading.title = title;
+  }
+  headings.set(callId, heading);
+}
+
+const headedChunkByActivity = new WeakMap<
+  ThreadActivityItem,
+  { readonly heading: CallHeading; readonly entry: DerivedWorkLogEntry }
+>();
+
+/**
+ * A streamed chunk carrying its call's command and title, as the input's
+ * lifecycle rows of the call give them. Absorbed into its call's row it adds
+ * nothing; rendered apart — a row that splits a running command's group, say
+ * — its row is headed like the call's (`workEntryDisplayLabel`), never with
+ * its text. Memoised per activity and heading, so a derivation that names the
+ * same call returns the same object.
+ */
+function headedChunk(activity: ThreadActivityItem, heading: CallHeading): DerivedWorkLogEntry {
+  const cached = headedChunkByActivity.get(activity);
+  if (cached && cached.heading.command === heading.command && cached.heading.title === heading.title) {
+    return cached.entry;
+  }
+  const entry: DerivedWorkLogEntry = {
+    ...derivedWorkLogEntry(activity),
+    ...(heading.command !== undefined ? { command: heading.command } : {}),
+    ...(heading.title !== undefined ? { toolTitle: heading.title } : {})
+  };
+  headedChunkByActivity.set(activity, { heading: { ...heading }, entry });
+  return entry;
 }
 
 /** Activity kinds that never become a work-log row. */
@@ -595,11 +676,17 @@ export function deriveWorkLogEntries(
   const agentLaunchToolIds = new Set<string>();
   // The calls whose start another of their lifecycle rows supersedes (`startIsCallRow`).
   const supersededCalls = new Set<string>();
+  // What each call's lifecycle rows name it, for its chunks (`headedChunk`).
+  const callHeadings = new Map<string, CallHeading>();
   for (const activity of activities) {
-    if (activity.activityKind !== "tool.started" && CALL_LIFECYCLE_KINDS.has(activity.activityKind)) {
-      const toolUseId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
+    if (CALL_LIFECYCLE_KINDS.has(activity.activityKind)) {
+      const payload = asRecord(activity.payload);
+      const toolUseId = asTrimmedString(payload?.toolUseId);
       if (toolUseId) {
-        supersededCalls.add(toolUseId);
+        if (activity.activityKind !== "tool.started") {
+          supersededCalls.add(toolUseId);
+        }
+        noteCallHeading(callHeadings, toolUseId, payload);
       }
       continue;
     }
@@ -661,7 +748,11 @@ export function deriveWorkLogEntries(
         continue;
       }
     }
-    const entry = derivedWorkLogEntry(activity);
+    const heading =
+      activity.activityKind === "tool.output"
+        ? callHeadings.get(asTrimmedString(asRecord(activity.payload)?.toolUseId) ?? "")
+        : undefined;
+    const entry = heading === undefined ? derivedWorkLogEntry(activity) : headedChunk(activity, heading);
     // A native agent launch gets its visible row from `task.started`; defer
     // its own in-progress tool row so a second launch cannot duplicate the batch.
     if (

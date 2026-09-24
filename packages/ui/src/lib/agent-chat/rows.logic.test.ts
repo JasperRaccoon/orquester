@@ -698,33 +698,81 @@ describe("a command's streamed output is the inside of its row", () => {
     }
   });
 
-  it("a settled call and its chunks read \"Ran 1 command\", one hidden row, which still joins every chunk", () => {
-    const items = [
-      prompt(),
-      call("tool.started", "start", 2, "inProgress"),
-      chunk(1),
-      chunk(2),
-      chunk(3),
-      call("tool.completed", "done", 9, "completed"),
-      message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })
-    ];
+  it("a settled call and its chunks render exactly as the call would without them — its row, labelled with its command", () => {
     const settled = {
       latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(1), completedAt: stamp(10) },
       expandedTurnIds: new Set(["t1"])
     };
-    const rows = deriveTimelineRows(baseInput(entriesFrom(items), settled));
-    const toggle = rows.find((row) => row.kind === "work-toggle");
-    assert.ok(toggle?.kind === "work-toggle");
-    assert.deepEqual([toggle.summary, toggle.hiddenCount, toggle.summaryKind, toggle.hasFailure], ["Ran 1 command", 1, "command", false]);
-
-    const expanded = deriveTimelineRows(
-      baseInput(entriesFrom(items), { ...settled, expandedWorkGroupIds: new Set([toggle.groupId]) })
-    ).find((row) => row.kind === "work" && row.isExpandedToolGroup);
-    assert.ok(expanded?.kind === "work");
+    const withoutChunks = [
+      prompt(),
+      call("tool.started", "start", 2, "inProgress"),
+      call("tool.completed", "done", 9, "completed"),
+      message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })
+    ];
+    const withChunks = [...withoutChunks.slice(0, 2), chunk(1), chunk(2), chunk(3), ...withoutChunks.slice(2)];
+    const callRow = (items: Parameters<typeof entriesFrom>[0]) => {
+      const rows = deriveTimelineRows(baseInput(entriesFrom(items), settled));
+      assert.ok(!kinds(rows).includes("work-toggle"), "no \"Ran 1 command\" toggle hiding its one row");
+      const row = rows.find((candidate) => candidate.kind === "work");
+      assert.ok(row?.kind === "work");
+      return row;
+    };
+    const plain = callRow(withoutChunks);
+    const streamed = callRow(withChunks);
+    assert.deepEqual([streamed.displayLabel, streamed.isExpandedToolGroup], [plain.displayLabel, false]);
+    assert.equal(streamed.displayLabel, "npm run build");
+    // The row still carries every chunk: open, they are its output.
     assert.deepEqual(
-      joinLifecycleDetails(omitSupersededLifecycleMarkers(expanded.groupedEntries, (entry) => entry)).map((entry) => [entry.id, entry.detail]),
+      joinLifecycleDetails(omitSupersededLifecycleMarkers(streamed.groupedEntries, (entry) => entry)).map((entry) => [entry.id, entry.detail]),
       [["done", "line 1\nline 2\nline 3\n"]]
     );
+  });
+
+  it("a Claude call whose input is still streaming reads its title live, never \"Bash: {}\"", () => {
+    const claudeStart = activity(
+      "tool.started",
+      { itemType: "command_execution", toolUseId: "toolu_1", title: "Command run", detail: "Bash: {}", status: "inProgress", data: { toolName: "Bash", input: {} } },
+      { id: "start", turnId: "t1", createdAt: stamp(2) }
+    );
+    const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), claudeStart]), running));
+    assert.deepEqual(kinds(rows), ["message", "working", "work-live"]);
+    const [live] = liveRows(rows);
+    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Command run");
+  });
+
+  it("a woken parent call's turnless rows, left by a rewind of the turn they preceded, render nothing", () => {
+    // What a Claude parent call emits before the synthetic turn its own message opens stays turnless: its start and an
+    // early input update. The start is superseded; the update, still in progress, is a neutral row a group hides.
+    const turnless = (activityKind: string, id: string, at: number) =>
+      activity(activityKind, { itemType: "command_execution", toolUseId: "call-w", title: "Command run", status: "inProgress", data: { command: "cat out.txt" } }, { id, createdAt: stamp(at) });
+    const items = [prompt(), message("assistant", "Done.", { id: "a1", turnId: "t1", createdAt: stamp(2) }), turnless("tool.started", "ws", 3), turnless("tool.updated", "wu", 4)];
+    for (const [name, input] of [["settled", {}], ["running", running]] as const) {
+      const rows = deriveTimelineRows(baseInput(entriesFrom(items), input));
+      assert.ok(!rows.some((row) => row.kind === "work" || row.kind === "work-live" || row.kind === "work-toggle"), `${name}: ${kinds(rows).join(", ")}`);
+    }
+  });
+
+  it("an orphan call — its chunks with no row of the call in the group — counts once, headed \"Tool output\"", () => {
+    // Retention kept the chunks and not the call's opening row (past its cap): they are its only trace here.
+    const orphan = (n: number) =>
+      activity("tool.output", { toolUseId: "call-9", streamKind: "command_output", delta: `orphan ${n}\n` }, {
+        id: `o${n}`,
+        turnId: "t1",
+        summary: "Tool output",
+        createdAt: stamp(2 + n)
+      });
+    const settled = {
+      latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(1), completedAt: stamp(10) },
+      expandedTurnIds: new Set(["t1"])
+    };
+    const items = [prompt(), orphan(1), orphan(2), orphan(3), call("tool.completed", "done", 8, "completed"), message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })];
+    const toggle = deriveTimelineRows(baseInput(entriesFrom(items), settled)).find((row) => row.kind === "work-toggle");
+    assert.ok(toggle?.kind === "work-toggle");
+    assert.deepEqual([toggle.hiddenCount, toggle.summary], [2, "Used 1 tool and ran 1 command"]);
+    // Live, an orphan call's row is headed as a call, never with its latest line.
+    const live = liveRows(deriveTimelineRows(baseInput(entriesFrom([prompt(), orphan(1), orphan(2)]), running)));
+    assert.equal(live.length, 1);
+    assert.equal(liveWorkEntryLabel(live[0]!.entry, live[0]!.active), "Tool output");
   });
 });
 

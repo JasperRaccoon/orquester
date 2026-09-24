@@ -125,7 +125,9 @@ export function backgroundShellEntries(
  * keeps a running call's opening row only among the most recently active
  * ones (`OPEN_WORK_RETENTION_LIMIT`). Its chunks alone are still one row,
  * `joinLifecycleDetails` folding them into the first; without the title that
- * row read as the first line of the output.
+ * row read as the first line of the output. A title that is only the shell's
+ * own id — the roster's fallback when nothing ever named the task — names
+ * nothing, and is no title.
  */
 export function backgroundShellRows(
   items: readonly ThreadItem[],
@@ -134,7 +136,8 @@ export function backgroundShellRows(
 ): AgentChatTimelineRow[] {
   const groupedEntries = backgroundShellEntries(items, agentId);
   if (groupedEntries.length === 0) return [];
-  const title = fallbackTitle?.trim() ?? "";
+  const given = fallbackTitle?.trim() ?? "";
+  const title = given === agentId ? "" : given;
   const framed = groupedEntries.some((entry) => LIFECYCLE_KINDS.has(entry.sourceActivityKind ?? ""));
   return [
     {

@@ -111,6 +111,13 @@ function toolFailureFromOutput(entry: WorkLogEntry, includeCommand: boolean): bo
   if (!workLogEntryIsToolLike(entry)) {
     return false;
   }
+  // A call still running is judged when it completes: the heuristic is for a
+  // completion whose output tells another story. A running command's row
+  // carries its output so far once its chunks are joined into it, and a line
+  // that merely prints "No such file or directory" is not the call failing.
+  if (entry.toolLifecycleStatus === "inProgress") {
+    return false;
+  }
   const output = includeCommand
     ? [entry.detail, entry.command].filter(Boolean).join("\n")
     : (entry.detail ?? "");
@@ -358,18 +365,18 @@ export function isStreamedOutputEntry(entry: WorkLogEntry): boolean {
 }
 
 /**
- * `entries` without the chunks a row of their own call absorbs: each streamed
- * chunk whose call (`toolCallId`) has a non-chunk entry in the same list. What
- * a run's live row and a group's summary read, while the rows they render
- * still carry every chunk for `joinLifecycleDetails` to fold — read with them,
- * a command's output counted as a tool per flush ("Used 548 tools and ran 1
- * command"), named the live row with its latest line, and failed the run on a
- * line that merely printed "No such file or directory". A chunk whose call has
- * no row in the list renders as a row of its own, and stays.
+ * `entries` as the rows they render: without the streamed chunks
+ * `joinLifecycleDetails` folds into another row — each chunk whose call
+ * (`toolCallId`) has a non-chunk entry in the same list, and each orphan chunk
+ * (its call has none there) after the first of its call, which carries them
+ * all. What a run's live row and a group's summary read, while the rows they
+ * render still carry every chunk for the join — read with them, a command's
+ * output counted as a tool per flush ("Used 548 tools and ran 1 command") and
+ * named the live row with its latest line.
  *
  * `entries` itself when it holds no chunk.
  */
-export function withoutOwnedOutput<T>(
+export function withoutJoinedOutput<T>(
   entries: readonly T[],
   workEntryFor: (entry: T) => WorkLogEntry
 ): readonly T[] {
@@ -386,13 +393,18 @@ export function withoutOwnedOutput<T>(
   if (!chunks) {
     return entries;
   }
+  const orphanCalls = new Set<string>();
   return entries.filter((entry) => {
     const workEntry = workEntryFor(entry);
-    return !(
-      isStreamedOutputEntry(workEntry) &&
-      workEntry.toolCallId !== undefined &&
-      calls.has(workEntry.toolCallId)
-    );
+    const callId = workEntry.toolCallId;
+    if (!isStreamedOutputEntry(workEntry) || callId === undefined) {
+      return true;
+    }
+    if (calls.has(callId) || orphanCalls.has(callId)) {
+      return false;
+    }
+    orphanCalls.add(callId);
+    return true;
   });
 }
 
@@ -507,12 +519,17 @@ export function singleToolCallLabel(entry: WorkLogEntry): string {
   return capitalize(normalizeCompactToolLabel(entry.toolTitle || entry.label));
 }
 
-/** *T3: `MessagesTimeline.logic.ts:55-70` (`workEntryDisplayLabel`).* */
+/**
+ * *T3: `MessagesTimeline.logic.ts:55-70` (`workEntryDisplayLabel`); differs: a
+ * streamed chunk's detail is its call's output, never its name — its row is
+ * headed like its call's (its command, else its title), else by its own
+ * summary, "Tool output".*
+ */
 export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: string): string {
   if (entry.command) {
     return entry.command;
   }
-  if (entry.detail) {
+  if (entry.detail && !isStreamedOutputEntry(entry)) {
     return entry.detail;
   }
   const changedFiles = entry.changedFiles ?? [];
