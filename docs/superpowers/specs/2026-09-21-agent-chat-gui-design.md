@@ -1384,8 +1384,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   call on the parent turn live when it started, its MCP progress the child's heartbeat — while the
   child's text streams stay chatter, so its messages stay roster ticks. A child's approval is still
   the parent's card, on the parent turn live as it arrives, joined to the child's namespaced call in
-  the child's own request bookkeeping, which the parent's settle never clears (fixtures README
-  observation 20).*
+  the child's own request bookkeeping, which the parent's settle never clears. A child's question is
+  the parent's card on NO turn: a turn's end dismisses the native-callback questions on it (§6.2), so
+  on the parent's turn a parent whose `wait` returned swept the card while the child still waited
+  for its answer (fixtures README observation 20).*
 
 #### OpenCode
 

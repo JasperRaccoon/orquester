@@ -1241,9 +1241,10 @@ export class CodexSession {
           );
         }
         const requestId = this.nextRequestId();
-        // A collab child's question rides the parent turn live now, as its
-        // approvals do (`requestTurnId`); the provider's turn stays its ref.
-        const turnId = this.requestTurnId(params.threadId, params.turnId);
+        // Stamped once, so the request and its resolution agree: a collab
+        // child's question rides NO turn (`questionTurnId`); the provider's
+        // turn stays its ref either way.
+        const turnId = this.questionTurnId(params.threadId, params.turnId);
         const answers = await new Promise<Record<string, unknown>>((resolve, reject) => {
           this.pendingUserInputs.set(requestId, {
             requestId,
@@ -1765,16 +1766,40 @@ export class CodexSession {
   }
 
   /**
-   * The turn a request's rows ride: its own for this thread's requests; for a
-   * collab child's, the PARENT turn live as it arrives, or none between parent
-   * turns — as the child's call rides the parent turn it started in
+   * The turn an APPROVAL's rows ride: its own for this thread's requests; for
+   * a collab child's, the PARENT turn live as it arrives, or none between
+   * parent turns — as the child's call rides the parent turn it started in
    * (`normalise.ts` `childCallEnvelope`). Stamped with the child's own turn,
    * a turn this thread never had, `read_transcript` placed the card in no turn
-   * and a rewind treated it apart from the call it is about. The card stays the
-   * parent's (no owner); the provider's turn stays in its refs.
+   * and any rewind dropped it (`reduceReverted` keeps a row only on a kept turn
+   * or on none). Safe on the parent's turn because nothing settles an approval
+   * by its turn: the fold derives pending approvals without one (`pending.ts`),
+   * and only a Stop, the exit or a host's first load closes them. The card
+   * stays the parent's (no owner); the provider's turn stays in its refs. A
+   * QUESTION is different — {@link questionTurnId}.
    */
   private requestTurnId(threadId: string | undefined, providerTurnId: string | undefined): string | undefined {
     return this.isChildThread(threadId) ? (this.activeTurnId ?? undefined) : providerTurnId;
+  }
+
+  /**
+   * The turn a QUESTION's rows ride: its own for this thread's questions;
+   * NONE for a collab child's. Unlike an approval, a question is settled by
+   * its turn: when a turn ends, the host dismisses every native-callback
+   * question on it (`settleStrandedQuestions` in the orchestrator, §6.2 — the
+   * provider's request died with the turn, and the card must not block the
+   * composer), in the log only, never answering the adapter. A child's
+   * request does not die with the PARENT's turn: a parent whose `wait`
+   * returned settles its turn while the child's card is still open, and on the
+   * parent's turn that sweep took the card away while the child stayed blocked
+   * on `item/tool/requestUserInput` until a Stop. The child's own turn is no
+   * answer either — a turn this thread never had, which every rewind drops.
+   * Turnless, the card is answered or cancelled like any other, and a Stop,
+   * the exit or a host's first load settles it; the provider's turn stays in
+   * its refs.
+   */
+  private questionTurnId(threadId: string | undefined, providerTurnId: string): string | undefined {
+    return this.isChildThread(threadId) ? undefined : providerTurnId;
   }
 
   /** Keep the live-task registry in step with what the normaliser emitted. */

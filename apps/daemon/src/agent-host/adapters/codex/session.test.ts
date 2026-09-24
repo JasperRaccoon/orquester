@@ -1262,6 +1262,42 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     await idle.stop();
   });
 
+  it("a child's QUESTION rows ride no turn — the parent's turn end cannot strand them — and the answer reaches the child", async () => {
+    // Unlike an approval, a question IS settled by its turn: the host dismisses
+    // every native-callback question of a turn when that turn ends (§6.2). On
+    // the parent's turn, a parent whose `wait` returned swept the child's card
+    // away while the child still waited for its answer.
+    const r = rig({
+      turns: [
+        { kind: "child-approval", childThreadId: "child-1", item: "question", parentSettles: "while-asking" }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const asked = await r.events.waitForType("user-input.requested");
+    assert.equal(asked.turnId, undefined, "no turn: a turn's end sweeps that turn's questions");
+    assert.equal(asked.agentId, undefined, "still the parent's card");
+    assert.equal(asked.providerRefs?.providerTurnId, "child-1-turn", "the child's own turn stays the provider's ref");
+    await r.events.waitForType("turn.completed");
+
+    r.session.respondToUserInput(asked.requestId!, { branch: "main" });
+    const resolved = await r.events.waitForType("user-input.resolved");
+    assert.equal(resolved.turnId, undefined, "requested and resolved agree");
+    await r.events.waitFor(
+      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
+      "the child's turn ended, answered"
+    );
+    const reply = r
+      .received()
+      .find((frame) => (frame.result as { answers?: unknown } | undefined)?.answers !== undefined);
+    assert.deepEqual(
+      (reply?.result as { answers: unknown }).answers,
+      { branch: { answers: ["main"] } },
+      "the user's answer reached the child"
+    );
+    await r.stop();
+  });
+
   it("a child's request bookkeeping ends with the child's own turn, its thread's close, or a Stop", async () => {
     // The parent settles FIRST, so only the child's own turn end can clear
     // what the child's card left behind (an accepted call keeps its entry).

@@ -728,8 +728,15 @@ a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`
   carries the child's diff — kept apart from the parent's because a parent whose `wait` returned
   settles its turn while the child's card is still open, and cleared only by the child's own
   `turn/completed` or `thread/closed`, a Stop or the exit. A child's item declined with no request
-  behind it is a `tool.denied` owned by the child. A child's question (`item/tool/requestUserInput`)
-  rides the parent turn the same way.
+  behind it is a `tool.denied` owned by the child.
+- A child's question (`item/tool/requestUserInput`) is the parent's card too, but it rides NO turn
+  (`questionTurnId`, `session.ts`; the child's turn stays in `providerRefs`), and that is where it
+  differs from an approval: nothing settles an approval by its turn, while the host dismisses every
+  native-callback question on a turn when that turn ends (`settleStrandedQuestions`, §6.2 — in the
+  log only, never an answer to the adapter). On the parent's turn, a parent whose `wait` returned
+  swept the child's open card away and the child stayed blocked until a Stop; on the child's own
+  turn, a turn the thread never had, every rewind dropped it. Turnless, it is answered or cancelled
+  like any card, and a Stop or the exit settles it.
 - `commandExecution.aggregatedOutput` is "The command's output, aggregated from stdout and stderr";
   the bindings document no bound. The completion keeps it in `data.item.aggregatedOutput` — where
   `commandOutputText` and the wire slimmer's `projectCommandData` already read Codex's output — up

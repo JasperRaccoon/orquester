@@ -109,6 +109,10 @@ export type MockTurnScript =
    * child's turn. The child's item carries the raw id the parent's own item
    * would in this turn — only the child's namespace tells the two apart.
    *
+   * `item: "question"` asks instead (`item/tool/requestUserInput`, one
+   * question `branch` with the options `main` and `dev`), and the child's
+   * turn ends once it is answered.
+   *
    * `parentSettles` ends the PARENT's turn while the child works on, as a
    * parent whose `wait` returned does: `"before-asking"` between the child's
    * `item/started` and its request, `"while-asking"` right after the request,
@@ -117,7 +121,7 @@ export type MockTurnScript =
   | {
       kind: "child-approval";
       childThreadId: string;
-      item: "command" | "file-change";
+      item: "command" | "file-change" | "question";
       parentSettles?: "before-asking" | "while-asking";
     }
   | { kind: "silent" }
@@ -446,7 +450,16 @@ async function runTurn(turnId, script) {
       };
       send({ method: "item/started", params: { item: { type: "subAgentActivity", id: "sub-" + child, kind: "started", agentThreadId: child, agentPath: "/root/" + child }, threadId, turnId, startedAtMs: 0 } });
       send({ method: "turn/started", params: { threadId: child, turn: turnObject(childTurn, "inProgress") } });
-      if (script.item === "file-change") {
+      if (script.item === "question") {
+        await ask("item/tool/requestUserInput", {
+          threadId: child, turnId: childTurn, itemId,
+          questions: [{
+            id: "branch", header: "Branch", question: "Which branch?", isOther: false, isSecret: false,
+            options: [{ label: "main", description: "The default branch" }, { label: "dev", description: "The work branch" }]
+          }],
+          isBlocking: true, autoResolutionMs: null
+        });
+      } else if (script.item === "file-change") {
         const changes = [{ path: "/tmp/child.txt", kind: { type: "add" }, diff: "+from the child\\n" }];
         send({ method: "item/started", params: { item: { type: "fileChange", id: itemId, changes, status: "inProgress" }, threadId: child, turnId: childTurn, startedAtMs: 0 } });
         const reply = await ask("item/fileChange/requestApproval", { threadId: child, turnId: childTurn, itemId, startedAtMs: 0, reason: null, grantRoot: null });
