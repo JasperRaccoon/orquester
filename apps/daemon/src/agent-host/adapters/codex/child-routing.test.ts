@@ -77,6 +77,19 @@ describe("child routing — the three routes", () => {
     }
   });
 
+  it("routes a child's call rows — its patch updates and its output — to agent-event, never drops them", () => {
+    // They become the child's own rows under its namespaced item ids
+    // (`child-items.test.ts`); dropped, a Codex drill-in never showed a
+    // command's output.
+    for (const method of [
+      "item/fileChange/patchUpdated",
+      "item/commandExecution/outputDelta",
+      "item/fileChange/outputDelta"
+    ]) {
+      assert.equal(routeCodexChildNotification(method), "agent-event", method);
+    }
+  });
+
   it("DROPS the child thread-lifecycle methods that would rewrite the parent", () => {
     // A child compacting or archiving must not rewrite the parent's state.
     for (const method of ["thread/compacted", "thread/archived", "thread/started"]) {

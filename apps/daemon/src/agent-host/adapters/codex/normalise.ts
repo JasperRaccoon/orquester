@@ -15,20 +15,22 @@
  * replayed straight back through it in a test (§9).
  */
 
-import type {
-  CanonicalItemType,
-  CanonicalRequestType,
-  RuntimeContentStreamKind,
-  RuntimeErrorClass,
-  RuntimeEvent,
-  RuntimeEventRaw,
-  RuntimeTurnState,
-  UserInputQuestion
+import {
+  isToolLifecycleItemType,
+  type CanonicalItemType,
+  type CanonicalRequestType,
+  type ItemLifecyclePayload,
+  type RuntimeContentStreamKind,
+  type RuntimeErrorClass,
+  type RuntimeEvent,
+  type RuntimeEventRaw,
+  type RuntimeTurnState,
+  type UserInputQuestion
 } from "@orquester/api/agent-chat";
 
 import type { CodexProtocol, ServerNotificationMethod } from "./_generated/index.ts";
-import { notificationThreadId, routeCodexChildNotification } from "./child-routing.ts";
-import { classifyItem, type CodexThreadItem } from "./items.ts";
+import { childItemId, notificationThreadId, routeCodexChildNotification } from "./child-routing.ts";
+import { classifyItem, type ClassifiedItem, type CodexThreadItem } from "./items.ts";
 import { usageWindowsFromRateLimits, CodexUsageTracker } from "./usage.ts";
 
 /**
@@ -55,6 +57,26 @@ export interface CodexNormaliserOptions {
   ownThreadId?: () => string | null;
 }
 
+/**
+ * A collab child's call still in progress, under its namespaced id
+ * ({@link childItemId}).
+ */
+interface OpenChildItem {
+  childThreadId: string;
+  /** The child's OWN provider turn — the one whose `turn/completed` abandons it. */
+  childTurnId: string;
+  itemType: CanonicalItemType;
+  /**
+   * The PARENT turn live when the call started, or null between parent turns:
+   * every row of the call rides it, its output chunks and its end included —
+   * one call, one turn key (AGENTS.md, "A call's rows are one owner's and one
+   * turn's"). A child's own turn is a turn of another provider thread, which
+   * this thread's fold, index and rewinds know nothing of.
+   */
+  turnId: string | null;
+  providerItemId: string;
+}
+
 /** Per-session normalisation state. */
 /**
  * How many settled turn ids the normaliser remembers. The guard's only
@@ -73,6 +95,13 @@ export class CodexNormaliser {
   private readonly openItems = new Map<string, CanonicalItemType>();
   /** itemId → the turn it belongs to, so a settle closes only that turn's items. */
   private readonly openItemTurns = new Map<string, string>();
+  /**
+   * A collab child's calls still in progress, by namespaced id. Kept apart from
+   * {@link openItems}: a child works on past the parent's turn (§3.1), so the
+   * parent's `turn/completed` must not close them — the child's own does, or
+   * its `thread/closed`, or a Stop or the exit ({@link closeOpenItems}).
+   */
+  private readonly openChildItems = new Map<string, OpenChildItem>();
   /** Set while a turn is live, so `turn.completed` can carry the usage. */
   private activeTurnId: string | null = null;
   private turnModel: string | null = null;
@@ -215,9 +244,12 @@ export class CodexNormaliser {
     this.knownAgentPaths.clear();
   }
 
-  /** Item ids still `inProgress`, used to close them when a child dies. */
+  /**
+   * Item ids still `inProgress`, used to close them when a child dies — a
+   * collab child's calls included, under their namespaced ids.
+   */
   openItemIds(): string[] {
-    return [...this.openItems.keys()];
+    return [...this.openItems.keys(), ...this.openChildItems.keys()];
   }
 
   /**
@@ -231,7 +263,9 @@ export class CodexNormaliser {
    * 30-minute active-tool window.
    *
    * `turnId` scopes the close-out so a settled turn does not reap a later
-   * turn's items; `undefined` closes everything (the child is gone).
+   * turn's items; `undefined` closes everything (the child is gone, or a Stop
+   * ended the background work) — a collab child's calls too, which a parent's
+   * settling turn never closes: the child's own turn ends them.
    */
   closeOpenItems(
     status: "completed" | "failed",
@@ -255,6 +289,38 @@ export class CodexNormaliser {
           ...(itemTurn !== undefined ? { providerTurnId: itemTurn } : {}),
           providerItemId: itemId
         },
+        ...(raw !== undefined ? { raw } : {})
+      });
+    }
+    if (turnId === undefined) {
+      events.push(...this.closeChildItems(status, () => true, raw));
+    }
+    return events;
+  }
+
+  /**
+   * Close a collab child's calls `match` picks and forget them: the child's end
+   * of each, on the child's agent id and the parent turn the call rides, as
+   * {@link closeOpenItems} closes the parent's own.
+   */
+  private closeChildItems(
+    status: "completed" | "failed",
+    match: (open: OpenChildItem) => boolean,
+    raw?: RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    const events: RuntimeEventDraft[] = [];
+    for (const [itemId, open] of [...this.openChildItems.entries()]) {
+      if (!match(open)) {
+        continue;
+      }
+      this.openChildItems.delete(itemId);
+      events.push({
+        type: "item.completed",
+        payload: { itemType: open.itemType, status, agentId: open.childThreadId },
+        ...(open.turnId !== null ? { turnId: open.turnId } : {}),
+        itemId,
+        agentId: open.childThreadId,
+        providerRefs: { providerTurnId: open.childTurnId, providerItemId: open.providerItemId },
         ...(raw !== undefined ? { raw } : {})
       });
     }
@@ -806,13 +872,7 @@ export class CodexNormaliser {
 
     events.push({
       type: phase === "started" ? "item.started" : "item.completed",
-      payload: {
-        itemType: classified.itemType,
-        ...(classified.status !== undefined ? { status: classified.status } : {}),
-        ...(classified.title !== undefined ? { title: classified.title } : {}),
-        ...(classified.detail !== undefined ? { detail: classified.detail } : {}),
-        ...(classified.data !== undefined ? { data: classified.data } : {})
-      },
+      payload: itemPayload(classified),
       ...base,
       raw
     });
@@ -906,9 +966,9 @@ export class CodexNormaliser {
   }
 
   /**
-   * A child's own lifecycle becomes `task.*` rows on the child's agent id — it
-   * must never touch the parent's `activeTurnId`, usage baseline or thread
-   * state.
+   * A child's own lifecycle becomes `task.*` rows on the child's agent id, and
+   * its calls its own item rows ({@link childItemEvents}) — it must never touch
+   * the parent's `activeTurnId`, usage baseline or thread state.
    */
   private childAgentEvent(
     method: string,
@@ -978,7 +1038,16 @@ export class CodexNormaliser {
         this.settledChildren.add(childThreadId);
         const p = params as CodexProtocol.v2.TurnCompletedNotification;
         const state = turnState(p.turn.status);
+        const interrupted = state === "interrupted" || state === "cancelled";
         return [
+          // A turn the provider abandoned leaves its in-progress items with no
+          // `item/completed` of their own (R3 finding 1) — a child's as the
+          // parent's, and closed by the same rule, before the task row.
+          ...this.closeChildItems(
+            interrupted ? "failed" : "completed",
+            (open) => open.childThreadId === childThreadId && open.childTurnId === p.turn.id,
+            raw
+          ),
           {
             type: "task.updated",
             payload: {
@@ -995,6 +1064,8 @@ export class CodexNormaliser {
         this.relaunchedTurns.delete(childThreadId);
         this.settledChildren.add(childThreadId);
         return [
+          // A closed thread runs nothing: a call it left open was cut short.
+          ...this.closeChildItems("failed", (open) => open.childThreadId === childThreadId, raw),
           {
             type: "task.completed",
             payload: { taskId: childThreadId, status: "completed", ...linkage },
@@ -1019,9 +1090,21 @@ export class CodexNormaliser {
       }
       case "item/started":
       case "item/completed": {
-        const p = params as CodexProtocol.v2.ItemStartedNotification;
-        const classified = classifyItem(p.item as CodexThreadItem);
+        const p = params as
+          | CodexProtocol.v2.ItemStartedNotification
+          | CodexProtocol.v2.ItemCompletedNotification;
+        const item = p.item as CodexThreadItem;
+        const classified = classifyItem(item);
         return [
+          ...this.childItemEvents(
+            method === "item/started" ? "started" : "completed",
+            childThreadId,
+            p.turnId,
+            item.id,
+            classified,
+            raw
+          ),
+          // The roster's tick: what the agent is doing, and its last tool.
           {
             type: "task.progress",
             payload: {
@@ -1034,6 +1117,35 @@ export class CodexNormaliser {
           }
         ];
       }
+      case "item/fileChange/patchUpdated": {
+        const p = params as CodexProtocol.v2.FileChangePatchUpdatedNotification;
+        return [
+          {
+            type: "item.updated",
+            payload: { itemType: "file_change", status: "inProgress", data: p, agentId: childThreadId },
+            ...this.childCallEnvelope(childThreadId, p.turnId, p.itemId),
+            raw
+          }
+        ];
+      }
+      case "item/commandExecution/outputDelta":
+      case "item/fileChange/outputDelta": {
+        const p = params as
+          | CodexProtocol.v2.CommandExecutionOutputDeltaNotification
+          | CodexProtocol.v2.FileChangeOutputDeltaNotification;
+        return [
+          {
+            type: "content.delta",
+            payload: {
+              streamKind:
+                method === "item/commandExecution/outputDelta" ? "command_output" : "file_change_output",
+              delta: p.delta
+            },
+            ...this.childCallEnvelope(childThreadId, p.turnId, p.itemId),
+            raw
+          }
+        ];
+      }
       default:
         // `thread/status/changed`, `thread/tokenUsage/updated`,
         // `thread/settings/updated`, `model/rerouted`: the child is live, but
@@ -1041,6 +1153,79 @@ export class CodexNormaliser {
         // roster field we publish.
         return [];
     }
+  }
+
+  /**
+   * A collab child's call as the child's own tool row: its `item/started` and
+   * `item/completed` become `item.*` events exactly as the parent's do
+   * ({@link itemLifecycle}), stamped with the child's agent id on the envelope
+   * AND the payload, under the child's namespaced id ({@link childItemId}).
+   *
+   * Only a call is a row. The child's text streams stay chatter
+   * (`child-routing.ts`), so its message and reasoning items would be empty
+   * rows, and the parent-only extras of {@link itemLifecycle} — a plan
+   * proposal, a compaction marker, an async question, a `subAgentActivity`
+   * task — would rewrite the PARENT's thread; those items stay roster ticks.
+   * The child's approvals stay the parent's to answer (`session.ts`).
+   */
+  private childItemEvents(
+    phase: "started" | "completed",
+    childThreadId: string,
+    childTurnId: string,
+    providerItemId: string,
+    classified: ClassifiedItem,
+    raw: RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    if (!isToolLifecycleItemType(classified.itemType)) {
+      return [];
+    }
+    const envelope = this.childCallEnvelope(childThreadId, childTurnId, providerItemId);
+    if (phase === "started") {
+      this.openChildItems.set(envelope.itemId, {
+        childThreadId,
+        childTurnId,
+        itemType: classified.itemType,
+        turnId: envelope.turnId ?? null,
+        providerItemId
+      });
+    } else {
+      this.openChildItems.delete(envelope.itemId);
+    }
+    return [
+      {
+        type: phase === "started" ? "item.started" : "item.completed",
+        payload: itemPayload(classified, childThreadId),
+        ...envelope,
+        raw
+      }
+    ];
+  }
+
+  /**
+   * The envelope every row of a collab child's call carries: the namespaced
+   * item id, the child as owner, and the parent turn the call started in —
+   * recorded at its `item/started`, else the parent turn live now — never the
+   * child's own turn, which stays in `providerRefs` with the provider's item id.
+   */
+  private childCallEnvelope(
+    childThreadId: string,
+    childTurnId: string,
+    providerItemId: string
+  ): {
+    turnId?: string;
+    itemId: string;
+    agentId: string;
+    providerRefs: { providerTurnId: string; providerItemId: string };
+  } {
+    const itemId = childItemId(childThreadId, providerItemId);
+    const open = this.openChildItems.get(itemId);
+    const turnId = open !== undefined ? open.turnId : this.activeTurnId;
+    return {
+      ...(turnId !== null ? { turnId } : {}),
+      itemId,
+      agentId: childThreadId,
+      providerRefs: { providerTurnId: childTurnId, providerItemId }
+    };
   }
 
   /**
@@ -1263,6 +1448,21 @@ export function providerRequestKind(
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * An `item.*` payload from its classification — the parent's own items and a
+ * collab child's alike, the child's with its `agentId`.
+ */
+function itemPayload(classified: ClassifiedItem, agentId?: string): ItemLifecyclePayload {
+  return {
+    itemType: classified.itemType,
+    ...(classified.status !== undefined ? { status: classified.status } : {}),
+    ...(classified.title !== undefined ? { title: classified.title } : {}),
+    ...(classified.detail !== undefined ? { detail: classified.detail } : {}),
+    ...(classified.data !== undefined ? { data: classified.data } : {}),
+    ...(agentId !== undefined ? { agentId } : {})
+  };
+}
 
 function threadState(
   status: CodexProtocol.v2.ThreadStatus

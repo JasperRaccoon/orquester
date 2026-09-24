@@ -1367,6 +1367,14 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   calls itself. And `developer_instructions: null` is sent explicitly (§4.4). Unverified because no
   capture produced them: `item/permissions/requestApproval`, `item/tool/call`,
   `account/chatgptAuthTokens/refresh` and `attestation/generate` — all answered, none exercised.*
+  *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a child's calls
+  are not chatter. T3 routes a child's `item/*` as lifecycle and drops both output deltas and the
+  patch updates; here all five are the child's (`child-routing.ts`) and become its own rows — the
+  child's thread id as `agentId` on envelope and payload, the item id namespaced by that thread
+  (`codex-child:<thread>:<item>`), every row of a call on the parent turn live when it started —
+  while the child's text streams stay chatter, so its messages stay roster ticks. A child's approval
+  is still the parent's card, joined to the child's namespaced call (fixtures README observation
+  20).*
 
 #### OpenCode
 
@@ -3864,6 +3872,15 @@ the owner of its call's lifecycle rows in the same derivation input — `callOwn
 `lib/agent-chat/entries.logic.ts`, through which `itemsForAgent` includes it in its owner's drill-in
 and `deriveWorkLogEntries` leaves it out of every other view. A chunk whose call has no owned row in
 the input stays the parent's, as before.*
+
+*Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a Codex drill-in
+held the child's progress ticks and never a call — the adapter wrote a child's `item/*` only as the
+roster's `task.progress` and dropped its output deltas as chatter. A collab child's call is now its
+own rows by the same rule: its start, its output chunks and its end carry the child's thread id as
+`agentId` and one turn, the parent's turn live when the call started, under an item id namespaced by
+the child's thread, so it renders in the child's drill-in as one call with its output joined and
+never in the parent's timeline (`adapters/codex/normalise.ts` `childItemEvents`; codex fixtures
+README observation 20).*
 
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind

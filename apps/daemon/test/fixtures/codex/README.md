@@ -689,3 +689,33 @@ The last one is guarded: a `completed` or `interrupted` record arriving during a
 opened is taken to be about the run before (`relaunchedTurns`) — it marks the child settled but
 writes no `task.completed`, which would settle the new run, and that run ends at its own
 `turn/completed`.
+
+## 20. A collab child's calls are its own rows — read from the bindings, not captured
+
+**Not captured.** No file in this set spawns a collab child. This is read from the generated
+bindings (`_generated/protocol/v2/`, 0.154.0), for plan
+`2026-09-24-follow-ups-adapters-output-composer-history`, Task 3.
+
+- A child's items arrive on the parent's connection under the child's `threadId`: `item/started` and
+  `item/completed` (`{item, threadId, turnId, …}`), `item/commandExecution/outputDelta` and
+  `item/fileChange/outputDelta` (`{threadId, turnId, itemId, delta}` — the file-change stream is
+  documented as "Deprecated legacy notification for `apply_patch` textual output. The server no
+  longer emits this notification."), and `item/fileChange/patchUpdated`. The item ids are the
+  child's own; nothing in the bindings makes them unique across threads.
+- The normaliser (`normalise.ts`, `childItemEvents`) makes a child's **call** — an item of a
+  tool-lifecycle type — the child's own rows: `item.*` and `content.delta` events carrying
+  `agentId: <child thread id>` on the envelope **and** the payload, under
+  `codex-child:<child thread id>:<item id>` (`childItemId`, `child-routing.ts`), each riding the
+  PARENT turn that was live when the call started (none, when it started between parent turns),
+  the child's own turn and item id kept in `providerRefs`. The roster's `task.progress` tick stays.
+  The child's message, reasoning, plan, compaction and `subAgentActivity` items stay ticks: their
+  text streams are still chatter, and the parent-only extras those items carry would rewrite the
+  parent's thread.
+- A child's call ends at its own `item/completed`. One the child abandons is closed by the child's
+  own `turn/completed` (by the parent's rule: `failed` when the turn was interrupted), by its
+  `thread/closed` (`failed`), or by a Stop or the process's exit — never by the parent's
+  `turn/completed`, which a child works on past.
+- A child's approval stays the parent's card: the request names the child's `threadId`, `turnId`
+  and raw `itemId`. The session joins it to the child's namespaced call (`rowItemId`, `session.ts`),
+  so a decline is not read as a policy deny and a file change's card carries the child's diff; a
+  child's item declined with no request behind it is a `tool.denied` owned by the child.

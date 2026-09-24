@@ -1044,6 +1044,122 @@ describe("codex session — Stop closes a child re-engaged after it completed (I
   });
 });
 
+describe("codex session — a collab child's own calls (Task 3)", () => {
+  /** A child's item as its own thread reports it: the child's call, under the child's namespace. */
+  const childCommand = (
+    id: string,
+    status: CodexProtocol.v2.CommandExecutionStatus
+  ): CodexProtocol.v2.ThreadItem => ({
+    type: "commandExecution",
+    id,
+    pluginId: null,
+    scriptPath: null,
+    command: "make -j8",
+    cwd: process.cwd(),
+    processId: null,
+    source: "agent",
+    status,
+    commandActions: [],
+    aggregatedOutput: null,
+    exitCode: null,
+    durationMs: null
+  });
+
+  it("a child's command the user declined is the user's decline, never a policy deny", async () => {
+    // Approvals of a child stay the parent's to answer, but the item they name
+    // is the child's: the session must join the answer to the child's
+    // namespaced call, or the decline reads as "you were not asked".
+    const r = rig({ turns: [{ kind: "child-approval", childThreadId: "child-1", item: "command" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    assert.equal(opened.agentId, undefined, "the card is the parent's");
+    r.session.respondToApproval(opened.requestId!, "decline");
+
+    const ended = await r.events.waitFor(
+      (event) => event.type === "item.completed" && event.agentId === "child-1",
+      "the child's call ends"
+    );
+    assert.match(String(ended.itemId), /^codex-child:child-1:/);
+    assert.equal((ended.payload as { status?: string }).status, "declined");
+    await r.events.waitForType("turn.completed");
+    assert.equal(
+      r.events.types().includes("tool.denied"),
+      false,
+      "the USER declined this one; it is not a policy deny"
+    );
+    await r.stop();
+  });
+
+  it("a child's file-change card carries the child's path and diff", async () => {
+    const r = rig({ turns: [{ kind: "child-approval", childThreadId: "child-1", item: "file-change" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    const payload = opened.payload as {
+      detail?: string;
+      args?: { changes?: { path: string; diff: string }[] };
+    };
+    assert.match(String(payload.detail), /child\.txt/, "joined on the child's call, not a missing one");
+    assert.deepEqual(
+      payload.args?.changes?.map((change) => change.path),
+      ["/tmp/child.txt"]
+    );
+    r.session.respondToApproval(opened.requestId!, "accept");
+    await r.events.waitForType("turn.completed");
+    await r.stop();
+  });
+
+  it("a child's item declined with no request behind it is a policy deny — owned by the child", async () => {
+    const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("task.started");
+    r.session.injectNotificationForTest("item/completed", {
+      item: childCommand("policy-denied-1", "declined"),
+      threadId: "child-1",
+      turnId: "child-1-turn",
+      completedAtMs: 1
+    });
+    const denied = await r.events.waitForType("tool.denied");
+    const payload = denied.payload as { toolUseId?: string; agentId?: string; reason?: string };
+    assert.equal(payload.toolUseId, "codex-child:child-1:policy-denied-1");
+    assert.equal(payload.agentId, "child-1");
+    assert.equal(denied.agentId, "child-1", "the deny is a row of the child's drill-in");
+    assert.match(String(payload.reason), /you were not asked/);
+    await r.stop();
+  });
+
+  it("a session-scoped Stop closes a child's running command, as the child's", async () => {
+    const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+    r.session.injectNotificationForTest("item/started", {
+      item: childCommand("call_long", "inProgress"),
+      threadId: "child-1",
+      turnId: "child-1-turn",
+      startedAtMs: 0
+    });
+    await r.events.waitFor(
+      (event) => event.type === "item.started" && event.itemId === "codex-child:child-1:call_long",
+      "the child's call is a row"
+    );
+
+    await r.session.interruptTurn();
+
+    const closed = await r.events.waitFor(
+      (event) => event.type === "item.completed" && event.itemId === "codex-child:child-1:call_long",
+      "the child's running call closed"
+    );
+    assert.equal(closed.agentId, "child-1");
+    assert.equal((closed.payload as { status?: string; agentId?: string }).status, "failed");
+    assert.equal((closed.payload as { agentId?: string }).agentId, "child-1");
+    await r.stop();
+  });
+});
+
 describe("codex session — the liveness watchdog really pauses (Q1 finding 16)", () => {
   it("answering a card that outlived the window does not kill the turn", async () => {
     // The window is shrunk and the card is held open well past it. Before the

@@ -50,7 +50,7 @@ import {
 } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
-import { notificationThreadId } from "./child-routing.ts";
+import { childItemId, notificationThreadId } from "./child-routing.ts";
 import type {
   CodexProtocol,
   ServerNotificationMethod,
@@ -1050,6 +1050,7 @@ export class CodexSession {
         }
         const decision = await this.parkApproval({
           method: request.method,
+          threadId: params.threadId,
           turnId: params.turnId,
           itemId: params.itemId,
           providerRequestId: String(request.id),
@@ -1077,11 +1078,14 @@ export class CodexSession {
         // must be rendered by joining on `itemId` (fixtures README obs. 2).
         const params = request.params as CodexProtocol.v2.FileChangeRequestApprovalParams;
         // THE JOIN (E2E E7): without it the card renders its own type name and
-        // the user approves a write they cannot see.
-        const changes = this.fileChangesByItem.get(params.itemId) ?? [];
-        this.fileChangesByItem.delete(params.itemId);
+        // the user approves a write they cannot see. A collab child's item is
+        // remembered under the child's namespaced id, as its rows carry it.
+        const rowItemId = this.rowItemId(params.threadId, params.itemId);
+        const changes = this.fileChangesByItem.get(rowItemId) ?? [];
+        this.fileChangesByItem.delete(rowItemId);
         const decision = await this.parkApproval({
           method: request.method,
+          threadId: params.threadId,
           turnId: params.turnId,
           itemId: params.itemId,
           providerRequestId: String(request.id),
@@ -1165,6 +1169,7 @@ export class CodexSession {
         const params = request.params as CodexProtocol.v2.PermissionsRequestApprovalParams;
         const decision = await this.parkApproval({
           method: request.method,
+          threadId: params.threadId,
           turnId: params.turnId,
           itemId: params.itemId,
           providerRequestId: String(request.id),
@@ -1243,6 +1248,8 @@ export class CodexSession {
 
   private parkApproval(input: {
     method: string;
+    /** The thread the request is about: this one, or a collab child's (§4.5). */
+    threadId?: string;
     turnId?: string;
     itemId?: string;
     providerRequestId: string;
@@ -1273,8 +1280,10 @@ export class CodexSession {
       });
       if (input.itemId !== undefined) {
         // Remember that the USER was asked about this item, so its `declined`
-        // completion is not mistaken for a CLI-side policy deny.
-        this.askedItemIds.add(input.itemId);
+        // completion is not mistaken for a CLI-side policy deny — under the id
+        // its rows carry, a collab child's namespaced one. The card itself
+        // stays the parent's: the request row names the provider's own ids.
+        this.askedItemIds.add(this.rowItemId(input.threadId, input.itemId));
       }
       this.emit({
         type: "request.opened",
@@ -1629,10 +1638,13 @@ export class CodexSession {
       payload: {
         toolName: draft.payload.title ?? draft.payload.itemType,
         toolUseId: itemId,
-        reason: "Denied by Codex's own policy; you were not asked."
+        reason: "Denied by Codex's own policy; you were not asked.",
+        // A collab child's call: the deny is a row of the child's, as the call is.
+        ...(draft.agentId !== undefined ? { agentId: draft.agentId } : {})
       },
       ...(draft.turnId !== undefined ? { turnId: draft.turnId } : {}),
       itemId,
+      ...(draft.agentId !== undefined ? { agentId: draft.agentId } : {}),
       ...(draft.providerRefs !== undefined ? { providerRefs: draft.providerRefs } : {})
     };
   }
@@ -1642,7 +1654,11 @@ export class CodexSession {
    * follows can be joined to them by `itemId` (E2E E7).
    *
    * Bounded by construction: an entry is dropped the moment its approval is
-   * answered, and the whole map is cleared when the turn settles.
+   * answered or its item completes — an approval always comes before the end
+   * it decides (fixture `04-…`) — and the whole map is cleared when the turn
+   * settles. The completion matters for a collab child's items, which are
+   * remembered too (under their namespaced ids): a child works on while the
+   * parent has no turn to settle, and in full access it is never asked at all.
    */
   private rememberFileChange(draft: RuntimeEventDraft): void {
     if (draft.type !== "item.started" && draft.type !== "item.completed") {
@@ -1651,10 +1667,28 @@ export class CodexSession {
     if (draft.payload.itemType !== "file_change" || draft.itemId === undefined) {
       return;
     }
+    if (draft.type === "item.completed") {
+      this.fileChangesByItem.delete(draft.itemId);
+      return;
+    }
     const changes = (draft.payload.data as { changes?: unknown } | undefined)?.changes;
     if (Array.isArray(changes) && changes.length > 0) {
       this.fileChangesByItem.set(draft.itemId, changes as CodexProtocol.v2.FileUpdateChange[]);
     }
+  }
+
+  /**
+   * The id an item's rows carry: the provider's own for this thread's items, a
+   * collab child's namespaced by its thread (`childItemId`, as the normaliser
+   * names the child's rows). A request names the provider's ids, so the
+   * bookkeeping that joins a request to its item goes through here.
+   */
+  private rowItemId(threadId: string | undefined, itemId: string): string {
+    return threadId !== undefined &&
+      this.providerThreadId !== null &&
+      threadId !== this.providerThreadId
+      ? childItemId(threadId, itemId)
+      : itemId;
   }
 
   /** Keep the live-task registry in step with what the normaliser emitted. */

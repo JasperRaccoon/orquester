@@ -874,7 +874,17 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in,
   `deriveWorkLogEntries` keeps it out of every other view) and `unstampedChunkOwner` in
   `mcp/transcript.ts`. One whose call's rows are gone stays the parent's; the fold, its retention
-  and the history bridge keep mirroring the log.
+  and the history bridge keep mirroring the log. **A Codex collab child keeps the rule too**
+  (`childItemEvents`, `adapters/codex/normalise.ts`): its `item/*` became only the roster's
+  `task.progress` tick and its output deltas were dropped as chatter, so a Codex drill-in showed
+  ticks and never a command. A child's call is now the child's own rows — `agentId` on the envelope
+  (ingestion reads a row's author there: stamped on the payload alone, a child's call starting would
+  end the parent's thinking block) and on the payload — under `codex-child:<thread>:<item>`
+  (`childItemId`: a child's `call_1` is not the parent's), riding the parent turn live when the call
+  started; its own `turn/completed`, its `thread/closed`, a Stop or the exit closes what it
+  abandons, never the parent's settling turn. Its approvals stay the parent's card, joined to the
+  namespaced call (`rowItemId`, `session.ts`); its message and reasoning items stay ticks (codex
+  fixtures README observation 20).
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
