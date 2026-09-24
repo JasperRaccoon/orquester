@@ -4,6 +4,7 @@ import { beforeEach, describe, it } from "node:test";
 import type { StreamHandlers, Transporter, TransportRequest, TransportResponse } from "../transporter";
 
 import {
+  THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
   type AgentChatStreamFrame,
   type ThreadItemOutputWindowResponse
@@ -387,11 +388,12 @@ describe("a call's streamed output (GET …/items/:itemId/output, window by wind
     const join = await transport.readItemOutput!("s 1", "item/1");
 
     assert.deepEqual(join, { toolUseId: "call-1", output: "héllo wörld", complete: true, truncated: false });
+    const path = "/api/sessions/s%201/items/item%2F1/output";
     assert.deepEqual(
       transporter.requests.map((request) => [request.method, request.path, request.query]),
       [
-        ["GET", "/api/sessions/s%201/items/item%2F1/output", { offset: 0, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES }],
-        ["GET", "/api/sessions/s%201/items/item%2F1/output", { offset: 7, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES }]
+        ["GET", path, { offset: 0, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES }],
+        ["GET", path, { offset: 7, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES }]
       ],
       "every window as wide as one read takes, each from where the last one ended"
     );
@@ -467,22 +469,69 @@ describe("a call's streamed output (GET …/items/:itemId/output, window by wind
   });
 
   it("refuses a body of neither shape, and windows that do not meet end to end", async () => {
+    // Refused at the last page given — never read past it into the fake's default answer.
     const refused = async (...pages: unknown[]): Promise<void> => {
       const transporter = new FakeTransporter();
       const transport = createAgentChatTransport(transporter);
       transporter.responses.push(...pages.map(ok));
       await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /streamed output/);
+      assert.equal(transporter.requests.length, pages.length);
     };
     await refused({ seq: 3 });
     // Not the window asked for: a stitched text would hold bytes twice, or skip some.
-    await refused(window({ text: "abc", totalBytes: 6, nextOffset: 3 }), window({ offset: 2, text: "cdef", totalBytes: 6 }));
+    await refused(
+      window({ text: "abc", totalBytes: 6, nextOffset: 3 }),
+      window({ offset: 2, text: "cdef", totalBytes: 6 })
+    );
     // A next window where the text does not end, or an empty one before the end: never a gap, never a loop.
     await refused(window({ text: "abc", totalBytes: 6, nextOffset: 4 }));
     await refused(window({ text: "", totalBytes: 6, nextOffset: 0 }));
     // No next window, yet short of the end.
     await refused(window({ text: "abc", totalBytes: 6 }));
     // Another call's window mid-chain.
-    await refused(window({ text: "abc", totalBytes: 6, nextOffset: 3 }), window({ toolUseId: "call-2", offset: 3, text: "def", totalBytes: 6 }));
+    await refused(
+      window({ text: "abc", totalBytes: 6, nextOffset: 3 }),
+      window({ toolUseId: "call-2", offset: 3, text: "def", totalBytes: 6 })
+    );
+  });
+
+  it("refuses a window wider than one read takes, and a join past the host's cap", async () => {
+    // Refused as it arrives — never read past it into the fake's default answer.
+    const refused = async (page: ThreadItemOutputWindowResponse): Promise<void> => {
+      const transporter = new FakeTransporter();
+      const transport = createAgentChatTransport(transporter);
+      transporter.responses.push(ok(page));
+      await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /streamed output/);
+      assert.equal(transporter.requests.length, 1);
+    };
+    const wide = THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES + 1;
+    await refused(window({ text: "a".repeat(wide), totalBytes: wide }));
+    await refused(window({ text: "a", totalBytes: THREAD_ITEM_OUTPUT_MAX_BYTES + 1, nextOffset: 1 }));
+  });
+
+  it("takes a whole join arriving mid-chain (an older host back after a rollback) as the answer", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const whole = { toolUseId: "call-1", output: "abcd", complete: true, truncated: false };
+    transporter.responses.push(ok(window({ text: "ab", totalBytes: 4, nextOffset: 2, complete: false })));
+    transporter.responses.push(ok(whole));
+
+    assert.deepEqual(await transport.readItemOutput!("s1", "i1"), whole, "never the first window glued to it");
+    assert.equal(transporter.requests.length, 2);
+  });
+
+  it("answers null on a 404 mid-chain — the thread deleted between two reads — dropping what it had", async () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    transporter.responses.push(ok(window({ text: "ab", totalBytes: 4, nextOffset: 2, complete: false })));
+    transporter.responses.push({
+      status: 404,
+      ok: false,
+      data: { error: { code: "THREAD_NOT_FOUND", message: "No thread s1." } }
+    });
+
+    assert.equal(await transport.readItemOutput!("s1", "i1"), null);
+    assert.equal(transporter.requests.length, 2);
   });
 
   it("forwards the abort signal on every page", async () => {

@@ -357,7 +357,12 @@ test("several orphan chunks of one call join into ONE row: the first carries all
 
 test("the row a command's streamed output joins onto says the call streamed, however its rows were built", () => {
   // The background shell's drill-in builds its entries one activity at a time: only the chunks know what they are.
-  const started = entry({ id: "s", toolCallId: "c1", itemType: "command_execution", sourceActivityKind: "tool.started" });
+  const started = entry({
+    id: "s",
+    toolCallId: "c1",
+    itemType: "command_execution",
+    sourceActivityKind: "tool.started"
+  });
   const chunk = (id: string, detail: string, over: Partial<WorkLogEntry> = {}) =>
     entry({ id, toolCallId: "c1", sourceActivityKind: "tool.output", detail, streamedOutput: true, ...over });
   const [row] = joinLifecycleDetails([started, chunk("o1", "one\n")]);
