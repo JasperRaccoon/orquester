@@ -1513,6 +1513,7 @@ function replaceStreamingMessageRows(
     replacements.set(previousEntry.message, entry.message);
     if (turnId !== null) {
       const clock = previous.foldClocks.get(turnId);
+      // `terminalAt` never matches today: a streaming answer's turn has no fold, a settled one rebuilt above.
       if (clock !== undefined && (clock.lastAt === index || clock.terminalAt === index)) {
         (movedFolds ??= new Map()).set(turnId, clock);
       }

@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import { messageStreamingContext, type MessageStreamingContext, type Turn } from "@orquester/api/agent-chat";
+import {
+  messageStreamingContext,
+  type MessageStreamingContext,
+  type ThreadItem,
+  type ThreadMessageItem,
+  type Turn
+} from "@orquester/api/agent-chat";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { AgentChatTimelineRow, WorkLogEntry } from "./contracts";
 import {
   deriveTimelineEntriesFromItems,
   EMPTY_TIMELINE_PROJECTION,
+  type ThreadTimelineProjection,
   type TimelineEntry
 } from "./entries.logic";
 import {
@@ -24,7 +31,8 @@ import {
   formatWorkDuration,
   isGroupingEntry,
   isRowUnchanged,
-  type TimelineRowsInput
+  type TimelineRowsInput,
+  type TimelineRowsProjection
 } from "./rows.logic";
 import { activity, message, resetBuilders, stamp } from "./test-helpers";
 
@@ -1367,55 +1375,6 @@ describe("a message's liveness is the rule's, never its bare flag (isMessageStre
     assert.deepEqual(label(secondRows.rows), ["Worked for 8.0s"], "never the fast path's stale label");
   });
 
-  it("a token of a thinking block that ends a folded turn keeps the fast path and moves the fold's label", () => {
-    // The drill-in's shape: no turn unfolded as running and no turn rows, so a fold is timed by its rows.
-    // `t0` settled with its answer; in `t1` a build ran and a thought is still being written, the fold's last row.
-    const context = running("t1");
-    const before = [
-      activity(
-        "tool.completed",
-        { itemType: "command_execution", toolUseId: "call-0", title: "ls", command: "ls", status: "completed" },
-        { id: "ls", turnId: "t0", createdAt: stamp(1) }
-      ),
-      message("assistant", "Listed the files.", { id: "listed", turnId: "t0", createdAt: stamp(3) }),
-      activity(
-        "tool.completed",
-        { itemType: "command_execution", toolUseId: "call-1", title: "npm run build", command: "npm run build", status: "completed" },
-        { id: "build", turnId: "t1", createdAt: stamp(5) }
-      )
-    ];
-    const thought = message("reasoning", "The build", { id: "think", turnId: "t1", streaming: true, createdAt: stamp(6) });
-    const labels = (rows: readonly AgentChatTimelineRow[]) =>
-      rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, row.label]] : []));
-
-    const firstEntries = deriveTimelineEntriesFromItems([...before, thought], EMPTY_TIMELINE_PROJECTION);
-    const first = deriveTimelineRowsWithState(baseInput(firstEntries.entries, { messageStreaming: context }));
-    assert.deepEqual(labels(first.rows), [
-      ["t0", "Worked for 2.0s"],
-      ["t1", "Worked for 1.0s"]
-    ]);
-
-    let entries = firstEntries;
-    let previous = first;
-    for (const [at, text, reads] of [
-      [11, "The build passed", "Worked for 6.0s"],
-      [40, "The build passed; now the tests", "Worked for 35s"]
-    ] as const) {
-      entries = deriveTimelineEntriesFromItems([...before, { ...thought, text, updatedAt: stamp(at) }], entries);
-      const next = deriveTimelineRowsWithState(baseInput(entries.entries, { messageStreaming: context }), previous);
-      assert.equal(
-        messageRow(next.rows, "listed"),
-        messageRow(previous.rows, "listed"),
-        "the fast path took the token: a row it did not touch is the same object"
-      );
-      assert.deepEqual(labels(next.rows), [
-        ["t0", "Worked for 2.0s"],
-        ["t1", reads]
-      ]);
-      previous = next;
-    }
-  });
-
   it("isRowUnchanged sees a message row's liveness", () => {
     const row = messageRow(
       deriveTimelineRows(baseInput(entriesFrom(items()), { ...t2Running, messageStreaming: running("t2") })),
@@ -1424,5 +1383,126 @@ describe("a message's liveness is the rule's, never its bare flag (isMessageStre
     assert.equal(isRowUnchanged(row, { ...row }), true);
     const { streaming: _live, ...settled } = row;
     assert.equal(isRowUnchanged(row, settled), false);
+  });
+});
+
+describe("a fold its rows time moves with the last row its clock reads (the streamed-text fast path)", () => {
+  /**
+   * The drill-in's shape: no turn unfolded as running and no turn rows, so a
+   * fold is timed by its rows — from its first row to its last. `t1` is the
+   * session's running turn, so a thought flagged in it reads as streaming;
+   * `t0` settled with its answer, and no token touches its rows, which is what
+   * tells the fast path from a rebuild.
+   */
+  const context = messageStreamingContext({
+    head: { session: { status: "running", activeTurnId: "t1" } },
+    roster: []
+  });
+  const ran = (id: string, command: string, turnId: string, at: number) =>
+    activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: `call-${id}`, title: command, command, status: "completed" },
+      { id, turnId, createdAt: stamp(at) }
+    );
+  const settled: ThreadItem[] = [
+    ran("ls", "ls", "t0", 1),
+    message("assistant", "Listed the files.", { id: "listed", turnId: "t0", createdAt: stamp(3) })
+  ];
+  const build = ran("build", "npm run build", "t1", 5);
+  const thinking = (id: string, at: number): ThreadMessageItem =>
+    message("reasoning", "The build", { id, turnId: "t1", streaming: true, createdAt: stamp(at) });
+  /** The thought as a later frame has it: its text grown, its last write moved. */
+  const written = (thought: ThreadMessageItem, text: string, at: number): ThreadMessageItem => ({
+    ...thought,
+    text,
+    updatedAt: stamp(at)
+  });
+
+  interface Frame {
+    readonly timeline: ThreadTimelineProjection;
+    readonly rows: TimelineRowsProjection;
+  }
+  const start = (items: readonly ThreadItem[]): Frame => {
+    const timeline = deriveTimelineEntriesFromItems(items, EMPTY_TIMELINE_PROJECTION);
+    return { timeline, rows: deriveTimelineRowsWithState(baseInput(timeline.entries, { messageStreaming: context })) };
+  };
+  /** The next frame's rows — which the streamed-text fast path must have taken. */
+  const next = (previous: Frame, items: readonly ThreadItem[]): Frame => {
+    const timeline = deriveTimelineEntriesFromItems(items, previous.timeline);
+    const rows = deriveTimelineRowsWithState(baseInput(timeline.entries, { messageStreaming: context }), previous.rows);
+    assert.equal(
+      rows.rows.find((row) => row.id === "listed"),
+      previous.rows.rows.find((row) => row.id === "listed"),
+      "the fast path took the token: a row it did not touch is the same object"
+    );
+    return { timeline, rows };
+  };
+  const labels = (frame: Frame) =>
+    frame.rows.rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, row.label]] : []));
+  const foldRow = (frame: Frame, turnId: string) =>
+    frame.rows.rows.find((row) => row.kind === "turn-fold" && row.turnId === turnId);
+
+  it("a thought that ends its fold moves the fold's label with every token", () => {
+    const thought = thinking("think", 6);
+    let frame = start([...settled, build, thought]);
+    assert.deepEqual(labels(frame), [
+      ["t0", "Worked for 2.0s"],
+      ["t1", "Worked for 1.0s"]
+    ]);
+    frame = next(frame, [...settled, build, written(thought, "The build passed", 11)]);
+    assert.deepEqual(labels(frame), [
+      ["t0", "Worked for 2.0s"],
+      ["t1", "Worked for 6.0s"]
+    ]);
+    frame = next(frame, [...settled, build, written(thought, "The build passed; now the tests", 40)]);
+    assert.deepEqual(labels(frame), [
+      ["t0", "Worked for 2.0s"],
+      ["t1", "Worked for 35s"]
+    ]);
+  });
+
+  it("a thought a later row follows moves nothing: the fold ends on that row", () => {
+    const thought = thinking("think", 6);
+    const test = ran("test", "npm test", "t1", 8);
+    const first = start([...settled, build, thought, test]);
+    assert.deepEqual(labels(first), [
+      ["t0", "Worked for 2.0s"],
+      ["t1", "Worked for 3.0s"]
+    ]);
+    const second = next(first, [...settled, build, written(thought, "The build passed", 20), test]);
+    assert.deepEqual(
+      labels(second),
+      [
+        ["t0", "Worked for 2.0s"],
+        ["t1", "Worked for 3.0s"]
+      ],
+      "the test run still ends the fold"
+    );
+    assert.equal(foldRow(second, "t1"), foldRow(first, "t1"), "and its row is not touched");
+  });
+
+  it("of two thoughts streaming in one fold, only the last one's tokens move its label", () => {
+    const earlier = thinking("earlier", 6);
+    const later = thinking("later", 8);
+    let frame = start([...settled, build, earlier, later]);
+    assert.deepEqual(labels(frame), [
+      ["t0", "Worked for 2.0s"],
+      ["t1", "Worked for 3.0s"]
+    ]);
+    const grown = written(earlier, "The build, first", 20);
+    frame = next(frame, [...settled, build, grown, later]);
+    assert.deepEqual(
+      labels(frame),
+      [
+        ["t0", "Worked for 2.0s"],
+        ["t1", "Worked for 3.0s"]
+      ],
+      "the earlier thought ends nothing"
+    );
+    frame = next(frame, [...settled, build, grown, written(later, "The build, then the tests", 30)]);
+    assert.deepEqual(labels(frame), [
+      ["t0", "Worked for 2.0s"],
+      ["t1", "Worked for 25s"]
+    ]);
   });
 });

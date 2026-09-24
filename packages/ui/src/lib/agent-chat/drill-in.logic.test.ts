@@ -14,7 +14,12 @@ import {
 import type { AgentChatTimelineRow } from "./contracts";
 import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn, type AgentDrillInProjection } from "./drill-in.logic";
 import { deriveTimelineEntriesFromItems, EMPTY_TIMELINE_PROJECTION } from "./entries.logic";
-import { deriveTimelineRows, deriveTimelineRowsWithState, type TimelineRowsInput } from "./rows.logic";
+import {
+  deriveTimelineRows,
+  deriveTimelineRowsWithState,
+  type TimelineRowsInput,
+  type TimelineRowsProjection
+} from "./rows.logic";
 import { activity, head, message, resetBuilders, stamp } from "./test-helpers";
 
 beforeEach(() => {
@@ -289,6 +294,42 @@ describe("a drill-in's 'Worked for …' follows a streaming thinking block", () 
     assert.ok(row, `a row ${id}`);
     return row;
   };
+  const noneExpanded = new Set<string>();
+  const parentTurns = [
+    {
+      turnId: "t0",
+      state: "completed",
+      turnCount: null,
+      requestedAt: stamp(0),
+      startedAt: stamp(0),
+      completedAt: stamp(5),
+      assistantMessageId: null,
+      userMessageId: "u0"
+    },
+    {
+      turnId: "t1",
+      state: "running",
+      turnCount: null,
+      requestedAt: stamp(10),
+      startedAt: stamp(10),
+      completedAt: null,
+      assistantMessageId: null,
+      userMessageId: "u1"
+    }
+  ] as Turn[];
+  /** The window's input, as `store.ts` builds it while `t1` runs. */
+  const parentInput = (timelineEntries: TimelineRowsInput["timelineEntries"]): TimelineRowsInput => ({
+    timelineEntries,
+    latestTurn: { turnId: "t1", state: "running", startedAt: stamp(10), completedAt: null },
+    runningTurnId: "t1",
+    expandedTurnIds: noneExpanded,
+    expandedWorkGroupIds: noneExpanded,
+    isWorking: true,
+    activeTurnStartedAt: stamp(10),
+    turns: parentTurns,
+    supportsConversationRollback: false,
+    messageStreaming: working
+  });
 
   it("each token moves the label of the fold the thought ends, and consecutive tokens keep the fast path", () => {
     const first = drill(EMPTY_AGENT_DRILL_IN, thought);
@@ -314,42 +355,6 @@ describe("a drill-in's 'Worked for …' follows a streaming thinking block", () 
   });
 
   it("the parent's view is unchanged: the agent's tokens leave its rows as they were", () => {
-    const noneExpanded = new Set<string>();
-    const turns = [
-      {
-        turnId: "t0",
-        state: "completed",
-        turnCount: null,
-        requestedAt: stamp(0),
-        startedAt: stamp(0),
-        completedAt: stamp(5),
-        assistantMessageId: null,
-        userMessageId: "u0"
-      },
-      {
-        turnId: "t1",
-        state: "running",
-        turnCount: null,
-        requestedAt: stamp(10),
-        startedAt: stamp(10),
-        completedAt: null,
-        assistantMessageId: null,
-        userMessageId: "u1"
-      }
-    ] as Turn[];
-    // The window's input, as `store.ts` builds it while `t1` runs.
-    const parentInput = (timelineEntries: TimelineRowsInput["timelineEntries"]): TimelineRowsInput => ({
-      timelineEntries,
-      latestTurn: { turnId: "t1", state: "running", startedAt: stamp(10), completedAt: null },
-      runningTurnId: "t1",
-      expandedTurnIds: noneExpanded,
-      expandedWorkGroupIds: noneExpanded,
-      isWorking: true,
-      activeTurnStartedAt: stamp(10),
-      turns,
-      supportsConversationRollback: false,
-      messageStreaming: working
-    });
     const firstTimeline = deriveTimelineEntriesFromItems(items(thought), EMPTY_TIMELINE_PROJECTION);
     const first = deriveTimelineRowsWithState(parentInput(firstTimeline.entries));
     assert.deepEqual(
@@ -361,6 +366,33 @@ describe("a drill-in's 'Worked for …' follows a streaming thinking block", () 
     const nextTimeline = deriveTimelineEntriesFromItems(items(written("The build passed", 17)), firstTimeline);
     const next = deriveTimelineRowsWithState(parentInput(nextTimeline.entries), first);
     assert.equal(next.rows, first.rows, "the agent's words are not the parent's: none of its rows moves");
+  });
+
+  it("a thought of the parent's own streams in its running turn: no fold there, no clock, and its tokens relabel nothing", () => {
+    // The running turn is the session's active one, so it is unfolded; the settled one is timed by its turn row.
+    const own = message("reasoning", "Waiting on the build", {
+      id: "wait",
+      turnId: "t1",
+      streaming: true,
+      createdAt: stamp(13)
+    });
+    const firstTimeline = deriveTimelineEntriesFromItems([...items(thought), own], EMPTY_TIMELINE_PROJECTION);
+    const first = deriveTimelineRowsWithState(parentInput(firstTimeline.entries));
+    assert.deepEqual(foldLabels(first.rows), ["Worked for 5.0s"]);
+    assert.equal(first.foldClocks.size, 0, "each fold here is timed by its turn: none has a clock");
+
+    const grown = { ...own, text: "Waiting on the build; it passed", updatedAt: stamp(30) };
+    const nextTimeline = deriveTimelineEntriesFromItems([...items(thought), grown], firstTimeline);
+    const next = deriveTimelineRowsWithState(parentInput(nextTimeline.entries), first);
+    const rowOf = (projection: TimelineRowsProjection, id: string) => projection.rows.find((row) => row.id === id);
+    assert.ok(rowOf(first, "u0") !== undefined && rowOf(first, "turn-fold:t0") !== undefined);
+    assert.equal(
+      rowOf(next, "u0"),
+      rowOf(first, "u0"),
+      "the fast path took the token: a row it did not touch is the same object"
+    );
+    assert.equal(rowOf(next, "turn-fold:t0"), rowOf(first, "turn-fold:t0"), "and no fold row was relabelled");
+    assert.deepEqual(foldLabels(next.rows), ["Worked for 5.0s"], "its running turn is still not folded");
   });
 });
 
