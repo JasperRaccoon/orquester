@@ -36,6 +36,7 @@
 
 import {
   isMessageStreaming,
+  isSettledTurnState,
   NOTHING_STREAMS,
   startedTurns,
   type Checkpoint,
@@ -389,12 +390,25 @@ interface TurnFold {
  * "Worked for …" row. A single ordinary activity after that message joins the
  * fold; larger groups and failures stay visible as a trailing summary.
  *
- * *T3: `MessagesTimeline.logic.ts:627-803`.*
+ * A settled turn works for its OWN duration: its start to its completion, as
+ * the fold's turn row has them ({@link TimelineRowsInput.turns}). A row can
+ * land in a turn long after it settled — a host's first-load closer rides the
+ * turn its work started in (`leftover-work.ts`), and so does every row of a
+ * call a background agent started there and finished later — so the span to
+ * the turn's last row read "Worked for 50h" for a turn of seconds. Only a
+ * turn with no settled row to read — still running, or a caller that passes
+ * no turns — is timed by its rows: from its prompt to the later of its
+ * answer's last write and its last row.
+ *
+ * *T3: `MessagesTimeline.logic.ts:627-803`; differs: T3 times every turn but
+ * the latest by its rows.*
  */
 function deriveTurnFolds(input: {
   entries: readonly TimelineEntry[];
   terminalAssistantMessageIds: ReadonlySet<string>;
   latestTurn: LatestTurnSummary | null;
+  /** The fold's turns: a settled one is timed by its own start and completion. */
+  turns: readonly Turn[];
   unfoldedTurnIds: ReadonlySet<string>;
   /** {@link TimelineRowsInput.messageStreaming}'s answer for a message. */
   isStreaming: (message: ThreadMessageItem) => boolean;
@@ -407,6 +421,13 @@ function deriveTurnFolds(input: {
   }
   const groups = new Map<string, TurnGroup>();
   let pendingUserBoundary: string | null = null;
+  // First row per id wins, as `startedTurns` numbers them.
+  const turnRows = new Map<string, Turn>();
+  for (const turn of input.turns) {
+    if (turn.turnId !== null && !turnRows.has(turn.turnId)) {
+      turnRows.set(turn.turnId, turn);
+    }
+  }
 
   for (const entry of input.entries) {
     if (entry.kind === "message" && entry.message.role === "user") {
@@ -503,13 +524,19 @@ function deriveTurnFolds(input: {
     const isLatestInterruptedTurn =
       input.latestTurn?.turnId === turnId && input.latestTurn.state === "interrupted";
     const lastEntryEnd = lastEntry.kind === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
+    const turnRow = turnRows.get(turnId);
+    const ownDurationMs =
+      turnRow !== undefined && isSettledTurnState(turnRow.state)
+        ? elapsedMs(turnRow.startedAt, turnRow.completedAt)
+        : null;
     const durationMs =
-      input.latestTurn?.turnId === turnId && input.latestTurn.startedAt && input.latestTurn.completedAt
+      ownDurationMs ??
+      (input.latestTurn?.turnId === turnId && input.latestTurn.startedAt && input.latestTurn.completedAt
         ? elapsedMs(input.latestTurn.startedAt, input.latestTurn.completedAt)
         : elapsedMs(
             group.startBoundary ?? firstEntry.createdAt,
             maxIso(group.terminalEntry?.message.updatedAt ?? null, lastEntryEnd) ?? lastEntryEnd
-          );
+          ));
     const duration = durationMs !== null ? formatWorkDuration(durationMs) : null;
     const label = isLatestInterruptedTurn
       ? duration
@@ -638,7 +665,10 @@ export interface TimelineRowsInput {
   /**
    * The fold's turns, in start order. "Rewind to here" numbers a user message
    * by the turn it opened (`Turn.userMessageId`) and that turn's position
-   * among the STARTED turns (§5.5). Absent — the drill-in — means no rewind.
+   * among the STARTED turns (§5.5), and a settled turn's "Worked for …" is its
+   * own duration, read off its row. Absent means no rewind and folds timed by
+   * their rows; the drill-in passes them for the timing alone
+   * (`supportsConversationRollback` false).
    */
   turns?: readonly Turn[];
   supportsConversationRollback: boolean;
@@ -743,6 +773,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     entries,
     terminalAssistantMessageIds,
     latestTurn: input.latestTurn ?? null,
+    turns: input.turns ?? [],
     unfoldedTurnIds: activeVisualResponseTurnIds,
     isStreaming
   });
@@ -1403,13 +1434,14 @@ function replaceStreamingMessageRows(
     }
     // A token of a flagged message WITH a turn that reads as settled rebuilds,
     // an answer or a thinking block alike: its turn may fold (such an answer
-    // no longer holds it open; a thinking block never did), and a fold's
-    // "Worked for …" is timed by its terminal answer's and its last row's
-    // `updatedAt`. A turnless message joins no fold and keeps the fast path,
-    // as does one that reads as streaming — a streaming answer holds its turn
-    // unfolded; a streaming thinking block does not, and a fold it ends (in a
-    // drill-in, where no turn is unfolded as running) keeps its label until
-    // the next row, as it always did.
+    // no longer holds it open; a thinking block never did), and the "Worked
+    // for …" of a fold with no settled turn row to read is timed by its
+    // terminal answer's and its last row's `updatedAt` (`deriveTurnFolds`).
+    // A turnless message joins no fold and keeps the fast path, as does one
+    // that reads as streaming — a streaming answer holds its turn unfolded; a
+    // streaming thinking block does not, and a fold it ends (in a drill-in,
+    // where no turn is unfolded as running) keeps its label until the next
+    // row, as it always did.
     if (
       entry.message.turnId !== null &&
       !isMessageStreaming(entry.message, input.messageStreaming ?? NOTHING_STREAMS)

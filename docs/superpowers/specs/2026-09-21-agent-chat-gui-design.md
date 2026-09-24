@@ -3296,6 +3296,13 @@ Row kinds and behaviour:
   changes as a unified diff with click-through to an editor tab, failed hook runs, denials, MCP
   calls. A reasoning block after a tool changes the live label back to "Thinking"; an earlier
   tool cannot remain the visible current action.
+  *Built: a settled turn's work folds behind one "Worked for …" row, as in T3, timed by the turn's
+  own start and completion off the fold's turn row (`deriveTurnFolds`, `rows.logic.ts`), in the
+  timeline, the history and the drill-in — where T3 times every turn but the latest from its
+  prompt to its last row. A row can land in a settled turn long after it: §3.3's first-load
+  closers ride the turn their work started in, and so does every row of a call a background agent
+  started there and finished later; timed by its rows, a turn of seconds read "Worked for 50h". A
+  turn still running, or one no turn row describes, is still timed by its rows.*
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
   self-ticking elapsed timer, so the turn is never represented by an empty timeline.

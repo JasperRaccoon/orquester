@@ -251,6 +251,54 @@ describe("activity-group boundaries", () => {
     assert.match(fold.label, /^Worked for /);
     assert.ok(!kinds(rows).includes("work-toggle"), "the tool row is hidden behind the fold");
   });
+
+  it("a settled turn works for its own duration, from the fold's turn row — a row that lands in it late stretches nothing", () => {
+    // t1 ran 9 s and launched a background shell. The host died; its successor's first load, 50 h later, closed the
+    // shell with a row on t1 — its start's turn — at the end of the log.
+    const items = [
+      message("user", "build it", { id: "u1", createdAt: stamp(1) }),
+      activity("tool.completed", { itemType: "command_execution", toolUseId: "c1", command: "npm run build", status: "completed" }, {
+        id: "c1-done",
+        turnId: "t1",
+        createdAt: stamp(4)
+      }),
+      message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(9), updatedAt: stamp(10) }),
+      message("user", "and test it", { id: "u2", createdAt: stamp(20) }),
+      activity("tool.completed", { itemType: "command_execution", toolUseId: "c2", command: "npm test", status: "completed" }, {
+        id: "c2-done",
+        turnId: "t2",
+        createdAt: stamp(22)
+      }),
+      message("assistant", "Tested.", { id: "a2", turnId: "t2", createdAt: stamp(29), updatedAt: stamp(30) }),
+      activity("task.completed", { taskId: "shell-1", status: "stopped", agentKind: "background", title: "npm run dev" }, {
+        id: "shell-stop",
+        turnId: "t1",
+        tone: "info",
+        summary: "Task stopped",
+        createdAt: stamp(180_000)
+      })
+    ];
+    const settled = (turnId: string, userMessageId: string, from: number, to: number): Turn => ({
+      turnId,
+      state: "completed",
+      turnCount: null,
+      requestedAt: stamp(from),
+      startedAt: stamp(from),
+      completedAt: stamp(to),
+      assistantMessageId: null,
+      userMessageId
+    });
+    const foldLabels = (rows: readonly AgentChatTimelineRow[]) =>
+      rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, row.label]] : []));
+    const latestTurn = { turnId: "t2", state: "completed" as const, startedAt: stamp(20), completedAt: stamp(30) };
+    assert.deepEqual(
+      foldLabels(deriveTimelineRows(baseInput(entriesFrom(items), { latestTurn, turns: [settled("t1", "u1", 1, 10), settled("t2", "u2", 20, 30)] }))),
+      [
+        ["t1", "Worked for 9.0s"],
+        ["t2", "Worked for 10s"]
+      ]
+    );
+  });
 });
 
 describe("compaction and changed-files rows", () => {

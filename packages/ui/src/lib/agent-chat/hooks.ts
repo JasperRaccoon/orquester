@@ -240,6 +240,8 @@ export function useAgentChatDrillIn(
   const store = useThreadStore(sessionId);
   const entries = useThreadState(store, (state) => state.slice.entries);
   const roster = useThreadState(store, (state) => state.slice.roster);
+  // The parent's turns, which time the child's turn folds.
+  const turns = useThreadState(store, (state) => state.slice.turns);
   // Memoised by the roster and the session, so this selector is stable.
   const messageStreaming = useThreadState(store, (state) => messageStreamingContext(state.slice));
 
@@ -255,13 +257,14 @@ export function useAgentChatDrillIn(
       items: entries,
       agentId,
       messageStreaming,
+      turns,
       disclosures
     });
     return {
       rows: projection.current.stable.result,
       agent: roster.find((candidate) => candidate.id === agentId) ?? null
     };
-  }, [agentId, entries, roster, messageStreaming, disclosures]);
+  }, [agentId, entries, roster, messageStreaming, turns, disclosures]);
 }
 
 // ---------------------------------------------------------------------------
