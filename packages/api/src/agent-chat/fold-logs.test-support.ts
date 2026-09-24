@@ -767,8 +767,9 @@ export const LONG_CALL_WEIGHTS: Partial<Record<FleetAction, number>> = {
 
 /**
  * {@link LONG_CALL_WEIGHTS} leaner: one agent (with `maxAgents` 1), few
- * messages and agent rows, and parent-owned chunks dense enough that the
- * parent's window trims within the first thousand events — a window small
+ * messages and agent rows, parent-owned chunks dense enough that the parent's
+ * window trims within the first thousand events, and calls opened often
+ * enough that more than a cap's worth wait behind a cut — a window small
  * enough to restore through JSON at every split point.
  */
 export const LEAN_LONG_CALL_WEIGHTS: Partial<Record<FleetAction, number>> = {
@@ -778,9 +779,9 @@ export const LEAN_LONG_CALL_WEIGHTS: Partial<Record<FleetAction, number>> = {
   finish: 0.05,
   message: 0.3,
   delta: 0.2,
-  openCall: 0.35,
+  openCall: 2,
   chunk: 30,
-  closeCall: 0.2,
+  closeCall: 0.35,
   turn: 0.15,
   revert: 0.05
 };

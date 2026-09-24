@@ -465,7 +465,7 @@ test("snapshot + tail stays exact across the retention window and in-place updat
   for (let index = 0; index < rows; index += 1) {
     events.push(
       ev("thread.activity-appended", {
-        activity: activity("tool.started", { toolUseId: `t${index}` }, { id: `row-${index}` })
+        activity: activity("tool.completed", { toolUseId: `t${index}` }, { id: `row-${index}` })
       })
     );
     if (index % 100 === 0) {
@@ -491,7 +491,7 @@ test("snapshot + tail stays exact across the retention window and in-place updat
       // is replaced where it stands, and then leaves with that trim.
       events.push(
         ev("thread.activity-appended", {
-          activity: activity("tool.updated", { toolUseId: "t110" }, { id: "row-110" })
+          activity: activity("tool.completed", { toolUseId: "t110", status: "failed" }, { id: "row-110" })
         })
       );
     }

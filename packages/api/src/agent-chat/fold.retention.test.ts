@@ -102,25 +102,18 @@ function isMarker(row: ThreadActivityItem): boolean {
   );
 }
 
+type ReferenceUnit = { opening: ThreadActivityItem; openedAt: number; activeAt: number };
+
 /**
- * The opening rows of running work every trim keeps since
- * `FOLD_SNAPSHOT_VERSION` 4, read from the definitions — grouping each unit's
- * rows, not `open-work.ts`'s single pass — so the reference stays a second
- * reading of the rule. A call (a non-blank `toolUseId` on `tool.*` rows) is
- * open when its rows hold a `tool.started`/`tool.updated` and no
- * `tool.completed`/`tool.denied`, and opens with the first of those; a
- * background task (a non-blank `taskId` on `task.*` rows) when its rows hold a
- * `task.started` not stamped `agentKind: "agent"` and no `task.completed`, and
- * opens with the first such start. A unit ranks by its newest row — any of the
- * call's rows; any of the task's, or any row stamped with its id as the owner —
- * and a tie goes to the one opened later. Each window (the parent's, each
- * agent's) keeps the openings of its 16 best-ranked units; the ceiling across
- * agents, the 64 best-ranked agent-owned ones.
+ * The work still running, by its opening row, read from the definitions — grouping each unit's rows, not
+ * `open-work.ts`'s single pass — so the reference stays a second reading of the rule (`FOLD_SNAPSHOT_VERSION` 4). A
+ * call (a non-blank `toolUseId` on `tool.*` rows) is open when its rows hold a `tool.started`/`tool.updated` and no
+ * `tool.completed`/`tool.denied`, and opens with the first of those; a background task (a non-blank `taskId` on
+ * `task.*` rows) when its rows hold a `task.started` not stamped `agentKind: "agent"` and no `task.completed`, and
+ * opens with the first such start. A unit is active as of its newest row — any of the call's rows; any of the task's,
+ * or any row stamped with its id as the owner.
  */
-function referenceOpenings(activities: readonly ThreadActivityItem[]): {
-  windows: Set<ThreadActivityItem>;
-  ceiling: Set<ThreadActivityItem>;
-} {
+function referenceUnits(activities: readonly ThreadActivityItem[]): Map<ThreadActivityItem, ReferenceUnit> {
   const payloadOf = (row: ThreadActivityItem): Record<string, unknown> =>
     row.payload !== null && typeof row.payload === "object" && !Array.isArray(row.payload)
       ? (row.payload as Record<string, unknown>)
@@ -145,35 +138,40 @@ function referenceOpenings(activities: readonly ThreadActivityItem[]): {
     const owner = ownerOf(row);
     if (owner !== null) push(ownedAt, owner, at);
   });
-  type Unit = { opening: ThreadActivityItem; openedAt: number; activeAt: number };
-  const units: Unit[] = [];
+  const units = new Map<ThreadActivityItem, ReferenceUnit>();
   for (const rows of callRows.values()) {
     if (rows.some(([row]) => row.activityKind === "tool.completed" || row.activityKind === "tool.denied")) continue;
     const opener = rows.find(([row]) => row.activityKind === "tool.started" || row.activityKind === "tool.updated");
-    if (opener !== undefined) units.push({ opening: opener[0], openedAt: opener[1], activeAt: rows.at(-1)![1] });
+    if (opener !== undefined) units.set(opener[0], { opening: opener[0], openedAt: opener[1], activeAt: rows.at(-1)![1] });
   }
   for (const [taskId, rows] of taskRows) {
     if (rows.some(([row]) => row.activityKind === "task.completed")) continue;
     const start = rows.find(([row]) => row.activityKind === "task.started" && payloadOf(row).agentKind !== "agent");
     if (start === undefined) continue;
     const activeAt = Math.max(rows.at(-1)![1], ownedAt.get(taskId)?.at(-1) ?? -1);
-    units.push({ opening: start[0], openedAt: start[1], activeAt });
+    units.set(start[0], { opening: start[0], openedAt: start[1], activeAt });
   }
-  const best = (left: Unit, right: Unit): number => right.activeAt - left.activeAt || right.openedAt - left.openedAt;
-  const byWindow = new Map<string, Unit[]>();
-  for (const unit of units) push(byWindow, ownerOf(unit.opening) ?? "", unit);
-  const windows = new Set<ThreadActivityItem>();
-  for (const list of byWindow.values()) {
-    for (const unit of list.sort(best).slice(0, 16)) windows.add(unit.opening);
-  }
-  const ceiling = new Set(
-    units
-      .filter((unit) => ownerOf(unit.opening) !== null)
-      .sort(best)
-      .slice(0, 64)
+  return units;
+}
+
+/**
+ * The openings among `rows` a cut keeps: the `limit` most recently active, a tie going to the one opened later. Each
+ * window's cut ranks only the rows it would drop — those before its newest `limit` rows — and the ceiling only the
+ * rows that survived their own window.
+ */
+function referenceKept(
+  units: ReadonlyMap<ThreadActivityItem, ReferenceUnit>,
+  rows: readonly ThreadActivityItem[],
+  limit: number
+): Set<ThreadActivityItem> {
+  return new Set(
+    rows
+      .filter((row) => units.has(row))
+      .map((row) => units.get(row)!)
+      .sort((left, right) => right.activeAt - left.activeAt || right.openedAt - left.openedAt)
+      .slice(0, limit)
       .map((unit) => unit.opening)
   );
-  return { windows, ceiling };
 }
 
 /**
@@ -182,14 +180,15 @@ function referenceOpenings(activities: readonly ThreadActivityItem[]): {
  * these logs carry exactly as the fold's `<` does, ties included — with the
  * parent window's marker exemption as it stands since `FOLD_SNAPSHOT_VERSION`
  * 3: either spelling ({@link isMarker}); and, since 4, every window's and the
- * ceiling's exemption for the opening rows of running work
- * ({@link referenceOpenings}).
+ * ceiling's exemption for the opening rows of running work ({@link referenceUnits},
+ * {@link referenceKept}): 16 per window among the rows its cut would drop, 64
+ * under the ceiling among the agents' rows that survived their own windows.
  */
 function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): Set<ThreadActivityItem> {
   if (activities.length <= ACTIVITY_RETENTION_LIMIT) {
     return new Set();
   }
-  const openings = referenceOpenings(activities);
+  const units = referenceUnits(activities);
   const pendingById = new Map<string, ThreadActivityItem>();
   const parentRows: ThreadActivityItem[] = [];
   const agentRows = new Map<string, ThreadActivityItem[]>();
@@ -215,9 +214,10 @@ function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): S
   const retainedByQuestion = new Set(pendingById.values());
   const drop = new Set<ThreadActivityItem>();
   const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
+  const keptByParent = referenceKept(units, parentRows.slice(0, Math.max(0, parentStart)), 16);
   for (let index = 0; index < parentStart; index += 1) {
     const row = parentRows[index]!;
-    if (retainedByQuestion.has(row) || openings.windows.has(row) || isAnchor(row) || isMarker(row)) {
+    if (retainedByQuestion.has(row) || keptByParent.has(row) || isAnchor(row) || isMarker(row)) {
       continue;
     }
     drop.add(row);
@@ -225,18 +225,20 @@ function referenceActivitiesToDrop(activities: readonly ThreadActivityItem[]): S
   const survivingAgentRows: ThreadActivityItem[] = [];
   for (const rows of agentRows.values()) {
     const start = rows.length - AGENT_ACTIVITY_RETENTION_LIMIT;
+    const keptByAgent = referenceKept(units, rows.slice(0, Math.max(0, start)), 16);
     rows.forEach((row, index) => {
-      if (index < start && !isAnchor(row) && !openings.windows.has(row)) drop.add(row);
+      if (index < start && !isAnchor(row) && !keptByAgent.has(row)) drop.add(row);
       else survivingAgentRows.push(row);
     });
   }
   if (survivingAgentRows.length > AGENT_ACTIVITY_TOTAL_LIMIT) {
+    const keptByCeiling = referenceKept(units, survivingAgentRows, 64);
     survivingAgentRows.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     const excess = survivingAgentRows.length - AGENT_ACTIVITY_TOTAL_LIMIT;
     let dropped = 0;
     for (const row of survivingAgentRows) {
       if (dropped === excess) break;
-      if (isAnchor(row) || openings.ceiling.has(row)) continue;
+      if (isAnchor(row) || keptByCeiling.has(row)) continue;
       drop.add(row);
       dropped += 1;
     }
@@ -911,10 +913,10 @@ function lostAt(states: readonly ThreadFoldState[], row: ThreadActivityItem, fro
   return states.findIndex((state, step) => step >= from && !state.activities.includes(row));
 }
 
-test("running work keeps at most 16 opening rows per window and 64 across agents, below every slack", () => {
+test("running work keeps at most 16 opening rows behind each window's cut and 64 under the ceiling, below every slack", () => {
   assert.equal(OPEN_WORK_RETENTION_LIMIT, 16);
   assert.equal(OPEN_WORK_TOTAL_RETENTION_LIMIT, 64);
-  // So every trim still frees at least its slack minus the cap, and none runs on every event.
+  // So a trim still frees at least its slack minus the cap — less any old open questions, which count too.
   assert.ok(OPEN_WORK_RETENTION_LIMIT < ACTIVITY_RETENTION_SLACK);
   assert.ok(OPEN_WORK_RETENTION_LIMIT < AGENT_ACTIVITY_RETENTION_SLACK);
   assert.ok(OPEN_WORK_TOTAL_RETENTION_LIMIT < AGENT_ACTIVITY_TOTAL_SLACK);
@@ -997,7 +999,7 @@ for (const closer of ["tool.completed", "tool.denied"] as const) {
 }
 
 for (const window of ["parent", "agent"] as const) {
-  test(`the ${window} window keeps the openings of its 16 most recently active open calls: a streaming call outranks 40 opened after it and left quiet, and every trim frees its slack minus 16`, () => {
+  test(`the ${window} window keeps the openings of the 16 most recently active open calls behind its cut: a streaming call outranks 40 opened after it and left quiet, and every trim frees its slack minus 16`, () => {
     reset();
     const agentId = window === "agent" ? "ag" : undefined;
     const [limit, slack] =
@@ -1049,6 +1051,75 @@ for (const window of ["parent", "agent"] as const) {
     );
   });
 }
+
+test("a burst of calls in flight inside the window takes no slot from an old quiet shell's start: a window's cap ranks only the openings its cut would drop", () => {
+  reset();
+  // A dev server started first and went quiet; its start is a parent row.
+  const shellStart = activity(
+    "task.started",
+    { taskId: "sh1", agentKind: "background", taskType: "local_bash", isBackgrounded: true, description: "npm run dev" },
+    { id: "shell-start" }
+  );
+  const events: DomainEvent[] = [created(), running(), appended(shellStart)];
+  for (let index = 0; index < 520; index += 1) events.push(parentRow(index));
+  // Twenty calls in flight at once, each more recently active than the shell.
+  const burst: ThreadActivityItem[] = [];
+  for (let index = 0; index < 20; index += 1) {
+    const row = callRow("tool.started", `burst-${index}`, `burst-start-${index}`);
+    burst.push(row);
+    events.push(appended(row));
+  }
+  // Enough rows to take the parent past its limit plus slack once, the burst inside its newest 500.
+  for (let index = 520; index < 530; index += 1) events.push(parentRow(index));
+  const states = statesOf(events);
+  const trimAt = states.findIndex((state) => itemsDroppedByRetention(state).length > 0);
+  assert.equal(trimAt, events.length - 1, "one trim, at the last row");
+  const trimmed = states[trimAt]!;
+  assert.ok(trimmed.activities.includes(shellStart), "the shell's start is kept: the one opening the cut would drop");
+  assert.ok(burst.every((row) => trimmed.activities.includes(row)), "the burst is inside the window anyway");
+  assert.deepEqual(trimmed.roster.map((row) => row.id), ["sh1"], "the shell stays on the roster");
+});
+
+test("the ceiling's slots go to openings that survived their own window: those an agent's own cap dropped take none", () => {
+  reset();
+  const events: DomainEvent[] = [created(), running()];
+  // Sixty calls four agents opened first and left open, each inside its own window: the oldest rows the ceiling reaches.
+  const quiet: ThreadActivityItem[] = [];
+  for (const agentId of ["b0", "b1", "b2", "b3"]) {
+    for (let index = 0; index < 15; index += 1) {
+      const row = callRow("tool.started", `${agentId}-call-${index}`, `${agentId}-start-${index}`, agentId);
+      quiet.push(row);
+      events.push(appended(row));
+    }
+  }
+  // Thirty calls agent `a` opened next, all more recently active than the quiet ones by the end.
+  const busy: ThreadActivityItem[] = [];
+  for (let index = 0; index < 30; index += 1) {
+    const row = callRow("tool.started", `a-call-${index}`, `a-start-${index}`, "a");
+    busy.push(row);
+    events.push(appended(row));
+  }
+  // Twelve more agents, each inside its own window.
+  const others = Array.from({ length: 12 }, (_, index) => `c${index}`);
+  for (let round = 0; round < 150; round += 1) {
+    for (const id of others) events.push(agentRow(id, round));
+  }
+  // Agent `a`'s own rows put its thirty openings behind its newest 200; then its calls print, and its 251st row trims
+  // its window — its cap keeps sixteen openings — with the rows across agents past the ceiling.
+  for (let index = 0; index < AGENT_ACTIVITY_RETENTION_LIMIT; index += 1) events.push(agentRow("a", 1_000 + index));
+  for (let index = 0; index < 21; index += 1) events.push(chunkRow(`a-call-${index}`, index, "a"));
+  const states = statesOf(events);
+  const trimAt = states.findIndex((state) => itemsDroppedByRetention(state).length > 0);
+  assert.equal(trimAt, events.length - 1, "one trim, at the last row");
+  const trimmed = states[trimAt]!;
+  const held = (rows: readonly ThreadActivityItem[]): number => rows.filter((row) => trimmed.activities.includes(row)).length;
+  assert.equal(held(busy), OPEN_WORK_RETENTION_LIMIT, "agent a's own cap kept sixteen of its thirty openings");
+  assert.equal(
+    held(quiet),
+    OPEN_WORK_TOTAL_RETENTION_LIMIT - OPEN_WORK_RETENTION_LIMIT,
+    "the ceiling's other 48 slots went to the quiet agents' openings, not to the fourteen agent a's cap dropped"
+  );
+});
 
 test("a running background shell keeps its task.started through 600 parent rows, so the roster keeps it; once it ends, a trim drops it", () => {
   reset();

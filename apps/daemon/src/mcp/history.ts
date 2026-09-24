@@ -165,10 +165,11 @@ function keptWhateverItsAge(activity: ThreadActivityItem, openings: ReadonlySet<
 /**
  * The opening rows of the work `snap` shows still running (`openWorkOf`): each call's first `tool.started` or
  * `tool.updated` that no `tool.completed` or `tool.denied` has closed, each background task's `task.started` with no
- * `task.completed`. The fold keeps them whatever their age — the 16 most recently active per window, the 64 among the
- * agents' under the ceiling across them (`OPEN_WORK_RETENTION_LIMIT`, packages/api fold.ts) — so a long command's start
- * outlives its own output. Every one counts here, not only those the fold kept: that can only name more turns partial
- * than are, never read a partial turn as whole.
+ * `task.completed`. The fold keeps them whatever their age — the 16 most recently active of those a window's cut would
+ * drop, and under the ceiling across agents the 64 most recently active of the agents' that survived their own window
+ * (`OPEN_WORK_RETENTION_LIMIT`, packages/api fold.ts) — so a long command's start outlives its own output. Every one
+ * counts here, not only those the fold kept: that can only name more turns partial than are, never read a partial turn
+ * as whole.
  */
 function openingsOf(snap: ThreadSnapshotPayload): ReadonlySet<ThreadActivityItem> {
   const { calls, tasks } = openWorkOf(snap.items.filter((item): item is ThreadActivityItem => item.kind === "activity"));
