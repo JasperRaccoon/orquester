@@ -8,6 +8,7 @@ import { shortAccountLabel } from "../../../../lib/account-label";
 import { identityChangeSummary } from "../../../../lib/agent-chat/account-switch";
 import { useAppStore } from "../../../../store/app";
 import type { AgentChatTimelineRow, WorkLogEntry } from "../../../../lib/agent-chat/contracts";
+import { fullOutputSourceOf } from "../../../../lib/agent-chat/full-output";
 import {
   DisclosureChevron,
   ShimmerText,
@@ -320,6 +321,7 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
   const command = entry.command?.trim() ?? "";
   const changedFiles = entry.changedFiles ?? [];
   const diff = looksLikeUnifiedDiff(detail) ? detail : null;
+  const fullOutput = fullOutputSourceOf(entry);
 
   const canExpand =
     entry.questionAnswer !== undefined ||
@@ -435,12 +437,14 @@ export const ToolEntryRow = React.memo(function ToolEntryRow({
               ))}
             </div>
           ) : null}
-          {/* §5.6: offered ONLY where the slimmer stamped `truncated`, so the
-              button is a promise that the full read really has more. */}
-          {entry.truncated === true ? (
+          {/* A promise that the read really has more: where the slimmer
+              stamped `truncated` (§5.6), the item; where a command's output
+              streamed, the host's join of it, of which this row may hold only
+              the latest (`fullOutputSourceOf`). */}
+          {fullOutput !== null ? (
             <button
               type="button"
-              onClick={() => ctx.onLoadFullOutput(entry.id)}
+              onClick={() => ctx.onLoadFullOutput(entry.id, fullOutput)}
               className="mt-2 rounded text-[11px] text-neutral-500 transition-colors hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
             >
               Load full output

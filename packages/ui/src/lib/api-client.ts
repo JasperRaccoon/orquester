@@ -94,7 +94,12 @@ import {
 } from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
-import type { ThreadItemResponse, TurnDiffQuery, TurnDiffResponse } from "@orquester/api/agent-chat";
+import type {
+  ThreadItemOutputResponse,
+  ThreadItemResponse,
+  TurnDiffQuery,
+  TurnDiffResponse
+} from "@orquester/api/agent-chat";
 
 export interface ApiRequestOptions {
   query?: TransportRequest["query"];
@@ -954,6 +959,21 @@ export class ApiClient {
   /** One activity item's full, unslimmed payload (§5.6's "load full output"). */
   agentChatItem(id: string, itemId: string): Promise<ThreadItemResponse> {
     return this.agentChat.readItem(id, itemId);
+  }
+
+  /**
+   * The whole streamed output of the tool call an item belongs to, as the
+   * host joins its chunks (§6.3 `GET …/items/:itemId/output`, read window by
+   * window) — "load full output" on a command whose output streamed. `null`
+   * where the host has none to give (a 404) or the transport cannot ask: the
+   * caller reads the item instead.
+   */
+  agentChatItemOutput(
+    id: string,
+    itemId: string,
+    signal?: AbortSignal
+  ): Promise<ThreadItemOutputResponse | null> {
+    return this.agentChat.readItemOutput?.(id, itemId, signal) ?? Promise.resolve(null);
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

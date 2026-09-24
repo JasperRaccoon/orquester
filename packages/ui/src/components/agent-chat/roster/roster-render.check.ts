@@ -509,6 +509,10 @@ assert.ok(
   !shellDrillIn.includes("max-h-64"),
   "and not the short cap a tool row inside a conversation gets"
 );
+assert.ok(
+  shellDrillIn.includes("Load full output"),
+  "and the whole of what it printed is a read away: the shell's window keeps 200 rows, the host's join all of it"
+);
 
 // Nothing printed yet: the copy is a shell's, not a subagent's.
 const silentShell = render(

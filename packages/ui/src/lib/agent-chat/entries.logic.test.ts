@@ -537,6 +537,88 @@ describe("a started call's own row", () => {
   });
 });
 
+describe("a call that streamed a command's output: its whole output is the host's join", () => {
+  const commandRow = (activityKind: string, extra: Record<string, unknown> = {}, turnId = "t1") =>
+    activity(
+      activityKind,
+      { itemType: "command_execution", toolUseId: "call-1", title: "npm test", command: "npm test", status: "inProgress", ...extra },
+      { turnId }
+    );
+  const chunk = (delta: string, over: { streamKind?: string; toolUseId?: string; turnId?: string } = {}) =>
+    activity(
+      "tool.output",
+      { toolUseId: over.toolUseId ?? "call-1", streamKind: over.streamKind ?? "command_output", delta },
+      { turnId: over.turnId ?? "t1", summary: "Tool output" }
+    );
+
+  it("a chunk of a command's output says so; a file change's result text, or a chunk naming no call, never", () => {
+    assert.equal(workLogEntryFromActivity(chunk("PASS a.test.ts\n")).streamedOutput, true);
+    assert.equal(
+      workLogEntryFromActivity(chunk("File created successfully at: /w/p/a.ts", { streamKind: "file_change_output" })).streamedOutput,
+      undefined
+    );
+    assert.equal(workLogEntryFromActivity(activity("tool.output", { streamKind: "command_output", delta: "x\n" })).streamedOutput, undefined);
+  });
+
+  it("every lifecycle row of a call whose command output the input holds says so, wherever its chunks lie", () => {
+    // A long command whose early chunks the window evicted: a later one is still there, in a turn the completion
+    // does not share (they never meet in one group), or after it.
+    const completion = commandRow("tool.completed", { status: "completed", detail: "line 598" }, "t2");
+    for (const input of [
+      [chunk("line 599\n"), completion],
+      [completion, chunk("line 599\n", { turnId: "t2" })]
+    ]) {
+      const row = deriveWorkLogEntries(input).find((entry) => entry.id === completion.id);
+      assert.equal(row?.streamedOutput, true);
+    }
+    // A running command's start, its call's only row so far.
+    const start = commandRow("tool.started");
+    assert.equal(deriveWorkLogEntries([start, chunk("PASS\n")])[0]?.streamedOutput, true);
+  });
+
+  it("a command that streamed nothing, and a file change whose result text streamed, say nothing", () => {
+    const plain = commandRow("tool.completed", { status: "completed", detail: "2 passed" });
+    assert.equal(deriveWorkLogEntries([plain])[0]?.streamedOutput, undefined);
+    assert.equal(
+      deriveWorkLogEntries([plain, chunk("x\n", { toolUseId: "call-9" })])[0]?.streamedOutput,
+      undefined,
+      "another call's output marks nothing here"
+    );
+    const edit = activity(
+      "tool.completed",
+      { itemType: "file_change", toolUseId: "call-e", title: "File change", status: "completed", changedFiles: ["/w/p/a.ts"] },
+      { turnId: "t1" }
+    );
+    const result = chunk("File created successfully at: /w/p/a.ts", { streamKind: "file_change_output", toolUseId: "call-e" });
+    for (const entry of deriveWorkLogEntries([edit, result])) {
+      assert.equal(entry.streamedOutput, undefined, entry.id);
+    }
+  });
+
+  it("is the same object on every derivation that holds the call's output, so a settled group keeps its row memos", () => {
+    const completion = commandRow("tool.completed", { status: "completed" });
+    const first = deriveWorkLogEntries([chunk("a\n"), completion]).find((entry) => entry.id === completion.id);
+    const second = deriveWorkLogEntries([chunk("a\n"), chunk("b\n"), completion]).find((entry) => entry.id === completion.id);
+    assert.equal(first?.streamedOutput, true);
+    assert.equal(second, first);
+  });
+
+  it("in an agent's drill-in too: its own call's rows and chunks", () => {
+    const own = { agentId: "ag1", turnId: "t1" };
+    const completion = activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: "call-a", command: "ls", status: "completed", agentId: "ag1" },
+      own
+    );
+    const output = activity("tool.output", { toolUseId: "call-a", streamKind: "command_output", delta: "a.ts\n" }, own);
+    const entries = deriveWorkLogEntries([output, completion], { ownerAgentId: "ag1" });
+    assert.deepEqual(entries.map((entry) => [entry.id, entry.streamedOutput]), [
+      [output.id, true],
+      [completion.id, true]
+    ]);
+  });
+});
+
 describe("compaction classification", () => {
   it("recognises both spellings", () => {
     assert.equal(isCompactionActivity(activity("context-compaction", {})), true);
