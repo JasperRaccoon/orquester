@@ -434,8 +434,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   and folds nothing else before the gate. Every other thread goes into
   `bootSettlePending`: §3.4's stale-`pending`-turn settle, which the reconcile used to run on every
   idle thread at boot, runs on the thread's **first load**, inside `loadRuntime` before the runtime
-  is published, so no read, stream snapshot or command can see the thread unsettled — and never at
-  boot. A head that cannot be read is folded, as before. Measured before, on the owner's VPS
+  is published — and so does the closing of whatever its last process left running
+  (`closeLeftoverWork`, see "A running state never outlives its process"), which an orphan gets in
+  the reconcile itself — so no read, stream snapshot or command can see the thread unsettled — and
+  never at boot. A head that cannot be read is folded, as before. Measured before, on the owner's VPS
   (2026-09-23): 16 s of folding for 78 MB of logs, all of it on the readiness path — an 18 s
   "connecting" window on every host replacement; the reconcile now costs one `meta.json` read per
   thread plus the orphans' own folds. The deploy handover's `/stop` (`markThreadsForContinuation`)
@@ -532,8 +534,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   activity, chunks included — `OPEN_WORK_RETENTION_LIMIT` 16 among the openings each window's cut
   would drop (one among the window's newest rows survives anyway and takes no slot),
   `OPEN_WORK_TOTAL_RETENTION_LIMIT` 64 under the ceiling among the openings that survived their own
-  window — because a crash leaves work open for good and those dangling openings must not crowd out
-  a command still printing. A kept row still counts in its class, as an open question does, so a
+  window — because work a dead host left open stays open until the thread's next first load closes
+  it (see "A running state never outlives its process"), a finished call can read open again (the
+  limits `open-work.ts` documents), and those dangling openings must not crowd out a command still
+  printing. A kept row still counts in its class, as an open question does, so a
   trim frees at least its slack minus the cap, minus (in the parent's window) the old open
   questions, which count and are kept too; and the walk runs inside a trim only. `state.evicted`
   (serialized, never cleared) records that retention has dropped something, and `windowBoundary`
@@ -698,9 +702,32 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
 - **`raw.ndjson` is as sensitive as the repository it watched** — it records whatever the agent
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.
-- **A running state never outlives its process.** Before `session.exited` the adapter settles the
-  in-flight turn, closes every live task `stopped` and fails every parked request. Every wait on a
-  child has a deadline (`support/deadline.ts`), and an expired one kills the child.
+- **A running state never outlives its process — a dead host's included.** Before
+  `session.exited` the adapter settles the in-flight turn, closes every live task `stopped` and
+  fails every parked request. Every wait on a child has a deadline (`support/deadline.ts`), and an
+  expired one kills the child. A host that is killed (a crash, an OOM, a hard stop) runs none of
+  that teardown, and left alone its calls, tasks and messages stay open in the log for good: the
+  fold keeps a running call's opening row (`open-work.ts`, within its caps), and a roster row with
+  no terminal row reads running again the moment a session is live. So a thread's **first load in a host
+  lifetime** appends what that teardown would have written (`closeLeftoverWork` in
+  `orchestrator.ts`; the rows are derived from the folded window alone by `leftoverWorkClosings`,
+  `orchestration/leftover-work.ts`): for every open call a `tool.completed {status: "failed"}`
+  with detail "Stopped when the agent host restarted." and its latest lifecycle row's item type,
+  title, turn, owner, parent call and data (a completion carries a call's final state — the
+  snapshot read drops every `tool.updated` a later completion supersedes); for every task the
+  roster shows `pending`/`running`/`waiting` (any agent kind — `idle` is left alone, as the fold's
+  session-death rule leaves it) a `task.completed {status: "stopped"}` with its latest row's
+  linkage, the roster's `agentKind` and its start's owner; for every message still streaming a
+  `streaming: false`, empty-text settle. Calls come first, so a background shell's item closes
+  before its task, and every closer carries its opener's owner — a closer in another retention
+  class can age out first and leave the call reading open again. It runs in `settleOnFirstLoad`
+  (the `bootSettlePending` settle, before the runtime is published) and in `reconcileThread` after
+  `settleStalePendingTurns` — for an orphan before its turn is settled or continued, since a
+  continuation's process owns none of it — never for a thread an adapter lists as live
+  (`listSessions()`); best-effort (a failed append is logged, the thread still loads); in passes
+  that skip what an earlier one closed, because the roster lists 100 rows, live first. A second
+  load finds nothing to close. On the owner's host (2026-09-24) a big thread's first load appends
+  100–1 800 rows, almost all turnless subagent messages written before ingestion settled them.
 - **The agent host is a protected kill target but its children are not.** `system-status.ts` takes
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a
