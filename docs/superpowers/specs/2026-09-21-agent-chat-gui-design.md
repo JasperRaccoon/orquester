@@ -422,6 +422,18 @@ continue."` — the user is told the thread could not be picked up, not that it
 was never eligible. Both clear the marker and leave the cursor alone, so the
 thread is still resumable by hand.*
 
+*Built: **the turn is settled at the time its process last wrote, not at the restart.** The fold
+settles a turn at its settling `thread.session-set`'s `occurredAt` (§5.1), and a settle stamped
+with the restart counted the whole downtime in the turn's duration — a turn that worked for a
+minute read as hours. The process that ran the turn wrote nothing after its log's last line, so
+the turn was over by then; the host only notices at its next start. So the reconcile's settle is
+its FIRST row, stamped with the `occurredAt` of the log's last line (`lastWriteAt` — the head's
+`updatedAt`, which the fold stamps from every event, so nothing is read for it), and everything it
+appends after — the `runtime.error` notice, the closings below — keeps the clock's time, which is
+when it was noticed; the log's times never go back. A continuation that is attempted and fails
+settles at its own time: it ran in this host's lifetime
+(`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `reconcileThread`, `settleAsError`).*
+
 **The resume cursor is not event-sourced.** It lives in a per-thread
 `binding.json` beside `meta.json` that is only ever written field-wise through
 one `upsertSessionBinding`, whose `undefined` means "unchanged" and whose `null`
@@ -522,17 +534,19 @@ kept that process's requests, calls and tasks open for good: a card no process c
 the composer and `send_message` until the user stops the session (§7.4), the fold keeps a running
 call's opening row (retention's open-work rule, §5.1), and a roster row with no terminal row reads
 running again once a session is live (§7.6). So a thread's first load in a host lifetime — the
-`bootSettlePending` settle above, and an orphan's reconcile after the stale-`pending` settle and
-before its turn is settled or continued — appends the rows that close them, for the rows in the
-folded window: first, for every request still pending but a message-mode question,
+`bootSettlePending` settle above, and an orphan's reconcile after its turn is settled (step 4's
+settle comes first) and before it is continued — appends the rows that close them, for the rows in
+the folded window: first, for every request still pending but a message-mode question,
 the host's own cancellation — the rows a Stop writes ("Request cancelled", "Question cancelled", on
-the head's running turn), never a provider's "resolved"/"submitted", which would say someone
-answered (a message-mode question stays pending, where a Stop would cancel it too: it parked no
-request and accepts a later message, §6.2); a `tool.completed {status:
+the turn the head said was running), never a provider's "resolved"/"submitted", which would say
+someone answered (a message-mode question stays pending, where a Stop would cancel it too: it parked
+no request and accepts a later message, §6.2); a `tool.completed {status:
 "failed"}` reading "Stopped when the agent host restarted." for every open call, on its latest
 lifecycle row's item type, title, turn, owner and data (an output an update stored cut never passes
 for whole: the opening row's whole data rides instead, else the cut copy marked `truncated`; an
-identity-only cut rides unmarked); a `task.completed {status: "stopped"}` for
+identity-only cut rides unmarked) and the files that row names at its top level (`changedFiles`, the
+slimmer's promotion out of the data — a Codex patch update is stored as `data: {}` beside them, and
+a closer that copied the data alone listed no files); a `task.completed {status: "stopped"}` for
 every roster task still `pending`, `running` or `waiting`, on its start's owner and turn — `idle`
 is left alone, as the session-death rule leaves it. A shell's item closes before its task, every
 closer rides its opener's owner so it cannot leave a window before the row it closes, and nothing
@@ -543,7 +557,10 @@ to the end of the log, and "Load older" then lost every row between its first ch
 (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `closeLeftoverWork`,
 `apps/daemon/src/agent-host/orchestration/leftover-work.ts`). Its readers decide instead: it
 reads as streaming only while a live session runs its turn or its agent is still at work (§7.3,
-`isMessageStreaming`), so a stream no process can continue reads as settled.*
+`isMessageStreaming`), so a stream no process can continue reads as settled. After the closings the
+same load names the launches an older host never wrote: an OpenCode or Codex agent launched before
+the relaunch fix gets one `task.started` naming `legacy-launch:<taskId>` once it is settled, so its
+next relaunch reopens it (§7.6).*
 
 ### 3.4 Session restart policy
 
@@ -572,6 +589,13 @@ or a pre-adoption row cannot pin a thread as busy forever. That state is what th
 (§7.6) shows during a restart and what keeps the thread out of any "settled" treatment.
 
 *T3: `apps/server/src/orchestration/ThreadSettlementPolicy.ts:28-45` — `threadHasQueuedTurnStart` and its absolute age bound; `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:1777-1792` — `pendingTurnStart` consulted on every session/turn lifecycle event; `:1849-1856` — a `ready` session with a pending turn start is reported as `starting`*
+
+*Built: a `pending` turn the host never sent — it died between the commit and the effect — is
+settled past that grace window on the thread's first load (or in an orphan's reconcile), by a
+`stopped` session state, and the settle is stamped with the time the log was last written, as §3.3
+settles an orphaned turn: nothing sent the turn after that line, and an orphan's running turn,
+which the same settle ends, ended there too. The "Queued message was not sent" notice follows at
+the clock's time (`settleStalePendingTurns`).*
 
 **Compaction is the one operation that both refuses and queues.** `/compact` is rejected outright
 while a turn is running or another compaction is in flight — it rewrites the conversation the turn
@@ -3790,9 +3814,15 @@ with `task_id` resumes the child under a new call; Codex's is `codex-launch:<ite
 launch record, then `codex-run:<turn id>` at a settled child's own next turn. The start is the one
 row of a run retention never drops: a status row would reopen the agent only until its window
 dropped that row, and the old end would read again mid-run. An agent first launched by a host
-older than this change carries no launch id, and a relaunch from a terminal state does not reopen it
-(`packages/api/src/agent-chat/roster.ts`, `adapters/opencode/normalize.ts`,
-`adapters/codex/normalise.ts`).*
+older than this change carries no launch id, and no relaunch from a terminal state could reopen
+it — so a thread's first load names one for it rather than weaken the guard: every settled
+OpenCode or Codex agent with no launch id on any start gets one appended `task.started` naming
+`legacy-launch:<taskId>`, on its first start's turn and owner, with its newest row's linkage and
+stamped with the roster's own `updatedAt` for it, so the roster reads exactly as before and the
+agent's spawn row takes it in; the next relaunch names a different id, and reopens it. An `idle`
+agent needs none, since any start reopens it (`packages/api/src/agent-chat/roster.ts`,
+`adapters/opencode/normalize.ts`, `adapters/codex/normalise.ts`,
+`apps/daemon/src/agent-host/orchestration/leftover-work.ts` `legacyLaunchStarts`).*
 
 Background tasks (`agentKind: "background"`) list in the same roster with a distinct icon, and a
 **live background row is never collapsed behind "N more" and never fades**: it outlives the turn
