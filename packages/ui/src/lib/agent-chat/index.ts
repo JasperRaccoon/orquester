@@ -63,6 +63,7 @@ export {
   retainThreadStore,
   THREAD_SNAPSHOT_IDLE_TTL_MS,
   THREAD_STORE_DISPOSE_GRACE_MS,
+  updateThreadDraft,
   type AgentChatThreadState,
   type RetainedThreadState,
   type ThreadStore,
@@ -106,3 +107,4 @@ export * from "./title.logic";
 export * from "./timeline-position";
 export * from "./keybindings.logic";
 export * from "./rewind.logic";
+export * from "./history.logic";

@@ -110,7 +110,29 @@ describe("item classification — typed on the generated discriminants", () => {
       delivery: null,
       questions: null
     });
+    // Ingestion reads the phase from `data.phase` (`assistantPhase`,
+    // `ingestion/index.ts`); `detail` is its mirror, a marker only because
+    // the two agree.
+    assert.equal((classified.data as { phase?: unknown } | undefined)?.phase, "commentary");
     assert.equal(classified.detail, "commentary");
+  });
+
+  it("the answer carries its phase the same way, and no phase means no marker", () => {
+    const agentMessage = (phase: "final_answer" | null): CodexThreadItem => ({
+      type: "agentMessage",
+      id: "i",
+      text: "It listens on port 8080.",
+      phase,
+      memoryCitation: null,
+      delivery: null,
+      questions: null
+    });
+    const answer = classifyItem(agentMessage("final_answer"));
+    assert.equal((answer.data as { phase?: unknown } | undefined)?.phase, "final_answer");
+    assert.equal(answer.detail, "final_answer");
+    const unphased = classifyItem(agentMessage(null));
+    assert.equal((unphased.data as { phase?: unknown } | undefined)?.phase, null);
+    assert.equal(unphased.detail, undefined);
   });
 
   it("a file change names its path, and names the extras when there are several", () => {

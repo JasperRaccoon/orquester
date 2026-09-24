@@ -5,7 +5,9 @@
  * with the host: the fold is `@orquester/api/agent-chat`'s `applyDomainEvent`
  * (package W2). This module owns only what is client-specific — turning
  * `snapshot` / `event` / `synchronized` frames into the `AgentChatThreadSlice`
- * the hooks read, the sequence floor, and the host-instance rule.
+ * the hooks read, the sequence floor, the host-instance rule, and handing
+ * each step's retention drops to the history's bridge while older history is
+ * loaded (`historyAfterEvent`, design 2026-09-23 fold performance).
  *
  * Nothing here imports React or zustand.
  */
@@ -30,6 +32,12 @@ import type {
   AgentChatThreadSlice,
   DisclosureState
 } from "./contracts";
+import {
+  EMPTY_HISTORY,
+  historyAfterEvent,
+  historyBoundsFromSnapshot,
+  resetHistory
+} from "./history.logic";
 
 /**
  * The fold is W2's. It is injected rather than imported at the call site so a
@@ -98,7 +106,8 @@ export function emptySlice(sessionId: string): AgentChatThreadSlice {
     interactionMode: DEFAULT_INTERACTION_MODE,
     queue: [],
     respondingRequestIds: [],
-    errorBanner: null
+    errorBanner: null,
+    history: EMPTY_HISTORY
   };
 }
 
@@ -142,16 +151,17 @@ const requestIdOf = (activity: ThreadActivityItem): string | null => {
  * request stamped later is a different one that merely reuses the id (a
  * provider may recycle ids — E2E R2-1). Without the stamps the seed falls back
  * to closing unconditionally and a recycled id is swallowed.
+ *
+ * No position index: the fold keeps its caches beside the state and builds
+ * them from `items` on first use.
  */
 export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState {
-  const itemIndex = new Map<string, number>();
   const closedRequestIds = new Set<string>();
   const closedRequestAt = new Map<string, string>();
   // The activity subset, same objects and same order — W2's fold keeps it
   // beside `items` because every derivation over it is activity-only.
   const activities: ThreadActivityItem[] = [];
-  snapshot.items.forEach((item, index) => {
-    itemIndex.set(item.id, index);
+  snapshot.items.forEach((item) => {
     if (isActivity(item)) {
       activities.push(item);
       if (item.activityKind.endsWith(".resolved")) {
@@ -169,7 +179,6 @@ export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFo
   return {
     head: snapshot.head,
     items: snapshot.items,
-    itemIndex,
     activities,
     turns: snapshot.turns,
     checkpoints: snapshot.checkpoints,
@@ -240,8 +249,16 @@ export function projectSlice(
  *
  * - `snapshot` **replaces** loaded history (§6.6) and bumps the history epoch.
  *   The queue, drafts, disclosures and scroll are client-local and survive it.
+ *   The indexed history pages and the bridge go with it — a cache of a log
+ *   the new snapshot may no longer match — and its bounds are re-read (design
+ *   2026-09-23 "Client").
  * - `event` is dropped at or below the cursor — that is what makes the
- *   overlapping snapshot / replay / live windows safe.
+ *   overlapping snapshot / replay / live windows safe. While history is
+ *   loaded (or its first page is on its way) the rows the step's retention
+ *   dropped go onto the history's bridge, and a `thread.reverted` that
+ *   reaches a loaded page or a bridge row drops both (`historyAfterEvent`,
+ *   design 2026-09-23 fold performance). With none loaded the history is
+ *   never touched.
  * - `synchronized` marks the stream live. A **different** `hostInstanceId`
  *   means the host restarted under us: the caller must re-read rather than
  *   resume, so the connection goes back to `connecting` and
@@ -255,10 +272,11 @@ export function applyFrame(
   switch (frame.kind) {
     case "snapshot": {
       const fold = foldStateFromSnapshot(frame.thread);
+      const history = resetHistory(historyBoundsFromSnapshot(frame.thread), state.slice.history);
       return {
         ...state,
         fold,
-        slice: projectSlice({ ...state.slice, connection: "connecting" }, fold),
+        slice: projectSlice({ ...state.slice, connection: "connecting", history }, fold),
         historyEpoch: state.historyEpoch + 1
       };
     }
@@ -270,7 +288,13 @@ export function applyFrame(
       if (fold === state.fold) {
         return state;
       }
-      return { ...state, fold, slice: projectSlice(state.slice, fold) };
+      const history = historyAfterEvent(state.slice.history, {
+        event: frame.event,
+        before: state.fold,
+        after: fold
+      });
+      const previous = history === state.slice.history ? state.slice : { ...state.slice, history };
+      return { ...state, fold, slice: projectSlice(previous, fold) };
     }
     case "synchronized": {
       const changed =

@@ -201,11 +201,10 @@ export interface ThreadMessageItem {
    * running "I'll do X next" narration.
    *
    * REALITY (Codex): an `agentMessage` carries a `phase` of `final_answer` or
-   * `commentary`, and §7.3 wants commentary demoted into the activity group
-   * rather than shown as a second full-width answer — a thread of narration
-   * rendered as answers is unreadable. The projection (W11) demotes it; the
-   * timeline additionally renders a commentary message quietly if one reaches
-   * it, so a missed demotion degrades instead of shouting.
+   * `commentary`. §7.3 shows commentary as a visible assistant message between
+   * tool calls, live and replayed alike; the phase stays metadata so that
+   * commentary can never become the turn's terminal answer
+   * (`isCommentaryAssistantMessage` in the UI's `rows.logic.ts`).
    *
    * *Added by W12; additive. Producers: the adapters / ingestion (W3, W6–W9).*
    */
@@ -585,4 +584,28 @@ export interface ThreadSnapshotPayload {
   pending: PendingRequests;
   roster: RuntimeSubagent[];
   seq: number;
+  /**
+   * Where the retained window ends and the indexed history begins — what a
+   * client needs to offer "load older turns" (`GET …/history`). Absent from a
+   * host that predates the index; a client then offers nothing, exactly as
+   * before. See `ThreadHistoryBounds` in `wire.ts`.
+   */
+  history?: ThreadHistoryBounds;
+}
+
+/**
+ * The history boundary stamped on a snapshot. `hasOlder` is the only field a
+ * client branches on; `beforeCursor` is the opaque cursor of the FIRST older
+ * page (the turns just below the retained window), and the ordinals are for
+ * copy ("turn 12 of 87"). `indexed: false` means the host has no usable index
+ * right now — nothing older can be offered, whatever the log holds.
+ */
+export interface ThreadHistoryBounds {
+  indexed: boolean;
+  hasOlder: boolean;
+  beforeCursor: string | null;
+  /** Ordinal (1-based, by ORDER of started turns) of the oldest turn still in the window. */
+  oldestRetainedOrdinal: number | null;
+  /** How many started turns the index knows for this thread. */
+  totalTurns: number;
 }

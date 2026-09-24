@@ -22,13 +22,17 @@
  */
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
-import { IDENTITY_CHANGED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
+import {
+  commandDisplayDetail,
+  compactionMarkerState,
+  IDENTITY_CHANGED_ACTIVITY_KIND,
+  isAgentOwnedActivity,
+  isCompactionActivity,
+  isPlanImplementationMessage,
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX
+} from "@orquester/api/agent-chat";
 
-import type {
-  CompactionMarkerState,
-  WorkLogEntry,
-  WorkLogToolLifecycleStatus
-} from "./contracts";
+import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
 import { normalizeCompactToolLabel } from "./presentation.logic";
 
 // ---------------------------------------------------------------------------
@@ -51,6 +55,11 @@ export interface ProposedPlanEntry {
    * the message log.
    */
   implementedAt: string | null;
+  /**
+   * The wire cut `planMarkdown` at 16 KiB (§5.6); `GET …/items/:id` holds the
+   * whole plan, and Implement must send that one.
+   */
+  truncated?: true;
 }
 
 export type TimelineEntry =
@@ -65,8 +74,12 @@ export interface TimelineEntriesProjection {
   readonly entries: TimelineEntry[];
 }
 
-/** The §7.3 prefix a plan-implementing turn carries. *T3: `proposedPlan.ts:73`.* */
-export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
+/**
+ * The §7.3 prefix a plan-implementing turn carries — one spelling in
+ * `@orquester/api/agent-chat`, shared with the host and the MCP.
+ * *T3: `proposedPlan.ts:73`.*
+ */
+export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
 
 // ---------------------------------------------------------------------------
 // Payload readers (the §5.6 allow-list, and nothing else)
@@ -152,49 +165,6 @@ export function workLogEntryFromActivity(activity: ThreadActivityItem): WorkLogE
   return derivedWorkLogEntry(activity);
 }
 
-/** Command output can live in provider data while `detail` only echoes the command. */
-function commandOutputPreview(data: Record<string, unknown> | null): string | undefined {
-  const item = asRecord(data?.item);
-  const raw = asRecord(data?.rawOutput);
-  const outputStreams = [asTrimmedString(raw?.stdout), asTrimmedString(raw?.stderr)]
-    .filter((value): value is string => value !== undefined);
-  const content = Array.isArray(data?.content)
-    ? data.content.flatMap((value) => {
-        const block = asRecord(value);
-        const text = asRecord(block?.content);
-        return block?.type === "content" ? [asTrimmedString(text?.text)].filter(Boolean) : [];
-      }).join("\n")
-    : undefined;
-  const candidates = [
-    item?.aggregatedOutput,
-    asRecord(item?.result)?.content,
-    data?.rawOutput,
-    raw?.content,
-    outputStreams.length > 0 ? outputStreams.join("\n") : undefined,
-    raw?.output,
-    raw?.output_for_prompt,
-    content,
-    asRecord(data?.result)?.content,
-    data?.result
-  ];
-  for (const candidate of candidates) {
-    const text = asTrimmedString(candidate);
-    if (text !== undefined) return text;
-  }
-  return undefined;
-}
-
-function repeatsCommandPreview(detail: string | undefined, command: string | undefined): boolean {
-  if (detail === undefined || command === undefined) return false;
-  if (detail === command) return true;
-  const prefix = detail.endsWith("...")
-    ? detail.slice(0, -3)
-    : detail.endsWith("…")
-      ? detail.slice(0, -1)
-      : undefined;
-  return prefix !== undefined && prefix.length > 0 && command.startsWith(prefix);
-}
-
 function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry {
   const cached = derivedByActivity.get(activity);
   if (cached) {
@@ -214,18 +184,11 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       : asTrimmedString(payload?.detail)
     : asTrimmedString(payload?.detail);
   const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
-  const isCommand = payload?.itemType === "command_execution";
-  const output = isCommand ? commandOutputPreview(data) : undefined;
-  const commandEcho =
-    isCommand && repeatsCommandPreview(detail, command) &&
-    asTrimmedString(data?.kind)?.toLowerCase() === "execute";
-  const displayDetail =
-    isCommand && output !== undefined &&
-    (detail === undefined || commandEcho || detail === asTrimmedString(payload?.title))
-      ? output
-      : commandEcho
-        ? undefined
-        : detail;
+  // A command row shows the output its provider data carries where `detail`
+  // only echoes the command or repeats the title — one rule in
+  // `@orquester/api` (`command-output.ts`), shared with the MCP's transcript.
+  // It is given the detail kept above: a task row's may have become its label.
+  const displayDetail = commandDisplayDetail(payload, { detail });
 
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
@@ -428,9 +391,9 @@ function isAgentTaskStartedActivity(activity: ThreadActivityItem): boolean {
  */
 export function isAgentInternalActivity(activity: ThreadActivityItem): boolean {
   const payload = asRecord(activity.payload);
-  const ownedByAgent =
-    (typeof activity.agentId === "string" && activity.agentId.trim().length > 0) ||
-    (typeof payload?.agentId === "string" && payload.agentId.trim().length > 0);
+  // The ownership half is `@orquester/api`'s: the conversation's compaction
+  // marker is decided by the same test on the host and in the MCP.
+  const ownedByAgent = isAgentOwnedActivity(activity);
   const bypassed = payload?.timelineBypass === true;
 
   if (TASK_KINDS.has(activity.activityKind)) {
@@ -485,30 +448,12 @@ function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
   return typeof detail === "string" && detail.startsWith("ExitPlanMode:");
 }
 
-/** The compaction marker's activity kind. */
-export function isCompactionActivity(activity: ThreadActivityItem): boolean {
-  if (activity.activityKind === "context-compaction") {
-    return true;
-  }
-  return (
-    activity.activityKind === "thread.state.changed" &&
-    asRecord(activity.payload)?.state === "compacted"
-  );
-}
-
 /**
- * Which of the three compaction markers this activity is (§7.3).
- *
- * **Anything unreadable is `compacted`.** An old log only ever recorded the
- * settled marker — a `context-compaction` activity with no `state`, or the
- * legacy `thread.state.changed` one — and reading an unknown spelling as an
- * in-flight phase would leave a resumed thread shimmering "Compacting
- * context…" against a provider that finished months ago.
+ * The compaction marker's activity kind, and which of its three states a row
+ * is (§7.3). One rule in `@orquester/api` (`compaction.ts`), shared with the
+ * host's thread index and the MCP; re-exported for this module's importers.
  */
-export function compactionMarkerState(activity: ThreadActivityItem): CompactionMarkerState {
-  const state = asRecord(activity.payload)?.state;
-  return state === "compacting" || state === "compaction-failed" ? state : "compacted";
-}
+export { compactionMarkerState, isCompactionActivity };
 
 /** Before/after token counts, carried on the event and formatted client-side (§7.3). */
 export function compactionTokens(activity: ThreadActivityItem): {
@@ -884,9 +829,9 @@ export function splitThreadItems(
       continue;
     }
     if (item.activityKind === "turn.proposed.completed") {
-      const planMarkdown =
-        asTrimmedString(asRecord(item.payload)?.planMarkdown) ??
-        planBuffers.get(item.turnId ?? item.id);
+      const payload = asRecord(item.payload);
+      const sent = asTrimmedString(payload?.planMarkdown);
+      const planMarkdown = sent ?? planBuffers.get(item.turnId ?? item.id);
       if (planMarkdown) {
         plansById.set(item.id, {
           id: item.id,
@@ -894,7 +839,8 @@ export function splitThreadItems(
           updatedAt: item.updatedAt,
           turnId: item.turnId,
           planMarkdown,
-          implementedAt: null
+          implementedAt: null,
+          ...(sent !== undefined && payload?.truncated === true ? { truncated: true as const } : {})
         });
       }
       continue;
@@ -909,7 +855,7 @@ export function splitThreadItems(
       (message) =>
         message.role === "user" &&
         message.createdAt > plan.createdAt &&
-        message.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+        isPlanImplementationMessage(message.text)
     );
     return implementing ? { ...plan, implementedAt: implementing.createdAt } : plan;
   });
@@ -1173,6 +1119,7 @@ function samePlans(left: readonly ProposedPlanEntry[], right: readonly ProposedP
     return (
       plan.id === other.id &&
       plan.planMarkdown === other.planMarkdown &&
+      plan.truncated === other.truncated &&
       plan.implementedAt === other.implementedAt &&
       plan.updatedAt === other.updatedAt
     );

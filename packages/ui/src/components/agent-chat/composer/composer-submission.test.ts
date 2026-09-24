@@ -4,11 +4,15 @@ import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 
 import {
   attachmentRejectionReason,
+  buildPlanImplementationPrompt,
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
+  draftAfterSend,
+  failedSendRestoreTarget,
   hasSendableContent,
+  implementationTextResolver,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
   pastedTextDisposition,
@@ -17,12 +21,16 @@ import {
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  sendComposerTurn,
   stagedAttachmentKeyForRef,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
   uploadsBlockSend,
+  type ComposerSendOutcome,
+  type FailedSendRestoreTarget,
   type StagedAttachmentLike
 } from "./composer-submission.ts";
+import type { StagedAttachment } from "./ComposerAttachments";
 
 const DESKTOP = { isMobileViewport: false, shiftKey: false, modifierKey: false, isRunning: false };
 
@@ -471,4 +479,299 @@ test("R2-3: only a STANDALONE command is swallowed", () => {
     }),
     null
   );
+});
+
+// ---------------------------------------------------------------------------
+// The send step: Implement reads a cut plan back whole (§5.6, §7.3, §7.4)
+// ---------------------------------------------------------------------------
+
+/** A stand-in for the store's `sendTurn`: records what reached the wire. */
+function recordingSend(failure?: Error): { sent: string[]; send: (text: string) => Promise<void> } {
+  const sent: string[] = [];
+  return {
+    sent,
+    send: async (text) => {
+      sent.push(text);
+      if (failure) throw failure;
+    }
+  };
+}
+
+/** What Implement holds for a plan the wire cut at 16 KiB: the prompt ends in "…". */
+const CUT_PROMPT = buildPlanImplementationPrompt("# Ship it\n\nstep 1…");
+
+test("Implement on a plan that cannot be read back sends nothing, and says why", async () => {
+  const wire = recordingSend();
+  const outcome = await sendComposerTurn({
+    text: CUT_PROMPT,
+    resolveText: () =>
+      Promise.reject(new Error("The full plan could not be loaded, so nothing was sent. Try again.")),
+    send: wire.send
+  });
+  assert.deepEqual(outcome, {
+    kind: "refused",
+    notice: "The full plan could not be loaded, so nothing was sent. Try again."
+  });
+  assert.deepEqual(wire.sent, [], "nothing reached the wire");
+  // A reader that rejects with a bare value still gets an honest notice.
+  const bare = await sendComposerTurn({ text: CUT_PROMPT, resolveText: () => Promise.reject("gone"), send: wire.send });
+  assert.deepEqual(bare, { kind: "refused", notice: "The full plan could not be loaded." });
+  assert.deepEqual(wire.sent, []);
+});
+
+test("a read-back prompt over the turn bound is refused before it is sent, and nothing goes back to the draft", async () => {
+  const whole = buildPlanImplementationPrompt(`# Ship it\n\n${"step ".repeat(MAX_TURN_INPUT_CHARS / 5)}`);
+  // The composer measured the CUT prompt, which fits; only the whole one is over.
+  assert.equal(composerPromptLengthValidationMessage(CUT_PROMPT), null);
+  const expected = composerPromptLengthValidationMessage(whole);
+  assert.ok(expected !== null, "the whole prompt is over the bound");
+  const wire = recordingSend();
+  const outcome = await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send: wire.send });
+  // `refused` carries no text: only a FAILED send is written back into the
+  // draft, so the whole prompt never lands in the composer.
+  assert.deepEqual(outcome, { kind: "refused", notice: expected });
+  assert.deepEqual(wire.sent, [], "the host never had to refuse it");
+});
+
+test("a plan read back whole is what gets sent, not the cut one", async () => {
+  const whole = buildPlanImplementationPrompt(`# Ship it\n\n${"step\n".repeat(4_000)}done`);
+  assert.ok(whole.length > 16 * 1024, "longer than the wire's cut");
+  const wire = recordingSend();
+  const outcome = await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send: wire.send });
+  assert.deepEqual(outcome, { kind: "sent" });
+  assert.deepEqual(wire.sent, [whole]);
+});
+
+test("a plain send goes out as typed, and one the host refuses goes back to the draft as typed", async () => {
+  const wire = recordingSend();
+  assert.deepEqual(await sendComposerTurn({ text: "fix the tests", send: wire.send }), { kind: "sent" });
+  assert.deepEqual(wire.sent, ["fix the tests"]);
+
+  // The user's own words: a failed send hands them back whole, for the draft.
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  assert.deepEqual(await sendComposerTurn({ text: "fix the tests", send: refusing.send }), {
+    kind: "failed",
+    text: "fix the tests",
+    notice: "The agent host is restarting."
+  });
+  assert.deepEqual(refusing.sent, ["fix the tests"]);
+});
+
+test("a failed Implement leaves the draft alone: its prompt is the composer's, not the user's", async () => {
+  // Written into the draft, the prompt would turn the primary button into a
+  // plan-mode "Refine" that carries the implementation prefix. Left out, the
+  // plan is still actionable, and Implement is simply pressed again.
+  const whole = buildPlanImplementationPrompt("# Ship it\n\nevery step");
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  assert.deepEqual(await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send: refusing.send }), {
+    kind: "failed",
+    text: null,
+    notice: "The agent host is restarting."
+  });
+  assert.deepEqual(refusing.sent, [whole], "the whole prompt is what the host refused");
+});
+
+test("every Implement reads its plan at send time, intact or cut, and no other send does", async () => {
+  const reads: string[] = [];
+  const read = async (plan: { id: string; planMarkdown: string }) => {
+    reads.push(plan.id);
+    return plan.planMarkdown;
+  };
+  const intact = { id: "p-intact", planMarkdown: "# Ship it\n\nevery step" };
+  const resolveText = implementationTextResolver({ action: "implement", proposal: intact, read });
+  assert.ok(resolveText, "an intact plan's Implement resolves its prompt too, not only a cut one's");
+  assert.deepEqual(reads, [], "nothing is read before the send step runs");
+  assert.equal(await resolveText(), buildPlanImplementationPrompt(intact.planMarkdown));
+  assert.deepEqual(reads, ["p-intact"]);
+
+  // A Refine sends the user's own text, and a plain send has no plan at all.
+  assert.equal(implementationTextResolver({ action: "refine", proposal: intact, read }), undefined);
+  assert.equal(implementationTextResolver({ action: null, proposal: null, read }), undefined);
+  assert.deepEqual(reads, ["p-intact"]);
+});
+
+test("so a failed Implement on an intact plan leaves the draft alone too", async () => {
+  const intact = { id: "p-intact", planMarkdown: "# Ship it\n\nevery step" };
+  const prompt = buildPlanImplementationPrompt(intact.planMarkdown);
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  const outcome = await sendComposerTurn({
+    text: prompt,
+    resolveText: implementationTextResolver({
+      action: "implement",
+      proposal: intact,
+      read: async (plan) => plan.planMarkdown
+    }),
+    send: refusing.send
+  });
+  assert.deepEqual(outcome, { kind: "failed", text: null, notice: "The agent host is restarting." });
+  assert.deepEqual(refusing.sent, [prompt]);
+});
+
+// ---------------------------------------------------------------------------
+// What a settled send leaves in the draft: a failed one comes back whole (§7.4)
+// ---------------------------------------------------------------------------
+
+/** A file picked or pasted here: keyed per staging, uploaded, ready to send. */
+function fileChip(id: string, mimeType = "application/pdf", key = `picked:${id}`): StagedAttachment {
+  return {
+    key,
+    name: id,
+    sizeBytes: 12,
+    mimeType,
+    status: "ready",
+    progress: 1,
+    ref: { type: "file", id: `att-${id}`, name: id, mimeType, sizeBytes: 12 }
+  };
+}
+
+function imageChip(id: string, key = `picked:${id}`): StagedAttachment {
+  const name = `${id}.png`;
+  return {
+    key,
+    name,
+    sizeBytes: 12,
+    mimeType: "image/png",
+    status: "ready",
+    progress: 1,
+    ref: { type: "image", id: `att-${id}`, name, mimeType: "image/png", sizeBytes: 12 }
+  };
+}
+
+const failedWith = (text: string | null): ComposerSendOutcome => ({
+  kind: "failed",
+  text,
+  notice: "Could not send the message."
+});
+
+/** What `submit` leaves behind before the send goes out: nothing, tray included. */
+const EMPTIED: { text: string; attachments: StagedAttachment[] } = { text: "", attachments: [] };
+
+test("a failed send comes back with the chips it carried, so a resend carries the files", async () => {
+  const shot = imageChip("shot");
+  const report = fileChip("report");
+  const refusing = recordingSend(new Error("The agent host is restarting."));
+  const outcome = await sendComposerTurn({ text: "why does [Image #1] fail? see the report", send: refusing.send });
+  assert.deepEqual(draftAfterSend({ outcome, sent: [shot, report], draft: EMPTIED }), {
+    text: "why does [Image #1] fail? see the report",
+    attachments: [shot, report]
+  });
+});
+
+test("what was typed or staged while it was in flight stays, behind it, and no chip is doubled", () => {
+  const report = fileChip("report");
+  // A browser pick is keyed by its ref, so delivering it again stages the same key.
+  const pick = fileChip("pick", "text/html", stagedAttachmentKeyForRef({ id: "att-pick" }));
+  const logs = fileChip("logs", "text/plain");
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("compare these"),
+      sent: [report, pick],
+      draft: { text: "and the logs", attachments: [{ ...pick }, logs] }
+    }),
+    { text: "compare these\n\nand the logs", attachments: [report, pick, logs] }
+  );
+  // One upload under another key is still one file, as `decideStagedAttachmentForRef` has it.
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("compare these"),
+      sent: [report],
+      draft: { text: "", attachments: [{ ...report, key: "picked:report-again" }, logs] }
+    }),
+    { text: "compare these", attachments: [report, logs] }
+  );
+  // A message of files alone comes back as files alone: no blank lines ahead of what was typed since.
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith(""),
+      sent: [report],
+      draft: { text: "and this", attachments: [] }
+    }),
+    { text: "and this", attachments: [report] }
+  );
+});
+
+test("an image staged meanwhile keeps its own [Image #N] once the sent images are back ahead of it", () => {
+  const before = imageChip("before");
+  const after = imageChip("after");
+  // Staged into the emptied tray, the pasted image was #1 of its own.
+  const pasted = imageChip("pasted");
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("compare [Image #1] with [Image #2]"),
+      sent: [before, after],
+      draft: { text: "then crop [Image #1], not [Image #7]", attachments: [pasted] }
+    }),
+    {
+      // A number that names none of the staged images is the user's own, as typed.
+      text: "compare [Image #1] with [Image #2]\n\nthen crop [Image #3], not [Image #7]",
+      attachments: [before, after, pasted]
+    }
+  );
+
+  // An image delivered again meanwhile IS the sent one: its placeholder follows it there.
+  const pick = imageChip("pick", stagedAttachmentKeyForRef({ id: "att-pick" }));
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("look at [Image #1] and [Image #2]"),
+      sent: [before, pick],
+      draft: { text: "[Image #1] is the one, then [Image #2]", attachments: [{ ...pick }, pasted] }
+    }),
+    {
+      text: "look at [Image #1] and [Image #2]\n\n[Image #2] is the one, then [Image #3]",
+      attachments: [before, pick, pasted]
+    }
+  );
+  // So does one upload under another key: it is the same image.
+  assert.deepEqual(
+    draftAfterSend({
+      outcome: failedWith("look at [Image #1] and [Image #2]"),
+      sent: [before, pick],
+      draft: { text: "[Image #1] is the one", attachments: [{ ...pick, key: "picked:pick-again" }] }
+    }),
+    { text: "look at [Image #1] and [Image #2]\n\n[Image #2] is the one", attachments: [before, pick] }
+  );
+});
+
+test("a send that went out, a refusal and a failed Implement all leave the draft as it is", () => {
+  const report = fileChip("report");
+  // `submit` already cleared the draft; only what was typed since is in it.
+  const typedSince = { text: "next question", attachments: [] as StagedAttachment[] };
+  assert.equal(draftAfterSend({ outcome: { kind: "sent" }, sent: [report], draft: typedSince }), null);
+  assert.equal(
+    draftAfterSend({
+      outcome: { kind: "refused", notice: "The full plan could not be loaded." },
+      sent: [],
+      draft: typedSince
+    }),
+    null
+  );
+  // Wave D1: Implement's prompt is the composer's, and it never carries a chip.
+  assert.equal(draftAfterSend({ outcome: failedWith(null), sent: [], draft: typedSince }), null);
+});
+
+// ---------------------------------------------------------------------------
+// Where it comes back: the thread it was sent FROM (§7.4)
+// ---------------------------------------------------------------------------
+
+test("a failed send comes back to the thread it was sent from, whichever thread the composer shows by then", () => {
+  const cases: Array<{
+    what: string;
+    liveThread: string | null;
+    shownByComposer: boolean;
+    want: FailedSendRestoreTarget;
+  }> = [
+    // Still mounted and still on A: the handle registered for A is its own.
+    { what: "still on A", liveThread: "A", shownByComposer: true, want: "live" },
+    { what: "still on A, whatever the bridge says", liveThread: "A", shownByComposer: false, want: "live" },
+    // Handed thread B while the send was in flight: the draft on screen is B's.
+    { what: "moved to B", liveThread: "B", shownByComposer: false, want: "persisted" },
+    // A project switch unmounted it.
+    { what: "unmounted", liveThread: null, shownByComposer: false, want: "persisted" },
+    // A's tab came back in another composer, which owns A's one visible draft now.
+    { what: "moved to B, A open again elsewhere", liveThread: "B", shownByComposer: true, want: "composer" },
+    { what: "unmounted, A open again elsewhere", liveThread: null, shownByComposer: true, want: "composer" }
+  ];
+  for (const { what, liveThread, shownByComposer, want } of cases) {
+    assert.equal(failedSendRestoreTarget({ sentFrom: "A", liveThread, shownByComposer }), want, what);
+  }
 });

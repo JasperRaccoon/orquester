@@ -10,14 +10,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { AgentChatStreamFrame } from "@orquester/api/agent-chat";
+import {
+  THREAD_HISTORY_DEFAULT_TURNS,
+  THREAD_HISTORY_MAX_TURNS,
+  THREAD_SEARCH_MAX_QUERY_CHARS,
+  THREAD_SEARCH_MAX_RESULTS,
+  type AgentChatStreamFrame,
+  type ThreadHistoryPage,
+  type ThreadSearchHit,
+  type ThreadSearchResponse
+} from "@orquester/api/agent-chat";
 
 import {
   AGENT_HOST_PROTOCOL_VERSION,
   agentHostRoutes,
   type AgentHostHealthResponse
 } from "../host-protocol.ts";
+import type { ThreadIndex } from "../index/index.ts";
 import { createTestHost, type TestHost } from "../orchestration/testing/index.ts";
+import { createFakeThreadIndex } from "../orchestration/testing/fake-index.ts";
 import {
   agentHostExtraRoutes,
   type AgentHostThreadSummary
@@ -47,10 +58,15 @@ interface Harness {
   stop(): Promise<void>;
 }
 
-async function harness(options: { openGate?: boolean } = {}): Promise<Harness> {
+async function harness(
+  options: { openGate?: boolean; index?: ThreadIndex; afterStopResponse?: () => void } = {}
+): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "agent-host-test-"));
   const socketPath = join(dir, "agent-host.sock");
-  const host = createTestHost({ openGate: options.openGate ?? true });
+  const host = createTestHost({
+    openGate: options.openGate ?? true,
+    ...(options.index ? { index: options.index } : {})
+  });
   const server = createAgentHostServer({
     orchestrator: host.orchestrator,
     store: host.store,
@@ -61,7 +77,8 @@ async function harness(options: { openGate?: boolean } = {}): Promise<Harness> {
     tmpDir: join(dir, "tmp"),
     startedAt: "1970-01-01T00:00:00.000Z",
     pid: 4242,
-    onStop: async () => ({ ok: true, markedThreadIds: [] })
+    onStop: async () => ({ ok: true, markedThreadIds: [] }),
+    ...(options.afterStopResponse ? { afterStopResponse: options.afterStopResponse } : {})
   });
   await server.listen();
 
@@ -330,6 +347,51 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     await h.stop();
   });
 
+  it("serves a tool call's streamed output joined from the log, and 404s with its own code", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const at = h.host.clock.nowIso();
+    const row = (id: string, activityKind: string, payload: Record<string, unknown>) => ({
+      eventId: `ev-${id}`,
+      threadId,
+      type: "thread.activity-appended" as const,
+      payload: {
+        activity: { kind: "activity" as const, id, tone: "tool" as const, activityKind, summary: activityKind, payload, turnId: null, createdAt: at, updatedAt: at }
+      },
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    });
+    const shell = "bgshell:task-1";
+    await h.host.orchestrator.ingestionSink(threadId, [
+      row("start", "tool.started", { itemType: "command_execution", toolUseId: shell }),
+      row("o1", "tool.output", { toolUseId: shell, streamKind: "command_output", delta: "one\n" }),
+      row("o2", "tool.output", { toolUseId: shell, streamKind: "command_output", delta: "  two\n" }),
+      row("warn", "runtime.warning", { message: "not a tool call" })
+    ]);
+    await h.host.settle();
+
+    const running = await h.call("GET", agentHostRoutes.itemOutput(threadId, "start"));
+    assert.equal(running.status, 200);
+    assert.deepEqual(running.body, { toolUseId: shell, output: "one\n  two\n", complete: false, truncated: false });
+
+    // Not a tool call, and no such item: ITEM_NOT_FOUND — never the THREAD_NOT_FOUND a route miss answers.
+    for (const itemId of ["warn", "nope"]) {
+      const missing = await h.call("GET", agentHostRoutes.itemOutput(threadId, itemId));
+      assert.equal(missing.status, 404, itemId);
+      assert.equal((missing.body as { error: { code: string } }).error.code, "ITEM_NOT_FOUND", itemId);
+    }
+    const miss = await h.call("GET", `${agentHostRoutes.itemOutput(threadId, "start")}/more`);
+    assert.equal(miss.status, 404);
+    assert.equal((miss.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+    // A thread the host does not have is the thread's own 404.
+    const gone = await h.call("GET", agentHostRoutes.itemOutput("thread-gone", "start"));
+    assert.equal(gone.status, 404);
+    assert.equal((gone.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+    await h.stop();
+  });
+
   it("serves the provider snapshots with the host instance id", async () => {
     const h = await harness();
     const result = await h.call("GET", agentHostRoutes.providers);
@@ -515,7 +577,12 @@ describe("agent host server — the event stream (§6.3)", () => {
   });
 
   it("the intentional stop writes the continuation markers first (§3.3)", async () => {
-    const h = await harness();
+    let teardownStarted = false;
+    const h = await harness({
+      afterStopResponse: () => {
+        teardownStarted = true;
+      }
+    });
     const threadId = await h.host.createThread();
     await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "stop-1", input: "go" });
     await h.host.settle();
@@ -529,6 +596,7 @@ describe("agent host server — the event stream (§6.3)", () => {
     const stopped = await h.call("POST", agentHostRoutes.stop);
     assert.equal(stopped.status, 200);
     assert.equal((stopped.body as { ok: boolean }).ok, true);
+    assert.equal(teardownStarted, true, "teardown starts only after the response flushes");
     await h.stop();
   });
 
@@ -608,5 +676,147 @@ describe("agent host server - a deadline answers its specified status (E9)", () 
     assert.equal(answer.status, 503);
     assert.equal((answer.body as { error: { code: string } }).error.code, "HOST_UNAVAILABLE");
     await h.stop();
+  });
+});
+
+describe("agent host server — indexed history and search (design 2026-09-23, C)", () => {
+  /** Record what the route hands the orchestrator, then let the real call answer. */
+  function spyHistory(h: Harness): Array<{ threadId: string; before?: string; turns?: number }> {
+    const calls: Array<{ threadId: string; before?: string; turns?: number }> = [];
+    const readHistory = h.host.orchestrator.readHistory.bind(h.host.orchestrator);
+    h.host.orchestrator.readHistory = (threadId, query) => {
+      calls.push({ threadId, ...query });
+      return readHistory(threadId, query);
+    };
+    return calls;
+  }
+
+  it("serves a history page, clamping `turns` and passing `before` through untouched", async () => {
+    const h = await harness({ index: createFakeThreadIndex() });
+    const threadId = await h.host.createThread();
+    const calls = spyHistory(h);
+
+    const page = await h.call("GET", `${agentHostRoutes.history(threadId)}?before=opaque-cursor&turns=5`);
+    assert.equal(page.status, 200);
+    const body = page.body as ThreadHistoryPage;
+    assert.equal(body.threadId, threadId);
+    assert.deepEqual(body.turns, []);
+    assert.equal(body.page.beforeCursor, null);
+
+    for (const [query, turns] of [
+      ["", THREAD_HISTORY_DEFAULT_TURNS],
+      ["?turns=0", 1],
+      ["?turns=-4", 1],
+      [`?turns=${THREAD_HISTORY_MAX_TURNS + 900}`, THREAD_HISTORY_MAX_TURNS],
+      ["?turns=many", THREAD_HISTORY_DEFAULT_TURNS],
+      ["?before=&turns=7", 7]
+    ] as const) {
+      const answer = await h.call("GET", `${agentHostRoutes.history(threadId)}${query}`);
+      assert.equal(answer.status, 200, query);
+      assert.deepEqual(calls.at(-1), { threadId, turns }, query);
+    }
+    assert.deepEqual(calls[0], { threadId, before: "opaque-cursor", turns: 5 });
+    await h.stop();
+  });
+
+  it("answers 503 INDEX_UNAVAILABLE for history without a usable index, 404 for no thread", async () => {
+    for (const index of [undefined, createFakeThreadIndex({ available: false })]) {
+      const h = await harness(index ? { index } : {});
+      const threadId = await h.host.createThread();
+      const answer = await h.call("GET", agentHostRoutes.history(threadId));
+      assert.equal(answer.status, 503);
+      assert.equal(
+        (answer.body as { error: { code: string } }).error.code,
+        "INDEX_UNAVAILABLE"
+      );
+      const missing = await h.call("GET", agentHostRoutes.history("no-such-thread"));
+      assert.equal(missing.status, 404);
+      await h.stop();
+    }
+  });
+
+  it("stamps the snapshot a thread read answers with its history bounds", async () => {
+    const h = await harness({ index: createFakeThreadIndex() });
+    const threadId = await h.host.createThread();
+    const read = await h.call("GET", agentHostRoutes.read(threadId));
+    assert.equal(read.status, 200);
+    const thread = (read.body as { kind: string; thread: { history?: unknown } }).thread;
+    assert.deepEqual(thread.history, {
+      indexed: true,
+      hasOlder: false,
+      beforeCursor: null,
+      oldestRetainedOrdinal: null,
+      totalTurns: 0
+    });
+    await h.stop();
+  });
+
+  it("searches, clamping the query and the limit, and passing the project through", async () => {
+    const index = createFakeThreadIndex();
+    const hit: ThreadSearchHit = {
+      threadId: "thread-1",
+      projectPath: "/work/project",
+      title: "Test thread",
+      turnId: "turn-1",
+      ordinal: 1,
+      kind: "message",
+      id: "user:1",
+      role: "user",
+      activityKind: null,
+      snippet: "a «needle» here",
+      at: "1970-01-01T00:00:00.000Z",
+      seq: 2
+    };
+    index.searchHits = Array.from({ length: 60 }, (_unused, n) => ({ ...hit, id: `user:${n}` }));
+    const h = await harness({ index });
+
+    const answer = await h.call(
+      "GET",
+      `${agentHostRoutes.search}?q=${encodeURIComponent("needle")}&limit=3&projectPath=${encodeURIComponent("/work/project")}`
+    );
+    assert.equal(answer.status, 200);
+    const body = answer.body as ThreadSearchResponse;
+    assert.equal(body.query, "needle");
+    assert.equal(body.indexed, true);
+    assert.equal(body.hits.length, 3);
+    assert.equal(body.truncated, true);
+    assert.deepEqual(index.searches.at(-1), { q: "needle", limit: 3, projectPath: "/work/project" });
+
+    await h.call("GET", `${agentHostRoutes.search}?q=needle`);
+    assert.deepEqual(index.searches.at(-1), { q: "needle", limit: 20 }, "a default page of hits");
+    await h.call("GET", `${agentHostRoutes.search}?q=needle&limit=0`);
+    assert.equal(index.searches.at(-1)?.limit, 1);
+    await h.call("GET", `${agentHostRoutes.search}?q=needle&limit=9999`);
+    assert.equal(index.searches.at(-1)?.limit, THREAD_SEARCH_MAX_RESULTS);
+
+    // Clamped by code point: an astral character is never cut in half.
+    const long = "🔎".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 50);
+    const clamped = await h.call("GET", `${agentHostRoutes.search}?q=${encodeURIComponent(long)}`);
+    assert.equal(
+      Array.from((clamped.body as ThreadSearchResponse).query).length,
+      THREAD_SEARCH_MAX_QUERY_CHARS
+    );
+    assert.equal(index.searches.at(-1)?.q, (clamped.body as ThreadSearchResponse).query);
+
+    // A blank query matches nothing, and is still a 200.
+    const blank = await h.call("GET", agentHostRoutes.search);
+    assert.equal(blank.status, 200);
+    assert.deepEqual(blank.body, { query: "", hits: [], truncated: false, indexed: true });
+    await h.stop();
+  });
+
+  it("answers search `indexed: false` with a 200 when there is no usable index", async () => {
+    for (const index of [undefined, createFakeThreadIndex({ available: false })]) {
+      const h = await harness(index ? { index } : {});
+      const answer = await h.call("GET", `${agentHostRoutes.search}?q=anything`);
+      assert.equal(answer.status, 200);
+      assert.deepEqual(answer.body, {
+        query: "anything",
+        hits: [],
+        truncated: false,
+        indexed: false
+      });
+      await h.stop();
+    }
   });
 });

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --import tsx --import ./test/svg-loader.mjs --test $(find src -name '*.test.ts') && for f in $(find src -name '*.check.ts'); do node --import tsx --import ./test/svg-loader.mjs \"$f\" || exit 1; done"
+    "test": "node --import tsx --import ./test/svg-loader.mjs --import ./test/quiet-mock-timers.mjs --test $(find src -name '*.test.ts') && for f in $(find src -name '*.check.ts'); do node --import tsx --import ./test/svg-loader.mjs --import ./test/quiet-mock-timers.mjs \"$f\" || exit 1; done"
   },
   "dependencies": {
     "@codemirror/language": "^6.12.3",

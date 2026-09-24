@@ -9,13 +9,16 @@
  */
 
 import {
+  buildPlanImplementationPrompt,
   MAX_TURN_ATTACHMENTS,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
   MAX_TURN_INPUT_CHARS,
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
+import { imageOrdinal, imagePlaceholder } from "./composer-images";
 import { parseStandaloneComposerSlashCommand } from "./composer-trigger";
 import type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
 
@@ -328,12 +331,13 @@ export function hasSendableContent(input: {
 // The plan follow-up (§7.5, §7.4 primary actions)
 // ---------------------------------------------------------------------------
 
-/** Prefix of the message sent when the user approves a plan. *T3: `proposedPlan.ts:74`.* */
-export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
-
-export function buildPlanImplementationPrompt(planMarkdown: string): string {
-  return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
-}
+/**
+ * Prefix of the message sent when the user approves a plan, and the message
+ * itself: one spelling in `@orquester/api/agent-chat`, shared with the host and
+ * the MCP. Re-exported so existing imports from this module keep working.
+ * *T3: `proposedPlan.ts:74-77`.*
+ */
+export { buildPlanImplementationPrompt, PLAN_IMPLEMENTATION_PROMPT_PREFIX };
 
 /** The plan's own title — its first markdown heading — or `null`. */
 export function proposedPlanTitle(planMarkdown: string): string | null {
@@ -364,6 +368,218 @@ export function resolvePlanFollowUpSubmission(input: {
     interactionMode: "default",
     action: "implement"
   };
+}
+
+// ---------------------------------------------------------------------------
+// The send step (§7.3, §7.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * How one send ended, for the composer to render:
+ *  - `sent` — the transport took exactly the text it was handed;
+ *  - `refused` — nothing was sent, and the draft is left as it is;
+ *  - `failed` — the transport rejected. `text` is what goes back to the draft,
+ *    with the chips the send carried ({@link draftAfterSend}); it is the only
+ *    outcome that writes the draft. It holds the user's own words from a
+ *    plain send or a Refine, and `null` from an Implement, whose prompt the
+ *    composer generated. The draft is then left as it is and the plan stays
+ *    actionable.
+ */
+export type ComposerSendOutcome =
+  | { kind: "sent" }
+  | { kind: "refused"; notice: string }
+  | { kind: "failed"; text: string | null; notice: string };
+
+/**
+ * The `resolveText` of an Implement, and of no other send: the proposal read
+ * through `read` (the store's `readFullPlanMarkdown`: as is when intact, read
+ * back whole when the wire cut it at 16 KiB, §5.6), built into the
+ * implementation prompt at send time.
+ *
+ * Every Implement gets one, not only a cut plan's, because `resolveText` is
+ * how {@link sendComposerTurn} tells a prompt the composer generated from the
+ * user's own words. A Refine sends the user's draft, and a plain send has no
+ * plan at all.
+ */
+export function implementationTextResolver<Proposal>(input: {
+  action: "implement" | "refine" | null;
+  proposal: Proposal | null;
+  read: (proposal: Proposal) => Promise<string>;
+}): (() => Promise<string>) | undefined {
+  const { action, proposal, read } = input;
+  if (action !== "implement" || proposal === null) {
+    return undefined;
+  }
+  return () => read(proposal).then(buildPlanImplementationPrompt);
+}
+
+/**
+ * The step between "the user pressed send" and the wire.
+ *
+ * A plain send, or a Refine, holds its text: the user's own words. An
+ * Implement resolves its prompt here through `resolveText`
+ * ({@link implementationTextResolver}), which reads the whole plan even when
+ * the wire cut it at 16 KiB (§5.6). When the plan cannot be read, nothing is
+ * sent. The resolved prompt is also the one measured against the turn input
+ * bound (§4.1) here. The draft was validated on the CUT prompt, and a prompt
+ * only the host refuses would come back as a failed send. A plain send was
+ * validated before its draft was cleared, and is not measured again.
+ *
+ * A failed send puts the user's own words back into the draft, never a
+ * resolved prompt. Written into the draft, the prompt would turn the primary
+ * button into a plan-mode "Refine" that carries the implementation prefix.
+ * Left out, the plan stays actionable and Implement is pressed again.
+ *
+ * `send` is the transport (the store's `sendTurn`), passed in so every branch
+ * is testable without a renderer.
+ */
+export async function sendComposerTurn(input: {
+  text: string;
+  resolveText?: () => Promise<string>;
+  send: (text: string) => Promise<void>;
+}): Promise<ComposerSendOutcome> {
+  let text = input.text;
+  if (input.resolveText) {
+    try {
+      text = await input.resolveText();
+    } catch (error) {
+      return {
+        kind: "refused",
+        notice: error instanceof Error ? error.message : "The full plan could not be loaded."
+      };
+    }
+    const validation = composerSubmissionValidationMessage({
+      prompt: text,
+      submissionTarget: "provider-turn"
+    });
+    if (validation) return { kind: "refused", notice: validation };
+  }
+  try {
+    await input.send(text);
+    return { kind: "sent" };
+  } catch (error) {
+    return {
+      kind: "failed",
+      text: input.resolveText ? null : text,
+      notice: error instanceof Error ? error.message : "Could not send the message."
+    };
+  }
+}
+
+/**
+ * The minimum a chip has to look like for {@link draftAfterSend}. Structural,
+ * like {@link StagedAttachmentLike}; `mimeType` is what numbers an image.
+ */
+export interface RestorableAttachment {
+  key: string;
+  mimeType: string;
+  ref?: { id: string };
+}
+
+/** An `[Image #N]`, as `imagePlaceholder` writes it. */
+const IMAGE_PLACEHOLDER = /\[Image #(\d+)\]/g;
+
+/**
+ * What a settled send does to the draft: the draft to show next, or `null`
+ * to leave it as it is.
+ *
+ * `submit` empties the draft, tray included, before the send goes out. Only
+ * a FAILED send writes anything back, and then the chips it carried come back
+ * WITH its text: restoring the words alone is how a resend went out without
+ * the files. Everything else leaves the draft alone. A sent message is gone,
+ * a refusal sent nothing, and a failed Implement (`text: null`) carried the
+ * composer's prompt and no chip, since a chip in the tray turns Implement back
+ * into a plain send.
+ *
+ * What was typed or staged while the send was in flight stays, behind what
+ * comes back: its text after the restored text, its chips after the restored
+ * chips. Chips merge by `key`, or by the upload's ref id as
+ * {@link decideStagedAttachmentForRef} has it, so a chip delivered again
+ * meanwhile is not staged twice. An image's `[Image #N]` is its position among
+ * the staged images, so the restored text keeps naming its images, and each
+ * placeholder the meanwhile text wrote for one of its own images follows that
+ * image to where it lands. A number that names none of them is the user's own
+ * text and stays as typed.
+ */
+export function draftAfterSend<A extends RestorableAttachment>(input: {
+  outcome: ComposerSendOutcome;
+  /** The chips the send carried, in tray order. */
+  sent: readonly A[];
+  /** The draft as it is now, holding what was typed or staged meanwhile. */
+  draft: { text: string; attachments: readonly A[] };
+}): { text: string; attachments: A[] } | null {
+  const { outcome, sent, draft } = input;
+  if (outcome.kind !== "failed" || outcome.text === null) return null;
+
+  const sentCopyOf = (entry: A): A | undefined =>
+    sent.find(
+      (candidate) =>
+        candidate.key === entry.key ||
+        (candidate.ref !== undefined && candidate.ref.id === entry.ref?.id)
+    );
+  const attachments = [
+    ...sent,
+    ...draft.attachments.filter((entry) => sentCopyOf(entry) === undefined)
+  ];
+
+  const meanwhileImages = draft.attachments.filter((entry) => entry.mimeType.startsWith("image/"));
+  const meanwhileText = draft.text.replace(IMAGE_PLACEHOLDER, (placeholder, digits: string) => {
+    const image = meanwhileImages[Number(digits) - 1];
+    if (image === undefined) return placeholder;
+    const ordinal = imageOrdinal(attachments, (sentCopyOf(image) ?? image).key);
+    return ordinal === null ? placeholder : imagePlaceholder(ordinal);
+  });
+
+  const restored = outcome.text;
+  const text =
+    meanwhileText.trim().length === 0
+      ? restored
+      : restored.trim().length === 0
+        ? meanwhileText
+        : `${restored}\n\n${meanwhileText}`;
+  return { text, attachments };
+}
+
+/**
+ * A send that settled without going out, on its way back to a draft: its
+ * outcome — the text to restore, if any, and the notice — and the chips it
+ * carried, in tray order. {@link draftAfterSend} decides what that does to
+ * whichever draft it reaches; {@link failedSendRestoreTarget} decides which
+ * draft that is.
+ */
+export interface FailedSendRestore<A extends RestorableAttachment = RestorableAttachment> {
+  outcome: Exclude<ComposerSendOutcome, { kind: "sent" }>;
+  sent: readonly A[];
+}
+
+/**
+ * Which draft a send that did not go out comes back to (§7.4) — always a
+ * draft of **the thread it was sent FROM**, decided when the send settles: by
+ * then a project switch may have unmounted the composer that sent it, or that
+ * composer may show another thread, whose draft is not this one's.
+ *
+ *  - `live` — the composer that sent it is still mounted and still shows that
+ *    thread: its own live draft, as a restore always went.
+ *  - `composer` — it is not, but another composer shows the thread now (its
+ *    tab came back after the switch): that composer's live draft, through the
+ *    bridge. A mounted composer owns its thread's one visible draft and reads
+ *    the persisted copy only when it loads the thread, so a restore written
+ *    there behind its back would not show, and its next save would drop it.
+ *  - `persisted` — no composer shows the thread: its persisted draft in the
+ *    thread store, which the next composer to show it loads.
+ */
+export type FailedSendRestoreTarget = "live" | "composer" | "persisted";
+
+export function failedSendRestoreTarget(input: {
+  /** The thread the message was sent from. */
+  sentFrom: string;
+  /** The thread whose draft the sending composer's live draft holds now; `null` once it is unmounted. */
+  liveThread: string | null;
+  /** Whether a mounted composer shows `sentFrom` now — a bridge handle is registered for it. */
+  shownByComposer: boolean;
+}): FailedSendRestoreTarget {
+  if (input.liveThread === input.sentFrom) return "live";
+  return input.shownByComposer ? "composer" : "persisted";
 }
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,9 @@
 
 import type { AttachmentRef } from "@orquester/api/agent-chat";
 
+import type { StagedAttachment } from "./ComposerAttachments";
 import type { ComposerShortcutCommand } from "./composer-shortcuts";
+import type { FailedSendRestore } from "./composer-submission";
 
 export interface ComposerHandle {
   /** Insert text into the draft at the caret (or append it); focus stays where it is (§7.4). */
@@ -37,6 +39,15 @@ export interface ComposerHandle {
    * token — the `data-composer-shortcut` convention (§7.4).
    */
   openControl: (command: ComposerShortcutCommand) => void;
+  /**
+   * Put a failed send's draft back into this composer's live draft (§7.4) —
+   * `draftAfterSend` over what it holds now, the send's notice with it — for
+   * a send from this thread that the composer it left from can no longer put
+   * back itself (a project switch unmounted it, or it shows another thread).
+   * `false` when this composer does not show that thread either, so the
+   * caller writes the thread's persisted draft instead.
+   */
+  restoreFailedSend: (restore: FailedSendRestore<StagedAttachment>) => boolean;
 }
 
 const handles = new Map<string, ComposerHandle>();
@@ -75,6 +86,19 @@ export function insertComposerText(
  */
 export function stageComposerAttachment(sessionId: string, ref: AttachmentRef): boolean {
   return composerHandle(sessionId)?.stageAttachment(ref) ?? false;
+}
+
+/**
+ * Hand a failed send's draft to the composer that shows its thread (§7.4).
+ * `false` when none takes it — nothing is mounted for that thread, or what is
+ * no longer shows it — and the caller then writes the thread's persisted
+ * draft, where the next composer to show the thread loads it.
+ */
+export function restoreComposerFailedSend(
+  sessionId: string,
+  restore: FailedSendRestore<StagedAttachment>
+): boolean {
+  return composerHandle(sessionId)?.restoreFailedSend(restore) ?? false;
 }
 
 /** Open a composer control by its `data-composer-shortcut` token. */

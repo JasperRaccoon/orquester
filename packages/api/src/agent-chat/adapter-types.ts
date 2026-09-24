@@ -295,7 +295,14 @@ export interface AdapterCapabilities {
   sessionModelSwitch: "in-session" | "unsupported";
   /** Codex. Starts a resumed turn with no synthetic user prompt (§3.3). */
   promptlessTurnContinuation?: boolean;
-  /** Absent means true; Grok is false (§5.5 step 2 refuses before any write). */
+  /**
+   * Absent means FALSE: "rewind to here" is withheld. The client's provider
+   * repair fills a missing flag from `FALLBACK_CAPABILITIES`
+   * (`packages/ui/src/lib/agent-chat/providers.ts`), and the MCP's
+   * `supportsFrom` reports `rollback: false`. Every adapter declares it;
+   * Grok's is false (§5.5 step 2 refuses before any write). The host's own
+   * refusal, `assertRollbackSupported`, goes by adapter id, not this flag.
+   */
   supportsConversationRollback?: boolean;
   /**
    * The provider can resume a conversation that is already open elsewhere by

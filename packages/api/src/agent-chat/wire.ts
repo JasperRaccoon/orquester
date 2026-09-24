@@ -23,6 +23,7 @@ import type {
 import type { DomainEvent } from "./domain-events.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
+  Checkpoint,
   LatestTurnSummary,
   ThreadItem,
   ThreadSessionStatus,
@@ -74,6 +75,15 @@ export const agentChatRoutes = {
   item: (sessionId: string, itemId: string): string =>
     `${sessionBase(sessionId)}/items/${encodeURIComponent(itemId)}`,
   /**
+   * The streamed output of the tool call an item belongs to — every
+   * `tool.output` chunk of the call, joined by the host
+   * ({@link ThreadItemOutputResponse}). A 404 of its own is
+   * `ITEM_NOT_FOUND`; a host that predates the route answers the miss as its
+   * generic 404 `THREAD_NOT_FOUND` ("No route for GET …").
+   */
+  itemOutput: (sessionId: string, itemId: string): string =>
+    `${sessionBase(sessionId)}/items/${encodeURIComponent(itemId)}/output`,
+  /**
    * §6.3 attachment read-back. NOT `/api/fs/download`: that route is confined
    * to `fsRoot`, and a thread's attachments live under the appdir's
    * `daemon/agent/threads/<id>/attachments`. Carries the same `?token=`
@@ -86,8 +96,120 @@ export const agentChatRoutes = {
   providers: "/api/agent/providers",
   providerRefresh: (adapterId: string): string =>
     `/api/agent/providers/${encodeURIComponent(adapterId)}/refresh`,
-  hostStop: "/api/agent-host/stop"
+  hostStop: "/api/agent-host/stop",
+
+  // Indexed history (design 2026-09-23 "thread index and lazy boot").
+  /**
+   * A page of turns OLDER than what the client holds, folded from the log by
+   * the host: `?before=<cursor>&turns=<n>`. No cursor means "the turns just
+   * below the retained window" (the snapshot's `history.beforeCursor`).
+   */
+  history: (sessionId: string): string => `${sessionBase(sessionId)}/history`,
+  /** Full-text search over every indexed thread on the host: `?q=&limit=&projectPath=`. */
+  search: "/api/agent/search"
 } as const;
+
+// ---------------------------------------------------------------------------
+// Indexed history and search (design 2026-09-23 "thread index and lazy boot")
+// ---------------------------------------------------------------------------
+
+/** Query string of `GET …/history`. */
+export interface ThreadHistoryQuery {
+  /** Opaque, from a previous page or the snapshot's `history.beforeCursor`. */
+  before?: string;
+  /** Turns per page, clamped to `[1, THREAD_HISTORY_MAX_TURNS]`. */
+  turns?: number;
+}
+
+export const THREAD_HISTORY_DEFAULT_TURNS = 20;
+export const THREAD_HISTORY_MAX_TURNS = 100;
+
+/** One turn of a history page, as the index knows it. Oldest first in a page. */
+export interface ThreadHistoryTurn {
+  turnId: string;
+  /** 1-based, by ORDER of started turns — the same count `/revert` uses. */
+  ordinal: number;
+  userMessageId: string | null;
+  requestedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  /**
+   * False when a compaction happened after this turn: rewinding to it would
+   * cross the compaction boundary, which the provider cannot honour (§5.5).
+   * The client withholds "rewind to here" on it, as it does inside the window.
+   */
+  rewindable: boolean;
+}
+
+/**
+ * `GET …/history`. `items`/`checkpoints` are the fold of exactly the events
+ * those turns span, slimmed like a snapshot (§5.6). A client merges them
+ * ABOVE what it holds and drops any item whose id it already has — the newest
+ * page and the retained window can overlap by a few rows, because retention
+ * evicts rows, not turns.
+ */
+export interface ThreadHistoryPage {
+  threadId: string;
+  turns: ThreadHistoryTurn[];
+  items: ThreadItem[];
+  checkpoints: Checkpoint[];
+  page: {
+    /** Cursor of the next older page, or null when this page reached turn 1. */
+    beforeCursor: string | null;
+    /**
+     * The id of the row at the page's upper boundary — the first row of the
+     * log the page does NOT hold: the window's first row for a page asked
+     * without a cursor, the previous page's first row otherwise (a message's
+     * first chunk when the boundary moved back to keep a message whole). The
+     * client places every window row written before it in the history section,
+     * so the timeline stays in log order when the page shares no row with the
+     * window (design 2026-09-23 fold performance, "Client"). Null when that
+     * line is not a row; absent from a host that predates the field.
+     */
+    endItemId?: string | null;
+  };
+  /** The thread's sequence the page was computed against. */
+  seq: number;
+}
+
+/** Query string of `GET /api/agent/search`. */
+export interface ThreadSearchQuery {
+  q: string;
+  /** Clamped to `[1, THREAD_SEARCH_MAX_RESULTS]`. */
+  limit?: number;
+  /** Restrict to one project root. */
+  projectPath?: string;
+}
+
+export const THREAD_SEARCH_MAX_RESULTS = 50;
+export const THREAD_SEARCH_MAX_QUERY_CHARS = 200;
+
+export interface ThreadSearchHit {
+  threadId: string;
+  projectPath: string;
+  title: string;
+  /** The turn the row belongs to; null for a turnless row. */
+  turnId: string | null;
+  ordinal: number | null;
+  kind: "message" | "activity";
+  /** Message id or activity id. */
+  id: string;
+  role: "user" | "assistant" | "reasoning" | null;
+  activityKind: string | null;
+  /** A short excerpt with the match highlighted by `«` and `»`. */
+  snippet: string;
+  at: string;
+  seq: number;
+}
+
+export interface ThreadSearchResponse {
+  query: string;
+  hits: ThreadSearchHit[];
+  /** More hits existed than `limit`. */
+  truncated: boolean;
+  /** False when the host has no usable index; `hits` is then empty. */
+  indexed: boolean;
+}
 
 /** The `name` accepted by `Transporter.agentChat.command(sessionId, name, body)`. */
 export type AgentChatCommandName =
@@ -305,7 +427,22 @@ export type AgentChatErrorCode =
   /** 409 — a turn is running or another compaction is in flight (§3.4). */
   | "COMPACTION_UNAVAILABLE"
   /** 503 — the host is restarting; the client retries the SAME `commandId`. */
-  | "HOST_UNAVAILABLE";
+  | "HOST_UNAVAILABLE"
+  /**
+   * 503 — the host has no usable thread index right now (driver missing, file
+   * being rebuilt). Only `GET …/history` answers it: `GET /api/agent/search`
+   * is never an error for "no index" — it answers 200 with `indexed:false`
+   * and no hits — and nothing about the live thread is affected.
+   */
+  | "INDEX_UNAVAILABLE"
+  /**
+   * 404 — only `GET …/items/:itemId/output` answers it: the thread has no such
+   * item, or the item names no tool call. A code of its own because a host
+   * that predates the route answers the miss as its generic 404
+   * `THREAD_NOT_FOUND` ("No route for GET …") — the code `GET …/items/:itemId`
+   * gives a missing item — and a reader must tell the two apart.
+   */
+  | "ITEM_NOT_FOUND";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -313,7 +450,9 @@ export const AGENT_CHAT_ERROR_CODES = [
   "COMMAND_ID_CONFLICT",
   "COMMAND_REJECTED",
   "COMPACTION_UNAVAILABLE",
-  "HOST_UNAVAILABLE"
+  "HOST_UNAVAILABLE",
+  "INDEX_UNAVAILABLE",
+  "ITEM_NOT_FOUND"
 ] as const satisfies readonly AgentChatErrorCode[];
 
 /** A failed command answers this, and it is not a transport error to swallow. */
@@ -419,6 +558,51 @@ export interface TurnDiffResponse {
 /** `GET /api/sessions/:id/items/:itemId` — the full, unslimmed payload (§5.6). */
 export interface ThreadItemResponse {
   item: ThreadItem;
+}
+
+/**
+ * The most bytes of streamed output {@link ThreadItemOutputResponse} carries
+ * (UTF-8). Past it the join stops, on a character boundary, and says so with
+ * `truncated`: the answer stays a bounded read however long a command ran.
+ */
+export const THREAD_ITEM_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * `GET /api/sessions/:id/items/:itemId/output` — the streamed output of the
+ * tool call the item belongs to.
+ *
+ * Some output exists only as `tool.output` chunks (`payload.delta`, the §5.6
+ * command-output buffer): a Claude background shell's, tailed from the file
+ * the CLI writes, and a running command's so far. No single item holds it —
+ * the GUI joins the chunks onto the call's row — and the snapshot cannot give
+ * it back whole (per-agent windows evict chunks, every string is capped on the
+ * wire, history pages are slimmed), so the host joins them from the log.
+ *
+ * The join reads the raw log: a chunk written in a turn a later rewind
+ * (`thread.reverted`) removed is still joined — chunks written before a rewind
+ * are what the command printed, and a rewind unprints nothing (a Claude rewind
+ * restarts the session, closing an open shell first, so none prints on through
+ * one). It is by call, not by stream: a file change's `file_change_output`
+ * chunks join like a command's, and the reader decides what the text is.
+ *
+ * 404 `ITEM_NOT_FOUND` when the thread has no such item, or the item names no
+ * tool call (no `payload.toolUseId`).
+ */
+export interface ThreadItemOutputResponse {
+  /** The call: the item's `payload.toolUseId`. */
+  toolUseId: string;
+  /**
+   * Every `tool.output` chunk of the call, joined verbatim in log order — ""
+   * when it streamed nothing.
+   */
+  output: string;
+  /** A `tool.completed` row exists for the call: its output will not grow. */
+  complete: boolean;
+  /**
+   * The join passed {@link THREAD_ITEM_OUTPUT_MAX_BYTES}: `output` is its head,
+   * cut on a character boundary.
+   */
+  truncated: boolean;
 }
 
 /** `GET /api/agent/providers` (§6.3). */

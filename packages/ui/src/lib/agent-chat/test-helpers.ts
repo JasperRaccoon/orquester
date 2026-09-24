@@ -10,9 +10,12 @@ import type {
   ThreadActivityItem,
   ThreadActivityTone,
   ThreadHead,
+  ThreadHistoryPage,
+  ThreadHistoryTurn,
   ThreadMessageItem,
   ThreadSessionState,
-  ThreadSnapshotPayload
+  ThreadSnapshotPayload,
+  Turn
 } from "@orquester/api/agent-chat";
 
 let seqCounter = 0;
@@ -127,6 +130,51 @@ export function snapshot(
     checkpoints: [],
     pending: { approvals: [], userInputs: [] },
     roster: [],
+    seq: 0,
+    ...overrides
+  };
+}
+
+/** A fold turn row: started once the provider minted its id, pending before. */
+export function foldTurn(turnId: string | null, userMessageId?: string): Turn {
+  return {
+    turnId,
+    state: turnId === null ? "pending" : "completed",
+    turnCount: null,
+    requestedAt: stamp(0),
+    startedAt: turnId === null ? null : stamp(0),
+    completedAt: turnId === null ? null : stamp(0),
+    assistantMessageId: null,
+    ...(userMessageId !== undefined ? { userMessageId } : {})
+  };
+}
+
+/** One turn of a `GET …/history` page, as the index reports it. */
+export function historyTurn(
+  turnId: string,
+  ordinal: number,
+  overrides: Partial<ThreadHistoryTurn> = {}
+): ThreadHistoryTurn {
+  return {
+    turnId,
+    ordinal,
+    userMessageId: null,
+    requestedAt: stamp(ordinal * 10),
+    startedAt: stamp(ordinal * 10),
+    completedAt: stamp(ordinal * 10 + 5),
+    rewindable: true,
+    ...overrides
+  };
+}
+
+/** A `GET …/history` answer. */
+export function historyPage(overrides: Partial<ThreadHistoryPage> = {}): ThreadHistoryPage {
+  return {
+    threadId: "s1",
+    turns: [],
+    items: [],
+    checkpoints: [],
+    page: { beforeCursor: null },
     seq: 0,
     ...overrides
   };

@@ -158,6 +158,35 @@ export interface ChatTimelineProps {
   scroll?: TimelineScrollPosition | null | undefined;
   /** Publishes the reading position back into that LRU as the user scrolls. */
   onScrollPositionChange?: ((position: TimelineScrollPosition) => void) | undefined;
+  /**
+   * Older turns exist beyond everything the timeline holds (design
+   * 2026-09-23 §C "History page"): a "Load older turns" row sits above the
+   * first row. Never offered on a read-only surface or the drill-in. Absent
+   * means no.
+   *
+   * *Added with the thread index; additive to the foundation's contract.*
+   */
+  historyHasOlder?: boolean | undefined;
+  /** A page is loading: the row spins and cannot be pressed again. */
+  historyLoading?: boolean | undefined;
+  /** Why the last load failed, in words, shown inline under the row. */
+  historyError?: string | null | undefined;
+  /**
+   * Fetch the next older page. It is prepended ABOVE the rows; the timeline
+   * keeps the viewport on what the user was reading (scroll anchoring) unless
+   * it is following the end.
+   */
+  onLoadOlderHistory?: (() => void) | undefined;
+  /**
+   * A row the store wants on screen — the command palette's search hit. The
+   * timeline scrolls it to the top of the viewport once it is rendered and
+   * visible, disarms follow, and hands the nonce back through
+   * {@link onRevealHandled}.
+   *
+   * *Added with the thread index; additive to the foundation's contract.*
+   */
+  revealRequest?: { rowId: string; nonce: number } | null | undefined;
+  onRevealHandled?: ((nonce: number) => void) | undefined;
 }
 
 /**
@@ -195,8 +224,12 @@ export interface ChatComposerProps {
   hasPendingRequest: boolean;
   queue: QueuedComposerMessage[];
   activePlan: ActivePlanState | null;
-  /** The un-implemented proposal that turns the primary action into a split button. */
-  actionableProposedPlan: { planMarkdown: string } | null;
+  /**
+   * The un-implemented proposal that turns the primary action into a split
+   * button. Implement reads it through `actions.readFullPlanMarkdown`, so it
+   * takes that reader's own input type.
+   */
+  actionableProposedPlan: Parameters<AgentChatActions["readFullPlanMarkdown"]>[0] | null;
   /** The composer goes `inert` for exactly one reason (§7.5). */
   reverting: boolean;
   /**

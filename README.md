@@ -74,7 +74,7 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - Web Push (VAPID) when an agent needs input or finishes — debounced, per-session, with a test button.
 
 ### 🔌 MCP server built in
-The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`) so *other* agents can orchestrate your sessions: list workspaces/tabs, read terminals, send input and keys, wait for idle/attention, create/close tabs, manage todos, browse files and check usage.
+The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`, on the authenticated remote transport) so *other* agents can drive your agent chat sessions the way you do in the GUI: open, resume and configure Claude Code, Codex, OpenCode and Grok sessions, send messages with attachments and get the reply back, answer questions and approvals, read transcripts and diffs, wait for a session to need attention, and check usage and cost — plus shared todos and sandboxed file reads. Setup and the tool reference: [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
 
 ---
 
@@ -123,7 +123,8 @@ flowchart LR
 
 - **Two transports, one server**: an always-on Unix socket (desktop, trusted) and an opt-in, hot-reloadable HTTP transport (remote web, bearer-auth) — flip remote access on/off without touching running sessions.
 - **tmux-backed persistence**: commands live in a dedicated tmux server, so a daemon restart or redeploy reattaches to every running agent. Falls back to direct node-pty where tmux < 3.2 (Windows, stock macOS) — sessions then don't survive restarts.
-- **State is plain JSON** under one appdir (`~/.orquester` by default) — no database.
+- **State is plain JSON** under one appdir (`~/.orquester` by default); the one SQLite file, the agent host's thread index, is a disposable cache rebuilt from the chat logs.
+- **External agents over MCP**: `POST /mcp` (remote transport only) drives chat sessions as an in-process client of the daemon's own REST API — the same routes and gates the GUI uses, no terminal keystrokes. See [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
 
 ### Monorepo layout
 

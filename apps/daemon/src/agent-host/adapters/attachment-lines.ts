@@ -45,12 +45,35 @@ export function appendAttachmentPathLines(
 }
 
 /**
- * Collapse every run of control characters in a name to one space: a name is
- * the uploader's text, and a newline in it would forge a line of the user's
- * turn.
+ * The line a question ANSWER names a file with (§6.2):
+ * `Attached file: <name> (<path>)`, or `(not available)` for a file the host
+ * can no longer resolve. The orchestrator folds it into a native answer's
+ * text, and echoes it under its question in a message-mode answer — where
+ * naming the path is what lets `appendAttachmentPathLines` find the file
+ * already named and add no block of its own.
+ */
+export function attachedFileLine(name: string, path: string | undefined): string {
+  return `Attached file: ${singleLineName(name)} (${path ?? "not available"})`;
+}
+
+/** A name in a line is capped at this many code points (never half a pair). */
+const LINE_NAME_MAX_CHARS = 255;
+
+/**
+ * A name as a line shows it. A name is the uploader's text and the command
+ * hop bounds it only as non-empty, so every run of control characters (C0,
+ * DEL, C1), Unicode line or paragraph separators and other whitespace becomes
+ * one space — a line break in it would forge a line of the user's turn — the
+ * ends are trimmed, the length is capped, and a name with nothing left is
+ * `attachment`: a line always names something.
  */
 function singleLineName(name: string): string {
-  return name.replace(/[\u0000-\u001f\u007f]+/g, " ");
+  const flat = name
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const capped = Array.from(flat).slice(0, LINE_NAME_MAX_CHARS).join("").trimEnd();
+  return capped.length > 0 ? capped : "attachment";
 }
 
 /**

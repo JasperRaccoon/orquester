@@ -24,7 +24,7 @@ import type {
   SessionActivity,
   SessionSummary
 } from "@orquester/api";
-import type { ISessionManager, SessionInputOptions } from "../sessions.ts";
+import type { ISessionManager } from "../sessions.ts";
 import type { ChatSessionManager } from "./chat-sessions.ts";
 
 /**
@@ -171,17 +171,13 @@ export class ChatAwareSessionManager implements ISessionManager {
     return this.chat.has(id) ? "" : this.pty.scrollback(id);
   }
 
-  async captureText(id: string, opts?: { lines?: number }): Promise<string> {
-    return this.chat.has(id) ? "" : this.pty.captureText(id, opts);
-  }
-
   buffer(id: string): string {
     return this.chat.has(id) ? "" : this.pty.buffer(id);
   }
 
-  input(id: string, data: string, options?: SessionInputOptions): void {
+  input(id: string, data: string): void {
     if (this.chat.has(id)) return;
-    this.pty.input(id, data, options);
+    this.pty.input(id, data);
   }
 
   resize(id: string, cols: number, rows: number): void {

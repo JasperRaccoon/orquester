@@ -104,6 +104,14 @@ function activityOfKind(
   return sink.activities().filter((event) => event.payload.activity.activityKind === kind);
 }
 
+/**
+ * An `agentMessage` phase exactly as Codex's live normaliser reports it: in
+ * `detail` AND in `data.phase` (`adapters/codex/items.ts`).
+ */
+function codexPhase(phase: string): { detail: string; data: unknown } {
+  return { detail: phase, data: { phase, delivery: null, questions: null } };
+}
+
 beforeEach(() => {
   resetRuntimeEventCounter();
 });
@@ -887,23 +895,22 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
     }
   });
 
-  const phaseCases: [string | undefined, "answer" | "commentary"][] = [
-    ["commentary", "commentary"],
-    ["COMMENTARY ", "commentary"],
-    ["final_answer", "answer"],
-    ["some real detail text", "answer"],
-    [undefined, "answer"]
+  // The phase is read from `data.phase` (D3); `detail` alone is only ever text.
+  const phaseCases: [string, { detail?: string; data?: unknown }, "answer" | "commentary"][] = [
+    ["codex commentary", codexPhase("commentary"), "commentary"],
+    ["codex, padded upper-case", codexPhase("COMMENTARY "), "commentary"],
+    ["codex final_answer", codexPhase("final_answer"), "answer"],
+    ["codex, no phase", { data: { phase: null, delivery: null, questions: null } }, "answer"],
+    ["a 'commentary' detail with no data.phase", { detail: "commentary" }, "answer"],
+    ["a real detail text", { detail: "some real detail text" }, "answer"],
+    ["no detail, no data", {}, "answer"]
   ];
-  for (const [detail, expected] of phaseCases) {
-    it(`item detail ${JSON.stringify(detail)} -> messageKind ${expected}`, async () => {
+  for (const [label, fields, expected] of phaseCases) {
+    it(`${label} -> messageKind ${expected}`, async () => {
       const { ingestion, sink } = harness();
       const turn = { turnId: "turn-1", itemId: "item-1" };
       await ingestion.ingest(
-        runtimeEvent(
-          "item.started",
-          { itemType: "assistant_message", ...(detail !== undefined ? { detail } : {}) },
-          turn
-        )
+        runtimeEvent("item.started", { itemType: "assistant_message", ...fields }, turn)
       );
       await ingestion.ingest(
         runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "text" }, turn)
@@ -930,7 +937,7 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
     await ingestion.ingest(
       runtimeEvent(
         "item.completed",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         turn
       )
     );
@@ -942,12 +949,12 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
     }
   });
 
-  it("a phase-marker detail is metadata, NOT the message text", async () => {
+  it("Codex's phase-marker detail is metadata, NOT the message text", async () => {
     const { ingestion, sink } = harness();
     await ingestion.ingest(
       runtimeEvent(
         "item.completed",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         { turnId: "turn-1", itemId: "item-1" }
       )
     );
@@ -979,7 +986,7 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
     await ingestion.ingest(
       runtimeEvent(
         "item.started",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         { ...turn, itemId: "item-1" }
       )
     );
@@ -992,7 +999,7 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
     await ingestion.ingest(
       runtimeEvent(
         "item.completed",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         { ...turn, itemId: "item-1" }
       )
     );
@@ -1016,7 +1023,7 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
     await ingestion.ingest(
       runtimeEvent(
         "item.started",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         { turnId: "turn-1", itemId: "item-1" }
       )
     );

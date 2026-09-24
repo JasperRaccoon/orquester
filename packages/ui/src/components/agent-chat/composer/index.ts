@@ -53,6 +53,7 @@ export {
   insertComposerText,
   openComposerControl,
   registerComposerHandle,
+  restoreComposerFailedSend,
   stageComposerAttachment,
   type ComposerHandle
 } from "./composer-bridge";
@@ -124,6 +125,7 @@ export {
   EMPTY_PERSISTED_DRAFT,
   loadComposerDraft,
   persistableAttachmentRefs,
+  persistedDraftAfterSend,
   persistedDraftsEqual,
   type DraftPersistScheduler,
   type LoadedComposerDraft,

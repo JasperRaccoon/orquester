@@ -49,6 +49,7 @@ import {
   type RewindTarget
 } from "../../lib/agent-chat/rewind.logic";
 import { cn } from "../../lib/cn";
+import { canLoadOlderHistory } from "../../lib/agent-chat/history.logic";
 import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
@@ -169,7 +170,7 @@ function fullOutputText(item: ThreadItem): string {
  */
 export function AgentChatView({ session, projectPath, active }: AgentChatViewProps): JSX.Element {
   const sessionId = session.id;
-  const { slice, actions, rows, activePlan, actionableProposedPlan, reverting } =
+  const { slice, actions, rows, activePlan, actionableProposedPlan, reverting, reveal } =
     useAgentChatThread(sessionId);
   const pending = useAgentChatPending(sessionId);
   const roster = useAgentChatRoster(sessionId);
@@ -434,6 +435,17 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     (target: RewindTarget) =>
       rewindTo({ messageId: target.messageId, targetTurnCount: target.targetTurnCount }),
     [rewindTo]
+  );
+
+  // --- older history and the palette's reveal (design 2026-09-23) ----------
+  // The "Load older turns" row pages the indexed log in ABOVE the window; the
+  // rows it brings are already in `rows` (the store merges them), so this is
+  // only the door and its state. A failure lands on the row in words — the
+  // action never rejects — and a search hit's reveal scrolls a row into view.
+  const historyHasOlder = !paintOnly && canLoadOlderHistory(slice.history);
+  const loadOlderHistory = React.useCallback(
+    () => dispatch(() => actions.loadOlderHistory()),
+    [actions]
   );
 
   // --- the plan-ready decision (§7.3, §7.5) --------------------------------
@@ -760,6 +772,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               projectPath={projectPath}
               scroll={paintOnly ? null : scrollPosition}
               onScrollPositionChange={paintOnly ? noop : rememberScrollPosition}
+              historyHasOlder={historyHasOlder}
+              historyLoading={!paintOnly && slice.history.loading}
+              historyError={paintOnly ? null : slice.history.error}
+              onLoadOlderHistory={paintOnly ? noop : loadOlderHistory}
+              revealRequest={paintOnly ? null : reveal}
+              onRevealHandled={actions.acknowledgeReveal}
             />
           )}
 

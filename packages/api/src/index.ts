@@ -20,6 +20,7 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
  * everything else.
  */
 export * from "./agent-chat/index.ts";
+export * from "./cliproxy-launch-models.ts";
 
 export type {
   AgentChatBackgroundLiveness,

@@ -23,8 +23,7 @@ import {
   CLAUDE_SESSION_ALLOWED_DESPITE_SPEC,
   CLAUDE_RUNTIME_INSTRUCTIONS,
   buildClaudeProbeOptions,
-  buildClaudeQueryOptions,
-  parseClaudeLaunchArgs
+  buildClaudeQueryOptions
 } from "./launch.ts";
 import {
   MINIMUM_CLAUDE_CLI_VERSION,
@@ -253,33 +252,26 @@ describe("claude launch — the options object (§4.5)", () => {
     assert.equal(settings.showThinkingSummaries, true);
   });
 
-  it("folds a permission launch arg into the mode instead of argv", () => {
-    const parsed = parseClaudeLaunchArgs([
-      "--dangerously-skip-permissions",
-      "--verbose",
-      "--effort",
-      "high",
-      "--permission-mode=acceptEdits"
-    ]);
-    assert.equal(parsed.permissionMode, "acceptEdits");
-    assert.equal(parsed.skipPermissions, true);
-    assert.deepEqual(parsed.extraArgs, { verbose: null, effort: "high" });
-
-    const built = buildClaudeQueryOptions({
-      cwd: "/work",
-      executablePath: "/bin/claude",
-      env: {},
-      runtimeMode: "approval-required",
-      models: MODELS,
-      attachmentsDir: "/a",
-      canUseTool: noopCanUseTool,
-      launchArgs: ["--permission-mode=acceptEdits", "--verbose"]
+  it("permissions come only from the runtime mode; effort only from the model selection", () => {
+    const supervised = build("approval-required", {
+      model: "default",
+      options: [{ id: "effort", value: "low" }]
     });
-    assert.equal(built.options.permissionMode, "acceptEdits");
-    const extra = built.options.extraArgs as Record<string, unknown>;
-    assert.equal(extra["permission-mode"], undefined);
-    assert.equal(extra["dangerously-skip-permissions"], undefined);
-    assert.equal(extra.verbose, null);
+    assert.equal(supervised.options.permissionMode, undefined);
+    assert.equal(supervised.options.allowDangerouslySkipPermissions, undefined);
+    assert.equal(supervised.options.effort, "low");
+    const extra = supervised.options.extraArgs as Record<string, unknown> | undefined;
+    assert.equal(extra?.effort, undefined);
+    assert.equal(extra?.["dangerously-skip-permissions"], undefined);
+    // The one flag the adapter authors itself, and nothing else.
+    assert.deepEqual(extra, { "thinking-display": "summarized" });
+
+    const full = build("full-access", { model: "default" });
+    assert.equal(full.options.permissionMode, "bypassPermissions");
+    assert.equal(full.options.allowDangerouslySkipPermissions, true);
+
+    const edits = build("auto-accept-edits", { model: "default" });
+    assert.equal(edits.options.permissionMode, "acceptEdits");
   });
 
   it("the probe's options never run a hook and never open an MCP server", () => {

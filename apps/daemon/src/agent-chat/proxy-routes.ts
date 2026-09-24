@@ -18,10 +18,12 @@ import { overlayManagedAccountAuth } from "./provider-auth-overlay.ts";
 import {
   AGENT_CHAT_COMMAND_NAMES,
   AGENT_CHAT_ERROR_CODES,
+  THREAD_SEARCH_MAX_QUERY_CHARS,
   agentChatRoutes,
   type AgentChatCommandName,
   type AgentChatErrorCode,
-  type AgentChatErrorEnvelope
+  type AgentChatErrorEnvelope,
+  type ThreadSearchResponse
 } from "@orquester/api/agent-chat";
 import { agentHostRoutes } from "../agent-host/host-protocol.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
@@ -96,12 +98,25 @@ const HOST_UNAVAILABLE = chatError(
   "The agent host is restarting. Retry the same commandId."
 );
 
+/**
+ * The §6.2 status of every code. Total by construction: a code added to
+ * {@link AgentChatErrorCode} without a status here is a typecheck error, never
+ * a silent 409.
+ */
+const CHAT_ERROR_STATUS: Record<AgentChatErrorCode, number> = {
+  INVALID_COMMAND: 400,
+  THREAD_NOT_FOUND: 404,
+  COMMAND_ID_CONFLICT: 409,
+  COMMAND_REJECTED: 409,
+  COMPACTION_UNAVAILABLE: 409,
+  HOST_UNAVAILABLE: 503,
+  INDEX_UNAVAILABLE: 503,
+  ITEM_NOT_FOUND: 404
+};
+
 /** The §6.2 status for a code, so the account route answers like a command. */
 function statusForChatError(code: AgentChatErrorCode): number {
-  if (code === "INVALID_COMMAND") return 400;
-  if (code === "THREAD_NOT_FOUND") return 404;
-  if (code === "HOST_UNAVAILABLE") return 503;
-  return 409;
+  return CHAT_ERROR_STATUS[code];
 }
 
 /**
@@ -228,6 +243,23 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
     }
   );
 
+  // The streamed output of the tool call an item belongs to, joined by the
+  // host from the log. Passed through verbatim, 404s included: the host's own
+  // is `ITEM_NOT_FOUND`, and a surviving older host's route miss is its generic
+  // `THREAD_NOT_FOUND`, so a caller can tell them apart (the MCP's
+  // `read_tool_output` takes either as "no streamed output" and answers the
+  // item's own text). Unlike `/search`, nothing is synthesised here: no answer
+  // of this route could stand for an older host's.
+  app.get<{ Params: { id: string; itemId: string } }>(
+    pattern(agentChatRoutes.itemOutput(":id", ":itemId")),
+    async (request, reply) => {
+      const { id, itemId } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      return forwardJson(deps, reply, "GET", agentHostRoutes.itemOutput(id, itemId));
+    }
+  );
+
   app.get<{
     Params: { id: string; turnCount: string };
     Querystring: { ignoreWhitespace?: string };
@@ -248,6 +280,31 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       })
     );
   });
+
+  // A page of turns older than the client's window (design 2026-09-23 "thread
+  // index and lazy boot"). Forwarded, never interpreted: the host owns the
+  // cursor format and the `turns` clamp, and a host without a usable index
+  // answers 503 `INDEX_UNAVAILABLE` itself. The page's `seq` is deliberately
+  // NOT noted — it names the thread's current sequence while the page carries
+  // only old turns, so moving the tab's reconnect cursor to it would let a
+  // §6.3 reconnect skip live events the client was never sent.
+  app.get<{ Params: { id: string }; Querystring: { before?: string; turns?: string } }>(
+    pattern(agentChatRoutes.history(":id")),
+    async (request, reply) => {
+      const { id } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      return forwardJson(
+        deps,
+        reply,
+        "GET",
+        withQuery(agentHostRoutes.history(id), {
+          before: request.query.before,
+          turns: request.query.turns
+        })
+      );
+    }
+  );
 
   // The long-lived §6.3 subscription. Hijacked so Fastify's serializer never
   // sees it: the response is raw chunked NDJSON, piped from the host with
@@ -283,6 +340,37 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
     }
     return value;
   });
+
+  // Full-text search across every thread the host has indexed (design
+  // 2026-09-23). Host-level like `providers`, so no tab gate. `q` crosses
+  // untouched: quoting it for the FTS parser and clamping `q`/`limit` happen
+  // once, on the host. "No index" is never an error on this route: a current
+  // host without a usable one answers 200 `indexed:false` itself, passed
+  // through, and the one case the daemon has to speak for is the 404 below.
+  app.get<{ Querystring: { q?: string; limit?: string; projectPath?: string } }>(
+    agentChatRoutes.search,
+    async (request, reply) => {
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      return forwardJson(
+        deps,
+        reply,
+        "GET",
+        withQuery(agentHostRoutes.search, {
+          q: request.query.q,
+          limit: request.query.limit,
+          projectPath: request.query.projectPath
+        }),
+        undefined,
+        // The one 404 this route can see: a surviving older host predates
+        // `/search` and answers its generic route-miss 404 until its
+        // drain-restart (a current host never 404s here). That means exactly
+        // "no index on this host", so answer the shape the palette renders as
+        // unavailable rather than an error. `…/history` keeps its passthrough:
+        // there a 404 can also mean the thread is gone.
+        { notFound: () => unindexedSearch(request.query.q) }
+      );
+    }
+  );
 
   app.post<{ Params: { id: string } }>(
     pattern(agentChatRoutes.providerRefresh(":id")),
@@ -352,6 +440,21 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
 // helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The search answer of a host with no usable index. The query is echoed
+ * clamped to the same bound the host applies, and `""` when there was none.
+ */
+function unindexedSearch(q: unknown): ThreadSearchResponse {
+  return {
+    // Code points, as the host clamps it: a cut by UTF-16 unit could split an
+    // astral character and echo a lone surrogate back as the `query`.
+    query: typeof q === "string" ? Array.from(q).slice(0, THREAD_SEARCH_MAX_QUERY_CHARS).join("") : "",
+    hits: [],
+    truncated: false,
+    indexed: false
+  };
+}
+
 function withQuery(path: string, query: Record<string, string | undefined>): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
@@ -391,10 +494,22 @@ async function forwardJson(
   reply: FastifyReply,
   method: string,
   path: string,
-  body?: unknown
+  body?: unknown,
+  options: {
+    /**
+     * Answer a host 404 with 200 and this value instead, decided before
+     * anything is sent. Only for a route where the host can 404 for one
+     * reason alone — it predates the route (see the search route).
+     */
+    notFound?: () => unknown;
+  } = {}
 ): Promise<unknown> {
   try {
     const response = await deps.client.json<unknown>(method, path, body);
+    if (response.status === 404 && options.notFound) {
+      void reply.code(200);
+      return options.notFound();
+    }
     void reply.code(response.status);
     if (response.value !== null) return response.value;
     // A non-JSON body from the host is a bug on its side; never leak it raw.

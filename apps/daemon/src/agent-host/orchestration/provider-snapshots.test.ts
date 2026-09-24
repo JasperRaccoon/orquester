@@ -609,6 +609,32 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
     });
   });
 
+  it("layer 3: a correlated cache makes boot refresh a no-op", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-pending-"));
+    try {
+      await writeCache(stateDir, {
+        claude: {
+          identity: identityFor("claude", { binPath: "/usr/bin/claude" }),
+          snapshot: snapshotFor("claude", { version: "2.1.210" })
+        }
+      });
+      await withSeeded(
+        async ({ registry, probe }) => {
+          await registry.load();
+          registry.startBootRefresh();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+
+          assert.equal(probe.calls, 0, "boot must serve the correlated cache without a live probe");
+          await registry.refreshAllNow();
+          assert.equal(probe.calls, 1, "an explicit refresh still probes the provider");
+        },
+        { stateDir, binPath: "/usr/bin/claude" }
+      );
+    } finally {
+      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
   it("layer 3: the boot probe's result is written to the cache WITH its identity", async () => {
     await withSeeded(async ({ registry, stateDir }) => {
       registry.startBootRefresh();

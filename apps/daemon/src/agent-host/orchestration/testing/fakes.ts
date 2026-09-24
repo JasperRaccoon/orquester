@@ -14,12 +14,19 @@ import type {
   CheckpointStatus,
   CommandReceipt,
   DomainEvent,
+  FoldSnapshotFile,
   RuntimeEvent,
   ProviderSessionBinding,
   ProviderSessionBindingPatch,
+  ThreadFoldState,
   ThreadHead,
   AttachmentRef,
   AgentAdapterId
+} from "@orquester/api/agent-chat";
+import {
+  FOLD_SNAPSHOT_VERSION,
+  parseFoldSnapshotFile,
+  serializeFoldState
 } from "@orquester/api/agent-chat";
 
 import type {
@@ -28,6 +35,8 @@ import type {
   AttachmentPutInput,
   CaptureResult,
   CheckpointService,
+  EventPosition,
+  EventsFromResult,
   Ingestion,
   ThreadStore,
   ThreadTail,
@@ -57,10 +66,40 @@ export interface FakeThreadStore extends ThreadStore {
   /** Cut the log at `index`, as a malformed line would (§5.1). */
   truncateAt(threadId: string, index: number): void;
   headSaves: number;
+  /**
+   * `state.json` per thread, as `saveFoldSnapshot` wrote it (A2). Plant a
+   * stale or broken snapshot here to drive the fallback: `loadFoldSnapshot`
+   * validates it exactly as the real store validates the file.
+   */
+  readonly snapshots: Map<string, FoldSnapshotFile>;
 }
 
 export function createFakeThreadStore(): FakeThreadStore {
+  /**
+   * Positions are synthetic: every event "occupies" this many bytes, so the
+   * line at log index `i` sits at `i * FAKE_LINE_BYTES`. Only the relations
+   * between positions are the real store's contract — contiguous, starting
+   * where the last append ended — and those hold here too. Derived from the
+   * index at read time, so a test that pushes onto `logs` directly stays
+   * consistent.
+   */
+  const FAKE_LINE_BYTES = 1000;
+  const positionAt = (index: number, seq: number): EventPosition => ({
+    seq,
+    byteOffset: index * FAKE_LINE_BYTES,
+    byteLength: FAKE_LINE_BYTES
+  });
+  const isCursorCount = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
+  const lastSeqOf = (threadId: string): number => {
+    const log = logs.get(threadId) ?? [];
+    return log[log.length - 1]?.seq ?? 0;
+  };
+  const logBytesOf = (threadId: string): number =>
+    (logs.get(threadId) ?? []).length * FAKE_LINE_BYTES;
+  /** What the real store's trip through `state.json` does to a snapshot. */
+  const throughDisk = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
   const logs = new Map<string, DomainEvent[]>();
+  const snapshots = new Map<string, FoldSnapshotFile>();
   const heads = new Map<string, ThreadHead>();
   const bindings = new Map<string, ProviderSessionBinding>();
   const receipts = new Map<string, CommandReceipt>();
@@ -75,6 +114,7 @@ export function createFakeThreadStore(): FakeThreadStore {
     receipts,
     rawFrames,
     pruneCalls,
+    snapshots,
     headSaves: 0,
 
     truncateAt(threadId: string, index: number): void {
@@ -89,9 +129,11 @@ export function createFakeThreadStore(): FakeThreadStore {
       const log = logs.get(input.threadId) ?? [];
       logs.set(input.threadId, log);
       const stamped: DomainEvent[] = [];
+      const positions: EventPosition[] = [];
       for (const event of input.events) {
         const seq = log.length + 1;
         const persisted = { ...event, seq } as DomainEvent;
+        positions.push(positionAt(log.length, seq));
         log.push(persisted);
         stamped.push(persisted);
       }
@@ -100,7 +142,7 @@ export function createFakeThreadStore(): FakeThreadStore {
         // Written in the same step as the events.
         receipts.set(input.receipt.commandId, { ...input.receipt, seq });
       }
-      return { seq, events: stamped };
+      return { seq, events: stamped, positions, logBytes: log.length * FAKE_LINE_BYTES };
     },
 
     async readTail(threadId: string, afterSeq: number): Promise<ThreadTail> {
@@ -116,6 +158,150 @@ export function createFakeThreadStore(): FakeThreadStore {
 
     async readAll(threadId: string): Promise<ThreadTail> {
       return store.readTail(threadId, 0);
+    },
+
+    /**
+     * The real store's cursor rules over the synthetic positions: an offset
+     * that is not a line boundary, past the end, or whose line does not carry
+     * `afterSeq + 1` is a mismatch. A `truncateAt` cut is the malformed line:
+     * a read stops before it (`truncated`), and a cursor at or past it is
+     * stale.
+     */
+    async readEventsFrom(
+      threadId: string,
+      input: { byteOffset: number; afterSeq: number }
+    ): Promise<EventsFromResult> {
+      const log = logs.get(threadId) ?? [];
+      const cut = Math.min(truncated.get(threadId) ?? log.length, log.length);
+      const { byteOffset, afterSeq } = input;
+      const stale: EventsFromResult = {
+        events: [],
+        positions: [],
+        truncated: false,
+        seq: afterSeq,
+        logBytes: byteOffset,
+        mismatch: true
+      };
+      if (
+        !isCursorCount(byteOffset) ||
+        !isCursorCount(afterSeq) ||
+        byteOffset % FAKE_LINE_BYTES !== 0 ||
+        byteOffset / FAKE_LINE_BYTES > log.length
+      ) {
+        return stale;
+      }
+      const start = byteOffset / FAKE_LINE_BYTES;
+      if (start === log.length) {
+        return { ...stale, mismatch: false };
+      }
+      if (start >= cut || log[start]!.seq !== afterSeq + 1) {
+        return stale;
+      }
+      const events = log.slice(start, cut);
+      return {
+        events,
+        positions: events.map((event, index) => positionAt(start + index, event.seq)),
+        truncated: cut < log.length,
+        seq: events[events.length - 1]!.seq,
+        logBytes: cut * FAKE_LINE_BYTES,
+        mismatch: false
+      };
+    },
+
+    async readEventRange(
+      threadId: string,
+      input: { fromByte: number; toByte: number }
+    ): Promise<{ events: DomainEvent[]; truncated: boolean }> {
+      const { fromByte, toByte } = input;
+      if (!isCursorCount(fromByte) || !isCursorCount(toByte) || toByte < fromByte) {
+        throw new RangeError(`agent-chat: unusable byte range [${fromByte}, ${toByte})`);
+      }
+      if (fromByte === toByte) {
+        return { events: [], truncated: false };
+      }
+      if (fromByte % FAKE_LINE_BYTES !== 0) {
+        // Starts inside a line: nothing decodes.
+        return { events: [], truncated: true };
+      }
+      const log = logs.get(threadId) ?? [];
+      const cut = Math.min(truncated.get(threadId) ?? log.length, log.length);
+      const start = fromByte / FAKE_LINE_BYTES;
+      // Only lines whose newline falls inside the window are complete.
+      const end = Math.floor(toByte / FAKE_LINE_BYTES);
+      return {
+        events: log.slice(start, Math.min(end, cut)),
+        truncated: toByte % FAKE_LINE_BYTES !== 0 || end > cut
+      };
+    },
+
+    async lastSeq(threadId: string): Promise<number> {
+      return lastSeqOf(threadId);
+    },
+
+    async logLength(threadId: string): Promise<number> {
+      return logBytesOf(threadId);
+    },
+
+    /**
+     * The real store's rules: validated through `parseFoldSnapshotFile` after
+     * a JSON round trip, and refused when it claims more of the log than
+     * there is. Never throws.
+     */
+    async loadFoldSnapshot(threadId: string): Promise<FoldSnapshotFile | null> {
+      const stored = snapshots.get(threadId);
+      if (stored === undefined) {
+        return null;
+      }
+      let snapshot: FoldSnapshotFile | null;
+      try {
+        snapshot = parseFoldSnapshotFile(throughDisk(stored), threadId);
+      } catch {
+        return null;
+      }
+      if (snapshot === null) {
+        return null;
+      }
+      return snapshot.seq > lastSeqOf(threadId) || snapshot.logBytes > logBytesOf(threadId)
+        ? null
+        : snapshot;
+    },
+
+    /**
+     * Stored synchronously, as a copy taken at call time (the real store
+     * serialises before it queues). Refuses a state not folded to `seq`, and
+     * drops a save the log cannot honour, exactly like the real store.
+     */
+    async saveFoldSnapshot(input: {
+      threadId: string;
+      seq: number;
+      logBytes: number;
+      state: ThreadFoldState;
+      extras?: Record<string, unknown>;
+    }): Promise<void> {
+      if (input.state.seq !== input.seq) {
+        throw new Error(
+          `agent-chat: fold snapshot seq ${input.seq} does not match its state's seq ${input.state.seq}`
+        );
+      }
+      if (
+        logBytesOf(input.threadId) === 0 ||
+        input.seq > lastSeqOf(input.threadId) ||
+        input.logBytes > logBytesOf(input.threadId)
+      ) {
+        return;
+      }
+      snapshots.set(
+        input.threadId,
+        throughDisk({
+          version: FOLD_SNAPSHOT_VERSION,
+          threadId: input.threadId,
+          seq: input.seq,
+          logBytes: input.logBytes,
+          writtenAt: new Date(0).toISOString(),
+          state: serializeFoldState(input.state),
+          ...(input.extras !== undefined ? { extras: input.extras } : {})
+        })
+      );
     },
 
     async loadHead(threadId: string): Promise<ThreadHead | null> {
@@ -157,6 +343,7 @@ export function createFakeThreadStore(): FakeThreadStore {
       heads.delete(threadId);
       bindings.delete(threadId);
       truncated.delete(threadId);
+      snapshots.delete(threadId);
       for (const [id, commandId] of [...receipts]) {
         if (commandId.threadId === threadId) receipts.delete(id);
       }

@@ -645,6 +645,92 @@ describe("the live rows", () => {
   });
 });
 
+describe("a timeline split into the history and the window (design 2026-09-23)", () => {
+  /** Turn tR, still running: its prompt, a word from the agent, a call still in flight. */
+  const running = () =>
+    entriesFrom([
+      message("user", "go", { id: "uR", createdAt: stamp(1) }),
+      message("assistant", "on it", { id: "aR", turnId: "tR", createdAt: stamp(2) }),
+      activity("tool.updated", { toolUseId: "call-1", status: "inProgress" }, {
+        id: "xR",
+        turnId: "tR",
+        summary: "Read src/a.ts",
+        createdAt: stamp(3)
+      })
+    ]);
+  const live = (overrides: Partial<TimelineRowsInput> = {}) =>
+    baseInput(running(), {
+      isWorking: true,
+      runningTurnId: "tR",
+      activeTurnStartedAt: stamp(1),
+      ...overrides
+    });
+
+  it("renders a running turn live in a projection the timeline continues below — the tail is the window's", () => {
+    const whole = deriveTimelineRows(live());
+    const above = deriveTimelineRows(live({ continuesBelow: true }));
+
+    assert.deepEqual(kinds(above), kinds(whole), "the same rows: unfolded, live, header after the prompt");
+    assert.ok(!kinds(above).includes("turn-fold"));
+    const answer = above.find((row) => row.kind === "message" && row.id === "aR");
+    assert.equal(answer?.kind === "message" ? answer.showAssistantMeta : null, false);
+    const call = above.find((row) => row.kind === "work-live");
+    assert.equal(call?.kind === "work-live" ? call.active : null, true, "the call in flight is live");
+  });
+
+  it("leaves the thinking placeholder to the projection that ends the timeline", () => {
+    const quiet = entriesFrom([message("user", "go", { id: "uR", createdAt: stamp(1) })]);
+    const input = baseInput(quiet, { isWorking: true, runningTurnId: "tR", activeTurnStartedAt: stamp(1) });
+    assert.deepEqual(kinds(deriveTimelineRows(input)), ["message", "working", "thinking"]);
+    assert.deepEqual(kinds(deriveTimelineRows({ ...input, continuesBelow: true })), ["message", "working"]);
+  });
+
+  it("puts the running turn's header where the timeline's last prompt is", () => {
+    const below = deriveTimelineRows(live({ continuesBelow: true, activeTurnHeader: "below" }));
+    assert.ok(!kinds(below).includes("working"), "the prompt is further down");
+    assert.ok(!kinds(below).includes("turn-fold"), "the running turn still never folds");
+
+    const window = entriesFrom([
+      activity("tool.completed", { toolUseId: "call-2", status: "failed" }, {
+        id: "xR2",
+        turnId: "tR",
+        tone: "error",
+        createdAt: stamp(4)
+      })
+    ]);
+    const after = deriveTimelineRows(
+      baseInput(window, {
+        isWorking: true,
+        runningTurnId: "tR",
+        activeTurnStartedAt: stamp(1),
+        activeTurnHeader: "above"
+      })
+    );
+    assert.deepEqual(kinds(after), ["work", "thinking"], "no second header: it is above");
+  });
+
+  it("needs no placeholder when a live row above shows the turn working, and reports its own", () => {
+    const window = entriesFrom([
+      activity("tool.completed", { toolUseId: "call-2", status: "failed" }, {
+        id: "xR2",
+        turnId: "tR",
+        tone: "error",
+        createdAt: stamp(4)
+      })
+    ]);
+    const input = baseInput(window, {
+      isWorking: true,
+      runningTurnId: "tR",
+      activeTurnStartedAt: stamp(1),
+      activeTurnHeader: "above" as const
+    });
+    assert.ok(!kinds(deriveTimelineRows({ ...input, liveActivityAbove: true })).includes("thinking"));
+
+    assert.equal(deriveTimelineRowsWithState(live({ continuesBelow: true })).hasActivityRow, true);
+    assert.equal(deriveTimelineRowsWithState(input).hasActivityRow, false);
+  });
+});
+
 describe("deriveUnsettledTurnId", () => {
   it("prefers the session's running turn over a lagging latest turn", () => {
     assert.equal(
@@ -698,6 +784,44 @@ describe("stable rows", () => {
     assert.equal(isRowUnchanged(a, b), false);
     assert.equal(isRowUnchanged(a, { ...a }), true);
     assert.equal(isRowUnchanged(a, { ...a, createdAt: stamp(2) }), false);
+  });
+});
+
+describe("the plan card row (§7.3)", () => {
+  it("carries the wire's cut (§5.6), so Copy and Download know to read the whole plan back", () => {
+    const rows = deriveTimelineRows(
+      baseInput(
+        entriesFrom([
+          activity(
+            "turn.proposed.completed",
+            { planMarkdown: "# Cut\n\nstep 1…", truncated: true },
+            { id: "p-cut", createdAt: stamp(1) }
+          ),
+          activity("turn.proposed.completed", { planMarkdown: "# Whole" }, { id: "p-whole", createdAt: stamp(2) })
+        ])
+      )
+    );
+    const plans = rows.flatMap((row) => (row.kind === "proposed-plan" ? [row] : []));
+    assert.deepEqual(
+      plans.map((row) => [row.id, row.truncated]),
+      [
+        ["p-cut", true],
+        ["p-whole", undefined]
+      ]
+    );
+    assert.equal("truncated" in plans[1]!, false, "an intact plan's row carries no flag at all");
+  });
+
+  it("makes the cut part of the row's identity check", () => {
+    const plan: AgentChatTimelineRow = {
+      kind: "proposed-plan",
+      id: "p",
+      createdAt: stamp(1),
+      planMarkdown: "# Plan",
+      implementedAt: null
+    };
+    assert.equal(isRowUnchanged(plan, { ...plan }), true);
+    assert.equal(isRowUnchanged(plan, { ...plan, truncated: true }), false);
   });
 });
 

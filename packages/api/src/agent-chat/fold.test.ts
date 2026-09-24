@@ -8,11 +8,14 @@ import test from "node:test";
 
 import {
   ACTIVITY_RETENTION_LIMIT,
+  ACTIVITY_RETENTION_SLACK,
   AGENT_ACTIVITY_RETENTION_LIMIT,
   MESSAGE_RETENTION_LIMIT,
+  MESSAGE_RETENTION_SLACK,
   applyDomainEvent,
   createEmptyThreadState,
   foldThread,
+  itemPositionOf,
   toThreadSnapshot
 } from "./fold.ts";
 import type { ThreadFoldState } from "./fold.ts";
@@ -37,6 +40,15 @@ function reset(): void {
   resetSeq();
   resetActivityIds();
 }
+
+/**
+ * Enough unrelated parent rows, after two early rows, for batch retention to
+ * trim once and take both: the window trims only when more than
+ * `ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK` droppable parent rows
+ * pile up (design `2026-09-23-fold-performance-design.md`, B), and then cuts
+ * back to the limit.
+ */
+const PAST_THE_PARENT_TRIM = ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK + 10;
 
 // --- head ------------------------------------------------------------------
 
@@ -461,7 +473,7 @@ test("a tombstoned request stays closed after its resolution ages out of retenti
       activity: activity("approval.resolved", { requestId: "R1", decision: "accept" })
     })
   ];
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 10; i += 1) {
+  for (let i = 0; i < PAST_THE_PARENT_TRIM; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
@@ -500,7 +512,7 @@ test("an aged-out user-input resolution keeps its question closed too", () => {
       activity: activity("user-input.resolved", { requestId: "Q1", answers: {} })
     })
   ];
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 10; i += 1) {
+  for (let i = 0; i < PAST_THE_PARENT_TRIM; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
@@ -508,6 +520,10 @@ test("an aged-out user-input resolution keeps its question closed too", () => {
     );
   }
   let state = fold(events);
+  assert.ok(
+    !state.activities.some((entry) => entry.activityKind === "user-input.resolved"),
+    "the closing row really has aged out"
+  );
   state = applyDomainEvent(state, ev("thread.activity-appended", { activity: askedRow }));
   assert.deepEqual(state.pending.userInputs, []);
 });
@@ -528,7 +544,7 @@ test("a RECYCLED request id opens a fresh card even across retention (R2-1)", ()
       activity: activity("approval.resolved", { requestId: "codex-T-1", decision: "accept" })
     })
   ];
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 10; i += 1) {
+  for (let i = 0; i < PAST_THE_PARENT_TRIM; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
@@ -536,6 +552,10 @@ test("a RECYCLED request id opens a fresh card even across retention (R2-1)", ()
     );
   }
   let state = fold(events);
+  assert.ok(
+    !state.activities.some((entry) => entry.activityKind === "approval.resolved"),
+    "the closing row really has aged out"
+  );
   state = applyDomainEvent(
     state,
     ev("thread.activity-appended", {
@@ -568,7 +588,9 @@ test("retention that drops a request row re-derives pending on that very event",
       })
     })
   ];
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT - 1; i += 1) {
+  // Batch retention: the approval is the oldest of LIMIT + SLACK droppable
+  // parent rows — past the limit, but nothing trims before the slack is used up.
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK - 1; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
@@ -578,7 +600,7 @@ test("retention that drops a request row re-derives pending on that very event",
   let state = fold(events);
   assert.equal(state.pending.approvals.length, 1, "still inside the window");
 
-  // One more unrelated row pushes the approval out.
+  // One more unrelated row trips the trim, which takes the approval with it.
   state = applyDomainEvent(
     state,
     ev("thread.activity-appended", {
@@ -629,19 +651,26 @@ test("activities are retained at the window, keeping an unresolved async questio
       )
     })
   );
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 50; i += 1) {
+  // The question counts toward the trigger (design B), so the question and
+  // LIMIT + SLACK rows are one past it: the trim cuts the parent window back to
+  // its last LIMIT rows and keeps the still-open question ahead of them.
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
       })
     );
   }
+  const beforeTrim = fold(events.slice(0, -1));
+  assert.equal(
+    beforeTrim.activities.length,
+    ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK,
+    "nothing is trimmed while the slack lasts"
+  );
   const state = fold(events);
   assert.equal(state.activities.length, ACTIVITY_RETENTION_LIMIT + 1);
-  assert.ok(
-    state.activities.some((entry) => entry.id === "question"),
-    "a still-open async question is never scrolled out"
-  );
+  assert.equal(state.activities[0]?.id, "question", "a still-open async question is never scrolled out");
+  assert.equal(state.activities[1]?.id, `noise-${ACTIVITY_RETENTION_SLACK}`);
   assert.equal(state.pending.userInputs.length, 1);
 });
 
@@ -661,7 +690,8 @@ test("a compaction marker never ages out of the window", () => {
       )
     })
   );
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + 50; i += 1) {
+  // The marker does not count toward the trigger: LIMIT + SLACK + 1 rows trim.
+  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK + 1; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
@@ -671,12 +701,15 @@ test("a compaction marker never ages out of the window", () => {
   const state = fold(events);
   assert.equal(state.activities.length, ACTIVITY_RETENTION_LIMIT + 1);
   assert.equal(state.activities[0]?.id, "marker", "the marker is kept, ahead of the window");
+  assert.equal(state.evicted?.activities, true, "the trim really ran");
 });
 
 test("messages are retained at their own window, independently of activities", () => {
   reset();
   const events: DomainEvent[] = [created()];
-  for (let i = 0; i < MESSAGE_RETENTION_LIMIT + 10; i += 1) {
+  // Batch retention: nothing is dropped up to LIMIT + SLACK messages; the next
+  // one trims the oldest down to exactly the limit.
+  for (let i = 0; i < MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK + 1; i += 1) {
     events.push(
       ev("thread.message-sent", {
         messageId: `m${i}`,
@@ -687,10 +720,18 @@ test("messages are retained at their own window, independently of activities", (
       })
     );
   }
+  assert.equal(
+    messages(fold(events.slice(0, -1))).length,
+    MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK,
+    "nothing is trimmed while the slack lasts"
+  );
   const state = fold(events);
+  const first = `m${MESSAGE_RETENTION_SLACK + 1}`;
   assert.equal(messages(state).length, MESSAGE_RETENTION_LIMIT);
-  assert.equal(messages(state)[0]?.id, "m10", "the oldest messages are the ones dropped");
-  assert.equal(state.itemIndex.get("m10"), 0, "the index is rebuilt after a prune");
+  assert.equal(messages(state)[0]?.id, first, "the oldest messages are the ones dropped");
+  assert.equal(itemPositionOf(state, first), 0, "positions are re-indexed after a trim");
+  assert.equal(itemPositionOf(state, "m0"), undefined, "a dropped message has no position");
+  assert.deepEqual(state.evicted, { activities: false, messages: true });
 });
 
 // --- revert (§5.5) ---------------------------------------------------------
@@ -1225,7 +1266,10 @@ test("retention: an agent's rows have their own window and its anchors never age
       })
     );
   }
-  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 20; index += 1) {
+  // Batch retention (design B): the agent's 300 rows trim once the list passes
+  // the gate (500 activities); the parent's trim once LIMIT + SLACK + 1 of its
+  // droppable rows pile up — the anchor is not one of them.
+  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK + 1; index += 1) {
     events.push(ev("thread.activity-appended", { activity: activity("tool.completed", { toolUseId: `p${index}` }) }));
   }
   const state = fold(events);
@@ -1239,5 +1283,8 @@ test("retention: an agent's rows have their own window and its anchors never age
     "the parent window is not consumed by the agent's rows, and the launch row survives"
   );
   assert.ok(parentRows.some((row) => row.id === anchor.id), "the agent's launch row is never evicted");
-  assert.equal((parentRows[1]?.payload as { toolUseId: string }).toolUseId, "p20");
+  assert.equal(
+    (parentRows[1]?.payload as { toolUseId: string }).toolUseId,
+    `p${ACTIVITY_RETENTION_SLACK + 1}`
+  );
 });

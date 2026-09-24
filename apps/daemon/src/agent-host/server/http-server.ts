@@ -21,12 +21,19 @@ import { dirname, join } from "node:path";
 import {
   AGENT_CHAT_COMMAND_NAMES,
   MAX_TURN_FILE_BYTES,
+  THREAD_HISTORY_DEFAULT_TURNS,
+  THREAD_HISTORY_MAX_TURNS,
+  THREAD_SEARCH_MAX_QUERY_CHARS,
+  THREAD_SEARCH_MAX_RESULTS,
   type AgentChatCommandName,
   type AgentChatStreamFrame,
   type AgentHostStopResponse,
   type AgentProvidersResponse,
   type RefreshProviderResponse,
+  type ThreadHistoryPage,
+  type ThreadItemOutputResponse,
   type ThreadItemResponse,
+  type ThreadSearchResponse,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
 
@@ -94,8 +101,10 @@ export interface AgentHostServerOptions {
   pid?: number;
   /** See `AgentHostHealthResponse.codeStamp`. */
   codeStamp?: string | null;
-  /** Called by `POST /stop`: writes the §3.3 markers, then drains and stops. */
+  /** Called by `POST /stop`: writes the §3.3 markers before the response. */
   onStop(): Promise<AgentHostStopResponse>;
+  /** Starts teardown only after the 200 response has been flushed. */
+  afterStopResponse?(): void;
   /** A watcher handle the provider registry's demand gate counts (§3.2). */
   addProviderWatcher?(): () => void;
 }
@@ -210,6 +219,26 @@ const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export function isSafeThreadId(value: string): boolean {
   return THREAD_ID_PATTERN.test(value) && !value.split(/[/\\]/).includes("..");
 }
+
+/**
+ * An integer query parameter clamped to `[min, max]`. Absent or unparseable
+ * answers `fallback`: a page size is a preference, never a reason to refuse.
+ */
+function clampedIntParam(
+  url: URL,
+  name: string,
+  bounds: { min: number; max: number; fallback: number }
+): number {
+  const raw = url.searchParams.get(name);
+  const value = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+  if (!Number.isFinite(value)) {
+    return bounds.fallback;
+  }
+  return Math.min(bounds.max, Math.max(bounds.min, value));
+}
+
+/** `GET /search` without a `limit`. */
+const DEFAULT_SEARCH_RESULTS = 20;
 
 function parseAfter(url: URL): number | undefined {
   const raw = url.searchParams.get("after");
@@ -371,8 +400,32 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       return;
     }
 
+    // Full-text search over every indexed thread (design 2026-09-23, C). Never
+    // a 503: without a usable index it answers `indexed: false`, which is what
+    // the client renders "search is unavailable" from.
+    if (path === agentHostRoutes.search && method === "GET") {
+      // Clamped by code point, so a cut never splits a surrogate pair.
+      const q = Array.from(url.searchParams.get("q") ?? "")
+        .slice(0, THREAD_SEARCH_MAX_QUERY_CHARS)
+        .join("");
+      const limit = clampedIntParam(url, "limit", {
+        min: 1,
+        max: THREAD_SEARCH_MAX_RESULTS,
+        fallback: DEFAULT_SEARCH_RESULTS
+      });
+      const projectPath = url.searchParams.get("projectPath");
+      const body: ThreadSearchResponse = orchestrator.searchThreads({
+        q,
+        limit,
+        ...(projectPath !== null && projectPath.length > 0 ? { projectPath } : {})
+      });
+      sendJson(response, 200, body);
+      return;
+    }
+
     if (path === agentHostRoutes.stop && method === "POST") {
       const body = await options.onStop();
+      response.once("finish", () => options.afterStopResponse?.());
       sendJson(response, 200, body);
       return;
     }
@@ -468,6 +521,25 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       return;
     }
 
+    // A page of turns older than the retained window (design 2026-09-23, C).
+    // `before` is opaque and passed through; the orchestrator decodes it and
+    // treats a malformed one as a first-page request. 503 `INDEX_UNAVAILABLE`
+    // without a usable index.
+    if (rest === "/history" && method === "GET") {
+      const before = url.searchParams.get("before");
+      const turns = clampedIntParam(url, "turns", {
+        min: 1,
+        max: THREAD_HISTORY_MAX_TURNS,
+        fallback: THREAD_HISTORY_DEFAULT_TURNS
+      });
+      const body: ThreadHistoryPage = await orchestrator.readHistory(threadId, {
+        ...(before !== null && before.length > 0 ? { before } : {}),
+        turns
+      });
+      sendJson(response, 200, body);
+      return;
+    }
+
     if (rest === "/events" && method === "GET") {
       const after = parseAfter(url);
       const releaseWatcher = options.addProviderWatcher?.();
@@ -538,6 +610,27 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         return;
       }
       const body: ThreadItemResponse = { item };
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // The streamed output of the tool call the item belongs to, joined from
+    // the log. Its 404 is `ITEM_NOT_FOUND`, never `THREAD_NOT_FOUND`: that is
+    // what a host predating this route answers for it (the route miss below),
+    // and a reader must tell "no such item" from "no such route".
+    const itemOutputMatch = /^\/items\/([^/]+)\/output$/.exec(rest);
+    if (itemOutputMatch && method === "GET") {
+      const itemId = decodeURIComponent(itemOutputMatch[1]!);
+      const body: ThreadItemOutputResponse | null = await orchestrator.readToolOutput(threadId, itemId);
+      if (!body) {
+        sendJson(response, 404, {
+          error: {
+            code: "ITEM_NOT_FOUND",
+            message: `No tool call behind item '${itemId}': no such item, or it is not a tool call.`
+          }
+        });
+        return;
+      }
       sendJson(response, 200, body);
       return;
     }

@@ -71,3 +71,38 @@ export function findFirstVisibleIndex(
 export function offsetWithinRow(row: RowMetric, scrollTop: number): number {
   return Math.max(0, scrollTop - row.top);
 }
+
+/** The two things {@link scrollRowTo} reads off a scroller — a structural type, so it runs without a DOM. */
+export interface ScrollHost {
+  scrollTop: number;
+  getBoundingClientRect(): { top: number };
+}
+
+/**
+ * Scroll so the viewport's top edge sits `offset` px into `row` — a negative
+ * offset leaves the row's top that far BELOW the edge.
+ *
+ * Measured against where the row is NOW and written as an absolute target, so
+ * whatever moved above it (a history page prepended, the load row going away)
+ * is absorbed exactly once — including when the browser's own scroll
+ * anchoring has already moved the scroll for us (design 2026-09-23 "Client").
+ */
+export function scrollRowTo(
+  scroller: ScrollHost,
+  row: { getBoundingClientRect(): { top: number } },
+  offset: number
+): void {
+  const rowTop = row.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  scroller.scrollTop = scroller.scrollTop + rowTop + offset;
+}
+
+/** The rendered element of a timeline row, or null (not rendered, or no `CSS.escape` here). */
+export function findRowElement(scroller: ParentNode, rowId: string): HTMLElement | null {
+  // `CSS.escape` is not universal (and absent in a non-DOM render): a row id
+  // we cannot safely quote is simply not found, rather than throwing inside a
+  // layout effect.
+  if (typeof CSS === "undefined" || typeof CSS.escape !== "function") {
+    return null;
+  }
+  return scroller.querySelector<HTMLElement>(`[data-timeline-row-id="${CSS.escape(rowId)}"]`);
+}

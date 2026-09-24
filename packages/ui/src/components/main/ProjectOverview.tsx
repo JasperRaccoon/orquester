@@ -7,7 +7,7 @@ import { useAppStore } from "../../store/app";
 import { launchWithNotice } from "../../lib/launch-notice";
 import { relativeTime } from "../../lib/relative-time";
 import { resumeAccountId } from "../../lib/resume-account";
-import { canOpenChat, chatLaunchRefId, isChatResumableConversation } from "../../lib/session-kind";
+import { canOpenChat, chatLaunchRefId, isResumableByInstalledAgent } from "../../lib/session-kind";
 import { runtimeModeForAgent } from "../../lib/chat-prefs";
 import { resolveLaunchModel } from "../../lib/launch-models";
 import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
@@ -203,9 +203,8 @@ export const RecentConversationsList: React.FC<{
   const resumable = React.useMemo(() => {
     const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
     return (cached ?? []).filter((c) => {
-      const entry = byId.get(chatLaunchRefId(c));
-      if (!entry?.enabled || !isChatResumableConversation(c)) return false;
-      return adapter === undefined || entry.chat?.adapter === adapter;
+      if (!isResumableByInstalledAgent(c, byId)) return false;
+      return adapter === undefined || byId.get(chatLaunchRefId(c))?.chat?.adapter === adapter;
     });
   }, [cached, agents, adapter]);
   const visible = resumable.slice(0, shown);
@@ -260,10 +259,7 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
    */
   const resumable = React.useMemo(() => {
     const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
-    return (cached ?? []).filter((c) => {
-      const entry = byId.get(chatLaunchRefId(c));
-      return Boolean(entry?.enabled) && isChatResumableConversation(c);
-    });
+    return (cached ?? []).filter((c) => isResumableByInstalledAgent(c, byId));
   }, [cached, agents]);
 
   const agentName = (refId: string) => agents.find((a) => a.id === refId)?.name ?? refId;

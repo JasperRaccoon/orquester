@@ -119,15 +119,16 @@ import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
-import { TerminalControl } from "./mcp/terminal-control.ts";
-import { TodoTools } from "./mcp/todo-tools.ts";
+import { InjectDaemonApi } from "./mcp/daemon-api.ts";
 import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
+import { TodoTools } from "./mcp/todo-tools.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
   declaredLengthExceedsCap,
   discardUpload,
+  isUploadTooLarge,
   receiveUpload,
   refuseUpload,
   uploadTempPath
@@ -4036,10 +4037,21 @@ export function createServer(
           }
           try {
             const uploaded = await services.agentChat.uploadAttachment(id, request.query, request.raw);
+            // The host's answer is relayed as is: its `{error}` envelope is what
+            // the chat transport reads, so `refuseUpload`'s `{code, message}`
+            // cannot carry it. A host refusal can still leave the body unread,
+            // and then it closes the socket the same way.
+            if (relayedUploadClosesConnection(uploaded.status, request.raw)) {
+              reply.header("connection", "close");
+            }
             return reply.code(uploaded.status).send(uploaded.value ?? undefined);
           } catch (error) {
-            if (error instanceof UploadTooLargeError) {
-              return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", error.message);
+            // The cap is the caller's failure, never the host's. The service
+            // hands it on typed; the predicate also reads it through the host
+            // client's HOST_UNAVAILABLE wrapper, so a 413 never depends on who
+            // unwrapped it.
+            if (isUploadTooLarge(error)) {
+              return refuseUpload(reply, 413, "UPLOAD_TOO_LARGE", new UploadTooLargeError().message);
             }
             request.log?.warn?.({ err: error }, "agent chat attachment upload failed");
             return refuseUpload(reply, 503, "HOST_UNAVAILABLE", "The agent host is restarting.");
@@ -4624,23 +4636,23 @@ export function createServer(
     });
   }
 
-  // Terminal-control MCP — HTTP-only. The unix socket is unauthenticated, so full
-  // terminal drive must never be reachable there; register /mcp only on remote.
+  // Orquester MCP — HTTP-only. The unix socket is unauthenticated, so full
+  // session drive must never be reachable there; register /mcp only on remote.
+  // Each request's tools call this app's own routes in-process with the
+  // caller's bearer (spec §4.2), so every gate and error code is the GUI's.
   if (options.mode === "remote") {
-    const control = new TerminalControl({
-      sessions: services.sessions,
-      registry: services.registry,
-      workspacesDir: resolved.workspacesDir,
-      fsRoot: resolved.fsRoot,
-      listWorkspaces: () => listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile),
-      listProjects: (workspace) =>
-        listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile),
-    });
     registerMcp(app, {
-      control,
+      createApi: (authorization) =>
+        new InjectDaemonApi({
+          app,
+          authorization,
+          agentChat: services.agentChat ?? null,
+          broadcaster: services.broadcaster,
+          fsRoot: resolved.fsRoot,
+          workspacesDir: resolved.workspacesDir
+        }),
       todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
-      files: new FsTools({ fsRoot: resolved.fsRoot }),
-      getUsage: (force) => usage.snapshot(force),
+      files: new FsTools({ fsRoot: resolved.fsRoot })
     });
   }
 
@@ -4708,6 +4720,34 @@ function uploadsRootDir(daemonDir: string): string {
 /** Per-session upload dir: <appdir>/daemon/uploads/<sessionId>. */
 function sessionUploadsDir(daemonDir: string, sessionId: string): string {
   return join(uploadsRootDir(daemonDir), sessionId);
+}
+
+/**
+ * Whether relaying the agent host's answer to a chat upload must close the
+ * client's connection (`POST /api/sessions/:id/upload`, the chat branch).
+ *
+ * The host may refuse before it has read the whole body: a missing `name`, or
+ * its 50 MiB cap tripping mid-body. If body bytes are still on the wire then,
+ * a kept-alive connection has Node take the rest off the socket only to throw
+ * it away, or stall while the route's pipe to the host stands still. So a
+ * relayed refusal answers `Connection: close`, as `refuseUpload` does for the
+ * daemon's own (AGENTS.md, "Uploads are raw binary streams").
+ *
+ * The test is `complete`, not `readableEnded`. Node's HTTP parser sets
+ * `complete` the moment the last body byte comes off the socket, which is
+ * exactly when a kept-alive connection has nothing left to drain.
+ * `readableEnded` also waits for the route's own consumer, a pipe into a host
+ * that may have stopped reading. So it stays false for a body that is already
+ * entirely in memory, and closing then would only drop a healthy connection.
+ * `readableEnded` implies `complete`, so the only connections `readableEnded`
+ * would close and `complete` keeps are ones whose body is already entirely
+ * off the wire. A raw request that does not report `complete` at all
+ * (light-my-request's, under `inject`) counts as incomplete, the safe
+ * direction. A success never closes: the host answers 2xx only once it has
+ * read the whole body.
+ */
+export function relayedUploadClosesConnection(status: number, request: { readonly complete?: boolean }): boolean {
+  return status >= 400 && request.complete !== true;
 }
 
 /** Minimal MIME → extension map for naming clipboard images that carry no filename. */

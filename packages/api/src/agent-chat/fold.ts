@@ -19,7 +19,9 @@
  *   activities (agent-owned rows have their own window, see
  *   {@link AGENT_ACTIVITY_RETENTION_LIMIT}),
  *   plus every unresolved async question and any long-lived singleton row
- *   regardless of age;
+ *   regardless of age — in BATCHES: a class grows past its limit by its slack
+ *   before one pass cuts every class back to its limit (design
+ *   `2026-09-23-fold-performance-design.md`, B);
  * - a revert (§5.5) keeps the first `turnCount` STARTED turns, by turn ORDER
  *   (`turns.ts`) — the checkpoint list decides only for a log that recorded no
  *   started turn at all, the legacy fallback;
@@ -30,11 +32,32 @@
  * changes only the objects it touches: the UI's row memoisation depends on
  * identity, so every unchanged array, item and sub-model keeps its reference
  * and `applyDomainEvent` returns `state` itself when nothing moved.
+ *
+ * **What the fold derives to go fast lives beside the state, never on it**
+ * (design A1/A2): the id → position index, the retention counters and the
+ * roster engine are kept per state in a module-level `WeakMap`, built from the
+ * arrays the first time a state without them is folded onto (a snapshot, a
+ * deserialized file, a hand-built test state), and never mutated once a state
+ * can reach them. So `deepEqual` between states, `serializeFoldState` and the
+ * wire shape never see them, and two events folded onto one state give two
+ * independent, correct states.
  */
 
-import type { DomainEvent } from "./domain-events.ts";
+import { isCompactionActivity } from "./compaction.ts";
+import type {
+  DomainEvent,
+  ThreadMessageSentPayload,
+  ThreadTurnDiffCompletedPayload
+} from "./domain-events.ts";
 import { derivePendingRequests } from "./pending.ts";
-import { foldSubagentActivities } from "./roster.ts";
+import {
+  createRosterEngine,
+  foldSubagentActivities,
+  rosterEngineAppend,
+  rosterEngineReplace,
+  rosterFromEngine
+} from "./roster.ts";
+import type { RosterEngine } from "./roster.ts";
 import type {
   Checkpoint,
   PendingRequests,
@@ -71,16 +94,47 @@ export const MESSAGE_RETENTION_LIMIT = 2_000;
 export const CHECKPOINT_RETENTION_LIMIT = 500;
 
 /**
+ * Batch retention (design `2026-09-23-fold-performance-design.md`). A class is
+ * trimmed back to its limit only once it holds more than its limit PLUS its
+ * slack in rows retention may drop — so the expensive trim runs once per
+ * slack's worth of rows instead of on every append, and the window measures
+ * between the limit and limit + slack (exempt rows aside) between trims.
+ * The limits above are what a trim cuts back to; these are how far past them
+ * a class may grow first.
+ */
+export const ACTIVITY_RETENTION_SLACK = 50;
+export const AGENT_ACTIVITY_RETENTION_SLACK = 50;
+export const AGENT_ACTIVITY_TOTAL_SLACK = 200;
+export const MESSAGE_RETENTION_SLACK = 200;
+
+/**
+ * What retention has ever dropped from a fold. Serialized with the state (it
+ * is a function of the log, not of the retained rows), never cleared — a
+ * revert does not bring an evicted row back. The host reads it to tell "the
+ * window holds more than its limit" apart from "the window has lost rows":
+ * only the second has anything older to page in.
+ */
+export interface FoldEvictions {
+  /** At least one activity row was dropped by retention. */
+  activities: boolean;
+  /** At least one message was dropped by retention. */
+  messages: boolean;
+}
+
+/**
  * Everything a thread fold accumulates. `head` is `null` until
  * `thread.created` lands, so a truncated or empty log is representable rather
  * than an error.
+ *
+ * Only the thread's own state: the id → position index that makes a streaming
+ * delta cheap used to ride here as `itemIndex`, and copying it per appended row
+ * was a fifth of a big thread's fold. It now lives in the fold's side table
+ * with the other caches ({@link itemPositionOf} reads it).
  */
 export interface ThreadFoldState {
   head: ThreadHead | null;
   /** Timeline order: messages and activities interleaved by arrival. */
   items: ThreadItem[];
-  /** Index into `items` by id, so a streaming delta is O(1). */
-  itemIndex: Map<string, number>;
   /**
    * The activity subset of {@link items}, same objects, same order. Kept
    * beside `items` because both derivations (§5.1 pending, §7.6 roster) and
@@ -107,6 +161,8 @@ export interface ThreadFoldState {
   seq: number;
   /** True once `thread.deleted` has been applied. */
   deleted: boolean;
+  /** Absent until retention first drops something ({@link FoldEvictions}). */
+  evicted?: FoldEvictions;
 }
 
 const EMPTY_PENDING: PendingRequests = { approvals: [], userInputs: [] };
@@ -116,7 +172,6 @@ export function createEmptyThreadState(): ThreadFoldState {
   return {
     head: null,
     items: [],
-    itemIndex: new Map(),
     activities: [],
     turns: [],
     checkpoints: [],
@@ -169,6 +224,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  * activities, plus every unresolved async question regardless of age, so a
  * chatty turn cannot scroll a still-open question out of the pending set.
  *
+ * Every rule at its EXACT limit: batch retention changes when this runs (the
+ * trigger, {@link retentionTriggered}), never what it drops (design B).
+ *
+ * A compaction marker — {@link isCompactionActivity}, the one rule
+ * `compaction.ts` shares with the UI, the MCP and the thread index — is exempt
+ * from the parent window (§4.6.5, §7.3). It is structure, not chatter: it is
+ * where the provider's memory of the conversation begins, which "rewind to
+ * here" reads to withhold the messages before it (§5.5) and the timeline
+ * reads to draw the divider. There is one per compaction, so keeping them all
+ * costs nothing — and a 500-row window on a busy thread evicted the marker
+ * within minutes, after which every pre-compaction message was offered for a
+ * rewind the adapter could only refuse. Both spellings: an older log wrote
+ * the settled marker as `thread.state.changed {state: "compacted"}`, which
+ * the window evicted like any row until `FOLD_SNAPSHOT_VERSION` 3. In an
+ * agent's own window a marker is an ordinary row.
+ *
  * *T3: `projector.ts:63-87` (`retainThreadActivities`).*
  */
 function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<ThreadActivityItem> {
@@ -188,7 +259,7 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
         pendingById.delete(requestId);
       }
     }
-    const owner = typeof activity.agentId === "string" && activity.agentId.length > 0 ? activity.agentId : null;
+    const owner = ownerOf(activity);
     if (owner === null) {
       parentRows.push(activity);
     } else {
@@ -201,14 +272,15 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
   const drop = new Set<ThreadActivityItem>();
 
   // The parent window: the last ACTIVITY_RETENTION_LIMIT rows the parent
-  // timeline renders, plus every open async question and every agent anchor.
+  // timeline renders, plus every open async question, every agent anchor and
+  // every compaction marker.
   const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
   for (let index = 0; index < parentStart; index += 1) {
     const activity = parentRows[index]!;
     if (
       retainedByQuestion.has(activity) ||
       isAgentAnchorRow(activity) ||
-      isCompactionMarkerRow(activity)
+      isCompactionActivity(activity)
     ) {
       continue;
     }
@@ -229,7 +301,12 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
     }
   }
   if (survivingAgentRows.length > AGENT_ACTIVITY_TOTAL_LIMIT) {
-    survivingAgentRows.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    // A plain code-point comparison, not `localeCompare` (design B): ISO-8601
+    // stamps order lexicographically, ICU collation is the slow way to learn
+    // that, and `sort` is stable, so ties keep the order built above.
+    survivingAgentRows.sort((left, right) =>
+      left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0
+    );
     const excess = survivingAgentRows.length - AGENT_ACTIVITY_TOTAL_LIMIT;
     let dropped = 0;
     for (const activity of survivingAgentRows) {
@@ -254,70 +331,358 @@ function isAgentAnchorRow(activity: ThreadActivityItem): boolean {
   return asRecord(activity.payload)?.agentKind === "agent";
 }
 
-/**
- * A compaction marker (§4.6.5, §7.3) is structure, not chatter: it is where
- * the provider's memory of the conversation begins, which "rewind to here"
- * reads to withhold the messages before it (§5.5) and the timeline reads to
- * draw the divider. There is one per compaction, so keeping them all costs
- * nothing — and a 500-row window on a busy thread evicted the marker within
- * minutes, after which every pre-compaction message was offered for a rewind
- * the adapter could only refuse.
- */
-function isCompactionMarkerRow(activity: ThreadActivityItem): boolean {
-  return activity.activityKind === "context-compaction";
+/** The agent that owns a row (its own window), or `null` for a parent row. */
+function ownerOf(activity: ThreadActivityItem): string | null {
+  return typeof activity.agentId === "string" && activity.agentId.length > 0
+    ? activity.agentId
+    : null;
 }
 
-/** Rebuild `itemIndex` from an items array. */
-function indexItems(items: readonly ThreadItem[]): Map<string, number> {
-  const index = new Map<string, number>();
-  for (let i = 0; i < items.length; i += 1) {
-    index.set(items[i]!.id, i);
-  }
-  return index;
-}
+// ---------------------------------------------------------------------------
+// Batch retention (design `2026-09-23-fold-performance-design.md`, B)
+// ---------------------------------------------------------------------------
 
 /**
- * Apply both retention windows, returning the same arrays when nothing was
- * dropped. Messages and activities are capped independently even though they
- * share one interleaved list.
+ * The trim: every retention rule at its exact limit, in one pass —
+ * {@link activitiesToDrop} over the activities and the oldest messages past
+ * {@link MESSAGE_RETENTION_LIMIT} — so the result is exactly what per-event
+ * retention would have cut this window to. Messages and activities are capped
+ * independently even though they share one interleaved list.
+ *
+ * `null` when it drops nothing (the trigger counts old open questions the trim
+ * keeps), so the arrays stay shared.
  */
-function applyRetention(
-  items: ThreadItem[],
+function trimWindow(
+  items: readonly ThreadItem[],
   activities: ThreadActivityItem[]
-): { items: ThreadItem[]; activities: ThreadActivityItem[]; itemIndex: Map<string, number> | null } {
-  const messageCount = items.length - activities.length;
-  const overActivities = activities.length > ACTIVITY_RETENTION_LIMIT;
-  const overMessages = messageCount > MESSAGE_RETENTION_LIMIT;
-  if (!overActivities && !overMessages) {
-    return { items, activities, itemIndex: null };
-  }
-
-  const dropActivities = overActivities ? activitiesToDrop(activities) : new Set<ThreadActivityItem>();
-  let messagesToDrop = overMessages ? messageCount - MESSAGE_RETENTION_LIMIT : 0;
+): {
+  items: ThreadItem[];
+  activities: ThreadActivityItem[];
+  /** The rows removed, in list order; never empty. */
+  dropped: ThreadItem[];
+} | null {
+  const dropActivities = activitiesToDrop(activities);
+  let messagesToDrop = Math.max(0, items.length - activities.length - MESSAGE_RETENTION_LIMIT);
   if (dropActivities.size === 0 && messagesToDrop === 0) {
-    // Over the trigger but nothing to evict (agent-owned rows sit outside the
-    // parent window): keep the arrays, so a streamed token still shares them.
-    return { items, activities, itemIndex: null };
+    return null;
   }
-  const dropMessages = new Set<ThreadItem>();
-  if (messagesToDrop > 0) {
-    for (const item of items) {
-      if (messagesToDrop === 0) break;
-      if (item.kind === "message") {
-        dropMessages.add(item);
-        messagesToDrop -= 1;
-      }
+  const nextItems: ThreadItem[] = [];
+  const dropped: ThreadItem[] = [];
+  for (const item of items) {
+    let drop: boolean;
+    if (item.kind === "message") {
+      // The oldest messages go first, in list order.
+      drop = messagesToDrop > 0;
+      if (drop) messagesToDrop -= 1;
+    } else {
+      drop = dropActivities.has(item);
+    }
+    (drop ? dropped : nextItems).push(item);
+  }
+  const nextActivities =
+    dropActivities.size > 0
+      ? activities.filter((activity) => !dropActivities.has(activity))
+      : activities;
+  return { items: nextItems, activities: nextActivities, dropped };
+}
+
+/** Parent rows: the parent window's class ({@link retentionClassOf}). */
+const PARENT_CLASS: unique symbol = Symbol("parent");
+
+/**
+ * The window a row counts in for the trigger: {@link PARENT_CLASS}, its owning
+ * agent's id, or `null` for a row no rule ever drops (an agent anchor anywhere,
+ * a compaction marker of either spelling in the parent window) — mirroring the
+ * exemptions of {@link activitiesToDrop}.
+ *
+ * An open message-mode question counts in its class although the trim keeps
+ * it: whether it is still open depends on rows anywhere in the list, and a
+ * class must be a property of the row alone for the counts to move by one per
+ * row. Worst case — more than a slack's worth of open questions in the old
+ * part of the window — the trim runs without dropping them: time, never
+ * correctness (design B).
+ */
+type RetentionClass = typeof PARENT_CLASS | string | null;
+
+function retentionClassOf(activity: ThreadActivityItem): RetentionClass {
+  if (isAgentAnchorRow(activity)) {
+    return null;
+  }
+  const owner = ownerOf(activity);
+  if (owner !== null) {
+    return owner;
+  }
+  return isCompactionActivity(activity) ? null : PARENT_CLASS;
+}
+
+/** One agent holding more droppable rows than this trips the trigger. */
+const AGENT_TRIGGER = AGENT_ACTIVITY_RETENTION_LIMIT + AGENT_ACTIVITY_RETENTION_SLACK;
+
+/**
+ * What the trigger reads: the droppable rows per class, a pure function of
+ * `activities` ({@link countsFrom}) that the fold keeps in step instead of
+ * recounting the window per event. Messages need no counter: they are
+ * `items.length - activities.length`.
+ */
+interface RetentionCounts {
+  readonly parent: number;
+  /** Per owning agent; an agent with no droppable row has no entry. */
+  readonly agents: ReadonlyMap<string, number>;
+  /** The sum of {@link agents}. */
+  readonly agentTotal: number;
+  /** How many entries of {@link agents} are past {@link AGENT_TRIGGER}. */
+  readonly agentsPastTrigger: number;
+}
+
+function countsFrom(activities: readonly ThreadActivityItem[]): RetentionCounts {
+  let parent = 0;
+  let agentTotal = 0;
+  const agents = new Map<string, number>();
+  for (const activity of activities) {
+    const cls = retentionClassOf(activity);
+    if (cls === PARENT_CLASS) {
+      parent += 1;
+    } else if (cls !== null) {
+      agents.set(cls, (agents.get(cls) ?? 0) + 1);
+      agentTotal += 1;
     }
   }
+  return { parent, agents, agentTotal, agentsPastTrigger: agentsPastTriggerIn(agents) };
+}
 
-  const nextItems = items.filter(
-    (item) =>
-      !(item.kind === "activity" && dropActivities.has(item)) && !dropMessages.has(item)
+function agentsPastTriggerIn(agents: ReadonlyMap<string, number>): number {
+  let past = 0;
+  for (const count of agents.values()) {
+    if (count > AGENT_TRIGGER) past += 1;
+  }
+  return past;
+}
+
+/**
+ * `counts` after one row joined (`delta` 1) or left (`delta` -1) class `cls`.
+ * The agents map is small (one entry per agent) and copied on write.
+ */
+function countsWith(counts: RetentionCounts, cls: RetentionClass, delta: 1 | -1): RetentionCounts {
+  if (cls === null) {
+    return counts;
+  }
+  if (cls === PARENT_CLASS) {
+    return { ...counts, parent: counts.parent + delta };
+  }
+  const before = counts.agents.get(cls) ?? 0;
+  const after = before + delta;
+  const agents = new Map(counts.agents);
+  if (after > 0) agents.set(cls, after);
+  else agents.delete(cls);
+  return {
+    parent: counts.parent,
+    agents,
+    agentTotal: counts.agentTotal + delta,
+    agentsPastTrigger:
+      counts.agentsPastTrigger + (after > AGENT_TRIGGER ? 1 : 0) - (before > AGENT_TRIGGER ? 1 : 0)
+  };
+}
+
+/** `counts` after a trim removed `dropped`: O(dropped), at most one copy of the agents map. */
+function countsWithout(counts: RetentionCounts, dropped: readonly ThreadItem[]): RetentionCounts {
+  let parent = counts.parent;
+  let agentTotal = counts.agentTotal;
+  let agents: Map<string, number> | null = null;
+  for (const item of dropped) {
+    if (item.kind !== "activity") {
+      continue;
+    }
+    const cls = retentionClassOf(item);
+    if (cls === PARENT_CLASS) {
+      parent -= 1;
+    } else if (cls !== null) {
+      agents ??= new Map(counts.agents);
+      const left = (agents.get(cls) ?? 0) - 1;
+      if (left > 0) agents.set(cls, left);
+      else agents.delete(cls);
+      agentTotal -= 1;
+    }
+  }
+  if (agents === null) {
+    return parent === counts.parent ? counts : { ...counts, parent };
+  }
+  return { parent, agents, agentTotal, agentsPastTrigger: agentsPastTriggerIn(agents) };
+}
+
+/**
+ * The trigger (design B), evaluated after every step that changed the window:
+ * more messages than their limit plus slack, or — past today's gate
+ * (`activities.length > ACTIVITY_RETENTION_LIMIT`, which is what keeps a
+ * history page of ≤ 400 activities lossless) — an activity class holding more
+ * droppable rows than its limit plus slack.
+ *
+ * A function of the state alone, never of history such as "rows since the
+ * last trim": a snapshot at any seq, folded forward through the tail, must
+ * trim exactly where the whole-log fold does.
+ */
+function retentionTriggered(
+  items: readonly ThreadItem[],
+  activities: readonly ThreadActivityItem[],
+  counts: RetentionCounts
+): boolean {
+  if (items.length - activities.length > MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK) {
+    return true;
+  }
+  return (
+    activities.length > ACTIVITY_RETENTION_LIMIT &&
+    (counts.parent > ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK ||
+      counts.agentsPastTrigger > 0 ||
+      counts.agentTotal > AGENT_ACTIVITY_TOTAL_LIMIT + AGENT_ACTIVITY_TOTAL_SLACK)
   );
-  const nextActivities = dropActivities.size > 0
-    ? activities.filter((activity) => !dropActivities.has(activity))
-    : activities;
-  return { items: nextItems, activities: nextActivities, itemIndex: indexItems(nextItems) };
+}
+
+// ---------------------------------------------------------------------------
+// Per-state caches (design A1/A2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Each item id → its LAST position in `items`, persistently. `base` maps the
+ * ids of the first `baseLength` rows; it is shared by every state since it was
+ * built and never mutated. The overlay is the rest of the list: positions move
+ * only when rows leave it — a trim or a revert, which rebuild the index — while
+ * an append adds a row at the end and an in-place replacement keeps its id and
+ * position. So the rows appended since the base was built ARE the overlay,
+ * already copied on write with `items`: a lookup walks that tail newest first
+ * (so the last position wins) before asking the base, and an append costs the
+ * index nothing until the tail passes {@link INDEX_TAIL_LIMIT} and is compacted
+ * into a new base. Copying the whole map per appended row was a fifth of a
+ * fleet thread's fold; a separate overlay map, copied per append, still left
+ * the fleet benchmark half again slower than walking the tail.
+ */
+interface PositionIndex {
+  readonly base: ReadonlyMap<string, number>;
+  readonly baseLength: number;
+}
+
+/**
+ * The longest tail a lookup walks before it is compacted into a new base.
+ * Measured on the fleet benchmark between 64 and 1 024: longer tails trade
+ * compactions for walks, and a trim rebuilds the index anyway, so it hardly
+ * matters above ~256.
+ */
+const INDEX_TAIL_LIMIT = 256;
+
+function indexFrom(items: readonly ThreadItem[]): PositionIndex {
+  const base = new Map<string, number>();
+  for (let position = 0; position < items.length; position += 1) {
+    base.set(items[position]!.id, position);
+  }
+  return { base, baseLength: items.length };
+}
+
+/** `id`'s last position in `items`, the list `index` was kept for. */
+function positionOf(
+  index: PositionIndex,
+  items: readonly ThreadItem[],
+  id: string
+): number | undefined {
+  for (let position = items.length - 1; position >= index.baseLength; position -= 1) {
+    if (items[position]!.id === id) {
+      return position;
+    }
+  }
+  return index.base.get(id);
+}
+
+/** The index once a row was appended to `items`: itself, until the tail is due for compaction. */
+function indexAfterAppend(index: PositionIndex, items: readonly ThreadItem[]): PositionIndex {
+  if (items.length - index.baseLength <= INDEX_TAIL_LIMIT) {
+    return index;
+  }
+  const base = new Map(index.base);
+  for (let position = index.baseLength; position < items.length; position += 1) {
+    base.set(items[position]!.id, position);
+  }
+  return { base, baseLength: items.length };
+}
+
+/**
+ * What the fold keeps per state beside it. Immutable, like everything a state
+ * can reach: a step that changes the window builds new caches from its
+ * predecessor's, and a step that does not shares them.
+ */
+interface FoldCaches {
+  readonly index: PositionIndex;
+  readonly counts: RetentionCounts;
+  /**
+   * The incremental roster (design A4), standing for `activities`. `null`
+   * until a step first derives a roster, and again after a change it cannot
+   * take incrementally (a trim, a revert, a replacement the engine refuses):
+   * the next derive builds it from the list, which is the same roster by the
+   * engine's contract.
+   */
+  readonly roster: RosterEngine | null;
+}
+
+const cachesByState = new WeakMap<ThreadFoldState, FoldCaches>();
+
+function buildCaches(
+  items: readonly ThreadItem[],
+  activities: readonly ThreadActivityItem[]
+): FoldCaches {
+  return { index: indexFrom(items), counts: countsFrom(activities), roster: null };
+}
+
+/** `state`'s caches, built from its arrays the first time a state without any is folded onto. */
+function cachesOf(state: ThreadFoldState): FoldCaches {
+  let caches = cachesByState.get(state);
+  if (caches === undefined) {
+    caches = buildCaches(state.items, state.activities);
+    cachesByState.set(state, caches);
+  }
+  return caches;
+}
+
+/**
+ * How a reducer changed `items`/`activities`, which is all `commit` needs to
+ * carry the caches forward without walking the window: a row appended at the
+ * end (of both lists, for an activity), a row replaced in place (same id, same
+ * positions), or anything else — the caches are then rebuilt from the arrays.
+ */
+type WindowChange =
+  | { readonly kind: "appended"; readonly item: ThreadItem }
+  | { readonly kind: "replaced"; readonly previous: ThreadItem; readonly next: ThreadItem }
+  | { readonly kind: "rebuilt" };
+
+function cachesAfterChange(
+  previous: FoldCaches,
+  change: Exclude<WindowChange, { kind: "rebuilt" }>,
+  items: readonly ThreadItem[]
+): FoldCaches {
+  if (change.kind === "appended") {
+    const item = change.item;
+    const index = indexAfterAppend(previous.index, items);
+    if (item.kind === "message") {
+      return { index, counts: previous.counts, roster: previous.roster };
+    }
+    return {
+      index,
+      counts: countsWith(previous.counts, retentionClassOf(item), 1),
+      roster: previous.roster === null ? null : rosterEngineAppend(previous.roster, item)
+    };
+  }
+  const { previous: before, next: after } = change;
+  if (before.kind !== "activity" || after.kind !== "activity") {
+    // A message merged in place: same id, same position, no class, no roster.
+    return previous;
+  }
+  // Both rows' classes count: a replacement may move a row to another owner,
+  // or make it an anchor.
+  const beforeClass = retentionClassOf(before);
+  const afterClass = retentionClassOf(after);
+  return {
+    index: previous.index,
+    counts:
+      beforeClass === afterClass
+        ? previous.counts
+        : countsWith(countsWith(previous.counts, beforeClass, -1), afterClass, 1),
+    roster: previous.roster === null ? null : rosterEngineReplace(previous.roster, before, after)
+  };
 }
 
 function checkpointKey(turnId: string | null, turnCount: number): string {
@@ -431,8 +796,14 @@ type Mutation = {
   head?: ThreadHead | null;
   items?: ThreadItem[];
   activities?: ThreadActivityItem[];
-  itemIndex?: Map<string, number>;
-  turns?: Turn[];
+  /** How `items`/`activities` changed: set exactly when either of them is. */
+  change?: WindowChange;
+  /**
+   * There is deliberately no `turns` here: every turn change goes through
+   * {@link turnsAfterEvent}, the code {@link applyTurnEvent} runs too. A reducer
+   * says only what its turn arm needs from the rest of the fold.
+   */
+  turnContext?: TurnEventContext;
   checkpoints?: Checkpoint[];
   deleted?: boolean;
   /** Re-derive `pending` from the (possibly new) activity list. */
@@ -476,7 +847,8 @@ function commit(
 ): ThreadFoldState {
   let items = mutation.items ?? state.items;
   let activities = mutation.activities ?? state.activities;
-  let itemIndex = mutation.itemIndex ?? state.itemIndex;
+  // Undefined for a state nothing has folded onto yet: built on first need.
+  let caches = cachesByState.get(state);
 
   // Retention can drop an open approval or a live roster row on an append that
   // has nothing to do with either, so a drop is its own re-derive trigger —
@@ -484,13 +856,33 @@ function commit(
   // rows the fold no longer holds until some later event happened to touch
   // them (R5 #18).
   let retentionDropped = false;
-  if (mutation.items !== undefined || mutation.activities !== undefined) {
-    const retained = applyRetention(items, activities);
-    if (retained.itemIndex !== null) {
-      items = retained.items;
-      retentionDropped = retained.activities !== activities;
-      activities = retained.activities;
-      itemIndex = retained.itemIndex;
+  let dropped: ThreadItem[] = [];
+  let evicted = state.evicted;
+  if (mutation.change !== undefined) {
+    caches =
+      mutation.change.kind === "rebuilt"
+        ? buildCaches(items, activities)
+        : cachesAfterChange(cachesOf(state), mutation.change, items);
+    // Batch retention (design B): nothing is trimmed until a class holds more
+    // than its limit plus its slack, and then every class is cut back to its
+    // limit at once.
+    if (retentionTriggered(items, activities, caches.counts)) {
+      const trimmed = trimWindow(items, activities);
+      if (trimmed !== null) {
+        retentionDropped = trimmed.activities !== activities;
+        items = trimmed.items;
+        activities = trimmed.activities;
+        dropped = trimmed.dropped;
+        evicted = withEvictions(evicted, dropped);
+        // Positions moved, so the index is rebuilt; the counts lose exactly
+        // the dropped rows; and a dropped activity always re-derives the
+        // roster below, which rebuilds the engine from the trimmed list.
+        caches = {
+          index: indexFrom(items),
+          counts: countsWithout(caches.counts, dropped),
+          roster: retentionDropped ? null : caches.roster
+        };
+      }
     }
   }
 
@@ -517,10 +909,17 @@ function commit(
     mutation.rederivePending === true || retentionDropped
       ? derivePendingRequests(activities, { closed: closedRequestIds, closedAt: closedRequestAt })
       : state.pending;
-  const roster =
-    mutation.rederiveRoster === true || sessionLiveChanged || retentionDropped
-      ? foldSubagentActivities(activities, { sessionLive: isSessionLive(nextSessionStatus) })
-      : state.roster;
+  // Re-derived exactly when it always was — a task row, a session-liveness
+  // change, a dropped activity — and otherwise kept by identity. What changed
+  // is the cost: the engine carries each task's fold from step to step, so a
+  // task row no longer refolds the whole list (design A4).
+  let roster = state.roster;
+  if (mutation.rederiveRoster === true || sessionLiveChanged || retentionDropped) {
+    const current = caches ?? cachesOf(state);
+    const engine = current.roster ?? createRosterEngine(activities);
+    roster = rosterFromEngine(engine, { sessionLive: isSessionLive(nextSessionStatus) });
+    caches = engine === current.roster ? current : { ...current, roster: engine };
+  }
 
   const head = mutation.head !== undefined ? mutation.head : state.head;
   const nextHead =
@@ -528,20 +927,173 @@ function commit(
       ? null
       : { ...head, seq: event.seq, updatedAt: event.occurredAt };
 
-  return {
+  const next: ThreadFoldState = {
     head: nextHead,
     items,
-    itemIndex,
     activities,
-    turns: mutation.turns ?? state.turns,
+    turns: turnsAfterEvent(state.turns, event, mutation.turnContext ?? NO_TURN_CONTEXT),
     checkpoints: mutation.checkpoints ?? state.checkpoints,
     pending,
     roster,
     closedRequestIds,
     ...(closedRequestAt !== undefined ? { closedRequestAt } : {}),
     seq: event.seq,
-    deleted: mutation.deleted ?? state.deleted
+    deleted: mutation.deleted ?? state.deleted,
+    ...(evicted !== undefined ? { evicted } : {})
   };
+  if (caches !== undefined) {
+    cachesByState.set(next, caches);
+  }
+  if (dropped.length > 0) {
+    droppedByStep.set(next, dropped);
+  }
+  return next;
+}
+
+/** The evictions after a trim that removed `dropped` (unchanged when it removed none). */
+function withEvictions(
+  previous: FoldEvictions | undefined,
+  dropped: readonly ThreadItem[]
+): FoldEvictions | undefined {
+  if (dropped.length === 0) return previous;
+  const activities = previous?.activities === true || dropped.some((item) => item.kind === "activity");
+  const messages = previous?.messages === true || dropped.some((item) => item.kind === "message");
+  if (previous !== undefined && previous.activities === activities && previous.messages === messages) {
+    return previous;
+  }
+  return { activities, messages };
+}
+
+/**
+ * The rows retention removed in the step that produced a state, by state. A
+ * side table rather than a field: it describes one transition, not the
+ * thread, so it must neither be serialized nor compared, and a state built any
+ * other way (a snapshot, a deserialized file) simply has none.
+ */
+const droppedByStep = new WeakMap<ThreadFoldState, readonly ThreadItem[]>();
+
+const NO_DROPPED: readonly ThreadItem[] = [];
+
+/**
+ * The rows retention dropped in the {@link applyDomainEvent} call that
+ * returned `state`, in list order — empty when it dropped none, and for any
+ * state that was not produced by a trimming step. The client keeps these when
+ * it has older history pages loaded, so the rows between the pages and the
+ * window never vanish from the screen (design 2026-09-23 fold performance).
+ */
+export function itemsDroppedByRetention(state: ThreadFoldState): readonly ThreadItem[] {
+  return droppedByStep.get(state) ?? NO_DROPPED;
+}
+
+/**
+ * The position of item `id` in `state.items` — its LAST one, should a message
+ * and an activity share an id — or undefined (tests, diagnostics).
+ */
+export function itemPositionOf(state: ThreadFoldState, id: string): number | undefined {
+  const position = positionOf(cachesOf(state).index, state.items, id);
+  return position !== undefined && state.items[position]?.id === id ? position : undefined;
+}
+
+/**
+ * **Test-only.** Design A2's invariant, checked: how the caches the fold keeps
+ * for `state` differ from caches rebuilt from its arrays — a description of
+ * the first mismatches, or `null` when they agree or when none are kept yet (a
+ * state nothing has folded onto builds them on first use). The roster engine
+ * is compared through its output under both liveness readings, which refolds
+ * the whole activity list: `{ roster: false }` skips it.
+ */
+export function __foldCacheConsistency(
+  state: ThreadFoldState,
+  options: { readonly roster?: boolean } = {}
+): string | null {
+  const caches = cachesByState.get(state);
+  if (caches === undefined) {
+    return null;
+  }
+  const problems: string[] = [];
+
+  // The index: the base must map every id of its rows to that id's LAST
+  // position among them, and nothing else; the tail past it is walked, so it
+  // only has to be short. Checked without building a map: every row's id must
+  // point at a row at or after it with the same id (so at its last one), and
+  // exactly one row per distinct id — its last — points at itself.
+  const { base, baseLength } = caches.index;
+  if (baseLength > state.items.length || state.items.length - baseLength > INDEX_TAIL_LIMIT) {
+    problems.push(`index base covers ${baseLength} of ${state.items.length} rows`);
+  } else {
+    let lastPositions = 0;
+    for (let position = 0; position < baseLength; position += 1) {
+      const id = state.items[position]!.id;
+      const at = base.get(id);
+      if (at === undefined || at < position || at >= baseLength || state.items[at]!.id !== id) {
+        problems.push(`index puts ${id} (row ${position}) at ${String(at)}`);
+        break;
+      }
+      if (at === position) lastPositions += 1;
+    }
+    if (problems.length === 0 && base.size !== lastPositions) {
+      problems.push(`index base holds ${base.size} ids, its rows ${lastPositions}`);
+    }
+  }
+
+  const counts = countsFrom(state.activities);
+  for (const field of ["parent", "agentTotal", "agentsPastTrigger"] as const) {
+    if (caches.counts[field] !== counts[field]) {
+      problems.push(`counts.${field} is ${caches.counts[field]}, the window says ${counts[field]}`);
+    }
+  }
+  const agents = new Set([...caches.counts.agents.keys(), ...counts.agents.keys()]);
+  for (const agent of agents) {
+    if (caches.counts.agents.get(agent) !== counts.agents.get(agent)) {
+      problems.push(
+        `counts for agent ${agent}: ${String(caches.counts.agents.get(agent))}, the window says ${String(counts.agents.get(agent))}`
+      );
+      break;
+    }
+  }
+
+  if (options.roster !== false && caches.roster !== null) {
+    for (const sessionLive of [true, false]) {
+      if (
+        !sameJsonValue(
+          rosterFromEngine(caches.roster, { sessionLive }),
+          foldSubagentActivities(state.activities, { sessionLive })
+        )
+      ) {
+        problems.push(`the roster engine disagrees with the activity list (sessionLive ${sessionLive})`);
+      }
+    }
+  }
+  return problems.length === 0 ? null : problems.join("; ");
+}
+
+/** Structural equality of JSON-shaped values, key order aside (the roster rows). */
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((entry, index) => sameJsonValue(entry, right[index]))
+    );
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = Object.keys(leftRecord);
+  return (
+    keys.length === Object.keys(rightRecord).length &&
+    keys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+        sameJsonValue(leftRecord[key], rightRecord[key])
+    )
+  );
 }
 
 /**
@@ -640,33 +1192,10 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
     case "thread.message-sent":
       return reduceMessageSent(state, event);
 
-    case "thread.turn-start-requested": {
-      const payload = event.payload;
-      // A turn replayed from the provider's transcript arrives already over,
-      // and must never be settled from session status the way a live turn is
-      // — that would settle whatever turn is actually running (E6).
-      const settled = payload.settled;
-      const turn: Turn = {
-        turnId: payload.turnId,
-        state: settled?.state ?? (payload.turnId === null ? "pending" : "running"),
-        turnCount: null,
-        requestedAt: event.occurredAt,
-        startedAt: payload.turnId === null ? null : event.occurredAt,
-        completedAt: settled?.completedAt ?? null,
-        assistantMessageId: settled?.assistantMessageId ?? null,
-        // The prompt that opened the turn. A replayed turn whose prompt the
-        // projection could not name carries `""`, which is no id at all.
-        ...(payload.messageId.length > 0 ? { userMessageId: payload.messageId } : {}),
-        ...(settled?.tokenUsage !== undefined ? { tokenUsage: settled.tokenUsage } : {}),
-        interactionMode: payload.interactionMode,
-        ...(payload.modelSelection?.model !== undefined
-          ? { model: payload.modelSelection.model }
-          : state.head?.modelSelection.model !== undefined
-            ? { model: state.head.modelSelection.model }
-            : {})
-      };
-      return { turns: [...state.turns, turn] };
-    }
+    case "thread.turn-start-requested":
+      // The row itself is the turn arm's (`requestedTurn`); a turn start that
+      // names no model inherits the head's.
+      return { turnContext: { head: state.head } };
 
     case "thread.session-set":
       return reduceSessionSet(state, event);
@@ -708,7 +1237,7 @@ function reduceMessageSent(
   event: Extract<DomainEvent, { type: "thread.message-sent" }>
 ): Mutation {
   const payload = event.payload;
-  const existingIndex = state.itemIndex.get(payload.messageId);
+  const existingIndex = positionOf(cachesOf(state).index, state.items, payload.messageId);
   const existing = existingIndex === undefined ? undefined : state.items[existingIndex];
 
   if (existing !== undefined && existing.kind === "message") {
@@ -734,8 +1263,9 @@ function reduceMessageSent(
     items[existingIndex!] = next;
     return {
       items,
-      turns: stampAssistantMessage(state.turns, next),
-      itemIndex: state.itemIndex
+      change: { kind: "replaced", previous: existing, next },
+      // The MERGED row stamps the turn: its first role and owner, not the delta's.
+      turnContext: { message: next }
     };
   }
 
@@ -754,10 +1284,14 @@ function reduceMessageSent(
     ...(payload.reasoningKind !== undefined ? { reasoningKind: payload.reasoningKind } : {}),
     ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {})
   };
-  const items = [...state.items, message];
-  const itemIndex = new Map(state.itemIndex);
-  itemIndex.set(message.id, items.length - 1);
-  return { items, itemIndex, turns: stampAssistantMessage(state.turns, message) };
+  return {
+    // `concat` with an array argument takes V8's fast path, one exact-size
+    // copy: measured at under half the cost of `[...items, row]` on a
+    // fleet-sized window, and every appended row pays it.
+    items: state.items.concat([message]),
+    change: { kind: "appended", item: message },
+    turnContext: { message }
+  };
 }
 
 /**
@@ -765,7 +1299,7 @@ function reduceMessageSent(
  * §5.4 diff card anchor on. First assistant message of the turn wins; a
  * checkpoint may overwrite it with the provider's own answer.
  */
-function stampAssistantMessage(turns: Turn[], message: ThreadMessageItem): Turn[] {
+function stampAssistantMessage(turns: Turn[], message: MessageStamp): Turn[] {
   if (message.role !== "assistant" || message.agentId !== undefined) {
     return turns;
   }
@@ -805,6 +1339,18 @@ function reduceSessionSet(
       : {})
   };
   const head = state.head === null ? null : { ...state.head, session };
+  // The turns move in the turn arm (`sessionSetTurns`), which reads only the
+  // event: the status and the active turn id are the incoming block's, which
+  // the carry-forward above never touches.
+  return head !== null ? { head } : {};
+}
+
+/** The turn arm of `thread.session-set`: stamp the settled turn's numbers, then adopt or settle. */
+function sessionSetTurns(
+  turns: Turn[],
+  event: Extract<DomainEvent, { type: "thread.session-set" }>
+): Turn[] {
+  const session = event.payload.session;
   // The provider's final numbers for the turn this event settles (E10). They
   // are stamped BEFORE settlement so `applySessionStatusToTurn`'s
   // already-settled short-circuit cannot drop them, and only onto the named
@@ -812,7 +1358,6 @@ function reduceSessionSet(
   // rewrites a closed turn's cost.
   const turnResult = event.payload.turn;
 
-  let turns = state.turns;
   if (turnResult !== undefined) {
     const index = turns.findIndex((turn) => turn.turnId === turnResult.turnId);
     const turn = index === -1 ? undefined : turns[index];
@@ -834,22 +1379,19 @@ function reduceSessionSet(
   }
 
   if (session.status === "running" && session.activeTurnId !== null) {
-    turns = adoptActiveTurn(turns, session.activeTurnId, event.occurredAt);
-  } else {
-    // Leaving `running` is the turn-end signal: settle every unsettled turn so
-    // a duration reflects the whole turn (§5.1). Only the trailing run of
-    // unsettled turns can exist, but walking them all is what keeps a lost
-    // `turn.started` from stranding a pending row forever.
-    let changed = false;
-    const next = turns.map((turn) => {
-      const settled = applySessionStatusToTurn(turn, session.status, event.occurredAt);
-      if (settled !== turn) changed = true;
-      return settled;
-    });
-    if (changed) turns = next;
+    return adoptActiveTurn(turns, session.activeTurnId, event.occurredAt);
   }
-
-  return { ...(head !== null ? { head } : {}), turns };
+  // Leaving `running` is the turn-end signal: settle every unsettled turn so
+  // a duration reflects the whole turn (§5.1). Only the trailing run of
+  // unsettled turns can exist, but walking them all is what keeps a lost
+  // `turn.started` from stranding a pending row forever.
+  let changed = false;
+  const next = turns.map((turn) => {
+    const settled = applySessionStatusToTurn(turn, session.status, event.occurredAt);
+    if (settled !== turn) changed = true;
+    return settled;
+  });
+  return changed ? next : turns;
 }
 
 /**
@@ -906,7 +1448,7 @@ function reduceActivityAppended(
   event: Extract<DomainEvent, { type: "thread.activity-appended" }>
 ): Mutation {
   const activity = event.payload.activity;
-  const existingIndex = state.itemIndex.get(activity.id);
+  const existingIndex = positionOf(cachesOf(state).index, state.items, activity.id);
   const existing = existingIndex === undefined ? undefined : state.items[existingIndex];
 
   const mutationFlags = {
@@ -918,24 +1460,47 @@ function reduceActivityAppended(
     const items = state.items.slice();
     items[existingIndex!] = activity;
     const activities = state.activities.slice();
-    const activityAt = activities.indexOf(existing);
+    const activityAt = activityPositionOf(state.activities, existing, existingIndex!);
     if (activityAt !== -1) {
       activities[activityAt] = activity;
-    } else {
-      activities.push(activity);
+      return {
+        items,
+        activities,
+        change: { kind: "replaced", previous: existing, next: activity },
+        ...mutationFlags
+      };
     }
-    return { items, activities, itemIndex: state.itemIndex, ...mutationFlags };
+    // The two lists disagree (only a hand-built state can): the row is
+    // appended to the activities, as it always was, and nothing incremental
+    // can describe that, so the caches are rebuilt.
+    activities.push(activity);
+    return { items, activities, change: { kind: "rebuilt" }, ...mutationFlags };
   }
 
-  const items = [...state.items, activity];
-  const itemIndex = new Map(state.itemIndex);
-  itemIndex.set(activity.id, items.length - 1);
   return {
-    items,
-    itemIndex,
-    activities: [...state.activities, activity],
+    // `concat`, not a spread: see `reduceMessageSent`.
+    items: state.items.concat([activity]),
+    activities: state.activities.concat([activity]),
+    change: { kind: "appended", item: activity },
     ...mutationFlags
   };
+}
+
+/**
+ * Where `row`, at `itemPosition` in `items`, sits in `activities`. The
+ * activities are the activity subset of the items in the same order, so the
+ * row is at or before its item position: walking back from there visits at
+ * most the messages before it or the activities after it, whichever is fewer,
+ * instead of every activity from the start. A miss falls back to the whole
+ * list, so a hand-built state finds the row wherever it is, as before.
+ */
+function activityPositionOf(
+  activities: readonly ThreadActivityItem[],
+  row: ThreadActivityItem,
+  itemPosition: number
+): number {
+  const at = activities.lastIndexOf(row, Math.min(itemPosition, activities.length - 1));
+  return at !== -1 ? at : activities.indexOf(row);
 }
 
 function reduceTurnDiffCompleted(
@@ -954,26 +1519,8 @@ function reduceTurnDiffCompleted(
   };
   const checkpoints = foldCheckpoint(state.checkpoints, checkpoint);
   if (checkpoints === state.checkpoints) {
-    return {};
-  }
-
-  // The turn keeps its own settlement (session status decides that, §5.1); the
-  // checkpoint only stamps the turn count and the anchor message.
-  let turns = state.turns;
-  if (payload.turnId !== null) {
-    const index = turns.findIndex((turn) => turn.turnId === payload.turnId);
-    if (index !== -1) {
-      const turn = turns[index]!;
-      const next: Turn = {
-        ...turn,
-        turnCount: payload.turnCount,
-        assistantMessageId: payload.assistantMessageId ?? turn.assistantMessageId
-      };
-      if (next.turnCount !== turn.turnCount || next.assistantMessageId !== turn.assistantMessageId) {
-        turns = turns.slice();
-        turns[index] = next;
-      }
-    }
+    // Refused (§5.4): nothing moves, the turns included.
+    return { turnContext: { checkpointRefused: true } };
   }
 
   const head =
@@ -981,7 +1528,34 @@ function reduceTurnDiffCompleted(
       ? undefined
       : { ...state.head, turnCount: payload.turnCount };
 
-  return { checkpoints, turns, ...(head !== undefined ? { head } : {}) };
+  return { checkpoints, ...(head !== undefined ? { head } : {}) };
+}
+
+/**
+ * The turn arm of `thread.turn-diff-completed`. The turn keeps its own
+ * settlement (session status decides that, §5.1); the checkpoint only stamps
+ * the turn count and the anchor message.
+ */
+function checkpointTurns(turns: Turn[], payload: ThreadTurnDiffCompletedPayload): Turn[] {
+  if (payload.turnId === null) {
+    return turns;
+  }
+  const index = turns.findIndex((turn) => turn.turnId === payload.turnId);
+  if (index === -1) {
+    return turns;
+  }
+  const turn = turns[index]!;
+  const next: Turn = {
+    ...turn,
+    turnCount: payload.turnCount,
+    assistantMessageId: payload.assistantMessageId ?? turn.assistantMessageId
+  };
+  if (next.turnCount === turn.turnCount && next.assistantMessageId === turn.assistantMessageId) {
+    return turns;
+  }
+  const stamped = turns.slice();
+  stamped[index] = next;
+  return stamped;
 }
 
 /**
@@ -1010,35 +1584,9 @@ function reduceReverted(
   event: Extract<DomainEvent, { type: "thread.reverted" }>
 ): Mutation {
   const target = event.payload.turnCount;
-  const started = startedTurns(state.turns);
-
-  const retainedTurnIds = new Set<string>();
-  if (started.length === 0 && state.checkpoints.length > 0) {
-    // Legacy: no turn row to order, so the checkpoints at or below the target
-    // name the retained turns, as they did for every log before turn order.
-    for (const checkpoint of state.checkpoints) {
-      if (checkpoint.turnId !== null && checkpoint.checkpointTurnCount <= target) {
-        retainedTurnIds.add(checkpoint.turnId);
-      }
-    }
-  } else {
-    // Clamped: a negative target keeps nothing, rather than `slice`'s
-    // count-from-the-end reading of it.
-    for (const turn of started.slice(0, Math.max(0, target))) {
-      retainedTurnIds.add(turn.turnId);
-    }
-  }
-
-  // A checkpoint goes with its turn — never with its count, which an older
-  // host assigned densely. Only a turn-less one is judged by its count.
-  const checkpoints = state.checkpoints
-    .filter((entry) =>
-      entry.turnId !== null
-        ? retainedTurnIds.has(entry.turnId)
-        : entry.checkpointTurnCount <= target
-    )
-    .sort((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
-    .slice(-CHECKPOINT_RETENTION_LIMIT);
+  // Which turns survive, and with them which checkpoints. The turn rows are
+  // the turn arm's (`turnsAfterEvent`), computed from the same plan.
+  const { retainedTurnIds, checkpoints } = planRevert(state.turns, state.checkpoints, target);
 
   // Only a STARTED turn's claim is judged: a row that never got an id (a send
   // that failed before the provider answered) is neither retained nor dropped
@@ -1073,8 +1621,72 @@ function reduceReverted(
     (item): item is ThreadActivityItem => item.kind === "activity"
   );
 
-  // The retained rows, in start order and whole — `userMessageId` included.
-  let turns = state.turns.filter(
+  const head =
+    state.head === null ? undefined : { ...state.head, turnCount: target };
+
+  return {
+    items,
+    activities,
+    // Rows left from anywhere in the list: every position may have moved.
+    change: { kind: "rebuilt" },
+    // The legacy fallback and the latest-turn synthesis read the checkpoints.
+    turnContext: { checkpoints: state.checkpoints },
+    checkpoints,
+    rederivePending: true,
+    rederiveRoster: true,
+    ...(head !== undefined ? { head } : {})
+  };
+}
+
+/** What a rewind to `target` started turns keeps (§5.5). */
+interface RevertPlan {
+  retainedTurnIds: ReadonlySet<string>;
+  checkpoints: Checkpoint[];
+  /** The retained rows, in start order and whole — `userMessageId` included. */
+  turns: Turn[];
+}
+
+/**
+ * The turn-order half of {@link reduceReverted}, shared with the turn arm so
+ * the fold and {@link applyTurnEvent} keep the same turns. Pure: `turns` and
+ * `checkpoints` are the state before the rewind.
+ */
+function planRevert(
+  turns: readonly Turn[],
+  checkpoints: readonly Checkpoint[],
+  target: number
+): RevertPlan {
+  const started = startedTurns(turns);
+
+  const retainedTurnIds = new Set<string>();
+  if (started.length === 0 && checkpoints.length > 0) {
+    // Legacy: no turn row to order, so the checkpoints at or below the target
+    // name the retained turns, as they did for every log before turn order.
+    for (const checkpoint of checkpoints) {
+      if (checkpoint.turnId !== null && checkpoint.checkpointTurnCount <= target) {
+        retainedTurnIds.add(checkpoint.turnId);
+      }
+    }
+  } else {
+    // Clamped: a negative target keeps nothing, rather than `slice`'s
+    // count-from-the-end reading of it.
+    for (const turn of started.slice(0, Math.max(0, target))) {
+      retainedTurnIds.add(turn.turnId);
+    }
+  }
+
+  // A checkpoint goes with its turn — never with its count, which an older
+  // host assigned densely. Only a turn-less one is judged by its count.
+  const keptCheckpoints = checkpoints
+    .filter((entry) =>
+      entry.turnId !== null
+        ? retainedTurnIds.has(entry.turnId)
+        : entry.checkpointTurnCount <= target
+    )
+    .sort((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
+    .slice(-CHECKPOINT_RETENTION_LIMIT);
+
+  let keptTurns = turns.filter(
     (turn) => turn.turnId !== null && retainedTurnIds.has(turn.turnId)
   );
   // `latestTurn` is recomputed from the last surviving checkpoint (§5.5): if
@@ -1084,14 +1696,15 @@ function reduceReverted(
   // that exists is never moved: with a sparse checkpoint list the last
   // checkpoint is rarely the last turn, and moving its row to the end would
   // reorder the started turns under every later rewind.
-  const latestCheckpoint = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1]! : null;
+  const latestCheckpoint =
+    keptCheckpoints.length > 0 ? keptCheckpoints[keptCheckpoints.length - 1]! : null;
   if (
     latestCheckpoint !== null &&
     latestCheckpoint.turnId !== null &&
-    !turns.some((turn) => turn.turnId === latestCheckpoint.turnId)
+    !keptTurns.some((turn) => turn.turnId === latestCheckpoint.turnId)
   ) {
-    turns = [
-      ...turns,
+    keptTurns = [
+      ...keptTurns,
       {
         turnId: latestCheckpoint.turnId,
         state: latestCheckpoint.status === "error" ? "failed" : "completed",
@@ -1104,18 +1717,122 @@ function reduceReverted(
     ];
   }
 
-  const head =
-    state.head === null ? undefined : { ...state.head, turnCount: target };
+  return { retainedTurnIds, checkpoints: keptCheckpoints, turns: keptTurns };
+}
 
+// ---------------------------------------------------------------------------
+// The turn arms
+// ---------------------------------------------------------------------------
+
+/** What `stampAssistantMessage` reads of a message row. */
+type MessageStamp = Pick<ThreadMessageItem, "id" | "role" | "turnId" | "agentId">;
+
+/**
+ * What a turn arm reads from OUTSIDE `turns`: the rest of the fold as it
+ * stands when the event lands. Each reducer fills in what its arm needs;
+ * {@link applyTurnEvent} has none of it, and its doc says what that changes.
+ */
+interface TurnEventContext {
+  /** The head: a turn start that names no model inherits the head's. */
+  readonly head?: ThreadHead | null;
+  /**
+   * The row a `thread.message-sent` produced. A delta merges onto an existing
+   * row, and that row's role and owner — the first event's — decide the stamp.
+   */
+  readonly message?: MessageStamp;
+  /**
+   * The checkpoint fold refused the capture (a `missing` placeholder never
+   * clobbers a `ready` one, §5.4), so no turn moves either.
+   */
+  readonly checkpointRefused?: boolean;
+  /** The checkpoints before a rewind: the legacy fallback and the latest-turn synthesis read them. */
+  readonly checkpoints?: readonly Checkpoint[];
+}
+
+const NO_TURN_CONTEXT: TurnEventContext = {};
+
+/**
+ * Every change the fold makes to `turns`, and the only place it makes one:
+ * `commit` runs this for every event, and {@link applyTurnEvent} is this with
+ * no context. Returns `turns` itself when the event touches no turn.
+ */
+function turnsAfterEvent(turns: Turn[], event: DomainEvent, context: TurnEventContext): Turn[] {
+  switch (event.type) {
+    case "thread.turn-start-requested":
+      return [...turns, requestedTurn(event, context.head)];
+
+    case "thread.message-sent":
+      return stampAssistantMessage(turns, context.message ?? messageStampOf(event.payload));
+
+    case "thread.session-set":
+      return sessionSetTurns(turns, event);
+
+    case "thread.turn-diff-completed":
+      return context.checkpointRefused === true ? turns : checkpointTurns(turns, event.payload);
+
+    case "thread.reverted":
+      return planRevert(turns, context.checkpoints ?? [], event.payload.turnCount).turns;
+
+    case "thread.created":
+    case "thread.meta-updated":
+    case "thread.runtime-mode-set":
+    case "thread.activity-appended":
+    case "thread.turn-interrupt-requested":
+    case "thread.approval-response-requested":
+    case "thread.user-input-response-requested":
+    case "thread.checkpoint-revert-requested":
+    case "thread.deleted":
+      return turns;
+
+    default:
+      // As in `reduce`: `never` for the closed union, so a new event type must
+      // decide here whether it moves a turn; inert at runtime for a type a
+      // newer host wrote (§8).
+      void (event as never);
+      return turns;
+  }
+}
+
+/**
+ * The turn arm of `thread.turn-start-requested`: the row the request opens.
+ * A turn replayed from the provider's transcript arrives already over, and
+ * must never be settled from session status the way a live turn is — that
+ * would settle whatever turn is actually running (E6).
+ */
+function requestedTurn(
+  event: Extract<DomainEvent, { type: "thread.turn-start-requested" }>,
+  head: ThreadHead | null | undefined
+): Turn {
+  const payload = event.payload;
+  const settled = payload.settled;
   return {
-    items,
-    activities,
-    itemIndex: indexItems(items),
-    turns,
-    checkpoints,
-    rederivePending: true,
-    rederiveRoster: true,
-    ...(head !== undefined ? { head } : {})
+    turnId: payload.turnId,
+    state: settled?.state ?? (payload.turnId === null ? "pending" : "running"),
+    turnCount: null,
+    requestedAt: event.occurredAt,
+    startedAt: payload.turnId === null ? null : event.occurredAt,
+    completedAt: settled?.completedAt ?? null,
+    assistantMessageId: settled?.assistantMessageId ?? null,
+    // The prompt that opened the turn. A replayed turn whose prompt the
+    // projection could not name carries `""`, which is no id at all.
+    ...(payload.messageId.length > 0 ? { userMessageId: payload.messageId } : {}),
+    ...(settled?.tokenUsage !== undefined ? { tokenUsage: settled.tokenUsage } : {}),
+    interactionMode: payload.interactionMode,
+    ...(payload.modelSelection?.model !== undefined
+      ? { model: payload.modelSelection.model }
+      : head?.modelSelection.model !== undefined
+        ? { model: head.modelSelection.model }
+        : {})
+  };
+}
+
+/** The row a `thread.message-sent` opens when no row has its id yet. */
+function messageStampOf(payload: ThreadMessageSentPayload): MessageStamp {
+  return {
+    id: payload.messageId,
+    role: payload.role,
+    turnId: payload.turnId,
+    ...(payload.agentId !== undefined ? { agentId: payload.agentId } : {})
   };
 }
 
@@ -1130,6 +1847,34 @@ export function foldThread(events: Iterable<DomainEvent>): ThreadFoldState {
     state = applyDomainEvent(state, event);
   }
   return state;
+}
+
+/**
+ * The turn-only reducer: the change {@link applyDomainEvent} makes to `turns`
+ * for `event`, from `turns` and `event` alone — the fold's own turn arms, not
+ * a copy of them. The thread index numbers turns with it (design
+ * `2026-09-23-thread-index-and-lazy-boot-design.md`): ids, order, state,
+ * timestamps and prompts — what the index reads — agree with the fold's on
+ * every log but the legacy one below.
+ *
+ * Four arms also read the rest of the fold, which only the fold has. Without
+ * it they do this, and this is exactly where the fold's `turns` differ:
+ * - a turn start that names no model records none (the fold: the head's);
+ * - a message stamps a turn's anchor by the event's own role and owner (the
+ *   fold: by those of the row a delta merges onto, set by its first event);
+ * - a checkpoint always stamps its turn (the fold moves nothing for a capture
+ *   it refuses — a `missing` placeholder over a `ready` one, §5.4);
+ * - a rewind on a log with no started turn keeps none (the fold's legacy
+ *   fallback reads the checkpoints and synthesises the latest turn).
+ *
+ * No sequence or thread guard, unlike {@link applyDomainEvent}: feed it one
+ * thread's log, in order, once. Never writes to `turns`, and returns it as-is
+ * when the event touches no turn.
+ */
+export function applyTurnEvent(turns: readonly Turn[], event: DomainEvent): Turn[] {
+  // The arms never write to the array they are given; typing it mutable only
+  // lets them hand it back unchanged, which is what keeps identity stable.
+  return turnsAfterEvent(turns as Turn[], event, NO_TURN_CONTEXT);
 }
 
 /**

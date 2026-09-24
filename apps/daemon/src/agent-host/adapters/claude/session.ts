@@ -122,6 +122,20 @@ interface BackgroundShellTail {
 
 const IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES);
 
+/**
+ * §4.1: Claude ingests an attachment natively — as an inline base64 image
+ * block — only when it is an image of a mime the API accepts. Everything else
+ * (a PDF, a CSV, a pasted-text file, an image of any other mime) reaches the
+ * agent as a line of the `Attached files:` block `appendAttachmentPathLines`
+ * writes, which the attachments-dir grant (`launch.ts`) lets it `Read` without
+ * an approval prompt. Pure; judged on the ref alone.
+ */
+export function claudeIngestsAttachment(
+  attachment: AttachmentRef
+): attachment is Extract<AttachmentRef, { type: "image" }> {
+  return attachment.type === "image" && IMAGE_MIME_TYPES.has(attachment.mimeType);
+}
+
 interface PendingApproval {
   requestId: string;
   requestType: CanonicalRequestType;
@@ -157,7 +171,6 @@ export interface ClaudeSessionOptions {
   onClosed: (session: ClaudeSession) => void;
   /** Marks the cached provider snapshot stale (§4.1). */
   onUsageLimitsStale?: () => void;
-  launchArgs?: readonly string[];
   autoCompactWindow?: number;
 }
 
@@ -276,7 +289,6 @@ export class ClaudeSession {
       ...(this.resumeSessionId === undefined
         ? { sessionId: this.options.context.ids.uuid() }
         : {}),
-      ...(this.options.launchArgs !== undefined ? { launchArgs: this.options.launchArgs } : {}),
       ...(this.options.autoCompactWindow !== undefined
         ? { autoCompactWindow: this.options.autoCompactWindow }
         : {})
@@ -1645,13 +1657,12 @@ export class ClaudeSession {
     const imageBlocks: Array<Record<string, unknown>> = [];
     const pathLines: AttachmentPathLine[] = [];
     for (const attachment of input.attachments) {
+      // Resolved for every ref, native or not: one that no longer resolves
+      // fails the turn instead of vanishing from it (§4.1).
       const path = await this.options.context.resolveAttachmentPath(this.threadId, attachment.id);
-      if (attachment.type !== "image") {
+      if (!claudeIngestsAttachment(attachment)) {
         pathLines.push({ name: attachment.name, path });
         continue;
-      }
-      if (!IMAGE_MIME_TYPES.has(attachment.mimeType)) {
-        throw new Error(`Unsupported Claude image attachment type '${attachment.mimeType}'.`);
       }
       const bytes = await fs.readFile(path);
       imageBlocks.push({

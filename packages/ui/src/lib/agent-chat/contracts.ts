@@ -12,6 +12,7 @@ import type {
   AttachmentRef,
   BackgroundLiveness,
   Checkpoint,
+  CompactionMarkerState,
   ComposerContextRecord,
   InteractionMode,
   ModelSelection,
@@ -23,6 +24,8 @@ import type {
   RuntimeSubagent,
   ThreadActivityItem,
   ThreadHead,
+  ThreadHistoryBounds,
+  ThreadHistoryPage,
   ThreadItem,
   ThreadMessageItem,
   ThreadSessionStatus,
@@ -93,6 +96,66 @@ export interface QueuedComposerMessage {
   queuedAt: string;
 }
 
+/**
+ * The indexed history BELOW the retained window (design 2026-09-23 §C
+ * "History page", "Client"): what the snapshot said about it, the pages the
+ * user has pulled in so far, and the bridge that keeps them joined to the
+ * window while it keeps evicting (design 2026-09-23 fold performance,
+ * "Client — the history bridge").
+ *
+ * A cache of a log that may have been reverted, never an authority: a
+ * `snapshot` frame resets it (bounds re-read, pages and bridge dropped), and
+ * so does a rewind that reaches into a loaded page or a bridge row. In memory
+ * only — it rides the retained thread snapshot and nothing is persisted.
+ *
+ * *Added with the thread index; `contracts.ts` stays additive-only.*
+ */
+export interface AgentChatHistoryState {
+  /** The snapshot's `history` block; null from a host that predates the index. */
+  bounds: ThreadHistoryBounds | null;
+  /**
+   * Oldest first, exactly as the host sent them. A row two pages share, or a
+   * page shares with the bridge or the window, is resolved where the rows are
+   * built: once, at its oldest place, with its newest content.
+   */
+  pages: ThreadHistoryPage[];
+  /**
+   * The rows the window's retention dropped while a page was loaded (or the
+   * first one was on its way), oldest first — what sits between the newest
+   * page and the window. Without it every eviction opened a hole there until
+   * the chat was reloaded. Only rows the parent timeline renders are kept.
+   *
+   * *Added with the history bridge; `contracts.ts` stays additive-only.*
+   */
+  bridge: readonly ThreadItem[];
+  /**
+   * How many of the window's own items, counted from its oldest (the fold's
+   * list order — the log's first-emission order), lie before the END of the
+   * loaded history — the newest page's end, or the newest bridge row,
+   * whichever is later. A message outlives the tool rows around it (2 000
+   * against 500), and an agent's launch row or a compaction marker outlives
+   * everything, so such rows render with the history, in their place, and
+   * not below it. Zero with nothing loaded.
+   *
+   * *Added with the history bridge; `contracts.ts` stays additive-only.*
+   */
+  windowCut: number;
+  /**
+   * The window has dropped a row the parent timeline renders since the
+   * snapshot the bounds came from. There is then older history to show
+   * whatever that snapshot's `hasOlder` said, and its cursor names the block
+   * below the window as it WAS — so the first page is asked for without one.
+   * Reset by the next snapshot.
+   *
+   * *Added with the history bridge; `contracts.ts` stays additive-only.*
+   */
+  windowEvicted: boolean;
+  /** A `GET …/history` is in flight; the "Load older turns" row spins. */
+  loading: boolean;
+  /** Why the last load failed, readable as it stands; cleared by the next success. */
+  error: string | null;
+}
+
 /** One open thread's slice. Created on tab open, dropped on tab close (§7.2). */
 export interface AgentChatThreadSlice {
   sessionId: string;
@@ -121,6 +184,27 @@ export interface AgentChatThreadSlice {
   respondingRequestIds: string[];
   /** Thread-level error banner text, overlaid — never a timeline row (§7.3). */
   errorBanner: string | null;
+  /**
+   * The indexed history below the retained window — its bounds and the pages
+   * pulled in so far (design 2026-09-23 §C).
+   *
+   * *Added with the thread index; `contracts.ts` stays additive-only.*
+   */
+  history: AgentChatHistoryState;
+}
+
+/**
+ * A turn the store wants on screen — the command palette's search hit
+ * (design 2026-09-23 "Client"). The timeline scrolls `rowId` to the top of
+ * the viewport, disarms follow, and acknowledges the `nonce`; a newer request
+ * replaces an unhandled one.
+ *
+ * *Added with the thread index; `contracts.ts` stays additive-only.*
+ */
+export interface AgentChatRevealRequest {
+  turnId: string;
+  rowId: string;
+  nonce: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -234,14 +318,11 @@ export interface WorkLogEntry {
 }
 
 /**
- * The three states a `context-compaction` activity comes in (mirrors
- * `RuntimeThreadState`'s compaction arm in `@orquester/api/agent-chat`).
- *
- * `compacting` is a **phase, not an event**: it says the provider is rewriting
- * the conversation right now, so it renders as the live placeholder's label
- * rather than as a divider claiming a compaction that has not happened yet.
+ * The three states a compaction marker comes in. Declared in
+ * `@orquester/api/agent-chat` (`compaction.ts`) with the rule that classifies
+ * a row, which the host's thread index and the MCP share; re-exported here.
  */
-export type CompactionMarkerState = "compacting" | "compacted" | "compaction-failed";
+export type { CompactionMarkerState };
 
 // ---------------------------------------------------------------------------
 // §7.3 — the twelve projected row kinds
@@ -362,6 +443,12 @@ export type AgentChatTimelineRow =
       createdAt: string;
       planMarkdown: string;
       implementedAt: string | null;
+      /**
+       * The wire cut `planMarkdown` at 16 KiB (§5.6). The card's Copy and
+       * Download then read the whole plan back (`readFullPlanMarkdown`)
+       * rather than hand over text that ends in "…".
+       */
+      truncated?: true;
     }
   /**
    * The live placeholders. `compacting` is set while the thread is in the
@@ -413,6 +500,12 @@ export interface AgentChatActions {
   }): Promise<void>;
   /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
   steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;
+  /**
+   * The whole markdown of a proposal Implement is about to send (§7.3): as is
+   * when intact, read back through `GET …/items/:itemId` when the wire cut it
+   * (`truncated`, §5.6). Rejects rather than ever answer the cut text.
+   */
+  readFullPlanMarkdown(plan: { id: string; planMarkdown: string; truncated?: true }): Promise<string>;
   /**
    * `/interrupt`. Omits `turnId` whenever the session is not `running`, which
    * is also the only way to stop background work — and it stops all of it.
@@ -502,6 +595,40 @@ export interface AgentChatActions {
   saveDraft(draft: ComposerDraft): void;
   /** Re-read the thread (a host instance change, or a user retry). */
   refresh(): Promise<void>;
+  /**
+   * `GET …/history`: the next page of turns OLDER than what the thread holds,
+   * prepended above everything loaded (design 2026-09-23 §C). Asks by the
+   * oldest page's cursor; with nothing loaded, by the snapshot's — unless the
+   * window has evicted rows since that snapshot, when it asks with none (the
+   * block just below the window as it stands). Asks nothing when there is
+   * nothing older.
+   *
+   * Never rejects: a failure lands in `slice.history.error` in words, never
+   * in the thread's error banner. Overlapping calls share the one request in
+   * flight, and a page that lands after a snapshot (or a rewind) replaced
+   * the history it was asked against is dropped.
+   *
+   * *Added with the thread index; `contracts.ts` stays additive-only.*
+   */
+  loadOlderHistory(): Promise<void>;
+  /**
+   * Bring `turnId` on screen — the command palette's search hit. Waits for
+   * the thread to synchronize, then scrolls to the turn when the window or a
+   * loaded page holds it, and otherwise loads older pages until one does,
+   * bounded at 25 pages. Resolves `true` once a reveal request is set, and
+   * `false` for a turn the thread no longer has or cannot reach. Never
+   * rejects.
+   *
+   * *Added with the thread index; `contracts.ts` stays additive-only.*
+   */
+  revealTurn(turnId: string): Promise<boolean>;
+  /**
+   * The timeline handled the reveal request carrying `nonce`; clear it. A
+   * stale nonce clears nothing, so a newer request is never dropped.
+   *
+   * *Added with the thread index; `contracts.ts` stays additive-only.*
+   */
+  acknowledgeReveal(nonce: number): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +651,13 @@ export interface AgentChatThreadView {
    * *Added by W15, widened by W11 in the fix wave (R8-B1 / R7-2);
    * `contracts.ts` stays additive-only.*
    */
-  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
+  actionableProposedPlan: {
+    id: string;
+    planMarkdown: string;
+    turnId: string | null;
+    /** The wire cut `planMarkdown` (§5.6): see `readFullPlanMarkdown`. */
+    truncated?: true;
+  } | null;
   /**
    * True while a `/revert` is in flight — §7.5's one reason the composer goes
    * `inert`, so a turn cannot race history the host is rewriting.
@@ -532,6 +665,12 @@ export interface AgentChatThreadView {
    * *Added by W15; `contracts.ts` stays additive-only.*
    */
   reverting: boolean;
+  /**
+   * The turn the timeline should bring on screen, until it acknowledges it.
+   *
+   * *Added with the thread index; `contracts.ts` stays additive-only.*
+   */
+  reveal: AgentChatRevealRequest | null;
 }
 
 export interface AgentChatRosterView {

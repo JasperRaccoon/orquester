@@ -34,6 +34,10 @@ import type {
 // Operation inputs
 // ---------------------------------------------------------------------------
 
+/**
+ * Registry `args` are the terminal launcher's flags; a chat launch never sees
+ * them. Permissions come only from `runtimeMode`.
+ */
 export interface StartSessionInput {
   threadId: string;
   cwd: string;
@@ -52,14 +56,6 @@ export interface StartSessionInput {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   /**
-   * The registry entry's own launch args (claudex/claudemix proxy flags, a
-   * user's configured flags). Adapters that can fold a flag into their
-   * protocol — Claude's `--permission-mode` /
-   * `--dangerously-skip-permissions` — read them here; the rest ignore them.
-   * Empty when the entry declares none.
-   */
-  launchArgs?: readonly string[];
-  /**
    * The adapter's own cursor from `meta.json`. `unknown` by contract — each
    * adapter owns its shape and it is the only thing persisted for resume. A
    * cursor that fails its own shape check means "no resume", **never** an
@@ -70,9 +66,19 @@ export interface StartSessionInput {
 
 export interface SendTurnInput {
   threadId: string;
-  /** One flat string, already trimmed and bounds-checked by the host (§4.1). */
+  /**
+   * One flat string, already trimmed and bounds-checked by the host (§4.1) —
+   * except a message-mode answer's echo (§6.2), which the host builds itself
+   * from the questions and answers and does not bound.
+   */
   input: string;
-  /** References only, resolved by the host against the thread's attachments dir. */
+  /**
+   * References only, resolved by the host against the thread's attachments
+   * dir, each carrying the `sizeBytes` the host STAT'd (never the size the
+   * client declared). The adapter hands its provider what it ingests natively
+   * and names every other file in an `Attached files:` block after the text
+   * (`adapters/attachment-lines.ts`, §4.1).
+   */
   attachments: AttachmentRef[];
   modelSelection?: ModelSelection;
   interactionMode: InteractionMode;

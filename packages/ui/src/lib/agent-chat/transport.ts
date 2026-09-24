@@ -25,8 +25,12 @@ import {
   type AttachmentRef,
   type CommandReceiptResponse,
   type RefreshProviderResponse,
+  type ThreadHistoryPage,
+  type ThreadHistoryQuery,
   type ThreadItemResponse,
   type ThreadReadResponse,
+  type ThreadSearchQuery,
+  type ThreadSearchResponse,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
 import type { SessionUploadResponse } from "@orquester/api";
@@ -126,6 +130,22 @@ export interface AgentChatTransport {
     options?: { after?: number; signal?: AbortSignal }
   ): Promise<ThreadReadResponse>;
   readItem(sessionId: string, itemId: string, signal?: AbortSignal): Promise<ThreadItemResponse>;
+  /**
+   * `GET …/history` — a page of turns OLDER than what the client holds,
+   * folded from the log by the host (design 2026-09-23 §C "History page").
+   * No `before` asks for the turns just below the retained window. Answers
+   * 503 `INDEX_UNAVAILABLE` while the host has no usable index.
+   */
+  readHistory(
+    sessionId: string,
+    query: ThreadHistoryQuery,
+    signal?: AbortSignal
+  ): Promise<ThreadHistoryPage>;
+  /**
+   * `GET /api/agent/search` — full-text search over every indexed thread on
+   * the host (design 2026-09-23 §C "Search"). Host-level, not per session.
+   */
+  search(query: ThreadSearchQuery, signal?: AbortSignal): Promise<ThreadSearchResponse>;
   turnDiff(
     sessionId: string,
     turnCount: number,
@@ -280,6 +300,20 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
       });
     },
 
+    readHistory(sessionId, query, signal) {
+      return send<ThreadHistoryPage>("GET", agentChatRoutes.history(sessionId), {
+        query: definedQuery({ before: query.before, turns: query.turns }),
+        ...(signal === undefined ? {} : { signal })
+      });
+    },
+
+    search(query, signal) {
+      return send<ThreadSearchResponse>("GET", agentChatRoutes.search, {
+        query: definedQuery({ q: query.q, limit: query.limit, projectPath: query.projectPath }),
+        ...(signal === undefined ? {} : { signal })
+      });
+    },
+
     turnDiff(sessionId, turnCount, options) {
       return send<TurnDiffResponse>("GET", agentChatRoutes.turnDiff(sessionId, turnCount), {
         // §5.4: whitespace is ignored by default; only an explicit `false` turns it off.
@@ -333,6 +367,23 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
       return response.data;
     }
   };
+}
+
+/**
+ * A query object with its `undefined` keys dropped, so an absent option never
+ * travels as an empty parameter the host would have to tell apart from a real
+ * one (`?before=` is not "no cursor").
+ */
+function definedQuery(
+  query: Record<string, string | number | undefined>
+): Record<string, string | number> {
+  const defined: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) {
+      defined[key] = value;
+    }
+  }
+  return defined;
 }
 
 /**

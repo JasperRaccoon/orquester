@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { FsSandboxError } from "@orquester/config/fs";
-import { ToolError } from "./terminal-control.ts";
+import { ToolError } from "./errors.ts";
 import { DEFAULT_READ_BYTES, FsTools, MAX_FS_ENTRIES, MAX_READ_BYTES } from "./fs-tools.ts";
 
 async function makeRoot(t: TestContext) {
@@ -175,4 +175,39 @@ test("readFileWindow blocks symlinks that resolve outside the sandbox", async (t
   await symlink(join(outside, "secret.txt"), join(root, "secret-link"));
 
   await assert.rejects(() => new FsTools({ fsRoot: root }).readFileWindow("secret-link"), FsSandboxError);
+});
+
+const REPLACEMENT = String.fromCharCode(0xfffd);
+
+test("readFileWindow ends a window on a UTF-8 character boundary and says how many bytes it consumed", async (t) => {
+  const root = await makeRoot(t);
+  // 1-, 2-, 3- and 4-byte characters, so window ends land inside each kind.
+  const content = "a語bé語d😀e".repeat(500);
+  await write(root, "cjk.txt", content);
+  const tools = new FsTools({ fsRoot: root });
+  let offset = 0;
+  let text = "";
+  let short = 0;
+  for (let pages = 0; offset < Buffer.byteLength(content); pages += 1) {
+    assert.ok(pages < 10_000, "paging advances");
+    const page = await tools.readFileWindow("cjk.txt", { offset, maxBytes: 10 });
+    assert.ok(!page.text.includes(REPLACEMENT), `page at ${offset} splits no character`);
+    assert.equal(page.consumed, Buffer.byteLength(page.text), "consumed is exactly the bytes the text covers");
+    assert.ok(page.consumed > 0 && page.consumed <= 10);
+    if (page.consumed < 10 && page.truncated) short += 1;
+    text += page.text;
+    offset += page.consumed;
+    assert.equal(page.truncated, offset < Buffer.byteLength(content));
+  }
+  assert.equal(text, content, "the pages concatenate to the file");
+  assert.ok(short > 0, "some windows ended early, on a boundary");
+});
+
+test("readFileWindow: a window narrower than its first character takes that character whole, so paging never stalls", async (t) => {
+  const root = await makeRoot(t);
+  await write(root, "wide.txt", "語😀x");
+  const tools = new FsTools({ fsRoot: root });
+  assert.deepEqual(await tools.readFileWindow("wide.txt", { offset: 0, maxBytes: 1 }), { path: join(root, "wide.txt"), text: "語", size: 8, offset: 0, truncated: true, consumed: 3 });
+  assert.deepEqual(await tools.readFileWindow("wide.txt", { offset: 3, maxBytes: 2 }), { path: join(root, "wide.txt"), text: "😀", size: 8, offset: 3, truncated: true, consumed: 4 });
+  assert.deepEqual(await tools.readFileWindow("wide.txt", { offset: 7, maxBytes: 1 }), { path: join(root, "wide.txt"), text: "x", size: 8, offset: 7, truncated: false, consumed: 1 });
 });

@@ -25,7 +25,8 @@ import {
   imageOrdinal,
   imagePlaceholder,
   removeImagePlaceholder,
-  revokeImagePreviews
+  revokeImagePreviews,
+  withoutPreviews
 } from "./composer-images";
 import {
   REWIND_ESCAPE_HINT,
@@ -45,6 +46,7 @@ import {
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
 import { registerComposerHandle } from "./composer-bridge";
+import { restoreFailedSendDraft } from "./composer-failed-send";
 import {
   blockedProviderCommandMessage,
   buildSkillMenuItems,
@@ -71,16 +73,20 @@ import {
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
+  draftAfterSend,
   hasSendableContent,
+  implementationTextResolver,
   isPasteAsTextShortcut,
   nextPastedTextFileName,
   pastedTextDisposition,
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
+  sendComposerTurn,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
-  uploadsBlockSend
+  uploadsBlockSend,
+  type FailedSendRestore
 } from "./composer-submission";
 import {
   detectComposerTrigger,
@@ -104,6 +110,13 @@ interface DraftState {
 }
 
 const EMPTY_DRAFT: DraftState = { text: "", attachments: [] };
+
+/** What goes on the wire for the staged chips: their uploaded references. */
+function attachmentRefs(attachments: readonly StagedAttachment[]): AttachmentRef[] {
+  return attachments
+    .map((entry) => entry.ref)
+    .filter((ref): ref is AttachmentRef => ref !== undefined);
+}
 
 /** 70px → 200px, T3's prompt bounds. *T3: `ComposerPromptEditorTiptap.tsx:729-736`.* */
 const PROMPT_MIN_PX = 70;
@@ -240,6 +253,13 @@ export function ChatComposer({
    */
   const carriedContextRef = React.useRef<ComposerContextRecord[]>([]);
   const persistRef = React.useRef<DraftPersistScheduler | null>(null);
+  /**
+   * The thread whose draft the live draft holds, or `null` once this composer
+   * is unmounted — what a send reads when it settles, to put a failure back
+   * into the thread it was sent from (`runSend`). Written only by the draft
+   * scheduler's layout effect, the same step that flushes that thread's writes.
+   */
+  const liveThreadRef = React.useRef<string | null>(null);
   const insetRef = React.useRef(0);
   const restingRef = React.useRef(true);
   const retryFilesRef = React.useRef(new Map<string, File>());
@@ -274,18 +294,21 @@ export function ChatComposer({
   // ---------------------------------------------------------------------
   // The draft is the store's (§7.1, §7.4)
   // ---------------------------------------------------------------------
-  // One `AgentChatView` serves every chat tab in a PROJECT, so a tab switch
-  // inside a project keeps this component mounted and only `sessionId`
-  // changes — but focusing a session of another project swaps the whole tab
-  // set and unmounts it, and a reload destroys it outright. A draft held in
-  // component state (as a hand-swapped per-tab map once was) is lost to both.
+  // Each chat tab owns its composer: `MainView` mounts an `AgentChatView` per
+  // tab, keyed by the tab id — the session id — and a tab switch only hides
+  // it, so `sessionId` never changes under a mounted composer, and every
+  // branch that handles a thread swap (the load below, a failed send's
+  // restore) is defensive. But focusing a session of another project swaps
+  // the whole tab set and unmounts it, and a reload destroys it outright. A
+  // draft held in component state (as a hand-swapped per-tab map once was) is
+  // lost to both.
   //
   // So the thread store's persisted draft is the owner: this loads it on mount
-  // and on every thread swap, and the two effects below write it back. The
-  // load deliberately does NOT go through `stageAttachment` — that one also
-  // writes an `[Image #N]` placeholder at the caret, and the text being
-  // restored already contains the placeholders the user saw. The same holds
-  // for a file's path: the restored text already carries it.
+  // (and on a thread swap, should one come), and the two effects below write
+  // it back. The load deliberately does NOT go through `stageAttachment` —
+  // that one also writes an `[Image #N]` placeholder at the caret, and the
+  // text being restored already contains the placeholders the user saw. The
+  // same holds for a file's path: the restored text already carries it.
   const previousSessionRef = React.useRef<string | null>(null);
   React.useLayoutEffect(() => {
     if (previousSessionRef.current === sessionId) return;
@@ -314,10 +337,18 @@ export function ChatComposer({
    * so the tail of thread A is written to thread A even though `sessionId`
    * already names B. `pagehide`/`visibilitychange` cover what React never sees
    * at all — a reload or a backgrounded tab runs no cleanup.
+   *
+   * A LAYOUT effect, and the one writer of `liveThreadRef`: the cleanup that
+   * stops this composer holding a thread's draft — a swap, an unmount — is the
+   * one that flushes that thread's pending write, in the same commit as the
+   * swap's draft load. So a send that settles afterwards (`runSend`) finds its
+   * thread either still here or with its persisted draft complete: it never
+   * reads that draft while its last keystrokes are in neither place.
    */
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const scheduler = createDraftPersistScheduler((draft) => storeDraftActions.saveDraft(draft));
     persistRef.current = scheduler;
+    liveThreadRef.current = sessionId;
     const flush = (): void => scheduler.flush();
     const flushIfHidden = (): void => {
       if (document.visibilityState === "hidden") scheduler.flush();
@@ -329,6 +360,7 @@ export function ChatComposer({
       document.removeEventListener("visibilitychange", flushIfHidden);
       scheduler.flush();
       if (persistRef.current === scheduler) persistRef.current = null;
+      liveThreadRef.current = null;
     };
   }, [sessionId, storeDraftActions]);
 
@@ -621,7 +653,42 @@ export function ChatComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isMobile, active]);
 
-  React.useEffect(
+  /**
+   * Put a send that did not go out back into the LIVE draft (§7.4): its text
+   * and chips ahead of anything typed or staged since (`draftAfterSend`), its
+   * notice with them — when this composer shows `thread`, the one the send
+   * left from. Its own send, or one a composer that no longer shows the thread
+   * hands over through the bridge. `false` when it does not show `thread`, so
+   * the caller goes on to that thread's persisted draft.
+   *
+   * `flushSync`: the check and the write are one step, and the restore is
+   * committed and its write scheduled before any later swap or unmount
+   * renders. A promise continuation's update is not sync-lane: an unmount (a
+   * project switch) rendered first would drop it with the component, and a
+   * swap (defensive, above) would load the next thread's draft over it — the
+   * restore would be on no screen and in no thread's store.
+   */
+  const restoreIntoLiveDraft = React.useCallback(
+    (thread: string, restore: FailedSendRestore<StagedAttachment>): boolean => {
+      if (liveThreadRef.current !== thread) return false;
+      flushSync(() => {
+        setDraft((state) => {
+          const next = draftAfterSend({ outcome: restore.outcome, sent: restore.sent, draft: state });
+          return next === null ? state : { ...state, ...next };
+        });
+        setNotice(restore.outcome.notice);
+      });
+      return true;
+    },
+    []
+  );
+
+  // A LAYOUT effect, as the draft load and the draft scheduler are: the handle
+  // names this composer's thread from the commit that loads that thread's
+  // draft to the one that lets it go, so a failed send that settles in between
+  // finds the composer that shows its thread (§7.4) — never a stale handle,
+  // and never nothing while a composer that has just mounted already shows it.
+  React.useLayoutEffect(
     () =>
       registerComposerHandle(sessionId, {
         // A bridge insert never takes focus by itself, whether or not a user
@@ -632,9 +699,18 @@ export function ChatComposer({
         insertText: (text, mode) => insertText(text, mode, { focus: isTextareaFocused() }),
         stageAttachment,
         focusAtEnd,
-        openControl
+        openControl,
+        restoreFailedSend: (restore) => restoreIntoLiveDraft(sessionId, restore)
       }),
-    [focusAtEnd, insertText, isTextareaFocused, openControl, sessionId, stageAttachment]
+    [
+      focusAtEnd,
+      insertText,
+      isTextareaFocused,
+      openControl,
+      restoreIntoLiveDraft,
+      sessionId,
+      stageAttachment
+    ]
   );
 
   // ---------------------------------------------------------------------
@@ -999,32 +1075,65 @@ export function ChatComposer({
       : uploadBlock;
 
   const runSend = React.useCallback(
-    async (text: string, mode: InteractionMode, refs: AttachmentRef[]) => {
+    async (
+      text: string,
+      mode: InteractionMode,
+      attachments: readonly StagedAttachment[],
+      resolveText?: () => Promise<string>
+    ) => {
+      // The thread this message leaves FROM. A failure goes back into its
+      // draft, whichever thread — if any — this composer shows by the time
+      // the send settles.
+      const sentFrom = sessionId;
       setSending(true);
       try {
-        await actions.sendTurn({
+        const refs = attachmentRefs(attachments);
+        const outcome = await sendComposerTurn({
           text,
-          ...(refs.length > 0 ? { attachments: refs } : {}),
-          interactionMode: mode,
-          ...(modelSelection ? { modelSelection } : {})
+          ...(resolveText ? { resolveText } : {}),
+          send: (resolved) =>
+            actions.sendTurn({
+              text: resolved,
+              ...(refs.length > 0 ? { attachments: refs } : {}),
+              interactionMode: mode,
+              ...(modelSelection ? { modelSelection } : {})
+            })
         });
-        // The keyboard is worse than a lost second on mobile: dismiss it only
-        // once the send actually succeeded.
-        if (isMobile) textareaRef.current?.blur();
-      } catch (error) {
-        // A failed send goes back to the FRONT of the draft, ahead of anything
-        // typed since, so nothing the user wrote while it was in flight is
-        // reordered behind it.
-        setDraft((state) => ({
-          ...state,
-          text: state.text.trim().length > 0 ? `${text}\n\n${state.text}` : text
-        }));
-        setNotice(error instanceof Error ? error.message : "Could not send the message.");
+        if (outcome.kind === "sent") {
+          // The keyboard is worse than a lost second on mobile: dismiss it only
+          // once the send actually succeeded.
+          if (isMobile) textareaRef.current?.blur();
+          return;
+        }
+        // A failed send comes back whole, its chips with its text, to the
+        // FRONT of the draft: ahead of anything typed or staged since, so
+        // nothing the user wrote while it was in flight is reordered behind it
+        // (`draftAfterSend`). A refusal sent nothing and leaves the draft
+        // alone: a plan that could not be read back, or read back over the
+        // bound, is still actionable, so Implement is still there to press
+        // again. A failed Implement (`text: null`) leaves the draft alone for
+        // the same reason: its prompt is the composer's, and in the draft it
+        // would read as a plan-mode Refine carrying the implementation prefix.
+        // `submit` revoked the sent chips' preview URLs; a restored image chip
+        // resolves its preview again, as a reloaded one does.
+        //
+        // And it comes back to the thread it was sent FROM, never to the one
+        // on screen when it settles: this live draft while this composer
+        // still shows that thread, else the live draft of the composer that
+        // shows it now, else that thread's persisted draft, where the next
+        // composer to show it loads it (`restoreFailedSendDraft`). Its notice
+        // goes only where its draft does.
+        restoreFailedSendDraft({
+          sentFrom,
+          liveThread: liveThreadRef.current,
+          restore: { outcome, sent: withoutPreviews(attachments) },
+          restoreLive: (restore) => restoreIntoLiveDraft(sentFrom, restore)
+        });
       } finally {
         setSending(false);
       }
     },
-    [actions, isMobile, modelSelection]
+    [actions, isMobile, modelSelection, restoreIntoLiveDraft, sessionId]
   );
 
   const submit = React.useCallback(
@@ -1082,6 +1191,16 @@ export function ChatComposer({
       }
       const outgoing = plan?.text ?? text.trim();
       const outgoingMode = plan?.interactionMode ?? interactionMode;
+      // Implement resolves its prompt at send time through the store's read:
+      // as is when intact, read back whole when §5.6 cut it at 16 KiB. It sends
+      // nothing when the plan cannot be read, or when the whole prompt is over
+      // the bound the cut one passed below. A failed Implement never writes its
+      // prompt into the draft (`sendComposerTurn`).
+      const implementationText = implementationTextResolver({
+        action: plan?.action ?? null,
+        proposal: planFollowUp,
+        read: (proposal) => actions.readFullPlanMarkdown(proposal)
+      });
 
       const validation = composerSubmissionValidationMessage({
         prompt: outgoing,
@@ -1092,9 +1211,7 @@ export function ChatComposer({
         return;
       }
 
-      const refs = draft.attachments
-        .map((entry) => entry.ref)
-        .filter((ref): ref is AttachmentRef => ref !== undefined);
+      const sentAttachments = draft.attachments;
       const disposition = resolveFollowUpDisposition({
         followUpBehavior: chatPrefs.followUpBehavior,
         intent,
@@ -1119,7 +1236,7 @@ export function ChatComposer({
       if (disposition === "queue") {
         actions.queueMessage({
           text: outgoing,
-          attachments: refs,
+          attachments: attachmentRefs(sentAttachments),
           context: [],
           interactionMode: outgoingMode,
           // The client store owns the tool boundary a queued message anchors
@@ -1130,7 +1247,7 @@ export function ChatComposer({
         });
         return;
       }
-      void runSend(outgoing, outgoingMode, refs);
+      void runSend(outgoing, outgoingMode, sentAttachments, implementationText);
     },
     [
       planFollowUp,
