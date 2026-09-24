@@ -4,6 +4,9 @@
  * still shows pending or running, and the rows that end each one — shaped as
  * the adapters' own teardown writes them, in the class of the row that opened
  * it — and what it leaves: a message-mode question, a message still streaming.
+ * And the launch ids an older host never wrote on an OpenCode or Codex
+ * agent's start (`legacyLaunchStarts`): which agents get one, and that it
+ * changes nothing the roster shows but lets a relaunch reopen the agent.
  * The first load and the orphaned-thread reconcile that append them are
  * `reconcile.test.ts`'s.
  */
@@ -27,7 +30,13 @@ import {
 
 import { transcriptEntries } from "../../mcp/transcript.ts";
 import { projectSnapshotActivities } from "../ingestion/coalesce.ts";
-import { LEFTOVER_CALL_DETAIL, leftoverWorkClosings, type LeftoverClosing } from "./leftover-work.ts";
+import {
+  LEFTOVER_CALL_DETAIL,
+  legacyLaunchId,
+  legacyLaunchStarts,
+  leftoverWorkClosings,
+  type LeftoverClosing
+} from "./leftover-work.ts";
 
 const THREAD = "thread-lw";
 const AT = "2026-09-24T10:00:00.000Z";
@@ -896,5 +905,221 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     );
     assert.deepEqual(closingsOf(applied(state, closingsOf(state))), []);
     assert.deepEqual(closingsOf(foldOf([said("user:1", "user", "hello", false)])), []);
+  });
+});
+
+describe("legacyLaunchStarts — a launch id for an agent an older host launched with none", () => {
+  const createdAs = (adapter: "claude" | "codex" | "opencode" | "grok"): Unsequenced =>
+    event("thread.created", {
+      projectPath: "/work/project",
+      cwd: "/work/project",
+      title: "Legacy agents",
+      adapter,
+      refId: adapter,
+      accountId: "acc1",
+      home: "account",
+      modelSelection: { model: "test-model" },
+      runtimeMode: "approval-required"
+    });
+
+  const foldAs = (adapter: "claude" | "codex" | "opencode" | "grok", events: readonly Unsequenced[]): ThreadFoldState =>
+    foldThread(sequenced([createdAs(adapter), ...events], 0));
+
+  function launchesOf(state: ThreadFoldState): ThreadActivityItem[] {
+    let next = 0;
+    return legacyLaunchStarts(state, { nextId: () => `launch-${(next += 1)}` });
+  }
+
+  const appliedRows = (state: ThreadFoldState, activities: readonly ThreadActivityItem[]): ThreadFoldState =>
+    sequenced(
+      activities.map((activity) => event("thread.activity-appended", { activity })),
+      state.seq
+    ).reduce(applyDomainEvent, state);
+
+  const at = (second: number): Partial<ThreadActivityItem> => {
+    const stamp = `2026-09-24T10:00:${String(second).padStart(2, "0")}.000Z`;
+    return { createdAt: stamp, updatedAt: stamp };
+  };
+
+  /**
+   * An OpenCode child as the normaliser wrote it before the relaunch fix: its
+   * run started at its own `session.created`, before the parent's `task` part
+   * named it, so its start carries no launching call — and every later row
+   * carries the part's `callID` in its linkage.
+   */
+  const legacyOpenCodeChild = (childId: string, turnId: string): Unsequenced[] => [
+    row(`start:${childId}`, "task.started", {
+      taskId: childId,
+      detail: "Subagent",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId
+    }, { turnId, agentId: childId, ...at(1) }),
+    row(`task-progress:${childId}`, "task.progress", {
+      taskId: childId,
+      title: "Explore the repo",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId,
+      role: "explore",
+      toolUseId: `call_${childId}`
+    }, { turnId, agentId: childId, ...at(2) }),
+    row(`done:${childId}`, "task.completed", {
+      taskId: childId,
+      status: "completed",
+      summary: "Found it",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId,
+      title: "Explore the repo",
+      role: "explore",
+      toolUseId: `call_${childId}`
+    }, { turnId: "turn-2", agentId: childId, ...at(5) })
+  ];
+
+  /** A relaunch of `childId` under a new call, as a host with the relaunch fix writes it. */
+  const relaunch = (childId: string, callId: string): Unsequenced =>
+    row(`relaunch:${callId}`, "task.started", {
+      taskId: childId,
+      detail: "Explore the repo",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId,
+      toolUseId: callId
+    }, { turnId: "turn-3", agentId: childId, ...at(9) });
+
+  const rosterOf = (state: ThreadFoldState) => foldSubagentActivities(state.activities, { sessionLive: true });
+
+  it("gives a settled legacy OpenCode agent one start that names a launch id, on its first start's turn and owner", () => {
+    const state = foldAs("opencode", [...turn("turn-1"), ...legacyOpenCodeChild("ses_child", "turn-1")]);
+    assert.deepEqual(launchesOf(state), [
+      {
+        kind: "activity",
+        id: "launch-1",
+        tone: "info",
+        activityKind: "task.started",
+        // The launch row's own summary: this is that agent's anchor again.
+        summary: "task.started",
+        payload: {
+          taskId: "ses_child",
+          // Its latest row's linkage — the roster's title does not move back —
+          // with the launch id it never had in place of the part's call.
+          agentKind: "agent",
+          taskType: "subagent",
+          agentId: "ses_child",
+          title: "Explore the repo",
+          role: "explore",
+          toolUseId: "legacy-launch:ses_child"
+        },
+        turnId: "turn-1",
+        agentId: "ses_child",
+        // The roster's own `updatedAt` for the agent: the cap ranking (live,
+        // idle, settled — newest first) does not move.
+        createdAt: "2026-09-24T10:00:05.000Z",
+        updatedAt: "2026-09-24T10:00:05.000Z"
+      }
+    ]);
+    assert.equal(legacyLaunchId("ses_child"), "legacy-launch:ses_child");
+  });
+
+  it("changes nothing the roster shows, and lets a later relaunch reopen the agent", () => {
+    const state = foldAs("opencode", [...turn("turn-1"), ...legacyOpenCodeChild("ses_child", "turn-1")]);
+    const after = appliedRows(state, launchesOf(state));
+    assert.deepEqual(rosterOf(after), rosterOf(state), "it reads completed, exactly as before");
+    assert.deepEqual(rosterOf(after).map((agent) => [agent.id, agent.status]), [["ses_child", "completed"]]);
+
+    const relaunched = (from: ThreadFoldState) =>
+      applyDomainEvent(from, sequenced([relaunch("ses_child", "call_again")], from.seq)[0]!);
+    // Without it, the roster reads a start on a settled agent with no launch
+    // id behind it as a late delivery…
+    assert.equal(rosterOf(relaunched(state))[0]?.status, "completed");
+    // …and with it, as the relaunch it is.
+    assert.equal(rosterOf(relaunched(after))[0]?.status, "running");
+    assert.equal(rosterOf(relaunched(after))[0]?.activationCount, 2);
+  });
+
+  it("gives a settled legacy Codex agent one too — a stopped one as much as a completed one", () => {
+    const codexChild = (childId: string, end: Unsequenced): Unsequenced[] => [
+      // `subAgentActivity started` before the fix: no `codex-launch:` id.
+      row(`start:${childId}`, "task.started", {
+        taskId: childId,
+        detail: "reviewer",
+        agentKind: "agent",
+        taskType: "subagent",
+        agentId: childId,
+        agentPath: `/root/${childId}`,
+        title: "reviewer"
+      }, { turnId: "turn-1", agentId: childId }),
+      end
+    ];
+    const state = foldAs("codex", [
+      ...turn("turn-1"),
+      ...codexChild(
+        "thr-done",
+        row("done", "task.completed", { taskId: "thr-done", status: "completed", agentKind: "agent", agentId: "thr-done" }, {
+          agentId: "thr-done"
+        })
+      ),
+      ...codexChild(
+        "thr-cut",
+        row("cut", "task.updated", { taskId: "thr-cut", status: "interrupted", agentKind: "agent", agentId: "thr-cut" }, {
+          agentId: "thr-cut"
+        })
+      )
+    ]);
+    assert.deepEqual(
+      launchesOf(state).map((launch) => [
+        (launch.payload as Record<string, unknown>).taskId,
+        (launch.payload as Record<string, unknown>).toolUseId,
+        launch.turnId,
+        launch.agentId
+      ]),
+      [
+        ["thr-done", "legacy-launch:thr-done", "turn-1", "thr-done"],
+        ["thr-cut", "legacy-launch:thr-cut", "turn-1", "thr-cut"]
+      ]
+    );
+  });
+
+  it("gives none to an agent that needs none: launched with an id, idle, still active, a background task, or no start in the window", () => {
+    const state = foldAs("codex", [
+      ...turn("turn-1"),
+      // A launch id already: the roster reopens it on a different one.
+      row("s-launched", "task.started", { taskId: "launched", agentKind: "agent", toolUseId: "codex-launch:item-1" }, { turnId: "turn-1" }),
+      row("e-launched", "task.completed", { taskId: "launched", status: "completed", agentKind: "agent" }),
+      // Idle: any start reopens it — and one now would.
+      row("s-idle", "task.started", { taskId: "idle", agentKind: "agent" }, { turnId: "turn-1" }),
+      row("e-idle", "task.updated", { taskId: "idle", status: "idle", agentKind: "agent" }),
+      // Still running: the first load's closings settle it first.
+      row("s-running", "task.started", { taskId: "running", agentKind: "agent" }, { turnId: "turn-1" }),
+      // A background task is no agent: it is never relaunched.
+      row("s-shell", "task.started", { taskId: "shell", agentKind: "background", taskType: "local_bash" }, { turnId: "turn-1" }),
+      row("e-shell", "task.completed", { taskId: "shell", status: "completed", agentKind: "background" }),
+      // No start in the window: no launch row to stand for, no turn to ride.
+      row("p-startless", "task.progress", { taskId: "startless", agentKind: "agent", title: "Seen late" }, { turnId: "turn-1" }),
+      row("e-startless", "task.completed", { taskId: "startless", status: "completed", agentKind: "agent" })
+    ]);
+    assert.deepEqual(launchesOf(state), []);
+  });
+
+  it("gives none on a Claude or Grok thread, whose agents always launched with an id", () => {
+    for (const adapter of ["claude", "grok"] as const) {
+      const state = foldAs(adapter, [...turn("turn-1"), ...legacyOpenCodeChild("task-1", "turn-1")]);
+      assert.deepEqual(launchesOf(state), [], adapter);
+    }
+  });
+
+  it("gives each agent one, once: a second pass finds nothing", () => {
+    const state = foldAs("opencode", [
+      ...turn("turn-1"),
+      ...legacyOpenCodeChild("ses_a", "turn-1"),
+      ...legacyOpenCodeChild("ses_b", "turn-1")
+    ]);
+    const launches = launchesOf(state);
+    assert.deepEqual(
+      launches.map((launch) => (launch.payload as Record<string, unknown>).toolUseId),
+      ["legacy-launch:ses_a", "legacy-launch:ses_b"]
+    );
+    assert.deepEqual(launchesOf(appliedRows(state, launches)), []);
   });
 });

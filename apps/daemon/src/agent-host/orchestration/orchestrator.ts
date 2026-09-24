@@ -139,7 +139,7 @@ import {
   threadNotFound
 } from "./errors.ts";
 import { applyEventsChunked, DEFAULT_FOLD_OPS, type FoldOps } from "./fold-ops.ts";
-import { leftoverWorkClosings } from "./leftover-work.ts";
+import { legacyLaunchStarts, leftoverWorkClosings } from "./leftover-work.ts";
 import {
   createMemoryLaunchConfigStore,
   launchConfigFromRequest,
@@ -4348,10 +4348,53 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
+   * The start that names a launch id for every settled agent an older host
+   * launched with none (`legacyLaunchStarts` in `leftover-work.ts`, which
+   * says which agents and why the row changes nothing but that). The roster
+   * reopens a settled agent only on a start naming a launch id different from
+   * its last, so without one the first relaunch a host with the relaunch fix
+   * writes for such an agent reads as a late delivery, and the agent stays
+   * settled while it works. The paths and guards of the closings — a first
+   * load, never a thread an adapter lists as live — and best-effort likewise.
+   * Once per agent: the row names a launch id, so a later load finds none.
+   */
+  const recordLegacyLaunches = async (runtime: ThreadRuntime): Promise<void> => {
+    try {
+      if (!headOf(runtime) || runtime.deleted || hasLiveSession(runtime.id)) return;
+      const launches = legacyLaunchStarts(runtime.state, { nextId: () => ids.eventId() });
+      if (launches.length === 0) return;
+      const occurredAt = clock.nowIso();
+      await append(
+        runtime,
+        launches.map((activity) =>
+          buildEvent(runtime.id, "thread.activity-appended", { activity }, { occurredAt })
+        )
+      );
+    } catch (error) {
+      logger.warn(`agent-host: failed to name the launches of ${runtime.id}'s legacy agents`, error);
+    }
+  };
+
+  /**
+   * What a thread's first load in a host lifetime owes the rows its last
+   * process wrote: the work it left open, closed ({@link closeLeftoverWork}),
+   * then the launch ids an older host never wrote
+   * ({@link recordLegacyLaunches}) — after the closings, so an agent they
+   * just stopped reads as the settled agent it is.
+   */
+  const repairLeftovers = async (
+    runtime: ThreadRuntime,
+    runningTurnId?: string | null
+  ): Promise<void> => {
+    await closeLeftoverWork(runtime, runningTurnId);
+    await recordLegacyLaunches(runtime);
+  };
+
+  /**
    * A1: the settle a thread the reconcile did not fold is owed, on its first
-   * load — and the work its last process left running, closed. Best-effort,
-   * exactly as it was at boot — a failure is logged and the thread still
-   * loads, rather than a transient write error making it unreadable.
+   * load — and what its last process left, repaired. Best-effort, exactly as
+   * it was at boot — a failure is logged and the thread still loads, rather
+   * than a transient write error making it unreadable.
    */
   const settleOnFirstLoad = async (runtime: ThreadRuntime): Promise<void> => {
     try {
@@ -4359,7 +4402,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     } catch (error) {
       logger.warn(`agent-host: failed to settle ${runtime.id} on its first load`, error);
     }
-    await closeLeftoverWork(runtime);
+    await repairLeftovers(runtime);
   };
 
   const reconcile = async (): Promise<void> => {
@@ -4432,7 +4475,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // is owed what `settleOnFirstLoad` does: no live session serves it
       // (`live`, above), so nothing can own what its log still shows running.
       await settleStalePendingTurns(runtime);
-      await closeLeftoverWork(runtime);
+      await repairLeftovers(runtime);
       return;
     }
 
@@ -4474,13 +4517,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
       // A parked request's cancellation rides the turn the head said was
       // running, as a Stop's does, though the settle has just cleared it.
-      await closeLeftoverWork(runtime, session.activeTurnId);
+      await repairLeftovers(runtime, session.activeTurnId);
       return;
     }
 
     // What the dead process still had running is closed before its turn is
-    // continued: a continuation's process owns none of it.
-    await closeLeftoverWork(runtime, session.activeTurnId);
+    // continued — and its legacy agents' launches named: a continuation's
+    // process owns none of it, and may relaunch any of them.
+    await repairLeftovers(runtime, session.activeTurnId);
 
     // 1/2. The marker is written AGAIN, with `prepared`, immediately before the
     // continuation is sent: that is what makes recovery survive a host that

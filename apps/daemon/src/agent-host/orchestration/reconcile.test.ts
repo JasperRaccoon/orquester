@@ -4,12 +4,13 @@
  * scripted adapter and a temporary in-memory store; the assertions are on the
  * resulting head and on which continuation call the adapter received — and on
  * what a thread's first load closes of the work a dead process left open (one
- * of those on the real store, for what reaches the disk), and when a turn
- * that process was running ends (its last write, never the restart). The
- * late rows those closings write stretch an old turn's range in the thread
- * index, and so does a background agent's late completion: the "Load older"
- * walks over a real index are here, a rewind that keeps such a turn among
- * them.
+ * of those on the real store, for what reaches the disk), when a turn that
+ * process was running ends (its last write, never the restart), and the
+ * launch ids a first load gives the agents an older host launched with none.
+ * The late rows those closings write stretch an old turn's range in the
+ * thread index, and so does a background agent's late completion: the "Load
+ * older" walks over a real index are here, a rewind that keeps such a turn
+ * among them.
  */
 
 import assert from "node:assert/strict";
@@ -1481,6 +1482,179 @@ describe("reconcile — a crash-settled turn ends when its process died", () => 
         ["provider.turn.start.failed", next.clock.nowIso()]
       ]
     );
+    await next.stop();
+  });
+});
+
+describe("reconcile — a first load gives a legacy agent the launch id an older host never wrote", () => {
+  /**
+   * An OpenCode child as the normaliser wrote it before the relaunch fix: its
+   * run started at its own `session.created`, so its start names no launching
+   * call, and every later row names the parent `task` part's `callID`.
+   */
+  const legacyChildRows = (threadId: string, childId: string): AppendableDomainEvent[] => [
+    sunkRow(threadId, `start:${childId}`, "task.started", {
+      taskId: childId,
+      detail: "Subagent",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId
+    }, { turnId: "turn-1", agentId: childId }),
+    sunkRow(threadId, `task-progress:${childId}`, "task.progress", {
+      taskId: childId,
+      title: "Explore the repo",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId,
+      toolUseId: `call_${childId}`
+    }, { turnId: "turn-1", agentId: childId }),
+    sunkRow(threadId, `done:${childId}`, "task.completed", {
+      taskId: childId,
+      status: "completed",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId,
+      title: "Explore the repo",
+      toolUseId: `call_${childId}`
+    }, { turnId: "turn-1", agentId: childId })
+  ];
+
+  type LegacyAdapter = "opencode" | "codex" | "claude";
+
+  const hostFor = (adapter: LegacyAdapter, store?: FakeThreadStore) =>
+    createTestHost({
+      ...(store !== undefined ? { store } : {}),
+      adapters: { [adapter]: createScriptedAdapter({ id: adapter }) }
+    });
+
+  /** A thread whose last host died after `legacyChildRows`, its head at rest. */
+  async function legacyThread(adapter: LegacyAdapter) {
+    const first = hostFor(adapter);
+    const threadId = await first.createThread({ refId: adapter });
+    await first.orchestrator.ingestionSink(threadId, legacyChildRows(threadId, "ses_child"));
+    await first.settle();
+    await first.stop();
+    return { store: first.store, threadId, logLength: first.store.logs.get(threadId)!.length };
+  }
+
+  /** Each appended launch row: its task, launch id and turn. */
+  const launchesIn = (events: readonly DomainEvent[]) =>
+    events.flatMap((event) => {
+      if (event.type !== "thread.activity-appended" || event.payload.activity.activityKind !== "task.started") return [];
+      const payload = event.payload.activity.payload as Record<string, unknown>;
+      return [[payload.taskId, payload.toolUseId, event.payload.activity.turnId]];
+    });
+
+  it("an OpenCode thread's first load names the agent's launch: it still reads completed, and a relaunch reopens it", async () => {
+    const { store, threadId, logLength } = await legacyThread("opencode");
+    const next = hostFor("opencode", store);
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength, "boot appends nothing to a thread it did not fold");
+
+    const read = await next.orchestrator.readThread(threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(launchesIn(appended), [["ses_child", "legacy-launch:ses_child", "turn-1"]]);
+    assert.equal(appended.length, 1, "nothing else is written");
+    assert.deepEqual(
+      foldSubagentActivities(
+        snapshotItems(read).filter((item): item is ThreadActivityItem => item.kind === "activity"),
+        { sessionLive: true }
+      ).map((agent) => [agent.id, agent.status]),
+      [["ses_child", "completed"]]
+    );
+
+    // A host with the relaunch fix re-prompts the child under a new call,
+    // inside a live turn: the host's own fold reopens it.
+    await next.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.session-set", { session: { status: "running", activeTurnId: "turn-2" } }),
+      sunkRow(threadId, "relaunch", "task.started", {
+        taskId: "ses_child",
+        detail: "Explore the repo",
+        taskType: "subagent",
+        agentKind: "agent",
+        agentId: "ses_child",
+        toolUseId: "call_again"
+      }, { turnId: "turn-2", agentId: "ses_child" })
+    ]);
+    await next.settle();
+    const after = await next.orchestrator.readThread(threadId);
+    assert.equal(after.kind, "snapshot");
+    assert.deepEqual(
+      after.kind === "snapshot" ? after.thread.roster.map((agent) => [agent.id, agent.status, agent.activationCount]) : null,
+      [["ses_child", "running", 2]]
+    );
+    await next.stop();
+  });
+
+  it("a second load appends nothing", async () => {
+    const { store, threadId, logLength } = await legacyThread("opencode");
+    const next = hostFor("opencode", store);
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await next.stop();
+    assert.equal(store.logs.get(threadId)!.length, logLength + 1);
+
+    const third = hostFor("opencode", store);
+    await third.orchestrator.reconcile();
+    await third.orchestrator.readThread(threadId);
+    await third.settle();
+    await third.stop();
+    assert.equal(store.logs.get(threadId)!.length, logLength + 1);
+  });
+
+  it("a Claude thread's first load names none: its agents always launched with an id", async () => {
+    const { store, threadId, logLength } = await legacyThread("claude");
+    const next = hostFor("claude", store);
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength);
+    await next.stop();
+  });
+
+  it("an orphaned Codex thread gets it in the reconcile, before a continuation's process can relaunch anything", async () => {
+    const first = hostFor("codex");
+    const threadId = await first.createThread({ refId: "codex" });
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await first.settle();
+    await first.orchestrator.ingestionSink(threadId, legacyChildRows(threadId, "thr-child"));
+    await first.settle();
+    await first.stop();
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({
+      store: first.store,
+      adapters: { codex: createScriptedAdapter({ id: "codex", capabilities: { promptlessTurnContinuation: true } }) },
+      continuationEnabled: () => true
+    });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(launchesIn(appended), [["thr-child", "legacy-launch:thr-child", "turn-1"]]);
+    const launchAt = appended.findIndex((event) => launchesIn([event]).length > 0);
+    const preparedAt = appended.findIndex(
+      (event) => event.type === "thread.session-set" && event.payload.session.status === "starting"
+    );
+    assert.ok(preparedAt !== -1 && launchAt < preparedAt, "named before the continuation is prepared");
+    await next.stop();
+  });
+
+  it("never on a first load that finds the thread live", async () => {
+    const { store, threadId, logLength } = await legacyThread("opencode");
+    const next = hostFor("opencode", store);
+    await next.orchestrator.reconcile();
+    await next.adapter.startSession({
+      threadId,
+      cwd: "/work/project",
+      home: { kind: "account", path: "/tmp/home/acc1" },
+      modelSelection: { model: "test-model" },
+      runtimeMode: "approval-required"
+    });
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength);
     await next.stop();
   });
 });

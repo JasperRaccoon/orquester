@@ -99,6 +99,14 @@
  * closer, past the cut, leaves the history with them — the fold keeps it by
  * its turn, and the window shows it while retention does.
  *
+ * **A first load also names the launches an older host never wrote**
+ * ({@link legacyLaunchStarts}): an OpenCode or Codex agent launched before
+ * the relaunch fix has no launch id on its start, so the roster could never
+ * tell its relaunch from a late delivery. One `task.started` carrying
+ * {@link legacyLaunchId} gives a settled one an id; it changes nothing the
+ * roster shows, and lets the next relaunch reopen it. After the closings, so
+ * an agent they stop counts as settled.
+ *
  * Pure: no clock, no ids, no I/O of its own — the caller hands in both.
  */
 
@@ -109,6 +117,8 @@ import {
   commandOutputText,
   foldSubagentActivities,
   openWorkOf,
+  TERMINAL_SUBAGENT_STATUSES,
+  type AgentAdapterId,
   type OpenCall,
   type RuntimeSubagent,
   type ThreadActivityItem,
@@ -415,4 +425,141 @@ function taskCloser(agent: RuntimeSubagent, rows: TaskRows, input: LeftoverWorkI
     createdAt: input.now,
     updatedAt: input.now
   };
+}
+
+// ---------------------------------------------------------------------------
+// Launch ids an older host never wrote
+// ---------------------------------------------------------------------------
+
+/**
+ * The adapters whose older hosts launched agents with no launch id on their
+ * first `task.started`: OpenCode started a child's run at its own
+ * `session.created`, before the parent's `task` part named it, and Codex's
+ * `subAgentActivity started` carried no `codex-launch:` id (both until the
+ * relaunch fix, 2026-09-24). Claude's starts always name the launching
+ * `tool_use_id`, and Grok surfaced no agents at all before it did so with ids.
+ */
+const LEGACY_LAUNCH_ADAPTERS: ReadonlySet<AgentAdapterId> = new Set(["opencode", "codex"]);
+
+/** The launch id a first load gives an agent an older host launched with none. */
+export function legacyLaunchId(taskId: string): string {
+  return `legacy-launch:${taskId}`;
+}
+
+/** One agent's rows, as {@link legacyLaunchStarts} reads them. */
+interface AgentRows {
+  /** Every row naming the task — the roster folds the kinds it reads, skips the rest. */
+  readonly rows: ThreadActivityItem[];
+  /** Its first `task.started`: the launch this row stands for, its turn and its owner. */
+  readonly start: ThreadActivityItem;
+  /** Its newest `task.*` row: the linkage bundle as it now stands. */
+  latest: ThreadActivityItem;
+  /** Some `task.started` of it names a launch id, as the roster reads one. */
+  launched: boolean;
+}
+
+/**
+ * The `task.started` rows that give a settled agent the launch id an older
+ * host never wrote on its start — `[]` for anything but an OpenCode or Codex
+ * thread (the head's adapter).
+ *
+ * The roster reopens a settled agent only on a start whose `toolUseId`
+ * differs from the previous start's, both defined (`roster.ts`, the
+ * `task.started` arm): a new call is a relaunch, the same one a late
+ * delivery. A host with the relaunch fix starts every run under a launch id,
+ * but an agent an older host launched has none behind it, so its first
+ * relaunch reads as a late delivery and the agent stays settled while it
+ * works. One start carrying {@link legacyLaunchId} gives it one; the fold is
+ * untouched (`FOLD_SNAPSHOT_VERSION` stays), and a log an older host folds
+ * reads the row as what it is, the same agent's start.
+ *
+ * For every agent the roster reads as one (`agentKind: "agent"`) with a start
+ * in the window, none of whose starts names a launch id, and whose own fold is
+ * TERMINAL — `completed`, `failed`, `cancelled`, `interrupted`, a stop the
+ * first load's closings just wrote included. On a terminal agent the start
+ * only records the id: no reopen, and no visible row — it is that agent's
+ * anchor again (retention keeps it; the GUI's spawn row and the MCP's entry
+ * are keyed by task id). An `idle` agent gets none: any start reopens it
+ * (Codex's resumable child), and this one would, now. An active one is the
+ * closings' to settle first. An agent with no start in the window gets none:
+ * no launch to stand for and no turn to ride, and a start would be the row
+ * that creates it in the roster, running, once retention dropped the rest.
+ *
+ * The row is the agent's launch again: its first start's turn — a rewind
+ * keeps or drops it with that start (`reduceReverted`) — owner, tone and
+ * summary; its newest row's linkage (without the status and error that row
+ * reported), as a closer carries it, so the roster's title does not move
+ * back; the launch id in place of any call a later row named. It is stamped
+ * with the roster's own `updatedAt` for the agent, which the `task.started`
+ * arm writes back unchanged: stamped with the load's time, a thread of more
+ * than `ROSTER_LIMIT` agents would rank every legacy one newest among the
+ * settled rows, and the cap would drop the agents that really are.
+ *
+ * Once per agent: the row names a launch id, so the next load finds none.
+ * Pure — `nextId` asked once per row.
+ */
+export function legacyLaunchStarts(
+  state: Pick<ThreadFoldState, "head" | "activities">,
+  input: { readonly nextId: () => string }
+): ThreadActivityItem[] {
+  const adapter = state.head?.adapter;
+  if (adapter === undefined || !LEGACY_LAUNCH_ADAPTERS.has(adapter)) return [];
+
+  // One pass: every row naming a task, by the trimmed id the roster keys it on.
+  const tasks = new Map<string, ThreadActivityItem[]>();
+  const agents = new Map<string, AgentRows>();
+  for (const activity of state.activities) {
+    const payload = asRecord(activity.payload);
+    const taskId = nonBlank(payload?.taskId)?.trim();
+    if (taskId === undefined) continue;
+    let rows = tasks.get(taskId);
+    if (rows === undefined) {
+      rows = [];
+      tasks.set(taskId, rows);
+    }
+    rows.push(activity);
+    if (!TASK_ROW_KINDS.has(activity.activityKind)) continue;
+    const known = agents.get(taskId);
+    const launches = activity.activityKind === "task.started" && nonBlank(payload?.toolUseId) !== undefined;
+    if (known !== undefined) {
+      known.latest = activity;
+      known.launched ||= launches;
+    } else if (activity.activityKind === "task.started") {
+      agents.set(taskId, { rows, start: activity, latest: activity, launched: launches });
+    }
+  }
+
+  const starts: ThreadActivityItem[] = [];
+  for (const [taskId, agent] of agents) {
+    if (agent.launched) continue;
+    // The task's own fold, alone: one task is never capped, and every arm of
+    // the roster reads its own task only, so this is its row in the roster.
+    const [folded] = foldSubagentActivities(agent.rows);
+    if (folded === undefined || folded.agentKind !== "agent" || !TERMINAL_SUBAGENT_STATUSES.has(folded.status)) {
+      continue;
+    }
+    const linkage = taskLinkageActivityFields(asRecord(agent.latest.payload) ?? {});
+    delete linkage.status;
+    delete linkage.error;
+    linkage.agentKind = folded.agentKind;
+    const owner = ownerOf(agent.start);
+    starts.push({
+      kind: "activity",
+      id: input.nextId(),
+      tone: agent.start.tone,
+      activityKind: "task.started",
+      summary: agent.start.summary,
+      payload: {
+        // The rows' own spelling, as a closer writes it.
+        taskId: nonBlank(asRecord(agent.start.payload)?.taskId) ?? taskId,
+        ...linkage,
+        toolUseId: legacyLaunchId(taskId)
+      },
+      turnId: agent.start.turnId,
+      ...(owner !== undefined ? { agentId: owner } : {}),
+      createdAt: folded.updatedAt,
+      updatedAt: folded.updatedAt
+    });
+  }
+  return starts;
 }
