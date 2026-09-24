@@ -105,12 +105,15 @@ export const OUTPUT_WINDOW_HEAD = "...\n\n";
  *   sending (fixtures 03, 04, 12): the appended text;
  * - `value` is a prefix of the mark, `""` included: nothing, and the mark
  *   stays — a snapshot never rewinds what went out, as with text parts;
- * - otherwise the mark re-bases on `value`, a window that slides instead of
- *   growing: past 30 000 characters the tool keeps {@link OUTPUT_WINDOW_HEAD}
- *   and the last 30 000. What follows the window's longest overlap with the
- *   end of the mark is new. A window keeping nothing of the mark — a burst
- *   longer than itself between two frames — is new whole, its head marking
- *   the gap; a value with no such head that overlaps nothing proves nothing.
+ * - `value` carries {@link OUTPUT_WINDOW_HEAD}: past 30 000 characters the
+ *   tool keeps that head and the last 30 000, a window that slides instead of
+ *   growing. The mark re-bases on it, and what follows the window's longest
+ *   overlap with the end of the mark is new; a window keeping nothing of the
+ *   mark — a burst longer than itself between two frames — is new whole, its
+ *   head marking the gap;
+ * - anything else re-bases the mark and adds nothing: without the head, an
+ *   overlap proves nothing (a value opening with the mark's last line break
+ *   would read as a window that repeats the whole mark).
  *
  * Repetitive output can overlap further than it really did, and then a
  * repeat is lost, never shown twice.
@@ -125,13 +128,51 @@ export function advanceOutputMark(
   if (mark.startsWith(value)) {
     return { mark, chunk: "" };
   }
-  const windowed = value.startsWith(OUTPUT_WINDOW_HEAD);
-  const body = windowed ? value.slice(OUTPUT_WINDOW_HEAD.length) : value;
-  const overlap = suffixPrefixOverlap(mark, body);
-  if (overlap > 0) {
-    return { mark: value, chunk: body.slice(overlap) };
+  if (!value.startsWith(OUTPUT_WINDOW_HEAD)) {
+    return { mark: value, chunk: "" };
   }
-  return { mark: value, chunk: windowed ? value : "" };
+  const body = value.slice(OUTPUT_WINDOW_HEAD.length);
+  const overlap = suffixPrefixOverlap(mark, body);
+  return { mark: value, chunk: overlap > 0 ? body.slice(overlap) : value };
+}
+
+/** How much of the stream's end {@link finalOutputRemainder} looks for. */
+const FINAL_ANCHOR_CHARS = 512;
+/**
+ * The shortest end it anchors on. Below it — a line or two — the same text
+ * recurs in ordinary output by chance (`ok`, a prompt, a blank line), so
+ * finding it proves nothing about where the stream ended.
+ */
+const FINAL_ANCHOR_FLOOR = 64;
+
+/**
+ * What a command's final `output` holds past the stream a client was shown —
+ * `mark`, its last running value — for its completion to append before it
+ * closes the call. 1.18.32's final output is not always that value
+ * (`ShellTool.run`, read from the source): a command it stopped gains a
+ * `<shell_metadata>` note (the timeout, "User aborted the command"), an output
+ * past its limits is cut again behind a note naming the file that holds all
+ * of it, and what a running frame the client never got carried shows only
+ * there.
+ *
+ * - The final output extends the mark: the rest of it.
+ * - Otherwise it was cut: what follows the LAST place it holds the mark's
+ *   end — its last {@link FINAL_ANCHOR_CHARS} characters, or all of a
+ *   shorter mark — is new. A mark shorter than {@link FINAL_ANCHOR_FLOOR}
+ *   anchors nothing.
+ * - Not found: nothing. The stream then stays as it was shown, and the
+ *   completion's own output is what the row's data keeps.
+ */
+export function finalOutputRemainder(mark: string, final: string): string {
+  if (final.startsWith(mark)) {
+    return final.slice(mark.length);
+  }
+  if (mark.length < FINAL_ANCHOR_FLOOR) {
+    return "";
+  }
+  const anchor = mark.slice(-FINAL_ANCHOR_CHARS);
+  const at = final.lastIndexOf(anchor);
+  return at === -1 ? "" : final.slice(at + anchor.length);
 }
 
 /** How much of the mark's end the overlap search looks for first. */
@@ -420,9 +461,26 @@ export interface OpenCodeChildAgent {
    * The child's own `session.idle` ended the current run with no result: the
    * parent's `task` part that settles right after it carries the answer
    * (fixture 12, lines 179-180), and gives it to this run's end once
-   * (`linkChildFromTaskPart`). Cleared by that, and by a relaunch.
+   * (`linkChildFromTaskPart`) — or, for a run in the background, the answer
+   * the tool injects into the parent (`takeBackgroundResult`). Cleared by
+   * that, and by a relaunch.
    */
   resultPending?: boolean;
+  /**
+   * A background run's answer that reached the parent before the child's own
+   * `session.idle` ended the run: that end carries it. Cleared by a relaunch.
+   */
+  pendingResult?: string;
+}
+
+/**
+ * A running command part's `state.metadata.output` as last seen — what its
+ * `command_output` chunks already showed — and the message holding the part,
+ * so a removed message drops its parts' marks.
+ */
+export interface OpenCodeOutputMark {
+  messageId: string;
+  value: string;
 }
 
 export interface OpenCodeCancellation {
@@ -470,11 +528,11 @@ export interface OpenCodeSessionState {
   /**
    * A running command part's `state.metadata.output` as last seen, by part id
    * — the high-water mark its `command_output` chunks are cut against
-   * (`emitRunningOutput`). Dropped when the part settles or is removed;
-   * bounded, least recently written first, for a part whose settle never
-   * reached the demux.
+   * (`emitCommandOutput`). Dropped when the part settles or is removed, or its
+   * message is; bounded, least recently written first, for a part whose
+   * settle never reached the demux.
    */
-  outputMarks: Map<string, string>;
+  outputMarks: Map<string, OpenCodeOutputMark>;
   turnTokenUsage?: OpenCodeTurnTokenUsageAccumulator;
 
   /**
