@@ -793,7 +793,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   closer rides the turn its work started in, so a turn of seconds read "Worked for 50h". Only a turn
   still running, or one no row describes, is timed by its rows. A drill-in's folds are always timed
   by the agent's own rows (`drill-in.logic.ts` passes no `turns`): a background agent works long
-  past the parent turn its rows ride, and that turn's seconds would say nothing of it.
+  past the parent turn its rows ride, and that turn's seconds would say nothing of it. A thinking
+  block never holds a fold open, so there — no turn is unfolded as running — a thought still being
+  written can end a folded turn: a fold its rows time keeps a clock (`TurnFoldClock` in
+  `rows.logic.ts`: its start and the POSITIONS of its answer and its last row, which a token never
+  moves), and the streamed-text fast path relabels it off that clock, so its "Worked for …" follows
+  the tokens and closes on the thought's last write. The drill-in holds its disclosure sets across
+  projections for that fast path (`shallowEqualInput` compares them by identity; a fresh pair per
+  projection rebuilt every row on every token).
 - **The agent host is a protected kill target but its children are not.** `system-status.ts` takes
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a

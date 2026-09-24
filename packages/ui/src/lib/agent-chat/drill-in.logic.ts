@@ -90,13 +90,20 @@ export function projectAgentDrillIn(
       expandedTurnIds.add(turnId);
     }
   }
+  // The rows derivation compares these sets by identity, so the pair is held
+  // while its members stay the same: a fresh pair per projection sent every
+  // streamed token down a full rebuild instead of the streamed-text fast path.
+  const heldInput = held?.rows?.input;
   const rows = deriveTimelineRowsWithState(
     {
       timelineEntries: timeline.entries,
       isWorking: false,
       activeTurnStartedAt: null,
-      expandedTurnIds,
-      expandedWorkGroupIds: new Set(input.disclosures?.expandedGroupIds ?? []),
+      expandedTurnIds: keepHeldSet(heldInput?.expandedTurnIds, expandedTurnIds),
+      expandedWorkGroupIds: keepHeldSet(
+        heldInput?.expandedWorkGroupIds,
+        new Set(input.disclosures?.expandedGroupIds ?? [])
+      ),
       // A child timeline offers no rewind: §5.5 rolls back the thread, and
       // a subagent has no turn of the thread's own to roll back to. Nor the
       // thread's `turns`: a fold here is timed by the agent's own rows — a
@@ -109,4 +116,17 @@ export function projectAgentDrillIn(
   );
   const stable = computeStableRows(rows.rows, held?.stable ?? EMPTY_STABLE_ROWS);
   return { agentId, timeline, rows, stable };
+}
+
+/** `held` when it has exactly `next`'s members, else `next`. */
+function keepHeldSet(held: ReadonlySet<string> | undefined, next: ReadonlySet<string>): ReadonlySet<string> {
+  if (held === undefined || held.size !== next.size) {
+    return next;
+  }
+  for (const id of next) {
+    if (!held.has(id)) {
+      return next;
+    }
+  }
+  return held;
 }
