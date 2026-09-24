@@ -3305,7 +3305,11 @@ Row kinds and behaviour:
   their work started in; timed by its rows, a turn of seconds read "Worked for 50h". A turn still
   running, or one no turn row describes, is still timed by its rows, and so is every fold of a
   drill-in: a background agent works long past the parent turn its rows ride, so its fold keeps
-  the span of the agent's own rows, never that turn's seconds.*
+  the span of the agent's own rows, never that turn's seconds. A thinking block never holds a fold
+  open, so a drill-in's fold can end on a thought still being written: its "Worked for …" follows
+  the tokens — the streamed-text fast path re-reads it off the fold's clock (`TurnFoldClock`), and
+  the drill-in's tokens take that fast path as the window's do — and closes on the thought's last
+  write.*
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
   self-ticking elapsed timer, so the turn is never represented by an empty timeline.
