@@ -2890,15 +2890,18 @@ exactly as above. Paging a long output used to read and decode the whole log twi
 read, then the join) and ship the whole join: 151 MiB of log and 8 MiB of output were ~3.4 s and
 8 MiB per page. The windows come from the host store's in-memory **tool-output cache**
 (`store/tool-output-cache.ts`): an item cursor per item — its newest write, whose activity is then
-read back as one line (`readItem` rides it too) — and an incremental join per CALL, each extended
-by the committed log past its cursor with `readLog`'s rules, rebuilt from byte 0 on any doubt,
-dropped by `deleteThread`, untouched by a revert; 32 MiB of join buffers, 1 024 item cursors, LRU,
-10 minutes idle. The first page of that log now costs ~2.2 s and every later one under a
-millisecond. No `AGENT_HOST_PROTOCOL_VERSION` bump: the query is additive both ways — a host from
+read back as one line (`readItem` rides it too; a message the resident fold still holds is the
+orchestrator's to answer, from the fold, and never reaches the store) — and an incremental join per
+CALL, each extended by the committed log past its cursor with `readLog`'s rules, rebuilt from byte 0
+on any doubt, dropped by `deleteThread`, untouched by a revert; 32 MiB of join buffers, 1 024 item
+cursors, LRU, 10 minutes idle. The first page of that log now costs ~2.2 s and every later one a few
+milliseconds. No `AGENT_HOST_PROTOCOL_VERSION` bump: the query is additive both ways — a host from
 before windows matches the route on its path and answers the whole join (the MCP tells the two
 bodies apart, `isThreadItemOutputWindow`, and windows that one itself), and a daemon from before
 windows sends no query — and a bump would also have thrown away the provider-snapshot disk cache.
-The daemon forwards `offset`/`maxBytes` only as single strings.*
+The daemon forwards `offset`/`maxBytes` verbatim — an empty or a repeated value included — so the
+host's rules are the only ones: an empty or repeated `offset` is its 400, a repeated `maxBytes`
+takes its first value.*
 
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured

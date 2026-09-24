@@ -491,8 +491,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   store's **tool-output cache** (`store/tool-output-cache.ts`, memory only) serves
   `GET …/items/:itemId/output?offset=&maxBytes=` and `readItem`'s activities: an item cursor per
   `(thread, item)` — its newest write, the line and the call it names, so an activity read is the
-  log's tail plus one `pread` of its line (checked by `seq` and id; a message still folds the whole
-  log) — and an incremental join per `(thread, call)`, keyed by CALL so an item re-pointed at
+  log's tail plus one `pread` of its line (checked by `seq` and id; a message is never the store's
+  to answer while the thread's resident fold holds it — the orchestrator's `readItem` returns the
+  fold's copy, unslimmed and merged as the store's whole-log fold would merge it — and only one
+  retention dropped folds the whole log) — and an incremental join per `(thread, call)`, keyed by CALL so an item re-pointed at
   another call never rebuilds one (`ToolOutputJoin`, the same step as `joinToolOutput`; the
   split-point property test in `tool-output.test.ts` holds them equal). Every entry is extended by
   the COMMITTED log past its cursor (`entry.logBytes` — never an append in flight, which a rollback

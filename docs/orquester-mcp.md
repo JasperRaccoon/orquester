@@ -836,8 +836,9 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   output's window too, but neither reads the thread's log whole again: the host keeps each item's
   newest write and each call's joined output in memory, and extends them by what the log gained
   since — the first page of a long thread's output costs a read of its log, every later one a few
-  milliseconds, and only the window asked for crosses to the daemon. (A message still folds the
-  thread's log for its text on every page, as the GUI's viewer does.)
+  milliseconds, and only the window asked for crosses to the daemon. (A message comes from the
+  thread the host holds in memory; only one old enough to have left it — past the newest 2 000 —
+  folds the thread's log for its text, on every page.)
 
 ```jsonc
 // The transcript shows a test run's first line — and where the whole of it is.
