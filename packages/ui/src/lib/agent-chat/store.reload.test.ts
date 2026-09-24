@@ -41,6 +41,7 @@ import {
   createThreadStore,
   resetDismissedErrorBanners,
   resetThreadStores,
+  retainThreadStore,
   type ThreadStore
 } from "./store";
 import { AgentChatCommandError, type AgentChatTransport } from "./transport";
@@ -156,6 +157,20 @@ function open(sessionId: string, host: ReturnType<typeof fakeHost>, idPrefix = "
   });
 }
 
+/**
+ * The page a reload replaces: its store is the registry's, so the reload
+ * below tears it down — nothing of it may act after, as nothing of a page
+ * a browser reloaded does.
+ */
+function previousPage(sessionId: string, host: ReturnType<typeof fakeHost>): ThreadStore {
+  return retainThreadStore(sessionId, {
+    transport: host.transport,
+    newId: ids("first-page-"),
+    now,
+    delay: async () => {}
+  });
+}
+
 /** Everything the page held in memory is gone; the tab's storage is what survives. */
 function reload(): void {
   resetThreadStores();
@@ -236,7 +251,7 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("re-posts a send the page was still posting under the SAME commandId, once, the thread reading Sending meanwhile", async () => {
     const before = fakeHost();
-    const page = open("A", before, "first-page-");
+    const page = previousPage("A", before);
     await flush();
     void page.getState().actions.sendTurn({ text: "deploy the fix", attachments: [file("f1")] }).catch(() => {});
     await settle();
@@ -395,7 +410,7 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("brings queued messages back as queued, in order, under the commandIds they were queued with", async () => {
     const before = fakeHost();
-    const page = open("A", before, "first-page-");
+    const page = previousPage("A", before);
     await flush();
     before.push(running("A"));
     for (const text of ["one", "two", "three"]) page.getState().actions.queueMessage(queuedInput(text));
@@ -434,6 +449,93 @@ describe("a reload never loses or duplicates a message", () => {
     assert.deepEqual(host.turns, queuedWith);
     assert.deepEqual(thread.getState().slice.queue, []);
     assert.equal(stored(), null);
+  });
+
+  it("leaves nothing for a reload once a send settled — delivered, or given back to the draft", async () => {
+    const before = fakeHost();
+    const page = previousPage("A", before);
+    await flush();
+    const delivered = page.getState().actions.sendTurn({ text: "landed" });
+    const refused = page.getState().actions.sendTurn({ text: "given back" }).catch(() => {});
+    await settle();
+    before.attempts[0]!.answer();
+    before.attempts[1]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await delivered;
+    await refused;
+    assert.equal(stored(), null);
+
+    reload();
+    const host = fakeHost();
+    open("A", host, "second-page-");
+    await flush();
+    assert.equal(host.attempts.length, 0, "the composer already gave the refused one back: never twice");
+  });
+
+  it("re-posts first, under its own id, the queued send a page was posting when it reloaded", async () => {
+    const before = fakeHost();
+    const page = previousPage("A", before);
+    await flush();
+    before.push(running("A"));
+    page.getState().actions.queueMessage(queuedInput("one"));
+    page.getState().actions.queueMessage(queuedInput("two"));
+    const [one, two] = page.getState().slice.queue.map((message) => message.commandId);
+    before.push(ready("A"));
+    await settle();
+    assert.deepEqual(before.posted(), [["one", one]], "the head is on its way");
+
+    reload();
+    const host = fakeHost();
+    const thread = open("A", host, "second-page-");
+    await flush();
+    host.push(ready("A"));
+    await settle();
+    assert.deepEqual(host.posted(), [["one", one]], "the head again, the same command — and nothing else yet");
+    assert.deepEqual(thread.getState().slice.queue.map((message) => message.text), ["two"]);
+    host.attempts[0]!.answer();
+    await settle();
+    assert.deepEqual(host.posted(), [
+      ["one", one],
+      ["two", two]
+    ]);
+  });
+
+  it("starts a generation that has nothing retained from the queue this page kept", async () => {
+    const host = fakeHost();
+    const first = open("A", host, "first-");
+    await flush();
+    host.push(running("A"));
+    first.getState().actions.queueMessage(queuedInput("one"));
+    first.getState().actions.queueMessage(queuedInput("two"));
+    const queuedWith = first.getState().slice.queue.map((message) => message.commandId);
+    // Torn down with its retained snapshot gone — what the 5-minute idle TTL does.
+    (first as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({
+      retain: false
+    });
+
+    const next = open("A", host, "next-");
+    assert.deepEqual(
+      next.getState().slice.queue.map((message) => [message.text, message.commandId]),
+      [
+        ["one", queuedWith[0]],
+        ["two", queuedWith[1]]
+      ]
+    );
+  });
+
+  it("does not bring back as queued what Stop returned to the composer", async () => {
+    const before = fakeHost();
+    const page = previousPage("A", before);
+    await flush();
+    before.push(running("A"));
+    page.getState().actions.queueMessage(queuedInput("one"));
+    page.getState().actions.drainQueueToComposer();
+    assert.equal(page.getState().draft.text, "one");
+
+    reload();
+    const thread = open("A", fakeHost(), "second-page-");
+    await flush();
+    assert.deepEqual(thread.getState().slice.queue, [], "it is in the draft, once");
+    assert.equal(thread.getState().draft.text, "one");
   });
 
   it("re-posts first the queued send the page was posting, and holds the rest of the queue until it settles", async () => {
