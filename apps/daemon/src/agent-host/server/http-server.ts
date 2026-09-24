@@ -257,15 +257,22 @@ function parseAfter(url: URL): number | undefined {
 /**
  * The window `GET …/items/:itemId/output` is asked for, or null when neither
  * `offset` nor `maxBytes` is present — the whole join, as the route answered
- * before windows. `offset` must be decimal digits (a 400 otherwise); one too
+ * before windows. `offset` must be decimal digits, given once (a 400
+ * otherwise: an empty or a repeated one names no place to start); one too
  * large to be a safe integer is past any join's end, and reads as the end.
- * `maxBytes` is a preference, clamped and defaulted like a page size.
+ * `maxBytes` is a preference, clamped and defaulted like a page size — a
+ * repeated one takes its first value, as every page size here does. The
+ * daemon forwards both verbatim, so these rules are the only ones.
  */
 export function parseItemOutputWindow(url: URL): ThreadItemOutputWindowQuery | null {
-  const rawOffset = url.searchParams.get("offset");
-  if (rawOffset === null && !url.searchParams.has("maxBytes")) return null;
+  const offsets = url.searchParams.getAll("offset");
+  if (offsets.length === 0 && !url.searchParams.has("maxBytes")) return null;
+  if (offsets.length > 1) {
+    throw new AgentChatCommandError("INVALID_COMMAND", "`offset` must be given once.");
+  }
+  const rawOffset = offsets[0];
   let offset = 0;
-  if (rawOffset !== null) {
+  if (rawOffset !== undefined) {
     if (!/^\d+$/.test(rawOffset)) {
       throw new AgentChatCommandError("INVALID_COMMAND", "`offset` must be a non-negative integer.");
     }

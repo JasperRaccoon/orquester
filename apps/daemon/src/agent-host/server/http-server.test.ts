@@ -450,6 +450,12 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
       assert.equal(refused.status, 400, offset);
       assert.deepEqual(refused.body, { error: { code: "INVALID_COMMAND", message: "`offset` must be a non-negative integer." } }, offset);
     }
+    // A repeated offset names no one place to start: refused, whatever the values. A repeated maxBytes is a preference
+    // like any page size here: its first value.
+    const twice = await output("?offset=1&offset=2");
+    assert.equal(twice.status, 400);
+    assert.deepEqual(twice.body, { error: { code: "INVALID_COMMAND", message: "`offset` must be given once." } });
+    assert.equal(((await output("?offset=0&maxBytes=3&maxBytes=100")).body as { text: string }).text, "one");
     // A window's size is a preference: below 1 it is one character, unparseable it is the default, huge it is the widest.
     assert.deepEqual([(await output("?offset=0&maxBytes=0")).body], [{ toolUseId: "bgshell:task-1", offset: 0, text: "o", totalBytes: 10, nextOffset: 1, complete: false, truncated: false }]);
     for (const maxBytes of ["abc", "99999999999"]) {

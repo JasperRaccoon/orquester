@@ -245,30 +245,28 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
 
   // The streamed output of the tool call an item belongs to, joined by the
   // host from the log — one window of it when `?offset=`/`?maxBytes=` ask for
-  // one, forwarded verbatim and never interpreted (the host owns their rules),
-  // and only as single strings: a repeated key reaches Fastify as an array,
-  // which is no value. Passed through verbatim, 404s included: the host's own
+  // one, forwarded verbatim and never interpreted: the host owns their rules
+  // (`parseItemOutputWindow`), so an empty or a repeated value crosses as it
+  // came and gets the host's own answer (a 400 for `?offset=`) — dropping it
+  // here turned `?offset=` into the whole join and `?offset=1&offset=2` into
+  // a window from 0. Passed through verbatim, 404s included: the host's own
   // is `ITEM_NOT_FOUND`, and a surviving older host's route miss is its generic
   // `THREAD_NOT_FOUND`, so a caller can tell them apart (the MCP's
   // `read_tool_output` takes either as "no streamed output" and answers the
   // item's own text). Unlike `/search`, nothing is synthesised here: no answer
   // of this route could stand for an older host's — and a host that predates
   // windows answers the whole join, which the reader tells apart itself.
-  app.get<{ Params: { id: string; itemId: string }; Querystring: { offset?: unknown; maxBytes?: unknown } }>(
+  app.get<{ Params: { id: string; itemId: string }; Querystring: Record<string, unknown> }>(
     pattern(agentChatRoutes.itemOutput(":id", ":itemId")),
     async (request, reply) => {
       const { id, itemId } = request.params;
       if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
       if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
-      const { offset, maxBytes } = request.query;
       return forwardJson(
         deps,
         reply,
         "GET",
-        withQuery(agentHostRoutes.itemOutput(id, itemId), {
-          offset: typeof offset === "string" ? offset : undefined,
-          maxBytes: typeof maxBytes === "string" ? maxBytes : undefined
-        })
+        `${agentHostRoutes.itemOutput(id, itemId)}${verbatimQuery(request.query, ["offset", "maxBytes"])}`
       );
     }
   );
@@ -466,6 +464,24 @@ function unindexedSearch(q: unknown): ThreadSearchResponse {
     truncated: false,
     indexed: false
   };
+}
+
+/**
+ * The named keys of a query exactly as the client sent them — an empty value,
+ * and every value of a repeated key (Fastify hands those over as an array),
+ * in order — for a route whose host judges them itself. `""` when none is
+ * present, so a request without them stays the route's bare path.
+ */
+function verbatimQuery(query: Record<string, unknown>, keys: readonly string[]): string {
+  const params = new URLSearchParams();
+  for (const key of keys) {
+    const value = query[key];
+    for (const one of Array.isArray(value) ? value : [value]) {
+      if (typeof one === "string") params.append(key, one);
+    }
+  }
+  const suffix = params.toString();
+  return suffix ? `?${suffix}` : "";
 }
 
 function withQuery(path: string, query: Record<string, string | undefined>): string {

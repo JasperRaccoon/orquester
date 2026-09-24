@@ -316,11 +316,19 @@ test("a window of a tool call's streamed output forwards offset/maxBytes verbati
   assert.equal(h.host.requests[0].url, "/threads/t1/items/bgshell%3Atask-1/output?offset=40000&maxBytes=55000");
   await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "i1")}?offset=abc` });
   assert.equal(h.host.requests[1].url, "/threads/t1/items/i1/output?offset=abc");
-  // Only those two, and only as single strings: a repeated key is no value, an empty one none either.
+  // Empty and repeated values cross too, so the host judges them as a request made to it directly would be judged
+  // (a 400 for `?offset=` or a repeated offset) — never a whole join, or a window from 0, the host would not answer.
+  // Only those two keys: anything else stays behind.
   await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "i1")}?offset=1&offset=2&maxBytes=5&other=x` });
-  assert.equal(h.host.requests[2].url, "/threads/t1/items/i1/output?maxBytes=5");
+  assert.equal(h.host.requests[2].url, "/threads/t1/items/i1/output?offset=1&offset=2&maxBytes=5");
   await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "i1")}?offset=&maxBytes=` });
-  assert.equal(h.host.requests[3].url, "/threads/t1/items/i1/output");
+  assert.equal(h.host.requests[3].url, "/threads/t1/items/i1/output?offset=&maxBytes=");
+  // The host's refusal is passed through as it came.
+  h.host.handler = (_req, res) => res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "INVALID_COMMAND", message: "`offset` must be a non-negative integer." } }));
+  const refused = await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "i1")}?offset=` });
+  assert.equal(h.host.requests[4].url, "/threads/t1/items/i1/output?offset=");
+  assert.equal(refused.statusCode, 400);
+  assert.equal(refused.json().error.code, "INVALID_COMMAND");
   await h.close();
 });
 

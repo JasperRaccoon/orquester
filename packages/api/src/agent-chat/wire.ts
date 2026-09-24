@@ -619,8 +619,9 @@ export interface ThreadItemOutputResponse {
  * before windows existed.
  *
  * Both count UTF-8 bytes of the join. On the wire they are decimal strings:
- * an `offset` that is not one is a 400 `INVALID_COMMAND`, and one past the
- * end (however large) reads as the end; `maxBytes` is clamped to
+ * an `offset` that is not one, or is given twice, is a 400
+ * `INVALID_COMMAND`, and one past the end (however large) reads as the end;
+ * `maxBytes` (its first value, if repeated) is clamped to
  * `[1, THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES]` and defaults to
  * {@link THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES} when absent or unparseable
  * — a window's size is a preference, never a reason to refuse.
