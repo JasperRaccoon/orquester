@@ -109,6 +109,13 @@ interface ToolTrack extends ToolCallSnapshot {
   started: boolean;
   lastEmittedProgressLength?: number;
   skippedSinceEmit: number;
+  /**
+   * The tool's own name: `_meta["x.ai/tool"].name`, else the FIRST frame's
+   * title — every captured call's first frame is titled with the tool's name,
+   * and every later one rewrites the title (and the completion drops the
+   * vendor block altogether).
+   */
+  toolName?: string;
 }
 
 interface BackgroundTrack {
@@ -119,6 +126,35 @@ interface BackgroundTrack {
   toolUseId?: string;
   outputFile?: string;
   turnId?: string;
+}
+
+/** One roster agent `spawn_subagent` launched, keyed by its task id (§7.6). */
+interface SubagentTrack {
+  readonly taskId: string;
+  /** The call that launched the latest run, named on every row as `toolUseId`. */
+  toolUseId: string;
+  /** The call that opened the run in progress — whose kind decides how it ends. */
+  owner: string;
+  title: string;
+  description: string;
+  role?: string;
+  live: boolean;
+  /** The turn the run started in, for the rows that close it after that turn. */
+  turnId?: string;
+  /** A `background_tasks` snapshot listed it (see {@link GrokNormalizer.foldBackgroundTasks}). */
+  listed: boolean;
+}
+
+/** One `spawn_subagent` call, keyed by its call id. */
+interface SubagentLaunch {
+  readonly taskId: string;
+  /** `background: true` — the call answers with the subagent's id at once. */
+  readonly background: boolean;
+  /** The call started or reopened the run, so its failure is the run's. */
+  readonly opensRun: boolean;
+  /** Ids the launch's own input named: never taken for its subagent's. */
+  readonly inputIds: ReadonlySet<string>;
+  settled: boolean;
 }
 
 const TOOL_STATUS_TO_ITEM_STATUS: Record<ToolCallStatus, RuntimeItemStatus> = {
@@ -139,6 +175,67 @@ export const FINISHED_CALLS_REMEMBERED = 1_024;
 
 function isTerminalToolStatus(status: ToolCallStatus | null | undefined): boolean {
   return status === "completed" || status === "failed";
+}
+
+/**
+ * The tool that launches a subagent — the CLI's embedded docs and its own
+ * Claude-compat tool table (`Agent` → `spawn_subagent`); no capture holds a
+ * call (fixtures README observation 36).
+ */
+export const SPAWN_SUBAGENT_TOOL = "spawn_subagent";
+
+/**
+ * How many launches, agents and subagent ids the normaliser remembers for
+ * `resume_from`, oldest forgotten first (a live agent never is). A resume of a
+ * forgotten id starts a row of its own — the same as after a host restart.
+ */
+export const SUBAGENTS_REMEMBERED = 512;
+
+/** At most this many ids are taken from one launch's result. */
+const IDS_PER_LAUNCH = 16;
+
+/** Grok's subagent ids are UUIDv7 ("Subagent id must be a UUIDv7", the CLI's own message). */
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+function uuidsIn(value: unknown): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return (text.match(UUID_PATTERN) ?? []).map((id) => id.toLowerCase());
+}
+
+function textArgument(
+  record: Record<string, unknown> | undefined,
+  key: string
+): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Drop the oldest entries a map may lose until it is back within `limit`. */
+function evictOldest<K, V>(
+  map: Map<K, V>,
+  limit: number,
+  evictable: (value: V) => boolean = () => true
+): void {
+  if (map.size <= limit) {
+    return;
+  }
+  for (const [key, value] of map) {
+    if (evictable(value)) {
+      map.delete(key);
+      if (map.size <= limit) {
+        return;
+      }
+    }
+  }
 }
 
 /** The `_x.ai` `sessionUpdate` names this adapter knows. */
@@ -175,9 +272,24 @@ export class GrokNormalizer {
   private readonly history = new GrokHistoryCollector();
 
   private readonly tools = new Map<string, ToolTrack>();
-  /** Calls that reached a terminal status, bounded by {@link FINISHED_CALLS_REMEMBERED}. */
-  private readonly finishedCalls = new Set<string>();
+  /**
+   * Calls that reached a terminal status → the row type they had, bounded by
+   * {@link FINISHED_CALLS_REMEMBERED}.
+   */
+  private readonly finishedCalls = new Map<string, ToolTrack["itemType"]>();
   private readonly tasks = new Map<string, BackgroundTrack>();
+  /** Roster agents, by task id; see {@link subagentFromToolCall}. */
+  private readonly subagents = new Map<string, SubagentTrack>();
+  /** `spawn_subagent` calls, by call id. */
+  private readonly subagentLaunches = new Map<string, SubagentLaunch>();
+  /** A subagent id (lower-cased) → the roster task it is, for `resume_from`. */
+  private readonly subagentIds = new Map<string, string>();
+  /**
+   * The turn the latest subagent launch ran in (`TurnTokenUsage.hasSubagents`).
+   * A turn id, not a per-turn flag: a steer re-runs {@link beginTurn} inside
+   * the same turn.
+   */
+  private lastSubagentTurnId: string | undefined;
   private readonly hooks = new Map<string, string>();
 
   /** Slash commands, refreshed from `available_commands_update` (69, not 7). */
@@ -210,8 +322,12 @@ export class GrokNormalizer {
    */
   private permissionDenied = false;
 
+  /** The ACP session's id — never a subagent's (see {@link learnSubagentIds}). */
+  private readonly sessionId: string;
+
   constructor(deps: GrokNormalizerDeps, sessionId: string) {
     this.deps = deps;
+    this.sessionId = sessionId.toLowerCase();
     // Unique per NORMALISER instance, not per session: a `session/load` reuses
     // the session id, and an item id that collided across the restart would
     // merge two different assistant bubbles.
@@ -300,10 +416,27 @@ export class GrokNormalizer {
   /**
    * The turn settled: close any open assistant bubble so the UI never keeps a
    * dangling in-progress row, and stop accepting late chunks.
+   *
+   * A FOREGROUND subagent whose launching call is still open was cut with the
+   * turn: its call blocks the turn, so the turn cannot end with it running,
+   * and a `session/cancel` leaves an in-flight call with no terminal frame at
+   * all (fixture 05's `write`) while the CLI cancels a foreground child with
+   * its parent's turn. It is closed `stopped` here, or it would read running —
+   * and hold the tab "working" — until the process exits. A background one
+   * outlives the turn by design.
    */
   endTurn(): RuntimeEvent[] {
     this.assistantUpdatesOpen = false;
-    return this.closeAssistantSegment();
+    const events = this.closeAssistantSegment();
+    for (const track of this.subagents.values()) {
+      const owner = this.subagentLaunches.get(track.owner);
+      if (!track.live || owner === undefined || owner.background || owner.settled) {
+        continue;
+      }
+      owner.settled = true;
+      events.push(this.closeSubagent(track, "stopped"));
+    }
+    return events;
   }
 
   // ------------------------------------------------- ACP `session/update`
@@ -525,13 +658,20 @@ export class GrokNormalizer {
     // finished call again as a new `item.started`, re-registered it as live,
     // and the exit sweep (`failOpenTools`) then failed a call that had
     // completed. It is dropped. A terminal one restates the end, as before,
-    // and nothing else: the side effects of the end (plan mode, a background
-    // task, a subagent) already ran on the first.
-    const restatesEnd = previous === undefined && this.finishedCalls.has(toolCallId);
+    // under the row type the call had, and nothing else: the side effects of
+    // the end (plan mode, a background task, a subagent) ran on the first.
+    const finishedItemType =
+      previous === undefined ? this.finishedCalls.get(toolCallId) : undefined;
+    const restatesEnd = finishedItemType !== undefined;
     if (restatesEnd && !isTerminalToolStatus(update.status)) {
       return [];
     }
     const vendor = xaiToolMeta(update._meta);
+    const firstTitle =
+      method === "tool_call" && typeof update.title === "string" ? update.title.trim() : "";
+    const toolName =
+      vendor?.name ?? previous?.toolName ?? (firstTitle.length > 0 ? firstTitle : undefined);
+    const spawnsSubagent = toolName === SPAWN_SUBAGENT_TOOL;
     const kind = normalizeToolKind(update.kind) ?? previous?.kind;
     const title = update.title ?? previous?.title;
     const status = (update.status ?? previous?.status ?? (method === "tool_call" ? "pending" : undefined)) as
@@ -556,8 +696,14 @@ export class GrokNormalizer {
       rawInput,
       // `_meta["x.ai/tool"].kind` is Grok's own authoritative discriminant, it
       // is finer-grained than ACP's, and it is present on the FIRST frame of a
-      // call where ACP's `kind` is still absent — so it leads.
-      itemType: itemTypeFromToolKind(acpKindFromVendorKind(vendor?.kind) ?? kind ?? undefined),
+      // call where ACP's `kind` is still absent — so it leads. A subagent's
+      // launch is an agent launch, as Claude's `Agent` call is.
+      itemType:
+        finishedItemType ??
+        (spawnsSubagent
+          ? "collab_agent_tool_call"
+          : itemTypeFromToolKind(acpKindFromVendorKind(vendor?.kind) ?? kind ?? undefined)),
+      ...(toolName === undefined ? {} : { toolName }),
       started: previous?.started === true,
       title: title ?? undefined,
       status: status ?? undefined,
@@ -617,7 +763,7 @@ export class GrokNormalizer {
 
     if (terminal) {
       this.tools.delete(toolCallId);
-      this.rememberFinishedCall(toolCallId);
+      this.rememberFinishedCall(toolCallId, next.itemType);
     } else {
       this.tools.set(toolCallId, next);
     }
@@ -643,20 +789,274 @@ export class GrokNormalizer {
       }
     }
 
-    events.push(...this.backgroundFromToolCall(toolCallId, rawInput, rawOutput, status));
+    const raw: RuntimeEventRaw = {
+      source: ACP_RAW_SOURCE,
+      method: `session/update:${method}`,
+      payload: params
+    };
+    events.push(
+      ...(spawnsSubagent
+        ? this.subagentFromToolCall(toolCallId, rawInput, update, status, raw)
+        : this.backgroundFromToolCall(toolCallId, rawInput, rawOutput, status))
+    );
     return events;
   }
 
-  /** Oldest first out, so the set stays within {@link FINISHED_CALLS_REMEMBERED}. */
-  private rememberFinishedCall(toolCallId: string): void {
+  /** Oldest first out, so the memory stays within {@link FINISHED_CALLS_REMEMBERED}. */
+  private rememberFinishedCall(toolCallId: string, itemType: ToolTrack["itemType"]): void {
     this.finishedCalls.delete(toolCallId);
-    this.finishedCalls.add(toolCallId);
-    if (this.finishedCalls.size > FINISHED_CALLS_REMEMBERED) {
-      const oldest = this.finishedCalls.values().next().value;
-      if (oldest !== undefined) {
-        this.finishedCalls.delete(oldest);
+    this.finishedCalls.set(toolCallId, itemType);
+    evictOldest(this.finishedCalls, FINISHED_CALLS_REMEMBERED);
+  }
+
+  // ------------------------------------------------------------- subagents
+
+  /**
+   * A `spawn_subagent` call → a roster agent (§7.6), built from the call
+   * alone: it is the one thing about a subagent the client observably gets.
+   * The CLI's `_x.ai` vocabulary also names `subagent_spawned`,
+   * `subagent_progress`, `subagent_finished` and a `x.ai/task_completed`
+   * notification, but no capture holds one, so they stay unmapped — a
+   * `runtime.warning` — rather than guessed (fixtures README observation 36).
+   *
+   * - The call's first frame STARTS the agent: `task.started`, agent-kind
+   *   (`taskType: "subagent"`), stamped with its own id like every Grok task,
+   *   launched by the call (`toolUseId`), so the GUI hides the launch row
+   *   behind the agent's the way it hides a Claude `Agent` call.
+   * - A foreground call's end is the agent's end, with the call's result (the
+   *   text the parent model reads) as the agent's. A failed call fails it.
+   * - A `background: true` call answers at once with the subagent's id; the
+   *   agent works on, and no observable frame reports its end. It stays live
+   *   while the parent session lives — Stop, the session's stop and the
+   *   process's exit close it `stopped` ({@link stopBackgroundTasks}) — unless
+   *   a background-task frame that joins it reports one
+   *   ({@link foldBackgroundTasks}).
+   * - `resume_from` re-launches a completed subagent. The relaunch contract
+   *   (AGENTS.md, "Agent rows must survive resumes and retention", rule 1):
+   *   the SAME task starts again under the NEW call, before any row of the
+   *   run, so the roster reopens it; the task is found by the subagent id the
+   *   source launch reported ({@link learnSubagentIds}); an id no launch
+   *   reported (a host restart since) names a task of its own.
+   */
+  private subagentFromToolCall(
+    toolCallId: string,
+    rawInput: unknown,
+    update: Extract<SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>,
+    status: ToolCallStatus | undefined,
+    raw: RuntimeEventRaw
+  ): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    let launch = this.subagentLaunches.get(toolCallId);
+    if (launch === undefined) {
+      launch = this.launchSubagent(toolCallId, asRecord(rawInput), raw, events);
+    }
+    if (isTerminalToolStatus(status) && !launch.settled) {
+      launch.settled = true;
+      events.push(...this.settleSubagentLaunch(launch, status === "failed", update, raw));
+    }
+    return events;
+  }
+
+  private launchSubagent(
+    toolCallId: string,
+    input: Record<string, unknown> | undefined,
+    raw: RuntimeEventRaw,
+    events: RuntimeEvent[]
+  ): SubagentLaunch {
+    const resumeFrom = textArgument(input, "resume_from");
+    const taskId =
+      resumeFrom === undefined
+        ? toolCallId
+        : (this.subagentIds.get(resumeFrom.toLowerCase()) ?? resumeFrom);
+    const description = textArgument(input, "description");
+    const role = textArgument(input, "subagent_type");
+    // The documented parameter is `background`; the rewritten input spells a
+    // tool's own flag `is_background` (fixture 11).
+    const background = input?.["background"] === true || input?.["is_background"] === true;
+    const existing = this.subagents.get(taskId);
+    const opensRun = existing?.live !== true;
+    const title = description ?? existing?.title ?? role ?? "Subagent";
+    const track: SubagentTrack = existing ?? {
+      taskId,
+      toolUseId: toolCallId,
+      owner: toolCallId,
+      title,
+      description: title,
+      live: false,
+      listed: false
+    };
+    track.toolUseId = toolCallId;
+    track.title = title;
+    track.description = description ?? track.description;
+    if (role !== undefined) {
+      track.role = role;
+    }
+    if (opensRun) {
+      track.owner = toolCallId;
+      track.live = true;
+      track.turnId = this.deps.activeTurnId();
+      track.listed = false;
+    }
+    this.subagents.delete(taskId);
+    this.subagents.set(taskId, track);
+    evictOldest(this.subagents, SUBAGENTS_REMEMBERED, (entry) => !entry.live);
+
+    const launch: SubagentLaunch = {
+      taskId,
+      background,
+      opensRun,
+      inputIds: new Set(uuidsIn(input)),
+      settled: false
+    };
+    this.subagentLaunches.set(toolCallId, launch);
+    evictOldest(this.subagentLaunches, SUBAGENTS_REMEMBERED);
+    this.lastSubagentTurnId = this.deps.activeTurnId();
+
+    events.push(
+      this.event(
+        "task.started",
+        {
+          ...this.subagentLinkage(track),
+          description: track.description,
+          isBackgrounded: background
+        },
+        undefined,
+        raw
+      )
+    );
+    return launch;
+  }
+
+  /**
+   * The launch's call reached its end. Only a run's OWN launch ends it: a
+   * resume the CLI refused (its source still running) fails the call and
+   * never the agent it named; a foreground resume that returned proves the
+   * earlier run over, whatever this adapter had seen of it.
+   */
+  private settleSubagentLaunch(
+    launch: SubagentLaunch,
+    failed: boolean,
+    update: Extract<SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>,
+    raw: RuntimeEventRaw
+  ): RuntimeEvent[] {
+    const track = this.subagents.get(launch.taskId);
+    if (track === undefined) {
+      return [];
+    }
+    if (failed) {
+      if (!launch.opensRun) {
+        track.toolUseId = track.owner;
+        return [];
+      }
+      return track.live
+        ? [this.closeSubagent(track, "failed", toolContentText(update.content), raw)]
+        : [];
+    }
+    this.learnSubagentIds(launch, update);
+    if (launch.background || !track.live) {
+      return [];
+    }
+    return [this.closeSubagent(track, "completed", toolContentText(update.content), raw)];
+  }
+
+  /**
+   * Remember the subagent id(s) a launch reported, for a later `resume_from`.
+   * Read shape-free — the UUIDs in what the call returned: the CLI's subagent
+   * ids are UUIDv7, and the result is the one place the parent model learns
+   * the id it later passes to `resume_from` (a background launch "returns
+   * immediately with a subagent ID", the docs say; a foreground result's
+   * `rawOutput` is the `SubagentCompleted` output, whose fields include
+   * `subagent_id`, per the binary).
+   *
+   * The CLI's own `rawOutput` is read first, and the text only when it names
+   * none: the text of a foreground result is the subagent's summary, model
+   * prose that may quote any id. Never taken: an id the launch's own input
+   * named (a prompt quoting another agent's), the session's own id, a live
+   * shell's (whose snapshot rows must stay the shell's), and an id an earlier
+   * launch reported first.
+   */
+  private learnSubagentIds(
+    launch: SubagentLaunch,
+    update: Extract<SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>
+  ): void {
+    const usable = (id: string): boolean =>
+      !launch.inputIds.has(id) &&
+      id !== this.sessionId &&
+      !this.tasks.has(id) &&
+      !this.subagentIds.has(id);
+    const structured = uuidsIn(update.rawOutput).filter(usable);
+    const ids = structured.length > 0 ? structured : uuidsIn(update.content).filter(usable);
+    for (const id of ids.slice(0, IDS_PER_LAUNCH)) {
+      this.rememberSubagentId(id, launch.taskId);
+    }
+  }
+
+  private rememberSubagentId(id: string, taskId: string): void {
+    const key = id.toLowerCase();
+    if (this.subagentIds.has(key)) {
+      return;
+    }
+    this.subagentIds.set(key, taskId);
+    evictOldest(this.subagentIds, SUBAGENTS_REMEMBERED);
+  }
+
+  /** The task a background-task frame's ids name, when they are a subagent's. */
+  private subagentOfBackgroundTask(
+    taskId: string,
+    toolCallId: string | undefined
+  ): string | undefined {
+    const launched =
+      toolCallId === undefined ? undefined : this.subagentLaunches.get(toolCallId)?.taskId;
+    if (launched !== undefined) {
+      this.rememberSubagentId(taskId, launched);
+      return launched;
+    }
+    return this.subagentIds.get(taskId.toLowerCase());
+  }
+
+  private subagentLinkage(track: SubagentTrack): {
+    taskId: string;
+    taskType: string;
+    agentId: string;
+    title: string;
+    role?: string;
+    toolUseId: string;
+  } {
+    return {
+      taskId: track.taskId,
+      taskType: "subagent",
+      agentId: track.taskId,
+      title: track.title,
+      ...(track.role === undefined ? {} : { role: track.role }),
+      toolUseId: track.toolUseId
+    };
+  }
+
+  /** `task.completed` for a live agent, and out of the live set. */
+  private closeSubagent(
+    track: SubagentTrack,
+    status: "completed" | "failed" | "stopped",
+    summary?: string,
+    raw?: RuntimeEventRaw
+  ): RuntimeEvent {
+    track.live = false;
+    // The rows that close a run after its turn name the turn it ran in, as a
+    // shell's closers do; a foreground end within its own turn is that turn.
+    return this.event(
+      "task.completed",
+      { ...this.subagentLinkage(track), status, ...(summary === undefined ? {} : { summary }) },
+      track.turnId,
+      raw
+    );
+  }
+
+  private get hasLiveSubagents(): boolean {
+    for (const track of this.subagents.values()) {
+      if (track.live) {
+        return true;
       }
     }
+    return false;
   }
 
   /**
@@ -852,18 +1252,23 @@ export class GrokNormalizer {
    * the roster folds it directly instead of inferring a lifecycle from
    * `rawOutput` discriminants the way T3 must.
    *
-   * The catch (observation 29): **nothing is emitted after the turn settles.**
-   * Twenty seconds of watching a `sleep 25` produced no completion event at
-   * all — Grok surfaces background progress only when the model polls. So a
-   * task seen `running` may never be heard from again, and §3.1's liveness
-   * registry needs its own expiry or the thread reads "monitoring" forever.
-   * That is a host-side concern; the adapter's duty is to stop claiming the
-   * task is live once the session ends, which {@link stopBackgroundTasks}
-   * does.
+   * The catch (observation 29): no frame reporting a task's end was ever
+   * captured — the one capture was stopped 22 s into its `sleep 25` — and the
+   * `x.ai/task_completed` the CLI names has no captured shape. So a task seen
+   * `running` may never be heard from again, and §3.1's liveness registry
+   * needs its own expiry or the thread reads "monitoring" forever. That is a
+   * host-side concern; the adapter's duty is to stop claiming the task is live
+   * once the session ends, which {@link stopBackgroundTasks} does.
+   *
+   * An entry whose id a `spawn_subagent` launch reported is that subagent
+   * (not captured: whether the CLI lists subagents here at all): its end, or
+   * its dropping out once listed, is the agent's end — the one way a
+   * background subagent's end could be observed.
    */
   private foldBackgroundTasks(tasks: ReadonlyArray<XaiBackgroundTask>, raw: RuntimeEventRaw): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     const seen = new Set<string>();
+    const listedSubagents = new Set<string>();
     for (const task of tasks) {
       if (typeof task.task_id !== "string" || task.task_id.length === 0) {
         continue;
@@ -871,6 +1276,13 @@ export class GrokNormalizer {
       seen.add(task.task_id);
       const status = normalizeTaskStatus(task.status);
       const existing = this.tasks.get(task.task_id);
+      const subagentTask =
+        existing === undefined ? this.subagentIds.get(task.task_id.toLowerCase()) : undefined;
+      if (subagentTask !== undefined) {
+        listedSubagents.add(subagentTask);
+        events.push(...this.subagentFromSnapshot(subagentTask, status, raw));
+        continue;
+      }
       const turnId = existing?.turnId ?? this.deps.activeTurnId();
       const linkage = {
         taskId: task.task_id,
@@ -928,7 +1340,36 @@ export class GrokNormalizer {
         )
       );
     }
+    for (const track of this.subagents.values()) {
+      if (track.live && track.listed && !listedSubagents.has(track.taskId)) {
+        events.push(this.closeSubagent(track, "completed", undefined, raw));
+      }
+    }
     return events;
+  }
+
+  /** A snapshot entry of a subagent's: its terminal status ends the agent. */
+  private subagentFromSnapshot(
+    taskId: string,
+    status: RuntimeTaskStatus,
+    raw: RuntimeEventRaw
+  ): RuntimeEvent[] {
+    const track = this.subagents.get(taskId);
+    if (track === undefined || !track.live) {
+      return [];
+    }
+    track.listed = true;
+    switch (status) {
+      case "completed":
+        return [this.closeSubagent(track, "completed", undefined, raw)];
+      case "failed":
+        return [this.closeSubagent(track, "failed", undefined, raw)];
+      case "cancelled":
+      case "interrupted":
+        return [this.closeSubagent(track, "stopped", undefined, raw)];
+      default:
+        return [];
+    }
   }
 
   /**
@@ -939,10 +1380,19 @@ export class GrokNormalizer {
   private taskBackgrounded(update: Record<string, unknown>, raw: RuntimeEventRaw): RuntimeEvent[] {
     const taskId = update["task_id"];
     const command = update["command"];
-    if (typeof taskId !== "string" || taskId.length === 0 || typeof command !== "string") {
+    if (typeof taskId !== "string" || taskId.length === 0) {
       return [];
     }
     const toolUseId = typeof update["tool_call_id"] === "string" ? update["tool_call_id"] : undefined;
+    // A task a `spawn_subagent` call backgrounded is that subagent, already on
+    // the roster — never a shell row of its own. Not captured: whether the CLI
+    // backgrounds a subagent through this frame at all (observation 36).
+    if (this.subagentOfBackgroundTask(taskId, toolUseId) !== undefined) {
+      return [];
+    }
+    if (typeof command !== "string") {
+      return [];
+    }
     const description = typeof update["description"] === "string" ? update["description"] : undefined;
     const outputFile = typeof update["output_file"] === "string" ? update["output_file"] : undefined;
     const turnId = this.deps.activeTurnId();
@@ -1019,12 +1469,23 @@ export class GrokNormalizer {
   }
 
   /**
-   * Close every live background task. Called before `session.exited`, because
-   * a running state must never outlive its process (§3.1) — and because Grok
-   * never reports a completion of its own accord.
+   * Close every live background task and every live subagent. Called before
+   * `session.exited`, on the session's stop and on a session-scoped Stop,
+   * because a running state must never outlive its process (§3.1) — and
+   * because no frame that reports such an end is mapped.
    */
   stopBackgroundTasks(): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
+    for (const track of this.subagents.values()) {
+      if (!track.live) {
+        continue;
+      }
+      const owner = this.subagentLaunches.get(track.owner);
+      if (owner !== undefined) {
+        owner.settled = true;
+      }
+      events.push(this.closeSubagent(track, "stopped"));
+    }
     for (const [taskId, track] of [...this.tasks.entries()]) {
       this.tasks.delete(taskId);
       events.push(
@@ -1050,7 +1511,7 @@ export class GrokNormalizer {
     const events: RuntimeEvent[] = [];
     for (const [toolCallId, track] of [...this.tools.entries()]) {
       this.tools.delete(toolCallId);
-      this.rememberFinishedCall(toolCallId);
+      this.rememberFinishedCall(toolCallId, track.itemType);
       if (!track.started) {
         continue;
       }
@@ -1154,7 +1615,10 @@ export class GrokNormalizer {
 
   /** `turn.completed`, from whichever sources settled the turn. */
   turnCompleted(turnId: string, outcome: GrokTurnOutcome, errorMessage?: string): RuntimeEvent {
-    const usage = turnTokenUsage(outcome.usage, this.tasks.size > 0);
+    const usage = turnTokenUsage(
+      outcome.usage,
+      this.tasks.size > 0 || this.lastSubagentTurnId === turnId || this.hasLiveSubagents
+    );
     const state = turnStateFromOutcome(outcome, errorMessage);
     const costUsd =
       outcome.usage?.costUsdTicks === undefined ? undefined : outcome.usage.costUsdTicks / 1_000_000_000;

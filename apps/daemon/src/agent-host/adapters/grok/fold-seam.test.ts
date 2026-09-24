@@ -28,15 +28,17 @@ import { GrokNormalizer } from "./normalize.ts";
 
 const THREAD = "thread-1";
 const SESSION = "01a0c1a7-1185-7171-9447-3aa38569088c";
+const T0 = Date.parse("2026-09-24T10:00:00.000Z");
 
 interface Seam {
   grok: GrokNormalizer;
-  turn: { current: string | undefined };
   liveness: ReturnType<typeof createLivenessRegistry>;
-  /** Normalise, then ingest every event the normaliser returned, in order. */
+  /** Ingest every event, in order, and wait for the sink. */
   feed(events: readonly RuntimeEvent[]): Promise<void>;
+  /** Normalise one `session/update`, then feed what it produced. */
   update(update: Record<string, unknown>): Promise<void>;
-  activities(): ThreadActivityItem[];
+  /** A turn the session starts: `turn.started`, and the normaliser's own reset. */
+  startTurn(turnId: string): Promise<void>;
   state(): ReturnType<typeof fold>;
 }
 
@@ -53,17 +55,17 @@ function seam(): Seam {
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer
   });
-  const turn = { current: "turn-1" as string | undefined };
+  let turnId: string | undefined;
   let counter = 0;
   const grok = new GrokNormalizer(
     {
       threadId: THREAD,
       stamp: () => {
         counter += 1;
-        return { eventId: `g${counter}`, createdAt: new Date(Date.parse("2026-09-24T10:00:00.000Z") + counter).toISOString() };
+        return { eventId: `g${counter}`, createdAt: new Date(T0 + counter).toISOString() };
       },
       uuid: () => `u${(counter += 1)}`,
-      activeTurnId: () => turn.current,
+      activeTurnId: () => turnId,
       planHost: { platform: "linux", env: { GROK_HOME: "~/home" } }
     },
     SESSION
@@ -76,14 +78,17 @@ function seam(): Seam {
   };
   return {
     grok,
-    turn,
     liveness,
     feed,
     update: async (update) =>
       await feed(
-        grok.handleSessionUpdate({ sessionId: SESSION, update, _meta: { promptId: "p1" } } as unknown as SessionNotification)
+        grok.handleSessionUpdate({ sessionId: SESSION, update, _meta: { promptId: "p1" } } as never)
       ),
-    activities: () => fold(sink.events()).activities,
+    startTurn: async (id) => {
+      turnId = id;
+      grok.beginTurn();
+      await feed([grok.event("turn.started", {}, id)]);
+    },
     state: () => fold(sink.events())
   };
 }
@@ -122,7 +127,8 @@ function fold(events: AppendableDomainEvent[]) {
 
 function rowsOfCall(activities: readonly ThreadActivityItem[], callId: string): ThreadActivityItem[] {
   return activities.filter(
-    (row) => row.activityKind.startsWith("tool.") && (row.payload as { toolUseId?: string }).toolUseId === callId
+    (row) =>
+      row.activityKind.startsWith("tool.") && (row.payload as { toolUseId?: string }).toolUseId === callId
   );
 }
 
@@ -132,10 +138,11 @@ const ECHO_CALL = "call-a7c3bfe8-967c-4ffe-916f-749b3b6da4c2-0";
 
 test("a late status-less update of a finished call leaves the timeline one completed call", async () => {
   const s = seam();
-  await s.feed([{ eventId: "ts", threadId: THREAD, createdAt: "2026-09-24T10:00:00.000Z", turnId: "turn-1", type: "turn.started", payload: {} } as RuntimeEvent]);
+  await s.startTurn("turn-1");
   for (const entry of agentFrames(readCapture("03b-bash-output-accumulation.ndjson"))) {
     const params = entry.params as SessionNotification | undefined;
-    if (entry.method === "session/update" && (params?.update as { toolCallId?: string }).toolCallId === ECHO_CALL) {
+    const callId = (params?.update as { toolCallId?: string } | undefined)?.toolCallId;
+    if (entry.method === "session/update" && callId === ECHO_CALL) {
       await s.feed(s.grok.handleSessionUpdate(params!));
     }
   }
@@ -148,9 +155,153 @@ test("a late status-less update of a finished call leaves the timeline one compl
   // The exit sweep, as a dying process runs it.
   await s.feed(s.grok.failOpenTools("The agent process exited."));
 
-  const rows = rowsOfCall(s.activities(), ECHO_CALL);
-  assert.equal(rows.filter((row) => row.activityKind === "tool.started").length, 1, "one start: one call");
+  const rows = rowsOfCall(s.state().activities, ECHO_CALL);
+  assert.equal(rows.filter((row) => row.activityKind === "tool.started").length, 1, "one start, one call");
   const last = rows.at(-1);
   assert.equal(last?.activityKind, "tool.completed");
-  assert.equal((last?.payload as { status?: string }).status, "completed", "a completed command never reads failed");
+  assert.equal((last?.payload as { status?: string }).status, "completed", "a completed command never fails");
+});
+
+// ---------------------------------------------------------------------------
+// spawn_subagent through ingestion, the fold and the liveness registry
+// ---------------------------------------------------------------------------
+
+/** The captured tool-call shape; `spawn_subagent` itself is not captured (see normalize.test.ts). */
+const SPAWN_META = {
+  "x.ai/tool": {
+    version: 1,
+    name: "spawn_subagent",
+    kind: "other",
+    namespace: "grok_build",
+    label: "Spawn Subagent",
+    read_only: false
+  }
+};
+const SUB_A = "01a0c1a9-7b2e-7c3d-8e4f-0123456789ab";
+const SUB_B = "01a0c1aa-1111-7222-8333-444455556666";
+
+const spawnStart = (callId: string, input: Record<string, unknown>) => ({
+  sessionUpdate: "tool_call",
+  toolCallId: callId,
+  title: "spawn_subagent",
+  rawInput: input,
+  _meta: SPAWN_META
+});
+
+const spawnEnd = (
+  callId: string,
+  status: "completed" | "failed",
+  text: string,
+  rawOutput?: Record<string, unknown>
+) => ({
+  sessionUpdate: "tool_call_update",
+  toolCallId: callId,
+  status,
+  content: [{ type: "content", content: { type: "text", text } }],
+  ...(rawOutput === undefined ? {} : { rawOutput })
+});
+
+const FIND_CALLERS = {
+  prompt: "Find every caller of add().",
+  description: "find callers",
+  subagent_type: "explore"
+};
+
+function agent(s: Seam, taskId: string) {
+  const roster = s.state().roster;
+  const row = roster.find((entry) => entry.id === taskId);
+  assert.ok(row, `roster had ${JSON.stringify(roster.map((entry) => entry.id))}`);
+  return row;
+}
+
+test("a foreground Grok subagent runs, ends with its result, and its launch row is the agent's", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  await s.update(spawnStart("call-s1", FIND_CALLERS));
+
+  const running = agent(s, "call-s1");
+  assert.equal(running.status, "running");
+  assert.equal(running.title, "find callers");
+  assert.equal(s.liveness.liveness(THREAD), "working", "a running subagent is live work");
+
+  const result = "add() is called from main.js:3.";
+  await s.update(spawnEnd("call-s1", "completed", result, { type: "SubagentCompleted", subagent_id: SUB_A }));
+  const done = agent(s, "call-s1");
+  assert.equal(done.status, "completed");
+  assert.equal(done.result, result);
+  assert.equal(done.activationCount, 1);
+  assert.equal(s.liveness.liveness(THREAD), null);
+
+  // The GUI hides a call's rows behind an AGENT task row naming it
+  // (`deriveWorkLogEntries`, packages/ui entries.logic.ts, pinned by "hides a
+  // launch tool row once its task row replaces it") unless the call failed.
+  const activities = s.state().activities;
+  const anchors = activities.filter((row) => row.activityKind.startsWith("task."));
+  assert.ok(anchors.length >= 2);
+  for (const row of anchors) {
+    const payload = row.payload as { agentKind?: string; toolUseId?: string };
+    assert.equal(payload.agentKind, "agent", "ingestion stamps it an agent");
+    assert.equal(payload.toolUseId, "call-s1", "…launched by the spawn call");
+  }
+  const launchRows = rowsOfCall(activities, "call-s1");
+  assert.ok(launchRows.length >= 2);
+  for (const row of launchRows) {
+    const payload = row.payload as { itemType?: string; status?: string };
+    assert.equal(payload.itemType, "collab_agent_tool_call");
+    assert.notEqual(payload.status, "failed");
+  }
+});
+
+test("a resumed Grok subagent reopens as run 2 and settles with its new result", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  await s.update(spawnStart("call-s1", FIND_CALLERS));
+  const output = { type: "SubagentCompleted", subagent_id: SUB_A };
+  await s.update(spawnEnd("call-s1", "completed", "main.js:3", output));
+  assert.equal(agent(s, "call-s1").status, "completed");
+
+  await s.startTurn("turn-2");
+  await s.update(spawnStart("call-s2", { prompt: "Now check the tests.", resume_from: SUB_A }));
+  const reopened = agent(s, "call-s1");
+  assert.equal(reopened.status, "running");
+  assert.equal(reopened.activationCount, 2);
+  assert.equal(reopened.result, null, "the previous run's result is cleared");
+  assert.equal(s.liveness.liveness(THREAD), "working");
+
+  await s.update(spawnEnd("call-s2", "completed", "tests/add.test.js:4"));
+  const settled = agent(s, "call-s1");
+  assert.equal(settled.status, "completed");
+  assert.equal(settled.result, "tests/add.test.js:4");
+  assert.equal(settled.activationCount, 2);
+  assert.equal(s.state().roster.length, 1, "one agent, two runs");
+  assert.equal(s.liveness.liveness(THREAD), null);
+});
+
+test("a background Grok subagent keeps working after its call returns, until Stop closes it", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  const input = { prompt: "Run the suite.", description: "run tests", background: true };
+  await s.update(spawnStart("call-bg", input));
+  await s.update(spawnEnd("call-bg", "completed", `Background subagent ${SUB_B} started.`));
+  await s.feed(s.grok.endTurn());
+  await s.feed([s.grok.turnCompleted("turn-1", { stopReason: "end_turn" })]);
+
+  assert.equal(agent(s, "call-bg").status, "running", "no observable frame ended it");
+  assert.equal(s.liveness.liveness(THREAD), "working", "live work outlives the parent's turn");
+
+  await s.feed(s.grok.stopBackgroundTasks());
+  assert.equal(agent(s, "call-bg").status, "interrupted");
+  assert.equal(s.liveness.liveness(THREAD), null);
+});
+
+test("a foreground Grok subagent cut by its turn's end reads interrupted, and is not live", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  await s.update(spawnStart("call-s1", { prompt: "p", description: "find callers" }));
+  // `session/cancel`: the call gets no terminal frame (fixture 05), the turn settles.
+  await s.feed(s.grok.endTurn());
+  const cancelled = { stopReason: "cancelled", cancellationCategory: "MidTurnAbort" };
+  await s.feed([s.grok.turnCompleted("turn-1", cancelled)]);
+  assert.equal(agent(s, "call-s1").status, "interrupted");
+  assert.equal(s.liveness.liveness(THREAD), null);
 });
