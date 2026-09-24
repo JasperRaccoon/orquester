@@ -763,13 +763,17 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   precedes the complete frame that opens its synthetic turn — adopts the next turn to open
   (`beginTurn`: that synthetic turn, or a user turn sent in the window), so the turn's fold holds
   it and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); its start
-  row stays turnless. A log a host wrote before the stamp — an older host surviving a deploy writes
-  such chunks until its drain-restart — is read by the call, on the read side only (no fold change,
-  no version bump): an unstamped `tool.output` takes the owner of its call's lifecycle rows in the
-  same derivation input — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its
-  owner's drill-in, `deriveWorkLogEntries` keeps it out of every other view) and
-  `unstampedChunkOwner` in `mcp/transcript.ts`. One whose call's rows are gone stays the parent's;
-  the fold, its retention and the history bridge keep mirroring the log.
+  row stays turnless, so a start with neither a turn nor an owner is never a row on its own: the GUI
+  keeps a keyed start as its call's row only while no other lifecycle row of the call is in its
+  input, and never a bare one (`startIsCallRow`, `entries.logic.ts`), and the MCP transcript builds
+  no entry from one — after a rewind of the turn it is all that is left of the call. A log a host
+  wrote before the stamp — an older host surviving a deploy writes such chunks until its
+  drain-restart — is read by the call, on the read side only (no fold change, no version bump): an
+  unstamped `tool.output` takes the owner of its call's lifecycle rows in the same derivation input
+  — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in,
+  `deriveWorkLogEntries` keeps it out of every other view) and `unstampedChunkOwner` in
+  `mcp/transcript.ts`. One whose call's rows are gone stays the parent's; the fold, its retention
+  and the history bridge keep mirroring the log.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no

@@ -710,17 +710,22 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     ACP content blocks — when that detail is empty, repeats the row's title, or, on an executing
     call (`kind: "execute"` in its data, as Grok's ACP calls say), only repeats the command. That
     output is the one-line preview the wire carries (its first non-blank line, at most 84
-    characters), not the whole of it. The call's start never gives the detail — the GUI does not
-    show it, and Grok's first frame repeats the command before it says the call executes — so a
-    call that has only started, or that finished printing nothing, has no `detail`; and a later
-    echo never clears the output an earlier update gave. `tool.command` is the command the call
-    runs, from its payload or its data. Other tools keep the provider's detail as it came.
+    characters), not the whole of it. The call's start never gives the detail — the GUI shows a
+    start only until the call's next row replaces it, and Grok's first frame repeats the command
+    before it says the call executes — so a call that has only started, or that finished printing
+    nothing, has no `detail`; and a later echo never clears the output an earlier update gave.
+    `tool.command` is the command the call runs, from its payload or its data. Other tools keep the
+    provider's detail as it came.
+  - A call's start with neither a turn nor an owner is no row while nothing else of its call is in
+    the read, as the GUI drops it: a Claude parent call can start before the synthetic turn its own
+    message opens, every later row of the call carries that turn, and a rewind of that turn leaves
+    the start alone — no running call.
   - A tool row carries `outputItemId` where more of the call's output can be read, and
     `read_tool_output` reads it (§6, Tool output):
     - the call's completion (or denial) when its payload was cut on its way to you — the row the
       GUI offers **Load full output** on; for a command, its whole output. Never the call's start
-      (the GUI does not show it) nor an update: a running call's updates are stored already cut,
-      so one read back holds only its preview;
+      (what was cut there is the call's input, never its output) nor an update: a running call's
+      updates are stored already cut, so one read back holds only its preview;
     - else, for a **command** that streamed its output, the call's latest row — its start, its
       latest update, or a completion nothing cut. Streamed output is in no row's data: it arrives
       in chunks, which are never rows here and which only the agent host can join whole — a
@@ -731,12 +736,17 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       …"), but that is no command's output, so it never earns an id this way. A background shell
       is listed in `subagents` and its rows are in its own drill-in (`read_transcript` with its
       `agentId`), as in the GUI.
-    - In a drill-in, a command with no row of the call in the range (e.g. retention evicted its
-      start: it keeps running calls' opening rows, 16 at most behind each window's cut)
-      is still an entry, built from its latest chunk in the range: `tool.type` `command_execution`
-      and `outputItemId` that chunk. Title, command and status come from its rows elsewhere in the
-      view — else the title is the chunk's own, "Tool output", and the status `inProgress`. The
-      parent view builds no entry from chunks alone.
+    - In a drill-in, a command with no row of the call in the range (its rows are in other turns
+      — a background shell outlives the turn that launched it — or retention evicted its start: it
+      keeps running calls' opening rows, 16 at most behind each window's cut) is still an entry,
+      built from its latest chunk in the range: `tool.type` `command_execution` and `outputItemId`
+      that chunk. Command and status come from its rows elsewhere in the view, else the status is
+      `inProgress`. Its title is theirs; else, for a background task — a shell is one command —
+      the title of its row in a parent read's `subagents` (its description, or the command
+      itself); else its command; else the chunk's own, "Tool output". A subagent's title names
+      none of the calls it runs and is never used. The parent view builds no entry from chunks
+      alone: a running call keeps its opening row there, and an older host's unstamped subagent
+      output (below) can sit in the parent's scope.
     - A subagent's command output is the subagent's: it counts in its drill-in, where the command
       offers `outputItemId` like any other, and never in the parent view. An older agent host
       wrote a subagent's Bash result with no agent id, and one that survives a deploy keeps doing
