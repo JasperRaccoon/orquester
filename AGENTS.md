@@ -940,8 +940,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the calling session instead — a user message whose one text part is `synthetic` and wraps it in
   the same envelope, naming the child — which gives the run its result the same way
   (`takeBackgroundResult`; carried by the child's own end when it comes first). That prompt is
-  still no row. No result follows an end by `session.error` or a stop. (2) Every running frame of
-  a `bash` part restates ALL its output so far in `state.metadata.output`, which rode only the
+  still no row, live or replayed: E6 history skips `synthetic` user text parts (`history.ts`). No
+  result follows an end by `session.error` or a stop. (2) Every running frame of a `bash` part
+  restates ALL its output so far in `state.metadata.output`, which rode only the
   item row's `data.state` — dropped by the wire slimmer — so nothing showed until the
   completion. Each frame is cut against the value last seen for the part (`advanceOutputMark`,
   `OpenCodeSessionState.outputMarks`) into `content.delta {command_output}` of just what it adds,

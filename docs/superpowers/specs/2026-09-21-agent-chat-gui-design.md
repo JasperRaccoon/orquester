@@ -1480,9 +1480,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   takes a settled row's result from a later completion and reopens nothing. Before it, every
   OpenCode roster row read `result: null`. A run in the background answers "still working" at
   once, and its answer comes as a `synthetic` prompt to the calling session wrapping the same
-  envelope, which gives the run its result the same way (the prompt itself stays no row). And a
-  running command's output, which each `running` frame restates whole in `state.metadata.output`
-  and which reached nobody (it rode the item row's `data.state`, slimmed off the wire), streams
+  envelope, which gives the run its result the same way (the prompt is no row, live or
+  replayed). And a running command's output, which each `running` frame restates whole in
+  `state.metadata.output` and which reached nobody (it rode the item row's `data.state`, slimmed
+  off the wire), streams
   as §5.6's `command_output` chunks of what each frame adds, cut against a per-part high-water
   mark and owned like the call's rows. Past the tool's 30 000 characters the value is
   `"...\n\n"` and a sliding tail window; what follows the window's longest overlap with the last

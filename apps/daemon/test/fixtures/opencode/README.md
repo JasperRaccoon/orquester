@@ -747,11 +747,18 @@ run's result, once, as it takes a foreground part's output (`takeBackgroundResul
 that comes before the child's own `session.idle` rides that end instead. A part that is not
 `synthetic`, or names no child of the thread, is no result.
 
-How that prompt renders, unchanged by this: live, it is no row at all — a user-role text part is
-never emitted, being the client's own prompt, which the host already wrote — and the parent's
-reply to it streams as rows with no turn, since no `/turn` opened one. A thread adopted from
-OpenCode's own history (`history.ts`) projects every user text part, this one included, as a
-`You` message carrying the raw envelope.
+How that prompt renders: live, it is no row at all — a user-role text part is never emitted,
+being the client's own prompt, which the host already wrote. A thread adopted from OpenCode's
+own history (`history.ts`) skips every `synthetic` user text part the same way — the server
+wrote it, the user never typed it — so a prompt made only of such parts replays no `You` row,
+and the reply keeps its turn. History replays no roster rows at all (it reads the thread's own
+session, whose `task` parts replay as plain collab-agent calls), so a background run's result is
+filled on the live path only.
+
+**Known gap:** the parent's reply to that prompt streams as rows with no turn, and the thread
+reads idle while the parent's model writes it — no `/turn` opened one, and the session's `busy`
+with no active turn is ignored. Giving it a turn needs the shapes of that turn on the wire (a
+synthetic turn, like Claude's woken parent), which no capture has yet.
 
 ### 28. A running `bash` part restates its whole output on every frame
 
@@ -804,8 +811,10 @@ else what follows the LAST place it holds the stream's end — the stream's last
 or all of a shorter one, and none under 64, which recur in any output by chance; else nothing,
 and the stream stays short of the final output, which the completion row's data keeps whole. A
 stream that showed nothing adds nothing: its completion's own output is the row's. An errored
-part has no final output, and its error stays the completion's. A part's mark goes when it
-settles, when it is removed and when its message is.
+part — `Tool execution aborted` included — has no final output and adds nothing either: the
+stream is the command's output, and the error is the call's status and detail, which the row's
+failed status carries and the MCP transcript shows as text; it is never written into the stream.
+A part's mark goes when it settles, when it is removed and when its message is.
 
 ---
 
