@@ -84,6 +84,136 @@ export function mergeOpenCodeAssistantText(
 }
 
 // ---------------------------------------------------------------------------
+// Running command output
+// ---------------------------------------------------------------------------
+
+/**
+ * The head the `bash` tool puts on a command's running output once it passes
+ * the 30 000 characters it keeps: `"...\n\n"`, then the last 30 000 (`Ze` in
+ * 1.18.32's `ShellTool.run`, read from the source — not captured).
+ */
+export const OUTPUT_WINDOW_HEAD = "...\n\n";
+
+/**
+ * Value → chunk, for a running command part's `state.metadata.output`, which
+ * restates ALL the output so far on every frame: what `value` adds to what
+ * `mark` — the value last seen — already showed, and the mark to keep. Never
+ * text that was already shown; where a value cannot prove what it adds, it
+ * adds nothing (fixtures README observation 28):
+ *
+ * - `value` extends the mark — every running frame 1.18.5 was captured
+ *   sending (fixtures 03, 04, 12): the appended text;
+ * - `value` is a prefix of the mark, `""` included: nothing, and the mark
+ *   stays — a snapshot never rewinds what went out, as with text parts;
+ * - otherwise the mark re-bases on `value`, a window that slides instead of
+ *   growing: past 30 000 characters the tool keeps {@link OUTPUT_WINDOW_HEAD}
+ *   and the last 30 000. What follows the window's longest overlap with the
+ *   end of the mark is new. A window keeping nothing of the mark — a burst
+ *   longer than itself between two frames — is new whole, its head marking
+ *   the gap; a value with no such head that overlaps nothing proves nothing.
+ *
+ * Repetitive output can overlap further than it really did, and then a
+ * repeat is lost, never shown twice.
+ */
+export function advanceOutputMark(
+  mark: string,
+  value: string
+): { mark: string; chunk: string } {
+  if (value.startsWith(mark)) {
+    return { mark: value, chunk: value.slice(mark.length) };
+  }
+  if (mark.startsWith(value)) {
+    return { mark, chunk: "" };
+  }
+  const windowed = value.startsWith(OUTPUT_WINDOW_HEAD);
+  const body = windowed ? value.slice(OUTPUT_WINDOW_HEAD.length) : value;
+  const overlap = suffixPrefixOverlap(mark, body);
+  if (overlap > 0) {
+    return { mark: value, chunk: body.slice(overlap) };
+  }
+  return { mark: value, chunk: windowed ? value : "" };
+}
+
+/** How much of the mark's end the overlap search looks for first. */
+const OVERLAP_ANCHOR_CHARS = 256;
+/** How many places it tries before the linear pass answers instead. */
+const OVERLAP_ANCHOR_TRIES = 16;
+
+/**
+ * The length of the longest suffix of `left` that is a prefix of `right`.
+ *
+ * Every such suffix at least {@link OVERLAP_ANCHOR_CHARS} long ends with
+ * `left`'s last that-many characters, so a native `lastIndexOf` finds where it
+ * can end — the rightmost place first, the longest — and one native comparison
+ * confirms it: tens of microseconds on a 30 000-character window, where a
+ * loop over its characters costs a millisecond. A shorter one is looked for
+ * directly. An output that repeats itself can offer many places to try; past
+ * {@link OVERLAP_ANCHOR_TRIES} the linear pass ({@link borderOverlap}) answers,
+ * so no window costs more than that.
+ */
+export function suffixPrefixOverlap(left: string, right: string): number {
+  const size = Math.min(left.length, right.length);
+  if (size === 0) {
+    return 0;
+  }
+  const anchorLength = Math.min(OVERLAP_ANCHOR_CHARS, size);
+  const anchor = left.slice(left.length - anchorLength);
+  let at = right.lastIndexOf(anchor, size - anchorLength);
+  for (let tries = 0; at !== -1; tries += 1) {
+    if (tries === OVERLAP_ANCHOR_TRIES) {
+      return borderOverlap(left, right);
+    }
+    if (left.endsWith(right.slice(0, at + anchorLength))) {
+      return at + anchorLength;
+    }
+    at = at === 0 ? -1 : right.lastIndexOf(anchor, at - 1);
+  }
+  for (let length = anchorLength - 1; length > 0; length -= 1) {
+    if (left.endsWith(right.slice(0, length))) {
+      return length;
+    }
+  }
+  return 0;
+}
+
+/**
+ * {@link suffixPrefixOverlap} by Knuth-Morris-Pratt: linear in the window
+ * whatever the output, where trying each overlap in turn is quadratic on one
+ * that repeats itself.
+ */
+export function borderOverlap(left: string, right: string): number {
+  const size = Math.min(left.length, right.length);
+  if (size === 0) {
+    return 0;
+  }
+  // `border[i]`: the longest proper prefix of `right.slice(0, i + 1)` that is
+  // also its suffix.
+  const border = new Int32Array(size);
+  for (let index = 1, length = 0; index < size; index += 1) {
+    while (length > 0 && right.charCodeAt(index) !== right.charCodeAt(length)) {
+      length = border[length - 1];
+    }
+    if (right.charCodeAt(index) === right.charCodeAt(length)) {
+      length += 1;
+    }
+    border[index] = length;
+  }
+  let matched = 0;
+  for (let index = left.length - size; index < left.length; index += 1) {
+    while (
+      matched > 0 &&
+      (matched === size || left.charCodeAt(index) !== right.charCodeAt(matched))
+    ) {
+      matched = border[matched - 1];
+    }
+    if (left.charCodeAt(index) === right.charCodeAt(matched)) {
+      matched += 1;
+    }
+  }
+  return matched;
+}
+
+// ---------------------------------------------------------------------------
 // Token usage
 // ---------------------------------------------------------------------------
 
@@ -337,6 +467,14 @@ export interface OpenCodeSessionState {
 
   textPartsByMessageId: Map<string, Map<string, OpenCodeTextPartState>>;
   messageRoleById: Map<string, OpenCodeMessageRole>;
+  /**
+   * A running command part's `state.metadata.output` as last seen, by part id
+   * — the high-water mark its `command_output` chunks are cut against
+   * (`emitRunningOutput`). Dropped when the part settles or is removed;
+   * bounded, least recently written first, for a part whose settle never
+   * reached the demux.
+   */
+  outputMarks: Map<string, string>;
   turnTokenUsage?: OpenCodeTurnTokenUsageAccumulator;
 
   /**
@@ -397,6 +535,7 @@ export function createSessionState(input: {
     promptGeneration: 0,
     textPartsByMessageId: new Map(),
     messageRoleById: new Map(),
+    outputMarks: new Map(),
     pendingPermissions: new Map(),
     pendingQuestions: new Map(),
     resolvedRequestIds: new Set(),
@@ -415,6 +554,7 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.childAgents.clear();
   state.messageRoleById.clear();
   state.textPartsByMessageId.clear();
+  state.outputMarks.clear();
   state.turnTokenUsage = undefined;
   state.activeTurnId = undefined;
   state.interruptedTurnId = undefined;

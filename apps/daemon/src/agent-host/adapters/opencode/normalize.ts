@@ -62,6 +62,7 @@ import {
 import {
   accumulateStepUsage,
   addRelatedSession,
+  advanceOutputMark,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
   stepTotalTokens,
@@ -559,6 +560,7 @@ function demux(
       if (parts?.size === 0) {
         state.textPartsByMessageId.delete(event.properties.messageID);
       }
+      state.outputMarks.delete(event.properties.partID);
       return;
     }
 
@@ -631,6 +633,7 @@ function demux(
       if (part.type === "tool") {
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
         emitToolItem(tool, turnId, raw, out);
+        emitRunningOutput(state, tool, turnId, raw, out);
         if (tool.tool === "task") {
           // The parent's own row stays on the timeline; the child it names
           // additionally becomes a roster task (§7.6).
@@ -1297,6 +1300,7 @@ function demuxChild(
     case "message.part.removed": {
       const parts = state.textPartsByMessageId.get(event.properties.messageID);
       parts?.delete(event.properties.partID);
+      state.outputMarks.delete(event.properties.partID);
       return;
     }
 
@@ -1350,6 +1354,7 @@ function demuxChild(
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
         const agent = ensureChildAgent(state, childSessionId);
         emitToolItem(tool, turnId, raw, out, childSessionId);
+        emitRunningOutput(state, tool, turnId, raw, out, childSessionId);
         if (tool.state.status === "running" || tool.state.status === "pending") {
           emitTaskProgress(state, agent, raw, out, {
             lastToolName: tool.tool,
@@ -1637,6 +1642,63 @@ function emitToolItem(
           : {})
       }
     }
+  });
+}
+
+/**
+ * How many running command parts keep an output mark at once. Settled parts
+ * drop theirs, so only a part whose settle never reached the demux (an
+ * interrupted turn's suppressed tail, a stream gap) can pile up here.
+ */
+const OUTPUT_MARKS_CAP = 64;
+
+/**
+ * A running command's output, as it grows (fixtures README observation 28).
+ * Each `running` frame of a command-like part restates everything printed so
+ * far in `state.metadata.output`, which reached nobody: the item row carries
+ * it only inside `data.state`, and the wire slimmer drops it there, so only
+ * the completion ever showed output. Each frame now becomes a
+ * `command_output` delta of just what it adds ({@link advanceOutputMark}), on
+ * the call's own item and under the call's owner — the chunks ingestion joins
+ * onto the call's row while it runs. A settled part drops its mark: its
+ * completion carries `state.output`, as it always did.
+ */
+function emitRunningOutput(
+  state: OpenCodeSessionState,
+  part: Extract<OpenCodePart, { type: "tool" }>,
+  turnId: string | undefined,
+  raw: unknown,
+  out: Emitter,
+  agentId?: string
+): void {
+  const marks = state.outputMarks;
+  if (part.state.status !== "running") {
+    marks.delete(part.id);
+    return;
+  }
+  const output = isRecord(part.state.metadata) ? part.state.metadata.output : undefined;
+  if (typeof output !== "string" || toToolLifecycleItemType(part.tool) !== "command_execution") {
+    return;
+  }
+  const { mark, chunk } = advanceOutputMark(marks.get(part.id) ?? "", output);
+  // Written last, so the cap drops the mark written longest ago — a settle
+  // that never came, not a command still printing.
+  marks.delete(part.id);
+  marks.set(part.id, mark);
+  while (marks.size > OUTPUT_MARKS_CAP) {
+    const oldest = marks.keys().next();
+    if (oldest.done === true) {
+      break;
+    }
+    marks.delete(oldest.value);
+  }
+  if (chunk.length === 0) {
+    return;
+  }
+  out.push({
+    ...out.base({ turnId, itemId: part.callID, agentId, raw }),
+    type: "content.delta",
+    payload: { streamKind: "command_output", delta: chunk }
   });
 }
 
