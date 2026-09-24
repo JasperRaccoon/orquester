@@ -1493,7 +1493,7 @@ test("12: a subagent's running bash streams under the subagent, like the call's 
   assert.equal(joined(chunks), (completed?.payload.data as { result?: string }).result);
 });
 
-test("a resumed subagent's growing bash output streams under the subagent, every chunk once", () => {
+test("a resumed subagent's growing bash output streams under it, every chunk once", () => {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-resume";
   const resume = resumeFrames("call_resume");
@@ -1642,6 +1642,43 @@ test("a value of no known shape shares nothing provable: it re-bases and adds no
     chunks.map((chunk) => chunk.payload.delta),
     ["one\ntwo\n", "\ndone\n"]
   );
+});
+
+test("a removed part drops its mark; the marks are bounded, the longest unwritten first", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const partOf = (frame: OpenCodeRawEvent): string =>
+    (frame.properties as { part: { id: string } }).part.id;
+  const bash = bashFrames();
+  feed(session, [withOutput(bash.grown, "one\n")]);
+  assert.deepEqual([...session.state.outputMarks.keys()], [partOf(bash.grown)]);
+  feed(session, [
+    {
+      type: "message.part.removed",
+      properties: {
+        sessionID: BASH_SESSION_ID,
+        messageID: "msg_0c19e9533001yJC1rvPg6UFOT3",
+        partID: partOf(bash.grown)
+      }
+    }
+  ]);
+  assert.equal(session.state.outputMarks.size, 0);
+
+  // 64 commands running at once, none of them settling, then a 65th: the
+  // mark written longest ago is the one that goes.
+  const command = (index: number, output: string): OpenCodeRawEvent =>
+    withOutput(bashFrames({ prt_0c19e993b0013DG2Hi0JnCZ7bT: `prt_cmd_${index}` }).grown, output);
+  feed(
+    session,
+    Array.from({ length: 64 }, (_, index) => command(index, "x\n"))
+  );
+  const more = feed(session, [command(0, "x\ny\n"), command(64, "z\n")]).flat();
+  assert.deepEqual(
+    outputChunks(more).map((chunk) => chunk.payload.delta),
+    ["y\n", "z\n"]
+  );
+  assert.equal(session.state.outputMarks.size, 64);
+  assert.equal(session.state.outputMarks.has("prt_cmd_0"), true, "written again, so kept");
+  assert.equal(session.state.outputMarks.has("prt_cmd_1"), false);
 });
 
 test("a repeating output that slides into itself loses the repeat, never shows it twice", () => {
