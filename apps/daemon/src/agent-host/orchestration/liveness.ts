@@ -14,11 +14,13 @@
  * which is correct, because orphaned background work is not live.
  *
  * **Differs from T3: background rows expire.** T3 drops a task only on a
- * terminal status, which assumes every provider reports one. Grok does not —
- * a backgrounded task (`_x.ai/task_backgrounded`) never reports completion at
- * all, so a thread would read `"monitoring"` for the rest of the host's life
- * and the §6.4 ladder would keep the tab out of "finished" forever. Two bounds
- * fix it, both on the **background** bucket only:
+ * terminal status, which assumes every provider reports one. Grok's end of a
+ * backgrounded task (`_x.ai/task_backgrounded`) is never mapped — the one
+ * capture was stopped before its `sleep 25` could end, and the
+ * `x.ai/task_completed` the CLI's binary names has no captured shape (fixtures
+ * README observation 29) — so a thread would read `"monitoring"` for the rest
+ * of the host's life and the §6.4 ladder would keep the tab out of "finished"
+ * forever. Two bounds fix it, both on the **background** bucket only:
  *
  * - a watch loop with no transition for {@link BACKGROUND_LIVENESS_TTL_MS} is
  *   dropped (evaluated lazily on read, so there is no timer to leak and a test
@@ -187,9 +189,19 @@ export function createLivenessRegistry(
     // A subagent's internal non-agent work (its own shells and monitors) is
     // covered by the owning agent's entry. Nested agents fall through: they can
     // outlive their parent and must keep the thread working.
+    //
+    // An `agentId` equal to the task's OWN id names no owner: Grok stamps every
+    // row of a background shell with the shell itself (`adapters/grok/
+    // normalize.ts`), and reading that as "some agent's shell" dropped every
+    // Grok shell — a dev server left running neither read "monitoring" nor
+    // held a deploy's drain. Such a row is the task's own, classified below
+    // like any other: a shell is a watch loop, bounded by the TTL. Claude
+    // stamps only a real owner, and Codex and OpenCode type every row
+    // `subagent`, so neither reads differently.
     if (
       input.agentId !== undefined &&
       input.agentId.trim().length > 0 &&
+      input.agentId !== input.taskId &&
       (taskType === undefined || MONITOR_TASK_TYPES.has(taskType))
     ) {
       drop(input.threadId, input.taskId);

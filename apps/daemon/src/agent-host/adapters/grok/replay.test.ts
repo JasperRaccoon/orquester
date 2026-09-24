@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
+import { BACKGROUND_LIVENESS_TTL_MS, createLivenessRegistry } from "../../orchestration/liveness.ts";
+import { createTestClock } from "../../orchestration/testing/fakes.ts";
 import { captureFiles, readCapture, agentFrames, promptResults, type JsonRpcFrame } from "./fixtures.ts";
 import { GrokNormalizer } from "./normalize.ts";
 import { XAI_EXTENSION_NOTIFICATIONS, xaiMethodSpellings } from "./acp/_generated/xai.ts";
@@ -312,6 +314,22 @@ test("11 background task: the roster and the tool-call join produce one task.sta
   // Nothing was emitted after the turn settled: the task never completes on
   // its own, which is exactly why the adapter must close it on session exit.
   assert.equal(only(events, "task.completed").length, 0);
+});
+
+test("11 background task: the shell is live work — monitoring — in the real registry, bounded by its TTL", () => {
+  // Every task row of a Grok shell names the shell itself as its `agentId`;
+  // the registry once read that as "a subagent's own shell" and dropped it, so
+  // a dev server left running neither read "monitoring" nor held a deploy.
+  const { events } = replay("11-background-task.ndjson");
+  const clock = createTestClock(0);
+  const registry = createLivenessRegistry({ clock });
+  for (const event of events) {
+    registry.observe(event);
+  }
+  assert.equal(registry.liveness("thread-1"), "monitoring");
+  assert.equal(registry.liveAgentCount("thread-1"), 0);
+  clock.set(BACKGROUND_LIVENESS_TTL_MS);
+  assert.equal(registry.liveness("thread-1"), null, "the TTL still bounds a silent shell");
 });
 
 test("11 background task: stopping the session closes every live task", () => {
