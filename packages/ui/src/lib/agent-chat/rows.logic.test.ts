@@ -728,7 +728,7 @@ describe("a command's streamed output is the inside of its row", () => {
     );
   });
 
-  it("a Claude call whose input is still streaming reads its title live, never \"Bash: {}\"", () => {
+  it("a Claude call whose input is still streaming reads its tool's name live, never \"Bash: {}\"", () => {
     const claudeStart = activity(
       "tool.started",
       { itemType: "command_execution", toolUseId: "toolu_1", title: "Command run", detail: "Bash: {}", status: "inProgress", data: { toolName: "Bash", input: {} } },
@@ -737,18 +737,29 @@ describe("a command's streamed output is the inside of its row", () => {
     const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), claudeStart]), running));
     assert.deepEqual(kinds(rows), ["message", "working", "work-live"]);
     const [live] = liveRows(rows);
-    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Command run");
+    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Bash");
   });
 
-  it("a woken parent call's turnless rows, left by a rewind of the turn they preceded, render nothing", () => {
+  it("a woken parent call is its synthetic turn's live row; what a rewind of that turn leaves of it renders nothing", () => {
     // What a Claude parent call emits before the synthetic turn its own message opens stays turnless: its start and an
-    // early input update. The start is superseded; the update, still in progress, is a neutral row a group hides.
-    const turnless = (activityKind: string, id: string, at: number) =>
-      activity(activityKind, { itemType: "command_execution", toolUseId: "call-w", title: "Command run", status: "inProgress", data: { command: "cat out.txt" } }, { id, createdAt: stamp(at) });
-    const items = [prompt(), message("assistant", "Done.", { id: "a1", turnId: "t1", createdAt: stamp(2) }), turnless("tool.started", "ws", 3), turnless("tool.updated", "wu", 4)];
+    // early input update. The turn that opens adopts it with one update on that turn, its first row the live run holds.
+    const row = (activityKind: string, id: string, at: number, turnId: string | null) =>
+      activity(activityKind, { itemType: "command_execution", toolUseId: "call-w", title: "Command run", status: "inProgress", data: { command: "cat out.txt" } }, { id, turnId, createdAt: stamp(at) });
+    const turnless = [row("tool.started", "ws", 3, null), row("tool.updated", "wu", 4, null)];
+    const earlier = [prompt(), message("assistant", "Done.", { id: "a1", turnId: "t1", createdAt: stamp(2) })];
+    const woken = {
+      isWorking: true,
+      runningTurnId: "t2",
+      latestTurn: { turnId: "t2", state: "running" as const, startedAt: stamp(5), completedAt: null },
+      activeTurnStartedAt: stamp(5)
+    };
+    const live = liveRows(deriveTimelineRows(baseInput(entriesFrom([...earlier, ...turnless, row("tool.updated", "wa", 6, "t2")]), woken)));
+    assert.deepEqual(live.map((entry) => [entry.entry.id, liveWorkEntryLabel(entry.entry, entry.active), entry.active]), [["wa", "Running cat", true]]);
+    // A rewind of the synthetic turn takes the adopting update with it. The start is superseded; the update, still in
+    // progress, is a neutral row a group hides.
     for (const [name, input] of [["settled", {}], ["running", running]] as const) {
-      const rows = deriveTimelineRows(baseInput(entriesFrom(items), input));
-      assert.ok(!rows.some((row) => row.kind === "work" || row.kind === "work-live" || row.kind === "work-toggle"), `${name}: ${kinds(rows).join(", ")}`);
+      const rows = deriveTimelineRows(baseInput(entriesFrom([...earlier, ...turnless]), input));
+      assert.ok(!rows.some((candidate) => candidate.kind === "work" || candidate.kind === "work-live" || candidate.kind === "work-toggle"), `${name}: ${kinds(rows).join(", ")}`);
     }
   });
 

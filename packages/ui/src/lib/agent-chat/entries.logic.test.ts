@@ -408,9 +408,17 @@ describe("a started call's own row", () => {
       { turnId: "t1" }
     );
     assert.deepEqual(deriveWorkLogEntries([start]), []);
+    // The update that adopts a woken call before its input parsed names the tool alone (the Claude normaliser's
+    // `adoptedToolEvent`): still the plan boundary.
+    const adopted = activity(
+      "tool.updated",
+      { itemType: "dynamic_tool_call", toolUseId: "call-5", title: "Tool call", detail: "ExitPlanMode", status: "inProgress" },
+      { turnId: "t1" }
+    );
+    assert.deepEqual(deriveWorkLogEntries([adopted]), []);
   });
 
-  it("a Claude start that only names its tool with an empty input carries no detail: its row reads its title", () => {
+  it("a Claude start that only names its tool with an empty input keeps the tool's name as its detail: its row reads it", () => {
     // Claude's `content_block_start`: the input streams afterwards, and the call's first update comes once it parses
     // whole — for a Write or a subagent prompt, seconds later.
     const claudeStart = (name: string, itemType: string, title: string) =>
@@ -425,9 +433,10 @@ describe("a started call's own row", () => {
       ["Agent", "collab_agent_tool_call", "Subagent task"],
       ["mcp__github__create_issue", "mcp_tool_call", "MCP tool call"]
     ] as const) {
+      // A tool that takes no arguments has no other row until its result: it reads its name for its whole run.
       const entry = workLogEntryFromActivity(claudeStart(name, itemType, title));
-      assert.equal(entry.detail, undefined, name);
-      assert.equal(workEntryDisplayLabel(entry), title, name);
+      assert.equal(entry.detail, name, name);
+      assert.equal(workEntryDisplayLabel(entry), name, name);
     }
     // Only a start's, and only an empty input: a nested frame's start carries its whole input, and an update's
     // detail is the request as it stands.

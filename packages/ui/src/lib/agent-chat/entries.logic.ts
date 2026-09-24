@@ -184,8 +184,8 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     ? taskDetailAsLabel
       ? undefined
       : asTrimmedString(payload?.detail)
-    : activity.activityKind === "tool.started" && isEmptyInputEcho(asTrimmedString(payload?.detail))
-      ? undefined
+    : activity.activityKind === "tool.started"
+      ? startDetail(asTrimmedString(payload?.detail))
       : asTrimmedString(payload?.detail);
   const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
   // A command row shows the output its provider data carries where `detail`
@@ -361,15 +361,18 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
 }
 
 /**
- * Claude's start frame names its tool before any of its input has streamed —
- * `summarizeToolRequest(name, {})`, "Write: {}" — and the call's first update
- * comes only once that input parses whole: seconds later for a `Write` or a
- * subagent's prompt. That names no input, so it is no detail, and the row
- * reads the call's title meanwhile. A nested (subagent) frame carries its
- * whole input from the start, and only a start is ever this.
+ * A start's detail. Claude's start frame names its tool before any of its
+ * input has streamed — `summarizeToolRequest(name, {})`, "Write: {}" — and the
+ * call's first update comes only once that input parses whole: seconds later
+ * for a `Write` or a subagent's prompt, and never for a tool that takes no
+ * arguments, whose start is its only row until its result. The empty input
+ * names nothing, so the detail keeps the tool's name alone — "Write",
+ * "Agent", "mcp__x__list" — which the row reads meanwhile. A nested (subagent)
+ * frame carries its whole input from the start.
  */
-function isEmptyInputEcho(detail: string | undefined): boolean {
-  return detail !== undefined && /^[^\s:]+: \{\}$/.test(detail);
+function startDetail(detail: string | undefined): string | undefined {
+  const echo = detail === undefined ? null : /^([^\s:]+): \{\}$/.exec(detail);
+  return echo === null ? detail : echo[1];
 }
 
 /**
@@ -508,13 +511,14 @@ function inheritedChunkOwner(
  * Still dropped: an unkeyed start, which nothing ties to its call; and a start
  * with neither a turn nor an owner. A Claude PARENT call can start before the
  * synthetic turn its own message opens: what it emits before that turn opens
- * — its start and any early input update — stays turnless, and only its rows
- * after that carry the turn. A rewind of that turn leaves those turnless rows
- * as all there is of the call, and none reads as running: the start is
- * dropped here (superseded by the update, else as turnless and ownerless),
- * and a turnless update still in progress is a neutral row a group hides
- * (`workEntryIsVisibleInGroup`). The MCP's transcript builds no entry from
- * them either.
+ * — its start and any early input update — stays turnless. The turn adopts
+ * the call as it opens, with one update on it (the Claude normaliser's
+ * `adoptedToolEvent`), which is the running call's live row. A rewind of that
+ * turn leaves the turnless rows as all there is of the call, and none reads
+ * as running: the start is dropped here (superseded by the update, else as
+ * turnless and ownerless), and a turnless update still in progress is a
+ * neutral row a group hides (`workEntryIsVisibleInGroup`). The MCP's
+ * transcript builds no entry from them either.
  */
 function startIsCallRow(activity: ThreadActivityItem, supersededCalls: ReadonlySet<string>): boolean {
   const callId = asTrimmedString(asRecord(activity.payload)?.toolUseId);
@@ -609,7 +613,9 @@ function isNoContentRuntimeWarning(activity: ThreadActivityItem): boolean {
 /**
  * `ExitPlanMode` is a plan boundary, not a tool the user cares about. *T3:
  * `:528-540`; differs: a start is a row too (`startIsCallRow`), and Claude's
- * reads `ExitPlanMode: {}` until the plan streams into the call's input.*
+ * reads `ExitPlanMode: {}` until the plan streams into the call's input — and
+ * the update that adopts a woken call before its input parsed names the tool
+ * alone (the Claude normaliser's `adoptedToolEvent`).*
  */
 function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
   if (
@@ -620,7 +626,7 @@ function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
     return false;
   }
   const detail = asRecord(activity.payload)?.detail;
-  return typeof detail === "string" && detail.startsWith("ExitPlanMode:");
+  return typeof detail === "string" && (detail === "ExitPlanMode" || detail.startsWith("ExitPlanMode:"));
 }
 
 /**

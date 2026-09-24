@@ -417,10 +417,12 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     const inScope = (item: ThreadItem): boolean => (opts.agentId ? ownerOf(item) === opts.agentId : !ownerOf(item) || isAgentAnchor(item));
     // A call whose rows in the view are all turnless, ownerless and unclosed is no entry, as the GUI's timeline shows it
     // none: a Claude parent call can start before the synthetic turn its own message opens, and what it emits before
-    // that turn opens — its start and any early input update — stays turnless; only its rows after that carry the turn.
-    // A rewind of that turn leaves the turnless rows as all there is of the call, and the GUI hides them (the start as
-    // superseded, `startIsCallRow` in packages/ui entries.logic.ts; an update still in progress as a neutral row) — no
-    // running call. The calls a row of the view anchors — by its turn, its owner, or as the call's close:
+    // that turn opens — its start and any early input update — stays turnless. The turn adopts the call as it opens,
+    // with one update on it (the Claude normaliser's `adoptedToolEvent`), so a running call always has a row that
+    // carries its turn; a rewind of that turn removes it with the rest, leaving the turnless rows as all there is of the
+    // call, which the GUI hides (the start as superseded, `startIsCallRow` in packages/ui entries.logic.ts; an update
+    // still in progress as a neutral row) — no running call. The calls a row of the view anchors — by its turn, its
+    // owner, or as the call's close:
     const anchoredCalls = new Set<string>();
     for (const item of snap.items) {
       if (item.kind !== "activity" || (item.activityKind !== "tool.output" && !TOOL_KINDS.has(item.activityKind)) || !inScope(item)) continue;

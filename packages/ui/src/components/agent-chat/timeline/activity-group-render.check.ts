@@ -125,7 +125,7 @@ assert.ok(!building.includes("tool call failed"), "no row — the header or an o
 assert.ok(!building.includes("Tool call failed"), "and no failure glyph");
 
 // Claude's start frame names its tool before any of its input has streamed ("Bash: {}"): the header and the opened
-// row read the call's title until the input's own update.
+// row read the tool's name until the input's own update.
 const claudeCall = render(
   createElement(ActivityGroupRow, {
     row: runningGroup([
@@ -136,7 +136,7 @@ const claudeCall = render(
   }),
   false
 );
-assert.match(claudeCall, /aria-expanded="true"[^>]*>[\s\S]*?Command run[\s\S]*?<\/button>/, "the header reads the call's title");
+assert.match(claudeCall, /aria-expanded="true"[^>]*>[\s\S]*?Bash[\s\S]*?<\/button>/, "the header reads the tool's name");
 assert.ok(!claudeCall.includes("Bash: {}"), "never the empty input's echo");
 
 console.log("agent-chat activity group render checks passed");
