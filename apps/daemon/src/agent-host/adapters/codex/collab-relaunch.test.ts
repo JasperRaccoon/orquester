@@ -17,8 +17,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import {
+  foldSubagentActivities,
+  type RuntimeEvent,
+  type RuntimeSubagent
+} from "@orquester/api/agent-chat";
 
+import { runtimeEventToActivities } from "../../ingestion/activities.ts";
 import { createLivenessRegistry } from "../../orchestration/liveness.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
 import { CodexNormaliser, type RuntimeEventDraft } from "./normalise.ts";
@@ -120,6 +125,29 @@ function startOf(drafts: readonly RuntimeEventDraft[]): TaskStartedDraft {
   return start;
 }
 
+let seq = 0;
+
+/** Drafts as the session emits them: with an id, a thread and a time. */
+function stamp(drafts: readonly RuntimeEventDraft[]): RuntimeEvent[] {
+  return drafts.map(
+    (draft) =>
+      ({
+        ...draft,
+        eventId: `e${(seq += 1)}`,
+        threadId: "thread-1",
+        createdAt: "2026-09-24T00:00:00.000Z"
+      }) as RuntimeEvent
+  );
+}
+
+/** The child's roster row, folded by ingestion's translation and the real roster fold. */
+function rosterRow(drafts: readonly RuntimeEventDraft[]): RuntimeSubagent {
+  const activities = stamp(drafts).flatMap((event) => runtimeEventToActivities(event));
+  const row = foldSubagentActivities(activities).find((agent) => agent.id === CHILD);
+  assert.ok(row !== undefined);
+  return row;
+}
+
 describe("a collab child's launch record carries a launch id (I1)", () => {
   it("subAgentActivity started starts the task under codex-launch:<item id>", () => {
     const start = startOf(launch(make()));
@@ -197,6 +225,35 @@ describe("a settled child's own turn launches it again (I2)", () => {
     });
   }
 
+  // An end record settles a run on its own, with no turn of the child's seen.
+  for (const kind of ["completed", "interrupted"] as const) {
+    it(`subAgentActivity ${kind} before the child's first turn: that turn is new`, () => {
+      const normaliser = make();
+      launch(normaliser);
+      activity(normaliser, kind, `sub-${kind}`);
+
+      const events = turnStarted(normaliser, "child-turn-1");
+      assert.deepEqual(taskRows(events), ["task.started", "task.progress:running"]);
+      assert.equal(startOf(events).payload.toolUseId, "codex-run:child-turn-1");
+    });
+  }
+
+  it("a turn before the launch record: two starts in ONE run, the second only metadata", () => {
+    // The order of `subAgentActivity started` against the child's own
+    // notifications is unverified (fixtures README observation 19). A child
+    // whose turn comes first is one this session never saw launched, so its
+    // turn starts it; the launch record then starts it again. The fold finds
+    // the agent running at that second start and only fills its metadata.
+    const normaliser = make();
+    const events = [...turnStarted(normaliser, "child-turn-1"), ...launch(normaliser)];
+    assert.deepEqual(taskRows(events), ["task.started", "task.progress:running", "task.started"]);
+
+    const row = rosterRow(events);
+    assert.equal(row.status, "running");
+    assert.equal(row.activationCount, 1, "one run, not two");
+    assert.equal(row.title, "explorer", "the launch record's name fills in the metadata");
+  });
+
   it("a child launched before this session (a host restart) starts on its turn", () => {
     const normaliser = make();
     const events = turnStarted(normaliser, "child-turn-9");
@@ -226,19 +283,66 @@ describe("a settled child's own turn launches it again (I2)", () => {
   });
 });
 
-describe("interacted is no evidence of a run", () => {
-  let seq = 0;
-  const stamp = (drafts: readonly RuntimeEventDraft[]): RuntimeEvent[] =>
-    drafts.map(
-      (draft) =>
-        ({
-          ...draft,
-          eventId: `e${(seq += 1)}`,
-          threadId: "thread-1",
-          createdAt: "2026-09-24T00:00:00.000Z"
-        }) as RuntimeEvent
-    );
+describe("an end record never ends a run a relaunch opened (I4)", () => {
+  // How `subAgentActivity` records are ordered against the child's own
+  // notifications is unverified (fixtures README observation 19). A
+  // `completed`/`interrupted` record that arrives while a turn a relaunch
+  // opened is in progress is about the run before: it writes no end — which
+  // would settle the NEW run — and the run ends at its own `turn/completed`.
+  const cases = [
+    {
+      kind: "completed",
+      turn: "completed",
+      runEnd: "task.updated:idle",
+      end: "task.completed:completed"
+    },
+    {
+      kind: "interrupted",
+      turn: "interrupted",
+      runEnd: "task.updated:interrupted",
+      end: "task.completed:stopped"
+    }
+  ] as const;
 
+  /** Launched, one run settled by its own turn, and the child's next turn: a relaunch. */
+  function relaunched(): CodexNormaliser {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    turnCompleted(normaliser, "child-turn-1");
+    const relaunch = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(relaunch.payload.toolUseId, "codex-run:child-turn-2");
+    return normaliser;
+  }
+
+  for (const { kind, turn: status, runEnd, end } of cases) {
+    it(`subAgentActivity ${kind} DURING the relaunched turn writes no end; the turn's does`, () => {
+      const normaliser = relaunched();
+      assert.deepEqual(taskRows(activity(normaliser, kind, `sub-${kind}`)), []);
+      assert.deepEqual(taskRows(turnCompleted(normaliser, "child-turn-2", status)), [runEnd]);
+      // Settled all the same: its next turn launches it again.
+      assert.deepEqual(taskRows(turnStarted(normaliser, "child-turn-3")), [
+        "task.started",
+        "task.progress:running"
+      ]);
+    });
+
+    it(`subAgentActivity ${kind} AFTER the relaunched turn's own end is the run's end`, () => {
+      const normaliser = relaunched();
+      turnCompleted(normaliser, "child-turn-2", status);
+      assert.deepEqual(taskRows(activity(normaliser, kind, `sub-${kind}`)), [end]);
+    });
+
+    it(`subAgentActivity ${kind} during the LAUNCH's first turn still ends that run`, () => {
+      const normaliser = make();
+      launch(normaliser);
+      turnStarted(normaliser, "child-turn-1");
+      assert.deepEqual(taskRows(activity(normaliser, kind, `sub-${kind}`)), [end]);
+    });
+  }
+});
+
+describe("interacted is no evidence of a run", () => {
   it("interacted alone does not make a settled agent live; its own turn does", () => {
     // `send_message` "does not trigger a new turn": an interaction that is not
     // followed by one left the thread reading "working" with nothing to end it.

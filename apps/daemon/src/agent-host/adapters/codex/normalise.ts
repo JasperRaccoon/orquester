@@ -98,15 +98,25 @@ export class CodexNormaliser {
    */
   private readonly settledChildren = new Set<string>();
   /**
+   * Children whose turn in progress a relaunch opened. A `subAgentActivity`
+   * `completed`/`interrupted` arriving during it is about the run before —
+   * the records' order against the child's own notifications is unverified —
+   * and writing its end would settle the new run, so it only marks the child
+   * settled; the run ends at its own `turn/completed`.
+   */
+  private readonly relaunchedTurns = new Set<string>();
+  /**
    * Turns already settled by `turn/completed`. `turn/start`'s response can
    * arrive AFTER the completion notification for the same turn — re-activating
    * it would leave the session `running` forever (Q1 finding 3).
    *
    * Bounded to the most recent {@link SETTLED_TURNS_CAP}: the guard only ever
    * asks about the turn whose `turn/start` is still in flight, so an id older
-   * than that is dead weight — and `forgetAgents()` clears the neighbouring
-   * maps but never this one, which left it the session's one unbounded set
-   * (V1 §10 #4). Insertion order is eviction order.
+   * than that is dead weight — and `forgetAgents()` never clears this set, so
+   * unbounded it grew with every turn of the session (V1 §10 #4). Insertion
+   * order is eviction order. The child bookkeeping above is never cleared
+   * either (`launchedChildren`, `settledChildren`), and needs no cap: it grows
+   * by one entry per child thread a session sees, not per turn.
    */
   private readonly settledTurns = new Set<string>();
 
@@ -180,6 +190,7 @@ export class CodexNormaliser {
     }
     this.knownAgentPaths.clear();
     this.childTurns.clear();
+    this.relaunchedTurns.clear();
   }
 
   /**
@@ -932,6 +943,7 @@ export class CodexNormaliser {
         this.settledChildren.delete(childThreadId);
         const events: RuntimeEventDraft[] = [];
         if (relaunch) {
+          this.relaunchedTurns.add(childThreadId);
           if (launch !== undefined) {
             // The parent turn that re-engaged it has subagents too.
             this.knownAgentPaths.add(launch.agentPath);
@@ -962,6 +974,7 @@ export class CodexNormaliser {
       }
       case "turn/completed": {
         this.childTurns.delete(childThreadId);
+        this.relaunchedTurns.delete(childThreadId);
         this.settledChildren.add(childThreadId);
         const p = params as CodexProtocol.v2.TurnCompletedNotification;
         const state = turnState(p.turn.status);
@@ -979,6 +992,7 @@ export class CodexNormaliser {
       }
       case "thread/closed": {
         this.childTurns.delete(childThreadId);
+        this.relaunchedTurns.delete(childThreadId);
         this.settledChildren.add(childThreadId);
         return [
           {
@@ -1102,6 +1116,9 @@ export class CodexNormaliser {
       case "interrupted":
         this.knownAgentPaths.delete(item.agentPath);
         this.settledChildren.add(item.agentThreadId);
+        if (this.relaunchedTurns.has(item.agentThreadId)) {
+          return []; // about the run before (`relaunchedTurns`)
+        }
         return [
           {
             type: "task.completed",
@@ -1113,6 +1130,9 @@ export class CodexNormaliser {
       case "completed":
         this.knownAgentPaths.delete(item.agentPath);
         this.settledChildren.add(item.agentThreadId);
+        if (this.relaunchedTurns.has(item.agentThreadId)) {
+          return []; // about the run before (`relaunchedTurns`)
+        }
         return [
           {
             type: "task.completed",
