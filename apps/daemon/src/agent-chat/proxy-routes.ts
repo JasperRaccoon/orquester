@@ -244,19 +244,32 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   );
 
   // The streamed output of the tool call an item belongs to, joined by the
-  // host from the log. Passed through verbatim, 404s included: the host's own
+  // host from the log — one window of it when `?offset=`/`?maxBytes=` ask for
+  // one, forwarded verbatim and never interpreted (the host owns their rules),
+  // and only as single strings: a repeated key reaches Fastify as an array,
+  // which is no value. Passed through verbatim, 404s included: the host's own
   // is `ITEM_NOT_FOUND`, and a surviving older host's route miss is its generic
   // `THREAD_NOT_FOUND`, so a caller can tell them apart (the MCP's
   // `read_tool_output` takes either as "no streamed output" and answers the
   // item's own text). Unlike `/search`, nothing is synthesised here: no answer
-  // of this route could stand for an older host's.
-  app.get<{ Params: { id: string; itemId: string } }>(
+  // of this route could stand for an older host's — and a host that predates
+  // windows answers the whole join, which the reader tells apart itself.
+  app.get<{ Params: { id: string; itemId: string }; Querystring: { offset?: unknown; maxBytes?: unknown } }>(
     pattern(agentChatRoutes.itemOutput(":id", ":itemId")),
     async (request, reply) => {
       const { id, itemId } = request.params;
       if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
       if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
-      return forwardJson(deps, reply, "GET", agentHostRoutes.itemOutput(id, itemId));
+      const { offset, maxBytes } = request.query;
+      return forwardJson(
+        deps,
+        reply,
+        "GET",
+        withQuery(agentHostRoutes.itemOutput(id, itemId), {
+          offset: typeof offset === "string" ? offset : undefined,
+          maxBytes: typeof maxBytes === "string" ? maxBytes : undefined
+        })
+      );
     }
   );
 

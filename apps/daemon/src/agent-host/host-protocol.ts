@@ -118,9 +118,13 @@ export const agentHostRoutes = {
     `${thread(threadId)}/items/${encodeURIComponent(itemId)}`,
   /**
    * `GET` → `ThreadItemOutputResponse`: the streamed output of the tool call
-   * the item belongs to, joined from the log; 404 `ITEM_NOT_FOUND` when the
-   * item names no call. A host that predates the route answers its generic
-   * route-miss 404 `THREAD_NOT_FOUND` until its drain-restart.
+   * the item belongs to, joined from the log; with `?offset=&maxBytes=`,
+   * `ThreadItemOutputWindowResponse`, one window of it from the store's cache.
+   * 404 `ITEM_NOT_FOUND` when the item names no call. A host that predates the
+   * route answers its generic route-miss 404 `THREAD_NOT_FOUND` until its
+   * drain-restart, and one that predates windows ignores the query and answers
+   * the whole join — additive both ways, so `AGENT_HOST_PROTOCOL_VERSION` did
+   * not move for it.
    */
   itemOutput: (threadId: string, itemId: string): string =>
     `${thread(threadId)}/items/${encodeURIComponent(itemId)}/output`,

@@ -77,9 +77,12 @@ export const agentChatRoutes = {
   /**
    * The streamed output of the tool call an item belongs to — every
    * `tool.output` chunk of the call, joined by the host
-   * ({@link ThreadItemOutputResponse}). A 404 of its own is
-   * `ITEM_NOT_FOUND`; a host that predates the route answers the miss as its
-   * generic 404 `THREAD_NOT_FOUND` ("No route for GET …").
+   * ({@link ThreadItemOutputResponse}). With `?offset=&maxBytes=`
+   * ({@link ThreadItemOutputWindowQuery}) it answers one UTF-8 window of that
+   * join instead ({@link ThreadItemOutputWindowResponse}) — unless the host
+   * predates windows, which ignores the query and answers the whole join. A
+   * 404 of its own is `ITEM_NOT_FOUND`; a host that predates the route answers
+   * the miss as its generic 404 `THREAD_NOT_FOUND` ("No route for GET …").
    */
   itemOutput: (sessionId: string, itemId: string): string =>
     `${sessionBase(sessionId)}/items/${encodeURIComponent(itemId)}/output`,
@@ -585,6 +588,10 @@ export const THREAD_ITEM_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
  * one). It is by call, not by stream: a file change's `file_change_output`
  * chunks join like a command's, and the reader decides what the text is.
  *
+ * This is the WHOLE join, the answer when the query asks for no window (and
+ * every answer of a host that predates windows); one window of it is
+ * {@link ThreadItemOutputWindowResponse}, which carries `text`, never `output`.
+ *
  * 404 `ITEM_NOT_FOUND` when the thread has no such item, or the item names no
  * tool call (no `payload.toolUseId`).
  */
@@ -603,6 +610,88 @@ export interface ThreadItemOutputResponse {
    * cut on a character boundary.
    */
   truncated: boolean;
+}
+
+/**
+ * The query of `GET …/items/:itemId/output` that asks for ONE window of the
+ * join ({@link ThreadItemOutputWindowResponse}); without either field the
+ * route answers the whole join ({@link ThreadItemOutputResponse}), as it did
+ * before windows existed.
+ *
+ * Both count UTF-8 bytes of the join. On the wire they are decimal strings:
+ * an `offset` that is not one is a 400 `INVALID_COMMAND`, and one past the
+ * end (however large) reads as the end; `maxBytes` is clamped to
+ * `[1, THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES]` and defaults to
+ * {@link THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES} when absent or unparseable
+ * — a window's size is a preference, never a reason to refuse.
+ */
+export interface ThreadItemOutputWindowQuery {
+  offset?: number;
+  maxBytes?: number;
+}
+
+/** A window's size when the query names none. */
+export const THREAD_ITEM_OUTPUT_WINDOW_DEFAULT_BYTES = 64 * 1024;
+
+/** The widest window one request takes. */
+export const THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES = 1024 * 1024;
+
+/**
+ * One UTF-8 window of the join {@link ThreadItemOutputResponse} describes —
+ * never an `output` field, so a reader tells it from the whole join a host
+ * that ignores the query answers ({@link isThreadItemOutputWindow}).
+ *
+ * The byte space is the join's UTF-8 as it stands (`Buffer.from(output)`; a
+ * lone surrogate reads as U+FFFD, 3 bytes), the same space whichever host
+ * serves a page, so offsets carry across a host restart. A running call's
+ * join only grows at its end, so an earlier `nextOffset` stays valid.
+ */
+export interface ThreadItemOutputWindowResponse {
+  /** The call: the item's `payload.toolUseId`. */
+  toolUseId: string;
+  /**
+   * Where `text` begins: the requested offset, clamped to `totalBytes` and
+   * moved back to the first byte of the character it falls in.
+   */
+  offset: number;
+  /**
+   * Whole characters: at most `maxBytes` bytes of UTF-8, or exactly one
+   * character when `maxBytes` is narrower than it. Empty only at the end.
+   */
+  text: string;
+  /**
+   * UTF-8 bytes of the whole join as it stands (at most
+   * {@link THREAD_ITEM_OUTPUT_MAX_BYTES}); grows while the call runs.
+   */
+  totalBytes: number;
+  /** `offset` + the bytes of `text`, present only while that is below `totalBytes`. */
+  nextOffset?: number;
+  /** A `tool.completed` row exists for the call: its output will not grow. */
+  complete: boolean;
+  /** The join passed {@link THREAD_ITEM_OUTPUT_MAX_BYTES}: `totalBytes` is its head's. */
+  truncated: boolean;
+}
+
+const isByteCount = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * A body shaped like {@link ThreadItemOutputWindowResponse}. The whole join
+ * ({@link ThreadItemOutputResponse}) never is: it carries `output`, no `text`
+ * and no offsets.
+ */
+export function isThreadItemOutputWindow(body: unknown): body is ThreadItemOutputWindowResponse {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+  const value = body as Record<string, unknown>;
+  return (
+    typeof value.toolUseId === "string" &&
+    typeof value.text === "string" &&
+    isByteCount(value.offset) &&
+    isByteCount(value.totalBytes) &&
+    (value.nextOffset === undefined || isByteCount(value.nextOffset)) &&
+    typeof value.complete === "boolean" &&
+    typeof value.truncated === "boolean"
+  );
 }
 
 /** `GET /api/agent/providers` (§6.3). */

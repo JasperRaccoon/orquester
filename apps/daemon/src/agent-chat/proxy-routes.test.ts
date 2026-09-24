@@ -305,6 +305,25 @@ test("a tool call's streamed output is proxied verbatim — the host's own 404 a
   await h.close();
 });
 
+test("a window of a tool call's streamed output forwards offset/maxBytes verbatim, and passes the window through", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const window = { toolUseId: "bgshell:task-1", offset: 40_000, text: "two\n", totalBytes: 40_004, complete: true, truncated: false };
+  h.host.handler = (_req, res) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(window));
+  const served = await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "bgshell:task-1")}?offset=40000&maxBytes=55000` });
+  assert.equal(served.statusCode, 200);
+  assert.deepEqual(served.json(), window);
+  // Parsing and clamping are the host's, in one place: the values cross as they came.
+  assert.equal(h.host.requests[0].url, "/threads/t1/items/bgshell%3Atask-1/output?offset=40000&maxBytes=55000");
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "i1")}?offset=abc` });
+  assert.equal(h.host.requests[1].url, "/threads/t1/items/i1/output?offset=abc");
+  // Only those two, and only as single strings: a repeated key is no value, an empty one none either.
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "i1")}?offset=1&offset=2&maxBytes=5&other=x` });
+  assert.equal(h.host.requests[2].url, "/threads/t1/items/i1/output?maxBytes=5");
+  await h.app.inject({ method: "GET", url: `${agentChatRoutes.itemOutput("t1", "i1")}?offset=&maxBytes=` });
+  assert.equal(h.host.requests[3].url, "/threads/t1/items/i1/output");
+  await h.close();
+});
+
 test("a malformed turn count is rejected before the hop", async () => {
   const h = await makeHarness({ t1: tab("t1") });
   const response = await h.app.inject({ method: "GET", url: "/api/sessions/t1/turns/abc/diff" });

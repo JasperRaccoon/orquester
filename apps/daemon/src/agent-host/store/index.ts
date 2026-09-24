@@ -52,10 +52,13 @@ import type {
   FoldSnapshotFile,
   ProviderSessionBinding,
   ProviderSessionBindingPatch,
+  ThreadActivityItem,
   ThreadFoldState,
   ThreadHead,
   ThreadItem,
-  ThreadItemOutputResponse
+  ThreadItemOutputResponse,
+  ThreadItemOutputWindowQuery,
+  ThreadItemOutputWindowResponse
 } from "@orquester/api/agent-chat";
 import {
   FOLD_SNAPSHOT_VERSION,
@@ -104,7 +107,13 @@ import {
 } from "./files.ts";
 import { applyEventToHead } from "./head.ts";
 import { RawFrameLog, pruneRawLogDirectory } from "./raw-log.ts";
-import { joinToolOutput } from "./tool-output.ts";
+import { joinToolOutput, type ItemWrite } from "./tool-output.ts";
+import {
+  TOOL_OUTPUT_CACHE_IDLE_MS,
+  TOOL_OUTPUT_CACHE_MAX_BYTES,
+  TOOL_OUTPUT_CACHE_MAX_ENTRIES,
+  createToolOutputCache
+} from "./tool-output-cache.ts";
 
 /** `meta.json` is rewritten after this many appended events (§5.1). */
 export const HEAD_CHECKPOINT_EVENTS = 50;
@@ -223,6 +232,20 @@ export interface ThreadStoreOptions {
    * own logger.
    */
   logger?: { warn(message: string, detail?: unknown): void };
+  /**
+   * The bounds of the tool-output cache (`tool-output-cache.ts`): join
+   * buffers in bytes, entries (item cursors, and as many joins), and how long
+   * an unread entry lives. The defaults are its `TOOL_OUTPUT_CACHE_*`.
+   */
+  toolOutputCacheBytes?: number;
+  toolOutputCacheEntries?: number;
+  toolOutputCacheIdleMs?: number;
+  /**
+   * Test seam: every read of a thread's `events.ndjson` the tool-output cache
+   * makes (`[fromByte, toByte)`) and every whole-log read (`readLog`), so a
+   * test can see that a warm page read only the log's tail.
+   */
+  onLogRead?: (threadId: string, fromByte: number, toByte: number) => void;
 }
 
 /** Default cadence for the background sweep. */
@@ -285,10 +308,14 @@ export interface AgentThreadStore extends ThreadStore {
    * `GET /api/sessions/:id/items/:itemId` (§6.3): one item with its FULL,
    * unslimmed payload, or null.
    *
-   * Reads the log backwards rather than folding it, for two reasons: the
+   * The item's NEWEST write in the log, never the fold, for two reasons: the
    * newest write for an id is the authoritative one, and an item that aged
    * out of the fold's 500-row activity window (§5.1) is exactly the kind of
-   * row a "load full output" click asks for — it must still be servable.
+   * row a "load full output" click asks for — it must still be servable. The
+   * tool-output cache's item cursor says where that write is, so an activity
+   * costs the log's tail and one read of its own line; a message (a body only
+   * its deltas folded rebuild) and a line that no longer checks out are read
+   * from the whole log, as before the cursor.
    */
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
   /**
@@ -296,9 +323,21 @@ export interface AgentThreadStore extends ThreadStore {
    * item belongs to — every `tool.output` chunk of its `payload.toolUseId`,
    * joined in log order (`tool-output.ts`) — or null when the item names no
    * call. From the log, for the reason `readItem` reads it: the chunks a
-   * "load full output" asks for are exactly the rows retention drops.
+   * "load full output" asks for are exactly the rows retention drops. One
+   * whole read of the log per call: the route's answer when no window is
+   * asked for, as it was before windows.
    */
   readToolOutput(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
+  /**
+   * `GET …/items/:itemId/output?offset=&maxBytes=`: one window of the same
+   * join, served from the tool-output cache (`tool-output-cache.ts`) — built
+   * once per call, then extended by the log's tail alone.
+   */
+  readToolOutputWindow(
+    threadId: string,
+    itemId: string,
+    window: ThreadItemOutputWindowQuery
+  ): Promise<ThreadItemOutputWindowResponse | null>;
   /**
    * Run the host-wide sweep now: the raw-log ceiling plus every attachment
    * TTL. Equivalent to `pruneAttachments()` with no arguments; exposed so the
@@ -619,6 +658,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (contents === null) {
       return { events: [], seq: 0, truncated: false };
     }
+    options.onLogRead?.(threadId, 0, Buffer.byteLength(contents, "utf8"));
     const events: DomainEvent[] = [];
     const torn = contents.length > 0 && !contents.endsWith("\n");
     let truncated = torn;
@@ -688,6 +728,70 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       }
     }
     return { events, positions, lines: spans.length, truncated };
+  }
+
+  // --- the tool-output cache (`tool-output-cache.ts`) ------------------------
+
+  const toolOutputCache = createToolOutputCache({
+    eventsPath: (threadId) => threadEventsPath(rootDir, threadId),
+    // Loading the thread first is what cuts a torn tail before any window reads it.
+    committedLength: async (threadId) => (await ensureLoaded(threadId)).logBytes,
+    decodeLine,
+    now: () => clock.now().getTime(),
+    maxJoinBytes: options.toolOutputCacheBytes ?? TOOL_OUTPUT_CACHE_MAX_BYTES,
+    maxEntries: options.toolOutputCacheEntries ?? TOOL_OUTPUT_CACHE_MAX_ENTRIES,
+    idleMs: options.toolOutputCacheIdleMs ?? TOOL_OUTPUT_CACHE_IDLE_MS,
+    decodeSliceMs: DECODE_SLICE_MS,
+    yieldToLoop,
+    ...(options.onLogRead !== undefined ? { onLogRead: options.onLogRead } : {})
+  });
+
+  /**
+   * The activity an item cursor recorded, read back alone: exactly its line,
+   * and only while that line still is the write the cursor saw — the same
+   * `seq`, an activity, the same id. Null otherwise.
+   */
+  async function readActivityLine(
+    threadId: string,
+    itemId: string,
+    write: Extract<ItemWrite, { kind: "activity" }>
+  ): Promise<ThreadActivityItem | null> {
+    const end = write.byteOffset + write.byteLength;
+    options.onLogRead?.(threadId, write.byteOffset, end);
+    const line = await readFileWindow(threadEventsPath(rootDir, threadId), write.byteOffset, end);
+    if (line === null || line.bytes.length !== write.byteLength || line.bytes[write.byteLength - 1] !== 0x0a) {
+      return null;
+    }
+    const event = decodeLine(line.bytes.toString("utf8", 0, write.byteLength - 1));
+    return event?.type === "thread.activity-appended" &&
+      event.seq === write.seq &&
+      event.payload.activity.id === itemId
+      ? event.payload.activity
+      : null;
+  }
+
+  /** `readItem` over the whole log: its newest write read backwards, a message folded. */
+  async function readItemFromLog(threadId: string, itemId: string): Promise<ThreadItem | null> {
+    const tail = await readLog(threadId);
+    for (let index = tail.events.length - 1; index >= 0; index -= 1) {
+      const event = tail.events[index]!;
+      if (event.type === "thread.activity-appended") {
+        if (event.payload.activity.id === itemId) {
+          return event.payload.activity;
+        }
+        continue;
+      }
+      if (event.type !== "thread.message-sent" || event.payload.messageId !== itemId) {
+        continue;
+      }
+      // A message id is written once per delta, so the newest row alone is
+      // a fragment: rebuild the accumulated body the same way the fold does
+      // — yielding, like every other whole-log fold in this store, so a
+      // long thread's "load full output" cannot starve the health probe.
+      const state = await foldForward(createEmptyThreadState(), tail.events);
+      return state.items.find((item) => item.id === itemId) ?? null;
+    }
+    return null;
   }
 
   async function writeHead(head: ThreadHead): Promise<void> {
@@ -1318,6 +1422,9 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         threads.delete(threadId);
         loaded.delete(threadId);
         loading.delete(threadId);
+        // Only once the log is gone: a scan that started before this point
+        // publishes nothing, and one that starts after it reads what is left.
+        toolOutputCache.dropThread(threadId);
       });
     },
 
@@ -1505,37 +1612,42 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         entry.raw?.close();
         entry.raw = null;
       }
+      toolOutputCache.clear();
     },
 
     async readItem(threadId: string, itemId: string): Promise<ThreadItem | null> {
       assertSafeThreadId(threadId);
-      const tail = await readLog(threadId);
-      for (let index = tail.events.length - 1; index >= 0; index -= 1) {
-        const event = tail.events[index]!;
-        if (event.type === "thread.activity-appended") {
-          if (event.payload.activity.id === itemId) {
-            return event.payload.activity;
-          }
-          continue;
-        }
-        if (event.type !== "thread.message-sent" || event.payload.messageId !== itemId) {
-          continue;
-        }
-        // A message id is written once per delta, so the newest row alone is
-        // a fragment: rebuild the accumulated body the same way the fold does
-        // — yielding, like every other whole-log fold in this store, so a
-        // long thread's "load full output" cannot starve the health probe.
-        const state = await foldForward(createEmptyThreadState(), tail.events);
-        return state.items.find((item) => item.id === itemId) ?? null;
+      const write = await toolOutputCache.itemWrite(threadId, itemId);
+      if (write.kind === "none") {
+        return null;
       }
-      return null;
+      if (write.kind === "activity") {
+        const activity = await readActivityLine(threadId, itemId, write);
+        if (activity !== null) {
+          return activity;
+        }
+        // Not the line the cursor recorded: the log decides, and the cursor
+        // starts over on the next read.
+        await toolOutputCache.forgetItem(threadId, itemId);
+      }
+      return readItemFromLog(threadId, itemId);
     },
 
     async readToolOutput(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null> {
       assertSafeThreadId(threadId);
-      // One read of the log, as `readItem`: the item's newest write names the
-      // call, and every chunk of it is joined from the same events.
+      // One whole read of the log — the route's answer when no window is asked
+      // for, kept on the path it had before windows: the item's newest write
+      // names the call, and every chunk of it is joined from the same events.
       return joinToolOutput((await readLog(threadId)).events, itemId);
+    },
+
+    async readToolOutputWindow(
+      threadId: string,
+      itemId: string,
+      window: ThreadItemOutputWindowQuery
+    ): Promise<ThreadItemOutputWindowResponse | null> {
+      assertSafeThreadId(threadId);
+      return toolOutputCache.window(threadId, itemId, window);
     }
   };
 
