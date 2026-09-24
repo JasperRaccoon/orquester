@@ -3373,7 +3373,9 @@ the one rule the GUI, the MCP and the first load's `leftover-work.ts` read), and
 it back as a failed row. A Claude start that only names its tool
 with an empty input ("Bash: {}", "Write: {}" — the input streams afterwards, and the first update
 comes once it parses whole; a tool that takes no arguments has none until its result) keeps the
-tool's name alone as its detail, so the row reads "Write" or "mcp__x__list" meanwhile; the
+tool's name alone as its detail, so the row reads "Write" or "mcp__x__list" meanwhile — and so does
+every other lifecycle row of a call that echoes an empty input, a no-argument tool's completion
+above all, so its label never gains ": {}" as it completes (`callRowDetail`); the
 `ExitPlanMode` boundary covers the start too; and a start never offers "Load full output": what the
 read cut there is the call's input. (2) The rows a list renders are the ones counted, named and
 judged (`isStreamedOutputEntry`, `withoutJoinedOutput`, `lib/agent-chat/presentation.logic.ts`): a

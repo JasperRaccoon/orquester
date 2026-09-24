@@ -185,8 +185,8 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     ? taskDetailAsLabel
       ? undefined
       : asTrimmedString(payload?.detail)
-    : activity.activityKind === "tool.started"
-      ? startDetail(asTrimmedString(payload?.detail))
+    : CALL_LIFECYCLE_KINDS.has(activity.activityKind)
+      ? callRowDetail(asTrimmedString(payload?.detail))
       : asTrimmedString(payload?.detail);
   const command = asTrimmedString(payload?.command) ?? asTrimmedString(data?.command);
   // A command row shows the output its provider data carries where `detail`
@@ -362,16 +362,19 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
 }
 
 /**
- * A start's detail. Claude's start frame names its tool before any of its
- * input has streamed — `summarizeToolRequest(name, {})`, "Write: {}" — and the
- * call's first update comes only once that input parses whole: seconds later
- * for a `Write` or a subagent's prompt, and never for a tool that takes no
- * arguments, whose start is its only row until its result. The empty input
- * names nothing, so the detail keeps the tool's name alone — "Write",
- * "Agent", "mcp__x__list" — which the row reads meanwhile. A nested (subagent)
- * frame carries its whole input from the start.
+ * A lifecycle row's detail. Claude names a call's tool with its input echoed
+ * — `summarizeToolRequest(name, input)` — and its start frame does so before
+ * any of that input has streamed: "Write: {}". The call's first update comes
+ * only once the input parses whole, seconds later for a `Write` or a
+ * subagent's prompt, and never for a tool that takes no arguments: its start
+ * is its only row until its result, and its completion echoes the same empty
+ * input. The empty input names nothing, so every lifecycle row of the call
+ * (start, update, completion, denial) keeps the tool's name alone — "Write",
+ * "Agent", "mcp__x__list": a start reads it meanwhile, and a no-argument
+ * call's label never gains ": {}" as it completes. A nested (subagent) frame
+ * carries its whole input from the start.
  */
-function startDetail(detail: string | undefined): string | undefined {
+function callRowDetail(detail: string | undefined): string | undefined {
   const echo = detail === undefined ? null : /^([^\s:]+): \{\}$/.exec(detail);
   return echo === null ? detail : echo[1];
 }
