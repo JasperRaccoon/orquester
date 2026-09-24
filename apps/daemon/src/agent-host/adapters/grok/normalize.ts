@@ -128,6 +128,19 @@ const TOOL_STATUS_TO_ITEM_STATUS: Record<ToolCallStatus, RuntimeItemStatus> = {
   failed: "failed"
 };
 
+/**
+ * How many finished call ids the normaliser remembers, oldest forgotten
+ * first. A finished call's track is dropped (a long session would otherwise
+ * keep one per call), so this is what tells a late frame of a finished call
+ * from a new call's first one. The bound is memory only: a resend arriving a
+ * thousand calls later has never been seen.
+ */
+export const FINISHED_CALLS_REMEMBERED = 1_024;
+
+function isTerminalToolStatus(status: ToolCallStatus | null | undefined): boolean {
+  return status === "completed" || status === "failed";
+}
+
 /** The `_x.ai` `sessionUpdate` names this adapter knows. */
 const KNOWN_XAI_UPDATES = new Set([
   "model_changed",
@@ -162,6 +175,8 @@ export class GrokNormalizer {
   private readonly history = new GrokHistoryCollector();
 
   private readonly tools = new Map<string, ToolTrack>();
+  /** Calls that reached a terminal status, bounded by {@link FINISHED_CALLS_REMEMBERED}. */
+  private readonly finishedCalls = new Set<string>();
   private readonly tasks = new Map<string, BackgroundTrack>();
   private readonly hooks = new Map<string, string>();
 
@@ -505,6 +520,17 @@ export class GrokNormalizer {
     }
 
     const previous = this.tools.get(toolCallId);
+    // A frame of a call that already FINISHED. A status-less (or still
+    // in-progress) one has no lifecycle left to report: emitted, it opened the
+    // finished call again as a new `item.started`, re-registered it as live,
+    // and the exit sweep (`failOpenTools`) then failed a call that had
+    // completed. It is dropped. A terminal one restates the end, as before,
+    // and nothing else: the side effects of the end (plan mode, a background
+    // task, a subagent) already ran on the first.
+    const restatesEnd = previous === undefined && this.finishedCalls.has(toolCallId);
+    if (restatesEnd && !isTerminalToolStatus(update.status)) {
+      return [];
+    }
     const vendor = xaiToolMeta(update._meta);
     const kind = normalizeToolKind(update.kind) ?? previous?.kind;
     const title = update.title ?? previous?.title;
@@ -590,11 +616,13 @@ export class GrokNormalizer {
     }
 
     if (terminal) {
-      // A late update on a finished call must look brand-new, not like a
-      // no-op that coalescing would swallow.
       this.tools.delete(toolCallId);
+      this.rememberFinishedCall(toolCallId);
     } else {
       this.tools.set(toolCallId, next);
+    }
+    if (restatesEnd) {
+      return events;
     }
 
     // Plan mode is DECLARED, so the flag follows the tool call regardless of
@@ -617,6 +645,18 @@ export class GrokNormalizer {
 
     events.push(...this.backgroundFromToolCall(toolCallId, rawInput, rawOutput, status));
     return events;
+  }
+
+  /** Oldest first out, so the set stays within {@link FINISHED_CALLS_REMEMBERED}. */
+  private rememberFinishedCall(toolCallId: string): void {
+    this.finishedCalls.delete(toolCallId);
+    this.finishedCalls.add(toolCallId);
+    if (this.finishedCalls.size > FINISHED_CALLS_REMEMBERED) {
+      const oldest = this.finishedCalls.values().next().value;
+      if (oldest !== undefined) {
+        this.finishedCalls.delete(oldest);
+      }
+    }
   }
 
   /**
@@ -1010,6 +1050,7 @@ export class GrokNormalizer {
     const events: RuntimeEvent[] = [];
     for (const [toolCallId, track] of [...this.tools.entries()]) {
       this.tools.delete(toolCallId);
+      this.rememberFinishedCall(toolCallId);
       if (!track.started) {
         continue;
       }
