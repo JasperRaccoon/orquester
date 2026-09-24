@@ -927,6 +927,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
   `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
   a surfaced subagent.
+- **"Load full output" on a command whose output streamed reads the host's join, never the row.**
+  A row holds only the chunks its window kept (a parent's 500 rows, an agent's 200), and a Codex
+  command's or a background shell's completion carries no output of its own, so a row whose
+  command streamed (`streamedOutput`, `WorkLogEntry`: a `command_output` chunk, every lifecycle row
+  of a call whose chunks the derivation input holds — wherever they fall — and the row
+  `joinLifecycleDetails` puts them on) offers the button whether or not its payload was cut
+  (`fullOutputSourceOf`), and the viewer reads the call's join (`readFullOutput`,
+  `packages/ui/src/lib/agent-chat/full-output.ts`) through the chat transport's `readItemOutput`:
+  `GET …/items/:itemId/output` one window at a time, `THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide,
+  each starting where the last ended — else the read fails rather than stitch a text the call never
+  printed — with "still running" / "cut at 8 MiB" notes above the text. A host from before windows
+  answers the whole join, taken as it comes; a 404 or an empty join falls back to the item read,
+  never an error. Never a file change's join: its chunks are its result text (the MCP's rule).
+  The subagent drill-in opens the same viewer: a read, not a command. The read is not routed
+  through the thread store — a 200 KB payload the user asked to see once is not thread state.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
