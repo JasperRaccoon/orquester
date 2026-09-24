@@ -107,6 +107,13 @@ const said = (
     ...(extra.messageKind !== undefined ? { messageKind: extra.messageKind } : {})
   });
 
+/** A started turn, as the host writes one: the prompt, its pending row, the adopted provider id. */
+const turn = (turnId: string): Unsequenced[] => [
+  said(`user:${turnId}`, "user", `prompt for ${turnId}`, false),
+  event("thread.turn-start-requested", { turnId: null, messageId: `user:${turnId}`, interactionMode: "default" }),
+  event("thread.session-set", { session: { status: "running", activeTurnId: turnId } })
+];
+
 function foldOf(events: readonly Unsequenced[]): ThreadFoldState {
   return foldThread(sequenced([created(), ...events], 0));
 }
@@ -123,15 +130,19 @@ function closingsOf(state: ThreadFoldState, closed?: ReadonlySet<string>): Lefto
 /** The closings folded onto `state`, as `commit` folds what the store appended. */
 function applied(state: ThreadFoldState, closings: readonly LeftoverClosing[]): ThreadFoldState {
   const events = sequenced(
-    closings.map((closing) => event(closing.type, closing.payload as never)),
+    closings.map((closing) => event("thread.activity-appended", { activity: closing.activity })),
     state.seq
   );
   return events.reduce(applyDomainEvent, state);
 }
 
+/** `state` rewound to its first `turnCount` started turns (§5.5). */
+const rewound = (state: ThreadFoldState, turnCount: number): ThreadFoldState =>
+  applyDomainEvent(state, sequenced([event("thread.reverted", { turnCount })], state.seq)[0]!);
+
 const activityOf = (closing: LeftoverClosing | undefined): ThreadActivityItem => {
-  assert.equal(closing?.type, "thread.activity-appended");
-  return (closing!.payload as { activity: ThreadActivityItem }).activity;
+  assert.ok(closing !== undefined, "a closing");
+  return closing.activity;
 };
 
 describe("leftoverWorkClosings — what a dead process left open", () => {
@@ -292,7 +303,8 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
         title: "npm run dev",
         toolUseId: "toolu_shell"
       },
-      turnId: null,
+      // Its start's turn: a rewind keeps or drops the two together.
+      turnId: "turn-1",
       createdAt: NOW,
       updatedAt: NOW
     });
@@ -376,68 +388,81 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.deepEqual(openWorkOf(applied(state, closings).activities), { calls: [], tasks: [] });
   });
 
-  it("stamps a task's closer with the turn the head says is running, as the adapters stamp a teardown", () => {
+  it("stamps a task's closer with its start row's turn, so a rewind keeps or removes the two together", () => {
+    // turn-1 launched the agent and settled; turn-2 was running when the host died.
     const state = foldOf([
-      event("thread.session-set", { session: { status: "running", activeTurnId: "turn-7" } }),
-      row("agent-start", "task.started", { taskId: "agent-1", agentKind: "agent", title: "Explorer" })
+      ...turn("turn-1"),
+      row("agent-start", "task.started", { taskId: "agent-1", agentKind: "agent", title: "Explorer" }, {
+        turnId: "turn-1"
+      }),
+      event("thread.session-set", { session: { status: "ready", activeTurnId: null } }),
+      ...turn("turn-2")
     ]);
-    assert.equal(activityOf(closingsOf(state)[0]).turnId, "turn-7");
+    const closings = closingsOf(state);
+    assert.equal(activityOf(closings[0]).turnId, "turn-1", "the start's turn, not the one running");
+
+    const after = applied(state, closings);
+    const statusAfterRewind = (turnCount: number): Record<string, string> =>
+      Object.fromEntries(
+        foldSubagentActivities(rewound(after, turnCount).activities, { sessionLive: true }).map((agent) => [
+          agent.id,
+          agent.status
+        ])
+      );
+    // A rewind that keeps the start keeps its stop: the agent does not read running again.
+    assert.deepEqual(statusAfterRewind(1), { "agent-1": "interrupted" });
+    // One that removes the start removes the stop with it.
+    assert.deepEqual(statusAfterRewind(0), {});
   });
 
-  it("settles every message still streaming with its text unchanged, on its own turn and owner", () => {
+  it("stamps a task whose start the window lost with its latest row's turn", () => {
+    const state = foldOf([
+      row("progress", "task.progress", { taskId: "agent-1", agentKind: "agent", title: "Explorer" }, {
+        id: "task-progress:agent-1",
+        turnId: "turn-3"
+      })
+    ]);
+    assert.equal(activityOf(closingsOf(state)[0]).turnId, "turn-3");
+  });
+
+  it("puts every closer in exactly the class the fold gives its opener, whatever the owner's spelling", () => {
+    // The fold's owner is any non-empty `agentId` (`fold.ts` `ownerOf`), blank or not.
+    const state = foldOf([
+      row("odd-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_odd", title: "Bash" }, {
+        agentId: " "
+      }),
+      row("odd-task", "task.started", { taskId: "shell-odd", agentKind: "background", title: "odd" }, {
+        agentId: " "
+      })
+    ]);
+    const [call, task] = closingsOf(state).map(activityOf);
+    assert.equal(call!.agentId, " ");
+    assert.equal((call!.payload as Record<string, unknown>).agentId, " ");
+    assert.equal(task!.agentId, " ");
+  });
+
+  it("leaves every message still streaming to its readers: no closing names one", () => {
+    // Settling one moved its span in the thread index to the end of the log,
+    // and "Load older" then lost every row between its first chunk and the
+    // window (reconcile.test.ts walks the pages).
     const state = foldOf([
       said("assistant:agent-1:m1", "assistant", "Looking at", true, { agentId: "agent-1" }),
-      said("assistant:agent-1:m1", "assistant", " the tests", true, { agentId: "agent-1" }),
       said("reasoning:summary:agent-1:m2", "reasoning", "Thinking about it", true, {
         agentId: "agent-1",
         reasoningKind: "summary"
       }),
       said("assistant:parent", "assistant", "Checking first", true, { turnId: "turn-1", messageKind: "commentary" }),
-      said("assistant:done", "assistant", "All done.", false, { turnId: "turn-1" })
+      row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" })
     ]);
-
     const closings = closingsOf(state);
-    assert.deepEqual(closings.map((closing) => [closing.key, closing.type]), [
-      ["message:assistant:agent-1:m1", "thread.message-sent"],
-      ["message:reasoning:summary:agent-1:m2", "thread.message-sent"],
-      ["message:assistant:parent", "thread.message-sent"]
-    ]);
-    // Only what the message already carries rides its settle: the fold keeps
-    // a badge a later event omits, and must not gain one the stream never set.
-    assert.deepEqual(closings[0]!.payload, {
-      messageId: "assistant:agent-1:m1",
-      role: "assistant",
-      text: "",
-      streaming: false,
-      turnId: null,
-      agentId: "agent-1"
-    });
-    assert.deepEqual(closings[1]!.payload, {
-      messageId: "reasoning:summary:agent-1:m2",
-      role: "reasoning",
-      text: "",
-      streaming: false,
-      turnId: null,
-      agentId: "agent-1",
-      reasoningKind: "summary"
-    });
-    assert.deepEqual(closings[2]!.payload, {
-      messageId: "assistant:parent",
-      role: "assistant",
-      text: "",
-      streaming: false,
-      turnId: "turn-1",
-      messageKind: "commentary"
-    });
-
+    assert.deepEqual(closings.map((closing) => closing.key), ["call:toolu_1"]);
     const messages = applied(state, closings).items.filter((item) => item.kind === "message");
     assert.deepEqual(
-      messages.map((message) => [message.id, message.text, message.streaming, message.turnId]),
+      messages.map((message) => [message.id, message.streaming]),
       [
-        ["assistant:agent-1:m1", "Looking at the tests", false, null],
-        ["reasoning:summary:agent-1:m2", "Thinking about it", false, null],
-        ["assistant:parent", "Checking first", false, "turn-1"],
-        ["assistant:done", "All done.", false, "turn-1"]
+        ["assistant:agent-1:m1", true],
+        ["reasoning:summary:agent-1:m2", true],
+        ["assistant:parent", true]
       ]
     );
   });
@@ -445,11 +470,11 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
   it("skips what a caller already closed, and finds nothing in a thread with nothing open", () => {
     const state = foldOf([
       row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }),
-      said("assistant:m1", "assistant", "Hi", true)
+      row("t-start", "task.started", { taskId: "task-1", agentKind: "agent", title: "Explorer" })
     ]);
     assert.deepEqual(
       closingsOf(state, new Set(["call:toolu_1"])).map((closing) => closing.key),
-      ["message:assistant:m1"]
+      ["task:task-1"]
     );
     assert.deepEqual(closingsOf(applied(state, closingsOf(state))), []);
     assert.deepEqual(closingsOf(foldOf([said("user:1", "user", "hello", false)])), []);

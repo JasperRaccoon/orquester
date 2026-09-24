@@ -6,18 +6,18 @@
  * `closeLiveTasks` fails every call a subagent still has open and stops every
  * live task, a background shell's item before its task; Codex's
  * `closeOpenItems` fails every open item. A host that is killed — a crash, an
- * OOM, a deploy's hard stop — runs none of that, and the log keeps the calls,
- * tasks and streaming messages that process owned open for good. The fold
- * keeps their opening rows while they read open (`open-work.ts`, within its
- * caps), and a roster row with no terminal row reads running again the moment
- * a session is live. So the orchestrator appends, on a thread's first load in
- * a host lifetime, the rows its last process never wrote
- * (`closeLeftoverWork` in `orchestrator.ts`); this module derives them from
- * the folded window alone — reading the log past it is the cost the lazy boot
- * exists to avoid. The fold keeps the opening rows of open work within its
- * caps, so what a crash left open is normally in the window; a call whose
- * opening row the window no longer holds is not closed, and an older history
- * page still shows it as it was.
+ * OOM, a deploy's hard stop — runs none of that, and the log keeps the calls
+ * and tasks that process owned open for good. The fold keeps their opening
+ * rows while they read open (`open-work.ts`, within its caps), and a roster row
+ * with no terminal row reads running again the moment a session is live. So
+ * the orchestrator appends, on a thread's first load in a host lifetime, the
+ * rows its last process never wrote (`closeLeftoverWork` in
+ * `orchestrator.ts`); this module derives them from the folded window alone —
+ * reading the log past it is the cost the lazy boot exists to avoid. The fold
+ * keeps the opening rows of open work within its caps, so what a crash left
+ * open is normally in the window; a call whose opening row the window no
+ * longer holds is not closed, and an older history page still shows it as it
+ * was.
  *
  * - **Every open call** ({@link openWorkOf}) gets a `tool.completed`, `failed`
  *   as both adapters' teardown writes it, with {@link LEFTOVER_CALL_DETAIL}.
@@ -35,12 +35,29 @@
  *   rule leaves it: a resumable child stays resumable. The row carries the
  *   task's linkage bundle as its latest row has it (so the roster's title does
  *   not move back), the roster's own `agentKind` (an agent's closer is an
- *   anchor retention never drops, like its start) and its start's owner. Calls
- *   come first, so a background shell's item closes before its task, as the
- *   adapters order it.
- * - **Every message still streaming** is settled the way ingestion finalizes
- *   one: `streaming: false` with empty text, which keeps the body, on the
- *   message's own turn, owner and badges.
+ *   anchor retention never drops, like its start), its start's owner, and its
+ *   start's turn — a rewind keeps or drops a row by its turn (`reduceReverted`),
+ *   so a closer on any other turn could go with a rewind that keeps the start,
+ *   and the agent would read running again. Calls come first, so a background
+ *   shell's item closes before its task, as the adapters order it.
+ *
+ * **A message still `streaming: true` is left as the log has it.** Every
+ * `thread.message-sent` moves the message's span in the thread index to its
+ * line (`updateMessageDoc`), and a history page never splits a streamed
+ * message (`outsideMessages` in `orchestrator.ts`), so a settle appended here
+ * would stretch an old message's span to the end of the log: the first page
+ * would end at its first chunk, and every row between that chunk and the
+ * window would be on neither. How a stream no process can continue reads is
+ * its readers' to decide.
+ *
+ * A closer is a new activity id, so nothing it writes spans the log; its turn
+ * may be an old one, and the index then grows that turn's range over it — the
+ * late-reference rule, bounded at `MAX_LATE_REFERENCE_BYTES` past the next
+ * turn's start (`extendReferenced` in `index/indexer.ts`), which pages over
+ * without losing a row. As with every late reference, a later rewind that
+ * keeps that turn and drops the ones after it brings the dropped turns' rows
+ * inside the stretch back onto a history page: the revert-cut filter
+ * (`eventsOutsideRevertCuts`) keeps whatever lies in a surviving turn's range.
  *
  * Pure: no clock, no ids, no I/O of its own — the caller hands in both.
  */
@@ -52,9 +69,7 @@ import {
   type OpenCall,
   type RuntimeSubagent,
   type ThreadActivityItem,
-  type ThreadFoldState,
-  type ThreadMessageItem,
-  type ThreadMessageSentPayload
+  type ThreadFoldState
 } from "@orquester/api/agent-chat";
 
 import { taskLinkageActivityFields } from "../ingestion/activities.ts";
@@ -62,20 +77,12 @@ import { taskLinkageActivityFields } from "../ingestion/activities.ts";
 /** The detail a call a dead process left open is closed with. */
 export const LEFTOVER_CALL_DETAIL = "Stopped when the agent host restarted.";
 
-/** One row that ends one unit of leftover work, ready for `buildEvent`. */
-export type LeftoverClosing =
-  | {
-      /** `call:<toolUseId>`, `task:<taskId>` — one per unit, so a caller can skip what it closed. */
-      readonly key: string;
-      readonly type: "thread.activity-appended";
-      readonly payload: { activity: ThreadActivityItem };
-    }
-  | {
-      /** `message:<messageId>`. */
-      readonly key: string;
-      readonly type: "thread.message-sent";
-      readonly payload: ThreadMessageSentPayload;
-    };
+/** One row that ends one unit of leftover work: a `thread.activity-appended` payload's activity. */
+export interface LeftoverClosing {
+  /** `call:<toolUseId>` or `task:<taskId>` — one per unit, so a caller can skip what it closed. */
+  readonly key: string;
+  readonly activity: ThreadActivityItem;
+}
 
 export interface LeftoverWorkInput {
   /** Stamped on every row. */
@@ -97,14 +104,14 @@ const TASK_ROW_KINDS: ReadonlySet<string> = new Set([
 
 /**
  * The rows that close what `state` shows running: the open calls, then the
- * active tasks, then the streaming messages. `[]` when nothing is.
+ * active tasks. `[]` when nothing is.
  *
  * The roster lists at most `ROSTER_LIMIT` rows, live ones first, so a thread
  * with more running tasks than that shows the rest only once these are
  * closed: fold these rows on and ask again, with {@link LeftoverWorkInput.closed}.
  */
 export function leftoverWorkClosings(
-  state: Pick<ThreadFoldState, "head" | "items" | "activities">,
+  state: Pick<ThreadFoldState, "activities">,
   input: LeftoverWorkInput
 ): LeftoverClosing[] {
   const closed = input.closed ?? NOTHING_CLOSED;
@@ -113,7 +120,7 @@ export function leftoverWorkClosings(
   for (const call of openWorkOf(state.activities).calls) {
     const key = `call:${call.toolUseId}`;
     if (closed.has(key)) continue;
-    closings.push({ key, type: "thread.activity-appended", payload: { activity: callCloser(call, input) } });
+    closings.push({ key, activity: callCloser(call, input) });
   }
 
   const active = foldSubagentActivities(state.activities).filter((agent) =>
@@ -121,27 +128,13 @@ export function leftoverWorkClosings(
   );
   if (active.length > 0) {
     const rows = taskRowsOf(state.activities);
-    // What a teardown stamps its task rows with: the turn running when the
-    // process went away, if any.
-    const turnId = state.head?.session.activeTurnId ?? null;
     for (const agent of active) {
       const key = `task:${agent.id}`;
       const taskRows = rows.get(agent.id);
       // The roster is folded from these very rows, so an active agent has one.
       if (closed.has(key) || taskRows === undefined) continue;
-      closings.push({
-        key,
-        type: "thread.activity-appended",
-        payload: { activity: taskCloser(agent, taskRows, turnId, input) }
-      });
+      closings.push({ key, activity: taskCloser(agent, taskRows, input) });
     }
-  }
-
-  for (const item of state.items) {
-    if (item.kind !== "message" || !item.streaming) continue;
-    const key = `message:${item.id}`;
-    if (closed.has(key)) continue;
-    closings.push({ key, type: "thread.message-sent", payload: messageSettle(item) });
   }
   return closings;
 }
@@ -156,9 +149,18 @@ function nonBlank(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
-/** The agent that owns a row — its retention class — or undefined for the parent's. */
+/** An id as the fold reads one: any non-empty string, blank or not. */
+function presentId(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The agent that owns a row — its retention class — or undefined for the
+ * parent's: the fold's own rule (`fold.ts` `ownerOf`), so a closer lands in
+ * exactly the class the fold gives the row it closes.
+ */
 function ownerOf(activity: ThreadActivityItem): string | undefined {
-  return nonBlank(activity.agentId);
+  return presentId(activity.agentId);
 }
 
 /** `item.completed`'s row, as ingestion writes one, for a call nothing will complete. */
@@ -170,7 +172,7 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
   const title = nonBlank(payload.title) ?? nonBlank(opening.title);
   const data = payload.data ?? opening.data;
   const owner = ownerOf(latest);
-  const parentToolUseId = nonBlank(latest.parentToolUseId) ?? nonBlank(payload.parentToolUseId);
+  const parentToolUseId = presentId(latest.parentToolUseId) ?? presentId(payload.parentToolUseId);
   return {
     kind: "activity",
     id: input.nextId(),
@@ -197,7 +199,7 @@ function callCloser(call: OpenCall, input: LeftoverWorkInput): ThreadActivityIte
 }
 
 interface TaskRows {
-  /** The task's first `task.started`: whose window it opened in. */
+  /** The task's first `task.started`: whose window and turn it opened in. */
   start: ThreadActivityItem | undefined;
   /** Its newest `task.*` row: the linkage bundle as it now stands. */
   latest: ThreadActivityItem;
@@ -227,12 +229,7 @@ function taskRowsOf(activities: readonly ThreadActivityItem[]): Map<string, Task
 }
 
 /** `task.completed {status: "stopped"}`, as a teardown's `closeLiveTasks` writes it. */
-function taskCloser(
-  agent: RuntimeSubagent,
-  rows: TaskRows,
-  turnId: string | null,
-  input: LeftoverWorkInput
-): ThreadActivityItem {
+function taskCloser(agent: RuntimeSubagent, rows: TaskRows, input: LeftoverWorkInput): ThreadActivityItem {
   const source = asRecord(rows.latest.payload) ?? {};
   const linkage = taskLinkageActivityFields(source);
   // The status is this row's own, and an error the last row reported is not
@@ -241,7 +238,10 @@ function taskCloser(
   delete linkage.error;
   // Sticky on the roster: a row that ever named the task an agent made it one.
   linkage.agentKind = agent.agentKind;
-  const owner = ownerOf(rows.start ?? rows.latest);
+  // The row that opened the task decides both the window and the turn the
+  // stop rides; without one in the window, its latest row does.
+  const opener = rows.start ?? rows.latest;
+  const owner = ownerOf(opener);
   return {
     kind: "activity",
     id: input.nextId(),
@@ -254,23 +254,9 @@ function taskCloser(
       status: "stopped",
       ...linkage
     },
-    turnId,
+    turnId: opener.turnId,
     ...(owner !== undefined ? { agentId: owner } : {}),
     createdAt: input.now,
     updatedAt: input.now
-  };
-}
-
-/** Ingestion's `finalizeMessage` with nothing left in its buffer. */
-function messageSettle(message: ThreadMessageItem): ThreadMessageSentPayload {
-  return {
-    messageId: message.id,
-    role: message.role,
-    text: "",
-    streaming: false,
-    turnId: message.turnId,
-    ...(message.agentId !== undefined ? { agentId: message.agentId } : {}),
-    ...(message.reasoningKind !== undefined ? { reasoningKind: message.reasoningKind } : {}),
-    ...(message.messageKind !== undefined ? { messageKind: message.messageKind } : {})
   };
 }

@@ -18,6 +18,7 @@ import {
   openWorkOf,
   type DomainEvent,
   type ThreadActivityItem,
+  type ThreadHistoryPage,
   type ThreadItem
 } from "@orquester/api/agent-chat";
 
@@ -26,11 +27,14 @@ import {
   CONTINUATION_PROMPT,
   CONTINUATION_SEND_FAILED_MESSAGE
 } from "../host-protocol.ts";
+import { createThreadIndex, type ThreadIndex } from "../index/index.ts";
+import { MAX_LATE_REFERENCE_BYTES } from "../index/indexer.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createThreadStore } from "../store/index.ts";
 import { LEFTOVER_CALL_DETAIL } from "./leftover-work.ts";
 import { PENDING_TURN_GRACE_MS } from "./orchestrator.ts";
 import {
+  createRecordingLogger,
   createScriptedAdapter,
   createTestHost,
   type FakeThreadStore,
@@ -267,18 +271,23 @@ function leftoverRows(threadId: string): AppendableDomainEvent[] {
   ];
 }
 
-/** The closings `leftoverRows` owes, in the order a first load appends them. */
+/**
+ * The closings `leftoverRows` owes, in the order a first load appends them —
+ * and no message: one still streaming is left as the log has it.
+ */
 const LEFTOVER_CLOSINGS = [
   ["tool.completed", "toolu_parent"],
   ["tool.completed", "bgshell:shell-1"],
   ["tool.completed", "toolu_agent_call"],
   // The shell's item before its task, as the adapters close one.
   ["task.completed", "shell-1"],
-  ["task.completed", "agent-1"],
-  ["message", "assistant:agent-1:m1"]
+  ["task.completed", "agent-1"]
 ];
 
-/** Each closing an event appended: its row kind and the unit it ends. */
+/**
+ * Each closing an event appended: its row kind and the unit it ends. A
+ * message's `streaming: false` is listed too, so one written by mistake shows.
+ */
 function closingsIn(events: readonly DomainEvent[]): string[][] {
   const closings: string[][] = [];
   for (const event of events) {
@@ -299,8 +308,8 @@ function closingsIn(events: readonly DomainEvent[]): string[][] {
 
 /**
  * "Open ⇒ running", read as every reader reads it once a session is live
- * again: no open call, no open background task, no active roster row, no
- * streaming message — and the idle child still idle.
+ * again: no open call, no open background task, no active roster row — and the
+ * idle child still idle. A message still streaming is left as the log has it.
  */
 function assertNothingRunning(items: readonly ThreadItem[]): void {
   const activities = items.filter((item): item is ThreadActivityItem => item.kind === "activity");
@@ -312,10 +321,6 @@ function assertNothingRunning(items: readonly ThreadItem[]): void {
       ["agent-1", "interrupted"],
       ["codex-child", "idle"]
     ]
-  );
-  assert.deepEqual(
-    items.filter((item) => item.kind === "message" && item.streaming).map((item) => item.id),
-    []
   );
 }
 
@@ -859,7 +864,7 @@ describe("reconcile — a host start closes what a dead process left open", () =
   const isOrphaned = (head: ReturnType<typeof headOf>): boolean =>
     head.session.status === "running" || head.session.activeTurnId !== null;
 
-  it("a thread's first load closes every call, active task and streaming message the fold shows — the idle child untouched", async () => {
+  it("a thread's first load closes every open call and active task the fold shows — an idle child and a streaming message untouched", async () => {
     const { store, threadId, logLength } = await idleThreadWithLeftovers();
 
     const next = createTestHost({ store });
@@ -890,15 +895,24 @@ describe("reconcile — a host start closes what a dead process left open", () =
         [null, "agent-1"]
       ]
     );
+    // A task's stop rides its start's turn, though no turn is running now.
+    assert.deepEqual(
+      appended.flatMap((event) =>
+        event.type === "thread.activity-appended" && event.payload.activity.activityKind === "task.completed"
+          ? [event.payload.activity.turnId]
+          : []
+      ),
+      ["turn-1", "turn-1"]
+    );
 
     // The first reader's snapshot already has nothing running.
     const items = snapshotItems(read);
     assertNothingRunning(items);
+    // Nothing was written for the message: it is left streaming, as the log has it.
     const message = items.find((item) => item.id === "assistant:agent-1:m1");
     assert.deepEqual(
-      message?.kind === "message" ? [message.text, message.streaming, message.turnId, message.agentId] : null,
-      ["Looking at the tests", false, null, "agent-1"],
-      "settled with its text unchanged"
+      message?.kind === "message" ? [message.text, message.streaming] : null,
+      ["Looking at the tests", true]
     );
     await next.stop();
   });
@@ -1190,5 +1204,207 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await third.settle();
     assert.equal(first.store.logs.get(threadId)!.length, logLength + fleet, "a second load appends nothing");
     await third.stop();
+  });
+});
+
+describe("reconcile — Load older after a first load closed an old turn's leftovers", () => {
+  /** A real thread index in a temp dir: the message spans and late references are its own rules. */
+  async function realIndex(t: { after(fn: () => unknown): void }): Promise<ThreadIndex> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-leftover-history-"));
+    const index = createThreadIndex({ filePath: path.join(dir, "index.sqlite"), logger: createRecordingLogger() });
+    t.after(async () => {
+      index.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    return index;
+  }
+
+  /** One sink call per event, as `seedTurn` feeds a turn: the pending-turn rule reads each on its own. */
+  async function sinkEach(host: TestHost, threadId: string, events: AppendableDomainEvent[]): Promise<void> {
+    for (const event of events) {
+      await host.orchestrator.ingestionSink(threadId, [event]);
+    }
+  }
+
+  const startTurn = (host: TestHost, threadId: string, turnId: string): Promise<void> =>
+    sinkEach(host, threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: `user:${turnId}`,
+        role: "user",
+        text: `prompt for ${turnId}`,
+        streaming: false,
+        turnId: null
+      }),
+      sunk(threadId, "thread.turn-start-requested", {
+        turnId: null,
+        messageId: `user:${turnId}`,
+        interactionMode: "default"
+      }),
+      sunk(threadId, "thread.session-set", { session: { status: "running", activeTurnId: turnId } })
+    ]);
+
+  const settleTurn = (host: TestHost, threadId: string): Promise<void> =>
+    sinkEach(host, threadId, [
+      sunk(threadId, "thread.session-set", { session: { status: "ready", activeTurnId: null } })
+    ]);
+
+  const parentRows = (host: TestHost, threadId: string, turnId: string, count: number): Promise<void> =>
+    host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: count }, (_, i) => sunkRow(threadId, `${turnId}-row-${i}`, "runtime.warning", {}, { turnId }))
+    );
+
+  /**
+   * A thread whose host died long after an OLD turn opened a call it never
+   * closed and a subagent's words it never settled: o-1 left both, then o-2
+   * (`o2Rows` parent rows) and o-3 filled the window past its limit — the fold
+   * keeps the open call's opening row whatever its age (`open-work.ts`).
+   */
+  async function oldLeftovers(t: { after(fn: () => unknown): void }, o2Rows: number) {
+    const index = await realIndex(t);
+    const first = createTestHost({ index });
+    const threadId = await first.createThread();
+    await startTurn(first, threadId, "o-1");
+    await first.orchestrator.ingestionSink(threadId, [
+      sunkRow(threadId, "old-start", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "toolu_old",
+        status: "inProgress",
+        title: "Bash",
+        data: { toolName: "Bash", input: {} }
+      }, { turnId: "o-1", status: "inProgress" }),
+      sunkRow(threadId, "old-update", "tool.updated", {
+        itemType: "command_execution",
+        toolUseId: "toolu_old",
+        status: "inProgress",
+        title: "Bash",
+        data: { toolName: "Bash", input: { command: "npm run build" } }
+      }, { turnId: "o-1", status: "inProgress" }),
+      sunk(threadId, "thread.message-sent", {
+        messageId: "assistant:agent-old:m1",
+        role: "assistant",
+        text: "Still looking",
+        streaming: true,
+        turnId: null,
+        agentId: "agent-old"
+      })
+    ]);
+    await parentRows(first, threadId, "o-1", 40);
+    await settleTurn(first, threadId);
+    for (const [turnId, count] of [
+      ["o-2", o2Rows],
+      ["o-3", 300]
+    ] as const) {
+      await startTurn(first, threadId, turnId);
+      await parentRows(first, threadId, turnId, count);
+      await settleTurn(first, threadId);
+    }
+    await first.settle();
+    await index.drain();
+    await first.stop();
+    const store = first.store;
+    return { store, index, threadId, logLength: store.logs.get(threadId)!.length };
+  }
+
+  /** Every page below `before`, each page's own cursor followed down. */
+  async function walkHistory(host: TestHost, threadId: string, before: string | null): Promise<ThreadHistoryPage[]> {
+    const pages: ThreadHistoryPage[] = [];
+    let cursor = before;
+    while (cursor !== null) {
+      assert.ok(pages.length < 50, "paging terminates");
+      const page = await host.orchestrator.readHistory(threadId, { before: cursor });
+      pages.push(page);
+      cursor = page.page.beforeCursor;
+    }
+    return pages;
+  }
+
+  /**
+   * "Load older" loses no row: every activity and message the log ever wrote is
+   * in the window or on a page, and no activity is on two pages. (A row the
+   * window keeps out of age order — the call's opening row — may be on a page
+   * too; readers dedupe by id.)
+   */
+  function assertNothingLost(
+    store: FakeThreadStore,
+    threadId: string,
+    window: readonly ThreadItem[],
+    pages: readonly ThreadHistoryPage[]
+  ): void {
+    const everyRow = new Set(
+      store.logs.get(threadId)!.flatMap((event) =>
+        event.type === "thread.activity-appended"
+          ? [event.payload.activity.id]
+          : event.type === "thread.message-sent"
+            ? [event.payload.messageId]
+            : []
+      )
+    );
+    const paged = pages.flatMap((page) => page.items.filter((item) => item.kind === "activity").map((item) => item.id));
+    assert.equal(new Set(paged).size, paged.length, "no activity on two pages");
+    const shown = new Set([...window, ...pages.flatMap((page) => page.items)].map((item) => item.id));
+    assert.deepEqual([...everyRow].filter((id) => !shown.has(id)), [], "nothing is lost");
+  }
+
+  /** The first load, then the snapshot a client reads once the index has taken the closer. */
+  async function firstLoad(store: FakeThreadStore, index: ThreadIndex, threadId: string) {
+    const next = createTestHost({ store, index });
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await index.drain();
+    const read = await next.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    if (read.kind !== "snapshot") throw new Error("unreachable");
+    assert.equal(read.thread.history?.hasOlder, true, "the window has evicted: there is history to page");
+    return { next, window: read.thread.items, before: read.thread.history?.beforeCursor ?? null };
+  }
+
+  it("a small thread: the closer stretches the old turn over itself, within the bound, and no row is lost", async (t) => {
+    const { store, index, threadId, logLength } = await oldLeftovers(t, 300);
+    const { next, window, before } = await firstLoad(store, index, threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(closingsIn(appended), [["tool.completed", "toolu_old"]]);
+    assert.equal(appended.length, 1, "the call's closer, and nothing for the message");
+
+    // The closer names o-1 less than MAX_LATE_REFERENCE_BYTES past o-2's start,
+    // so the index's late-reference rule grows o-1's range over it
+    // (`extendReferenced`), overlapping o-2 and o-3…
+    const closer = appended[0]!;
+    const closerAt = store.logs.get(threadId)!.length - 1;
+    const o1 = index.turnById(threadId, "o-1");
+    const o2 = index.turnById(threadId, "o-2");
+    assert.ok(o1 && o2);
+    assert.ok((closerAt + 1) * 1000 - o2.firstByte <= MAX_LATE_REFERENCE_BYTES, "a small thread");
+    assert.equal(o1.lastSeq, closer.seq, "stretched over the closer");
+
+    // …and "Load older" still serves every row once.
+    const pages = await walkHistory(next, threadId, before);
+    assert.ok(pages.length >= 1);
+    assertNothingLost(store, threadId, window, pages);
+    await next.stop();
+  });
+
+  it("a big thread: the closer never stretches the old turn past the bound, and no row is lost", async (t) => {
+    const { store, index, threadId, logLength } = await oldLeftovers(t, 2_200);
+    const o1Before = index.turnById(threadId, "o-1");
+    const o2 = index.turnById(threadId, "o-2");
+    assert.ok(o1Before && o2);
+    assert.equal(o1Before.endByte, o2.firstByte, "o-1 ends where o-2 begins");
+    const { next, window, before } = await firstLoad(store, index, threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(closingsIn(appended), [["tool.completed", "toolu_old"]]);
+    assert.equal(appended.length, 1);
+
+    // More than MAX_LATE_REFERENCE_BYTES of log past o-2's start: the closer
+    // names o-1, and o-1's range does not move.
+    const closerAt = store.logs.get(threadId)!.length - 1;
+    assert.ok((closerAt + 1) * 1000 - o2.firstByte > MAX_LATE_REFERENCE_BYTES, "a big thread");
+    assert.deepEqual(index.turnById(threadId, "o-1"), o1Before);
+
+    const pages = await walkHistory(next, threadId, before);
+    assert.ok(pages.length >= 1);
+    assertNothingLost(store, threadId, window, pages);
+    await next.stop();
   });
 });
