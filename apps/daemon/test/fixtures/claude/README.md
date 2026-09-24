@@ -868,12 +868,15 @@ or the field absent as in 07) keeps its calls' settle at the parent's turn end. 
 capture of a background agent outliving a parent `result` the next time captures are allowed.
 
 A finishing background agent also **wakes the parent** between prompts (*"you will be notified when
-one completes"*), and that answer's stream begins before its first complete `assistant` frame —
-the frame that opens the adapter's synthetic turn, and whose uuid is that turn's rewind anchor
+one completes"*), and that answer's stream begins before its first complete `assistant` frame — the
+frame that opens the adapter's synthetic turn, and whose uuid is that turn's rewind anchor
 (observation 21). A `tool_use` streamed first therefore registers with no turn; it adopts the next
 turn to open — that synthetic turn, or a user turn if the user sends a message in that window — so
 everything it emits from then on rides it, and its turn's fold holds it and a rewind to before the
-turn removes it. What it emitted before — its start, an early input update — stays turnless.
+turn removes it. What it emitted before — its start, an early input update — stays turnless. The
+frame that opens the turn carries nothing new for the call, and its next frame is its `tool_result`,
+so the adapter marks the adoption with one `item.updated` on the turn, the call's state so far
+(`adoptedToolEvent`): without it a foreground command's whole run had no row that carried its turn.
 
 **c. Nested `tool_progress` frames carry no `task_id`.** The live windows held 6 / 10 / 46
 `tool_progress` frames — every one nested (a subagent's `Bash`), and not one with `task_id`; the SDK

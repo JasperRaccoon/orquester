@@ -79,11 +79,12 @@ export function readToolImagePath(
  * Tool name (plus its input, where the input decides) → the closed
  * `CanonicalItemType` of §4.2.
  *
- * *differs from T3:* the step-list tools and `ToolSearch` get explicit arms
- * ahead of the substring ladder. T3's ladder classifies `TaskCreate` as
- * `file_change` (it contains "create") and `ToolSearch` as a plain dynamic
- * call by accident rather than by decision; both are live tools on CLI
- * 2.1.210.
+ * *differs from T3:* the step-list tools, `ToolSearch` and an MCP tool's
+ * `mcp__` prefix get explicit arms ahead of the substring ladder. T3's ladder
+ * classifies `TaskCreate` as `file_change` (it contains "create") and
+ * `ToolSearch` as a plain dynamic call by accident rather than by decision;
+ * both are live tools on CLI 2.1.210. It read `mcp__github__create_issue` as a
+ * file change too, so a running MCP call's row said "File change".
  */
 export function classifyToolItemType(
   toolName: string,
@@ -96,6 +97,12 @@ export function classifyToolItemType(
     return "dynamic_tool_call";
   }
   const normalized = toolName.toLowerCase();
+  // An MCP tool is named `mcp__<server>__<tool>`, and its words are the
+  // server's: `mcp__github__create_issue` is no file change, whatever the
+  // ladder below would read into "create".
+  if (normalized.startsWith("mcp__")) {
+    return "mcp_tool_call";
+  }
   if (
     normalized.includes("agent") ||
     normalized === "task" ||

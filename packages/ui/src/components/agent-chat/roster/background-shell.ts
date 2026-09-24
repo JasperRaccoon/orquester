@@ -118,13 +118,27 @@ export function backgroundShellEntries(
  * The drill-in's rows for a background shell: one `work` row, or none at all
  * when the shell has printed nothing yet (so the timeline's own empty copy
  * shows instead of an empty row).
+ *
+ * `fallbackTitle` — the shell's roster row title (`AgentDrillIn` passes it):
+ * its description, or the command itself when it has none — labels the row
+ * when no lifecycle frame of the shell's call is left to name it: retention
+ * keeps a running call's opening row only among the most recently active
+ * ones (`OPEN_WORK_RETENTION_LIMIT`). Its chunks alone are still one row,
+ * `joinLifecycleDetails` folding them into the first; without the title that
+ * row read as the first line of the output. A title that is only the shell's
+ * own id — the roster's fallback when nothing ever named the task — names
+ * nothing, and is no title.
  */
 export function backgroundShellRows(
   items: readonly ThreadItem[],
-  agentId: string
+  agentId: string,
+  fallbackTitle?: string
 ): AgentChatTimelineRow[] {
   const groupedEntries = backgroundShellEntries(items, agentId);
   if (groupedEntries.length === 0) return [];
+  const given = fallbackTitle?.trim() ?? "";
+  const title = given === agentId ? "" : given;
+  const framed = groupedEntries.some((entry) => LIFECYCLE_KINDS.has(entry.sourceActivityKind ?? ""));
   return [
     {
       kind: "work",
@@ -133,7 +147,8 @@ export function backgroundShellRows(
       id: `background-shell:${agentId}`,
       createdAt: groupedEntries[0]!.createdAt,
       groupedEntries,
-      isExpandedToolGroup: false
+      isExpandedToolGroup: false,
+      ...(!framed && title.length > 0 ? { displayLabel: title } : {})
     }
   ];
 }

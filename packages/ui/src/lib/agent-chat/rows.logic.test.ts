@@ -3,12 +3,18 @@ import { beforeEach, describe, it } from "node:test";
 
 import type { Turn } from "@orquester/api/agent-chat";
 
+import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { AgentChatTimelineRow, WorkLogEntry } from "./contracts";
 import {
   deriveTimelineEntriesFromItems,
   EMPTY_TIMELINE_PROJECTION,
   type TimelineEntry
 } from "./entries.logic";
+import {
+  liveWorkEntryLabel,
+  omitSupersededLifecycleMarkers,
+  workEntryDisplayIndicatesToolFailure
+} from "./presentation.logic";
 import {
   computeStableRows,
   deriveTimelineRows,
@@ -636,6 +642,148 @@ describe("the live rows", () => {
     assert.equal(queued.length, 2);
     assert.equal(queued[0]?.kind === "queued-message" && queued[0].isNext, true);
     assert.equal(queued[1]?.kind === "queued-message" && queued[1].isNext, false);
+  });
+});
+
+describe("a command's streamed output is the inside of its row", () => {
+  // A Codex command as ingestion writes it: its start, then one `tool.output` row per flush of its output, then —
+  // once it exits — its completion. No update comes in between.
+  const prompt = () => message("user", "build it", { id: "u1", createdAt: stamp(1) });
+  const call = (activityKind: string, id: string, at: number, status: string) =>
+    activity(
+      activityKind,
+      { itemType: "command_execution", toolUseId: "call-1", title: "npm run build", command: "npm run build", status },
+      { id, turnId: "t1", createdAt: stamp(at) }
+    );
+  const chunk = (n: number, delta = `line ${n}\n`) =>
+    activity("tool.output", { toolUseId: "call-1", streamKind: "command_output", delta }, {
+      id: `c${n}`,
+      turnId: "t1",
+      summary: "Tool output",
+      createdAt: stamp(2 + n)
+    });
+  const running = {
+    isWorking: true,
+    runningTurnId: "t1",
+    latestTurn: { turnId: "t1", state: "running" as const, startedAt: stamp(1), completedAt: null },
+    activeTurnStartedAt: stamp(1)
+  };
+  const liveRows = (rows: readonly AgentChatTimelineRow[]) =>
+    rows.flatMap((row) => (row.kind === "work-live" ? [row] : []));
+
+  it("a running command and its N chunks are ONE live row, labelled with the command", () => {
+    const chunks = Array.from({ length: 40 }, (_, index) => chunk(index + 1));
+    const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), call("tool.started", "start", 2, "inProgress"), ...chunks]), running));
+    assert.deepEqual(kinds(rows), ["message", "working", "work-live"]);
+    const [live] = liveRows(rows);
+    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Running npm", "never the text of its latest chunk");
+    assert.equal(live!.active, true);
+    // The row still carries every chunk: expanded, they are its output.
+    assert.equal(live!.groupedEntries.length, 41);
+    assert.deepEqual(
+      joinLifecycleDetails(live!.groupedEntries).map((entry) => [entry.id, entry.detail]),
+      [["start", chunks.map((row) => (row.payload as { delta: string }).delta).join("")]]
+    );
+  });
+
+  it("a chunk that reads like a failure neither splits the run nor marks it failed", () => {
+    for (const failingAt of [2, 3]) {
+      const chunks = [1, 2, 3].map((n) => chunk(n, n === failingAt ? "cat: x: No such file or directory\n" : `line ${n}\n`));
+      const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), call("tool.started", "start", 2, "inProgress"), ...chunks]), running));
+      assert.deepEqual(kinds(rows), ["message", "working", "work-live"], `failing chunk ${failingAt}: one run`);
+      const [live] = liveRows(rows);
+      assert.equal(live!.entry.id, "start");
+      assert.equal(workEntryDisplayIndicatesToolFailure(live!.entry), false, `failing chunk ${failingAt}: not failed`);
+      assert.equal(live!.groupedEntries.length, 4);
+    }
+  });
+
+  it("a settled call and its chunks render exactly as the call would without them — its row, labelled with its command", () => {
+    const settled = {
+      latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(1), completedAt: stamp(10) },
+      expandedTurnIds: new Set(["t1"])
+    };
+    const withoutChunks = [
+      prompt(),
+      call("tool.started", "start", 2, "inProgress"),
+      call("tool.completed", "done", 9, "completed"),
+      message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })
+    ];
+    const withChunks = [...withoutChunks.slice(0, 2), chunk(1), chunk(2), chunk(3), ...withoutChunks.slice(2)];
+    const callRow = (items: Parameters<typeof entriesFrom>[0]) => {
+      const rows = deriveTimelineRows(baseInput(entriesFrom(items), settled));
+      assert.ok(!kinds(rows).includes("work-toggle"), "no \"Ran 1 command\" toggle hiding its one row");
+      const row = rows.find((candidate) => candidate.kind === "work");
+      assert.ok(row?.kind === "work");
+      return row;
+    };
+    const plain = callRow(withoutChunks);
+    const streamed = callRow(withChunks);
+    assert.deepEqual([streamed.displayLabel, streamed.isExpandedToolGroup], [plain.displayLabel, false]);
+    assert.equal(streamed.displayLabel, "npm run build");
+    // The row still carries every chunk: open, they are its output.
+    assert.deepEqual(
+      joinLifecycleDetails(omitSupersededLifecycleMarkers(streamed.groupedEntries, (entry) => entry)).map((entry) => [entry.id, entry.detail]),
+      [["done", "line 1\nline 2\nline 3\n"]]
+    );
+  });
+
+  it("a Claude call whose input is still streaming reads its tool's name live, never \"Bash: {}\"", () => {
+    const claudeStart = activity(
+      "tool.started",
+      { itemType: "command_execution", toolUseId: "toolu_1", title: "Command run", detail: "Bash: {}", status: "inProgress", data: { toolName: "Bash", input: {} } },
+      { id: "start", turnId: "t1", createdAt: stamp(2) }
+    );
+    const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), claudeStart]), running));
+    assert.deepEqual(kinds(rows), ["message", "working", "work-live"]);
+    const [live] = liveRows(rows);
+    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Bash");
+  });
+
+  it("a woken parent call is its synthetic turn's live row; what a rewind of that turn leaves of it renders nothing", () => {
+    // What a Claude parent call emits before the synthetic turn its own message opens stays turnless: its start and an
+    // early input update. The turn that opens adopts it with one update on that turn, its first row the live run holds.
+    const row = (activityKind: string, id: string, at: number, turnId: string | null) =>
+      activity(activityKind, { itemType: "command_execution", toolUseId: "call-w", title: "Command run", status: "inProgress", data: { command: "cat out.txt" } }, { id, turnId, createdAt: stamp(at) });
+    const turnless = [row("tool.started", "ws", 3, null), row("tool.updated", "wu", 4, null)];
+    const earlier = [prompt(), message("assistant", "Done.", { id: "a1", turnId: "t1", createdAt: stamp(2) })];
+    const woken = {
+      isWorking: true,
+      runningTurnId: "t2",
+      latestTurn: { turnId: "t2", state: "running" as const, startedAt: stamp(5), completedAt: null },
+      activeTurnStartedAt: stamp(5)
+    };
+    const live = liveRows(deriveTimelineRows(baseInput(entriesFrom([...earlier, ...turnless, row("tool.updated", "wa", 6, "t2")]), woken)));
+    assert.deepEqual(live.map((entry) => [entry.entry.id, liveWorkEntryLabel(entry.entry, entry.active), entry.active]), [["wa", "Running cat", true]]);
+    // A rewind of the synthetic turn takes the adopting update with it. The start is superseded; the update, still in
+    // progress, is a neutral row a group hides.
+    for (const [name, input] of [["settled", {}], ["running", running]] as const) {
+      const rows = deriveTimelineRows(baseInput(entriesFrom([...earlier, ...turnless]), input));
+      assert.ok(!rows.some((candidate) => candidate.kind === "work" || candidate.kind === "work-live" || candidate.kind === "work-toggle"), `${name}: ${kinds(rows).join(", ")}`);
+    }
+  });
+
+  it("an orphan call — its chunks with no row of the call in the group — counts once, headed \"Tool output\"", () => {
+    // Retention kept the chunks and not the call's opening row (past its cap): they are its only trace here.
+    const orphan = (n: number) =>
+      activity("tool.output", { toolUseId: "call-9", streamKind: "command_output", delta: `orphan ${n}\n` }, {
+        id: `o${n}`,
+        turnId: "t1",
+        summary: "Tool output",
+        createdAt: stamp(2 + n)
+      });
+    const settled = {
+      latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(1), completedAt: stamp(10) },
+      expandedTurnIds: new Set(["t1"])
+    };
+    const items = [prompt(), orphan(1), orphan(2), orphan(3), call("tool.completed", "done", 8, "completed"), message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })];
+    const toggle = deriveTimelineRows(baseInput(entriesFrom(items), settled)).find((row) => row.kind === "work-toggle");
+    assert.ok(toggle?.kind === "work-toggle");
+    assert.deepEqual([toggle.hiddenCount, toggle.summary], [2, "Used 1 tool and ran 1 command"]);
+    // Live, an orphan call's row is headed as a call, never with its latest line.
+    const live = liveRows(deriveTimelineRows(baseInput(entriesFrom([prompt(), orphan(1), orphan(2)]), running)));
+    assert.equal(live.length, 1);
+    assert.equal(liveWorkEntryLabel(live[0]!.entry, live[0]!.active), "Tool output");
   });
 });
 

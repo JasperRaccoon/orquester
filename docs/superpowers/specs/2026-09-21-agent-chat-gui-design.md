@@ -3336,6 +3336,43 @@ a later terminal row, is not a second tool call. Skipping this step double-count
 providers that emit an unkeyed start frame.
 *T3: `packages/client-runtime/src/work-log/presentation.ts:598-635` — `summarizeToolGroup` calls `omitSupersededLifecycleMarkers` first, buckets by `toolGroupAction`, and joins with an Oxford comma; `:637-673` — `omitSupersededLifecycleMarkers` and its `isStatuslessIdlessMarker` test; `:464-498` — `toolGroupAction`, the read/edit/command/search/other bucketing*
 
+*Built (2026-09-24, a running call is one titled row): T3 drops every `tool.started` row ("always
+followed by an update"), which holds for no Codex command — a start, `tool.output` chunks, then the
+completion — so a running command showed no title: its live row read as its latest chunk's text, and
+each flush of its output counted as a tool of its own ("Used 548 tools and ran 1 command"). Four
+rules now. (1) A keyed start is its call's row while the derivation input holds no other lifecycle
+row of the call (`tool.updated`, `tool.completed`, `tool.denied`), which supersedes it whole
+(`startIsCallRow`, `lib/agent-chat/entries.logic.ts`); retention keeps a running call's opening row
+(§5.1, "the opening row of running work"), and the history's pages, the bridge and a window row of a
+call the history began — its denial included — are derived together, so a call's close is in its
+start's input whenever both are loaded (the fold's own limit aside: a close written in another
+owner's window can age out before the opening row it closes, `open-work.ts`). An unkeyed start is
+still dropped, and so is a start with neither a turn nor an owner. A Claude parent call can start
+before the synthetic turn its own message opens: what it emits before that turn opens — its start
+and any early input update — stays turnless. The turn adopts the call as it opens, with one update
+on the turn (the Claude normaliser's `adoptedToolEvent`), which is the running call's live row until
+its result; after a rewind of that turn the turnless rows are all there is of the call. None reads
+as running: the start is dropped (superseded by the update, else as turnless and ownerless), and an
+update still in progress is a neutral row a group hides. A Claude start that only names its tool
+with an empty input ("Bash: {}", "Write: {}" — the input streams afterwards, and the first update
+comes once it parses whole; a tool that takes no arguments has none until its result) keeps the
+tool's name alone as its detail, so the row reads "Write" or "mcp__x__list" meanwhile; the
+`ExitPlanMode` boundary covers the start too; and a start never offers "Load full output": what the
+read cut there is the call's input. (2) The rows a list renders are the ones counted, named and
+judged (`isStreamedOutputEntry`, `withoutJoinedOutput`, `lib/agent-chat/presentation.logic.ts`): a
+streamed chunk whose call has a row of its own in the list is that row's output, and an orphan
+call's chunks — no row of the call in the list, its opening row past retention's cap, say — are one
+row, its first chunk; the rows still carry every chunk for `joinLifecycleDetails` to fold. So a
+call's own output never ends the live run, never names the live row and never counts in a group's
+summary or its hidden rows, and a group shaped by those rows renders a settled streamed command
+exactly as one that streamed nothing: its row, labelled with its command. A running command reads
+"Running npm". (3) The output heuristic never judges a call still in progress: a line that prints
+"No such file or directory" is not the call failing, in the live row, a live activity group's header
+or an opened row, and the call is judged when it completes. (4) An orphan call's chunks join into
+ONE row, the first carrying all their text in order (`timeline/row-chrome.ts`), headed like the
+call's own row — its command, else its title, which a chunk borrows from its call's lifecycle rows
+in the input — else "Tool output", never with its text.*
+
 **Failure styling is reserved for severe failures.** A non-zero command exit gets a muted failure
 mark; only a `runtime.error` or a `*.failed` lifecycle event — the turn or a core side effect
 broke — gets the destructive treatment. `runtime.warning` gets its own warning icon and colour,
@@ -3742,6 +3779,14 @@ output to its own tmp tree rather than streaming it, so a drill-in with no tail 
 reported anything yet" for the whole run. `background_tasks_changed` is deliberately NOT used to
 close rows — it is a level signal whose ordering against the bookends is unspecified, and
 correlating it made a clean shell read as interrupted (fixtures README observation 18).*
+
+*Built (2026-09-24): a shell's drill-in is ONE row — its call's lifecycle frames merged, every chunk
+of its output joined in (`roster/background-shell.ts`). Retention keeps a running shell's opening
+row only among the most recently active running work (§5.1), so a shell past that cap can be left
+with its chunks alone: they are still one row, and it is labelled with the shell's roster title (its
+description, or the command itself), which `AgentDrillIn` hands `backgroundShellRows` as its
+fallback title, rather than with the first line of the output — never with the shell's own id, the
+roster's title when nothing ever named the task.*
 
 Stopping is T3's, not the row's. Once a turn settles the composer's stop button is gone, so while
 `backgroundLiveness` is non-null and no turn is working, a banner sits in the notice stack above the

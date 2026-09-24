@@ -15,6 +15,7 @@ import { IDENTITY_CHANGED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
 import type { ToolGroupSummaryKind, WorkLogEntry } from "../../../lib/agent-chat/contracts";
 import { skillMentionsInText } from "../composer/composer-menu";
 import {
+  isStreamedOutputEntry,
   toolGroupSummaryIconName,
   type WorkEntryIconName
 } from "../../../lib/agent-chat/presentation.logic";
@@ -23,9 +24,13 @@ import { escapeRegExp } from "../../../lib/regexp";
 /**
  * Absorbed by W11 into the one resolver (fix-wave R7-6) and re-exported here
  * only so existing imports keep resolving. **These are not second copies** —
- * there is exactly one implementation, in `presentation.logic.ts`.
+ * there is exactly one implementation, in `presentation.logic.ts`. So is
+ * `isToolOutputRow`, a streamed output chunk of a tool call: the run's live
+ * row and a group's summary read the rows this join renders
+ * (`withoutJoinedOutput`), by the same definition of a chunk.
  */
 export {
+  isStreamedOutputEntry as isToolOutputRow,
   showDestructiveRowStyle,
   workEntryIsActiveTurnActivity
 } from "../../../lib/agent-chat/presentation.logic";
@@ -62,11 +67,6 @@ export function workEntryIsIdentityChange(entry: WorkLogEntry): boolean {
 // Folding one tool call's lifecycle rows into the row that renders it
 // ---------------------------------------------------------------------------
 
-/** A streamed output chunk of a tool call, not a tool call of its own. */
-export function isToolOutputRow(entry: WorkLogEntry): boolean {
-  return entry.sourceActivityKind === "tool.output";
-}
-
 function nonEmpty(value: string | undefined): string | null {
   if (value === undefined) return null;
   const trimmed = value.trim();
@@ -95,10 +95,12 @@ function nonEmpty(value: string | undefined): string | null {
  *  - it is scoped to the rows already in one group, never to the thread;
  *  - it is keyed on the id, never on a label match;
  *  - it only ever **adds** to a row, except for the streamed output, which is
- *    the fuller truth and therefore wins over a slimmed summary. An orphan
- *    output chunk — one whose owner is not in this group — is kept as its own
- *    row rather than silently dropped. The returned entry is the same reference
- *    when nothing was filled, so a settled group's row memos are untouched.
+ *    the fuller truth and therefore wins over a slimmed summary. Orphan output
+ *    chunks — whose call has no row in this group (its opening row aged out,
+ *    say) — are kept rather than silently dropped: as ONE row for their call,
+ *    the first of them, carrying all their text in order, never one row per
+ *    flush of the output. The returned entry is the same reference when
+ *    nothing was filled, so a settled group's row memos are untouched.
  */
 export function joinLifecycleDetails<T extends WorkLogEntry>(entries: readonly T[]): T[] {
   const owners = new Set<string>();
@@ -111,7 +113,7 @@ export function joinLifecycleDetails<T extends WorkLogEntry>(entries: readonly T
   for (const entry of entries) {
     const callId = entry.toolCallId;
     if (callId === undefined) continue;
-    if (isToolOutputRow(entry)) {
+    if (isStreamedOutputEntry(entry)) {
       // NOT `nonEmpty`: trimming a streamed chunk would eat the newlines that
       // separate it from the next one, and a command's output is its whitespace.
       const chunk = entry.detail;
@@ -141,11 +143,12 @@ export function joinLifecycleDetails<T extends WorkLogEntry>(entries: readonly T
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index] as T;
     const callId = entry.toolCallId;
-    if (callId === undefined || isToolOutputRow(entry)) continue;
+    if (callId === undefined || isStreamedOutputEntry(entry)) continue;
     if (outputs.has(callId)) outputRow.set(callId, index);
   }
 
   const result: T[] = [];
+  const orphanRows = new Set<string>();
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index] as T;
     const callId = entry.toolCallId;
@@ -153,9 +156,13 @@ export function joinLifecycleDetails<T extends WorkLogEntry>(entries: readonly T
       result.push(entry);
       continue;
     }
-    if (isToolOutputRow(entry)) {
-      // Kept only when nothing in this group owns it, so nothing is lost.
-      if (!owners.has(callId)) result.push(entry);
+    if (isStreamedOutputEntry(entry)) {
+      // Kept only when nothing in this group owns it — once per call, so
+      // nothing is lost and nothing is split.
+      if (owners.has(callId) || orphanRows.has(callId)) continue;
+      orphanRows.add(callId);
+      const text = outputs.get(callId)?.join("");
+      result.push(text === undefined || text === entry.detail ? entry : { ...entry, detail: text });
       continue;
     }
     const slot = borrowed.get(callId);

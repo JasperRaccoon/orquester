@@ -808,15 +808,24 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   turns), never the one active when the event is emitted — one call, one `tool:<turn>:<id>` key.
   The one late assignment: a parent call streamed while no turn was open — a woken parent's stream
   precedes the complete frame that opens its synthetic turn — adopts the next turn to open
-  (`beginTurn`: that synthetic turn, or a user turn sent in the window), so the turn's fold holds
-  it and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); its start
-  row stays turnless. A log a host wrote before the stamp — an older host surviving a deploy writes
-  such chunks until its drain-restart — is read by the call, on the read side only (no fold change,
-  no version bump): an unstamped `tool.output` takes the owner of its call's lifecycle rows in the
-  same derivation input — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its
-  owner's drill-in, `deriveWorkLogEntries` keeps it out of every other view) and
-  `unstampedChunkOwner` in `mcp/transcript.ts`. One whose call's rows are gone stays the parent's;
-  the fold, its retention and the history bridge keep mirroring the log.
+  (`beginTurn`: that synthetic turn, or a user turn sent in the window) and says so at once with ONE
+  `item.updated` on that turn carrying the call's state so far (`adoptedToolEvent`, the tool's name
+  alone as its detail while its input has not parsed) — the frame that opens the turn emits nothing
+  for the call, and its next rows come only with its result, so a running call had no turn-carrying
+  row: no MCP entry and no live row for a foreground command's whole run. The turn's fold holds the
+  call and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); what it
+  emitted before the turn opened — its start and any early input update — stays turnless, and after
+  a rewind of the turn that is all there is of the call, so neither view shows it running: the GUI
+  drops the start (superseded by the update, else as turnless and ownerless — `startIsCallRow`,
+  `entries.logic.ts`) and hides an in-progress update as a neutral row, and the MCP transcript
+  builds no entry from a call whose rows are all turnless, ownerless and unclosed. A log a host
+  wrote before the stamp — an older host surviving a deploy writes such chunks until its
+  drain-restart — is read by the call, on the read side only (no fold change, no version bump): an
+  unstamped `tool.output` takes the owner of its call's lifecycle rows in the same derivation input
+  — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in,
+  `deriveWorkLogEntries` keeps it out of every other view) and `unstampedChunkOwner` in
+  `mcp/transcript.ts`. One whose call's rows are gone stays the parent's; the fold, its retention
+  and the history bridge keep mirroring the log.
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no

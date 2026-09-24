@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { WorkLogEntry } from "../../../lib/agent-chat/contracts";
-import { omitSupersededLifecycleMarkers } from "../../../lib/agent-chat/presentation.logic";
+import {
+  isStreamedOutputEntry,
+  omitSupersededLifecycleMarkers
+} from "../../../lib/agent-chat/presentation.logic";
 import {
   findFirstVisibleIndex,
   findFirstVisibleRowIndex,
@@ -244,6 +247,7 @@ test("workEntryIsRerouteNotice and isToolOutputRow", () => {
   assert.ok(!workEntryIsRerouteNotice(entry({ sourceActivityKind: "tool.completed" })));
   assert.ok(isToolOutputRow(entry({ sourceActivityKind: "tool.output" })));
   assert.ok(!isToolOutputRow(entry({ sourceActivityKind: "tool.completed" })));
+  assert.equal(isToolOutputRow, isStreamedOutputEntry, "one definition, in the presentation resolver");
 });
 
 test("workEntryIsIdentityChange picks out the §3.4 account switch marker", () => {
@@ -327,6 +331,28 @@ test("an orphan output chunk is kept as its own row rather than vanishing", () =
   const orphan = entry({ id: "o", toolCallId: "gone", sourceActivityKind: "tool.output", detail: "x" });
   const other = entry({ id: "k", toolCallId: "here", sourceActivityKind: "tool.completed" });
   assert.equal(joinLifecycleDetails([orphan, other]).length, 2);
+});
+
+test("several orphan chunks of one call join into ONE row: the first carries all their text, nothing lost", () => {
+  const orphan = (id: string, toolCallId: string, detail: string) =>
+    entry({ id, toolCallId, sourceActivityKind: "tool.output", label: "Tool output", detail });
+  const other = entry({ id: "k", toolCallId: "here", sourceActivityKind: "tool.completed" });
+  const joined = joinLifecycleDetails([
+    orphan("o1", "gone", "one\n"),
+    other,
+    orphan("o2", "gone", "  two\n"),
+    orphan("p1", "also-gone", "elsewhere\n"),
+    orphan("o3", "gone", "\nthree")
+  ]);
+  assert.deepEqual(
+    joined.map((row) => [row.id, row.detail]),
+    [
+      ["o1", "one\n  two\n\nthree"],
+      ["k", undefined],
+      ["p1", "elsewhere\n"]
+    ],
+    "one row per call, at its first chunk; another call's chunks are its own row"
+  );
 });
 
 test("the join never overwrites a value the row already has", () => {

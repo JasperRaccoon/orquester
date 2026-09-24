@@ -109,7 +109,8 @@ interface ToolInFlight {
    * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`). The
    * one late assignment: a parent call streamed while no turn was open adopts
    * the next turn to open (`beginTurn`) — the woken parent's synthetic turn,
-   * or a user turn sent in that window.
+   * or a user turn sent in that window — and says so with one update on it
+   * (`adoptedToolEvent`).
    */
   turnId?: string;
 }
@@ -721,9 +722,11 @@ export class ClaudeNormalizer {
     // start, an early input update) stays turnless. Only such a stream can
     // have registered one — the parent's calls are settled at every turn end —
     // and a subagent's call is its own: it never joins a parent turn.
+    const adopted: ToolInFlight[] = [];
     for (const tool of this.inFlightTools.values()) {
       if (tool.agentId === undefined && tool.turnId === undefined) {
         tool.turnId = input.turnId;
+        adopted.push(tool);
       }
     }
     const anchorUuid = input.anchorUuid ?? input.turnId;
@@ -740,7 +743,40 @@ export class ClaudeNormalizer {
       }
     ];
     events.push(...this.sessionStateChanged("running", "turn:started"));
+    events.push(...adopted.map((tool) => this.adoptedToolEvent(tool)));
     return events;
+  }
+
+  /**
+   * The one update that tells a call's adoption (`beginTurn`): its state so
+   * far, on the turn that adopted it. The frame that opens a synthetic turn
+   * emits nothing for a call its stream already started, and the call's next
+   * rows come only with its result — a foreground `npm test` runs for minutes
+   * — so without this a running call's rows are all turnless: the MCP builds
+   * no entry for such a call (a rewind's leftover) and the GUI's live run
+   * holds only rows of the running turn. The shape is the call's own input
+   * update's; an input that has not parsed whole yet (the JSON streams, and a
+   * `Write` can take seconds) is named by the tool alone, as the GUI reads a
+   * start's "Write: {}".
+   */
+  private adoptedToolEvent(tool: ToolInFlight): RuntimeEvent {
+    const inputParsed = Object.keys(tool.input).length > 0;
+    return {
+      ...this.base({ turnId: tool.turnId, itemId: tool.itemId, providerItemId: tool.itemId }),
+      type: "item.updated",
+      payload: {
+        itemType: tool.itemType,
+        status: "inProgress",
+        title: tool.title,
+        ...(inputParsed
+          ? tool.detail !== undefined
+            ? { detail: tool.detail }
+            : {}
+          : { detail: tool.toolName }),
+        ...(tool.parentToolUseId !== undefined ? { parentToolUseId: tool.parentToolUseId } : {}),
+        data: { toolName: tool.toolName, input: tool.input }
+      }
+    };
   }
 
   /**

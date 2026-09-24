@@ -110,11 +110,13 @@ export function AgentDrillIn({
 
   // A shell's own rows are projected here rather than by the shared drill-in
   // hook, which applies the quiet-timeline filter a second time and drops
-  // them. See `background-shell.ts`.
+  // them. See `background-shell.ts`. The shell's roster title names its row
+  // once no frame of its call is left to name it.
   const items = useThreadItems(sessionId, background);
+  const shellTitle = agent?.title;
   const shellRows = React.useMemo(
-    () => (background ? backgroundShellRows(items, agentId) : null),
-    [background, items, agentId]
+    () => (background ? backgroundShellRows(items, agentId, shellTitle) : null),
+    [background, items, agentId, shellTitle]
   );
   // The hook is the source; the props are an override for a host that already
   // holds the projection (and for tests, which have no store).

@@ -2589,6 +2589,26 @@ describe("claude normaliser — a background subagent outlives the parent's turn
     });
     const turnId = allOf(opened, "turn.started")[0]?.turnId;
     assert.ok(turnId, "the complete frame opens the synthetic turn");
+    // …and the call it adopts says so at once, in ONE update on that turn carrying its state so far: until its result
+    // it has no other turn-carrying row, and a call whose rows are all turnless reads as a rewind's leftover.
+    const adopted = allOf(opened, "item.updated");
+    assert.deepEqual(
+      adopted.map((event) => [event.itemId, event.turnId, event.agentId]),
+      [["toolu_P", turnId, undefined]],
+      "the parent's call, once, on the new turn — never the subagent's"
+    );
+    assert.deepEqual(adopted[0]?.payload, {
+      itemType: "command_execution",
+      status: "inProgress",
+      title: "Command run",
+      detail: "Bash: cat out.txt",
+      data: { toolName: "Bash", input: { command: "cat out.txt" } }
+    });
+    assert.ok(
+      allOf(opened, "turn.started")[0]!.createdAt <= adopted[0]!.createdAt &&
+        opened.indexOf(allOf(opened, "turn.started")[0]!) < opened.indexOf(adopted[0]!),
+      "after the turn it rides"
+    );
 
     const done = feed({
       type: "user",
@@ -2606,7 +2626,7 @@ describe("claude normaliser — a background subagent outlives the parent's turn
         ["content.delta", turnId, undefined],
         ["item.completed", turnId, undefined]
       ],
-      "the call rides the turn that opened under it, so a rewind before it removes it"
+      "the call rides the turn that opened under it, so a rewind before it removes it — adopted once, not again"
     );
 
     // The subagent's call is its own: the parent's turn never adopts it.
@@ -2640,7 +2660,12 @@ describe("claude normaliser — a background subagent outlives the parent's turn
     // …and the user sends a message before its complete frame arrives: `sendTurn`
     // opens a USER turn, so the complete frame finds a turn open and no
     // synthetic turn opens under the call.
-    normalizer.beginTurn({ turnId: "turn-user" });
+    const userTurn = normalizer.beginTurn({ turnId: "turn-user" });
+    assert.deepEqual(
+      allOf(userTurn, "item.updated").map((event) => [event.itemId, event.turnId, event.agentId, event.payload.detail]),
+      [["toolu_P", "turn-user", undefined, "Bash: cat out.txt"]],
+      "the user's turn adopts the call, and says so once — never the subagent's"
+    );
     const frame = feed({
       type: "assistant",
       uuid: "u-wake",
@@ -2654,6 +2679,7 @@ describe("claude normaliser — a background subagent outlives the parent's turn
       }
     });
     assert.deepEqual(allOf(frame, "turn.started"), [], "no synthetic turn: one is already open");
+    assert.deepEqual(allOf(frame, "item.updated"), [], "and nothing more for the call it already adopted");
 
     const done = feed({
       type: "user",
@@ -2686,6 +2712,34 @@ describe("claude normaliser — a background subagent outlives the parent's turn
         ["item.completed", undefined, AGENT_TASK_ID]
       ]
     );
+  });
+
+  it("a call adopted before its input parsed is named by its tool alone, as its start reads", () => {
+    const { normalizer, feed } = feedable();
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
+    stream({ type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } });
+    // Claude parses a call's input once its JSON is whole: a Write's content can stream for seconds.
+    stream({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_W", name: "Write", input: {} } });
+    stream({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"file_path":"/w/a.txt","con' } });
+    const adopted = allOf(normalizer.beginTurn({ turnId: "turn-user" }), "item.updated");
+    assert.deepEqual(
+      adopted.map((event) => [event.itemId, event.turnId, event.payload.title, event.payload.detail, event.payload.data]),
+      [["toolu_W", "turn-user", "File change", "Write", { toolName: "Write", input: {} }]]
+    );
+  });
+
+  it("a call that already rides a turn is never adopted again", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed({
+      type: "stream_event",
+      uuid: "u-s",
+      session_id: "s",
+      parent_tool_use_id: null,
+      event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_T", name: "Bash", input: { command: "ls" } } }
+    });
+    assert.deepEqual(allOf(normalizer.beginTurn({ turnId: "turn-2" }), "item.updated"), []);
   });
 
   it("a subagent's tool_progress is its owner's heartbeat, on the call's own turn", () => {

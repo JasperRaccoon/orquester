@@ -17,6 +17,8 @@ import {
   applyDomainEvent,
   createEmptyThreadState,
   derivePendingRequests,
+  slimActivityPayload,
+  toThreadSnapshot,
   type DomainEvent,
   type RuntimeEvent,
   type ThreadActivityItem,
@@ -27,6 +29,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { countingIds, fixedClock, replayClaudeFixture } from "../adapters/claude/fixtures.ts";
 import { ClaudeNormalizer } from "../adapters/claude/normalize.ts";
+import { transcriptEntries } from "../../mcp/transcript.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createIngestion } from "./index.ts";
 import {
@@ -1025,7 +1028,7 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
     );
   });
 
-  it("a woken parent's call rides its synthetic turn, so a rewind to before that turn removes it", async () => {
+  it("a woken parent's call rides its synthetic turn — adopted by one row on it while it runs — and a rewind to before that turn removes it", async () => {
     const normalizer = new ClaudeNormalizer({
       threadId: THREAD_ID,
       clock: fixedClock(),
@@ -1049,23 +1052,13 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
     const feed = (frame: Record<string, unknown>): void => {
       events.push(...normalizer.handleMessage({ uuid: "u", session_id: "s", ...frame } as unknown as SDKMessage));
     };
+    const stream = (event: Record<string, unknown>): void => feed({ type: "stream_event", parent_tool_use_id: null, event });
     feed(result);
-    // Woken between prompts, the parent streams a tool_use BEFORE the complete
-    // frame that opens its synthetic turn.
-    feed({
-      type: "stream_event",
-      parent_tool_use_id: null,
-      event: { type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } }
-    });
-    feed({
-      type: "stream_event",
-      parent_tool_use_id: null,
-      event: {
-        type: "content_block_start",
-        index: 0,
-        content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }
-      }
-    });
+    // Woken between prompts, the parent streams a tool_use — its start and an early input update — BEFORE the
+    // complete frame that opens its synthetic turn.
+    stream({ type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } });
+    stream({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: {} } });
+    stream({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"command":"cat out.txt"}' } });
     feed({
       type: "assistant",
       uuid: "u-wake",
@@ -1077,6 +1070,7 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
         content: [{ type: "tool_use", id: "toolu_P", name: "Bash", input: { command: "cat out.txt" } }]
       }
     });
+    const opened = events.length;
     feed({
       type: "user",
       parent_tool_use_id: null,
@@ -1084,25 +1078,49 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
     });
     feed(result);
 
-    const { ingestion, sink } = harness();
-    for (const event of events) {
-      await ingestion.ingest(event);
-    }
-    await ingestion.drain();
-    const state = fold(sink.events());
-    const synthetic = state.turns.find((turn) => turn.turnId !== "turn-1");
-    assert.ok(synthetic?.turnId, "the woken parent's answer is a turn of its own");
-    const rowsOf = (folded: ReturnType<typeof fold>) =>
-      (callRows(folded).get("toolu_P") ?? []).map((row) => [row.activityKind, row.turnId]);
+    const folded = async (slice: readonly RuntimeEvent[]) => {
+      const { ingestion, sink } = harness();
+      for (const event of slice) {
+        await ingestion.ingest(event);
+      }
+      await ingestion.drain();
+      return fold(sink.events());
+    };
+    const rowsOf = (state: ReturnType<typeof fold>) =>
+      (callRows(state).get("toolu_P") ?? []).map((row) => [row.activityKind, row.turnId]);
+    /** The call as read_transcript serves it: the snapshot slimmed as every read is. */
+    const entriesOf = (state: ReturnType<typeof fold>) => {
+      const snap = toThreadSnapshot(state);
+      const read = { ...snap, items: snap.items.map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item)) };
+      return transcriptEntries(read, { turns: 5, include: new Set(["tools"] as const), maxChars: 100_000 })
+        .entries.filter((entry) => entry.kind === "tool")
+        .map((entry) => [entry.tool!.status, entry.tool!.command]);
+    };
+
+    // While it runs — its result still to come — the adoption is the call's one row on the turn, so it is the running
+    // call it is, for the MCP as for the GUI's live run.
+    const live = await folded(events.slice(0, opened));
+    const synthetic = live.turns.find((turn) => turn.turnId !== "turn-1")?.turnId;
+    assert.ok(synthetic, "the woken parent's answer is a turn of its own");
+    assert.deepEqual(rowsOf(live), [
+      ["tool.started", null],
+      ["tool.updated", null],
+      ["tool.updated", synthetic]
+    ]);
+    assert.deepEqual(entriesOf(live), [["inProgress", "cat out.txt"]]);
+
+    const state = await folded(events);
     assert.deepEqual(rowsOf(state), [
       ["tool.started", null],
-      ["tool.updated", synthetic.turnId],
-      ["tool.output", synthetic.turnId],
-      ["tool.completed", synthetic.turnId]
+      ["tool.updated", null],
+      ["tool.updated", synthetic],
+      ["tool.output", synthetic],
+      ["tool.completed", synthetic]
     ]);
+    assert.deepEqual(entriesOf(state), [["completed", "cat out.txt"]]);
 
-    // Rewind to turn 1: the synthetic turn goes, and the call with it. Its
-    // start row went out before the turn existed and stays, as it always has.
+    // Rewind to turn 1: the synthetic turn goes, and the call with it. What it emitted before the turn existed — its
+    // start and its early input update — stays, as it always has, and is no running call.
     const reverted = applyDomainEvent(state, {
       seq: state.seq + 1,
       eventId: "revert",
@@ -1114,6 +1132,10 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
       type: "thread.reverted",
       payload: { turnCount: 1 }
     });
-    assert.deepEqual(rowsOf(reverted), [["tool.started", null]]);
+    assert.deepEqual(rowsOf(reverted), [
+      ["tool.started", null],
+      ["tool.updated", null]
+    ]);
+    assert.deepEqual(entriesOf(reverted), []);
   });
 });

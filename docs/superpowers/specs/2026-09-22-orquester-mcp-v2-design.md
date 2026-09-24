@@ -802,18 +802,19 @@ command on a call whose data says it executes (`kind: "execute"`, whole or cut s
 only echoes the command. The output is the wire's one-line preview (§5.6 slimming). It is applied to each of the
 call's activities but its start, and one that gives nothing never clears an earlier detail; other tools keep `detail`
 as it came. Not the start (final review): the GUI drops `tool.started`, and Grok's first frame carries no ACP `kind`,
-so its echo of the command read as a detail and outlived a completion with no output. `tool.command` is the payload's
-`command`, else its data's, as the GUI reads it (Grok's rides only in `data`; the first build read only the payload's).
-(2) A `hook.completed` whose `outcome` is not `success` is a row, as the GUI keeps it: `error` when its tone is, else
-`warning`, with the text the other rows use ("Hook failed", "Hook cancelled"); a hook's start, progress and success are
-not rows. (3) An assistant row whose message is Codex commentary (`messageKind: "commentary"`) carries
-`commentary: true`, and the row a shed spares as the latest turn's final reply is never one. (4) `compaction` rows
-follow the rule in `packages/api/src/agent-chat/compaction.ts`: a row for every `isCompactionActivity` — a
-`context-compaction` row or the legacy `thread.state.changed {state: "compacted"}` — with `state` =
-`compactionMarkerState`, so a row with no readable state is `compacted`; the first build read it as `compacting`,
-showed no legacy marker, and scoped the parent view by the row's `agentId` alone. The parent view now leaves out a
-subagent's own compaction named on the row or on its payload (`isAgentOwnedActivity`); a drill-in keeps the rows
-stamped with its agent's id, as before.*
+so its echo of the command read as a detail and outlived a completion with no output. (The GUI shows a running call's
+start since Task 5 of plan `2026-09-24-subagent-output-long-calls-and-composer-sends`; the rule stands, see there.)
+`tool.command` is the payload's `command`, else its data's, as the GUI reads it (Grok's rides only in `data`; the first
+build read only the payload's). (2) A `hook.completed` whose `outcome` is not `success` is a row, as the GUI keeps it:
+`error` when its tone is, else `warning`, with the text the other rows use ("Hook failed", "Hook cancelled"); a hook's
+start, progress and success are not rows. (3) An assistant row whose message is Codex commentary
+(`messageKind: "commentary"`) carries `commentary: true`, and the row a shed spares as the latest turn's final reply is
+never one. (4) `compaction` rows follow the rule in `packages/api/src/agent-chat/compaction.ts`: a row for every
+`isCompactionActivity` — a `context-compaction` row or the legacy `thread.state.changed {state: "compacted"}` — with
+`state` = `compactionMarkerState`, so a row with no readable state is `compacted`; the first build read it as
+`compacting`, showed no legacy marker, and scoped the parent view by the row's `agentId` alone. The parent view now
+leaves out a subagent's own compaction named on the row or on its payload (`isAgentOwnedActivity`); a drill-in keeps the
+rows stamped with its agent's id, as before.*
 
 *Built (after v2 shipped — plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, item 1): a tool entry carries
 `outputItemId`, the id of the latest of the call's rows whose payload the read cut — `payload.truncated === true`, the
@@ -821,14 +822,15 @@ slimmer's promise that `GET …/items/:itemId` holds more (the GUI spec's §5.6)
 `tool.completed` or a `tool.denied` (the denial half is forward-compatible: a denial carries no `data` today and is never
 cut on the wire). It is the row whose "Load full output" button the GUI's timeline offers
 (`ActivityRows.tsx`: `entry.truncated` → `onLoadFullOutput(entry.id)`), and `read_tool_output` (§7.2) takes it as
-`itemId`. Never the call's start, which the GUI does not show (`tool.started` is a dropped kind in `entries.logic.ts`),
-and — the one departure from the GUI — never a `tool.updated`: ingestion persists an update already slimmed (the GUI
-spec's §5.6 exception, `maybeSlim`), so its item read serves the same cut payload, `truncated` and all, and
-`read_tool_output` would hand the one-line preview back as the whole output. The GUI still offers its button on a running
-call's latest update, where it shows that same cut payload; the MCP names no id there — unless the call streamed output
-(item 7, below). Absent when the snapshot shows nothing more to read. The slimmer's allow-list rebuilds a tool row's
-`data`, so most finished calls that carry provider data are cut and carry the field; its bytes are part of the row, which
-the shed measures whole.*
+`itemId`. Never the call's start, which the GUI does not show (`tool.started` is a dropped kind in `entries.logic.ts`;
+since Task 5 of plan `2026-09-24-subagent-output-long-calls-and-composer-sends` it shows a running call's start, and the
+rule stands: what the read cut on a start is the call's input, never its output), and — the one departure from the GUI —
+never a `tool.updated`: ingestion persists an update already slimmed (the GUI spec's §5.6 exception, `maybeSlim`), so
+its item read serves the same cut payload, `truncated` and all, and `read_tool_output` would hand the one-line preview
+back as the whole output. The GUI still offers its button on a running call's latest update, where it shows that same
+cut payload; the MCP names no id there — unless the call streamed output (item 7, below). Absent when the snapshot shows
+nothing more to read. The slimmer's allow-list rebuilds a tool row's `data`, so most finished calls that carry provider
+data are cut and carry the field; its bytes are part of the row, which the shed measures whole.*
 
 *Built (plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, item 7): streamed output. A Claude background shell's
 output (tailed from the CLI's file: ≤ 1 MiB, then one notice) and a running command's output so far exist only as
@@ -843,19 +845,21 @@ its latest chunk in the range. A start or an update is safe here: `read_tool_out
 own data as the output, and resolves the call from any of its rows. A background shell's rows carry its task id as
 `agentId`, so they are in its drill-in only, as in the GUI; its completion is always cut (the allow-list drops `input`
 and `background`) and holds no output, so the id is the completion's and the answer is the join. *Fix round 1:* a
-long-running shell's own chunks push its start out of its agent's 200-row window (the reviewer's 300 chunks), so a
-command call with chunks in the range and no lifecycle row there becomes an entry of its own, built from its latest chunk
-in the range: `tool.type` `command_execution`, the title and command its lifecycle rows in the view give in any turn
-(else the chunk's `summary`, "Tool output"), `status` its completion's in the view, else `inProgress`, and
-`outputItemId` that chunk, which `read_tool_output` joins. In a drill-in only: there a chunk carries its agent's own id,
-while the parent's scope also holds chunks of subagents' commands — Claude streams a subagent's Bash result with no
-agent id (fixture `claude/07`) while the call's rows are the subagent's — and building from them would put subagents'
-commands in the parent view, reading `inProgress` once the subagent's rows were evicted. This note first called a parent
-command whose rows were all evicted while its chunks survive theoretical; it is not (final review): a main-agent Codex
-command that streams past ~550 flushes — its chunks are parent rows, and the parent's window trims at 500 + 50 — loses
-its start row while it runs, and the parent view has no entry for it, so no `outputItemId`, until its completion lands.
-Follow-up: stamp streamed deltas with their agent — Claude sends a subagent's Bash output with no agent id today — so
-that the parent view can build entries for its own streaming commands, as a drill-in does.*
+long-running shell's own chunks pushed its start out of its agent's 200-row window (the reviewer's 300 chunks), so a
+command call with chunks in the range and no lifecycle row there becomes an entry of its own, built from its latest
+chunk in the range: `tool.type` `command_execution`, the title and command its lifecycle rows in the view give in any
+turn (else the chunk's `summary`, "Tool output" — since Task 5 below, a background task's roster title comes first),
+`status` its completion's in the view, else `inProgress`, and `outputItemId` that chunk, which `read_tool_output` joins.
+In a drill-in only, and still after plan `2026-09-24-subagent-output-long-calls-and-composer-sends`: retention now keeps
+a running call's opening row (Task 3), so a main-agent command keeps its entry — and its `outputItemId` — while it runs,
+and a Claude subagent's chunks carry its id (Task 2); but a log a host wrote before that stamp holds unstamped ones
+(fixture `claude/07`: Claude streamed a subagent's Bash result with no agent id while the call's rows were the
+subagent's), which the parent's scope still holds once the call's rows are evicted — no owner can be read for them there
+— and building from them would put subagents' commands in the parent view, reading `inProgress`. (This note first called
+a parent command whose rows were all evicted while its chunks survive theoretical; it was not, until Task 3 (final
+review): a main-agent Codex command that streamed past ~550 flushes — its chunks are parent rows, and the parent's
+window trims at 500 + 50 — lost its start row while it ran, and the parent view had no entry for it, so no
+`outputItemId`, until its completion landed.)*
 *Built (plan `2026-09-24-subagent-output-long-calls-and-composer-sends`, Task 2): the stamp half. The Claude normaliser
 now gives a call's output chunk the owner (and the turn) its item rows carry, so a subagent's Bash result is in its
 drill-in and offers the completion there as `outputItemId`. An unstamped chunk — what a host from before that wrote,
@@ -863,6 +867,25 @@ and what an older host surviving a deploy writes until its drain-restart — cou
 snapshot holds an owned lifecycle row of the call (`unstampedChunkOwner`, `transcript.ts` — the GUI's
 `callOwnersOf` rule); one whose call's rows were all evicted still reads as the parent's, so the parent view still
 builds no entry from chunks alone.*
+*Built (plan `2026-09-24-subagent-output-long-calls-and-composer-sends`, Task 5): an entry built from a chunk alone is
+titled by the call's lifecycle rows in the view, else — for a background task, which is one command — by the drill-in's
+roster row (`subagentTitle`: the shell's description, or the command itself; never the task's own id, which the roster
+uses when nothing named the task), else by the call's command, else by the chunk's `summary`, "Tool output"; a
+subagent's roster row names none of the calls it runs and is never used. And a call whose rows in the view are all
+turnless, ownerless (`isAgentOwnedActivity`) and unclosed — no `tool.completed` or `tool.denied` — builds no entry, as
+the GUI shows it none: a Claude parent call can start before the synthetic turn its own message opens, what it emits
+before that turn opens — its start and any early input update — stays turnless, and only its later rows carry the turn.
+A rewind of that turn used to leave an `inProgress` entry here that the GUI never showed: it drops the start (superseded
+by the update, else as turnless and ownerless — `startIsCallRow`, `entries.logic.ts`) and hides an update still in
+progress as a neutral row. (Fix round 1: the first build skipped only a lone turnless start, and a start with its early
+input update still made an entry. Fix round 2: that rule alone hid a woken call for its whole run — the frame that opens
+the turn emits nothing for the call, and its next rows come only with its result — so the Claude normaliser now marks
+the adoption with one update on the turn (`adoptedToolEvent`), a running call always has a row that carries its turn,
+and "all turnless, ownerless and unclosed" means a rewind's leftover again.) The GUI now shows a call's start while no
+other lifecycle row of the call is in its input (a running Codex command's only row); the rules above about the start
+stand for their own reasons: its detail is never taken, because the GUI replaces the start whole with the call's next
+row while an entry here keeps a detail an earlier row gave, and its cut payload is never an `outputItemId`, because what
+the read cut on a start is the call's input, never its output.*
 
 ### 7.7 Waiting
 
