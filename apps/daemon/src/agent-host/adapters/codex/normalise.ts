@@ -84,6 +84,20 @@ export class CodexNormaliser {
   /** Child thread id → its live turn id, so Stop can reach the fleet (§4.5). */
   private readonly childTurns = new Map<string, string>();
   /**
+   * Child thread id → the linkage of the launch record this session saw
+   * (`subAgentActivity started`), repeated on the start of every later run. A
+   * child missing here was launched before this session — a resume after a
+   * host restart.
+   */
+  private readonly launchedChildren = new Map<string, { agentPath: string; title: string }>();
+  /**
+   * Children with a settled run behind them — their own `turn/completed` or
+   * `thread/closed`, a `subAgentActivity` `completed`/`interrupted`, or a Stop
+   * that closed them ({@link forgetAgents}) — so the next turn one starts is
+   * a NEW run.
+   */
+  private readonly settledChildren = new Set<string>();
+  /**
    * Turns already settled by `turn/completed`. `turn/start`'s response can
    * arrive AFTER the completion notification for the same turn — re-activating
    * it would leave the session `running` forever (Q1 finding 3).
@@ -151,8 +165,19 @@ export class CodexNormaliser {
    * `subAgentActivity`, which an interrupted fleet never sends, so
    * `hasSubagents` would stay true for the session's life — and `childTurns`
    * would keep naming turns nothing can interrupt any more.
+   *
+   * Both callers — a Stop and the session's exit — close every live task
+   * `stopped` beside it, so every child this session knows has a settled run
+   * behind it, whether or not an end of its own ever follows: the next turn
+   * one starts is a new run.
    */
   forgetAgents(): void {
+    for (const child of this.launchedChildren.keys()) {
+      this.settledChildren.add(child);
+    }
+    for (const child of this.childTurns.keys()) {
+      this.settledChildren.add(child);
+    }
     this.knownAgentPaths.clear();
     this.childTurns.clear();
   }
@@ -837,13 +862,6 @@ export class CodexNormaliser {
   }
 
   /**
-   * `subAgentActivity` → the §4.2 task events.
-   *
-   * **The trap (§4.5).** Codex emits `subAgentActivity {agentPath:"/root"}`
-   * *about the root thread*; registering that as its own child made threads
-   * hang "working" forever. The root path is therefore never a task.
-   */
-  /**
    * A notification about a collab CHILD thread (R3 finding 2).
    *
    * Three routes, and the default is deliberately `"parent"`: §4.5's "Trap"
@@ -897,24 +915,54 @@ export class CodexNormaliser {
     switch (method) {
       case "turn/started": {
         const p = params as CodexProtocol.v2.TurnStartedNotification;
+        // The child's own turn is what says it works again — an `interacted`
+        // record is not. With no turn in progress, it is a NEW run when the
+        // child settled one before or this session never saw it launched, and
+        // the run starts again under a new launch id, before its first row:
+        // the roster reopens a settled agent only on a start naming a
+        // different id, and a progress row, replaced in place at its FIRST
+        // position, reopens nothing.
+        const launch = this.launchedChildren.get(childThreadId);
+        const relaunch =
+          !this.childTurns.has(childThreadId) &&
+          (this.settledChildren.has(childThreadId) || launch === undefined);
         // Remembered so Stop can interrupt the fleet before the parent (§4.5
         // step 3) — the child turn id exists nowhere else.
         this.childTurns.set(childThreadId, p.turn.id);
-        return [
-          {
-            type: "task.progress",
+        this.settledChildren.delete(childThreadId);
+        const events: RuntimeEventDraft[] = [];
+        if (relaunch) {
+          if (launch !== undefined) {
+            // The parent turn that re-engaged it has subagents too.
+            this.knownAgentPaths.add(launch.agentPath);
+          }
+          events.push({
+            type: "task.started",
             payload: {
               taskId: childThreadId,
-              description: `agent ${childThreadId}`,
-              status: "running",
-              ...linkage
+              description: launch?.title ?? `agent ${childThreadId}`,
+              toolUseId: `codex-run:${p.turn.id}`,
+              ...linkage,
+              ...(launch !== undefined ? { agentPath: launch.agentPath, title: launch.title } : {})
             },
             ...base
-          }
-        ];
+          });
+        }
+        events.push({
+          type: "task.progress",
+          payload: {
+            taskId: childThreadId,
+            description: `agent ${childThreadId}`,
+            status: "running",
+            ...linkage
+          },
+          ...base
+        });
+        return events;
       }
       case "turn/completed": {
         this.childTurns.delete(childThreadId);
+        this.settledChildren.add(childThreadId);
         const p = params as CodexProtocol.v2.TurnCompletedNotification;
         const state = turnState(p.turn.status);
         return [
@@ -931,6 +979,7 @@ export class CodexNormaliser {
       }
       case "thread/closed": {
         this.childTurns.delete(childThreadId);
+        this.settledChildren.add(childThreadId);
         return [
           {
             type: "task.completed",
@@ -980,6 +1029,21 @@ export class CodexNormaliser {
     }
   }
 
+  /**
+   * `subAgentActivity` → the §4.2 task events.
+   *
+   * **The trap (§4.5).** Codex emits `subAgentActivity {agentPath:"/root"}`
+   * *about the root thread*; registering that as its own child made threads
+   * hang "working" forever. The root path is therefore never a task.
+   *
+   * The launch record's start carries a launch id (`codex-launch:<item id>`),
+   * so a later run of the child — which starts under its own turn's id
+   * (`childAgentEvent`) — names a DIFFERENT one, the only start the roster
+   * reopens a settled agent on. `interacted` is no evidence of a run
+   * (`send_message` "does not trigger a new turn"), so its row carries no
+   * status: a `running` there put the agent back in the liveness registry
+   * with nothing left to take it out.
+   */
   private subAgentActivity(
     item: Extract<CodexThreadItem, { type: "subAgentActivity" }>,
     turnId: string,
@@ -1005,10 +1069,19 @@ export class CodexNormaliser {
     switch (item.kind) {
       case "started":
         this.knownAgentPaths.add(item.agentPath);
+        this.launchedChildren.set(item.agentThreadId, {
+          agentPath: item.agentPath,
+          title: linkage.title
+        });
         return [
           {
             type: "task.started",
-            payload: { taskId: item.agentThreadId, description: linkage.title, ...linkage },
+            payload: {
+              taskId: item.agentThreadId,
+              description: linkage.title,
+              toolUseId: `codex-launch:${item.id}`,
+              ...linkage
+            },
             ...base,
             raw
           }
@@ -1020,7 +1093,6 @@ export class CodexNormaliser {
             payload: {
               taskId: item.agentThreadId,
               description: linkage.title,
-              status: "running",
               ...linkage
             },
             ...base,
@@ -1029,6 +1101,7 @@ export class CodexNormaliser {
         ];
       case "interrupted":
         this.knownAgentPaths.delete(item.agentPath);
+        this.settledChildren.add(item.agentThreadId);
         return [
           {
             type: "task.completed",
@@ -1039,6 +1112,7 @@ export class CodexNormaliser {
         ];
       case "completed":
         this.knownAgentPaths.delete(item.agentPath);
+        this.settledChildren.add(item.agentThreadId);
         return [
           {
             type: "task.completed",
