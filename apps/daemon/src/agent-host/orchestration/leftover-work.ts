@@ -87,8 +87,8 @@
  * without losing a row. A later rewind that keeps that turn and drops the ones
  * after it clips the range at its cut (`clipAtCut`), as it clips every
  * surviving range: no history page serves the dropped turns' rows, and the
- * closer, past the cut, leaves the history with them — the fold keeps it by
- * its turn, and the window shows it while retention does.
+ * closer, past the cut, is served by the page that holds the cut, by the turn
+ * it names (`historyBlockEvents` in `orchestrator.ts`), as the fold keeps it.
  *
  * Pure: no clock, no ids, no I/O of its own — the caller hands in both.
  */

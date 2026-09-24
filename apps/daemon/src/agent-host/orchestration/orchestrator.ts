@@ -116,6 +116,7 @@ import {
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
 import type { IndexedItemPosition, IndexedTurn, ThreadIndex } from "../index/index.ts";
+import { referencedTurnId } from "../index/turn-reference.ts";
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
 import { joinToolOutput, toolOutputWindow } from "../store/tool-output.ts";
@@ -3219,6 +3220,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * a subagent fleet's single turn runs to thousands of events, and is walked
    * in blocks like any other stretch. `turns` in the answer is information
    * about the block; a turn can span two blocks.
+   *
+   * A block that holds a revert's cut folds the late rows of the turns the
+   * revert kept out of it (`historyBlockEvents`), and lists the newest of
+   * those turns when it lists no later one (`withLateTurns`). The index
+   * counts none of them — the revert dropped their positions — so they are
+   * counted here, against the same `HISTORY_PAGE_ACTIVITIES`: the block is
+   * planned again from the same end with that many fewer of the index's
+   * activities (`indexedActivityBudget`), and a page never folds more rows
+   * than a lossless one. A cut holding more late rows than a page can fold
+   * beside a single activity is served without them, as before, whenever
+   * folding them would evict a row.
    */
   const readHistory = async (
     threadId: string,
@@ -3240,14 +3252,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         page: { beforeCursor: null },
         seq
       };
+      let end: BlockEnd | null;
       let plan: HistoryBlock | null;
       try {
-        plan = planHistoryBlock(runtime, index, query);
+        end = historyBlockEnd(runtime, index, query);
+        plan =
+          end === null
+            ? null
+            : planHistoryBlock(index, threadId, end, query, HISTORY_PAGE_ACTIVITIES);
       } catch (error) {
         logger.warn(`agent-host: the thread index could not page ${threadId}`, error);
         throw indexUnavailable();
       }
-      if (plan === null) {
+      if (end === null || plan === null) {
         return empty;
       }
       const range = await store.readEventRange(threadId, {
@@ -3265,16 +3282,55 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         });
         return empty;
       }
-      const events = eventsOutsideRevertCuts(range.events, plan.turns, plan.firstTurnSeq);
-      const state = await applyEventsChunked(fold.createEmpty(), events, { apply: fold.apply });
+      const turnOf = turnLookup(index, threadId);
+      const whole = historyBlockEvents(range.events, plan.turns, plan.firstTurnSeq, turnOf);
+      let served = plan;
+      let block = whole;
+      if (whole.lateActivities.size > 0) {
+        let narrower: HistoryBlock | null;
+        try {
+          const count = indexedActivityBudget(index, threadId, end, whole.lateActivities);
+          narrower =
+            count < HISTORY_PAGE_ACTIVITIES
+              ? planHistoryBlock(index, threadId, end, query, count)
+              : null;
+        } catch (error) {
+          logger.warn(`agent-host: the thread index could not page ${threadId}`, error);
+          throw indexUnavailable();
+        }
+        // The same end, fewer activities: a tail of the block already read.
+        if (narrower !== null && narrower.fromByte > plan.fromByte) {
+          const from = narrower.startSeq;
+          served = narrower;
+          block = historyBlockEvents(
+            range.events.filter((event) => event.seq >= from),
+            narrower.turns,
+            narrower.firstTurnSeq,
+            turnOf
+          );
+        }
+      }
+      let state = await applyEventsChunked(fold.createEmpty(), block.events, { apply: fold.apply });
+      let lateTurns = block.lateTurns;
+      if (block.lateActivities.size > 0 && state.evicted?.activities === true) {
+        logger.warn("agent-host: a history page cannot fold its late rows whole; serving it without them", {
+          threadId,
+          lateRows: block.lateActivities.size
+        });
+        served = plan;
+        lateTurns = [];
+        state = await applyEventsChunked(fold.createEmpty(), whole.inRange, { apply: fold.apply });
+      }
       return {
         threadId,
-        turns: plan.turns.map((turn) => historyTurnOf(index, threadId, turn)),
+        turns: withLateTurns(served.turns, lateTurns).map((turn) =>
+          historyTurnOf(index, threadId, turn)
+        ),
         items: slimItemsForRead(state.items ?? []),
         checkpoints: state.checkpoints ?? [],
         page: {
-          beforeCursor: plan.beforeCursor,
-          endItemId: await rowAtSeq(threadId, index, plan.endSeq)
+          beforeCursor: served.beforeCursor,
+          endItemId: await rowAtSeq(threadId, index, served.endSeq)
         },
         seq
       };
@@ -3304,23 +3360,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * Where a block starts and ends, in seqs and in bytes, and the cursor of
-   * the block below it. Every boundary is a line start the index recorded —
-   * an activity's latest line, a message's first chunk, or the log's first
-   * byte — and never falls inside a streamed message, so consecutive blocks
-   * meet exactly: nothing is skipped, no message is split across two, and
-   * only an activity rewritten under the same id can repeat. Null when there
-   * is nothing below.
+   * Where a block ends, in seqs and in bytes: the request's cursor, else the
+   * snapshot's own (the window's boundary) — a malformed, foreign or
+   * no-longer-known cursor is a first-page request. Null when there is
+   * nothing to end at.
    */
-  const planHistoryBlock = (
+  const historyBlockEnd = (
     runtime: ThreadRuntime,
     index: ThreadIndex,
-    query: { before?: string; turns?: number }
-  ): HistoryBlock | null => {
+    query: { before?: string }
+  ): BlockEnd | null => {
     const threadId = runtime.id;
-    // The END — the request's cursor, else the snapshot's own (the window's
-    // boundary). A malformed, foreign or no-longer-known cursor is a first-
-    // page request.
     const cursor =
       query.before !== undefined && query.before.length > 0
         ? decodeHistoryCursor(query.before, threadId)
@@ -3344,12 +3394,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       end = { seq: endSeq, byteOffset: moved.byteOffset };
     }
+    return end;
+  };
 
-    // The START — HISTORY_PAGE_ACTIVITIES activities back...
-    let startSeq = index.activitySeqBefore(threadId, {
-      beforeSeq: end.seq,
-      count: HISTORY_PAGE_ACTIVITIES
-    });
+  /**
+   * Where a block that ends at `end` starts, in seqs and in bytes — `count`
+   * of the index's activities back — and the cursor of the block below it.
+   * Every boundary is a line start the index recorded — an activity's latest
+   * line, a message's first chunk, or the log's first byte — and never falls
+   * inside a streamed message, so consecutive blocks meet exactly: nothing is
+   * skipped, no message is split across two, and only an activity rewritten
+   * under the same id can repeat. Null when there is nothing below.
+   */
+  const planHistoryBlock = (
+    index: ThreadIndex,
+    threadId: string,
+    end: BlockEnd,
+    query: { turns?: number },
+    count: number
+  ): HistoryBlock | null => {
+    // The START — `count` activities back...
+    let startSeq = index.activitySeqBefore(threadId, { beforeSeq: end.seq, count });
     if (startSeq === null) {
       return null;
     }
@@ -3390,6 +3455,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return {
       fromByte,
       toByte: end.byteOffset,
+      startSeq: older ? startSeq : 0,
       endSeq: end.seq,
       turns: index.turnsInSeqRange(threadId, { fromSeq: older ? startSeq : 0, toSeq: end.seq }),
       firstTurnSeq: index.turnByOrdinal(threadId, 1)?.firstSeq ?? null,
@@ -4690,10 +4756,18 @@ function slimItemsForRead(items: readonly ThreadItem[]): ThreadItem[] {
  */
 export const HISTORY_PAGE_ACTIVITIES = 400;
 
+/** Where a history block ends (`historyBlockEnd`): the first line it does not hold. */
+interface BlockEnd {
+  seq: number;
+  byteOffset: number;
+}
+
 /** One planned history block (`planHistoryBlock`). */
 interface HistoryBlock {
   fromByte: number;
   toByte: number;
+  /** The seq of the line at `fromByte`; 0 for a block from the log's first byte. */
+  startSeq: number;
   /** The seq of the line at `toByte`: the first line the block does not hold. */
   endSeq: number;
   /** The turns whose ranges meet the block, in ordinal order. */
@@ -4882,39 +4956,168 @@ function capTurnOf(
   return ordinal >= 1 ? index.turnByOrdinal(threadId, ordinal) : null;
 }
 
+/** A history block's events, by what the block folds of them (`historyBlockEvents`). */
+interface HistoryBlockEvents {
+  /** Every event the block folds, in log order: `inRange` and the late rows. */
+  events: DomainEvent[];
+  /** Only the events inside some turn's range or before the first turn. */
+  inRange: DomainEvent[];
+  /**
+   * Every activity a late line writes, by id, with the seq of its newest late
+   * line — what the page counts against its activities (`indexedActivityBudget`).
+   */
+  lateActivities: Map<string, number>;
+  /** The turns the late lines belong to. */
+  lateTurns: IndexedTurn[];
+}
+
 /**
- * A block's events without a revert's cut: the index's turn ranges tile the
- * log except where a revert removed turns — those turns' lines and the
- * `thread.reverted` itself belong to no turn, a surviving range ending where
- * the first removed turn began (`clipAtCut` in `index/indexer.ts`) — so only
- * events inside some turn's `[firstSeq, lastSeq]`, or before the first turn
- * (the thread's preamble), are folded. Folding the cut would bring back the removed turns
- * and apply a `turnCount` counted from the thread's first turn, not the
- * block's. `turns` are the block's own, in ordinal order.
+ * What a history block folds. The index's turn ranges tile the log except
+ * where a revert removed turns: those turns' lines, the `thread.reverted`
+ * itself and whatever follows it until the next turn begins belong to no
+ * turn, a surviving range ending where the first removed turn began
+ * (`clipAtCut` in `index/indexer.ts`). Every event inside some turn's
+ * `[firstSeq, lastSeq]`, or before the first turn (the thread's preamble), is
+ * folded. Out of such a gap only the LATE lines of the turns a revert kept: a
+ * line that names a turn (`referencedTurnId`, the index's own rule for a line
+ * that belongs to a turn — an activity's, a message's or a checkpoint's
+ * `turnId`) which the index still has and which began before it — a turn-end
+ * capture that landed after the next prompt, a first-load closer, a
+ * background agent's late completion stamped with the turn its call started
+ * in. The fold keeps those by their turn (`reduceReverted`), and no range
+ * holds them: the revert clipped their turn's range at the cut and sealed it.
+ * Never a line of a removed turn (the index no longer has it, and an id
+ * minted again after the revert names a turn that began after the line), a
+ * line that names no turn, or the revert: folding the cut would bring the
+ * removed turns back and apply a `turnCount` counted from the thread's first
+ * turn, not the block's.
+ *
+ * A line lies in exactly one block, so each late row is on one page; the
+ * window may still hold it (retention keeps an agent's rows in windows of
+ * their own), and the reader renders one row per id, as it does for any row a
+ * first page repeats. `turns` are the block's own, in ordinal order.
  */
-function eventsOutsideRevertCuts(
+function historyBlockEvents(
   events: readonly DomainEvent[],
   turns: readonly IndexedTurn[],
-  firstTurnSeq: number | null
-): DomainEvent[] {
+  firstTurnSeq: number | null,
+  turnOf: (turnId: string) => IndexedTurn | null
+): HistoryBlockEvents {
   if (firstTurnSeq === null) {
-    return [...events];
+    return { events: [...events], inRange: [...events], lateActivities: new Map(), lateTurns: [] };
   }
-  const kept: DomainEvent[] = [];
+  const folded: DomainEvent[] = [];
+  const inRange: DomainEvent[] = [];
+  const lateActivities = new Map<string, number>();
+  const lateTurns = new Map<string, IndexedTurn>();
   let turn = 0;
   for (const event of events) {
     if (event.seq < firstTurnSeq) {
-      kept.push(event);
+      folded.push(event);
+      inRange.push(event);
       continue;
     }
     while (turn < turns.length && event.seq > turns[turn]!.lastSeq) {
       turn += 1;
     }
     if (turn < turns.length && event.seq >= turns[turn]!.firstSeq) {
-      kept.push(event);
+      folded.push(event);
+      inRange.push(event);
+      continue;
+    }
+    const turnId = referencedTurnId(event);
+    const owner = turnId === null ? null : turnOf(turnId);
+    if (owner === null || owner.firstSeq >= event.seq) {
+      continue;
+    }
+    folded.push(event);
+    lateTurns.set(owner.turnId, owner);
+    if (event.type === "thread.activity-appended") {
+      lateActivities.set(event.payload.activity.id, event.seq);
     }
   }
-  return kept;
+  return { events: folded, inRange, lateActivities, lateTurns: [...lateTurns.values()] };
+}
+
+/** The index's turn by id, asked once per id for one page. */
+function turnLookup(index: ThreadIndex, threadId: string): (turnId: string) => IndexedTurn | null {
+  const known = new Map<string, IndexedTurn | null>();
+  return (turnId) => {
+    let turn = known.get(turnId);
+    if (turn === undefined) {
+      turn = index.turnById(threadId, turnId);
+      known.set(turnId, turn);
+    }
+    return turn;
+  };
+}
+
+/**
+ * How many of the index's activities a block ending at `end` may hold beside
+ * the late rows it folds out of a revert's cut (`historyBlockEvents`): the
+ * most, `n`, for which the `n` activities below the end and the late rows
+ * from the `n`-th on — or all of them, for a block that reaches the log's
+ * first byte — are no more than `HISTORY_PAGE_ACTIVITIES`. A late row counts
+ * where its newest late line lies, unless that line is the one the index
+ * positions it at (written after the revert, before the next turn began):
+ * the index counts that row already. `late` holds those of the block planned
+ * with the whole count, which every smaller block's are among. At least 1,
+ * so paging always moves.
+ */
+function indexedActivityBudget(
+  index: ThreadIndex,
+  threadId: string,
+  end: BlockEnd,
+  late: ReadonlyMap<string, number>
+): number {
+  const lateSeqs = [...late]
+    .filter(([activityId, seq]) => index.itemPosition(threadId, activityId)?.seq !== seq)
+    .map(([, seq]) => seq);
+  if (lateSeqs.length === 0) {
+    return HISTORY_PAGE_ACTIVITIES;
+  }
+  const lateFrom = (start: number): number =>
+    index.hasItemsBefore(threadId, start)
+      ? lateSeqs.filter((seq) => seq >= start).length
+      : lateSeqs.length;
+  let budget = 1;
+  let low = 1;
+  let high = HISTORY_PAGE_ACTIVITIES;
+  // Moving the start back never drops a late row: `count + lateFrom` only
+  // grows with `count`, so the largest count that fits is found by halving.
+  while (low <= high) {
+    const count = Math.floor((low + high) / 2);
+    const start = index.activitySeqBefore(threadId, { beforeSeq: end.seq, count });
+    if (start !== null && count + lateFrom(start) <= HISTORY_PAGE_ACTIVITIES) {
+      budget = count;
+      low = count + 1;
+    } else {
+      high = count - 1;
+    }
+  }
+  return budget;
+}
+
+/**
+ * A block's turns — those its ranges meet — and, when none of them comes
+ * after the turns its late rows belong to, the newest of those. The client
+ * drops its loaded pages when a rewind removes a turn one of them lists
+ * (`historyAfterRevert` in the UI), and a rewind that removes a late row's
+ * turn removes every turn after it too: a page that lists a later turn is
+ * reached already, and one that lists none is reached through the newest
+ * late turn. Listed beside a later turn, a late row's turn would read as on
+ * screen to a search reveal (`planReveal`), which would stop at a page that
+ * holds only that row instead of paging on to the turn's own.
+ */
+function withLateTurns(turns: readonly IndexedTurn[], late: readonly IndexedTurn[]): IndexedTurn[] {
+  let newestLate: IndexedTurn | null = null;
+  for (const turn of late) {
+    if (newestLate === null || turn.ordinal > newestLate.ordinal) newestLate = turn;
+  }
+  if (newestLate === null || turns.some((turn) => turn.ordinal >= newestLate.ordinal)) {
+    return [...turns];
+  }
+  return [...turns, newestLate].sort((left, right) => left.ordinal - right.ordinal);
 }
 
 /** `turns` of a history request: an integer in `[1, THREAD_HISTORY_MAX_TURNS]`. */

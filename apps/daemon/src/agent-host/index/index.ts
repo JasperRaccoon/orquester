@@ -11,7 +11,9 @@
  * - `sqlite.ts` — driver resolution (once, at load) and the file lifecycle;
  * - `schema.ts` — the tables;
  * - `indexer.ts` — domain events → rows, one transaction per batch;
- * - `queries.ts` — turn lookups, paging, search.
+ * - `queries.ts` — turn lookups, paging, search;
+ * - `turn-reference.ts` — the turn a line says it belongs to, which history
+ *   planning reads too.
  *
  * Writes are applied per thread, in order, on an internal queue: `observe`
  * returns at once, `catchUp` rides the same queue so a live append and a
