@@ -4,7 +4,11 @@ import test from "node:test";
 import { anchorsCall, CALL_ROW_KINDS } from "./call-anchor.ts";
 import type { ThreadActivityItem } from "./thread.ts";
 
-function row(activityKind: string, extra: Partial<ThreadActivityItem> = {}, payload: Record<string, unknown> = {}): ThreadActivityItem {
+function row(
+  activityKind: string,
+  extra: Partial<ThreadActivityItem> = {},
+  payload: Record<string, unknown> = {}
+): ThreadActivityItem {
   return {
     kind: "activity",
     id: `${activityKind}:1`,

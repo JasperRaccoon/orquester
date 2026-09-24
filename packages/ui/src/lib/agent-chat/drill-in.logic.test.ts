@@ -154,18 +154,22 @@ describe("a drill-in's turn folds are timed by the parent's turns", () => {
    * thought, then a call it started there — which ran on after the turn
    * settled and completed an hour later, stamped with the turn it started in.
    */
+  const call = (status: string) => ({
+    itemType: "command_execution",
+    toolUseId: "call-1",
+    title: "npm run build",
+    command: "npm run build",
+    status
+  });
   const lateCall = (): ThreadItem[] => [
     message("reasoning", "Checking the build", { id: "think", agentId: "a1", turnId: "t1", createdAt: stamp(2) }),
-    activity(
-      "tool.started",
-      { itemType: "command_execution", toolUseId: "call-1", title: "npm run build", command: "npm run build", status: "inProgress" },
-      { id: "start", agentId: "a1", turnId: "t1", createdAt: stamp(3) }
-    ),
-    activity(
-      "tool.completed",
-      { itemType: "command_execution", toolUseId: "call-1", title: "npm run build", command: "npm run build", status: "completed" },
-      { id: "done", agentId: "a1", turnId: "t1", createdAt: stamp(3_600) }
-    )
+    activity("tool.started", call("inProgress"), { id: "start", agentId: "a1", turnId: "t1", createdAt: stamp(3) }),
+    activity("tool.completed", call("completed"), {
+      id: "done",
+      agentId: "a1",
+      turnId: "t1",
+      createdAt: stamp(3_600)
+    })
   ];
   const t1 = (state: "completed" | "running"): Turn => ({
     turnId: "t1",
@@ -177,8 +181,12 @@ describe("a drill-in's turn folds are timed by the parent's turns", () => {
     assistantMessageId: null
   });
   const foldLabels = (turns: readonly Turn[]): string[] =>
-    projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, { items: lateCall(), agentId: "a1", messageStreaming: NOTHING_STREAMS, turns })
-      .stable.result.flatMap((row) => (row.kind === "turn-fold" ? [row.label] : []));
+    projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items: lateCall(),
+      agentId: "a1",
+      messageStreaming: NOTHING_STREAMS,
+      turns
+    }).stable.result.flatMap((row) => (row.kind === "turn-fold" ? [row.label] : []));
 
   it("a settled turn works for its own duration, not until the last of its agent's rows landed", () => {
     assert.deepEqual(foldLabels([t1("completed")]), ["Worked for 9.0s"]);

@@ -738,7 +738,7 @@ describe("thread index: page ranges", () => {
     );
   });
 
-  it("a revert clips a surviving turn at the cut: a late event that stretched it over the removed turns never brings them back", async () => {
+  it("a revert clips a surviving turn at the cut: a late event's stretch never brings the removed turns back", async () => {
     const log = new TestLog();
     feed(index, log, log.append(created())); // 1
     feed(index, log, log.append(userMessage("u1", "first"), turnStart("u1"))); // 2, 3
