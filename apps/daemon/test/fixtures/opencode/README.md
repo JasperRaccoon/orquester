@@ -697,12 +697,12 @@ What the normaliser makes of it (`linkChildFromTaskPart`):
   its `task.started` carries the `callID` — the id the roster fold compares to tell a
   relaunch from a late delivery (AGENTS.md, "Agent rows must survive resumes and
   retention").
-- A live part naming a **settled** child under a new `callID` is a relaunch: a new
-  `task.started` naming it, before any row of the new run; the child's own `session.idle`
-  ends it.
-- Any other part whose `callID` is not the child's current launch — a stale frame of an
-  earlier call, a call on a child that is still working — emits no task row: it can
-  neither start a run nor end one.
+- A live part naming a **settled** child under a `callID` never seen for it is a relaunch: a
+  new `task.started` naming it, before any row of the new run; the child's own
+  `session.idle` ends it.
+- Any other part whose `callID` is not the child's current launch — a frame of any call
+  seen for it before (an earlier launch, a call handed over while it worked), a call on a
+  child that is still working — emits no task row: it can neither start a run nor end one.
 - A `completed` part with `metadata.background: true` does not settle the child.
 
 A capture of a real `task_id` resume would confirm the frame order; none has been made.

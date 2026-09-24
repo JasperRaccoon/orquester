@@ -3613,8 +3613,8 @@ row of the new run. OpenCode's launch id is the parent `task` part's `callID` â€
 with `task_id` resumes the child under a new call; Codex's is `codex-launch:<item id>` at the
 launch record, then `codex-run:<turn id>` at a settled child's own next turn. The start is the one
 row of a run retention never drops: a status row would reopen the agent only until its window
-dropped that row, and the old end would read again mid-run. An agent first launched before
-2026-09-24 carries no launch id, and a relaunch from a terminal state does not reopen it
+dropped that row, and the old end would read again mid-run. An agent first launched by a host
+older than this change carries no launch id, and a relaunch from a terminal state does not reopen it
 (`packages/api/src/agent-chat/roster.ts`, `adapters/opencode/normalize.ts`,
 `adapters/codex/normalise.ts`).*
 

@@ -685,5 +685,7 @@ message that starts nothing. The normaliser (`normalise.ts`) therefore:
 Which calls raise `interacted`, when `completed` fires relative to the child's own
 `turn/completed`, and how `subAgentActivity` is ordered against the child's own notifications are
 unverified; a capture of `spawn_agent` → `wait_agent` → `followup_task` would settle all three.
-Nothing guards the last one: a `completed` record that arrived after the child's next turn had
-started would still write its `task.completed`, and settle the new run.
+The last one is guarded: a `completed` or `interrupted` record arriving during a turn a relaunch
+opened is taken to be about the run before (`relaunchedTurns`) — it marks the child settled but
+writes no `task.completed`, which would settle the new run, and that run ends at its own
+`turn/completed`.

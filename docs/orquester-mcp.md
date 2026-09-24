@@ -658,9 +658,11 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     fact be whole: without an index the MCP cannot tell, so on a host without one they are named on
     every read. A subagent with no row left is bounded by the turn of the oldest row any subagent
     kept — or, when its last launch or end is a Claude end, by the turn it ended in, since a Claude
-    subagent that resumes launches again. Codex and OpenCode record a subagent's launch and end
-    once, and one they resume after its end works on with no new launch, so there an end bounds
-    nothing. After a history page failed, or the page limit below ran out, a subagent's turns are
+    subagent that resumes launches again. Codex and OpenCode now launch a subagent again too when
+    they resume it after its end, but a conversation recorded by an older host can hold one that
+    worked on after its end with no new launch, and the snapshot cannot tell the two apart — so
+    there an end bounds nothing. After a history page failed, or the page limit below ran out, a
+    subagent's turns are
     likewise named from the one it was launched in. Without `agentId`, any turn of the range still
     without a single row after the history pages were read is named the same way, unless the page
     limit ran out; a subagent's view has no such check, since a subagent has no rows in the turns it
