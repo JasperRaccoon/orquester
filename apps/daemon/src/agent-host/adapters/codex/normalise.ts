@@ -75,6 +75,8 @@ interface OpenChildItem {
    */
   turnId: string | null;
   providerItemId: string;
+  /** The call's row title, which names its progress heartbeats in the roster. */
+  title?: string;
 }
 
 /** Per-session normalisation state. */
@@ -1128,6 +1130,27 @@ export class CodexNormaliser {
           }
         ];
       }
+      case "item/mcpToolCall/progress": {
+        // The parent's own MCP progress is ephemeral (no task, so ingestion
+        // writes no row); a child's is the child's heartbeat — its task, so it
+        // persists as the agent's "what it is doing now", named by the call.
+        const p = params as CodexProtocol.v2.McpToolCallProgressNotification;
+        const envelope = this.childCallEnvelope(childThreadId, p.turnId, p.itemId);
+        const title = this.openChildItems.get(envelope.itemId)?.title;
+        return [
+          {
+            type: "tool.progress",
+            payload: {
+              toolUseId: envelope.itemId,
+              ...(title !== undefined ? { toolName: title } : {}),
+              ...(typeof p.message === "string" && p.message.length > 0 ? { summary: p.message } : {}),
+              taskId: childThreadId
+            },
+            ...envelope,
+            raw
+          }
+        ];
+      }
       case "item/commandExecution/outputDelta":
       case "item/fileChange/outputDelta": {
         const p = params as
@@ -1186,7 +1209,8 @@ export class CodexNormaliser {
         childTurnId,
         itemType: classified.itemType,
         turnId: envelope.turnId ?? null,
-        providerItemId
+        providerItemId,
+        ...(classified.title !== undefined ? { title: classified.title } : {})
       });
     } else {
       this.openChildItems.delete(envelope.itemId);

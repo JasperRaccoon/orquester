@@ -209,7 +209,10 @@ describe("a Codex command's completion keeps its output (Task 3)", () => {
     // "語" (3), "😀" (4) and ASCII.
     const line = (i: number): string => `✓ case ${i} 語 😀\n`;
     const lines: string[] = [];
-    for (let i = 0; Buffer.byteLength(lines.join(""), "utf8") <= CAP + 5_000; i += 1) lines.push(line(i));
+    for (let i = 0, bytes = 0; bytes <= CAP + 5_000; i += 1) {
+      lines.push(line(i));
+      bytes += Buffer.byteLength(lines[i]!, "utf8");
+    }
     const output = lines.join("");
     const n = make();
     const chunks: RuntimeEventDraft[][] = [];

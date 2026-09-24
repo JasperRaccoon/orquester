@@ -882,9 +882,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   end the parent's thinking block) and on the payload — under `codex-child:<thread>:<item>`
   (`childItemId`: a child's `call_1` is not the parent's), riding the parent turn live when the call
   started; its own `turn/completed`, its `thread/closed`, a Stop or the exit closes what it
-  abandons, never the parent's settling turn. Its approvals stay the parent's card, joined to the
-  namespaced call (`rowItemId`, `session.ts`); its message and reasoning items stay ticks (codex
-  fixtures README observation 20).
+  abandons, never the parent's settling turn (a Stop closes calls before tasks, as the exit does).
+  Its approvals stay the parent's card — no owner, on the parent turn live as the request arrives
+  (`requestTurnId`), like the call — joined to the namespaced call in the child's OWN request
+  bookkeeping (`requestsOf`, `session.ts`), which only the child's own turn end, its thread's close,
+  a Stop or the exit clears: cleared by the parent's settle, a decline on a card still open when a
+  parent's `wait` returned read "you were not asked", and a file change's card lost its diff. A
+  child's MCP progress is its heartbeat (`tool.progress` on its task); its message and reasoning
+  items stay ticks (codex fixtures README observation 20).
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no

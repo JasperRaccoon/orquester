@@ -275,13 +275,15 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
 /**
  * The most of a command's `aggregatedOutput` a completion stores, in UTF-8
  * bytes: 64 KiB. The fold holds every retained row's payload whole, in the
- * host's memory and in `state.json` — up to 550 parent rows and 2 200 across
- * agents — so the bound is what keeps a chatty command from inflating every
- * thread that ran one; the §5.6 wire already cuts any string to 16 KiB, so a
- * stored output up to four times that is still "more behind Load full output".
- * It is the raw log's own per-string cap (`RAW_LOG_MAX_STRING_CHARS`), and about
- * twice the 30 000 characters of a Bash call's output Claude Code hands back by
- * default (`BASH_MAX_OUTPUT_LENGTH`), which a Claude completion stores whole.
+ * host's memory and in `state.json`, and a call's completion is at most every
+ * other row of a window (its start is one too), so this bounds what stored
+ * output can add to a thread at about 275 × 64 KiB (≈ 17 MiB) in the parent's
+ * window (500 rows + 50 slack) and about 1 100 × 64 KiB (≈ 69 MiB) across
+ * agents (2 000 + 200) — the worst case, every call printing past the cap. The
+ * wire never carries it: the slimmer cuts the field to its first line.
+ * Measured against what the fold already holds, it is about twice the 30 000
+ * characters of a Bash call's output Claude Code hands back by default
+ * (`BASH_MAX_OUTPUT_LENGTH`), which a Claude completion stores whole.
  */
 export const COMMAND_OUTPUT_MAX_BYTES = 64 * 1024;
 

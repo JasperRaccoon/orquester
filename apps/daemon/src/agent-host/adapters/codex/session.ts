@@ -166,6 +166,17 @@ interface LiveTask {
   agentPath?: string;
 }
 
+/**
+ * The request bookkeeping of one thread's items: the ones the user was asked
+ * about, and the file changes whose card joins their diff — this thread's own
+ * (`askedItemIds`, `fileChangesByItem`) or a collab child's, under its
+ * namespaced item ids ({@link CodexSession.childRequests}).
+ */
+interface RequestBookkeeping {
+  asked: Set<string>;
+  fileChanges: Map<string, CodexProtocol.v2.FileUpdateChange[]>;
+}
+
 export class CodexSession {
   readonly threadId: string;
 
@@ -187,7 +198,8 @@ export class CodexSession {
   /**
    * Item ids the user was actually asked about. An item that completes
    * `declined` WITHOUT one of these was refused by the CLI's own policy, not
-   * by the user, and §4.2 wants that as `tool.denied`.
+   * by the user, and §4.2 wants that as `tool.denied`. This thread's own
+   * items; a collab child's are in {@link childRequests}.
    */
   private readonly askedItemIds = new Set<string>();
   /**
@@ -199,8 +211,19 @@ export class CodexSession {
    * so "an approval card must be rendered by joining on `itemId`, not from the
    * request alone" (fixtures README obs. 2). The card cannot do that join —
    * it never sees the item payload — so the adapter does it here (E2E E7).
+   * This thread's own items; a collab child's are in {@link childRequests}.
    */
   private readonly fileChangesByItem = new Map<string, CodexProtocol.v2.FileUpdateChange[]>();
+  /**
+   * The same two bookkeeping sets for each collab child, by child thread id,
+   * under the child's namespaced item ids (`childItemId`, as its rows carry
+   * them). Kept apart because a child works on past the parent's turn: its
+   * card can stay open while the parent's `wait` returns and the parent's turn
+   * settles, and clearing its entries there read the user's decline as "you
+   * were not asked" and lost its diff. They end with the child's own
+   * `turn/completed` or `thread/closed`, a Stop, or the exit.
+   */
+  private readonly childRequests = new Map<string, RequestBookkeeping>();
 
   private child: ProviderChild | null = null;
   private peer: CodexPeer | null = null;
@@ -307,6 +330,15 @@ export class CodexSession {
    */
   get liveChildTurnsForTest(): [string, string][] {
     return this.normaliser.liveChildTurns();
+  }
+
+  /** How many entries the collab children's request bookkeeping holds ({@link childRequests}). */
+  get childRequestEntriesForTest(): number {
+    let entries = 0;
+    for (const requests of this.childRequests.values()) {
+      entries += requests.asked.size + requests.fileChanges.size;
+    }
+    return entries;
   }
 
   /**
@@ -642,6 +674,12 @@ export class CodexSession {
    * Idempotent: the registry is emptied, so a second Stop emits nothing.
    */
   private stopBackgroundWork(): void {
+    // Close any tool row the abandoned work left spinning FIRST — calls before
+    // tasks, as the exit and the host's leftover closers order them: a call
+    // never outlives the agent that ran it.
+    for (const draft of this.normaliser.closeOpenItems("failed")) {
+      this.emit(draft);
+    }
     for (const task of this.liveTasks.values()) {
       this.emit({
         type: "task.completed",
@@ -655,12 +693,10 @@ export class CodexSession {
       });
     }
     this.liveTasks.clear();
-    // Close any tool row the abandoned work left spinning, then forget the
-    // agent bookkeeping so `hasSubagents` and `childTurns` do not outlive it.
-    for (const draft of this.normaliser.closeOpenItems("failed")) {
-      this.emit(draft);
-    }
+    // Then forget the agent bookkeeping so `hasSubagents` and `childTurns` do
+    // not outlive the work, and the children's request bookkeeping with it.
     this.normaliser.forgetAgents();
+    this.childRequests.clear();
   }
 
   /**
@@ -1003,10 +1039,15 @@ export class CodexSession {
         this.disarmLivenessWatchdog();
         // A settled turn's per-item bookkeeping is dead weight: `askedItemIds`
         // is otherwise pruned only when an item completes `declined`, so every
-        // APPROVED command left a permanent entry (Q1 finding 19).
+        // APPROVED command left a permanent entry (Q1 finding 19). This
+        // thread's own only: a collab child's card can outlive this turn.
         this.askedItemIds.clear();
         this.fileChangesByItem.clear();
       }
+    } else if ((method === "turn/completed" || method === "thread/closed") && !isOurs && about !== null) {
+      // A collab child's own turn ended, or its thread closed: every call it
+      // asked about has ended with it, so its bookkeeping is dead weight now.
+      this.childRequests.delete(about);
     } else if (method === "error" && isOurs) {
       const p = params as CodexProtocol.v2.ErrorNotification;
       if (!p.willRetry) {
@@ -1079,10 +1120,11 @@ export class CodexSession {
         const params = request.params as CodexProtocol.v2.FileChangeRequestApprovalParams;
         // THE JOIN (E2E E7): without it the card renders its own type name and
         // the user approves a write they cannot see. A collab child's item is
-        // remembered under the child's namespaced id, as its rows carry it.
+        // remembered in the child's own bookkeeping, under its namespaced id.
         const rowItemId = this.rowItemId(params.threadId, params.itemId);
-        const changes = this.fileChangesByItem.get(rowItemId) ?? [];
-        this.fileChangesByItem.delete(rowItemId);
+        const remembered = this.requestsOf(params.threadId, false)?.fileChanges;
+        const changes = remembered?.get(rowItemId) ?? [];
+        remembered?.delete(rowItemId);
         const decision = await this.parkApproval({
           method: request.method,
           threadId: params.threadId,
@@ -1146,6 +1188,7 @@ export class CodexSession {
         }
         const decision = await this.parkApproval({
           method: request.method,
+          threadId: params.threadId,
           ...(params.turnId !== null ? { turnId: params.turnId } : {}),
           providerRequestId: String(request.id),
           // `message` is the provider's own wording and is the card's title.
@@ -1198,6 +1241,9 @@ export class CodexSession {
           );
         }
         const requestId = this.nextRequestId();
+        // A collab child's question rides the parent turn live now, as its
+        // approvals do (`requestTurnId`); the provider's turn stays its ref.
+        const turnId = this.requestTurnId(params.threadId, params.turnId);
         const answers = await new Promise<Record<string, unknown>>((resolve, reject) => {
           this.pendingUserInputs.set(requestId, {
             requestId,
@@ -1208,7 +1254,7 @@ export class CodexSession {
               this.emit({
                 type: "user-input.resolved",
                 payload: { answers: resolved },
-                turnId: params.turnId,
+                ...(turnId !== undefined ? { turnId } : {}),
                 requestId,
                 raw
               });
@@ -1224,7 +1270,7 @@ export class CodexSession {
               // The provider's own signal, beside our derivation of it.
               isBlocking: params.isBlocking
             },
-            turnId: params.turnId,
+            ...(turnId !== undefined ? { turnId } : {}),
             itemId: params.itemId,
             requestId,
             providerRefs: {
@@ -1261,6 +1307,9 @@ export class CodexSession {
   }): Promise<ApprovalDecision> {
     const requestId = this.nextRequestId();
     const requestType = canonicalRequestType(input.method);
+    // The turn the card's rows ride: the request's own, or — a collab child's
+    // — the parent turn live as it arrives (`requestTurnId`).
+    const turnId = this.requestTurnId(input.threadId, input.turnId);
     return new Promise<ApprovalDecision>((resolve, reject) => {
       this.pendingApprovals.set(requestId, {
         requestId,
@@ -1269,7 +1318,7 @@ export class CodexSession {
           this.emit({
             type: "request.resolved",
             payload: { requestType, decision },
-            ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+            ...(turnId !== undefined ? { turnId } : {}),
             ...(input.itemId !== undefined ? { itemId: input.itemId } : {}),
             requestId,
             raw: input.raw
@@ -1280,10 +1329,11 @@ export class CodexSession {
       });
       if (input.itemId !== undefined) {
         // Remember that the USER was asked about this item, so its `declined`
-        // completion is not mistaken for a CLI-side policy deny — under the id
-        // its rows carry, a collab child's namespaced one. The card itself
-        // stays the parent's: the request row names the provider's own ids.
-        this.askedItemIds.add(this.rowItemId(input.threadId, input.itemId));
+        // completion is not mistaken for a CLI-side policy deny — in the
+        // bookkeeping of the thread the item is, under the id its rows carry
+        // (a collab child's namespaced one). The card itself stays the
+        // parent's: no owner, and the provider's own ids in its refs.
+        this.requestsOf(input.threadId, true)!.asked.add(this.rowItemId(input.threadId, input.itemId));
       }
       this.emit({
         type: "request.opened",
@@ -1297,7 +1347,7 @@ export class CodexSession {
           options: input.options,
           ...(input.args !== undefined ? { args: input.args } : {})
         },
-        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+        ...(turnId !== undefined ? { turnId } : {}),
         ...(input.itemId !== undefined ? { itemId: input.itemId } : {}),
         requestId,
         providerRefs: {
@@ -1413,6 +1463,7 @@ export class CodexSession {
     }
     this.askedItemIds.clear();
     this.fileChangesByItem.clear();
+    this.childRequests.clear();
     this.normaliser.forgetAgents();
 
     // 3. Close every live task; the roster folds `stopped` to `interrupted`.
@@ -1630,7 +1681,8 @@ export class CodexSession {
       return null;
     }
     const itemId = draft.itemId;
-    if (itemId === undefined || this.askedItemIds.delete(itemId)) {
+    // A collab child's call was asked about in the child's own bookkeeping.
+    if (itemId === undefined || this.requestsOf(draft.agentId, false)?.asked.delete(itemId) === true) {
       return null;
     }
     return {
@@ -1655,10 +1707,10 @@ export class CodexSession {
    *
    * Bounded by construction: an entry is dropped the moment its approval is
    * answered or its item completes — an approval always comes before the end
-   * it decides (fixture `04-…`) — and the whole map is cleared when the turn
-   * settles. The completion matters for a collab child's items, which are
-   * remembered too (under their namespaced ids): a child works on while the
-   * parent has no turn to settle, and in full access it is never asked at all.
+   * it decides (fixture `04-…`) — and the whole map goes when its turn ends:
+   * this thread's own settling turn for its items; for a collab child's, which
+   * sit in the child's own bookkeeping (a child's `agentId` is its thread id),
+   * the child's own turn end, its thread's close, a Stop or the exit.
    */
   private rememberFileChange(draft: RuntimeEventDraft): void {
     if (draft.type !== "item.started" && draft.type !== "item.completed") {
@@ -1668,13 +1720,21 @@ export class CodexSession {
       return;
     }
     if (draft.type === "item.completed") {
-      this.fileChangesByItem.delete(draft.itemId);
+      this.requestsOf(draft.agentId, false)?.fileChanges.delete(draft.itemId);
       return;
     }
     const changes = (draft.payload.data as { changes?: unknown } | undefined)?.changes;
     if (Array.isArray(changes) && changes.length > 0) {
-      this.fileChangesByItem.set(draft.itemId, changes as CodexProtocol.v2.FileUpdateChange[]);
+      this.requestsOf(draft.agentId, true)!.fileChanges.set(
+        draft.itemId,
+        changes as CodexProtocol.v2.FileUpdateChange[]
+      );
     }
+  }
+
+  /** A request or row about a collab child's thread, never this one's. */
+  private isChildThread(threadId: string | undefined): threadId is string {
+    return threadId !== undefined && this.providerThreadId !== null && threadId !== this.providerThreadId;
   }
 
   /**
@@ -1684,11 +1744,37 @@ export class CodexSession {
    * bookkeeping that joins a request to its item goes through here.
    */
   private rowItemId(threadId: string | undefined, itemId: string): string {
-    return threadId !== undefined &&
-      this.providerThreadId !== null &&
-      threadId !== this.providerThreadId
-      ? childItemId(threadId, itemId)
-      : itemId;
+    return this.isChildThread(threadId) ? childItemId(threadId, itemId) : itemId;
+  }
+
+  /**
+   * The request bookkeeping of `threadId`'s items: this thread's own, or a
+   * collab child's (`create` makes a child's on first use). Kept apart so the
+   * parent's settling turn never clears what a child's card still needs.
+   */
+  private requestsOf(threadId: string | undefined, create: boolean): RequestBookkeeping | undefined {
+    if (!this.isChildThread(threadId)) {
+      return { asked: this.askedItemIds, fileChanges: this.fileChangesByItem };
+    }
+    let requests = this.childRequests.get(threadId);
+    if (requests === undefined && create) {
+      requests = { asked: new Set(), fileChanges: new Map() };
+      this.childRequests.set(threadId, requests);
+    }
+    return requests;
+  }
+
+  /**
+   * The turn a request's rows ride: its own for this thread's requests; for a
+   * collab child's, the PARENT turn live as it arrives, or none between parent
+   * turns — as the child's call rides the parent turn it started in
+   * (`normalise.ts` `childCallEnvelope`). Stamped with the child's own turn,
+   * a turn this thread never had, `read_transcript` placed the card in no turn
+   * and a rewind treated it apart from the call it is about. The card stays the
+   * parent's (no owner); the provider's turn stays in its refs.
+   */
+  private requestTurnId(threadId: string | undefined, providerTurnId: string | undefined): string | undefined {
+    return this.isChildThread(threadId) ? (this.activeTurnId ?? undefined) : providerTurnId;
   }
 
   /** Keep the live-task registry in step with what the normaliser emitted. */

@@ -1130,7 +1130,7 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     await r.stop();
   });
 
-  it("a session-scoped Stop closes a child's running command, as the child's", async () => {
+  it("a session-scoped Stop closes a child's running command, as the child's, before its task", async () => {
     const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });
     await r.session.start();
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
@@ -1156,6 +1156,162 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     assert.equal(closed.agentId, "child-1");
     assert.equal((closed.payload as { status?: string; agentId?: string }).status, "failed");
     assert.equal((closed.payload as { agentId?: string }).agentId, "child-1");
+    // Calls before tasks, as every other close-out orders them (the exit, the
+    // host's leftover closers): a call never outlives the agent that ran it.
+    const stopped = await r.events.waitFor(
+      (event) =>
+        event.type === "task.completed" &&
+        event.payload.taskId === "child-1" &&
+        event.payload.status === "stopped",
+      "the child's task stopped"
+    );
+    assert.ok(
+      r.events.events.indexOf(closed) < r.events.events.indexOf(stopped),
+      "the call closes before its task's stopped row"
+    );
+    await r.stop();
+  });
+
+  it("a child's card declined after the PARENT's turn settled is still the user's decline", async () => {
+    // A parent whose `wait` returned settles its turn while the child's card
+    // is still open: the session's per-item bookkeeping for the child must not
+    // go with the parent's turn, or the decline reads "you were not asked".
+    const r = rig({
+      turns: [
+        { kind: "child-approval", childThreadId: "child-1", item: "command", parentSettles: "while-asking" }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    await r.events.waitForType("turn.completed");
+    await waitUntil(() => r.session.currentTurnId === null, "the parent's turn settled, the card still open");
+
+    r.session.respondToApproval(opened.requestId!, "decline");
+    await r.events.waitFor(
+      (event) =>
+        event.type === "item.completed" &&
+        event.agentId === "child-1" &&
+        (event.payload as { status?: string }).status === "declined",
+      "the child's call ends declined"
+    );
+    await r.events.waitFor(
+      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
+      "the child's turn ended"
+    );
+    assert.equal(
+      r.events.types().includes("tool.denied"),
+      false,
+      "the USER declined this one, after the parent's turn ended; it is not a policy deny"
+    );
+    await r.stop();
+  });
+
+  it("a child's remembered diff survives the parent's settle", async () => {
+    const r = rig({
+      turns: [
+        { kind: "child-approval", childThreadId: "child-1", item: "file-change", parentSettles: "before-asking" }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    const payload = opened.payload as { detail?: string; args?: { changes?: { path: string }[] } };
+    assert.match(String(payload.detail), /child\.txt/, "the child's item was remembered past the parent's turn");
+    assert.deepEqual(
+      payload.args?.changes?.map((change) => change.path),
+      ["/tmp/child.txt"]
+    );
+    r.session.respondToApproval(opened.requestId!, "accept");
+    await r.events.waitFor(
+      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
+      "the child's turn ended"
+    );
+    await r.stop();
+  });
+
+  it("a child's approval rows ride the parent turn live when the request arrives, as its call does", async () => {
+    const live = rig({ turns: [{ kind: "child-approval", childThreadId: "child-1", item: "command" }] });
+    await live.session.start();
+    const turn = await live.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const opened = await live.events.waitForType("request.opened");
+    assert.equal(opened.turnId, turn.turnId, "the parent's turn, not the child's own");
+    assert.equal(opened.agentId, undefined, "still the parent's card");
+    assert.deepEqual(opened.providerRefs?.providerTurnId, "child-1-turn", "the child's turn stays the provider's ref");
+    live.session.respondToApproval(opened.requestId!, "accept");
+    const resolved = await live.events.waitForType("request.resolved");
+    assert.equal(resolved.turnId, turn.turnId);
+    await live.events.waitForType("turn.completed");
+    await live.stop();
+
+    // A child asking between parent turns: no parent turn is live, so none.
+    const idle = rig({
+      turns: [
+        { kind: "child-approval", childThreadId: "child-1", item: "command", parentSettles: "before-asking" }
+      ]
+    });
+    await idle.session.start();
+    await idle.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const asked = await idle.events.waitForType("request.opened");
+    assert.equal(asked.turnId, undefined);
+    idle.session.respondToApproval(asked.requestId!, "accept");
+    await idle.events.waitFor(
+      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
+      "the child's turn ended"
+    );
+    await idle.stop();
+  });
+
+  it("a child's request bookkeeping ends with the child's own turn, its thread's close, or a Stop", async () => {
+    // The parent settles FIRST, so only the child's own turn end can clear
+    // what the child's card left behind (an accepted call keeps its entry).
+    const r = rig({
+      turns: [
+        { kind: "child-approval", childThreadId: "child-1", item: "command", parentSettles: "before-asking" }
+      ]
+    });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    assert.equal(r.session.childRequestEntriesForTest, 1, "the child's asked item");
+    r.session.respondToApproval(opened.requestId!, "accept");
+    await r.events.waitFor(
+      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
+      "the child's turn ended"
+    );
+    assert.equal(r.session.childRequestEntriesForTest, 0, "gone with the child's own turn");
+
+    // A child's file change is remembered for its card; its thread closing,
+    // and a Stop, forget it.
+    const fileChange = (id: string): CodexProtocol.v2.ThreadItem => ({
+      type: "fileChange",
+      id,
+      changes: [{ path: "/tmp/later.txt", kind: { type: "add" }, diff: "+later\n" }],
+      status: "inProgress"
+    });
+    r.session.injectNotificationForTest("turn/started", {
+      threadId: "child-1",
+      turn: { id: "child-1-turn-2", items: [], itemsView: "notLoaded", status: "inProgress", error: null, startedAt: 0, completedAt: null, durationMs: null }
+    });
+    r.session.injectNotificationForTest("item/started", {
+      item: fileChange("call_f1"),
+      threadId: "child-1",
+      turnId: "child-1-turn-2",
+      startedAtMs: 0
+    });
+    assert.equal(r.session.childRequestEntriesForTest, 1);
+    r.session.injectNotificationForTest("thread/closed", { threadId: "child-1" });
+    assert.equal(r.session.childRequestEntriesForTest, 0, "gone with the child's thread");
+
+    r.session.injectNotificationForTest("item/started", {
+      item: fileChange("call_f2"),
+      threadId: "child-2",
+      turnId: "child-2-turn",
+      startedAtMs: 0
+    });
+    assert.equal(r.session.childRequestEntriesForTest, 1);
+    await r.session.interruptTurn();
+    assert.equal(r.session.childRequestEntriesForTest, 0, "gone with a Stop");
     await r.stop();
   });
 });

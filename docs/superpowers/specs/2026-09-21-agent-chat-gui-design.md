@@ -1377,13 +1377,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   capture produced them: `item/permissions/requestApproval`, `item/tool/call`,
   `account/chatgptAuthTokens/refresh` and `attestation/generate` — all answered, none exercised.*
   *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a child's calls
-  are not chatter. T3 routes a child's `item/*` as lifecycle and drops both output deltas and the
-  patch updates; here all five are the child's (`child-routing.ts`) and become its own rows — the
-  child's thread id as `agentId` on envelope and payload, the item id namespaced by that thread
-  (`codex-child:<thread>:<item>`), every row of a call on the parent turn live when it started —
-  while the child's text streams stay chatter, so its messages stay roster ticks. A child's approval
-  is still the parent's card, joined to the child's namespaced call (fixtures README observation
-  20).*
+  are not chatter. T3 routes a child's `item/*` as lifecycle, drops both output deltas and the patch
+  updates, and passes an MCP call's progress to the parent; here all six are the child's
+  (`child-routing.ts`) and become its own rows — the child's thread id as `agentId` on envelope and
+  payload, the item id namespaced by that thread (`codex-child:<thread>:<item>`), every row of a
+  call on the parent turn live when it started, its MCP progress the child's heartbeat — while the
+  child's text streams stay chatter, so its messages stay roster ticks. A child's approval is still
+  the parent's card, on the parent turn live as it arrives, joined to the child's namespaced call in
+  the child's own request bookkeeping, which the parent's settle never clears (fixtures README
+  observation 20).*
 
 #### OpenCode
 

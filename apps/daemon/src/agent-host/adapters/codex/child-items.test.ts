@@ -12,7 +12,7 @@
  * live when the call started (AGENTS.md, "A call's rows are one owner's and
  * one turn's"); the child's own provider turn stays in `providerRefs`.
  *
- * No capture spawns a child (fixtures README observation 19), so these drive
+ * No capture spawns a child (fixtures README observation 20), so these drive
  * the normaliser with frames typed against `_generated/protocol/v2/`, and the
  * last test runs them through ingestion, the real fold, the host's join and
  * the MCP transcript — the seams the drill-in reads.
@@ -107,6 +107,34 @@ function commandItem(
     exitCode: status === "completed" ? 0 : null,
     durationMs: status === "completed" ? 5 : null
   };
+}
+
+/** A child's MCP call as the protocol reports it. */
+function mcpItem(id: string, status: CodexProtocol.v2.McpToolCallStatus): CodexProtocol.v2.ThreadItem {
+  return {
+    type: "mcpToolCall",
+    id,
+    server: "serena",
+    tool: "search",
+    status,
+    arguments: {},
+    appContext: null,
+    pluginId: null,
+    readOnlyHint: true,
+    result: null,
+    error: null,
+    durationMs: null
+  };
+}
+
+function mcpProgress(n: CodexNormaliser, itemId: string, message: string): RuntimeEventDraft[] {
+  const params: CodexProtocol.v2.McpToolCallProgressNotification = {
+    threadId: CHILD,
+    turnId: CHILD_TURN,
+    itemId,
+    message
+  };
+  return n.notification("item/mcpToolCall/progress", params);
 }
 
 function itemStarted(
@@ -284,6 +312,40 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     assert.deepEqual(n.openItemIds(), []);
   });
 
+  it("a child's turn that COMPLETED closes a call it left open as completed, as the parent's rule does", () => {
+    const n = make();
+    turnStarted(n, PARENT, PARENT_TURN);
+    launchChild(n);
+    itemStarted(n, CHILD, CHILD_TURN, commandItem("call_a", "inProgress", null));
+    const settled = turnCompleted(n, CHILD, CHILD_TURN, "completed");
+    assert.deepEqual(
+      settled.map((draft) => [draft.type, draft.itemId, draft.agentId]),
+      [
+        ["item.completed", `codex-child:${CHILD}:call_a`, CHILD],
+        ["task.updated", undefined, CHILD]
+      ]
+    );
+    assert.equal(payloadOf(settled[0]).status, "completed");
+    assert.equal(payloadOf(settled[1]).status, "idle");
+  });
+
+  it("a child's MCP progress is the child's: its namespaced call, its task, the call's turn", () => {
+    const n = make();
+    turnStarted(n, PARENT, PARENT_TURN);
+    launchChild(n);
+    itemStarted(n, CHILD, CHILD_TURN, mcpItem("call_m", "inProgress"));
+    const progress = mcpProgress(n, "call_m", "indexing 3/9");
+    const id = `codex-child:${CHILD}:call_m`;
+    assert.deepEqual(callRows(progress), [["tool.progress", id, CHILD, PARENT_TURN]]);
+    assert.deepEqual(payloadOf(progress[0]), {
+      toolUseId: id,
+      toolName: "serena: search",
+      summary: "indexing 3/9",
+      taskId: CHILD
+    });
+    assert.deepEqual(progress[0]!.providerRefs, { providerTurnId: CHILD_TURN, providerItemId: "call_m" });
+  });
+
   it("Stop and exit close a child's running call; a turn-scoped close of the parent's turn does not", () => {
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
@@ -437,6 +499,26 @@ describe("a child's call through ingestion and the fold (Task 3)", () => {
     // view shows only the parent's own.
     assert.deepEqual(toolEntries(state, CHILD), [["command_execution", "completed", CHILD]]);
     assert.deepEqual(toolEntries(state), [["command_execution", "completed", "(parent)"]]);
+  });
+
+  it("a child's MCP progress persists as the child's heartbeat and reaches its roster row", async () => {
+    // Routed to the parent (as it was), the frame carried the child's raw item
+    // id, no owner and no task: ingestion wrote nothing for it.
+    const n = make();
+    const events = await ingestCodexDrafts([
+      turnStarted(n, PARENT, PARENT_TURN),
+      launchChild(n),
+      itemStarted(n, CHILD, CHILD_TURN, mcpItem("call_m", "inProgress")),
+      mcpProgress(n, "call_m", "indexing 3/9")
+    ]);
+    const state = foldCodexLog(events);
+    const heartbeats = state.items.flatMap((item) => {
+      if (item.kind !== "activity" || item.activityKind !== "tool.progress") return [];
+      const payload = item.payload as { toolUseId?: unknown; taskId?: unknown; toolName?: unknown };
+      return [[item.agentId, payload.toolUseId, payload.taskId, payload.toolName]];
+    });
+    assert.deepEqual(heartbeats, [[CHILD, `codex-child:${CHILD}:call_m`, CHILD, "serena: search"]]);
+    assert.equal(state.roster.find((agent) => agent.id === CHILD)?.lastToolName, "serena: search");
   });
 
   it("a child's call starting never ends the parent's thinking block", async () => {

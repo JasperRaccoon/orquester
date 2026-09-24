@@ -84,7 +84,8 @@ describe("child routing — the three routes", () => {
     for (const method of [
       "item/fileChange/patchUpdated",
       "item/commandExecution/outputDelta",
-      "item/fileChange/outputDelta"
+      "item/fileChange/outputDelta",
+      "item/mcpToolCall/progress"
     ]) {
       assert.equal(routeCodexChildNotification(method), "agent-event", method);
     }

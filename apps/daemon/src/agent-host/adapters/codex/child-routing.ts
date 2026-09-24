@@ -36,10 +36,11 @@ export type CodexChildNotificationRoute = "agent-event" | "parent" | "drop";
  *
  * *T3: `CodexSessionRuntime.ts:1084-1095`* — T3 stops at `item/started` and
  * `item/completed`, which it reads as progress; here a child's call is its own
- * tool row (`normalise.ts` `childItemEvents`), so the three notifications that
- * move a call — a file change's patch updates and both output streams — are
- * the child's too, not chatter: dropped, a Codex drill-in never showed a
- * command's output.
+ * tool row (`normalise.ts` `childItemEvents`), so the four notifications that
+ * move a call — a file change's patch updates, both output streams and an MCP
+ * call's progress — are the child's too: dropped as chatter, a Codex drill-in
+ * never showed a command's output, and passed to the parent, a child's MCP
+ * progress named the child's raw item id and no owner, and wrote nothing.
  */
 export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
   "turn/started",
@@ -53,6 +54,7 @@ export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
   "item/fileChange/patchUpdated",
   "item/commandExecution/outputDelta",
   "item/fileChange/outputDelta",
+  "item/mcpToolCall/progress",
   "thread/closed",
   "error"
 ]);
@@ -65,7 +67,7 @@ export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
  * rows of its drill-in.
  *
  * *T3: `CodexSessionRuntime.ts:1097-1119`* — less the three call
- * notifications above.
+ * notifications above that T3 drops.
  */
 export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "item/agentMessage/delta",

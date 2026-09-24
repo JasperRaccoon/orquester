@@ -701,25 +701,35 @@ a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`
   `item/completed` (`{item, threadId, turnId, …}`), `item/commandExecution/outputDelta` and
   `item/fileChange/outputDelta` (`{threadId, turnId, itemId, delta}` — the file-change stream is
   documented as "Deprecated legacy notification for `apply_patch` textual output. The server no
-  longer emits this notification."), and `item/fileChange/patchUpdated`. The item ids are the
-  child's own; nothing in the bindings makes them unique across threads.
+  longer emits this notification."), `item/fileChange/patchUpdated` and `item/mcpToolCall/progress`
+  (`{threadId, turnId, itemId, message}`). The item ids are the child's own; nothing in the
+  bindings makes them unique across threads.
 - The normaliser (`normalise.ts`, `childItemEvents`) makes a child's **call** — an item of a
   tool-lifecycle type — the child's own rows: `item.*` and `content.delta` events carrying
   `agentId: <child thread id>` on the envelope **and** the payload, under
   `codex-child:<child thread id>:<item id>` (`childItemId`, `child-routing.ts`), each riding the
   PARENT turn that was live when the call started (none, when it started between parent turns),
-  the child's own turn and item id kept in `providerRefs`. The roster's `task.progress` tick stays.
+  the child's own turn and item id kept in `providerRefs`. The roster's `task.progress` tick stays,
+  and a child's MCP progress is the child's heartbeat: `tool.progress` on the namespaced call,
+  carrying the child's `taskId` (and the call's title as `toolName`), which ingestion persists as
+  the agent's current activity — passed to the parent, it named the raw id and wrote nothing.
   The child's message, reasoning, plan, compaction and `subAgentActivity` items stay ticks: their
   text streams are still chatter, and the parent-only extras those items carry would rewrite the
   parent's thread.
 - A child's call ends at its own `item/completed`. One the child abandons is closed by the child's
-  own `turn/completed` (by the parent's rule: `failed` when the turn was interrupted), by its
-  `thread/closed` (`failed`), or by a Stop or the process's exit — never by the parent's
-  `turn/completed`, which a child works on past.
+  own `turn/completed` (by the parent's rule: `failed` when the turn was interrupted, else
+  `completed`), by its `thread/closed` (`failed`), or by a Stop or the process's exit — never by the
+  parent's `turn/completed`, which a child works on past. A Stop closes the calls before the tasks.
 - A child's approval stays the parent's card: the request names the child's `threadId`, `turnId`
-  and raw `itemId`. The session joins it to the child's namespaced call (`rowItemId`, `session.ts`),
-  so a decline is not read as a policy deny and a file change's card carries the child's diff; a
-  child's item declined with no request behind it is a `tool.denied` owned by the child.
+  and raw `itemId`. Its rows carry no owner and ride the parent turn live as the request arrives
+  (none between parent turns), as the child's call does; the child's turn stays in `providerRefs`.
+  The session joins the card to the child's namespaced call in the child's own request bookkeeping
+  (`requestsOf`, `session.ts`), so a decline is not read as a policy deny and a file change's card
+  carries the child's diff — kept apart from the parent's because a parent whose `wait` returned
+  settles its turn while the child's card is still open, and cleared only by the child's own
+  `turn/completed` or `thread/closed`, a Stop or the exit. A child's item declined with no request
+  behind it is a `tool.denied` owned by the child. A child's question (`item/tool/requestUserInput`)
+  rides the parent turn the same way.
 - `commandExecution.aggregatedOutput` is "The command's output, aggregated from stdout and stderr";
   the bindings document no bound. The completion keeps it in `data.item.aggregatedOutput` — where
   `commandOutputText` and the wire slimmer's `projectCommandData` already read Codex's output — up
