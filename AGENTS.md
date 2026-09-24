@@ -739,10 +739,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   clear liveness, but it is not a roster event (fixtures README observation 18). **A running shell
   keeps its start and its roster row:** its `task.started` (a parent row, no anchor) and its
   `bgshell:` call's opening row are the opening rows of running work, which retention keeps
-  whatever their age while they are among the 16 most recently active its window's cut would drop
-  (`OPEN_WORK_RETENTION_LIMIT`, `FOLD_SNAPSHOT_VERSION` 4) — before that the start aged out after
-  550 parent rows and the shell left the roster while it ran, and a trickling shell's own output
-  evicted its call's opening row (title, command) after 250 chunks.
+  whatever their age while they are among the 16 most recently active openings its window's cut
+  would drop (`OPEN_WORK_RETENTION_LIMIT`, `FOLD_SNAPSHOT_VERSION` 4) — before that the start aged
+  out after 550 parent rows and the shell left the roster while it ran, and a trickling shell's own
+  output evicted its call's opening row (title, command) after 250 chunks.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission

@@ -500,7 +500,7 @@ test("snapshot + tail stays exact across the retention window and in-place updat
   // end; rows 5 and 110 are gone, so their updates are new rows.
   events.push(
     ev("thread.activity-appended", {
-      activity: activity("tool.completed", { toolUseId: "t200" }, { id: "row-200" })
+      activity: activity("tool.completed", { toolUseId: "t200", status: "completed" }, { id: "row-200" })
     }),
     ev("thread.activity-appended", {
       activity: activity("tool.completed", { toolUseId: "t5" }, { id: "row-5" })
@@ -541,7 +541,16 @@ test("snapshot + tail stays exact across the retention window and in-place updat
   const kindsOf = (id: string): string[] =>
     whole.activities.filter((row) => row.id === id).map((row) => row.activityKind);
   assert.deepEqual(kindsOf("row-5"), ["tool.completed"], "a long-gone row's update is a new row");
-  assert.deepEqual(kindsOf("row-200"), ["tool.completed"], "the in-place update replaced its row");
+  assert.deepEqual(
+    whole.activities.filter((row) => row.id === "row-200").map((row) => row.payload),
+    [{ toolUseId: "t200", status: "completed" }],
+    "the in-place update replaced its row"
+  );
+  assert.equal(
+    whole.activities.findIndex((row) => row.id === "row-200") + 1,
+    whole.activities.findIndex((row) => row.id === "row-201"),
+    "…where it stood"
+  );
   assert.deepEqual(kindsOf("row-110"), ["tool.completed"], "the replaced row left with the trim");
   assert.equal(whole.activities.at(-12)?.id, "row-110", "…and its next update came back at the end");
   assert.deepEqual(whole.pending.approvals, [], "the replayed request stays closed");

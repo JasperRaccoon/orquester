@@ -167,7 +167,9 @@ describe("a background shell's output through read_transcript and read_tool_outp
     assert.ok(api.paths.includes(agentChatRoutes.itemOutput(THREAD, "shell-done")), "the join was asked, and its miss read as none");
     await host.stop();
   });
+});
 
+describe("a subagent's command pushed past the cap, through read_transcript and read_tool_output, against the real orchestrator", () => {
   it("past the cap a running command loses its start — sixteen later calls of its agent, all more recently active, hold the slots — so its latest chunk is the entry and the id, and its whole output reads back from the log", async () => {
     const host = createTestHost();
     await host.createThread({ threadId: THREAD });
