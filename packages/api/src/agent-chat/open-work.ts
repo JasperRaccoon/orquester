@@ -5,15 +5,15 @@
  *
  * Each open unit has an OPENING row, the one row that says what the work is:
  * a call's title and command, a shell's description. The fold's retention
- * trim keeps it while the work runs, for the most recently active units
- * (`fold.ts`, `OPEN_WORK_RETENTION_LIMIT`) — a long command's own output
- * chunks used to push it out of the window — and the MCP's snapshot-only
- * history reads pass it over as a row kept whatever its age
- * (`apps/daemon/src/mcp/history.ts`).
+ * trim keeps it while the work runs, for the most recently active of the
+ * units a cut would drop (`fold.ts`, `OPEN_WORK_RETENTION_LIMIT`) — a long
+ * command's own output chunks used to push it out of the window — and the
+ * MCP's snapshot-only history reads pass it over as a row kept whatever its
+ * age (`apps/daemon/src/mcp/history.ts`).
  *
  * - A **call** is keyed by its non-blank `payload.toolUseId`. It is open while
  *   the list holds one of its {@link CALL_OPENER_KINDS} rows and none of its
- *   {@link CALL_CLOSER_KINDS} rows: a closer ends it for good, whatever
+ *   {@link CALL_CLOSER_KINDS} rows: a closer in the list ends it, whatever
  *   follows. Its opening row is its first opener in list order, its latest
  *   lifecycle row its newest opener, and its last activity the position of
  *   its newest `tool.*` row — a streamed `tool.output` chunk included, so a
@@ -26,6 +26,24 @@
  *   should there be several; its last activity the position of its newest
  *   `task.*` row or of the newest row it owns (`agentId` equal to the task id:
  *   a Claude shell's own `bgshell:<taskId>` output rows).
+ *
+ * **The list is all it reads**, so a finished call reads open again once its
+ * closer has left the window while a later opener-kind row of the same call is
+ * still in it — and the trim then keeps that row, within its cap. Two ways
+ * that happens: Grok forgets a call at its terminal update, so a status-less
+ * update after it comes out as a fresh `item.started`, a `tool.started` row
+ * behind the completion (`adapters/grok/normalize.ts`); and a closer written in
+ * another window than its opener — stamped with another owner — can age out of
+ * its own window first. A rewind that removes the turn holding a call's closer
+ * but not the one holding its opener reopens the call as well; that one is
+ * deterministic, a function of the list like everything here, which is all the
+ * fold needs.
+ *
+ * **What this decides, retention keeps** (`fold.ts`, `activitiesToDrop`):
+ * changing a definition here changes what the fold produces from the same log,
+ * so it means bumping `FOLD_SNAPSHOT_VERSION` (`fold-snapshot.ts`) with it — a
+ * `state.json` folded by the old rule is otherwise trusted, and carries the old
+ * answer forward for good.
  *
  * Positions are indexes into the list given. Pure, one pass, no Node APIs:
  * `@orquester/api` is shared with the browser.
