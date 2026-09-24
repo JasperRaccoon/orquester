@@ -11,8 +11,10 @@
  * `tool-progress:<taskId>`), streamed messages, message-mode questions
  * answered much later, approvals, compaction markers (and, in the legacy
  * tables only, an older log's `thread.state.changed` rows), turns that settle
- * or stop, and rewinds — so every retention class trims many times. The same
- * seed always writes the same log.
+ * or stop, and rewinds — so every retention class trims many times; and, in
+ * the long-call tables only, tool calls and background shells that stay open
+ * over many steps while they stream output chunks. The same seed always
+ * writes the same log.
  */
 
 import { isDeepStrictEqual } from "node:util";
@@ -20,6 +22,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isCompactionActivity } from "./compaction.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import {
+  AGENT_ACTIVITY_RETENTION_LIMIT,
   __foldCacheConsistency,
   applyDomainEvent,
   createEmptyThreadState,
@@ -29,6 +32,7 @@ import {
 } from "./fold.ts";
 import type { ThreadFoldState } from "./fold.ts";
 import { deserializeFoldState, serializeFoldState } from "./fold-snapshot.ts";
+import { openWorkOf } from "./open-work.ts";
 import type { ThreadActivityItem, ThreadItem } from "./thread.ts";
 import {
   activity,
@@ -98,7 +102,19 @@ export type FleetAction =
   /** A rewind to an earlier turn. */
   | "revert"
   /** A message and an activity sharing an id (the index keeps the LAST position). */
-  | "collide";
+  | "collide"
+  /**
+   * A tool call opens and stays open over many steps — the parent's, an
+   * agent's, or a background shell's own `bgshell:` call, which opens with the
+   * shell's `task.started` (a parent row, no anchor) and is owned by the shell.
+   * Many are never closed, as a crash leaves them. In no weight table but the
+   * long-call ones, so every other log stays exactly what it was.
+   */
+  | "openCall"
+  /** A streamed output chunk (`tool.output`) of an open call, usually one opened last. */
+  | "chunk"
+  /** An open call completes or is denied; a shell's call ends with its task. */
+  | "closeCall";
 
 export interface FleetLogOptions {
   readonly seed: number;
@@ -117,6 +133,15 @@ interface Agent {
   readonly owner: string | undefined;
   done: boolean;
   lastRowAt: string | null;
+}
+
+/** A call the log opened and has not closed (`openCall`). */
+interface LoggedCall {
+  readonly toolUseId: string;
+  /** The window its rows ride in: an agent's, a shell's own, or the parent's. */
+  readonly agentId: string | undefined;
+  /** The background task a shell's call belongs to. */
+  readonly shell: string | undefined;
 }
 
 /** A log shaped by `options.weights`, starting with `thread.created` and a first turn. */
@@ -144,6 +169,7 @@ export function fleetLog(options: FleetLogOptions): DomainEvent[] {
   const agents: Agent[] = [];
   const openQuestions: string[] = [];
   const openApprovals: string[] = [];
+  const openCalls: LoggedCall[] = [];
   const recentActivityIds: string[] = [];
   let lastMessageId: string | null = null;
   let lastStateRowId: string | null = null;
@@ -468,6 +494,93 @@ export function fleetLog(options: FleetLogOptions): DomainEvent[] {
         }
         break;
       }
+      case "openCall": {
+        counter += 1;
+        const roll = random();
+        if (roll < 0.2) {
+          // A background shell: its task row in the parent's window, its own
+          // call in the shell's, as Claude's `bgshell:<taskId>` item is.
+          const taskId = `bg-${counter}`;
+          appendRow(
+            activity(
+              "task.started",
+              { taskId, agentKind: "background", taskType: "local_bash", isBackgrounded: true, description: `npm run dev ${counter}` },
+              { id: `bg-start-${counter}`, turnId }
+            )
+          );
+          const call: LoggedCall = { toolUseId: `bgshell:${taskId}`, agentId: taskId, shell: taskId };
+          openCalls.push(call);
+          appendRow(
+            activity("tool.started", { itemType: "command_execution", toolUseId: call.toolUseId, title: "Background shell" }, {
+              id: `open-${counter}`,
+              turnId,
+              agentId: taskId
+            })
+          );
+          break;
+        }
+        const agent = roll < 0.55 ? (pick(liveAgents()) ?? pick(agents)) : undefined;
+        const call: LoggedCall = { toolUseId: `call-${counter}`, agentId: agent?.taskId, shell: undefined };
+        openCalls.push(call);
+        // Most calls open with their start; some only with an update (a Claude
+        // tool whose input streamed before anything else was said of it).
+        appendRow(
+          activity(random() < 0.8 ? "tool.started" : "tool.updated", { itemType: "command_execution", toolUseId: call.toolUseId, title: `cmd ${counter}` }, {
+            id: `open-${counter}`,
+            turnId,
+            ...(call.agentId !== undefined ? { agentId: call.agentId } : {})
+          })
+        );
+        break;
+      }
+      case "chunk": {
+        // Usually one of the calls opened last — a few streaming commands among
+        // many a crash left open and quiet — else any open call.
+        const recent = Math.min(3, openCalls.length);
+        const call =
+          random() < 0.75 && recent > 0
+            ? openCalls[openCalls.length - 1 - Math.floor(random() * recent)]
+            : pick(openCalls);
+        if (call === undefined) break;
+        counter += 1;
+        appendRow(
+          activity("tool.output", { toolUseId: call.toolUseId, streamKind: "command_output", delta: `out ${counter}\n` }, {
+            id: `chunk-${counter}`,
+            summary: "Tool output",
+            turnId,
+            ...(call.agentId !== undefined ? { agentId: call.agentId } : {})
+          })
+        );
+        break;
+      }
+      case "closeCall": {
+        if (openCalls.length === 0) break;
+        const [call] = openCalls.splice(Math.floor(random() * openCalls.length), 1);
+        counter += 1;
+        const denied = random() >= 0.85;
+        appendRow(
+          activity(
+            denied ? "tool.denied" : "tool.completed",
+            denied
+              ? { toolName: "Bash", toolUseId: call!.toolUseId }
+              : { itemType: "command_execution", toolUseId: call!.toolUseId, status: "completed" },
+            {
+              id: `close-${counter}`,
+              turnId,
+              ...(call!.agentId !== undefined ? { agentId: call!.agentId } : {})
+            }
+          )
+        );
+        if (call!.shell !== undefined) {
+          appendRow(
+            activity("task.completed", { taskId: call!.shell, agentKind: "background", status: "completed" }, {
+              id: `bg-done-${counter}`,
+              turnId
+            })
+          );
+        }
+        break;
+      }
       default:
         void (action satisfies never);
     }
@@ -630,6 +743,58 @@ export const MESSAGE_WEIGHTS: Partial<Record<FleetAction, number>> = {
   turn: 0.3,
   revert: 0.05,
   collide: 0.3
+};
+
+/**
+ * Long-running work: calls and background shells that stay open while their
+ * output chunks stream past the parent's window and a few agents' own (with
+ * `maxAgents` 4–6), beside calls left open and quiet — the parent rows'
+ * `tool.started` among them — calls that end, turns and a few rewinds.
+ */
+export const LONG_CALL_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  parent: 3,
+  agentRow: 6,
+  launch: 0.3,
+  finish: 0.1,
+  message: 2,
+  delta: 1,
+  openCall: 0.4,
+  chunk: 30,
+  closeCall: 0.25,
+  turn: 0.15,
+  revert: 0.03
+};
+
+/**
+ * {@link LONG_CALL_WEIGHTS} leaner: one agent (with `maxAgents` 1), few
+ * messages and agent rows, and parent-owned chunks dense enough that the
+ * parent's window trims within the first thousand events — a window small
+ * enough to restore through JSON at every split point.
+ */
+export const LEAN_LONG_CALL_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  parent: 1,
+  agentRow: 1,
+  launch: 0.3,
+  finish: 0.05,
+  message: 0.3,
+  delta: 0.2,
+  openCall: 0.35,
+  chunk: 30,
+  closeCall: 0.2,
+  turn: 0.15,
+  revert: 0.05
+};
+
+/**
+ * {@link AGENT_CEILING_WEIGHTS} with long-running work: many agents past the
+ * ceiling across them (with `maxAgents` 14) while some of their calls — and
+ * shells, each a window of its own — stay open and stream.
+ */
+export const LONG_CALL_CEILING_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  ...AGENT_CEILING_WEIGHTS,
+  openCall: 2,
+  chunk: 20,
+  closeCall: 0.6
 };
 
 // ---------------------------------------------------------------------------
@@ -800,7 +965,7 @@ export interface LegacyStateFate {
   readonly droppedOtherStates: number;
   /**
    * Parent legacy markers the final window holds although a parent row
-   * positioned after it was dropped: a trim reached past them, and only the
+   * positioned after them was dropped: a trim reached past them, and only the
    * exemption kept them. A row replaced in place keeps its old position, so it
    * counts from there, not from its latest write.
    */
@@ -870,4 +1035,136 @@ export function legacyStateFate(events: readonly DomainEvent[]): LegacyStateFate
       (stepOf.get(row) ?? Number.POSITIVE_INFINITY) < youngestDroppedParentStep
   ).length;
   return { droppedParentMarkers, droppedAgentMarkers, droppedOtherStates, keptPastATrim, movedInPlace };
+}
+
+/** What retention did with the opening rows of running work ({@link openWorkFate}). */
+export interface OpenWorkFate {
+  /**
+   * Opening rows of open calls a trim reached past in their own window — a row
+   * of the parent's or of their agent's window positioned after them was
+   * dropped — and kept: only the exemption keeps such a row. Distinct rows.
+   */
+  readonly callsKeptPastATrim: number;
+  /** The same for open background tasks' `task.started` rows. */
+  readonly tasksKeptPastATrim: number;
+  /**
+   * Agent-owned opening rows of open work the cross-agent ceiling reached past
+   * — it dropped a row that was inside its own agent's window and stamped
+   * after them — and kept. Distinct rows.
+   */
+  readonly keptPastTheCeiling: number;
+  /** Opening rows retention dropped while their work was still open: past a cap. */
+  readonly droppedWhileOpen: number;
+  /** Opening rows retention dropped once their work had ended: the exemption ends with it. */
+  readonly droppedAfterClose: number;
+}
+
+/**
+ * Folds `events` one at a time and says what retention did with the opening
+ * rows of running work — what a long-call log test must show its log really
+ * exercised. Reads which work is open from `open-work.ts`, over the window
+ * each trim ran on: this measures a log, it does not check the fold.
+ */
+export function openWorkFate(events: readonly DomainEvent[]): OpenWorkFate {
+  const callsKept = new Set<ThreadActivityItem>();
+  const tasksKept = new Set<ThreadActivityItem>();
+  const ceilingKept = new Set<ThreadActivityItem>();
+  let droppedWhileOpen = 0;
+  let droppedAfterClose = 0;
+  const windowOf = (row: ThreadActivityItem): string =>
+    typeof row.agentId === "string" && row.agentId.length > 0 ? row.agentId : "";
+  const nonBlank = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+  // The step each row object's POSITION was taken at, as in `legacyStateFate`.
+  const stepOf = new Map<ThreadActivityItem, number>();
+  let state = createEmptyThreadState();
+  events.forEach((event, step) => {
+    let row: ThreadActivityItem | undefined;
+    let replaced: ThreadActivityItem | undefined;
+    if (event.type === "thread.activity-appended") {
+      row = event.payload.activity;
+      const at = itemPositionOf(state, row.id);
+      const existing = at === undefined ? undefined : state.items[at];
+      if (existing?.kind === "activity") replaced = existing;
+      stepOf.set(row, replaced !== undefined ? (stepOf.get(replaced) ?? step) : step);
+    }
+    const next = applyDomainEvent(state, event);
+    const dropped = itemsDroppedByRetention(next).filter(
+      (item): item is ThreadActivityItem => item.kind === "activity"
+    );
+    if (dropped.length > 0) {
+      // The window the step's trim ran over: the previous one with the step's row in it.
+      const pre =
+        row === undefined
+          ? state.activities
+          : replaced !== undefined
+            ? state.activities.map((candidate) => (candidate === replaced ? row! : candidate))
+            : [...state.activities, row];
+      const work = openWorkOf(pre);
+      const open = new Map<ThreadActivityItem, "call" | "task">();
+      for (const call of work.calls) open.set(call.opening, "call");
+      for (const task of work.tasks) open.set(task.start, "task");
+      // Every call's and background task's opening row, open or ended.
+      const openings = new Set<ThreadActivityItem>();
+      const calls = new Set<string>();
+      const tasks = new Set<string>();
+      for (const candidate of pre) {
+        const payload = candidate.payload as Record<string, unknown> | null;
+        if (payload === null || typeof payload !== "object") continue;
+        const kind = candidate.activityKind;
+        if ((kind === "tool.started" || kind === "tool.updated") && nonBlank(payload.toolUseId) && !calls.has(payload.toolUseId)) {
+          calls.add(payload.toolUseId);
+          openings.add(candidate);
+        } else if (kind === "task.started" && payload.agentKind !== "agent" && nonBlank(payload.taskId) && !tasks.has(payload.taskId)) {
+          tasks.add(payload.taskId);
+          openings.add(candidate);
+        }
+      }
+      for (const gone of dropped) {
+        if (open.has(gone)) droppedWhileOpen += 1;
+        else if (openings.has(gone)) droppedAfterClose += 1;
+      }
+      // Per window, the position of the youngest row the trim dropped.
+      const youngestDropped = new Map<string, number>();
+      for (const gone of dropped) {
+        const window = windowOf(gone);
+        youngestDropped.set(window, Math.max(youngestDropped.get(window) ?? -1, stepOf.get(gone) ?? -1));
+      }
+      // How far the ceiling reached: the latest stamp among the dropped rows
+      // that were inside their own agent's window — only the ceiling drops those.
+      const owners = new Set(dropped.map(windowOf).filter((window) => window !== ""));
+      const byOwner = new Map<string, ThreadActivityItem[]>();
+      for (const candidate of pre) {
+        const window = windowOf(candidate);
+        if (!owners.has(window)) continue;
+        const rows = byOwner.get(window);
+        if (rows) rows.push(candidate);
+        else byOwner.set(window, [candidate]);
+      }
+      const insideOwnWindow = new Set<ThreadActivityItem>();
+      for (const rows of byOwner.values()) {
+        for (const candidate of rows.slice(-AGENT_ACTIVITY_RETENTION_LIMIT)) insideOwnWindow.add(candidate);
+      }
+      let reach: string | null = null;
+      for (const gone of dropped) {
+        if (insideOwnWindow.has(gone) && (reach === null || gone.createdAt > reach)) reach = gone.createdAt;
+      }
+      const droppedSet = new Set(dropped);
+      for (const [opening, kind] of open) {
+        if (droppedSet.has(opening)) continue;
+        const window = windowOf(opening);
+        if ((stepOf.get(opening) ?? Number.POSITIVE_INFINITY) < (youngestDropped.get(window) ?? -1)) {
+          (kind === "call" ? callsKept : tasksKept).add(opening);
+        }
+        if (window !== "" && reach !== null && opening.createdAt < reach) ceilingKept.add(opening);
+      }
+    }
+    state = next;
+  });
+  return {
+    callsKeptPastATrim: callsKept.size,
+    tasksKeptPastATrim: tasksKept.size,
+    keptPastTheCeiling: ceilingKept.size,
+    droppedWhileOpen,
+    droppedAfterClose
+  };
 }

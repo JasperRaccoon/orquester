@@ -19,6 +19,7 @@ export * from "./wire.ts";
 export * from "./fold.ts";
 export * from "./fold-snapshot.ts";
 export * from "./history-cursor.ts";
+export * from "./open-work.ts";
 export * from "./pending.ts";
 export * from "./plan.ts";
 export * from "./roster.ts";

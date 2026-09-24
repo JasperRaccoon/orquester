@@ -1415,6 +1415,14 @@ describe("the history bridge", () => {
     const pageItems = [...turnItems(1, clock), ...turnItems(2, clock)];
     const prompt = message("user", "go", { id: "uR", createdAt: stamp((clock.at += 1)) });
     const word = message("assistant", "on it", { id: "aR", turnId: "tR", createdAt: stamp((clock.at += 1)) });
+    // The call in flight: its start, which retention keeps while the call runs (`openWorkOf`), and its latest update,
+    // an ordinary row.
+    const opening = activity("tool.started", { toolUseId: "call-live", status: "inProgress" }, {
+      id: "xR-open",
+      turnId: "tR",
+      summary: "Read",
+      createdAt: stamp((clock.at += 1))
+    });
     const inFlight = activity("tool.updated", { toolUseId: "call-live", status: "inProgress" }, {
       id: "xR-live",
       turnId: "tR",
@@ -1439,7 +1447,7 @@ describe("the history bridge", () => {
       fake,
       snapshot({
         head: head({ session: { status: "running", activeTurnId: "tR" } }),
-        items: [prompt, word, inFlight, ...rows],
+        items: [prompt, word, opening, inFlight, ...rows],
         turns,
         seq,
         history: bounds()
@@ -1459,6 +1467,10 @@ describe("the history bridge", () => {
     }
     const { history } = state().slice;
     assert.ok(history.bridge.some((item) => item.id === "xR-live"), "the call in flight went to the bridge");
+    assert.ok(
+      state().slice.entries.some((item) => item.id === "xR-open"),
+      "its start stayed in the window, older than every row the bridge took"
+    );
     assert.ok(history.windowCut >= 2, "the prompt and the agent's word render with the history");
 
     // One window holding every row, as if nothing had been evicted.
@@ -1467,6 +1479,7 @@ describe("the history bridge", () => {
         ...pageItems,
         prompt,
         word,
+        opening,
         inFlight,
         ...rows,
         ...streamed

@@ -156,7 +156,7 @@ describe("a background shell's output through read_transcript and read_tool_outp
     await host.stop();
   });
 
-  it("a shell that printed past its agent's 200-row window: its start is gone, its latest chunk is the entry and the id", async () => {
+  it("a shell that printed past its agent's 200-row window keeps its start, which is the entry and the id; its whole output reads back from the log", async () => {
     const host = createTestHost();
     await host.createThread({ threadId: THREAD });
     for (const event of [
@@ -178,14 +178,17 @@ describe("a background shell's output through read_transcript and read_tool_outp
     await host.settle();
     const snap = await host.orchestrator.readThread(THREAD);
     assert.ok(snap.kind === "snapshot");
-    assert.equal(snap.thread.items.some((item) => item.id === "shell-start"), false, "retention dropped the shell's start");
+    // Retention keeps the opening row of a call still running (packages/api `openWorkOf`, FOLD_SNAPSHOT_VERSION 4): its
+    // own output dropped the start from the shell's window on chunk 250 before.
+    assert.equal(snap.thread.items.some((item) => item.id === "shell-start"), true, "retention kept the running shell's start");
+    assert.equal(snap.thread.items.some((item) => item.id === "chunk-0"), false, "its oldest chunks went");
     assert.ok(snap.thread.items.some((item) => item.id === "chunk-299"));
 
     const api = hostApi(host);
     const entry = await shellEntry(api);
     assert.deepEqual(entry, {
-      turn: 1, turnId: "turn-1", kind: "tool", createdAt: (snap.thread.items.find((item) => item.id === "chunk-299") as ThreadActivityItem).createdAt, agentId: "task-1",
-      tool: { type: "command_execution", title: "Tool output", status: "inProgress" }, outputItemId: "chunk-299"
+      turn: 1, turnId: "turn-1", kind: "tool", createdAt: (snap.thread.items.find((item) => item.id === "shell-start") as ThreadActivityItem).createdAt, agentId: "task-1",
+      tool: { type: "command_execution", title: "Background shell", status: "inProgress", command: "make -j8" }, outputItemId: "shell-start"
     });
     // The whole output, from the log — the chunks the window dropped included.
     const whole = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId! }), ctx(api));
