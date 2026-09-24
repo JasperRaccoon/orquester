@@ -16,6 +16,7 @@ import { after, describe, it } from "node:test";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { resumeCursorFor } from "../../orchestration/resume.ts";
+import type { CodexProtocol } from "./_generated/index.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
 import { CodexSession, fileChangeDetail, type CodexSessionOptions } from "./session.ts";
 import {
@@ -975,6 +976,70 @@ describe("codex session — session-scoped Stop with no running turn (R6)", () =
       0,
       "a Stop racing a settling turn must not kill the next one"
     );
+    await r.stop();
+  });
+});
+
+describe("codex session — Stop closes a child re-engaged after it completed (I5)", () => {
+  const childTurn = (id: string, status: CodexProtocol.v2.TurnStatus): CodexProtocol.v2.Turn => ({
+    id,
+    items: [],
+    itemsView: "notLoaded",
+    status,
+    error: null,
+    startedAt: 0,
+    completedAt: null,
+    durationMs: null
+  });
+
+  it("the relaunch registers the new run, so a session-scoped Stop closes it `stopped`", async () => {
+    // The child's first run ends — its own turn completes, and the parent's
+    // `subAgentActivity completed` closes the task, which drops it from the
+    // live-task registry — then the child's next turn relaunches it. Without a
+    // relaunch start nothing put it back, and Stop left the new run open.
+    const r = rig({ turns: [{ kind: "spawn-child", childThreadId: "child-1" }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.completed");
+    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+    await waitUntil(() => r.session.liveChildTurnsForTest.length === 1, "the child's first turn");
+
+    r.session.injectNotificationForTest("turn/completed", {
+      threadId: "child-1",
+      turn: childTurn("child-1-turn", "completed")
+    });
+    r.session.injectNotificationForTest("item/completed", {
+      item: {
+        type: "subAgentActivity",
+        id: "sub-child-1-done",
+        kind: "completed",
+        agentThreadId: "child-1",
+        agentPath: "/root/child-1"
+      },
+      threadId: (r.session.summary().resumeCursor as { threadId: string }).threadId,
+      turnId: "turn-x",
+      completedAtMs: 1
+    });
+    r.session.injectNotificationForTest("turn/started", {
+      threadId: "child-1",
+      turn: childTurn("child-1-turn-2", "inProgress")
+    });
+    const relaunch = await r.events.waitFor(
+      (event) =>
+        event.type === "task.started" && event.payload.toolUseId === "codex-run:child-1-turn-2",
+      "the relaunch start"
+    );
+
+    await r.session.interruptTurn();
+
+    const stopped = await r.events.waitFor(
+      (event) =>
+        event.type === "task.completed" &&
+        event.payload.taskId === "child-1" &&
+        event.payload.status === "stopped",
+      "the re-engaged run closed `stopped`"
+    );
+    assert.ok(r.events.events.indexOf(stopped) > r.events.events.indexOf(relaunch));
     await r.stop();
   });
 });

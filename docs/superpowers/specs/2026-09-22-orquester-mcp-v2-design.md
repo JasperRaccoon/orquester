@@ -766,10 +766,14 @@ snapshot cannot tell a full window by counting, because the host serves it with 
 projected away. For an agent with no row left, of the oldest row any agent kept — or of its end, when its last launch or
 end (a `task.started`/`task.completed` whose `taskId` names it, else, naming no task, stamped with its id) is Claude's:
 a `task.completed` naming it in `taskId` and not stamped with its id, since a Claude subagent that resumes launches
-again. An end stamped with the agent's own id (Codex, OpenCode, Grok) bounds nothing, because of a gap in those
-adapters: they write a child's launch and end once, and a child resumed after its end writes rows under its id with no
-new launch — OpenCode's `task` tool resumes a child session, and Codex's `interacted` after `completed` writes only
-`task.progress` — so rows can follow that end. A drill-in's span starts at the turn the subagent was launched in, since
+again. An end stamped with the agent's own id (Codex, OpenCode, Grok) bounds nothing, because of a gap those adapters
+had: they wrote a child's launch and end once, and a child resumed after its end wrote rows under its id with no new
+launch — OpenCode's `task` tool resumes a child session, and Codex's `interacted` after `completed` wrote only
+`task.progress` — so rows can follow that end. (Follow-up, plan
+`2026-09-24-subagent-output-long-calls-and-composer-sends`, Task 1: Codex and OpenCode now launch a child again when it
+is re-engaged after its end, which closes the gap for logs written since; rows after a stamped end remain possible in
+logs written before, and a snapshot cannot tell the two apart, so the floor stays.) A drill-in's span starts at the turn
+the subagent was launched in, since
 it has no rows before it, and so do a drill-in's failed read and — final review — its page-limit span, whose hint then
 names the call that reads from that turn) are named; in the parent view, after a walk that did not stop at the page
 limit, any turn of the range still without a row in the merged snapshot, beside a failed read's turns (a drill-in has no

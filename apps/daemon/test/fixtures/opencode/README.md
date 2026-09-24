@@ -472,7 +472,8 @@ the roster shows whatever the provider reports. The mapping this capture support
 
 | Frame | Becomes |
 |---|---|
-| child `session.created` | `task.started` — `taskId` = `agentId` = the **child session id**, the only identifier every one of these frames carries |
+| child `session.created` | no row yet — it registers the child; `taskId` = `agentId` = the **child session id**, the only identifier every one of these frames carries |
+| the parent's `task` part going `running` (next frame) | `task.started` with `toolUseId` = the part's `callID`, the launch id a relaunch is told apart by (observation 26), then `task.progress` |
 | child `session.updated` | `task.progress` on a real title change (an unchanged title is re-stated on every recompute — observation 25) |
 | child `session.status` | `task.updated {status: running \| idle}` |
 | child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal |
@@ -662,6 +663,49 @@ The same run confirms two things the captures already implied: a real model
 emits `reasoning` parts whose deltas arrive as `field: "text"` (observation 4),
 and `step-finish` usage accumulates to a `complete` turn total
 (`input + cache.read + cache.write`, `output + reasoning`).
+
+### 26. A `task` call with `task_id` resumes a child — no `session.created`, and a new call
+
+**Read from the CLI's source, not captured.** Added with the relaunch contract
+(plan `2026-09-24-subagent-output-long-calls-and-composer-sends`, Task 1) from the
+`TaskTool` source embedded in the installed **1.18.32** binary. For 1.18.5 the
+parameter is inferred: fixture 12's `task` output already carries the
+`<task id="ses_…" state="completed">` envelope a resume reads its id from.
+
+The `task` tool takes an optional `task_id` — *"This should only be set if you mean to
+resume a previous task (you can pass a prior task_id and the task will continue the same
+subagent session as before instead of creating a fresh one)"*. Its `execute`, in order:
+
+1. `task_id` names an existing session → that session; otherwise
+   `create({parentID, title: "<description> (@<agent> subagent)"})` — the only
+   `session.created`, so **a resume emits none**;
+2. `metadata({title, metadata: {parentSessionId, sessionId, model}})` — the part's
+   `running` frame, naming the child, **before**
+3. the child is prompted and its own frames begin; the part then completes with
+   `<task id="…" state="completed">…</task>`.
+
+Two more paths come out of the same function. A call naming a child whose job is still
+running is handed to that job as more context and answers at once — `metadata.background:
+true`, a `jobId`, and an output whose `state` is `running` ("Background task updated").
+And `background: true`, honoured only with `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`
+on the server, completes the part the same way while the child works ("Background task
+started").
+
+What the normaliser makes of it (`linkChildFromTaskPart`):
+
+- The child's `session.created` emits no row; the parent's `running` part starts the run, so
+  its `task.started` carries the `callID` — the id the roster fold compares to tell a
+  relaunch from a late delivery (AGENTS.md, "Agent rows must survive resumes and
+  retention").
+- A live part naming a **settled** child under a `callID` never seen for it is a relaunch: a
+  new `task.started` naming it, before any row of the new run; the child's own
+  `session.idle` ends it.
+- Any other part whose `callID` is not the child's current launch — a frame of any call
+  seen for it before (an earlier launch, a call handed over while it worked), a call on a
+  child that is still working — emits no task row: it can neither start a run nor end one.
+- A `completed` part with `metadata.background: true` does not settle the child.
+
+A capture of a real `task_id` resume would confirm the frame order; none has been made.
 
 ---
 

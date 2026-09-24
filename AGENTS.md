@@ -682,7 +682,24 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   relaunched run's progress row — already naming the new call — sits before the killed run's
   `stopped` row, and reading the call off it kept every relaunched agent `interrupted` for as long
   as it worked (2026-09-23). Anything that folds activities by position must remember that order
-  is first-emission order, not time.
+  is first-emission order, not time. **Every adapter that surfaces agents keeps the contract this
+  rule reads:** an agent's FIRST `task.started` carries a launch id; re-engaging an agent that is
+  not live emits a NEW `task.started` under a different one before any row of the new run; the run
+  ends with the adapter's usual end row, and no stale end of an earlier run follows; and the
+  adapter's own live set reopens, so Stop and exit close the new run `stopped`. A status-only
+  reopen is not enough: an appended `task.updated {running}` is an ordinary row of the agent's
+  window, and once retention drops it the roster reads the old end mid-run. OpenCode — a `task`
+  call with `task_id` re-prompts the existing child, no `session.created` — starts every run from
+  the parent's `running` `task` part under its `callID`; a live part naming a settled child under a
+  call never seen for it is the relaunch; a frame of any call seen before, or a call on a live
+  child, emits no task row (`linkChildFromTaskPart`). Codex starts under `codex-launch:<item id>`
+  at `subAgentActivity started` and again under `codex-run:<turn id>` at a child's own
+  `turn/started` after a settled run, or for a child this session never saw launched
+  (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no end, and
+  `interacted` carries no status — neither is evidence about the run in progress. An agent first
+  launched by a host older than this change has no launch id on its first start (such logs are
+  written until the deploy), so a relaunch from a terminal state does not reopen it; that would
+  need a fold change weakening the late-delivery guard, and is not made.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
