@@ -3322,27 +3322,29 @@ start's input whenever both are loaded (the fold's own limit aside: a close writ
 owner's window can age out before the opening row it closes, `open-work.ts`). An unkeyed start is
 still dropped, and so is a start with neither a turn nor an owner. A Claude parent call can start
 before the synthetic turn its own message opens: what it emits before that turn opens — its start
-and any early input update — stays turnless, and only its later rows carry the turn, so after a
-rewind of that turn the turnless rows are all there is of the call. None reads as running: the start
-is dropped (superseded by the update, else as turnless and ownerless), and an update still in
-progress is a neutral row a group hides. A Claude start that only names its tool with an empty input
-("Bash: {}", "Write: {}" — the input streams afterwards, and the first update comes once it parses
-whole) carries no detail, so the row reads the call's title meanwhile; the `ExitPlanMode` boundary
-covers the start too; and a start never offers "Load full output": what the read cut there is the
-call's input. (2) The rows a list renders are the ones counted, named and judged
-(`isStreamedOutputEntry`, `withoutJoinedOutput`, `lib/agent-chat/presentation.logic.ts`): a streamed
-chunk whose call has a row of its own in the list is that row's output, and an orphan call's chunks
-— no row of the call in the list, its opening row past retention's cap, say — are one row, its first
-chunk; the rows still carry every chunk for `joinLifecycleDetails` to fold. So a call's own output
-never ends the live run, never names the live row and never counts in a group's summary or its
-hidden rows, and a group shaped by those rows renders a settled streamed command exactly as one that
-streamed nothing: its row, labelled with its command. A running command reads "Running npm". (3) The
-output heuristic never judges a call still in progress: a line that prints "No such file or
-directory" is not the call failing, in the live row, a live activity group's header or an opened
-row, and the call is judged when it completes. (4) An orphan call's chunks join into ONE row, the
-first carrying all their text in order (`timeline/row-chrome.ts`), headed like the call's own row —
-its command, else its title, which a chunk borrows from its call's lifecycle rows in the input —
-else "Tool output", never with its text.*
+and any early input update — stays turnless. The turn adopts the call as it opens, with one update
+on the turn (the Claude normaliser's `adoptedToolEvent`), which is the running call's live row until
+its result; after a rewind of that turn the turnless rows are all there is of the call. None reads
+as running: the start is dropped (superseded by the update, else as turnless and ownerless), and an
+update still in progress is a neutral row a group hides. A Claude start that only names its tool
+with an empty input ("Bash: {}", "Write: {}" — the input streams afterwards, and the first update
+comes once it parses whole; a tool that takes no arguments has none until its result) keeps the
+tool's name alone as its detail, so the row reads "Write" or "mcp__x__list" meanwhile; the
+`ExitPlanMode` boundary covers the start too; and a start never offers "Load full output": what the
+read cut there is the call's input. (2) The rows a list renders are the ones counted, named and
+judged (`isStreamedOutputEntry`, `withoutJoinedOutput`, `lib/agent-chat/presentation.logic.ts`): a
+streamed chunk whose call has a row of its own in the list is that row's output, and an orphan
+call's chunks — no row of the call in the list, its opening row past retention's cap, say — are one
+row, its first chunk; the rows still carry every chunk for `joinLifecycleDetails` to fold. So a
+call's own output never ends the live run, never names the live row and never counts in a group's
+summary or its hidden rows, and a group shaped by those rows renders a settled streamed command
+exactly as one that streamed nothing: its row, labelled with its command. A running command reads
+"Running npm". (3) The output heuristic never judges a call still in progress: a line that prints
+"No such file or directory" is not the call failing, in the live row, a live activity group's header
+or an opened row, and the call is judged when it completes. (4) An orphan call's chunks join into
+ONE row, the first carrying all their text in order (`timeline/row-chrome.ts`), headed like the
+call's own row — its command, else its title, which a chunk borrows from its call's lifecycle rows
+in the input — else "Tool output", never with its text.*
 
 **Failure styling is reserved for severe failures.** A non-zero command exit gets a muted failure
 mark; only a `runtime.error` or a `*.failed` lifecycle event — the turn or a core side effect

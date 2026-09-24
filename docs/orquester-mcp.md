@@ -718,10 +718,12 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     provider's detail as it came.
   - A call whose rows in the read are all turnless, ownerless and unclosed is no row, as the GUI
     shows it none: a Claude parent call can start before the synthetic turn its own message opens,
-    what it emits before that turn opens — its start and any early input update — stays turnless,
-    and only its later rows carry the turn. A rewind of that turn leaves the turnless rows as all
-    there is of the call, and that is no running call. A row with a turn or an owner, or the call's
-    completion or denial, makes it a row as before.
+    and what it emits before that turn opens — its start and any early input update — stays
+    turnless. The turn adopts the call as it opens, and the adapter says so with one update on the
+    turn, so a running call always has a row that carries it. A rewind of that turn removes that row
+    and every later one, leaving the turnless rows as all there is of the call, and that is no
+    running call. A row with a turn or an owner, or the call's completion or denial, makes it a row
+    as before.
   - A tool row carries `outputItemId` where more of the call's output can be read, and
     `read_tool_output` reads it (§6, Tool output):
     - the call's completion (or denial) when its payload was cut on its way to you — the row the

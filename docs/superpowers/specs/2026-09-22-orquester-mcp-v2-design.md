@@ -878,11 +878,14 @@ before that turn opens — its start and any early input update — stays turnle
 A rewind of that turn used to leave an `inProgress` entry here that the GUI never showed: it drops the start (superseded
 by the update, else as turnless and ownerless — `startIsCallRow`, `entries.logic.ts`) and hides an update still in
 progress as a neutral row. (Fix round 1: the first build skipped only a lone turnless start, and a start with its early
-input update still made an entry.) The GUI now shows a call's start while no other lifecycle row of the call is in its
-input (a running Codex command's only row); the rules above about the start stand for their own reasons: its detail is
-never taken, because the GUI replaces the start whole with the call's next row while an entry here keeps a detail an
-earlier row gave, and its cut payload is never an `outputItemId`, because what the read cut on a start is the call's
-input, never its output.*
+input update still made an entry. Fix round 2: that rule alone hid a woken call for its whole run — the frame that opens
+the turn emits nothing for the call, and its next rows come only with its result — so the Claude normaliser now marks
+the adoption with one update on the turn (`adoptedToolEvent`), a running call always has a row that carries its turn,
+and "all turnless, ownerless and unclosed" means a rewind's leftover again.) The GUI now shows a call's start while no
+other lifecycle row of the call is in its input (a running Codex command's only row); the rules above about the start
+stand for their own reasons: its detail is never taken, because the GUI replaces the start whole with the call's next
+row while an entry here keeps a detail an earlier row gave, and its cut payload is never an `outputItemId`, because what
+the read cut on a start is the call's input, never its output.*
 
 ### 7.7 Waiting
 
