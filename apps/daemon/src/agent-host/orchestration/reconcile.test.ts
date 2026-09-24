@@ -1484,6 +1484,56 @@ describe("reconcile — a crash-settled turn ends when its process died", () => 
     );
     await next.stop();
   });
+
+  it("settles a stale pending turn behind a session already stopped, once: the next host's first load writes nothing", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await first.settle();
+    await first.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
+    await first.settle();
+    await first.stop();
+    assert.equal(headOf(first.store, threadId).session.status, "stopped");
+    // A message sent to the stopped session, its send never made.
+    const requestedAt = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, requestedAt);
+    const log = first.store.logs.get(threadId)!;
+    const logLength = log.length;
+    const notices = () =>
+      log.filter(
+        (event) =>
+          event.type === "thread.activity-appended" &&
+          event.payload.activity.activityKind === "provider.turn.start.failed"
+      ).length;
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await next.stop();
+    // The session was `stopped` already, and the settle is written all the
+    // same: it is what ends the turn, not a change of the session's state.
+    assert.deepEqual([turnOf(read, null).state, turnOf(read, null).completedAt], ["interrupted", requestedAt]);
+    assert.deepEqual(
+      log.slice(logLength).map((event) =>
+        event.type === "thread.activity-appended" ? event.payload.activity.activityKind : event.type
+      ),
+      ["thread.session-set", "provider.turn.start.failed"]
+    );
+    const settled = log.length;
+
+    // A later host lifetime finds nothing stale: no second notice, nothing at all.
+    const third = createTestHost({ store: first.store });
+    third.clock.advance(PENDING_TURN_GRACE_MS + 120_000);
+    await third.orchestrator.reconcile();
+    const again = await third.orchestrator.readThread(threadId);
+    await third.settle();
+    await third.stop();
+    assert.equal(log.length, settled, "the second load appends nothing");
+    assert.equal(turnOf(again, null).state, "interrupted");
+    assert.equal(notices(), 1, "one notice, once");
+  });
 });
 
 describe("reconcile — a first load gives a legacy agent the launch id an older host never wrote", () => {

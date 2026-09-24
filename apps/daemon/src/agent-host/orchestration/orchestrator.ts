@@ -1138,16 +1138,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * `occurredAt` is the clock's unless given — only a settle of a turn whose
    * process died before the host could see it end gives one
    * ({@link lastWriteAt}).
+   *
+   * `force` appends the session even when it is unchanged: the one caller is
+   * a settle whose whole point is the turn it ends, not a new session state
+   * — a stale `pending` turn behind a session that already reads `stopped`
+   * (`settleStalePendingTurns`); any session-set that leaves `running`
+   * settles every unsettled turn (`sessionSetTurns` in `fold.ts`).
    */
   const persistSession = async (
     runtime: ThreadRuntime,
     session: ThreadSessionState,
-    options: { occurredAt?: string } = {}
+    options: { occurredAt?: string; force?: boolean } = {}
   ): Promise<void> => {
     const next = coerceSessionForPendingTurn(runtime, session);
     // An unchanged republish is pure noise on every open stream, and it is the
     // republish — not a real transition — that produced the phantom row above.
-    if (sessionStateEquals(currentSession(runtime), next)) {
+    if (options.force !== true && sessionStateEquals(currentSession(runtime), next)) {
       return;
     }
     await append(runtime, [
@@ -4231,7 +4237,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * The settle comes first, at {@link lastWriteAt}: nothing sent the turn
    * after that line, and an orphan's running turn — which the same
    * `stopped` settles — ended there too. The notice follows, at the time it
-   * was noticed.
+   * was noticed. The settle is written even when the session already reads
+   * `stopped` (a message sent to a stopped session, the host dead before the
+   * send): it is what ends the turn, and a settle skipped as an unchanged
+   * session left the turn `pending` for good — the thread read "working"
+   * forever and every later first load wrote the notice again.
    */
   const settleStalePendingTurns = async (runtime: ThreadRuntime): Promise<void> => {
     const head = headOf(runtime);
@@ -4255,7 +4265,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         status: "stopped",
         activeTurnId: null
       },
-      { occurredAt: lastWriteAt(runtime) }
+      { occurredAt: lastWriteAt(runtime), force: true }
     );
     await appendActivity(runtime, {
       kind: "provider.turn.start.failed",
