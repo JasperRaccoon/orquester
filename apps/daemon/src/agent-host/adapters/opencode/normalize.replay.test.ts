@@ -1493,6 +1493,38 @@ test("12: a subagent's running bash streams under the subagent, like the call's 
   assert.equal(joined(chunks), (completed?.payload.data as { result?: string }).result);
 });
 
+test("a resumed subagent's growing bash output streams under the subagent, every chunk once", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  const [busy, pending, running, empty, grown, completed] = resume.work;
+  assert.ok(busy && pending && running && empty && grown && completed);
+  const final = "README.md\na.ts\nsrc/\n";
+  const events = feed(run, [
+    resume.pending,
+    resume.running,
+    busy,
+    pending,
+    running,
+    empty,
+    withOutput(grown, "README.md\n"),
+    withOutput(grown, "README.md\na.ts\n"),
+    withOutput(grown, final),
+    withOutput(completed, final)
+  ]).flat();
+  const chunks = outputChunks(events);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["README.md\n", "a.ts\n", "src/\n"]
+  );
+  assert.equal(joined(chunks), final);
+  for (const chunk of chunks) {
+    assert.equal(chunk.agentId, CHILD_SESSION_ID);
+    assert.equal(chunk.itemId, "call_bash_call_resume");
+    assert.equal(chunk.turnId, "turn-resume");
+  }
+});
+
 test("12 through the host: the chunks are the child call's output, joined and closed", async () => {
   const { log } = await throughHost(replayChildParent().events);
   const rows = log.flatMap((event) =>
