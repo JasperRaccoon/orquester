@@ -18,8 +18,9 @@
  */
 
 import type { ThreadActivityItem } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 
-import type { ActivePlanState } from "./contracts";
+import type { ActivePlanState, AgentChatActions } from "./contracts";
 import { PLAN_IMPLEMENTATION_PROMPT_PREFIX, type ProposedPlanEntry } from "./entries.logic";
 
 export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
@@ -189,10 +190,28 @@ export function normalizePlanMarkdownForExport(planMarkdown: string): string {
   return `${planMarkdown.trimEnd()}\n`;
 }
 
-/** *T3: `proposedPlan.ts:75-77`.* */
-export function buildPlanImplementationPrompt(planMarkdown: string): string {
-  return `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}${planMarkdown.trim()}`;
+/**
+ * What the plan card's Copy and Download hand over: always the WHOLE plan.
+ *
+ * An intact proposal is its own markdown, answered synchronously so a copy
+ * stays inside the click. One the wire cut at 16 KiB (§5.6, the row's
+ * `truncated`) is read back first through `readFull` — the store's
+ * `readFullPlanMarkdown`, the read Implement makes — which rejects rather than
+ * ever answer the cut text, so a failed read hands over nothing instead of a
+ * plan that silently ends in "…".
+ */
+export function wholePlanMarkdown(
+  plan: Parameters<AgentChatActions["readFullPlanMarkdown"]>[0],
+  readFull: AgentChatActions["readFullPlanMarkdown"]
+): string | Promise<string> {
+  return plan.truncated === true ? readFull(plan) : plan.planMarkdown;
 }
+
+/**
+ * The prefix plus the trimmed plan — one copy in `@orquester/api/agent-chat`,
+ * shared with the MCP's `implement_plan`. *T3: `proposedPlan.ts:75-77`.*
+ */
+export { buildPlanImplementationPrompt };
 
 /**
  * The composer's split button:

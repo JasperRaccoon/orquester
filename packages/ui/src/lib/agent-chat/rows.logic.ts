@@ -1108,7 +1108,8 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
         id: timelineEntry.id,
         createdAt: timelineEntry.createdAt,
         planMarkdown: timelineEntry.proposedPlan.planMarkdown,
-        implementedAt: timelineEntry.proposedPlan.implementedAt
+        implementedAt: timelineEntry.proposedPlan.implementedAt,
+        ...(timelineEntry.proposedPlan.truncated ? { truncated: true as const } : {})
       });
       continue;
     }
@@ -1546,7 +1547,8 @@ export function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow)
       return (
         a.createdAt === other.createdAt &&
         a.planMarkdown === other.planMarkdown &&
-        a.implementedAt === other.implementedAt
+        a.implementedAt === other.implementedAt &&
+        a.truncated === other.truncated
       );
     }
     case "queued-message": {

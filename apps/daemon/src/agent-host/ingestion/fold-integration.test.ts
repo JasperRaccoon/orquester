@@ -52,6 +52,14 @@ function harness() {
 }
 
 /**
+ * An `agentMessage` phase exactly as Codex's live normaliser reports it: in
+ * `detail` AND in `data.phase` (`adapters/codex/items.ts`).
+ */
+function codexPhase(phase: string): { detail: string; data: unknown } {
+  return { detail: phase, data: { phase, delivery: null, questions: null } };
+}
+
+/**
  * Stamp sequences the way the store does and fold. `thread.created` is the
  * host's, not ingestion's, so it is prepended here — ingestion only ever runs
  * on a thread that already exists.
@@ -489,7 +497,7 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     await ingestion.ingest(
       runtimeEvent(
         "item.started",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         { ...turn, itemId: "item-1" }
       )
     );
@@ -500,11 +508,12 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
       })
     );
     // The commentary item closes; only then does the next item open its own
-    // message — a segment stays open until a completion or a pause closes it.
+    // message — a segment stays open until a completion, a pause or another
+    // assistant item's `item.started` (same turn and owner, D4) closes it.
     await ingestion.ingest(
       runtimeEvent(
         "item.completed",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         { ...turn, itemId: "item-1" }
       )
     );
@@ -532,7 +541,7 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     await ingestion.ingest(
       runtimeEvent(
         "item.started",
-        { itemType: "assistant_message", detail: "commentary" },
+        { itemType: "assistant_message", ...codexPhase("commentary") },
         turn
       )
     );

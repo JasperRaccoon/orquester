@@ -13,6 +13,7 @@ import type {
   AttachmentRef,
   BackgroundLiveness,
   Checkpoint,
+  CompactionMarkerState,
   ComposerContextRecord,
   InteractionMode,
   ModelSelection,
@@ -344,14 +345,11 @@ export interface WorkLogEntry {
 }
 
 /**
- * The three states a `context-compaction` activity comes in (mirrors
- * `RuntimeThreadState`'s compaction arm in `@orquester/api/agent-chat`).
- *
- * `compacting` is a **phase, not an event**: it says the provider is rewriting
- * the conversation right now, so it renders as the live placeholder's label
- * rather than as a divider claiming a compaction that has not happened yet.
+ * The three states a compaction marker comes in. Declared in
+ * `@orquester/api/agent-chat` (`compaction.ts`) with the rule that classifies
+ * a row, which the host's thread index and the MCP share; re-exported here.
  */
-export type CompactionMarkerState = "compacting" | "compacted" | "compaction-failed";
+export type { CompactionMarkerState };
 
 // ---------------------------------------------------------------------------
 // §7.3 — the twelve projected row kinds
@@ -500,6 +498,12 @@ export type AgentChatTimelineRow =
       createdAt: string;
       planMarkdown: string;
       implementedAt: string | null;
+      /**
+       * The wire cut `planMarkdown` at 16 KiB (§5.6). The card's Copy and
+       * Download then read the whole plan back (`readFullPlanMarkdown`)
+       * rather than hand over text that ends in "…".
+       */
+      truncated?: true;
     }
   /**
    * The live placeholders. `compacting` is set while the thread is in the
@@ -551,6 +555,12 @@ export interface AgentChatActions {
   }): Promise<void>;
   /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
   steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;
+  /**
+   * The whole markdown of a proposal Implement is about to send (§7.3): as is
+   * when intact, read back through `GET …/items/:itemId` when the wire cut it
+   * (`truncated`, §5.6). Rejects rather than ever answer the cut text.
+   */
+  readFullPlanMarkdown(plan: { id: string; planMarkdown: string; truncated?: true }): Promise<string>;
   /**
    * `/interrupt`. Omits `turnId` whenever the session is not `running`, which
    * is also the only way to stop background work — and it stops all of it.
@@ -696,7 +706,13 @@ export interface AgentChatThreadView {
    * *Added by W15, widened by W11 in the fix wave (R8-B1 / R7-2);
    * `contracts.ts` stays additive-only.*
    */
-  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
+  actionableProposedPlan: {
+    id: string;
+    planMarkdown: string;
+    turnId: string | null;
+    /** The wire cut `planMarkdown` (§5.6): see `readFullPlanMarkdown`. */
+    truncated?: true;
+  } | null;
   /**
    * True while a `/revert` is in flight — §7.5's one reason the composer goes
    * `inert`, so a turn cannot race history the host is rewriting.

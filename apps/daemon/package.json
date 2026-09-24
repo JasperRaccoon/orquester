@@ -11,7 +11,7 @@
     "start": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test $(find src -name '*.test.ts')"
+    "test": "node --import tsx --import ./test/quiet-mock-timers.mjs --test $(find src -name '*.test.ts')"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.278",

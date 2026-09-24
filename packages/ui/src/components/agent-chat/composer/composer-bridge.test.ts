@@ -6,12 +6,19 @@ import {
   insertComposerText,
   openComposerControl,
   registerComposerHandle,
+  restoreComposerFailedSend,
   sendComposerText,
   stageComposerAttachment,
   type ComposerHandle
 } from "./composer-bridge.ts";
+import type { StagedAttachment } from "./ComposerAttachments";
+import type { FailedSendRestore } from "./composer-submission";
 
-function fakeHandle(log: string[], stageResult = true, sendResult = true): ComposerHandle {
+function fakeHandle(
+  log: string[],
+  stageResult = true,
+  { sendResult = true, showsThread = true }: { sendResult?: boolean; showsThread?: boolean } = {}
+): ComposerHandle {
   return {
     insertText: (text, mode) => log.push(`insert:${mode ?? "cursor"}:${text}`),
     stageAttachment: (ref) => {
@@ -23,9 +30,18 @@ function fakeHandle(log: string[], stageResult = true, sendResult = true): Compo
     sendText: (text) => {
       log.push(`send:${text}`);
       return sendResult;
+    },
+    restoreFailedSend: (restore) => {
+      log.push(`restore:${restore.outcome.notice}`);
+      return showsThread;
     }
   };
 }
+
+const FAILED: FailedSendRestore<StagedAttachment> = {
+  outcome: { kind: "failed", text: "hello", notice: "Could not send the message." },
+  sent: []
+};
 
 const REF = { type: "file", id: "/tmp/a.txt", name: "a.txt", sizeBytes: 1 } as const;
 
@@ -67,6 +83,23 @@ test("staging reports false when the composer refuses it", () => {
   unregister();
 });
 
+test("a failed send's draft reaches the composer that shows its thread", () => {
+  const log: string[] = [];
+  const unregister = registerComposerHandle("s5", fakeHandle(log));
+  assert.equal(restoreComposerFailedSend("s5", FAILED), true);
+  assert.deepEqual(log, ["restore:Could not send the message."]);
+  unregister();
+});
+
+test("a failed send is refused when no composer shows its thread, so the caller writes its persisted draft", () => {
+  assert.equal(restoreComposerFailedSend("never-mounted", FAILED), false);
+  // A composer can refuse too: it no longer shows the thread its handle names.
+  const log: string[] = [];
+  const unregister = registerComposerHandle("s6", fakeHandle(log, true, { showsThread: false }));
+  assert.equal(restoreComposerFailedSend("s6", FAILED), false);
+  unregister();
+});
+
 test("a stale unregister cannot drop the handle that replaced it", () => {
   // A fast tab switch can run the old effect's cleanup after the new effect
   // registered; a blind delete would leave the live composer unreachable.
@@ -93,7 +126,7 @@ test("goals §8.2: a chip action is sent BY the mounted composer, never around i
 test("goals §8.2: a refused or unmounted send reports false", () => {
   // The composer says why in its own notice; the caller only learns it did not go.
   const log: string[] = [];
-  const unregister = registerComposerHandle("s6", fakeHandle(log, true, false));
+  const unregister = registerComposerHandle("s6", fakeHandle(log, true, { sendResult: false }));
   assert.equal(sendComposerText("s6", "/goal clear"), false);
   unregister();
   assert.equal(sendComposerText("never-mounted", "/goal clear"), false);

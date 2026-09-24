@@ -741,6 +741,58 @@ test("a snapshot file of another version, another thread or a bad shape is rejec
   assert.notEqual(parseFoldSnapshotFile(good, THREAD_ID), null, "the untouched file still parses");
 });
 
+test("a state.json folded by version 2, whose retention evicted the legacy compaction marker, is discarded, never folded forward", () => {
+  reset();
+  // An older log's settled compaction, then parent rows enough for three trims.
+  const marker = activity("thread.state.changed", { state: "compacted" }, { id: "legacy-marker" });
+  const events: DomainEvent[] = [created(), ev("thread.activity-appended", { activity: marker })];
+  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.completed", { toolUseId: `t${index}` }, { id: `row-${index}` })
+      })
+    );
+  }
+  const whole = foldThread(events);
+  assert.equal(whole.activities[0]?.id, "legacy-marker", "this build keeps the marker whatever its age");
+
+  // Version 2 read the marker as an ordinary parent row. The same log with
+  // that row in any other state is therefore exactly what version 2 folded:
+  // the row in the same class, so the same trims, and gone with the first.
+  const asVersion2Read = events.map((event) =>
+    event.type === "thread.activity-appended" && event.payload.activity === marker
+      ? { ...event, payload: { activity: { ...marker, payload: { state: "running" } } } }
+      : event
+  );
+  let probe = createEmptyThreadState();
+  const firstTrim = asVersion2Read.findIndex((event) => {
+    probe = applyDomainEvent(probe, event);
+    return itemsDroppedByRetention(probe).length > 0;
+  });
+  assert.ok(firstTrim > 0);
+  const split = firstTrim + 10;
+  const version2State = foldThread(asVersion2Read.slice(0, split));
+  assert.ok(!version2State.items.some((item) => item.id === "legacy-marker"), "version 2 had evicted it");
+
+  // Trusted, that snapshot would carry the eviction forward for good.
+  const trusted = foldOnto(throughDisk(version2State), events.slice(split));
+  assert.ok(!trusted.activities.some((row) => row.id === "legacy-marker"));
+  assert.notDeepEqual(trusted, whole);
+
+  // It is not: a file stamped version 2 never parses, whatever it holds, so
+  // the store folds the whole log — which keeps the marker.
+  assert.ok(FOLD_SNAPSHOT_VERSION > 2, "the retention that keeps the legacy marker is a new version");
+  const file = onDisk(snapshotFile(version2State, { version: 2 }));
+  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null);
+  assert.notEqual(
+    parseFoldSnapshotFile({ ...file, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
+    null,
+    "the stamp is all that refuses it: the same file under this build's version would parse"
+  );
+  // This build's own snapshot of the same prefix folds forward to the whole log.
+  assert.deepEqual(foldOnto(throughDisk(foldThread(events.slice(0, split))), events.slice(split)), whole);
+});
+
 test("a snapshot of an empty, headless fold is a valid file", () => {
   const empty = createEmptyThreadState();
   const parsed = parseFoldSnapshotFile(onDisk(snapshotFile(empty, { logBytes: 0 })), THREAD_ID);
@@ -799,7 +851,7 @@ test("a missing goal key rejects the snapshot: a cache miss", () => {
   assert.equal(deserializeFoldState(copy), null);
   const file = onDisk(snapshotFile(state));
   delete file.state.goal;
-  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null, "no version-3 file lacks it");
+  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null, "no file this build writes lacks it");
 });
 
 test("a stored goal that is neither null nor a valid ThreadGoal rejects the snapshot: a cache miss", () => {

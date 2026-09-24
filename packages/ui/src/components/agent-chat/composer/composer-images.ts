@@ -56,3 +56,17 @@ export function revokeImagePreviews(
     if (attachment.previewUrl) revoke(attachment.previewUrl);
   }
 }
+
+/**
+ * The chips a failed send hands back to the draft. `submit` revoked their
+ * preview URLs when it emptied the tray, so each one drops its dead URL and an
+ * image chip resolves its preview again lazily, through the read-back route,
+ * exactly as a reloaded chip does.
+ */
+export function withoutPreviews<A extends { previewUrl?: string }>(attachments: readonly A[]): A[] {
+  return attachments.map((attachment) => {
+    if (attachment.previewUrl === undefined) return attachment;
+    const { previewUrl: _revoked, ...chip } = attachment;
+    return chip as A;
+  });
+}

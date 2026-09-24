@@ -213,11 +213,10 @@ export interface ThreadMessageItem {
    * running "I'll do X next" narration.
    *
    * REALITY (Codex): an `agentMessage` carries a `phase` of `final_answer` or
-   * `commentary`, and §7.3 wants commentary demoted into the activity group
-   * rather than shown as a second full-width answer — a thread of narration
-   * rendered as answers is unreadable. The projection (W11) demotes it; the
-   * timeline additionally renders a commentary message quietly if one reaches
-   * it, so a missed demotion degrades instead of shouting.
+   * `commentary`. §7.3 shows commentary as a visible assistant message between
+   * tool calls, live and replayed alike; the phase stays metadata so that
+   * commentary can never become the turn's terminal answer
+   * (`isCommentaryAssistantMessage` in the UI's `rows.logic.ts`).
    *
    * *Added by W12; additive. Producers: the adapters / ingestion (W3, W6–W9).*
    */

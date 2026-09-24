@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   appendAttachmentPathLines,
+  attachedFileLine,
   isAttachmentPathBlock,
   stripAttachmentPathLines
 } from "./attachment-lines.ts";
@@ -52,6 +53,30 @@ describe("attachment path lines (§4.1, §4.5)", () => {
       appendAttachmentPathLines("", [{ name: "a\r\n\u007fb.txt", path: "/a/c.txt" }]),
       "Attached files:\n- a b.txt: /a/c.txt"
     );
+  });
+
+  it("flattens C1 controls and Unicode line separators too, trims, caps a name at 255 and never leaves it empty", () => {
+    assert.equal(
+      appendAttachmentPathLines("", [{ name: " a\u0085b\u2028c\u2029d.txt ", path: "/a/d.txt" }]),
+      "Attached files:\n- a b c d.txt: /a/d.txt"
+    );
+    const long = `${"x".repeat(300)}.txt`;
+    assert.equal(
+      appendAttachmentPathLines("", [{ name: long, path: "/a/l.txt" }]),
+      `Attached files:\n- ${"x".repeat(255)}: /a/l.txt`
+    );
+    // A cap never splits a surrogate pair.
+    const emoji = "\u{1F600}".repeat(300);
+    assert.equal(Array.from(attachedFileLine(emoji, "/p").slice("Attached file: ".length)).length, 255 + " (/p)".length);
+    assert.equal(
+      appendAttachmentPathLines("", [{ name: "\u0000\n\t", path: "/a/e" }]),
+      "Attached files:\n- attachment: /a/e"
+    );
+  });
+
+  it("names an answer's file on one line, with its path or as not available (§6.2)", () => {
+    assert.equal(attachedFileLine("notes.md", "/a/notes.md"), "Attached file: notes.md (/a/notes.md)");
+    assert.equal(attachedFileLine("a\u0085b\u2028c", undefined), "Attached file: a b c (not available)");
   });
 
   it("reads `namedIn` for a path already named, and still appends to `text` (§4.6.8)", () => {

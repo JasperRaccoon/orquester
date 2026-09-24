@@ -17,6 +17,7 @@ import {
   GOAL_STATUS_ACTIVITY_KIND,
   GOAL_SUMMARY_TEXT_CHARS,
   goalActivitySummary,
+  isGoalCommandText,
   isHiddenGoalChange,
   isUnfinishedGoal,
   parseAgentGoal,
@@ -25,6 +26,7 @@ import {
   sameGoalState
 } from "./goal.ts";
 import type { AgentGoal, AgentGoalChange, AgentGoalStatus, GoalUpdatedPayload } from "./goal.ts";
+import { GOAL_ACTIONS, parseGoalSupport } from "./adapter-types.ts";
 
 /** Fails to compile if `T` is not exactly `U`. */
 type Exact<T, U> = [T] extends [U] ? ([U] extends [T] ? true : never) : never;
@@ -442,5 +444,49 @@ test("a thread goal without a string updatedAt, or whose goal does not parse, is
   assert.equal(parseThreadGoal({ ...FULL, status: "done", updatedAt: "2026-09-24T11:00:00.000Z" }), null);
   for (const value of [null, undefined, "goal", []]) {
     assert.equal(parseThreadGoal(value), null);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The typed command (§5.1) and the capability block (§4.5)
+// ---------------------------------------------------------------------------
+
+test("isGoalCommandText is `/goal` then whitespace or nothing, in any case, after trimming", () => {
+  for (const text of ["/goal", "/goal pause", "  /GOAL clear  ", "/Goal Make CI green", "/goal\nfix it", "/goal\tstatus"]) {
+    assert.equal(isGoalCommandText(text), true, JSON.stringify(text));
+  }
+  for (const text of ["/goals", "/goalie", "goal pause", "fix it /goal x", "//goal", "", "   "]) {
+    assert.equal(isGoalCommandText(text), false, JSON.stringify(text));
+  }
+});
+
+test("parseGoalSupport keeps a well-formed block and only the actions this build knows", () => {
+  assert.deepEqual(
+    parseGoalSupport({ command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true }),
+    { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true }
+  );
+  assert.deepEqual(
+    parseGoalSupport({ command: "provider", actions: ["clear", "teleport", "continue", 7], continuesAcrossTurns: false, extra: 1 }),
+    { command: "provider", actions: ["continue", "clear"], continuesAcrossTurns: false },
+    "an unknown action is dropped, not the block; the order is the spec's; unknown keys go"
+  );
+  assert.deepEqual(GOAL_ACTIONS, ["continue", "pause", "resume", "clear"]);
+});
+
+test("parseGoalSupport reads a block that does not parse as none", () => {
+  const good = { command: "host", actions: [], continuesAcrossTurns: true };
+  const bad: unknown[] = [
+    undefined,
+    null,
+    "host",
+    [good],
+    { ...good, command: "server" },
+    { ...good, command: undefined },
+    { ...good, actions: "pause" },
+    { ...good, continuesAcrossTurns: "yes" },
+    { command: "host", actions: [] }
+  ];
+  for (const value of bad) {
+    assert.equal(parseGoalSupport(value), null, JSON.stringify(value) ?? String(value));
   }
 });

@@ -69,6 +69,7 @@ import {
   type ThreadHistoryPage,
   type ThreadHistoryTurn,
   type ThreadItem,
+  type ThreadItemOutputResponse,
   type ThreadReadResponse,
   type ThreadSearchResponse,
   type ThreadSessionState,
@@ -80,6 +81,18 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AccountHome } from "@orquester/api/agent-chat";
+
+/**
+ * The prefix the client puts on the turn it sends when the user clicks
+ * Implement: one spelling in `@orquester/api/agent-chat`, shared with the UI
+ * and the MCP, and read back only through `isPlanImplementationMessage`.
+ * Re-exported so existing imports from this module keep working.
+ */
+import {
+  isPlanImplementationMessage,
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX
+} from "@orquester/api/agent-chat";
+export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
 
 import { stat } from "node:fs/promises";
 
@@ -114,12 +127,14 @@ import {
 import type { IndexedItemPosition, IndexedTurn, ThreadIndex } from "../index/index.ts";
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
+import { joinToolOutput } from "../store/tool-output.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import {
   AGENT_HOST_DEADLINES,
   GOAL_CONTINUATION_GRACE_MS,
   withDeadline
 } from "../support/deadline.ts";
+import { attachedFileLine } from "../adapters/attachment-lines.ts";
 import { createEventBuilder, describeFailure, makeActivity, type BuildEvent } from "./events.ts";
 import {
   AgentChatCommandError,
@@ -190,12 +205,6 @@ export interface ResolvedLaunch {
   home: AccountHome;
 }
 
-/**
- * The store plus the two optional members W2's implementation adds beyond the
- * `ThreadStore` seam: the parse message for a thread that could not be read,
- * and the backwards log scan that serves a `GET …/items/:id` for a row the
- * fold's retention window already dropped.
- */
 /** The snapshot registry, plus the change flag `agent.providers.changed` needs. */
 export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
   /** §7.7: an `auth.status {error}` from a turn must reach the snapshot. */
@@ -208,9 +217,19 @@ export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
   ): Promise<{ snapshot: ProviderSnapshot; changed: boolean }>;
 };
 
+/**
+ * The store plus the three optional members W2's implementation adds beyond the
+ * `ThreadStore` seam: the parse message for a thread that could not be read,
+ * the backwards log scan that serves a `GET …/items/:id` for a row the fold's
+ * retention window already dropped, and the join of a tool call's streamed
+ * output that serves `GET …/items/:id/output`. Without the last two the
+ * orchestrator reads `readAll` itself.
+ */
 export type HostThreadStore = ThreadStore & {
   threadError?(threadId: string): string | null;
   readItem?(threadId: string, itemId: string): Promise<ThreadItem | null>;
+  /** One `readLog` joining a call's `tool.output` chunks (`store/tool-output.ts`). */
+  readToolOutput?(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
 };
 
 export interface OrchestratorOptions {
@@ -242,12 +261,6 @@ export interface OrchestratorOptions {
   continuationEnabled?(projectPath: string): boolean | Promise<boolean>;
   /** A tab the user closed: settled on the next boot, never continued (§3.3). */
   isThreadClosed?(threadId: string): boolean | Promise<boolean>;
-  /**
-   * The registry entry's own launch args, handed to `startSession` so an
-   * adapter that folds a flag into its protocol (Claude's `--permission-mode`)
-   * sees what the entry declares.
-   */
-  launchArgsForRefId?(refId: string): readonly string[];
   /**
    * Where the §6.1 `launchEnv`/`unsetEnv`/`homePath`/`proxyRefId` are kept. The
    * daemon sends them once, at create; a session may be started much later by
@@ -495,6 +508,11 @@ export interface Orchestrator {
   /** Full-text search over every indexed thread; `indexed: false` without an index. */
   searchThreads(query: { q: string; limit: number; projectPath?: string }): ThreadSearchResponse;
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
+  /**
+   * `GET …/items/:itemId/output`: the streamed output of the tool call the item
+   * belongs to, joined from the log; null when the item names no call.
+   */
+  readToolOutput(threadId: string, itemId: string): Promise<ThreadItemOutputResponse | null>;
   readTurnDiff(
     threadId: string,
     turnCount: number,
@@ -1412,7 +1430,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       accountId: head.accountId,
       home: head.home
     });
-    const launchArgs = options.launchArgsForRefId?.(head.refId) ?? [];
     const session = await adapter.startSession({
       threadId: runtime.id,
       // R4-6: the PROJECT ROOT, not the thread's `cwd`. OpenCode pools one
@@ -1426,7 +1443,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       title: head.title,
       modelSelection: head.modelSelection,
       runtimeMode: head.runtimeMode,
-      ...(launchArgs.length > 0 ? { launchArgs } : {}),
       ...(resumeCursor !== undefined ? { resumeCursor } : {}),
       // goals §5.3: on EVERY start, so an adapter emits only real changes — a
       // resumed provider repeating the goal the thread already shows is not one.
@@ -1742,6 +1758,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const sendTurnEffect = async (runtime: ThreadRuntime, turn: QueuedTurn): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
+    // Every path that sends — a direct turn, a steer, a turn queued behind a
+    // compaction, a message-mode answer — lands here, so this is where each
+    // attachment is resolved and held to §6.3's bounds against the file the
+    // host STAT'd. A refusal is a timeline row, and nothing is captured,
+    // started or sent for it.
+    let attachments: AttachmentRef[];
+    try {
+      attachments = await resolveTurnAttachments(runtime.id, turn.attachments);
+    } catch (error) {
+      await appendActivity(runtime, {
+        kind: "provider.turn.start.failed",
+        summary: "Attachment rejected",
+        detail: describeFailure(error),
+        requestId: turn.messageId
+      });
+      return;
+    }
     // The pre-turn baseline, BEFORE the session is ensured and before the
     // provider is asked (§5.4; T3 captures it from the domain turn-start for
     // the same reason). Waiting on `turn.started` would fold everything the
@@ -1771,9 +1804,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     try {
       const result = await adapter.sendTurn({
         threadId: runtime.id,
-        // §4.6.9: never prefixed, indented or wrapped.
         input: providerInputFor(turn.input),
-        attachments: turn.attachments,
+        // Each carries the STAT'd size; the adapter names in an
+        // `Attached files:` block whatever it does not ingest natively (§4.1).
+        attachments,
         ...(turn.modelSelection !== undefined ? { modelSelection: turn.modelSelection } : {}),
         interactionMode: turn.interactionMode
       });
@@ -2095,6 +2129,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * shape dropped the question whenever there was exactly one, which reads as
    * a bare "yes" arriving from nowhere in a transcript the agent resumes
    * later. A multi-select answer is joined with commas.
+   *
+   * The line names the absolute host path (`pathById`), where T3's printed the
+   * id, which means nothing to an agent: the steer carries the same refs, and
+   * the adapters' `Attached files:` block (§4.5) then finds every path already
+   * named and appends nothing — so the echo says both which question a file
+   * belongs to and where it is. An image gets the same line: Claude, Codex and
+   * OpenCode ingest it natively as well; Grok ingests nothing and reads the
+   * path. `decide` refuses an answer whose file no longer resolves before this
+   * runs, so every line names a real path.
    */
   const answerMessageText = (
     questions: readonly { id: string; question: string }[],
@@ -2114,14 +2157,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (value.trim().length === 0 && attachments.length === 0) continue;
       const lines = [`${entry.question}\n${value.trim()}`.trimEnd()];
       for (const attachment of attachments) {
-        // The absolute host path, so the adapters' `Attached files:` block
-        // (§4.5) finds it already named and appends nothing; the id only when
-        // the file cannot be resolved (the send then fails as any missing
-        // attachment does). An image ref gets the same line: Claude, Codex
-        // and OpenCode ingest images natively and ignore it; Grok ingests
-        // nothing and, finding the path already named, appends nothing.
-        const named = pathById[attachment.id] ?? attachment.id;
-        lines.push(`Attached file: ${attachment.name} (${named})`);
+        lines.push(attachedFileLine(attachment.name, pathById[attachment.id]));
       }
       parts.push(lines.join("\n"));
     }
@@ -2145,21 +2181,36 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       });
       return;
     }
-    // §6.2: attachments are folded into the answer text by the host, so the
-    // adapter interface stays free of a second attachment channel.
+    // §6.2: attachments are folded into the answer by the host, so the adapter
+    // interface stays free of a second attachment channel — as the
+    // `Attached file: <name> (<absolute path>)` lines a message-mode echo
+    // prints, after the answer. `decide` refused any file that did not
+    // resolve; "(not available)" covers one that vanished since, rather than
+    // a bare name the agent cannot tell from prose.
     const folded: Record<string, unknown> = { ...answers };
     for (const [questionId, attachments] of Object.entries(attachmentsByQuestionId ?? {})) {
       if (attachments.length === 0) continue;
-      const paths: string[] = [];
+      const lines: string[] = [];
       for (const attachment of attachments) {
+        let path: string | undefined;
         try {
-          paths.push(await store.resolveAttachment(runtime.id, attachment.id));
+          path = await store.resolveAttachment(runtime.id, attachment.id);
         } catch {
-          paths.push(attachment.name);
+          path = undefined;
         }
+        lines.push(attachedFileLine(attachment.name, path));
       }
-      const base = typeof folded[questionId] === "string" ? (folded[questionId] as string) : "";
-      folded[questionId] = base.length > 0 ? `${base}\n\n${paths.join("\n")}` : paths.join("\n");
+      // A multi-select answer stays an array, its lines one more entry after
+      // the selections: every adapter matches each selection to its option
+      // (Grok reads anything unmatched as a free-text note), so joining them
+      // into one string would lose them as selections. A single answer is text.
+      const answer = folded[questionId];
+      const block = lines.join("\n");
+      folded[questionId] = Array.isArray(answer)
+        ? [...answer.filter((item): item is string => typeof item === "string"), block]
+        : typeof answer === "string" && answer.length > 0
+          ? `${answer}\n\n${block}`
+          : block;
     }
     try {
       await adapter.respondToUserInput(runtime.id, requestId, folded);
@@ -2178,29 +2229,39 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * what the client claimed". The upload hop checks the stat against the
    * *declared* mime and the command hop checks the *declared* size, so neither
    * alone closes the gap — this is the one place both are known.
+   *
+   * Resolves every ref of a turn, in order, against the thread's attachments
+   * dir and stamps the STAT'd size on it: that size is what the adapter judges
+   * native ingestion on (OpenCode's 20 MiB file-part cap). Throws
+   * `INVALID_COMMAND` for the first attachment that is gone or over its bound.
    */
-  const assertAttachmentWithinBounds = async (
+  const resolveTurnAttachments = async (
     threadId: string,
-    attachment: AttachmentRef
-  ): Promise<void> => {
-    let path: string;
-    try {
-      path = await store.resolveAttachment(threadId, attachment.id);
-    } catch {
-      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
+    refs: readonly AttachmentRef[]
+  ): Promise<AttachmentRef[]> => {
+    const resolved: AttachmentRef[] = [];
+    for (const ref of refs) {
+      let path: string;
+      try {
+        path = await store.resolveAttachment(threadId, ref.id);
+      } catch {
+        throw invalidCommand(`Attachment '${ref.name}' is not available.`);
+      }
+      let sizeBytes: number;
+      try {
+        sizeBytes = (await stat(path)).size;
+      } catch {
+        throw invalidCommand(`Attachment '${ref.name}' is not available.`);
+      }
+      const limit = ref.type === "image" ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
+      if (sizeBytes > limit) {
+        throw invalidCommand(
+          `Attachment '${ref.name}' is ${sizeBytes} bytes, over the ${limit}-byte limit.`
+        );
+      }
+      resolved.push({ ...ref, sizeBytes });
     }
-    let sizeBytes: number;
-    try {
-      sizeBytes = (await stat(path)).size;
-    } catch {
-      throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
-    }
-    const limit = attachment.type === "image" ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
-    if (sizeBytes > limit) {
-      throw invalidCommand(
-        `Attachment '${attachment.name}' is ${sizeBytes} bytes, over the ${limit}-byte limit.`
-      );
-    }
+    return resolved;
   };
 
   /**
@@ -2560,13 +2621,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // and the command bounds key on the size it declares here — so a
         // 40 MiB file uploaded as `application/octet-stream` could be sent as a
         // 1 KB "image". §6.3's rule is that the bounds hold against the file
-        // the host STAT'd, so the resolve path re-checks it.
-        const verifyAttachments = async (): Promise<void> => {
-          for (const attachment of attachments) {
-            await assertAttachmentWithinBounds(runtime.id, attachment);
-          }
-        };
-
+        // the host STAT'd: `sendTurnEffect` re-checks it on EVERY path that
+        // sends, including a turn queued behind a compaction and a message-mode
+        // answer, which a check here would miss.
         const queuedTurn: QueuedTurn = {
           messageId,
           input,
@@ -2585,20 +2642,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               runtime.queuedTurns.push(queuedTurn);
               return;
             }
-            void runEffect(runtime, async () => {
-              try {
-                await verifyAttachments();
-              } catch (error) {
-                await appendActivity(runtime, {
-                  kind: "provider.turn.start.failed",
-                  summary: "Attachment rejected",
-                  detail: describeFailure(error),
-                  requestId: queuedTurn.messageId
-                });
-                return;
-              }
-              await sendTurnEffect(runtime, queuedTurn);
-            });
+            void runEffect(runtime, () => sendTurnEffect(runtime, queuedTurn));
           }
         };
       }
@@ -2648,6 +2692,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         for (const entry of question?.questions ?? []) {
           questionTextById[entry.id] = entry.question;
         }
+        // Every attachment must still resolve. An answer naming a file the host
+        // no longer has is refused HERE, before anything is committed, so the
+        // card stays open instead of closing on an answer that can never reach
+        // the agent intact (§6.3). The paths name each file in a message-mode
+        // echo.
+        const pathById: Record<string, string> = {};
+        for (const attachment of Object.values(attachmentsByQuestionId ?? {}).flat()) {
+          try {
+            pathById[attachment.id] = await store.resolveAttachment(runtime.id, attachment.id);
+          } catch {
+            throw invalidCommand(`Attachment '${attachment.name}' is not available.`);
+          }
+        }
         const responseRequested = buildEvent(
           runtime.id,
           "thread.user-input-response-requested",
@@ -2673,15 +2730,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // below reaches `append` together or not at all — with the steer as the
         // decision's ONLY effect.
         if (question?.responseMode === "message") {
-          const pathById: Record<string, string> = {};
-          for (const attachment of Object.values(attachmentsByQuestionId ?? {}).flat()) {
-            try {
-              pathById[attachment.id] = await store.resolveAttachment(runtime.id, attachment.id);
-            } catch {
-              // Unresolvable now: the text keeps the id and the send fails
-              // like any missing attachment would (§6.3).
-            }
-          }
           const text = answerMessageText(
             question.questions,
             answers,
@@ -3903,6 +3951,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return null;
     });
 
+  const readToolOutput = async (
+    threadId: string,
+    itemId: string
+  ): Promise<ThreadItemOutputResponse | null> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      requireHead(runtime);
+      // The LOG, as for `readItem`: a call's streamed chunks are the rows the
+      // per-agent windows evict first, and the wire caps each one (§5.6).
+      if (store.readToolOutput) {
+        return store.readToolOutput(threadId, itemId);
+      }
+      return joinToolOutput((await store.readAll(threadId)).events, itemId);
+    });
+
   const readTurnDiff = async (
     threadId: string,
     turnCount: number,
@@ -4972,6 +5035,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     readHistory,
     searchThreads,
     readItem,
+    readToolOutput,
     readTurnDiff,
     summary,
     subscribe,
@@ -5038,14 +5102,6 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
     title: string;
   }>;
 }
-
-/**
- * The prefix the client puts on the turn it sends when the user clicks
- * Implement. Mirrors `PLAN_IMPLEMENTATION_PROMPT_PREFIX` in
- * `packages/ui/src/lib/agent-chat/entries.logic.ts`; the host cannot import
- * from the UI package, so the literal is pinned here and in a test.
- */
-export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
 
 /**
  * §3.3's orphan predicate: a turn was in flight, or a continuation was
@@ -5411,11 +5467,7 @@ function hasActionableProposedPlan(runtime: ThreadRuntime): boolean {
   }
   for (let index = latestPlanIndex + 1; index < items.length; index += 1) {
     const item = items[index]!;
-    if (
-      item.kind === "message" &&
-      item.role === "user" &&
-      item.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
-    ) {
+    if (item.kind === "message" && item.role === "user" && isPlanImplementationMessage(item.text)) {
       return false;
     }
   }

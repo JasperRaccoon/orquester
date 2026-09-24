@@ -1,226 +1,140 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { z } from "zod";
-import type { UsageResponse } from "@orquester/api";
-import { FsSandboxError } from "@orquester/config/fs";
-import { SessionError } from "../sessions.ts";
-import { TodoError } from "../todos.ts";
-import { AmbiguousTab, TabNotFound, TerminalControl, ToolError } from "./terminal-control.ts";
+import { CallToolRequestSchema, ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { DaemonApi } from "./daemon-api.ts";
+import { ToolError } from "./errors.ts";
 import type { FsTools } from "./fs-tools.ts";
+import { clipText, MAX_ECHO_CHARS, ok, toSafeToolError } from "./result.ts";
 import type { TodoTools } from "./todo-tools.ts";
+import type { ToolContext, ToolDef } from "./tool.ts";
+import { catalogTools } from "./tools/catalog.ts";
+import { fileTools } from "./tools/files.ts";
+import { messageTools } from "./tools/messages.ts";
+import { outputTools } from "./tools/output.ts";
+import { requestTools } from "./tools/requests.ts";
+import { searchTools } from "./tools/search.ts";
+import { sessionTools } from "./tools/sessions.ts";
+import { todoTools } from "./tools/todos.ts";
+import { usageTools } from "./tools/usage.ts";
+import { watchTools } from "./tools/watch.ts";
 
-const MCP_BODY_LIMIT = 8 * 1024 * 1024;
+/** 16 MiB: room for inline base64 attachments (spec §8.2). */
+const MCP_BODY_LIMIT = 16 * 1024 * 1024;
 
 export interface McpDeps {
-  control: TerminalControl;
+  /** Built per request with the caller's own `Authorization` header, so every daemon call is authorised as the caller (spec §4.2). */
+  createApi: (authorization: string | undefined) => DaemonApi;
   todos: TodoTools;
   files: FsTools;
-  getUsage: (force: boolean) => Promise<UsageResponse>;
+  now?: () => number;
 }
 
-/** Map any thrown error to an MCP isError result with a SAFE message (no path/stack leak). */
-export function toSafeToolError(err: unknown): { content: { type: "text"; text: string }[]; isError: true } {
-  let message: string;
-  if (err instanceof TabNotFound || err instanceof AmbiguousTab || err instanceof ToolError) {
-    message = err.message; // terminal-control's own — crafted safe (titles/ids, limits)
-  } else if (err instanceof SessionError) {
-    message = err.message; // e.g. 'Registry entry "claude" is not available.' — safe
-  } else if (err instanceof TodoError) {
-    message = err.message;
-  } else if (err instanceof FsSandboxError) {
-    message = "Path is not allowed (outside the sandbox)."; // NEVER the raw path
-  } else {
-    console.error("[mcp] unexpected tool error", err); // detail server-side only
-    message = "Internal error handling the tool call.";
-  }
-  return { content: [{ type: "text", text: message }], isError: true };
-}
+export const SERVER_VERSION = "2.0.0";
 
-/** JSON text content for a successful tool result. */
-function ok(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
-}
-
-const sel = {
-  workspace: z.string().optional(),
-  project: z.string().optional(),
-  tab: z.string().optional(),
-  tabId: z.string().optional(),
-};
 /**
- * Concise "skill hint" surfaced in the `initialize` result. Kept SHORT on purpose:
- * Claude Code only surfaces server instructions when tool-search is on, and truncates
- * them at ~2 KB — so this is a high-level pointer, and the load-bearing how-to lives in
- * each tool's `description` (PROMPT_HINT), the channel that reaches the model in every
- * config. Keep the most critical rules first and the whole thing under 2 KB.
+ * ≤ 2 KB: Claude Code truncates server instructions around there (and surfaces them only with tool
+ * search on), so every load-bearing rule is also in the description of the tool it governs.
  */
-export const SERVER_INSTRUCTIONS = `Orquester terminal-control drives Orquester's terminal & coding-agent tabs, addressed by (workspace,project,tab) or tabId. Each tool's description carries the detailed how-to; the load-bearing rules:
-• Read the tab (read_terminal, or send_and_wait's \`text\`) before AND after acting. settled:true means the pane went quiet, NOT that your input was accepted — judge from the text. One key per send_keys, read between.
-• Answer an interactive MENU (numbered options under a \`❯\` cursor) by option NUMBER; a MULTI-select ("[ ]" checkboxes) only TOGGLES on a number, so toggle the ones you want then press ["Tab"] to reach the UNNUMBERED "Submit"/"Next" row (never a number, and NOT the "Type something" option). In a multi-question batch (Question N of M) answer EVERY question before the final "Submit answers"; never submit early.
-• NEVER send ["Escape"] to a menu/question you mean to answer — it cancels it (declining the whole batch at once) and drops you to the input box, so your next write becomes a stray message.
-• A plain \`❯\` box with no numbered options is a text prompt: write_input with submit:true (a lone \`❯\` is empty — ghost/placeholder hints are filtered from your read). Numbered lists inside the agent's prose are NOT menus — reply with a normal message.
-• Beyond terminals: TODO lists are live in the UI (toggle_todo_item is atomic); list_files/read_file are sandboxed with byte paging; wait_for_attention catches bell/exit attention; get_usage reports quota — never loop refresh:true.`;
+export const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) exactly like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent), read_tool_output a tool row's whole output (its outputItemId); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
 
-export const PROMPT_HINT =
-  " Interactive MENU (numbered options + `❯` + an 'Esc to cancel' hint)? SINGLE-select: write_input the option NUMBER (or one send_keys arrow, then Enter). MULTI-select ('[ ]' checkboxes): a NUMBER only TOGGLES that option — toggle the ones you want (read between), then send_keys ['Tab'] to reach Submit/Next; the finish row is UNNUMBERED, so never a number and NOT the 'Type something' option. In a multi-question batch (Question N of M) answer EVERY question; at the final Review pick 'Submit answers' only when none remain unanswered. NEVER send Escape to a question you mean to answer: it cancels the whole batch and your next write becomes a stray message. Plain `❯` box (no numbered options): write_input with submit:true. Judge from the screen text, not `settled`.";
-
-export const ATTENTION_HINT =
-  " attention is WHY the tab wants you: 'needs-input' / 'finished' come from the agent's own hooks (claude/codex/opencode), 'bell' from a terminal BELL, null = nothing pending — read_terminal next and answer. Agents without hook coverage and plain shells only ever raise 'bell'; for non-attention quiescence use wait_for_idle.";
-
-export const READ_FILE_DESC =
-  "Read a text file inside the workspace sandbox. Path may be absolute or relative to the sandbox root. Supports byte-offset paging with offset/maxBytes; default window is 64KB (65536 bytes), max 256KB. truncated:true means advance offset and read again. Binary files are refused.";
-
-export const GET_USAGE_DESC =
-  "Report Claude/Codex/Grok subscription quota. Percent values are USED from 0-100; session is rolling 5h and weekly is 7d (Grok reports only a weekly credit pool), and either window may be null. Cache is fresh for about 5min. An absent agent means not logged in. A present agent with null windows and stale:true means logged in but no reading yet. Freshness is per-agent asOf/ageMinutes. refresh:true may still return last-known data due to backoff. NEVER call in a loop with refresh:true.";
-
-export function projectUsage(res: UsageResponse, now: number) {
-  return {
-    agents: res.agents.map((agent) => {
-      const asOfMs = agent.asOf ? Date.parse(agent.asOf) : Number.NaN;
-      return {
-        id: agent.id,
-        available: agent.available,
-        stale: agent.stale,
-        plan: agent.plan,
-        session: agent.session,
-        weekly: agent.weekly,
-        asOf: agent.asOf,
-        ageMinutes: Number.isNaN(asOfMs)
-          ? undefined
-          : Math.max(0, Math.round((now - asOfMs) / 60000)),
-      };
-    }),
-  };
+/** Every tool, in tools/list order (spec §7.10: 31). */
+export function allTools(): ToolDef[] {
+  return [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools];
 }
 
-/** Build a per-request McpServer with all tools bound to injected deps. */
-function buildServer(deps: McpDeps, signal: AbortSignal): McpServer {
-  const { control, todos, files, getUsage } = deps;
-  const server = new McpServer(
-    { name: "orquester", version: "1.1.0" },
-    { instructions: SERVER_INSTRUCTIONS }
-  );
-  const tool = (
-    name: string,
-    description: string,
-    schema: Record<string, z.ZodTypeAny>,
-    run: (args: any) => unknown | Promise<unknown>
-  ) =>
-    server.registerTool(name, { description, inputSchema: schema }, async (args: any) => {
-      try {
-        return ok(await run(args));
-      } catch (e) {
-        return toSafeToolError(e);
-      }
-    });
+/** How many refused fields an INVALID_ARGUMENT names before "…". */
+const MAX_NAMED_ISSUES = 5;
+/**
+ * The most one refused field's text takes, and the most its path takes within it. zod's words can echo the caller's
+ * input — the value an enum received, a strict object's unknown keys, a record's key in the path — and a 2 MiB value
+ * must not make a 2 MiB error. The path is cut on its own, so the reason after it still shows.
+ */
+const MAX_ISSUE_CHARS = 200;
+const MAX_ISSUE_PATH_CHARS = 100;
 
-  tool("list_workspaces", "List workspaces.", {}, async () =>
-    (await control.listWorkspacesProjected()).map((w) => ({
-      name: w.name,
-      projectCount: w.projectCount,
-      isArchived: w.isArchived ?? false
-    }))
-  );
-  tool("list_projects", "List a workspace's projects.", { workspace: z.string() }, async (a) =>
-    (await control.listProjectsProjected(a.workspace)).map((p) => ({
-      name: p.name,
-      path: p.path,
-      isArchived: p.isArchived ?? false
-    }))
-  );
-  tool("list_tabs", "List a project's tabs (sessions).", { workspace: z.string(), project: z.string() }, (a) =>
-    control.listTabs({ workspace: a.workspace, project: a.project })
-  );
-  tool("list_launchers", "List launchable shells/agents (valid refIds for create_tab).", {}, () =>
-    control.listLaunchers()
-  );
-  tool("read_terminal", "Read a tab's clean rendered screen text." + PROMPT_HINT,
-    { ...sel, lines: z.number().int().optional() },
-    (a) => control.readTerminal(a, { lines: a.lines })
-  );
-  tool("write_input", "Type text into a tab; submit:true appends Enter. Use for literal shortcut keys (1, y)." + PROMPT_HINT,
-    { ...sel, data: z.string(), submit: z.boolean().optional() },
-    (a) => control.writeInput(a, a.data, { submit: a.submit })
-  );
-  tool("send_keys", "Send named/control keys to a tab (Enter, C-c, Up, Space, Tab, Escape…). One key at a time; read between." + PROMPT_HINT,
-    { ...sel, keys: z.array(z.string()) },
-    (a) => control.sendKeys(a, a.keys)
-  );
-  tool("send_and_wait", "Write input, then block until the pane is quiet (or timeout). Inspect `text` for a prompt regardless of `settled`." + PROMPT_HINT,
-    { ...sel, data: z.string(), submit: z.boolean().optional(), idleMs: z.number().int().optional(), timeoutMs: z.number().int().optional(), lines: z.number().int().optional() },
-    (a) => control.sendAndWait(a, a.data, { submit: a.submit, idleMs: a.idleMs, timeoutMs: a.timeoutMs, lines: a.lines, signal })
-  );
-  tool("wait_for_idle", "Block until the pane is quiet (no write). The re-invoke path after a settled:false." + PROMPT_HINT,
-    { ...sel, idleMs: z.number().int().optional(), timeoutMs: z.number().int().optional(), lines: z.number().int().optional() },
-    (a) => control.waitForIdle(a, { idleMs: a.idleMs, timeoutMs: a.timeoutMs, lines: a.lines, signal })
-  );
-  tool("create_tab", "Launch a new tab (shell/agent from list_launchers) in a project. cwd is sandboxed.",
-    { workspace: z.string(), project: z.string(), refId: z.string(), title: z.string().optional(), cwd: z.string().optional() },
-    (a) => control.createTab({ workspace: a.workspace, project: a.project }, { refId: a.refId, title: a.title, cwd: a.cwd })
-  );
-  tool("close_tab", "Close a tab.", sel, (a) => control.closeTab(a));
-  tool("list_todos",
-    "List a workspace's (project's, if given) shared todo lists — the human sees them live in the UI.",
-    { workspace: z.string(), project: z.string().optional() },
-    (a) =>
-    todos.list({ workspace: a.workspace, project: a.project })
-  );
-  tool("create_todo",
-    "Create a shared todo list in a workspace (or project). Body starts empty — fill it with update_todo.",
-    { workspace: z.string(), project: z.string().optional(), name: z.string() },
-    (a) =>
-    todos.create({ workspace: a.workspace, project: a.project }, a.name)
-  );
-  tool("update_todo",
-    "Rename a todo list and/or replace its whole markdown body ('- [ ] item' lines). To tick ONE item use toggle_todo_item (atomic — no clobber).",
-    { id: z.string(), name: z.string().optional(), body: z.string().optional() },
-    (a) =>
-    todos.update(a.id, { name: a.name, body: a.body })
-  );
-  tool("delete_todo", "Delete a todo.", { id: z.string() }, (a) => todos.remove(a.id));
-  tool("toggle_todo_item",
-    "Atomically check/uncheck one task item by 1-based index or exact text; omit checked to flip. Prefer this over update_todo for ticks.",
-    { id: z.string(), item: z.union([z.string(), z.number().int()]), checked: z.boolean().optional() },
-    (a) =>
-    todos.toggleItem(a.id, a.item, a.checked)
-  );
-  tool("wait_for_attention",
-    "Block until a watched tab needs you (agent needs-input/finished, bell, or exit). workspace+project watches every running tab; add tab/tabId for one. Already-flagged tabs return instantly; tabs:[] on timeout." + ATTENTION_HINT + PROMPT_HINT,
-    { ...sel, timeoutMs: z.number().int().optional() },
-    (a) =>
-      control.waitForAttention(
-        { workspace: a.workspace, project: a.project, tab: a.tab, tabId: a.tabId },
-        { timeoutMs: a.timeoutMs, signal }
-      )
-  );
-  tool("list_files",
-    "List files/directories inside the workspace sandbox. Results are capped at 500 entries.",
-    { path: z.string() },
-    (a) => files.listFiles(a.path)
-  );
-  tool("read_file",
-    READ_FILE_DESC,
-    { path: z.string(), offset: z.number().int().optional(), maxBytes: z.number().int().optional() },
-    (a) => files.readFileWindow(a.path, { offset: a.offset, maxBytes: a.maxBytes })
-  );
-  tool("get_usage",
-    GET_USAGE_DESC,
-    { refresh: z.boolean().optional() },
-    async (a) => projectUsage(await getUsage(a.refresh === true), Date.now())
-  );
+/** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
+export function argumentProblems(toolName: string, error: z.ZodError): string {
+  const oneLine = (text: string) => text.replace(/\s+/g, " ");
+  const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
+    const path = issue.path.length ? clipText(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
+    return clipText(oneLine(`${path}: ${issue.message}`), MAX_ISSUE_CHARS);
+  });
+  const more = error.issues.length > MAX_NAMED_ISSUES ? "; …" : "";
+  return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`;
+}
 
+/**
+ * A tool's arguments as tools/call parses them: the tool's own schema, STRICT. zod's default strips a key the schema
+ * does not name, so a misspelled optional argument (`planmode` for `planMode`) was dropped and silently took its
+ * default; strict, it is refused, and argumentProblems names it. tools/list already promised as much: the SDK's
+ * converter advertises `additionalProperties: false` on every tool. Only the top level changes — a nested object keeps
+ * its own mode (an attachment is strict already).
+ */
+export function argumentsSchema(tool: ToolDef): z.ZodTypeAny {
+  return z.object(tool.input).strict();
+}
+
+/**
+ * A per-request McpServer with every tool bound to the caller's DaemonApi. The registrations are what `tools/list`
+ * serves; `tools/call` is our own handler, installed over the SDK's through its public `server.setRequestHandler`: the
+ * SDK answers an argument the schema refuses with its own text, outside spec §4.5's envelope. Ours parses the
+ * arguments ONCE with `argumentsSchema` (defaults applied; an unknown key refused; no `arguments` at all is `{}`),
+ * answers a refusal as INVALID_ARGUMENT naming the fields, and turns anything `run` throws into a coded isError result.
+ * An unknown tool is deliberately the JSON-RPC InvalidParams error (−32602), as the MCP spec has it: SDK 1.29's own
+ * handler raises the same error but catches it into an `isError` tool result. What else that handler checks is skipped
+ * on purpose: a tool's `enabled` flag (no tool is ever disabled), task support and output schemas (no tool declares
+ * either).
+ */
+export function buildServer(deps: McpDeps, authorization: string | undefined, signal: AbortSignal): McpServer {
+  const server = new McpServer({ name: "orquester", version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
+  const ctx: ToolContext = { api: deps.createApi(authorization), todos: deps.todos, files: deps.files, signal, now: deps.now ?? (() => Date.now()) };
+  const call = async (tool: ToolDef, args: unknown) => {
+    try {
+      return ok(await tool.run(args as never, ctx));
+    } catch (error) {
+      return toSafeToolError(error);
+    }
+  };
+  const tools = new Map<string, { tool: ToolDef; schema: z.ZodTypeAny }>();
+  for (const tool of allTools()) {
+    tools.set(tool.name, { tool, schema: argumentsSchema(tool) });
+    // Never invoked — the tools/call handler below replaces the SDK's — but it would answer the same way.
+    server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.input, annotations: tool.annotations }, (args: Record<string, unknown>) => call(tool, args));
+  }
+  server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const entry = tools.get(request.params.name);
+    // The name is the caller's text, of any length: quoted back capped, as every refusal quotes a caller's value.
+    if (!entry) throw new McpError(ErrorCode.InvalidParams, `Tool ${clipText(request.params.name, MAX_ECHO_CHARS)} not found`);
+    const parsed = await entry.schema.safeParseAsync(request.params.arguments ?? {});
+    if (!parsed.success) return toSafeToolError(new ToolError("INVALID_ARGUMENT", argumentProblems(entry.tool.name, parsed.error)));
+    return call(entry.tool, parsed.data);
+  });
   return server;
 }
 
-/** Mount POST /mcp (Streamable-HTTP, stateless). Caller registers this ONLY on the HTTP transport. */
+/** What the SDK's own stateless examples answer for the two methods a stateless server does not serve. */
+const METHOD_NOT_ALLOWED = { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null };
+
+/**
+ * Mount `POST /mcp` (Streamable HTTP, stateless, JSON responses). The caller registers this ONLY on
+ * the HTTP transport, behind the global bearer hook: the unix socket is unauthenticated.
+ */
 export function registerMcp(app: FastifyInstance, deps: McpDeps): void {
   app.post("/mcp", { bodyLimit: MCP_BODY_LIMIT }, async (request, reply) => {
-    const ctrl = new AbortController(); // cancels in-flight waits on disconnect
-    const server = buildServer(deps, ctrl.signal);
+    // A client gone before this point has had its 'close' already, and it never fires again: nothing would abort a wait
+    // started for it, and nothing will read the answer. Do no work for it (hijacked, so Fastify sends nothing either).
+    if (reply.raw.destroyed) {
+      reply.hijack();
+      return;
+    }
+    const ctrl = new AbortController(); // aborts in-flight waits when the client goes away
+    const server = buildServer(deps, request.headers.authorization, ctrl.signal);
+    // The transport answers 406 unless Accept lists both application/json and text/event-stream.
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
-      enableJsonResponse: true,
+      enableJsonResponse: true
     });
     reply.hijack();
     reply.raw.on("close", () => {
@@ -239,4 +153,8 @@ export function registerMcp(app: FastifyInstance, deps: McpDeps): void {
       reply.raw.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null }));
     }
   });
+  // No sessions and no server-initiated stream: answer the MCP spec's 405 rather than the daemon's JSON 404.
+  const notAllowed = async (_request: FastifyRequest, reply: FastifyReply) => reply.code(405).header("allow", "POST").send(METHOD_NOT_ALLOWED);
+  app.get("/mcp", notAllowed);
+  app.delete("/mcp", notAllowed);
 }

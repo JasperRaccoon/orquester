@@ -283,7 +283,10 @@ events from replayed history (§6.3).
 - `toThreadSnapshot` → `ThreadSnapshotPayload.goal: ThreadGoal | null` (optional on the type, for
   older hosts). The client's snapshot adoption sets `state.goal` from it (`?? null`).
 - `fold-snapshot.ts`: `serializeFoldState`/`deserializeFoldState` carry `goal`;
-  **`FOLD_SNAPSHOT_VERSION` 2 → 3** (the fold now produces a field it did not before). A stored
+  **`FOLD_SNAPSHOT_VERSION` 3 → 4** (the fold now produces a field it did not before; amended
+  2026-09-24 at the merge with `origin/main`, whose legacy compaction marker retention had taken 3
+  in the meantime — the two bumps are distinct fold changes, so neither may reuse the other's
+  number). A stored
   goal that the goal parser does not give back unchanged rejects the whole snapshot (amended
   2026-09-24): a cache miss, re-derived from the log — the cache rule, never a silent `null`.
 - Determinism: snapshot + tail must equal the whole-log fold at every split, goal included.
@@ -812,12 +815,42 @@ As built (amended 2026-09-24; `composer/composer-menu.ts`, `composer/composer-su
   (`resolveFollowUpDisposition`), and an open approval or question card does not hold it back
   (`pendingRequestBlocksSend`) — the same rules as the chip's actions.
 
+### 8.6 The Orquester MCP (amended 2026-09-24, at the merge with `origin/main`)
+
+The Orquester MCP (`apps/daemon/src/mcp/`, `docs/orquester-mcp.md`), built in parallel, drives chat
+sessions the way the GUI does, so goals reach it as the GUI shows them:
+
+- **`send_message`** recognises a host `/goal` by this design's rules — `isGoalCommandText` and
+  `capabilities.goals.command === "host"`, the capability read through `parseGoalSupport` (both in
+  `@orquester/api`, shared with the host's parser and the composer). It posts it as a turn, as the
+  composer does, lets it past an open request (`pendingRequestBlocksSend`), refuses one with
+  attachments before any upload, and waits for NO turn — none starts (§5.1). It waits for the
+  host's answer row instead — a `goal.status`, a visible `goal.updated`, or a `goal.command.failed`;
+  ≤ 15 s once the session is up, half a second for a pause of a paused goal or a resume of an active
+  one — and returns it as `answer` with `outcome: "goal"`, or `"failed"` for a failed command; a
+  command that changes nothing writes no row and returns without one, with a hint. While the
+  capabilities cannot be read, a `/goal` is refused: which side takes it is theirs to say.
+- **Turn waits** never end on a turn that settles while the goal continues: the `goal-continuing`
+  rung (§4.7) is not an outcome, so a message steering a continuing goal waits until the goal stops
+  or the timeout. `wait_for_session` needs no change: the rung raises no attention.
+- **`read_transcript`** shows the timeline's goal rows as `info` (a failed goal and a failed command
+  as `error`), and never a `progress` tick (§8.4).
+- **Views**: a session carries `chat.goal` — the summary's `{objective, status, continuing}` in a
+  list (objective cut to 200), the fold's goal in a detail (a finished one where the provider's last
+  update still carries it; `continuing` only beside `active`, the summary trailing the snapshot by a
+  poll) — and an agent its `supports.goals`.
+- **`update_session`** refuses an account switch while the goal continues (§5.5) — judged on the
+  summary and on the snapshot just read, so a stale "continuing" after a pause does not refuse —
+  before writing anything, and advises `interrupt_session` (a pause alone lets the running turn
+  finish); `interrupt_session` and `compact_session` pass the host's goal rules through (§5.6).
+
 ## 9. Compatibility
 
 - Additive only: no new domain event type, new optional fields, a new activity kind. An older build
   folds `goal.updated` as an ordinary activity and renders it as a generic row with its summary; an
   older client ignores `goal` on snapshots and summaries.
-- `FOLD_SNAPSHOT_VERSION` 3 invalidates every `state.json` once (re-derived from the log).
+- `FOLD_SNAPSHOT_VERSION` 4 invalidates every `state.json` once (re-derived from the log;
+  amended 2026-09-24: 4, not 3 — §4.4).
 - The head's `resumeGoalAfterRestart` (§5.5) is one more optional `meta.json` field, ignored by an
   older build (amended 2026-09-24).
 - A surviving older host during a rollout serves snapshots and summaries without `goal`: the chip

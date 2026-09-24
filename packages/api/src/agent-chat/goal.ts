@@ -338,3 +338,22 @@ export function sameGoalState(
     a.lastCheck === b.lastCheck
   );
 }
+
+// ---------------------------------------------------------------------------
+// The typed command (§5.1)
+// ---------------------------------------------------------------------------
+
+const GOAL_COMMAND_PATTERN = /^\/goal(?:\s|$)/i;
+
+/**
+ * Whether typed text is a `/goal …` command (goals §5.1): the trimmed text is
+ * `/goal` followed by whitespace or nothing, in any case — `/goals` is not
+ * one. Where goals are the host's to parse (`capabilities.goals.command ===
+ * "host"`, Codex) such a text is a goal command and never a prompt; where the
+ * provider parses it (Claude, Grok) it is an ordinary one. The ONE recognition
+ * rule: the host's parser, the composer's send path and the MCP's
+ * `send_message` all decide by it.
+ */
+export function isGoalCommandText(text: string): boolean {
+  return GOAL_COMMAND_PATTERN.test(text.trim());
+}

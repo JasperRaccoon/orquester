@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -9,6 +12,7 @@ import {
   decodeHistoryCursor,
   encodeHistoryCursor,
   foldThread,
+  type AttachmentRef,
   type DomainEvent,
   type RuntimeEvent,
   type ThreadActivityItem,
@@ -16,6 +20,7 @@ import {
   type ThreadItem
 } from "@orquester/api/agent-chat";
 
+import type { SendTurnInput } from "../adapter.ts";
 import { appendAttachmentPathLines } from "../adapters/attachment-lines.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { isAgentChatCommandError } from "./errors.ts";
@@ -1540,7 +1545,8 @@ describe("orchestrator — answering a question (§6.2)", () => {
 
     const call = host.adapter.calls.find((entry) => entry.kind === "respondToUserInput");
     const answers = (call?.detail as { answers: Record<string, string> }).answers;
-    assert.match(answers["Which branch?"] ?? "", /^main\n\n\/tmp\/notes\.md$/);
+    // The same `Attached file: <name> (<absolute path>)` line a message-mode echo prints (§6.2).
+    assert.match(answers["Which branch?"] ?? "", /^main\n\nAttached file: notes\.md \(\/tmp\/notes\.md\)$/);
 
     // The question text is persisted so an answered card renders without the
     // original request.
@@ -1556,37 +1562,33 @@ describe("orchestrator — answering a question (§6.2)", () => {
     await host.stop();
   });
 
-  it("a message-mode answer names each attachment by PATH, so the adapters' Attached files block has nothing to add", async () => {
+  it("keeps a multi-select answer's selections when files ride along, and the array when none do", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
-    await openQuestion(host, "q-2", { dismissible: true });
+    await openQuestion(host, "q-multi", { dismissible: false });
     await host.settle();
     const ref = await host.store.putAttachment({
       threadId,
-      name: "q3.xlsx",
-      sourcePath: "/tmp/q3.xlsx"
+      name: "notes.md",
+      sourcePath: "/tmp/notes.md"
     });
 
     await host.orchestrator.command(threadId, "answer", {
       commandId: cmd(),
-      requestId: "q-2",
-      answers: { "Which branch?": "this one" },
+      requestId: "q-multi",
+      answers: { "Which branch?": ["main", "dev"], "Which remote?": ["origin", "upstream"] },
       attachmentsByQuestionId: { "Which branch?": [ref] }
     });
     await host.settle();
 
-    const sent = (host.store.logs.get(threadId) ?? []).find(
-      (event) => event.type === "thread.message-sent" && event.payload.messageId === "async-answer:q-2"
-    ) as Extract<DomainEvent, { type: "thread.message-sent" }> | undefined;
-    assert.ok(sent);
-    const path = await host.store.resolveAttachment(threadId, ref.id);
-    assert.equal(sent.payload.text, `Which branch?\nthis one\nAttached file: q3.xlsx (${path})`);
-    // The line already names the path, so the shared block appends nothing.
-    assert.equal(
-      appendAttachmentPathLines(sent.payload.text, [{ name: "q3.xlsx", path }]),
-      sent.payload.text
-    );
+    const call = host.adapter.calls.find((entry) => entry.kind === "respondToUserInput");
+    const answers = (call?.detail as { answers: Record<string, unknown> }).answers;
+    // The selections survive as the array, so an adapter still matches each to
+    // its option, and the file's line rides as one more entry after them.
+    assert.deepEqual(answers["Which branch?"], ["main", "dev", "Attached file: notes.md (/tmp/notes.md)"]);
+    // No file on this one: the array reaches the adapter untouched.
+    assert.deepEqual(answers["Which remote?"], ["origin", "upstream"]);
     await host.stop();
   });
 });
@@ -1746,13 +1748,19 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     await host.stop();
   });
 
-  it("hands the registry entry's launch args to startSession", async () => {
+  it("startSession receives no launch args", async () => {
+    // Registry `args` are the TERMINAL launcher's flags
+    // (`--dangerously-skip-permissions`, `--effort …`, `--yolo`); a chat
+    // launch never sees them. Permissions come only from `runtimeMode`.
     const host = createTestHost();
     const threadId = await host.createThread();
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
     await host.settle();
-    // The harness declares none, so the field is absent rather than empty.
-    assert.equal(host.adapter.lastStart?.launchArgs, undefined);
+    const start = host.adapter.lastStart;
+    assert.ok(start !== null, "the turn started a session");
+    // No key carrying argv under any spelling — the mode is the only lever.
+    assert.deepEqual(Object.keys(start).filter((key) => /args$/i.test(key)), []);
+    assert.equal(start.runtimeMode, "approval-required");
     await host.stop();
   });
 });
@@ -2780,6 +2788,211 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
     assert.deepEqual(index.searches, [{ q: "hello", limit: 2, projectPath: "/work/project" }]);
     assert.deepEqual(host.orchestrator.searchThreads({ q: "   ", limit: 2 }).hits, []);
     assert.equal(index.searches.length, 1, "a blank query never reaches the index");
+    await host.stop();
+  });
+});
+
+describe("orchestrator — attachment delivery (§4.1, §6.3)", () => {
+  /**
+   * Real files, because the turn effect stats every attachment before it
+   * sends (§6.3). The fake store maps an id straight to its `sourcePath`, so
+   * `<dir>/<name>` is also the path `resolveAttachment` answers (and a
+   * message-mode echo names).
+   */
+  async function withFiles(
+    files: Record<string, number>,
+    run: (paths: Record<string, string>) => Promise<void>
+  ): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "agent-host-lines-"));
+    try {
+      const paths: Record<string, string> = {};
+      for (const [name, sizeBytes] of Object.entries(files)) {
+        const path = join(dir, name);
+        await writeFile(path, Buffer.alloc(sizeBytes, 0x61));
+        paths[name] = path;
+      }
+      await run(paths);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const sentTurns = (host: TestHost): SendTurnInput[] =>
+    host.adapter.calls
+      .filter((call) => call.kind === "sendTurn")
+      .map((call) => call.detail as SendTurnInput);
+
+  const userMessages = (host: TestHost, threadId = "thread-1") =>
+    (host.store.logs.get(threadId) ?? []).filter(
+      (event): event is Extract<DomainEvent, { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent"
+    );
+
+  it("hands the adapter every attachment with the size the host STAT'd, and the text as typed", async () => {
+    await withFiles({ "shot.png": 5, "report.pdf": 12 }, async (paths) => {
+      const host = createTestHost();
+      const threadId = await host.createThread();
+      const shot = await host.store.putAttachment({
+        threadId,
+        name: "shot.png",
+        mimeType: "image/png",
+        sourcePath: paths["shot.png"]!
+      });
+      const report = await host.store.putAttachment({
+        threadId,
+        name: "report.pdf",
+        mimeType: "application/pdf",
+        sourcePath: paths["report.pdf"]!
+      });
+      // The client DECLARES a size; the host stats the file, and that size wins.
+      const image: AttachmentRef = {
+        type: "image",
+        id: shot.id,
+        name: "shot.png",
+        mimeType: "image/png",
+        sizeBytes: 999
+      };
+
+      await host.orchestrator.command(threadId, "turn", {
+        commandId: cmd(),
+        input: "summarise",
+        attachments: [image, report]
+      });
+      await host.settle();
+
+      // The host adds nothing to the text: an adapter names whatever it does
+      // not ingest natively in its own `Attached files:` block.
+      assert.equal(host.adapter.lastTurn?.input, "summarise");
+      assert.deepEqual(host.adapter.lastTurn?.attachments, [
+        { ...image, sizeBytes: 5 },
+        { type: "file", id: report.id, name: "report.pdf", mimeType: "application/pdf", sizeBytes: 12 }
+      ]);
+      assert.equal(userMessages(host).at(-1)?.payload.text, "summarise");
+      await host.stop();
+    });
+  });
+
+  it("a steer resolves and stats its files too", async () => {
+    await withFiles({ "notes.md": 4 }, async (paths) => {
+      const host = createTestHost();
+      const threadId = await host.createThread();
+      await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "first" });
+      await host.settle();
+      const notes = await host.store.putAttachment({
+        threadId,
+        name: "notes.md",
+        sourcePath: paths["notes.md"]!
+      });
+      await host.orchestrator.command(threadId, "turn", {
+        commandId: cmd(),
+        input: "steer",
+        attachments: [notes]
+      });
+      await host.settle();
+
+      const sends = sentTurns(host);
+      assert.equal(sends.length, 2);
+      assert.equal(sends[1]?.input, "steer");
+      assert.equal(sends[1]?.attachments[0]?.sizeBytes, 4);
+      const starts = (host.store.logs.get(threadId) ?? []).filter(
+        (event) => event.type === "thread.turn-start-requested"
+      );
+      assert.equal(starts.length, 1, "still a steer, not a second turn");
+      await host.stop();
+    });
+  });
+
+  it("a message-mode answer's steer carries its files, and its text already names them", async () => {
+    await withFiles({ "notes.md": 4 }, async (paths) => {
+      const host = createTestHost();
+      const threadId = await host.createThread();
+      await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+      await host.settle();
+      await openQuestion(host, "codex-async:t:2", { dismissible: true });
+      await host.settle();
+      const notes = await host.store.putAttachment({
+        threadId,
+        name: "notes.md",
+        sourcePath: paths["notes.md"]!
+      });
+
+      await host.orchestrator.command(threadId, "answer", {
+        commandId: cmd(),
+        requestId: "codex-async:t:2",
+        answers: { "Which branch?": "main" },
+        attachmentsByQuestionId: { "Which branch?": [notes] }
+      });
+      await host.settle();
+
+      const echo = `Which branch?\nmain\nAttached file: notes.md (${paths["notes.md"]})`;
+      assert.equal(host.adapter.lastTurn?.input, echo);
+      assert.equal(host.adapter.lastTurn?.attachments[0]?.sizeBytes, 4);
+      // The echo already names the path, so the adapter's block appends nothing.
+      assert.equal(
+        appendAttachmentPathLines(echo, [{ name: "notes.md", path: paths["notes.md"]! }]),
+        echo
+      );
+      const message = userMessages(host).find(
+        (event) => event.payload.messageId === "async-answer:codex-async:t:2"
+      );
+      assert.equal(message?.payload.text, echo);
+      await host.stop();
+    });
+  });
+
+  it("an answer naming a file the host no longer has is refused, and the card stays open", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(host, "q-ghost", { dismissible: false });
+    await openQuestion(host, "codex-async:t:9", { dismissible: true });
+    await host.settle();
+    const ghost = { type: "file" as const, id: "thread-1-404", name: "ghost.md", sizeBytes: 1 };
+    const logged = (host.store.logs.get(threadId) ?? []).length;
+
+    for (const requestId of ["q-ghost", "codex-async:t:9"]) {
+      await assert.rejects(
+        host.orchestrator.command(threadId, "answer", {
+          commandId: cmd(),
+          requestId,
+          answers: { "Which branch?": "main" },
+          attachmentsByQuestionId: { "Which branch?": [ghost] }
+        }),
+        (error: unknown) =>
+          isAgentChatCommandError(error) &&
+          error.code === "INVALID_COMMAND" &&
+          /ghost\.md/.test(error.message)
+      );
+    }
+    await host.settle();
+
+    assert.equal((host.store.logs.get(threadId) ?? []).length, logged, "nothing was committed");
+    assert.equal(host.adapter.calls.some((call) => call.kind === "respondToUserInput"), false);
+    assert.deepEqual(
+      host.orchestrator.summary(threadId)?.pendingRequests.map((request) => request.requestId),
+      ["q-ghost", "codex-async:t:9"],
+      "both cards are still open"
+    );
+    await host.stop();
+  });
+
+  it("a turn naming an attachment the host does not have is refused as a row, and nothing is sent", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", {
+      commandId: cmd(),
+      input: "read this",
+      attachments: [{ type: "file", id: "thread-1-404", name: "ghost.md", sizeBytes: 1 }]
+    });
+    await host.settle();
+
+    assert.equal(sentTurns(host).length, 0);
+    const refused = (host.store.logs.get(threadId) ?? []).filter(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.summary === "Attachment rejected"
+    );
+    assert.equal(refused.length, 1);
     await host.stop();
   });
 });

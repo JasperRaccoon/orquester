@@ -27,6 +27,7 @@ import {
   RECEIPTS_RING_SIZE,
   ROSTER_LIMIT,
   RUNTIME_MODES,
+  THREAD_ITEM_OUTPUT_MAX_BYTES,
   TOOL_LIFECYCLE_ITEM_TYPES,
   TRANSIENT_RUNTIME_EVENT_TYPES,
   agentChatCommandPath,
@@ -271,6 +272,9 @@ test("route builders produce the §6 paths and encode their segments", () => {
   assert.equal(agentChatRoutes.events("s1"), "/api/sessions/s1/events");
   assert.equal(agentChatRoutes.turnDiff("s1", 7), "/api/sessions/s1/turns/7/diff");
   assert.equal(agentChatRoutes.item("s1", "a/b"), "/api/sessions/s1/items/a%2Fb");
+  // A tool call's streamed output hangs off its item: the id stays one encoded segment.
+  assert.equal(agentChatRoutes.itemOutput("s1", "bgshell:t/1"), "/api/sessions/s1/items/bgshell%3At%2F1/output");
+  assert.equal(THREAD_ITEM_OUTPUT_MAX_BYTES, 8 * 1024 * 1024);
   assert.equal(agentChatRoutes.providers, "/api/agent/providers");
   assert.equal(agentChatRoutes.hostStop, "/api/agent-host/stop");
 
@@ -289,7 +293,8 @@ test("the error-code list is closed and RESUME_UNAVAILABLE is not in it", () => 
     "COMMAND_REJECTED",
     "COMPACTION_UNAVAILABLE",
     "HOST_UNAVAILABLE",
-    "INDEX_UNAVAILABLE"
+    "INDEX_UNAVAILABLE",
+    "ITEM_NOT_FOUND"
   ]);
   assert.ok(!(AGENT_CHAT_ERROR_CODES as readonly string[]).includes("RESUME_UNAVAILABLE"));
 

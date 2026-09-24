@@ -13,6 +13,8 @@
  *    outlive the component: text, the refs of the attachments whose bytes are
  *    already on the daemon, and the carried context records.
  *  - {@link loadComposerDraft} — a persisted draft turned back into chips.
+ *  - {@link persistedDraftAfterSend} — a failed send put back into a persisted
+ *    draft, when no composer shows the thread it was sent from any more.
  *  - {@link createDraftPersistScheduler} — one write per window while typing,
  *    a synchronous flush for an unmount, a tab switch or a reload.
  *
@@ -24,7 +26,11 @@
 import type { AttachmentRef, ComposerContextRecord } from "@orquester/api/agent-chat";
 
 import { EMPTY_DRAFT, type ComposerDraft } from "../../../lib/agent-chat/composer.logic";
-import { decideStagedAttachmentForRef } from "./composer-submission";
+import {
+  decideStagedAttachmentForRef,
+  draftAfterSend,
+  type ComposerSendOutcome
+} from "./composer-submission";
 import type { StagedAttachment } from "./ComposerAttachments";
 
 /** The persisted spelling of "nothing to send", re-exported for the composer. */
@@ -135,6 +141,36 @@ export function loadComposerDraft(persisted: ComposerDraft): LoadedComposerDraft
     });
   }
   return { text: persisted.text, attachments, context: [...persisted.context] };
+}
+
+/**
+ * A send that did not go out, put back into a thread's PERSISTED draft
+ * (§7.4) — for when no composer shows the thread it was sent from any more,
+ * so there is no live draft to put it back into.
+ *
+ * The restore a live draft gets, on the persisted one: loaded exactly as a
+ * composer mount loads it ({@link loadComposerDraft}), then `draftAfterSend`
+ * puts the send's text and chips back ahead of what it already held — what
+ * was typed there since stays, behind them — and the result is narrowed back
+ * for storage ({@link composerDraftToPersist}) with the draft's context
+ * records as they were. `null` when the send gives nothing back: a refusal,
+ * or a failed Implement.
+ */
+export function persistedDraftAfterSend(input: {
+  outcome: ComposerSendOutcome;
+  /** The chips the send carried, in tray order. */
+  sent: readonly StagedAttachment[];
+  /** The thread's persisted draft as it is now. */
+  persisted: ComposerDraft;
+}): ComposerDraft | null {
+  const loaded = loadComposerDraft(input.persisted);
+  const next = draftAfterSend({ outcome: input.outcome, sent: input.sent, draft: loaded });
+  if (next === null) return null;
+  return composerDraftToPersist({
+    text: next.text,
+    attachments: next.attachments,
+    context: loaded.context
+  });
 }
 
 // ---------------------------------------------------------------------------

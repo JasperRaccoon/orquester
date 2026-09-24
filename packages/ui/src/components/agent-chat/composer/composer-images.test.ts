@@ -4,7 +4,8 @@ import {
   imageOrdinal,
   imagePlaceholder,
   removeImagePlaceholder,
-  revokeImagePreviews
+  revokeImagePreviews,
+  withoutPreviews
 } from "./composer-images.ts";
 
 describe("image placeholders", () => {
@@ -37,5 +38,16 @@ describe("image placeholders", () => {
       (url) => revoked.push(url)
     );
     assert.deepEqual(revoked, ["blob:a", "blob:b"]);
+  });
+
+  it("hands chips back without their revoked preview URLs, and the rest untouched", () => {
+    type Chip = { key: string; mimeType: string; previewUrl?: string };
+    const image: Chip = { key: "a", mimeType: "image/png", previewUrl: "blob:a" };
+    const file: Chip = { key: "f", mimeType: "text/plain" };
+    const back = withoutPreviews([image, file]);
+    assert.deepEqual(back, [{ key: "a", mimeType: "image/png" }, file]);
+    assert.equal("previewUrl" in back[0]!, false, "the lazy resolve only runs for a chip with no URL");
+    assert.equal(back[1], file, "a chip with no URL is returned as it is");
+    assert.equal(image.previewUrl, "blob:a", "the sent chip itself is not mutated");
   });
 });

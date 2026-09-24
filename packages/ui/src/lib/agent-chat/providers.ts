@@ -15,11 +15,11 @@
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 
+import { parseGoalSupport } from "@orquester/api/agent-chat";
 import type {
   AdapterCapabilities,
   AdapterGoalSupport,
   AgentAdapterId,
-  GoalAction,
   ProviderAuth,
   ProviderSnapshot,
   ProviderUsageLimitsUpdate
@@ -74,9 +74,6 @@ const asArray = <T>(value: unknown): T[] => (Array.isArray(value) ? (value as T[
 const isAuthStatus = (value: unknown): value is ProviderAuth["status"] =>
   value === "authenticated" || value === "unauthenticated" || value === "unknown";
 
-/** Every chip action this client can offer (goals §4.5), in the spec's order. */
-const GOAL_ACTIONS: readonly GoalAction[] = ["continue", "pause", "resume", "clear"];
-
 /**
  * A provider's goal block, or `undefined` for none (goals §8.1).
  *
@@ -86,25 +83,10 @@ const GOAL_ACTIONS: readonly GoalAction[] = ["continue", "pause", "resume", "cle
  * text. The one leniency is per action: an action this client does not know
  * is dropped, not the block — a newer host may add one, and the ones this
  * client does know still work (goals §9's additive rule, from the reading
- * side).
+ * side). The rule is `parseGoalSupport`'s, which the MCP reads by too.
  */
 function sanitizeGoalSupport(value: unknown): AdapterGoalSupport | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const { command, actions, continuesAcrossTurns } = value;
-  if (
-    (command !== "provider" && command !== "host") ||
-    !Array.isArray(actions) ||
-    typeof continuesAcrossTurns !== "boolean"
-  ) {
-    return undefined;
-  }
-  return {
-    command,
-    actions: GOAL_ACTIONS.filter((action) => actions.includes(action)),
-    continuesAcrossTurns
-  };
+  return parseGoalSupport(value) ?? undefined;
 }
 
 /**

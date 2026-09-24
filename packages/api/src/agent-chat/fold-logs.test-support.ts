@@ -9,19 +9,22 @@
  * nested under another agent), agent-owned rows, stable-id rows replaced in
  * place over and over (`task-progress:<taskId>`, an agent's
  * `tool-progress:<taskId>`), streamed messages, message-mode questions
- * answered much later, approvals, compaction markers, turns that settle or
- * stop, rewinds, and provider goal updates — so every retention class trims
+ * answered much later, approvals, compaction markers (and, in the legacy
+ * tables only, an older log's `thread.state.changed` rows), turns that settle
+ * or stop, rewinds, and provider goal updates — so every retention class trims
  * many times. The same seed always writes the same log.
  */
 
 import { isDeepStrictEqual } from "node:util";
 
+import { isCompactionActivity } from "./compaction.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import {
   __foldCacheConsistency,
   applyDomainEvent,
   createEmptyThreadState,
   foldThread,
+  itemPositionOf,
   itemsDroppedByRetention
 } from "./fold.ts";
 import type { ThreadFoldState } from "./fold.ts";
@@ -81,6 +84,16 @@ export type FleetAction =
   | "resolve"
   /** A compaction marker, sometimes agent-owned (only the parent window exempts it). */
   | "marker"
+  /**
+   * A thread-state row as an older log wrote it, `thread.state.changed`: with
+   * `{state: "compacted"}` the settled compaction marker's legacy spelling
+   * (the parent window exempts it, as it does `context-compaction`), with any
+   * other state an ordinary row. Sometimes the previous one again, in another
+   * state: replaced in place, it moves in or out of the exemption where it
+   * stands. In no weight table but the legacy ones, so every other log stays
+   * exactly what it was.
+   */
+  | "legacyState"
   /** The turn settles (or stops: a session-liveness change) and the next one starts. */
   | "turn"
   /** A rewind to an earlier turn. */
@@ -139,6 +152,7 @@ export function fleetLog(options: FleetLogOptions): DomainEvent[] {
   const openApprovals: string[] = [];
   const recentActivityIds: string[] = [];
   let lastMessageId: string | null = null;
+  let lastStateRowId: string | null = null;
   let streaming: { id: string; agentId?: string } | null = null;
   let counter = 0;
   let turn = 0;
@@ -400,6 +414,24 @@ export function fleetLog(options: FleetLogOptions): DomainEvent[] {
         );
         break;
       }
+      case "legacyState": {
+        counter += 1;
+        const agent = random() < 0.3 ? pick(agents) : undefined;
+        const roll = random();
+        const state = roll < 0.5 ? "compacted" : roll < 0.75 ? "compacting" : "running";
+        const id: string =
+          lastStateRowId !== null && random() < 0.3 ? lastStateRowId : `state-${counter}`;
+        lastStateRowId = id;
+        appendRow(
+          activity("thread.state.changed", { state }, {
+            id,
+            summary: state === "compacted" ? "Context compacted" : `State ${state}`,
+            turnId: random() < 0.3 ? null : turnId,
+            ...(agent !== undefined ? { agentId: agent.taskId } : {})
+          })
+        );
+        break;
+      }
       case "turn": {
         events.push(
           ev("thread.session-set", {
@@ -608,6 +640,28 @@ export const GOAL_WEIGHTS: Partial<Record<FleetAction, number>> = {
   goal: 1.5
 };
 
+/**
+ * {@link LEAN_PARENT_WEIGHTS} plus an older log's thread-state rows
+ * (`legacyState`): legacy compaction markers the parent window must keep
+ * whatever their age, other states it drops like any row, and rows moved in
+ * or out of the exemption in place — small enough to restore through JSON at
+ * every split point.
+ */
+export const LEGACY_PARENT_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  ...LEAN_PARENT_WEIGHTS,
+  legacyState: 2.5
+};
+
+/**
+ * {@link FLEET_WEIGHTS} plus an older log's thread-state rows, a few of them
+ * agent-owned: an agent's legacy marker is an ordinary row of its agent's
+ * window, as its `context-compaction` marker is.
+ */
+export const LEGACY_FLEET_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  ...FLEET_WEIGHTS,
+  legacyState: 1.5
+};
+
 /** Past the message window, with streamed deltas and a few activities. */
 export const MESSAGE_WEIGHTS: Partial<Record<FleetAction, number>> = {
   parent: 2,
@@ -779,4 +833,86 @@ export function near(points: readonly number[], radius: number): (split: number)
     for (let split = point - radius; split <= point + radius; split += 1) marked.add(split);
   }
   return (split) => marked.has(split);
+}
+
+/** What retention did with a log's `thread.state.changed` rows ({@link legacyStateFate}). */
+export interface LegacyStateFate {
+  /** Parent legacy markers retention dropped — never, while the exemption holds. */
+  readonly droppedParentMarkers: number;
+  /** Agent-owned legacy markers retention dropped with their agent's window. */
+  readonly droppedAgentMarkers: number;
+  /** Rows in any other state retention dropped, as it drops any row. */
+  readonly droppedOtherStates: number;
+  /**
+   * Parent legacy markers the final window holds although a parent row
+   * positioned after it was dropped: a trim reached past them, and only the
+   * exemption kept them. A row replaced in place keeps its old position, so it
+   * counts from there, not from its latest write.
+   */
+  readonly keptPastATrim: number;
+  /**
+   * Parent rows replaced in place by a parent row on the other side of the
+   * exemption: a marker settling from another state, or the reverse — the
+   * row moves between the kept and the droppable class where it stands.
+   */
+  readonly movedInPlace: number;
+}
+
+/**
+ * Folds `events` one at a time and says what retention did with their
+ * `thread.state.changed` rows (the `legacyState` action) — what a legacy log
+ * test must show its log really exercised. Reads the rule from `compaction.ts`:
+ * this measures a log, it does not check the fold.
+ */
+export function legacyStateFate(events: readonly DomainEvent[]): LegacyStateFate {
+  let droppedParentMarkers = 0;
+  let droppedAgentMarkers = 0;
+  let droppedOtherStates = 0;
+  let movedInPlace = 0;
+  const isStateRow = (row: ThreadActivityItem): boolean => row.activityKind === "thread.state.changed";
+  const isParentRow = (row: ThreadActivityItem): boolean =>
+    typeof row.agentId !== "string" || row.agentId.length === 0;
+  // The step each row object's POSITION was taken at: the fold keeps the
+  // event's own object, and a row replaced in place keeps its old position, so
+  // its new object takes the step of the one it replaced — retention drops by
+  // position, oldest first, never by the time of a row's latest write.
+  const stepOf = new Map<ThreadActivityItem, number>();
+  let youngestDroppedParentStep = -1;
+  let state = createEmptyThreadState();
+  events.forEach((event, step) => {
+    if (event.type === "thread.activity-appended") {
+      const row = event.payload.activity;
+      const at = itemPositionOf(state, row.id);
+      const existing = at === undefined ? undefined : state.items[at];
+      stepOf.set(row, existing?.kind === "activity" ? (stepOf.get(existing) ?? step) : step);
+      if (
+        existing?.kind === "activity" &&
+        (isStateRow(existing) || isStateRow(row)) &&
+        isParentRow(existing) &&
+        isParentRow(row) &&
+        isCompactionActivity(existing) !== isCompactionActivity(row)
+      ) {
+        movedInPlace += 1;
+      }
+    }
+    state = applyDomainEvent(state, event);
+    for (const item of itemsDroppedByRetention(state)) {
+      if (item.kind !== "activity") continue;
+      if (isParentRow(item)) {
+        youngestDroppedParentStep = Math.max(youngestDroppedParentStep, stepOf.get(item) ?? -1);
+      }
+      if (!isStateRow(item)) continue;
+      if (!isCompactionActivity(item)) droppedOtherStates += 1;
+      else if (isParentRow(item)) droppedParentMarkers += 1;
+      else droppedAgentMarkers += 1;
+    }
+  });
+  const keptPastATrim = state.activities.filter(
+    (row) =>
+      isStateRow(row) &&
+      isParentRow(row) &&
+      isCompactionActivity(row) &&
+      (stepOf.get(row) ?? Number.POSITIVE_INFINITY) < youngestDroppedParentStep
+  ).length;
+  return { droppedParentMarkers, droppedAgentMarkers, droppedOtherStates, keptPastATrim, movedInPlace };
 }

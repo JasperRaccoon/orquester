@@ -313,7 +313,7 @@ older host ignores both, and a newer one re-derives from the log whatever it can
 |---|---|
 | Commands (POST, JSON, every body carries a client-minted `commandId`) | `/api/sessions/:id/{turn,interrupt,approval,answer,dismiss,revert,compact,mode,session/stop}` → `{seq}` |
 | Daemon-owned, command-shaped (NOT proxied verbatim) | `POST /api/sessions/:id/account` `{commandId, accountId}` → `{seq}` — §3.4's account switch; see the gotcha below |
-| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
+| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
 | Host level | `GET /api/agent/providers` · `POST /api/agent/providers/:id/refresh` · `POST /api/agent-host/stop` · `GET /api/agent/search?q=&limit=&projectPath=` (full-text over every open chat; 200 `indexed:false` without an index) |
 
 Everything is built in one place — `agentChatRoutes` in `packages/api/src/agent-chat/wire.ts`; use
@@ -335,8 +335,11 @@ timeline. An unmapped provider message is a `satisfies never` typecheck error an
 `runtime.warning` at runtime — never a silent drop, and never the end of a turn.
 
 **Tests and fixtures.** `pnpm test` (root) → `pnpm -r --if-present test` → `node --import tsx
---test $(find src -name '*.test.ts')` per package. Replay tests live **under `src/`** (the daemon's
-test glob only walks `src`) and read recorded real-CLI captures from
+--test $(find src -name '*.test.ts')` per package. The daemon and UI scripts also preload
+`./test/quiet-mock-timers.mjs`, which drops node:test's "The MockTimers API is an experimental
+feature" `ExperimentalWarning` — only that one, every other warning still prints — so a run's output
+stays pristine (`node --test` hands `--import` on to each file's child process). Replay tests live
+**under `src/`** (the daemon's test glob only walks `src`) and read recorded real-CLI captures from
 `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/`, each with a `capturedWith` provenance
 block and a `README.md` of protocol observations that is required reading before touching its
 adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
@@ -373,6 +376,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   CLI's complete per-block `assistant` frames carry the stream's `message_start` id, which is how
   a snapshot finds its streamed block. `inFlightTools` is keyed by index only because a tool block
   is deleted the moment its result arrives.
+- **Registry `args` are the terminal launcher's flags and never reach a chat launch** — permissions
+  come only from `runtimeMode`, `full-access` = `bypassPermissions`; effort only from the model
+  selection. (`buildRefIdIndex` in `agent-host/main.ts` carries a row's adapter and bins, never its
+  `args`; Claude's mapping is `RUNTIME_MODE_TO_PERMISSION_MODE` in `adapters/claude/launch.ts`.)
 - **`HISTORICAL_RAW_SOURCE`** (`"history.replay"`) tags every event projected out of a provider's
   *native* history on resume. A replayed row is the past: it claims no token usage and its turns
   are already settled. Anything that treats a raw frame as live must check it. A replayed user row
@@ -647,8 +654,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   upload typed it into the PTY (`composer-files.ts`). Independently, every adapter appends
   `Attached files:\n- <name>: <path>` for the refs it does not ingest natively
   (`agent-host/adapters/attachment-lines.ts`), skipping paths the text already names — Claude
-  ingests images only, Codex images by path, OpenCode image/`text/*`/pdf as `file` parts, Grok
-  nothing. Before this, Claude and Codex dropped every non-image file silently behind a comment
+  ingests images only, Codex images by path, OpenCode image/`text/*`/pdf ≤ 20 MiB as `file` parts,
+  Grok nothing. Before any adapter sees a turn, `sendTurnEffect` resolves and STATs every
+  attachment on every sending path — a steer, a turn queued behind a compaction and a message-mode
+  answer included — and stamps the real size on the ref, so §6.3's bounds and OpenCode's cap hold
+  against the file on disk. A question answer names its files as `Attached file: <name> (<path>)`
+  lines instead (a native answer after its text, a multi-select's as one more array entry), and an
+  answer naming a file that no longer resolves is refused before anything is committed. Before this, Claude and Codex dropped every non-image file silently behind a comment
   that assumed a host path line never ported from T3. Claude reads the path without an approval
   (the thread's attachments dir is an `additionalDirectories` entry); Codex and OpenCode may raise
   their own approval card for a read outside the project. Chips draw a vendored Material Icon
@@ -779,9 +791,22 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   keeps `reverting` (the composer's one `inert` reason) until the truncation is folded, then returns
   the message's text and attachment chips to the composer; the host keeps an unreferenced
   attachment for 24 h, which is what lets those chips stay valid. Esc-Esc while idle opens the same
-  picker the composer's rewind control does. Two more things that were bugs: the compaction marker
-  is exempt from the 500-row activity window (a busy thread evicted it in minutes, and the gate then
-  offered every pre-compaction message), and Claude's "compacted in between" check is decided by the
+  picker the composer's rewind control does. Which row is "the last compaction marker" is ONE rule,
+  `isSettledConversationCompaction` (`packages/api/src/agent-chat/compaction.ts`): a
+  `context-compaction` row or the legacy `thread.state.changed {state:"compacted"}`, settled (an
+  unreadable state is), and never a subagent's own (a non-blank `agentId` on the row or on its
+  payload). The thread index's `markers` rows behind a history page's `rewindable` and the MCP's
+  `revert_session` call it; the GUI's window gates compose the same parts (`isCompactionActivity`,
+  `compactionMarkerState`) over the parent timeline, whose filter also drops `timelineBypass` rows
+  (`rows.logic.ts` `isCompactedMarkerEntry`, `history.logic.ts` `hasSettledCompaction` — a change to
+  the rule must be mirrored there). They used to disagree; the index derives rows by it, so changing
+  it bumps `INDEX_SCHEMA_VERSION`, and the fold's retention exempts every parent row
+  `isCompactionActivity` names, so changing that part bumps `FOLD_SNAPSHOT_VERSION` too. Two more
+  things that were bugs: the compaction marker — either spelling, by `isCompactionActivity`; the
+  legacy one was evicted like any row until `FOLD_SNAPSHOT_VERSION` 3 — is exempt from the parent's
+  500-row activity window (a busy thread evicted it in minutes, and the gate then offered every
+  pre-compaction message; an agent's own marker stays an ordinary row of its window), and Claude's
+  "compacted in between" check is decided by the
   anchor's POSITION relative to the transcript's last `isCompactSummary` row — `preserved_messages.
   all_uuids` names the pre-compaction rows the CLI kept, never the rows written afterwards, so
   reading it as the set of reachable anchors refused every rewind after a live `/compact`. OpenCode's
@@ -812,9 +837,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   untouched by retention, `thread.reverted` and history pages, because it is the provider's state,
   not the conversation's. It rides the snapshot as `goal`, and the tab summary as `goal {objective,
   status, continuing}` only while the goal is unfinished; that new fold field is why
-  `FOLD_SNAPSHOT_VERSION` is 3. Every goal adapter remembers the last goal it emitted, seeded from
-  the fold (`StartSessionInput.knownGoal`), emits only real changes (`sameGoalState`) and throttles
-  `change: "progress"` to one per 30 s itself — ingestion does not coalesce them. A `progress` tick
+  `FOLD_SNAPSHOT_VERSION` is 4 (3 is the legacy compaction marker's retention). Every goal adapter
+  remembers the last goal it emitted, seeded from the fold (`StartSessionInput.knownGoal`), emits
+  only real changes (`sameGoalState`) and throttles `change: "progress"` to one per 30 s itself —
+  ingestion does not coalesce them. A `progress` tick
   is hidden from the timeline (`isHiddenGoalChange`) and written under ONE stable id per thread
   (`goal-progress:<threadId>`, `ingestion/message-ids.ts`), replaced in place rather than spending a
   slot of the 500-row window on every tick, and the thread index skips its text. What a provider
@@ -917,6 +943,82 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `stopped` or `error`), which reads as continuing.
 
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
+
+**Orquester MCP** (`apps/daemon/src/mcp/`). `POST /mcp` lets an external agent drive chat sessions
+the way the chat GUI does: 31 tools (catalogue, sessions, search, messages, tool output, requests,
+waiting, usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is
+mounted **only on the HTTP transport** (`mode:"remote"`, behind the global bearer hook; the
+unauthenticated unix socket never serves it) as a stateless Streamable-HTTP endpoint with one
+`McpServer` per request, a 16 MiB body limit and `405` for `GET`/`DELETE`. Every tool but the kept
+todo/file pair is an **in-process client of the daemon's own REST API**: `InjectDaemonApi`
+(`daemon-api.ts`) runs every call through `app.inject()` with the caller's own `Authorization`
+header, so each route's gates (the create route's claudex model gate, seeded-account gate,
+`chat.adapter` check and tab-then-thread order; the proxy routes'
+`THREAD_NOT_FOUND`/`HOST_UNAVAILABLE` guards) and error codes are the GUI's by construction, not by
+review. Two invariants:
+
+- **Tools never touch services directly — only `DaemonApi`.** No `services.sessions`, no host
+  client, no store: the seam's only non-route methods are the attachment upload (over
+  `AgentChatService`) and the bus subscription. A route that proves awkward gets a `DaemonApi`
+  method; a tool never imports a service. The one standing exception is the kept todo/file pair,
+  which reaches `TodoTools`/`FsTools` (`todo-tools.ts`, `fs-tools.ts`) through its `ToolContext`.
+- **Waits ride the `Broadcaster`, never sleeps.** `send_message`/`implement_plan` with `wait` and
+  `wait_for_session` (`wait.ts`) subscribe to the bus the `/events` clients read and evaluate the
+  session summary (`activity` plus the seven chat fields) on every event, with a 10 s list re-read
+  only as a safety net, a 300 ms settle window for siblings stamped by one host poll, and the
+  request's `close` aborting them; `revert_session` waits (≤ 10 s) for the host's asynchronous
+  rewind the same way, re-reading the thread on each bus event about the session, else after 1 s.
+  `wait_for_session` compares `activity.needsAttentionAt` with the caller's `after` and hands back a
+  `cursor`: a chat tab's `finished` is sticky, so "return what is already flagged" was a busy loop
+  in v1. For the cursor to miss nothing, the daemon moves that stamp whenever something new calls
+  for the user, not only when the attention value changes (`agent-chat/summary.ts`): a request id
+  the previous host poll did not have, or a latest turn whose `completedAt` is later than that poll
+  — never a rewind or a replayed history, which land on turns that settled long ago.
+
+**Goals reach the MCP as the GUI shows them** (the goals gotchas above). A Codex `/goal` is the
+host's (`isGoalCommandText` + `capabilities.goals.command === "host"`, read through
+`parseGoalSupport` — the rules the host and the composer use): `send_message` posts it, waits for
+no turn — none starts — but for the host's answer row (a `goal.status`, a visible `goal.updated`,
+or a `goal.command.failed` → `outcome: "failed"`; ≤ 15 s once the session is up, half a second for
+a pause of a paused goal or a resume of an active one) and returns it as `answer`, and lets it past
+an open request as the composer does; with the capabilities unread, a `/goal` is refused rather
+than guessed at. A turn wait never ends on a turn that settles
+while the goal continues (the `goal-continuing` rung). `read_transcript` shows the timeline's goal
+rows (a `progress` tick never), views carry `chat.goal` and `supports.goals`, and `update_session`
+refuses an account switch while the goal continues before writing anything.
+
+Addressing: sessions only by `sessionId` (titles are not unique, so there is no title matching);
+`project` as the absolute path or `"<workspace>/<project>"`, resolved by `resolveProject()`
+(`addressing.ts`) to exactly `<workspacesDir>/<ws>/<name>` inside `fsRoot` — the string
+`GET /api/sessions?projectPath=` matches. The tools are deliberately stricter than the GUI in a
+few places: `project`, `cwd` and attachment paths must realpath inside `fsRoot`; `accountId` is
+family-checked before a create (the daemon silently falls back to the system home); at most 24
+running sessions per project; `update_session` refuses a mid-turn model/permission change without
+`force`. Like the GUI, `send_message` refuses while a request is pending (the host alone would take
+the message as a steer). Like the GUI's "Load older", `read_transcript` reads turns the snapshot's
+retained window no longer holds from the host's thread index (`history.ts`: `GET …/history`, at most
+5 pages a call, merged under the window by id with the window's copy winning, in log order); a turn
+it cannot read whole is named in `unavailableTurns` with a hint, and a failed page is never a tool
+error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
+row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
+output from the places the row's preview reads (`commandOutputText`, one list with
+`commandDisplayDetail`), unless the item is stored already cut (an update). A command's output
+that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
+command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
+and answered with `running`/`truncated`; never a file change's (Claude streams its result text as
+`file_change_output`, which is no command's output). `read_transcript` offers such a call's latest
+command row as its `outputItemId` — in a drill-in, when retention evicted the call's rows, an
+entry built from its latest chunk — and a host from before the route (its route-miss 404) falls
+back to the item's own text, never an error. A result is one JSON object capped at 60 000 bytes
+(`result.ts`); every tool that can outgrow it bounds itself first and says what it cut (`truncated`,
+`optionsOmitted`, `subagentsTruncated`, `filesTruncated`, …), so `ok()`'s byte cut is only the last
+resort. An error is `<CODE>: <message>`, the message capped at 4 000 code points. `server.ts`
+replaces the SDK's `tools/call` handler (public `server.setRequestHandler`) so a schema refusal
+answers the same `<CODE>: <message>` envelope as every other error, and it parses the arguments
+strictly (`argumentsSchema`, `.strict()` at the top level): an argument name the tool does not take
+is refused and named, never silently dropped — `tools/list` already advertises
+`additionalProperties: false`. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
+`docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 
 ### Key runtime flows
 
@@ -1470,4 +1572,5 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Agent chat: lazy boot, fold snapshot, thread index, history pages, search | `docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, `apps/daemon/src/agent-host/index/`, `reconcileThread`/`foldFromDisk`/`readHistory`/`windowBoundary` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, `packages/api/src/agent-chat/{fold-snapshot.ts,history-cursor.ts}`, `packages/ui/src/lib/agent-chat/history.logic.ts`, `packages/ui/src/components/command-palette/conversation-search.ts` |
 | Agent chat: goals (the provider-owned goal mirror, per-provider goal handling, Codex's host `/goal`, the goal watchdog window, the goal chip) | `docs/superpowers/specs/2026-09-24-agent-goals-design.md`, `packages/api/src/agent-chat/goal.ts`, `apps/daemon/src/agent-host/adapters/{claude,codex,grok}/`, `parseHostGoalCommand` in `apps/daemon/src/agent-host/orchestration/slash.ts`, `decideGoalCommand`/`goalContinuingNow`/`stopContinuingGoal` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, the goal window in `apps/daemon/src/agent-host/{support/deadline.ts,orchestration/turn-watchdog.ts}`, the `goal-continuing` rung in `apps/daemon/src/agent-chat/activity-ladder.ts`, `packages/ui/src/components/agent-chat/status/` (the goal chip) |
 | Agent chat: protocol fixtures (read the per-provider `README.md`) | `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/` |
+| Orquester MCP (tools, in-process client, waits) | `apps/daemon/src/mcp/server.ts`, `…/daemon-api.ts`, `…/wait.ts`, `…/tools/` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |

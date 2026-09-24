@@ -276,15 +276,11 @@ export class ActivityTracker {
   }
 
   /**
-   * A write reached the PTY. `programmatic` marks a write the daemon itself
-   * made (the MCP terminal-control tools): it is not a keystroke, so it must
-   * not open an echo window — a tool that writes and then waits for the bell
-   * would otherwise suppress the very answer it is waiting for.
+   * A write reached the PTY: local input, which opens the echo windows
+   * {@link ActivityTracker.noteOutput} applies.
    */
-  noteInput(now: number = Date.now(), options: { programmatic?: boolean } = {}): void {
-    if (!options.programmatic) {
-      this.lastInputAt = now;
-    }
+  noteInput(now: number = Date.now()): void {
+    this.lastInputAt = now;
     let changed = false;
     if (this.attention !== null) {
       this.setAttention(null, now);

@@ -35,7 +35,11 @@ import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
 import { ClaudeNormalizer } from "./normalize.ts";
-import { BACKGROUND_SHELL_TAIL_INTERVAL_MS, GOAL_VERDICT_REREAD_DELAYS_MS } from "./session.ts";
+import {
+  BACKGROUND_SHELL_TAIL_INTERVAL_MS,
+  GOAL_VERDICT_REREAD_DELAYS_MS,
+  claudeIngestsAttachment
+} from "./session.ts";
 
 // ---------------------------------------------------------------------------
 // The scripted peer
@@ -305,6 +309,8 @@ interface HarnessOptions {
   goalReadGate?: (threadId: string, label: string) => Promise<void>;
   /** Makes the test-only `onGoalWorkIdle` hook throw after counting. */
   goalWorkIdleThrows?: boolean;
+  /** Where an attachment id lives, for a test that needs the bytes read for real. */
+  resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -338,7 +344,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     },
     clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
     ids: countingIds(),
-    resolveAttachmentPath: async (_threadId, id) => `/attachments/${id}`,
+    resolveAttachmentPath:
+      options.resolveAttachmentPath ?? (async (_threadId, id) => `/attachments/${id}`),
     attachmentsDir: (threadId) => `/appdir/threads/${threadId}/attachments`,
     logRawFrame: () => {},
     // As `main.ts` builds it: only a managed (non-system) home is bound
@@ -914,6 +921,61 @@ describe("claude adapter — turns", () => {
     const compacted = findEvent(harness.events, "thread.state.changed");
     assert.ok(compacted);
     assert.equal(harness.adapter.capabilities.compaction.type, "slash-command");
+  });
+});
+
+describe("claude adapter — attachment delivery (§4.1)", () => {
+  const png = { type: "image" as const, id: "img-1", name: "shot.png", mimeType: "image/png", sizeBytes: 4 };
+  const pdf = { type: "file" as const, id: "doc-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 4 };
+
+  it("ingests inline only the images the API takes; everything else is a path line", () => {
+    assert.equal(claudeIngestsAttachment(png), true);
+    assert.equal(claudeIngestsAttachment(pdf), false);
+    assert.equal(
+      claudeIngestsAttachment({ type: "file", id: "t", name: "paste.txt", mimeType: "text/plain", sizeBytes: 1 }),
+      false
+    );
+    assert.equal(
+      claudeIngestsAttachment({ type: "image", id: "b", name: "x.bmp", mimeType: "image/bmp", sizeBytes: 1 }),
+      false,
+      "an image mime the API refuses is a path line, not a failed turn"
+    );
+    assert.equal(claudeIngestsAttachment({ type: "unknown", id: "u", name: "x" }), false);
+  });
+
+  it("puts the image blocks first and the path block inside the LAST text block", async () => {
+    const dir = await mkdtemp(nodePath.join(tmpdir(), "claude-attach-"));
+    try {
+      await writeFile(nodePath.join(dir, png.id), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      const harness = await makeHarness({
+        resolveAttachmentPath: async (_threadId, id) => nodePath.join(dir, id)
+      });
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "/review src",
+        attachments: [png, pdf],
+        interactionMode: "default"
+      });
+      if (peer.received.length === 0) {
+        await peer.nextTurn();
+      }
+
+      const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
+      assert.deepEqual(
+        content.map((block) => block.type),
+        ["image", "text"],
+        "the text block stays LAST, so the typed /command still expands"
+      );
+      assert.equal(
+        content.at(-1)?.text,
+        `/review src\n\nAttached files:\n- report.pdf: ${nodePath.join(dir, pdf.id)}`
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2094,18 +2156,19 @@ describe("claude adapter — fix-wave regressions", () => {
     assert.equal(typeof options.sessionId, "string");
   });
 
-  it("launchArgs reach the query and fold into the permission mode", async () => {
+  it("a supervised start launches supervised — no permission mode, no skip flag", async () => {
+    // The runtime mode is the only authority. The `claude` registry row's
+    // TERMINAL argv (`--dangerously-skip-permissions --effort max --verbose`)
+    // used to reach this start and was folded into `bypassPermissions`, so the
+    // permission chip did nothing.
     const harness = await makeHarness();
-    await harness.adapter.startSession({
-      ...START,
-      launchArgs: ["--dangerously-skip-permissions", "--verbose"]
-    });
+    await harness.adapter.startSession(START);
     const options = harness.queryOptions.at(-1)!;
-    assert.equal(options.permissionMode, "bypassPermissions");
-    assert.equal(options.allowDangerouslySkipPermissions, true);
-    const extra = options.extraArgs as Record<string, unknown> | undefined;
-    assert.equal(extra?.verbose, null);
-    assert.equal(extra?.["dangerously-skip-permissions"], undefined);
+    assert.equal(START.runtimeMode, "approval-required");
+    assert.equal(options.permissionMode, undefined);
+    assert.equal(options.allowDangerouslySkipPermissions, undefined);
+    // Only the flag the adapter authors itself; no terminal flag rides along.
+    assert.deepEqual(options.extraArgs, { "thinking-display": "summarized" });
   });
 });
 

@@ -27,6 +27,7 @@
  */
 
 import type { AgentAdapterId, AttachmentRef } from "@orquester/api/agent-chat";
+import { isGoalCommandText } from "@orquester/api/agent-chat";
 
 import type { HostGoalCommand } from "../adapter.ts";
 import { GROK_BLOCKED_COMMAND_MESSAGE, isBlockedGrokCommand } from "../adapters/grok/index.ts";
@@ -57,7 +58,6 @@ export function isHostNativeCompact(input: {
  */
 export const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
 
-const GOAL_COMMAND_PATTERN = /^\/goal(?:\s|$)/i;
 const GOAL_EDIT_PATTERN = /^edit(?:\s+([\s\S]*))?$/i;
 const GOAL_OBJECTIVE_TOO_LONG_MESSAGE = `A goal is limited to ${MAX_GOAL_OBJECTIVE_CHARS} characters.`;
 
@@ -93,10 +93,10 @@ export function parseHostGoalCommand(
   text: string,
   attachments: readonly AttachmentRef[] = []
 ): HostGoalCommand | { error: string } | null {
-  const trimmed = text.trim();
-  if (!GOAL_COMMAND_PATTERN.test(trimmed)) {
+  if (!isGoalCommandText(text)) {
     return null;
   }
+  const trimmed = text.trim();
   // A goal is a line of text the provider stores, not a prompt: there is
   // nowhere for a file to go.
   if (attachments.length > 0) {

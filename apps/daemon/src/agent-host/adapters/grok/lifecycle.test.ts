@@ -18,13 +18,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type {
-  AccountHome,
-  AgentAdapterId,
-  AgentGoal,
-  GoalUpdatedPayload,
-  RuntimeEvent,
-  RuntimeMode
+import {
+  MAX_TURN_INPUT_CHARS,
+  type AccountHome,
+  type AgentAdapterId,
+  type AgentGoal,
+  type GoalUpdatedPayload,
+  type RuntimeEvent,
+  type RuntimeMode
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
@@ -611,6 +612,34 @@ test("a path the text already names is not repeated in the Attached files block"
     .join("");
   assert.doesNotMatch(echoed, /Attached files:/);
   assert.ok(echoed.includes(typed), `expected the typed text verbatim in ${JSON.stringify(echoed)}`);
+  await r.dispose();
+});
+
+test("the input guard bounds the typed text, never the Attached files block after it", async () => {
+  const r = await rig();
+  await start(r);
+  const attachments = [{ type: "file" as const, id: "a1", name: "q3.xlsx", sizeBytes: 10 }];
+  await assert.rejects(
+    r.adapter.sendTurn({
+      threadId: "t1",
+      input: "x".repeat(MAX_TURN_INPUT_CHARS + 1),
+      attachments,
+      interactionMode: "default"
+    }),
+    /exceeds/
+  );
+  // A full-length message still takes its block on top.
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "x".repeat(MAX_TURN_INPUT_CHARS),
+    attachments,
+    interactionMode: "default"
+  });
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed",
+    "turn.completed"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(completed.payload.state, "completed");
   await r.dispose();
 });
 

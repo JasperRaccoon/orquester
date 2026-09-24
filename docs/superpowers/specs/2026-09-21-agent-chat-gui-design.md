@@ -743,6 +743,26 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
   ≤ 50 MiB; an unknown third arm is a deliberate forward-compat catch-all so a newer producer
   cannot break an older decoder. Claude gets that dir as an additional allowed directory so
   pasted images need no approval.
+  *Built: **no attachment is dropped, and the bounds hold against the file on disk.** The turn
+  effect (`sendTurnEffect`) resolves every attachment and holds it to these bounds against the size
+  the host STAT'd, which it stamps on the ref, on every sending path — a direct turn, a steer, a
+  turn queued behind a compaction and a message-mode answer, the last two of which a check on the
+  `/turn` decision never saw (§6.2). An attachment that is gone or over its bound is an "Attachment
+  rejected" row, and nothing is sent. Each adapter then hands its provider what it ingests
+  natively — Claude inline base64 for the four image mimes, Codex every image as a `localImage`
+  path item, OpenCode a `file` part for those images, `text/*` and PDF up to 20 MiB (judged on the
+  stat'd size), Grok nothing at all (its CLI declares `promptCapabilities.image: false`) — and names
+  every other file in the `Attached files:` block of §4.5, **after** the text and never before it,
+  so a typed `/command` still opens the turn (§4.6.9). The block is provider input only: the
+  persisted `thread.message-sent` keeps what the user typed. A native question answer folds its
+  attachments into `Attached file: <name> (<absolute path>)` lines after the answer; a
+  multi-select answer keeps its selections as the array and the lines ride as one more entry, so
+  the files cannot replace the selections and an adapter still matches each one to its option. An
+  answer naming a file that no longer resolves is refused before anything is committed, and the
+  card stays open. Before this, the Claude, Codex and
+  OpenCode adapters skipped whatever they did not ingest on the assumption that the host had
+  already flattened it into the prompt, and nothing had: a PDF never reached the agent and a
+  file-only turn broke.*
 - **Composer context is not adapter input.** `@file` references are flattened into `input` and
   persisted beside the user message for re-render only.
 
@@ -1064,6 +1084,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   so the divergence is a constant a reader trips over rather than a silent edit. `settingSources`
   is as written; the committed fixtures were captured with `["project","local"]` only, because this
   host's user-level settings carry a hook that perturbs the capture.*
+  *Built: registry `args` (`--dangerously-skip-permissions`, `--effort …`, `--yolo`) are the
+  TERMINAL launcher's flags and never reach a chat launch (`apps/daemon/src/agent-host/main.ts`
+  builds its refId index without them), so neither the launch-args `extraArgs` nor the fold above
+  exists: `extraArgs` carries only what the adapter authors itself (`thinking-display`).
+  Permissions come only from `runtimeMode`; `full-access` = `bypassPermissions` +
+  `allowDangerouslySkipPermissions`; effort only from the model selection. While the host still
+  handed the registry row's argv to every start, every Claude-family chat ran `bypassPermissions`
+  whatever the permission chip said, and the row's `--effort max|high` — appended after the SDK's
+  own `--effort`, and the CLI keeps the last one — overruled the effort chip.*
 - **Env is one variable.** `CLAUDE_CONFIG_DIR` only, on top of the base env; `HOME` is **never**
   overridden, because relocating `HOME` also relocates the macOS keychain lookup and the CLI then
   reports "Not logged in". Orquester's managed-account home is therefore bound through
@@ -1212,6 +1241,14 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   One `codex app-server` child per thread, bound to a per-session scope; probes get their own
   short-lived one.
   *T3: `apps/server/src/provider/Layers/codexLaunchArgs.ts:12-15`; `apps/server/src/provider/Layers/CodexSessionRuntime.ts:1313-1346`; `apps/server/src/provider/Layers/CodexProvider.ts:369-373`; `apps/server/src/provider/Layers/CodexAdapter.ts:2317-2336`*
+  *Built: registry `args` (`--dangerously-skip-permissions`, `--effort …`, `--yolo`) are the
+  TERMINAL launcher's flags and never reach a chat launch (`apps/daemon/src/agent-host/main.ts`
+  builds its refId index without them), so there are no "user launch args" here: the spawn is
+  exactly `codex app-server` (`adapters/codex/session.ts`), which takes no `--yolo` anyway.
+  Permissions come only from `runtimeMode`, sent on `thread/start` (§4.4); effort only from the
+  model selection.*
+  *Built: not on `thread/start` alone — `approvalPolicy`, `approvalsReviewer` and the sandbox ride
+  `thread/start`, `thread/resume` and every `turn/start` (`adapters/codex/session.ts`).*
 - **MCP rides `-c` config overrides, not a params field:**
   `-c mcp_servers.<name>.url=<endpoint>` and
   `-c '<name>.bearer_token_env_var="…"'` appended to argv with the token in env. Not needed for
@@ -2346,6 +2383,17 @@ only the fold's state, so a snapshot folded forward still equals the whole-log f
 host's history bounds read it (C, `2026-09-23-thread-index-and-lazy-boot-design.md`). T3 has no
 counterpart: its projector retains per event, in SQL, where the cost is the database's.*
 
+*Built (2026-09-23, the legacy compaction marker): the parent window also keeps every compaction
+marker whatever its age — the §5.5 exemption — by `isCompactionActivity`
+(`packages/api/src/agent-chat/compaction.ts`), the rule the UI's window gates, the MCP and the thread
+index share: a `context-compaction` row in any phase, or the `thread.state.changed {state:
+"compacted"}` an older log wrote instead. The legacy spelling used to be evicted like any row, so on
+an older thread the rewind gate lost its marker exactly as §5.5 describes; any other
+`thread.state.changed` is still an ordinary row, and an agent's own marker an ordinary row of its
+agent's window. `FOLD_SNAPSHOT_VERSION` went to 3, so a `state.json` folded under the old rule is
+discarded and its log re-folded once: on the thread's next load, or, for a thread orphaned at boot,
+in the §3.3 reconcile before the gate opens (`agent-host/main.ts`).*
+
 A thread directory that fails to parse marks that thread `error` with the parse message; it
 never affects other threads or host startup. A malformed line inside `events.ndjson` truncates the
 fold at that point rather than discarding the file.
@@ -2792,12 +2840,17 @@ reverse. Here that is one `events` array on one orchestrator decision — `respo
 effect. The reply text **echoes each question before its answer** (`"<question>\n<answer>"`, joined
 by blank lines), and a question's attachments follow as `Attached file: <name> (<path>)` lines —
 the absolute host path, so the adapters' `Attached files:` block (§4.5) finds each file already
-named and appends nothing; the id stands in only when the file cannot be resolved — and ride the
-message as real attachment refs. The echo is not decoration: the provider parked no request, so
+named and appends nothing; an answer naming a file the host cannot resolve is refused before
+anything is committed, so the card stays open — and ride the message as real attachment refs. The echo is not decoration: the provider parked no request, so
 the agent receives this as an ordinary user turn and has nothing but the text to tell it which
 question was answered — the previous shape dropped the question whenever there was exactly one,
 which reads as a bare "yes" arriving from nowhere in a resumed transcript. The message id is the
 deterministic `async-answer:<requestId>` too, so a replayed command cannot mint a duplicate.*
+
+*Built: **the answer's steer is an ordinary send.** It goes through the same turn effect as a
+`/turn`, which resolves and STATs every attachment before anything is sent (§6.3): an answer
+attachment that is gone or over its bound is an "Attachment rejected" row, never a send. The
+persisted `thread.message-sent` holds the echo, paths included, exactly as the adapter receives it.*
 
 `/session/stop` stops the provider child and leaves the thread, its log and its resume cursor
 intact; the next `/turn` re-adopts it through lazy recovery (§4.1). Without it a session wedged in
@@ -2935,6 +2988,29 @@ older host that has no `/search` route yet during a rollout
 `docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, C.*
 
 *T3: `apps/server/src/orchestration/threadDetailCursor.ts:3-19` + `:33-36` — the content-derived `(anchor, turnId)` cursor, and "a malformed or foreign-thread cursor degrades to a first-page request"; `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1673-1685` + `:3650-3690` — the keyset walk back by user turns under a raw-turn ceiling, and the `hasMore` probe; `packages/client-runtime/src/state/threads.ts:43-50` — 10 user turns on first paint, 20 per older page; differs: a page here is a block of the log by activity count with an optional in-turn `s` bound, because a single fleet turn outgrows the window, and the first paint is still the whole retained window rather than a turn window*
+
+
+*Built (plan `2026-09-23-mcp-output-drill-in-and-housekeeping`, item 7): one more read,
+**`GET /api/sessions/:id/items/:itemId/output`** → `ThreadItemOutputResponse
+{toolUseId, output, complete, truncated}` — the streamed output of the tool call the item belongs to.
+Some output is in no item's data at all: a Claude background shell's, tailed from the CLI's file
+into `content.delta {command_output}` (≤ 1 MiB, then one notice), and a running command's output so
+far exist only as §5.6's `tool.output` chunks, which the timeline joins onto the call's row
+(`joinLifecycleDetails`) but a snapshot cannot hand back whole — the per-agent windows evict them,
+every chunk is capped on the wire, history pages are slimmed. The host joins them from the log,
+next to `readItem` and in the same one read of it (`store/tool-output.ts`): the item's newest write
+names the call (`payload.toolUseId`), every `tool.output` row of that call is joined verbatim in log
+order, `complete` says a `tool.completed` exists for it, and past 8 MiB
+(`THREAD_ITEM_OUTPUT_MAX_BYTES`) the join stops on a character boundary with `truncated`. It reads
+the raw log: a `thread.reverted` filters nothing — chunks written before a rewind are what the
+command printed, and a rewind unprints nothing (a Claude rewind restarts the session, closing an
+open shell first, so no shell prints on through one). It is by call, not by stream — a file change's
+`file_change_output` joins too — and the reader decides what the text is: the MCP answers only a
+command's as its output. No such item, or one naming no call, is a 404 of its own, `ITEM_NOT_FOUND`
+— not `THREAD_NOT_FOUND`, which a host predating the route answers for it as its generic route miss,
+so a reader can tell the two apart until that host's drain-restart. The daemon proxies it verbatim,
+as it does `…/items/:itemId`. Its reader today is the MCP's `read_tool_output`; the timeline keeps
+joining the chunks it holds.*
 
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
@@ -3322,8 +3398,9 @@ Row kinds and behaviour:
 fetch it, so nothing decodes a 10 MiB image into a bubble on a phone. The sent-message chips, like
 the composer's, carry the file-type icon of §7.4 (`icons/files`). The plan proposal card offers
 **copy and download only**; there is no "save into the workspace" action, which would be a write
-into `fsRoot` from a render path. And there is no "load earlier" header: a thread is sent whole
-(§2), so there is nothing earlier to load
+into `fsRoot` from a render path. An older-history row ("Load older", `LoadOlderRow`) appears
+once the retained window has evicted a visible row, and pages the turns below it from the host's
+thread index (`GET …/history`; design `2026-09-23-thread-index-and-lazy-boot-design.md`)
 (`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
 assistant message between tool calls, in both live and replayed turns. The phase remains metadata
 so commentary cannot become the turn's terminal answer.*
@@ -3522,6 +3599,29 @@ not the composer's own typing — a finished upload's path, and every insert thr
 bridge (a delivered ref, the queue drained back by an interrupt, a displaced custom answer) —
 places the caret without moving focus unless the textarea already had it; a surface that means
 "edit this in the composer" (a queued row's return action) asks for focus explicitly.*
+
+*Built: **a send that did not go out goes back to the thread it was sent from.** `submit` empties
+the draft and its persisted copy before the send leaves; a failure puts its text and chips back
+ahead of anything typed or staged since (`draftAfterSend`, `composer-submission.ts`), and a
+refusal or a failed Implement gives nothing back. Where it goes is decided when the send settles,
+not when it left — by then a project switch may have unmounted the composer
+(`failedSendRestoreTarget`, routed by `restoreFailedSendDraft` in `composer-failed-send.ts`; a
+composer that now shows another thread is a defensive branch, since each chat tab owns its composer
+— `MainView` mounts one per tab, keyed by the tab id, which is the session id, and a tab switch only
+hides it): into the sending composer's live draft while it is still mounted and still shows that
+thread; into the live draft of the composer that shows the thread now, when its tab came back after
+the switch, through the composer bridge (`restoreFailedSend`) — a mounted composer owns its thread's
+one visible draft and reads the persisted copy only when it loads the thread, so a write behind its
+back would be neither shown nor kept; otherwise into that thread's persisted draft, the same
+`draftAfterSend` over the draft loaded as a mount loads it (`persistedDraftAfterSend`,
+`composer-draft.ts`), written through that thread's own open slice's `saveDraft` or, with none open,
+into the storage its next slice seeds from (`updateThreadDraft`, `lib/agent-chat/store.ts`). The
+notice goes only where the draft goes. Two layout-effect timings keep it exact: the composer stops
+naming a thread in the same cleanup that flushes that thread's pending draft write, and registers
+its bridge handle in the commit that loads the thread's draft — so a settle never reads a persisted
+draft missing its last keystrokes, and never misses a composer that has just mounted for the thread.
+The live write is a `flushSync`, so the restore is committed and its write scheduled before any
+later swap or unmount renders.*
 
 **The queued-message model.** This is the client's own queue of messages it has not dispatched
 yet, and it is a different thing from the host-side queue that holds already-posted `/turn`s behind

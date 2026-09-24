@@ -50,6 +50,7 @@ import type {
   AgentChatHistoryState,
   AgentChatRevealRequest,
   AgentChatThreadSlice,
+  AgentChatThreadView,
   AgentChatTimelineRow,
   DisclosureState,
   QueuedComposerMessage,
@@ -184,6 +185,13 @@ function defaultId(): string {
 const defaultDelay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Store one thread's draft under its id, leaving every other thread's as it is. */
+function persistDraft(sessionId: string, draft: ComposerDraft): void {
+  const all = readPersistedDrafts();
+  all[sessionId] = draft;
+  writePersistedDrafts(all);
+}
+
 /** A thread that has never been scrolled is pinned to the end and follows. */
 const DEFAULT_SCROLL_POSITION: RememberedTimelinePosition = {
   rowId: null,
@@ -220,7 +228,7 @@ export interface AgentChatThreadState {
    * timeline projection, which only this module holds. `id`/`turnId` ride along
    * so a consumer can tell one proposal from the next without diffing markdown.
    */
-  actionableProposedPlan: { id: string; planMarkdown: string; turnId: string | null } | null;
+  actionableProposedPlan: AgentChatThreadView["actionableProposedPlan"];
   /**
    * True while a `/revert` is in flight — for `rewindTo`, until the host has
    * answered it on the stream; §7.5's one reason the composer goes inert.
@@ -691,11 +699,17 @@ function project(state: InternalState): InternalState {
   // because `timeline.proposedPlans` never leaves this module.
   const latestPlan = findLatestProposedPlan(timeline.proposedPlans, latestTurn?.turnId ?? null);
   const nextPlan = hasActionableProposedPlan(latestPlan)
-    ? { id: latestPlan!.id, planMarkdown: latestPlan!.planMarkdown, turnId: latestPlan!.turnId }
+    ? {
+        id: latestPlan!.id,
+        planMarkdown: latestPlan!.planMarkdown,
+        turnId: latestPlan!.turnId,
+        ...(latestPlan!.truncated ? { truncated: true as const } : {})
+      }
     : null;
   const keptPlan =
     state.actionableProposedPlan?.id === nextPlan?.id &&
-    state.actionableProposedPlan?.planMarkdown === nextPlan?.planMarkdown
+    state.actionableProposedPlan?.planMarkdown === nextPlan?.planMarkdown &&
+    state.actionableProposedPlan?.truncated === nextPlan?.truncated
       ? state.actionableProposedPlan
       : nextPlan;
 
@@ -929,15 +943,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     };
 
     /**
-     * The single writer of this thread's persisted draft (`localStorage`, key
-     * `orquester:agent-chat-drafts`). Empty drafts are dropped from storage by
+     * The single writer of this thread's persisted draft while this slice is
+     * open (`localStorage`, key `orquester:agent-chat-drafts`) —
+     * `updateThreadDraft` writes storage itself only when no slice of the
+     * thread is. Empty drafts are dropped from storage by
      * `writePersistedDrafts`, so clearing is spelled as saving an empty draft.
      */
     const setDraft = (draft: ComposerDraft): void => {
       update((state) => (state.draft === draft ? state : { ...state, draft }));
-      const all = readPersistedDrafts();
-      all[sessionId] = draft;
-      writePersistedDrafts(all);
+      persistDraft(sessionId, draft);
     };
 
     /**
@@ -1125,6 +1139,23 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
       async steer(input) {
         await actions.sendTurn(input);
+      },
+
+      async readFullPlanMarkdown(plan) {
+        if (plan.truncated !== true) {
+          return plan.planMarkdown;
+        }
+        const response = await deps.transport.readItem(sessionId, plan.id).catch(() => null);
+        const item = response?.item;
+        const payload = item?.kind === "activity" ? item.payload : null;
+        const markdown =
+          typeof payload === "object" && payload !== null
+            ? (payload as { planMarkdown?: unknown }).planMarkdown
+            : undefined;
+        if (typeof markdown !== "string" || markdown.trim().length === 0) {
+          throw new Error("The full plan could not be loaded, so nothing was sent. Try again.");
+        }
+        return markdown;
       },
 
       async interrupt(input) {
@@ -2013,6 +2044,34 @@ export function releaseThreadStore(sessionId: string): void {
 /** The live slice for a session, if any. For surfaces that must not open one. */
 export function peekThreadStore(sessionId: string): ThreadStore | null {
   return registry.get(sessionId)?.store ?? null;
+}
+
+/**
+ * Rewrite one thread's persisted draft from outside its composer (§7.4): a
+ * send that did not go out, settling after the composer it left from stopped
+ * showing its thread. `change` gets the draft as it is now and answers the
+ * draft to write, or `null` to leave it as it is.
+ *
+ * Through the thread's own live slice when one is open — its `saveDraft`, so
+ * the draft the thread's next composer mount loads is the rewritten one — and
+ * otherwise straight into the storage every new slice of the thread seeds its
+ * draft from. Never through a slice captured earlier: one the registry has
+ * since dropped would still write storage, but a newer slice of the same
+ * thread keeps its own copy in memory, which the next mount would load
+ * instead, and its next save would write back over the change.
+ */
+export function updateThreadDraft(
+  sessionId: string,
+  change: (draft: ComposerDraft) => ComposerDraft | null
+): void {
+  const live = peekThreadStore(sessionId);
+  if (live) {
+    const next = change(live.getState().draft);
+    if (next !== null) live.getState().actions.saveDraft(next);
+    return;
+  }
+  const next = change(readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT);
+  if (next !== null) persistDraft(sessionId, next);
 }
 
 /** Test seam: drop every slice immediately, retained snapshots included. */

@@ -33,6 +33,20 @@ export class UploadTooLargeError extends Error {
 }
 
 /**
+ * True for the cap refusal, thrown bare or carried as the `cause` of the error
+ * something wrapped it in. The agent host client reports every failed chat
+ * upload as `HostUnavailableError` and keeps what failed the body as its
+ * `cause` (`agent-chat/host-client.ts`); an upload route must still answer the
+ * cap 413, not tell the client to retry a host that is fine.
+ */
+export function isUploadTooLarge(error: unknown): boolean {
+  return (
+    error instanceof UploadTooLargeError ||
+    (error instanceof Error && error.cause instanceof UploadTooLargeError)
+  );
+}
+
+/**
  * Let an (encapsulated) Fastify scope accept `application/octet-stream` and hand
  * the route the raw request stream untouched — no buffering, no bodyLimit. Kept
  * per scope rather than app-wide so every other route keeps answering 415 to a
@@ -79,11 +93,13 @@ export async function discardUpload(path: string): Promise<void> {
  * partial file is unlinked before the error propagates, so the caller only has
  * to map the error.
  *
- * The body is read with `destroyOnReturn:false` on purpose: `stream.pipeline`
- * (or a plain `for await`) would destroy the IncomingMessage when we bail on
- * the cap, and destroying a half-read request tears the socket down — the 413
- * would never reach the client. Leaving the request paused lets Fastify send
- * the reply; {@link refuseUpload}'s `Connection: close` then ends the socket.
+ * The body is read with `destroyOnReturn:false` on purpose: `receiveUpload`
+ * never destroys its source; the route owns the request. Bailing on the cap
+ * leaves it unread, and the route ends it — {@link refuseUpload} answers with
+ * `Connection: close`, and Node ends the socket once that reply is flushed.
+ * (Not because a destroyed request would lose the 413: on Node 20 a plain
+ * `for await` and `stream.pipeline` both detach a server request's socket
+ * before destroying it, and the reply still goes out.)
  */
 export async function receiveUpload(source: IncomingMessage, path: string, mode?: number): Promise<number> {
   const file = createWriteStream(path, { flags: "wx", mode });

@@ -106,8 +106,8 @@ const ANCESTRY_TERMINAL_MAX_ATTEMPTS = 5;
 const ANCESTRY_ASKED_MAX_ATTEMPTS = 12;
 /**
  * OpenCode ingests the four image mimes, `text/*` and PDF natively (under the
- * cap below); anything else rides as a path line in the text
- * (`attachment-lines.ts`).
+ * cap below, judged on the size the host STAT'd and stamped on the ref); anything
+ * else rides as a path line in the text (`attachment-lines.ts`).
  */
 const NATIVE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const NATIVE_FILE_PART_MAX_BYTES = 20 * 1024 * 1024;

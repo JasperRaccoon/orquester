@@ -4,6 +4,7 @@ import { ClipboardList, Download, Minimize2, Target } from "lucide-react";
 import { cn } from "../../../../lib/cn";
 import { clipGoalText } from "../../../../lib/agent-chat/goal.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
+import { wholePlanMarkdown } from "../../../../lib/agent-chat/plan.logic";
 import {
   COMPACTING_LABEL,
   compactionLabel,
@@ -259,6 +260,21 @@ export const TurnDiffRow = React.memo(function TurnDiffRow({
 const PLAN_COLLAPSE_CHARS = 900;
 const PLAN_COLLAPSE_LINES = 20;
 
+/** Hand `markdown` to the browser as a `.md` download named after its title. */
+function downloadPlanMarkdown(markdown: string): void {
+  try {
+    const blob = new Blob([markdown], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = planFileName(markdown);
+    anchor.click();
+    URL.revokeObjectURL(url);
+  } catch {
+    // A blocked download is not worth a toast the timeline cannot raise.
+  }
+}
+
 /**
  * The plan card (§7.3).
  *
@@ -274,6 +290,11 @@ const PLAN_COLLAPSE_LINES = 20;
  * (`ChatTimelineProps` exposes reads and commands only), so the card offers a
  * browser download instead; the file lands wherever the user's downloads go
  * rather than in the repo.
+ *
+ * **Copy and Download hand over the whole plan.** A proposal the wire cut at
+ * 16 KiB (§5.6, the row's `truncated`) is read back first, through the same
+ * store read Implement makes; a read that fails hands over nothing rather than
+ * a plan that ends in "…". The preview still renders the cut text.
  */
 export const ProposedPlanRow = React.memo(function ProposedPlanRow({
   row
@@ -286,19 +307,22 @@ export const ProposedPlanRow = React.memo(function ProposedPlanRow({
   const canCollapse = markdown.length > PLAN_COLLAPSE_CHARS || markdown.split("\n").length > PLAN_COLLAPSE_LINES;
   const title = proposedPlanTitle(markdown);
 
+  const { readFullPlanMarkdown } = ctx;
+  const wholeMarkdown = React.useCallback(
+    () => wholePlanMarkdown(row, readFullPlanMarkdown),
+    [row, readFullPlanMarkdown]
+  );
+
   const download = React.useCallback(() => {
-    try {
-      const blob = new Blob([markdown], { type: "text/markdown" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = planFileName(markdown);
-      anchor.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      // A blocked download is not worth a toast the timeline cannot raise.
+    const whole = wholeMarkdown();
+    if (typeof whole === "string") {
+      downloadPlanMarkdown(whole);
+      return;
     }
-  }, [markdown]);
+    // A plan that could not be read back downloads nothing; the timeline has
+    // no toast to say so, exactly as for a blocked download.
+    void whole.then(downloadPlanMarkdown, () => undefined);
+  }, [wholeMarkdown]);
 
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-3">
@@ -314,7 +338,7 @@ export const ProposedPlanRow = React.memo(function ProposedPlanRow({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
-          <CopyButton size="xs" value={markdown} label="Copy the plan" />
+          <CopyButton size="xs" value={wholeMarkdown} label="Copy the plan" />
           <ChatIconButton size="xs" label="Download the plan as markdown" onClick={download}>
             <Download size={12} strokeWidth={1.8} aria-hidden />
           </ChatIconButton>

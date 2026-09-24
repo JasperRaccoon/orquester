@@ -275,8 +275,9 @@ test("a state built before goals existed still folds, and its missing goal reads
   assert.equal(withGoal.goal?.objective, SHIP.objective);
 });
 
-test("the snapshot version moved to 3: every state.json written before the fold derived a goal is refolded once", () => {
-  assert.equal(FOLD_SNAPSHOT_VERSION, 3);
+test("the snapshot version moved to 4: every state.json written before the fold derived a goal is refolded once", () => {
+  // 3 is the legacy compaction marker's retention, which never derived a goal.
+  assert.ok(FOLD_SNAPSHOT_VERSION >= 4, "a version-3 state.json carries no goal, whatever its log holds");
 });
 
 test("a snapshot at ANY point plus the tail folds to the whole log's goal", () => {

@@ -190,9 +190,10 @@ interface ThreadState {
   /**
    * §7.3 `messageKind`. Codex's `agentMessage` carries a `phase`
    * (`final_answer` vs `commentary`), which the adapter surfaces as the
-   * assistant item's `detail` — but the message itself is built from
-   * `content.delta`, which has no phase. So the phase is remembered per
-   * provider item id and stamped onto whichever message that item opened.
+   * assistant item's `data.phase` (see `assistantPhase`) — but the message
+   * itself is built from `content.delta`, which has no phase. So the phase is
+   * remembered per provider item id and stamped onto whichever message that
+   * item opened.
    */
   assistantPhaseByItemId: Map<string, "answer" | "commentary">;
   /** messageId → the resolved {@link ThreadMessageItem.messageKind}. */
@@ -449,16 +450,41 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   }
 
   /**
-   * Codex's `agentMessage` phase, as the adapter surfaces it on the
-   * `assistant_message` item's `detail` (`apps/daemon/test/fixtures/codex/README.md`
-   * observation 18: `"final_answer"` vs `"commentary"` — the running "I'll do X
-   * next" narration). Any other detail is that item's real text, and a
-   * provider with no such notion never sends either marker.
+   * An `assistant_message` item's phase, and whether its `detail` is that
+   * phase's marker rather than the message text: ONE answer for the live
+   * stream, the live completion and the history replay, so the three cannot
+   * drift apart.
+   *
+   * The phase is Codex's `agentMessage` phase
+   * (`apps/daemon/test/fixtures/codex/README.md` observation 18:
+   * `"final_answer"` vs `"commentary"` — the running "I'll do X next"
+   * narration), read from `data.phase` on every path. Codex's live normaliser
+   * sends it there and mirrors it into `detail` (`adapters/codex/items.ts`);
+   * its history projection sends it only there, because a replayed row's
+   * `detail` IS the text (`adapters/codex/history.ts`). Every other producer
+   * puts text in `detail` too — OpenCode's live completion, every history row
+   * — so `detail` is the marker only when it names the phase `data.phase`
+   * carries. Guessing the phase from `detail` filed a resumed thread's
+   * commentary as its answer, and swallowed a reply whose whole text was
+   * "commentary" as a marker.
    */
-  function assistantPhaseFromDetail(
-    detail: string | undefined
-  ): "answer" | "commentary" | null {
-    switch (detail?.trim().toLowerCase()) {
+  function assistantPhase(payload: { detail?: string; data?: unknown }): {
+    phase: "answer" | "commentary" | null;
+    detailIsMarker: boolean;
+  } {
+    const data = payload.data;
+    const phase = phaseOf(
+      typeof data === "object" && data !== null ? (data as { phase?: unknown }).phase : undefined
+    );
+    return { phase, detailIsMarker: phase !== null && phaseOf(payload.detail) === phase };
+  }
+
+  /** `commentary` or `final_answer`, trimmed and case-insensitive; anything else is none. */
+  function phaseOf(value: unknown): "answer" | "commentary" | null {
+    if (typeof value !== "string") {
+      return null;
+    }
+    switch (value.trim().toLowerCase()) {
       case "commentary":
         return "commentary";
       case "final_answer":
@@ -466,11 +492,6 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       default:
         return null;
     }
-  }
-
-  /** True when `detail` is the phase marker and therefore NOT message text. */
-  function detailIsPhaseMarker(detail: string | undefined): boolean {
-    return assistantPhaseFromDetail(detail) !== null;
   }
 
   /**
@@ -1125,6 +1146,36 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       );
     }
 
+    // An assistant `item.started` for ANOTHER item than the open assistant
+    // segment of its turn and owner means that segment's item was abandoned:
+    // Codex drops an `agentMessage` mid-stream when the upstream stream is cut
+    // and silently re-samples (fixtures/codex 05, t 17754–21063). Close it the
+    // way its own `item.completed` would, with the text it has — otherwise the
+    // new item streams into it and inherits its kind, and an answer glued onto
+    // commentary is filed as commentary. Every adapter completes an assistant
+    // item before it starts the next, so this fires only on an abandonment: a
+    // restarted SAME item and another owner's item leave the segment alone.
+    if (
+      event.type === "item.started" &&
+      eventTurnId !== null &&
+      event.payload.itemType === "assistant_message" &&
+      event.itemId !== undefined
+    ) {
+      const owner = ownerOf(event);
+      const open = state.segments.get(segmentKey(eventTurnId, "assistant", owner));
+      if (open?.activeMessageId != null && open.baseKey !== segmentBaseKeyFromEvent(event)) {
+        finalizeSegment(
+          threadId,
+          state,
+          eventTurnId,
+          "assistant",
+          { cause: event, occurredAt: now },
+          owner
+        );
+        state.segments.delete(segmentKey(eventTurnId, "assistant", owner));
+      }
+    }
+
     // --- the provider's assistant-message phase (§7.3 `messageKind`) -------
     if (
       (event.type === "item.started" ||
@@ -1133,7 +1184,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       event.payload.itemType === "assistant_message" &&
       event.itemId !== undefined
     ) {
-      const phase = assistantPhaseFromDetail(event.payload.detail);
+      const { phase } = assistantPhase(event.payload);
       if (phase !== null) {
         noteAssistantPhase(state, event.itemId, phase, eventTurnId, ownerOf(event));
       }
@@ -1427,15 +1478,12 @@ export function createIngestion(options: IngestionOptions): Ingestion {
           turn.assistantMessageId = messageId;
         }
       }
-      const data = event.payload.data;
-      const phase =
-        typeof data === "object" && data !== null && !Array.isArray(data) &&
-        typeof (data as { phase?: unknown }).phase === "string"
-          ? (data as { phase: string }).phase
-          : event.payload.detail;
+      // Only the phase is asked here: a replayed row's `detail` is its text
+      // even when that text spells the phase, and the live stream keeps the
+      // same message, so reading it as a marker would lose it on resume alone.
       const kindFields =
         role === "assistant"
-          ? { messageKind: assistantPhaseFromDetail(phase) ?? "answer" }
+          ? { messageKind: assistantPhase(event.payload).phase ?? "answer" }
           : {};
       emit(state, threadId, event, now, "thread.message-sent", {
         messageId,
@@ -1714,13 +1762,14 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     );
     const active = activeSegmentId(state, turnId, "assistant", owner);
     const messageId = active ?? segmentMessageId(segmentBaseKeyFromEvent(event), 0, "assistant");
-    // A `detail` that IS the phase marker is metadata, not the message body,
-    // and `data.text` wins where an adapter elides `detail` for the label.
-    const detail = detailIsPhaseMarker(event.payload.detail)
-      ? undefined
-      : historicalItemText(event.payload);
+    // A `detail` that IS Codex's phase marker is metadata, not the message
+    // body, so it alone is dropped: `data.text` is always text, and it wins
+    // where an adapter elides `detail` for the label.
+    const text = historicalItemText(
+      assistantPhase(event.payload).detailIsMarker ? { data: event.payload.data } : event.payload
+    );
     const streamed = state.projected.has(messageId) || state.messages.has(messageId);
-    if (active === null && !streamed && !hasRenderableText(detail)) {
+    if (active === null && !streamed && !hasRenderableText(text)) {
       // Nothing to complete: no stream ever opened and the completion is empty.
       return;
     }
@@ -1728,9 +1777,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     const close = {
       cause: event,
       occurredAt: now,
-      // The completion's detail is a whole-message snapshot: it may only stand
+      // The completion's text is a whole-message snapshot: it may only stand
       // in for deltas that never arrived, or the text prints twice.
-      ...(!streamed && hasRenderableText(detail) ? { fallbackText: detail } : {})
+      ...(!streamed && hasRenderableText(text) ? { fallbackText: text } : {})
     };
     if (active !== null) {
       finalizeSegment(threadId, state, turnId, "assistant", close, owner);

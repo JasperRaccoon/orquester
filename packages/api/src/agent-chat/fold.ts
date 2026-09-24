@@ -45,6 +45,7 @@
  * independent, correct states.
  */
 
+import { isCompactionActivity } from "./compaction.ts";
 import type {
   DomainEvent,
   ThreadMessageSentPayload,
@@ -239,6 +240,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  * Every rule at its EXACT limit: batch retention changes when this runs (the
  * trigger, {@link retentionTriggered}), never what it drops (design B).
  *
+ * A compaction marker — {@link isCompactionActivity}, the one rule
+ * `compaction.ts` shares with the UI, the MCP and the thread index — is exempt
+ * from the parent window (§4.6.5, §7.3). It is structure, not chatter: it is
+ * where the provider's memory of the conversation begins, which "rewind to
+ * here" reads to withhold the messages before it (§5.5) and the timeline
+ * reads to draw the divider. There is one per compaction, so keeping them all
+ * costs nothing — and a 500-row window on a busy thread evicted the marker
+ * within minutes, after which every pre-compaction message was offered for a
+ * rewind the adapter could only refuse. Both spellings: an older log wrote
+ * the settled marker as `thread.state.changed {state: "compacted"}`, which
+ * the window evicted like any row until `FOLD_SNAPSHOT_VERSION` 3. In an
+ * agent's own window a marker is an ordinary row.
+ *
  * *T3: `projector.ts:63-87` (`retainThreadActivities`).*
  */
 function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<ThreadActivityItem> {
@@ -271,14 +285,15 @@ function activitiesToDrop(activities: readonly ThreadActivityItem[]): Set<Thread
   const drop = new Set<ThreadActivityItem>();
 
   // The parent window: the last ACTIVITY_RETENTION_LIMIT rows the parent
-  // timeline renders, plus every open async question and every agent anchor.
+  // timeline renders, plus every open async question, every agent anchor and
+  // every compaction marker.
   const parentStart = parentRows.length - ACTIVITY_RETENTION_LIMIT;
   for (let index = 0; index < parentStart; index += 1) {
     const activity = parentRows[index]!;
     if (
       retainedByQuestion.has(activity) ||
       isAgentAnchorRow(activity) ||
-      isCompactionMarkerRow(activity)
+      isCompactionActivity(activity)
     ) {
       continue;
     }
@@ -327,19 +342,6 @@ function isAgentAnchorRow(activity: ThreadActivityItem): boolean {
     return false;
   }
   return asRecord(activity.payload)?.agentKind === "agent";
-}
-
-/**
- * A compaction marker (§4.6.5, §7.3) is structure, not chatter: it is where
- * the provider's memory of the conversation begins, which "rewind to here"
- * reads to withhold the messages before it (§5.5) and the timeline reads to
- * draw the divider. There is one per compaction, so keeping them all costs
- * nothing — and a 500-row window on a busy thread evicted the marker within
- * minutes, after which every pre-compaction message was offered for a rewind
- * the adapter could only refuse.
- */
-function isCompactionMarkerRow(activity: ThreadActivityItem): boolean {
-  return activity.activityKind === "context-compaction";
 }
 
 /** The agent that owns a row (its own window), or `null` for a parent row. */
@@ -403,8 +405,8 @@ const PARENT_CLASS: unique symbol = Symbol("parent");
 /**
  * The window a row counts in for the trigger: {@link PARENT_CLASS}, its owning
  * agent's id, or `null` for a row no rule ever drops (an agent anchor anywhere,
- * a compaction marker in the parent window) — mirroring the exemptions of
- * {@link activitiesToDrop}.
+ * a compaction marker of either spelling in the parent window) — mirroring the
+ * exemptions of {@link activitiesToDrop}.
  *
  * An open message-mode question counts in its class although the trim keeps
  * it: whether it is still open depends on rows anywhere in the list, and a
@@ -423,7 +425,7 @@ function retentionClassOf(activity: ThreadActivityItem): RetentionClass {
   if (owner !== null) {
     return owner;
   }
-  return isCompactionMarkerRow(activity) ? null : PARENT_CLASS;
+  return isCompactionActivity(activity) ? null : PARENT_CLASS;
 }
 
 /** One agent holding more droppable rows than this trips the trigger. */

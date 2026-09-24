@@ -3,7 +3,8 @@ import { join } from "node:path";
 import type { TodoScope } from "@orquester/api";
 import { isValidName, type TodoRecord } from "@orquester/config";
 import { TodoError, type TodoListManager } from "../todos.ts";
-import { TabNotFound, ToolError } from "./terminal-control.ts";
+import { ToolError } from "./errors.ts";
+import { clipText, MAX_ECHO_CHARS } from "./result.ts";
 
 export type TodoProjection = {
   id: string;
@@ -106,24 +107,45 @@ function taskLines(lines: BodyLine[]): TaskLine[] {
   return tasks;
 }
 
+/**
+ * How many of a list's items a refusal names, and the most of each: the list's own text, of any length and count. 70,
+ * not more: beside a quote escaped at its longest (602 characters), the longest refusal — the ambiguous one, 40 items at
+ * 70 — is 3 701 characters for a 3 000-item list, so MAX_ERROR_MESSAGE_CHARS (result.ts) never cuts its tail, whatever
+ * the input. At 80 it was 4 101.
+ */
+const MAX_LISTED_ITEMS = 40;
+const MAX_LISTED_ITEM_CHARS = 70;
+
 function availableItems(tasks: TaskLine[]): string {
-  return tasks.map((task) => `${task.index}. ${task.item}`).join(", ");
+  const listed = tasks.slice(0, MAX_LISTED_ITEMS).map((task) => `${task.index}. ${clipText(task.item, MAX_LISTED_ITEM_CHARS)}`).join(", ");
+  return tasks.length > MAX_LISTED_ITEMS ? `${listed}, … (${tasks.length} items)` : listed;
 }
 
-function todoNotFound(id: string): ToolError {
-  return new ToolError(`No todo with id ${id}.`);
+/**
+ * A caller's value — a list id, an item's text — as a refusal quotes it: capped, quoted and escaped onto one line. The
+ * cap is in code points and comes BEFORE the escaping, so a control character or a lone surrogate costs six characters:
+ * a quote is at most 602.
+ */
+const quoted = (text: string): string => JSON.stringify(clipText(text, MAX_ECHO_CHARS));
+
+/**
+ * The store's 404 for a list it does not have ("todo not found"), said where the id is known: the id, quoted, and
+ * where the ids are.
+ */
+function missingList(id: string): TodoError {
+  return new TodoError(404, `No todo list with id ${quoted(id)}; list_todos shows the ids.`);
 }
 
-function rethrowTodoError(id: string, error: unknown): never {
-  if (error instanceof TodoError && error.status === 404) {
-    throw todoNotFound(id);
-  }
-  if (error instanceof TodoError) {
-    throw new ToolError(error.message);
-  }
-  throw error;
-}
+/** A store refusal, the 404 for this id named; anything else untouched. */
+const namingMissing = (id: string) => (error: unknown): never => {
+  throw error instanceof TodoError && error.status === 404 ? missingList(id) : error;
+};
 
+/**
+ * The todo tools' access to the daemon's todo store. A store refusal is a TodoError and is let through: result.ts maps
+ * its status to the code it deserves (404 NOT_FOUND, 409 CONFLICT, else INVALID_ARGUMENT) with its (safe) message — a
+ * missing list is not a bad argument. The 404 alone is reworded, to name the id it could not find.
+ */
 export class TodoTools {
   constructor(private readonly deps: TodoToolsDeps) {}
 
@@ -138,20 +160,12 @@ export class TodoTools {
   }
 
   async update(id: string, patch: { name?: string; body?: string }): Promise<TodoProjection> {
-    try {
-      return projectTodo(await this.deps.todos.update(id, patch));
-    } catch (error) {
-      rethrowTodoError(id, error);
-    }
+    return projectTodo(await this.deps.todos.update(id, patch).catch(namingMissing(id)));
   }
 
   async remove(id: string): Promise<{ deleted: true }> {
-    try {
-      await this.deps.todos.delete(id);
-      return { deleted: true };
-    } catch (error) {
-      rethrowTodoError(id, error);
-    }
+    await this.deps.todos.delete(id).catch(namingMissing(id));
+    return { deleted: true };
   }
 
   async toggleItem(
@@ -161,13 +175,14 @@ export class TodoTools {
   ): Promise<TodoToggleResult> {
     const todo = this.deps.todos.get(id);
     if (!todo) {
-      throw todoNotFound(id);
+      // The store's refusal for a list it does not have, as update and delete answer.
+      throw missingList(id);
     }
 
     const lines = splitBodyLines(todo.body);
     const tasks = taskLines(lines);
     if (tasks.length === 0) {
-      throw new ToolError("No task items in todo.");
+      throw new ToolError("INVALID_ARGUMENT", "No task items in todo.");
     }
 
     const task = this.resolveTask(tasks, item);
@@ -183,15 +198,15 @@ export class TodoTools {
 
   private resolveScope(sel: TodoSelector): ResolvedScope {
     if (!isValidName(sel.workspace)) {
-      throw new TabNotFound("Invalid workspace name.");
+      throw new ToolError("PROJECT_NOT_FOUND", "Invalid workspace name.");
     }
     if (sel.project !== undefined && !isValidName(sel.project)) {
-      throw new TabNotFound("Invalid workspace/project name.");
+      throw new ToolError("PROJECT_NOT_FOUND", "Invalid workspace/project name.");
     }
 
     const workspacePath = join(this.deps.workspacesDir, sel.workspace);
     if (!statSafe(workspacePath)?.isDirectory()) {
-      throw new TabNotFound(`No workspace "${sel.workspace}".`);
+      throw new ToolError("PROJECT_NOT_FOUND", `No workspace "${sel.workspace}".`);
     }
     if (sel.project === undefined) {
       return { scope: "workspace", refKey: sel.workspace };
@@ -199,7 +214,7 @@ export class TodoTools {
 
     const projectPath = join(workspacePath, sel.project);
     if (!statSafe(projectPath)?.isDirectory()) {
-      throw new TabNotFound(`No project "${sel.project}" in "${sel.workspace}".`);
+      throw new ToolError("PROJECT_NOT_FOUND", `No project "${sel.project}" in "${sel.workspace}".`);
     }
     return { scope: "project", refKey: projectPath };
   }
@@ -207,22 +222,25 @@ export class TodoTools {
   private resolveTask(tasks: TaskLine[], item: string | number): TaskLine {
     if (typeof item === "number") {
       if (!Number.isInteger(item) || item < 1 || item > tasks.length) {
-        throw new ToolError(`No task item at index ${item}. Available items: ${availableItems(tasks)}.`);
+        throw new ToolError("INVALID_ARGUMENT", `No task item at index ${item}. Available items: ${availableItems(tasks)}.`);
       }
       return tasks[item - 1];
     }
 
     const needle = item.trim();
     if (!needle) {
-      throw new ToolError(`Task item text is required. Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `Task item text is required. Available items: ${availableItems(tasks)}.`);
     }
 
-    const matches = tasks.filter((task) => task.item.toLowerCase() === needle.toLowerCase());
+    // Lowercased ONCE: the caller's text can be megabytes, and lowercasing it per item blocked the event loop for
+    // seconds on a long list.
+    const wanted = needle.toLowerCase();
+    const matches = tasks.filter((task) => task.item.toLowerCase() === wanted);
     if (matches.length === 0) {
-      throw new ToolError(`No task item matching "${item}". Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `No task item matching ${quoted(item)}. Available items: ${availableItems(tasks)}.`);
     }
     if (matches.length > 1) {
-      throw new ToolError(`Task item "${item}" is ambiguous; use index. Available items: ${availableItems(tasks)}.`);
+      throw new ToolError("INVALID_ARGUMENT", `Task item ${quoted(item)} is ambiguous; use index. Available items: ${availableItems(tasks)}.`);
     }
     return matches[0];
   }

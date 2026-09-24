@@ -35,12 +35,14 @@ import {
   deleted,
   delta,
   done,
+  legacyCompaction,
   liveTurn,
   recordingLogger,
   replayedTurn,
   reverted,
   session,
   stampAt,
+  subagentCompaction,
   TestLog,
   turnStart,
   userMessage,
@@ -422,6 +424,41 @@ describe("thread index: observe", () => {
           .get() as { n: number }
     );
     assert.equal(ftsRows.n, 0);
+  });
+
+  it("leaves a marker exactly for the conversation's own compaction rows, either spelling, its phase as the kind", async () => {
+    const log = new TestLog();
+    feed(
+      index,
+      log,
+      log.append(
+        created(), // 1
+        compaction("settled", null), // 2
+        compaction("running", null, "compacting"), // 3
+        compaction("failed", null, "compaction-failed"), // 4
+        legacyCompaction("legacy", null), // 5
+        activity("state", "thread.state.changed", { payload: { state: "running" } }), // 6
+        subagentCompaction("on-row", null, { agentId: "sub-1", on: "row" }), // 7
+        subagentCompaction("on-payload", null, { agentId: "sub-1", on: "payload" }), // 8
+        // A blank agentId names no agent: the quiet-timeline rule trims it.
+        activity("blank", "context-compaction", { payload: { state: "compacted" }, agentId: "  " }) // 9
+      )
+    );
+    await index.drain();
+
+    const { items, markers } = inspect((db) => ({
+      items: db.prepare("SELECT item_id FROM items ORDER BY seq").all(),
+      markers: db.prepare("SELECT seq, kind FROM markers ORDER BY seq").all()
+    }));
+    assert.deepEqual(markers, [
+      { seq: 2, kind: "compacted" },
+      { seq: 3, kind: "compacting" },
+      { seq: 4, kind: "compaction-failed" },
+      { seq: 5, kind: "compacted" },
+      { seq: 9, kind: "compacted" }
+    ]);
+    // A row that leaves no marker is still indexed as an activity.
+    assert.equal(items.length, 8);
   });
 
   it("a revert drops the removed turns and everything from their first line on, and closes every range", async () => {

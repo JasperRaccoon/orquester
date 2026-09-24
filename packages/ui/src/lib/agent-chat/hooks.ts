@@ -352,8 +352,9 @@ export function useProviderSnapshots(): ProviderSnapshot[] {
  * This is the durable copy of everything unsent: W13's `ChatComposer` loads it
  * on mount and on a thread swap, and saves it back on every change, so a
  * half-typed message outlives the component. It is also where a queued message
- * returned by an interrupt lands while no composer is mounted — the next mount
- * finds it there.
+ * returned by an interrupt lands while no composer is mounted, and where a
+ * failed send goes back once no composer shows its thread (`updateThreadDraft`)
+ * — the next mount finds either there.
  */
 export function useAgentChatDraft(sessionId: string): {
   draft: AgentChatThreadState["draft"];

@@ -163,19 +163,19 @@ function consoleLogger(): AdapterLogger {
   };
 }
 
-/** The registry `refId → adapter` map, from the catalog's `chat` block (§5.3). */
-function buildRefIdIndex(): Map<
-  string,
-  { adapter: AgentAdapterId; bins: string[]; args: string[] }
-> {
-  const index = new Map<string, { adapter: AgentAdapterId; bins: string[]; args: string[] }>();
+/**
+ * The registry `refId → adapter` map, from the catalog's `chat` block (§5.3).
+ *
+ * Deliberately WITHOUT the row's `args`: those are the terminal launcher's
+ * flags (`--dangerously-skip-permissions`, `--effort …`, `--yolo`) and a chat
+ * launch never sees them. Permissions come only from the thread's
+ * `runtimeMode`, effort only from its model selection.
+ */
+export function buildRefIdIndex(): Map<string, { adapter: AgentAdapterId; bins: string[] }> {
+  const index = new Map<string, { adapter: AgentAdapterId; bins: string[] }>();
   for (const entry of REGISTRY.agents as readonly RegistryEntryDef[]) {
     if (!entry.chat) continue;
-    index.set(entry.id, {
-      adapter: entry.chat.adapter,
-      bins: [...entry.bin],
-      args: [...(entry.args ?? [])]
-    });
+    index.set(entry.id, { adapter: entry.chat.adapter, bins: [...entry.bin] });
   }
   return index;
 }
@@ -520,7 +520,6 @@ export async function startAgentHost(
     },
     continuationEnabled: (projectPath) => continuationEnabledFor(appdir, projectPath, env),
     isThreadClosed: (threadId) => isThreadClosedFor(appdir, threadId),
-    launchArgsForRefId: (refId) => refIds.get(refId)?.args ?? [],
     launchConfigs,
     clock,
     ids,

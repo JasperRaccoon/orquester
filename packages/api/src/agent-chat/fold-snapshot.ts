@@ -80,20 +80,25 @@ import type {
 
 /**
  * The `state.json` format. **Bump it whenever the fold** (`fold.ts` and what it
- * calls: `pending.ts`, `roster.ts`, `turn-state.ts`, `turns.ts`) **changes what
- * it produces from the same log.** A load folds only the tail on top of a
- * snapshot, so a snapshot written by the old code would carry the old fold's
- * answer forward for every event before its `seq`; a bumped version makes the
- * next load discard it and fold from byte 0, once.
+ * calls: `compaction.ts`, `pending.ts`, `roster.ts`, `turn-state.ts`,
+ * `turns.ts`) **changes what it produces from the same log.** A load folds only
+ * the tail on top of a snapshot, so a snapshot written by the old code would
+ * carry the old fold's answer forward for every event before its `seq`; a
+ * bumped version makes the next load discard it and fold from byte 0, once.
  */
-export const FOLD_SNAPSHOT_VERSION = 3;
+export const FOLD_SNAPSHOT_VERSION = 4;
 
 // 2: batch retention (design `2026-09-23-fold-performance-design.md`) — the
 // window now grows past each limit by its slack before a trim, so a state
 // folded by version 1 holds a different window than version 2 folds to from
 // the same log; and the state carries `evicted`.
-// 3: the fold derives the thread's `goal` from its `goal.updated` rows (goals
-// §4.4) — a field a version-2 state never carries, whatever its log holds.
+// 3: the parent window keeps the legacy compaction marker, `thread.state.changed
+// {state: "compacted"}`, whatever its age, as it keeps `context-compaction`
+// (`isCompactionActivity`). Version 2 read it as an ordinary parent row: a
+// state it folded may have evicted the marker for good, and trimmed at other
+// steps, the marker having counted toward the parent's trigger.
+// 4: the fold derives the thread's `goal` from its `goal.updated` rows (goals
+// §4.4) — a field a version-3 state never carries, whatever its log holds.
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from

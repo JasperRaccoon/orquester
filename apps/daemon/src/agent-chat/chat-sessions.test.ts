@@ -241,9 +241,6 @@ class FakePty implements ISessionManager {
   async scrollback(): Promise<string> {
     return "pty";
   }
-  async captureText(): Promise<string> {
-    return "pty";
-  }
   buffer(): string {
     return "pty";
   }
@@ -358,7 +355,6 @@ test("the PTY-only surface is inert for a chat tab", async () => {
   const { router, chat } = makeRouter();
   seed(chat, "chat-1", 0);
   assert.equal(await router.scrollback("chat-1"), "");
-  assert.equal(await router.captureText("chat-1"), "");
   assert.equal(router.buffer("chat-1"), "");
   assert.equal(router.subscribe("chat-1", () => undefined, () => undefined)(), undefined);
   // …and untouched for a terminal.

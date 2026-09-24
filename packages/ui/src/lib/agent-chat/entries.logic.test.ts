@@ -425,6 +425,32 @@ describe("deriveTimelineEntriesFromItems", () => {
     );
     assert.equal(projection.proposedPlans[0]?.implementedAt, stamp(2));
   });
+
+  it("marks a proposal whose markdown the wire cut at 16 KiB (§5.6), and only that one", () => {
+    const projection = deriveTimelineEntriesFromItems(
+      [
+        activity(
+          "turn.proposed.completed",
+          { planMarkdown: "# Cut\n\nstep 1…", truncated: true },
+          { id: "p-cut", createdAt: stamp(1) }
+        ),
+        activity("turn.proposed.completed", { planMarkdown: "# Whole" }, { id: "p-whole", createdAt: stamp(2) }),
+        // Rebuilt from its deltas: the cut was some other field, and the row
+        // read back would carry no markdown to replace this one with.
+        activity("turn.proposed.delta", { delta: "# From deltas" }, { turnId: "t3", createdAt: stamp(3) }),
+        activity("turn.proposed.completed", { truncated: true }, { id: "p-deltas", turnId: "t3", createdAt: stamp(4) })
+      ],
+      EMPTY_TIMELINE_PROJECTION
+    );
+    assert.deepEqual(
+      projection.proposedPlans.map((plan) => [plan.id, plan.truncated === true]),
+      [
+        ["p-cut", true],
+        ["p-whole", false],
+        ["p-deltas", false]
+      ]
+    );
+  });
 });
 
 describe("drill-in ownership and streamed output", () => {

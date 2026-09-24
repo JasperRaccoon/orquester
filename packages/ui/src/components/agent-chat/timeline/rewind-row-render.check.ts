@@ -73,6 +73,7 @@ function context(overrides: Partial<TimelineRowContextValue>): TimelineRowContex
     onOpenTurnDiff: NOOP,
     onOpenFile: NOOP,
     onLoadFullOutput: NOOP,
+    readFullPlanMarkdown: (plan) => Promise.resolve(plan.planMarkdown),
     onOpenAgent: NOOP,
     onSendQueuedNow: NOOP,
     onReturnQueuedToComposer: NOOP,

@@ -143,8 +143,9 @@ Where the build departs from the text above, and why:
   the rows appended since, walked newest-first (at most 256) before being folded into a new base.
   Same invariants; the separate map measured 1.55 s against ~1.05 s.
 - **Row classes as built:** an agent anchor counts in no class; an agent-owned row counts for its
-  agent; a parent compaction marker counts in no class; every other parent row counts as parent,
-  open questions included. The message count is `items.length − activities.length`.
+  agent; a parent compaction marker — either spelling since the follow-up below — counts in no
+  class; every other parent row counts as parent, open questions included. The message count is
+  `items.length − activities.length`.
 - **Reducers tell `commit` how the window changed** (a row appended, a row replaced in place, or
   "rebuild"), so the counters and the index move by one row; a trim decrements the counters over
   the dropped rows; a revert rebuilds everything.
@@ -195,6 +196,23 @@ Where the build departs from the text above, and why:
 - Left as documented: each bridge change re-projects pages + bridge (bounded by the cap and rare
   under batching); the store's plain `refresh()` keeps its existing stale-snapshot race on a host
   restart.
+
+### Follow-up: the legacy compaction marker (`FOLD_SNAPSHOT_VERSION` 2 → 3)
+
+B's exemptions name "compaction markers", but the fold recognised only a `context-compaction` row:
+the `thread.state.changed {state: "compacted"}` an older log wrote for a settled compaction was
+evicted like any parent row, and counted toward the parent's trigger. The parent window's exemption
+and the row class now read `isCompactionActivity` (`packages/api/src/agent-chat/compaction.ts`), the
+rule the UI's window gates, the MCP and the thread index already share: both spellings are kept
+whatever their age, a `thread.state.changed` in any other state is still an ordinary row, and an
+agent's own marker is still an ordinary row of its agent's window. Nothing else about retention
+changed. A state folded by version 2 may already have evicted the marker (and trimmed at other
+steps), so `FOLD_SNAPSHOT_VERSION` went to 3: a version-2 `state.json` is discarded through the
+existing version-mismatch path and its log re-folded once: lazily, on the thread's next load —
+except a thread orphaned at boot: the host's boot reconcile folds it before the readiness gate opens
+(`agent-host/main.ts`; A1 of the thread-index design), so it re-folds there, on the readiness path.
+The reference model in `fold.retention.test.ts` reads both spellings; a log with legacy rows is
+checked against it, and through JSON at every split point in `fold.determinism-legacy.test.ts`.
 
 ## Ownership (parallel implementation)
 

@@ -15,7 +15,15 @@ import type BetterSqlite3 from "better-sqlite3";
 import { createThreadIndex, INDEX_SCHEMA_VERSION } from "./index.ts";
 import { INDEX_TABLES } from "./schema.ts";
 import { defaultSqliteDriver, type SqliteDriver } from "./sqlite.ts";
-import { created, recordingLogger, TestLog, userMessage } from "./testing.ts";
+import {
+  created,
+  legacyCompaction,
+  liveTurn,
+  recordingLogger,
+  subagentCompaction,
+  TestLog,
+  userMessage
+} from "./testing.ts";
 
 const require = createRequire(import.meta.url);
 const Database = require("better-sqlite3") as typeof BetterSqlite3;
@@ -225,6 +233,86 @@ describe("thread index file", () => {
       false,
       "never got as far as preparing statements against it"
     );
+  });
+
+  it("rebuilds a version-2 file — markers derived by the rule before the shared one — and re-derives them", async () => {
+    // A thread the two rules disagree on: version 2 skipped the legacy settled
+    // marker in turn 1 and kept a subagent's own compaction in turn 2 as the
+    // conversation's; version 3 does the opposite.
+    const log = new TestLog();
+    log.append(
+      created(),
+      ...liveTurn({ n: 1, prompt: "one", extra: [legacyCompaction("legacy", "t1")] }),
+      ...liveTurn({
+        n: 2,
+        prompt: "two",
+        extra: [subagentCompaction("sub", "t2", { agentId: "sub-1", on: "row" })]
+      }),
+      ...liveTurn({ n: 3, prompt: "three" })
+    );
+    const seqOf = (activityId: string): number => {
+      const event = log
+        .all()
+        .events.find(
+          (candidate) =>
+            candidate.type === "thread.activity-appended" &&
+            candidate.payload.activity.id === activityId
+        );
+      assert.ok(event !== undefined, `no activity ${activityId}`);
+      return event.seq;
+    };
+    const catchUp = {
+      threadId: log.threadId,
+      projectPath: "/w/p",
+      title: "T",
+      logSeq: log.lastSeq,
+      read: log.readEventsFrom
+    };
+    const first = createThreadIndex({ filePath, logger: recordingLogger() });
+    await first.catchUp(catchUp);
+    first.close();
+    // What version 2 left behind: the same statements, so the file passes every
+    // check but the version — its rows are the only thing wrong with it.
+    const writable = new Database(filePath);
+    writable.prepare("DELETE FROM markers").run();
+    writable
+      .prepare("INSERT INTO markers (thread_id, seq, kind) VALUES (?, ?, 'compacted')")
+      .run(log.threadId, seqOf("sub"));
+    writable.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
+    writable.close();
+
+    const logger = recordingLogger();
+    const second = createThreadIndex({ filePath, logger });
+    assert.notEqual(INDEX_SCHEMA_VERSION, 2, "the premise: v2 is another version");
+    assert.equal(second.available, true);
+    assert.equal(second.cursor(log.threadId), null, "nothing of the version-2 file is trusted");
+    assert.equal(second.totalTurns(log.threadId), 0);
+    assert.ok(
+      logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
+      "rebuilt by the version check"
+    );
+    assert.equal(
+      logger.entries.some((entry) => /does not fit this build/.test(entry.message)),
+      false,
+      "never got as far as preparing statements against it"
+    );
+
+    // The boot catch-up re-derives the thread from its log, by the shared rule.
+    await second.catchUp(catchUp);
+    const id = log.threadId;
+    assert.deepEqual(
+      [1, 2, 3].map((n) => second.rewindable(id, second.turnByOrdinal(id, n)!)),
+      [false, true, true]
+    );
+    second.close();
+    const { version, markers } = inspect((db) => ({
+      version: (db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as {
+        value: string;
+      }).value,
+      markers: db.prepare("SELECT seq, kind FROM markers").all()
+    }));
+    assert.equal(version, String(INDEX_SCHEMA_VERSION));
+    assert.deepEqual(markers, [{ seq: seqOf("legacy"), kind: "compacted" }]);
   });
 
   it("runs unavailable when the file can be neither opened nor recreated", () => {

@@ -9,7 +9,11 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import type { AgentChatStreamFrame, AttachmentRef } from "@orquester/api/agent-chat";
+import type {
+  AgentChatStreamFrame,
+  AttachmentRef,
+  ThreadItemResponse
+} from "@orquester/api/agent-chat";
 
 import { registerComposerHandle } from "../../components/agent-chat/composer/composer-bridge";
 import { createThreadStore, resetDismissedErrorBanners, type AgentChatThreadState } from "./store";
@@ -24,12 +28,19 @@ interface Posted {
 function fakeTransport(): {
   transport: AgentChatTransport;
   posted: Posted[];
+  /** Every `GET …/items/:itemId`, by item id. */
+  itemReads: string[];
   push(frame: AgentChatStreamFrame): void;
   fail(error: unknown, times?: number): void;
+  onReadItem(answer: (itemId: string) => Promise<ThreadItemResponse>): void;
 } {
   const posted: Posted[] = [];
+  const itemReads: string[] = [];
   let onFrame: ((frame: AgentChatStreamFrame) => void) | null = null;
   let failures: { error: unknown; times: number } | null = null;
+  let readItem: (itemId: string) => Promise<ThreadItemResponse> = async () => {
+    throw new Error("unused");
+  };
 
   const transport: AgentChatTransport = {
     stream(_sessionId, _options, handlers) {
@@ -51,8 +62,9 @@ function fakeTransport(): {
     async read() {
       return { kind: "snapshot", thread: snapshot() };
     },
-    async readItem() {
-      throw new Error("unused");
+    async readItem(_sessionId, itemId) {
+      itemReads.push(itemId);
+      return readItem(itemId);
     },
     async readHistory() {
       throw new Error("unused");
@@ -80,9 +92,13 @@ function fakeTransport(): {
   return {
     transport,
     posted,
+    itemReads,
     push: (frame) => onFrame?.(frame),
     fail: (error, times = 1) => {
       failures = { error, times };
+    },
+    onReadItem: (answer) => {
+      readItem = answer;
     }
   };
 }
@@ -333,6 +349,56 @@ describe("R8-B1 — the actionable plan proposal reaches the view", () => {
   });
 });
 
+describe("Implement never sends a plan the wire cut (§5.6, §7.3)", () => {
+  // Every wire string is cut at 16 KiB and the row stamped `truncated`; the
+  // whole plan is one `GET …/items/:itemId` away.
+  const cutProposal = () =>
+    activity(
+      "turn.proposed.completed",
+      { planId: "p", planMarkdown: "# Ship it\n\nstep 1…", truncated: true },
+      { id: "plan-1", createdAt: stamp(1) }
+    );
+  const wholePlan = "# Ship it\n\nstep 1\nstep 2";
+
+  it("marks the actionable proposal truncated and reads the whole plan back by its id", async () => {
+    const { fake, api } = await store();
+    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, items: [cutProposal()] }) });
+    const plan = api.getState().actionableProposedPlan;
+    assert.equal(plan?.truncated, true);
+
+    fake.onReadItem(async (itemId) => ({
+      item: activity("turn.proposed.completed", { planId: "p", planMarkdown: wholePlan }, { id: itemId })
+    }));
+    assert.equal(await api.getState().actions.readFullPlanMarkdown(plan!), wholePlan);
+    assert.deepEqual(fake.itemReads, ["plan-1"]);
+    assert.deepEqual(fake.posted, [], "reading the plan back sends nothing");
+  });
+
+  it("never reads an intact proposal back", async () => {
+    const { fake, api } = await store();
+    const intact = activity("turn.proposed.completed", { planMarkdown: "# Ship it" }, { createdAt: stamp(1) });
+    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, items: [intact] }) });
+    const plan = api.getState().actionableProposedPlan!;
+    assert.equal(plan.truncated, undefined);
+    assert.equal(await api.getState().actions.readFullPlanMarkdown(plan), "# Ship it");
+    assert.deepEqual(fake.itemReads, []);
+  });
+
+  it("refuses, rather than answer the cut text, when the read-back fails or brings no plan", async () => {
+    const { fake, api } = await store();
+    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, items: [cutProposal()] }) });
+    const plan = api.getState().actionableProposedPlan!;
+
+    fake.onReadItem(async () => {
+      throw new AgentChatCommandError(503, "HOST_UNAVAILABLE", "The agent host is restarting.");
+    });
+    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan), /full plan could not be loaded/);
+    fake.onReadItem(async (itemId) => ({ item: activity("turn.proposed.completed", {}, { id: itemId }) }));
+    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan), /full plan could not be loaded/);
+    assert.deepEqual(fake.posted, []);
+  });
+});
+
 describe("Q2-7 — a snapshot invalidates the cached projections", () => {
   it("rebuilds rows from the replacing snapshot rather than merging", async () => {
     const { fake, api } = await store();
@@ -388,7 +454,8 @@ describe("R7-5 — a returned queued message gives its attachments back as chips
       },
       focusAtEnd: () => {},
       openControl: () => {},
-      sendText: () => false
+      sendText: () => false,
+      restoreFailedSend: () => false
     });
     return { staged, inserted, unregister };
   }

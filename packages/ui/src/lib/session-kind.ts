@@ -1,5 +1,5 @@
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
-import type { AgentConversationSummary, SessionKind, SessionSummary } from "@orquester/api";
+import type { AgentConversationSummary, RegistryEntry, SessionKind, SessionSummary } from "@orquester/api";
 
 import { DEFAULT_THREAD_TITLE } from "./agent-chat/title.logic";
 
@@ -91,8 +91,17 @@ export function launchKindForAgent(agentRefId: string): SessionKind | null {
  * under the same HOME instead of going through the launcher's `resumeArgs`
  * (§5.3). It is only offered where the agent that would run it actually has an
  * adapter.
+ *
+ * A `cliproxy` row that names no `proxyRefId` is never offered. Only the
+ * launcher that owns a proxy home can find a transcript there, and with none
+ * named `chatLaunchRefId` falls back to the plain agent, which would open the
+ * daemon's own HOME and resume nothing. The MCP's `list_conversations` and
+ * `create_session` refuse the same row.
  */
 export function isChatResumableConversation(conversation: AgentConversationSummary): boolean {
+  if (conversation.home === "cliproxy" && !conversation.proxyRefId) {
+    return false;
+  }
   return canOpenChat(chatLaunchRefId(conversation));
 }
 
@@ -108,6 +117,35 @@ export function chatLaunchRefId(conversation: AgentConversationSummary): string 
     return conversation.proxyRefId;
   }
   return conversation.agentRefId;
+}
+
+/**
+ * Whether a project's resume lists offer a conversation: the registry entry it
+ * launches under ({@link chatLaunchRefId}) is installed, and chat can resume
+ * it ({@link isChatResumableConversation}). This is the filter behind both of
+ * `ProjectOverview`'s lists: the overview's own and the empty chat tab's.
+ *
+ * `agentsById` is the runtime registry keyed by id. An entry is `enabled` only
+ * when its binary was found.
+ */
+export function isResumableByInstalledAgent(
+  conversation: AgentConversationSummary,
+  agentsById: ReadonlyMap<string, Pick<RegistryEntry, "enabled">>
+): boolean {
+  return (
+    Boolean(agentsById.get(chatLaunchRefId(conversation))?.enabled) &&
+    isChatResumableConversation(conversation)
+  );
+}
+
+/**
+ * Whether one agent's "Resume a conversation" section in the "+" menu lists a
+ * conversation: the row launches under exactly that agent, and chat can resume
+ * it. A proxy-home row belongs to its launcher's section, never to plain
+ * `claude`'s, and an orphaned one to nobody's.
+ */
+export function isResumableByAgent(conversation: AgentConversationSummary, agentId: string): boolean {
+  return chatLaunchRefId(conversation) === agentId && isChatResumableConversation(conversation);
 }
 
 /**

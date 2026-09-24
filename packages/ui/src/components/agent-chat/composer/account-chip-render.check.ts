@@ -18,8 +18,29 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ChatAccountOption } from "../../../lib/agent-chat/account-switch";
 import { AccountChip } from "./ComposerChips";
 
+/**
+ * What React's server renderer prints, once per render, for the picker's
+ * `ComposerPopover`: its `useLayoutEffect` positions an open menu, and on the
+ * server nothing runs it. True, and beside the point for a markup check.
+ */
+const SSR_LAYOUT_EFFECT_WARNING = "Warning: useLayoutEffect does nothing on the server";
+
+/**
+ * The static markup, with exactly that one `console.error` dropped while it
+ * renders — every other call still prints, and `console.error` is itself
+ * again once the render returns or throws.
+ */
 function render(element: ReactElement): string {
-  return renderToStaticMarkup(element);
+  const consoleError = console.error;
+  console.error = (...args: unknown[]): void => {
+    if (typeof args[0] === "string" && args[0].startsWith(SSR_LAYOUT_EFFECT_WARNING)) return;
+    consoleError.apply(console, args);
+  };
+  try {
+    return renderToStaticMarkup(element);
+  } finally {
+    console.error = consoleError;
+  }
 }
 
 const OPTIONS: ChatAccountOption[] = [
