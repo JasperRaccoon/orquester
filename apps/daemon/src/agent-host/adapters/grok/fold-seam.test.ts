@@ -758,3 +758,50 @@ test("20 fed as the host feeds it: the monitor stays live through its own wakes 
   await s.feedThrough(s.events.length);
   assert.equal(s.liveness.liveness(THREAD), null, "its end ends it");
 });
+
+test("a subagent's own shell counts on its own once the subagent's run ends, until its own end", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  await s.update(spawnStart("call-s1", { prompt: "p", description: "find callers", background: true }));
+  const spawnedUpdate = {
+    sessionUpdate: "subagent_spawned",
+    subagent_id: SUB_A,
+    child_session_id: SUB_A,
+    description: "find callers",
+    subagent_type: "general-purpose"
+  };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: SESSION, update: spawnedUpdate }));
+  const SHELL = "call-88e87ad3-152e-4eab-b522-89fc544e8db5-0";
+  const backgrounded = {
+    sessionUpdate: "task_backgrounded",
+    tool_call_id: SHELL,
+    task_id: SHELL,
+    command: "npm run dev",
+    description: "dev server"
+  };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SUB_A, update: backgrounded }));
+  assert.equal(s.liveness.liveness(THREAD), "working", "the agent covers its own shell");
+  const finished = {
+    sessionUpdate: "subagent_finished",
+    subagent_id: SUB_A,
+    child_session_id: SUB_A,
+    status: "completed",
+    output: "started the server",
+    will_wake: true
+  };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: SESSION, update: finished }));
+  assert.equal(agent(s, "call-s1").status, "completed");
+  assert.equal(
+    s.liveness.liveness(THREAD),
+    "monitoring",
+    "the shell outlives its agent — whether the CLI kills it is not captured, and a deploy must not"
+  );
+  const completed = {
+    sessionUpdate: "task_completed",
+    task_snapshot: { task_id: SHELL, command: "npm run dev", exit_code: 0, completed: true, kind: "bash" },
+    will_wake: false
+  };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/task_completed", { sessionId: SUB_A, update: completed }));
+  assert.equal(s.liveness.liveness(THREAD), null, "its own end ends it");
+  assert.equal(agent(s, SHELL).status, "completed");
+});

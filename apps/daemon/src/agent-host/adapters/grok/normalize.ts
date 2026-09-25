@@ -163,6 +163,12 @@ interface BackgroundTrack {
   revived?: boolean;
   /** A monitor's latest line (`_x.ai/monitor_event`), which its progress row shows. */
   lastLine?: string;
+  /**
+   * The subagent whose child session started it ended while it ran: from
+   * then on its rows name itself, so the liveness registry counts it on its
+   * own (a watch loop's TTL) rather than as covered by an agent no longer live.
+   */
+  ownerEnded?: boolean;
 }
 
 /**
@@ -1994,6 +2000,7 @@ export class GrokNormalizer {
     track.revived = false;
     this.rememberEndedSubagent(track, by);
     const events = this.closeAgentWork(track.taskId, "The subagent ended.");
+    events.push(...this.orphanAgentTasks(track.taskId));
     // The rows that close a run after its turn name the turn it ran in, as a
     // shell's closers do; a foreground end within its own turn is that turn.
     events.push(
@@ -2009,6 +2016,40 @@ export class GrokNormalizer {
         raw
       )
     );
+    return events;
+  }
+
+  /**
+   * The shells and monitors an ended agent's child session started and left
+   * running. Stamped with the agent, the liveness registry counted them as
+   * covered by its entry — which the agent's end just removed — so a server
+   * the subagent left running stopped holding a deploy's drain. Whether the
+   * CLI stops them when their subagent ends is not captured, and not killing
+   * running work outranks a stale row: from here each names itself, re-armed
+   * as live with one progress row, and counts on its own (the watch loop's
+   * TTL) until its own end.
+   */
+  private orphanAgentTasks(agentTaskId: string): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    for (const [taskId, task] of this.tasks) {
+      if (task.scope.owner !== agentTaskId || task.ownerEnded === true) {
+        continue;
+      }
+      task.ownerEnded = true;
+      const linkage = this.shellLinkage(taskId, task);
+      events.push(
+        this.event(
+          "task.progress",
+          {
+            ...linkage,
+            description: linkage.title,
+            ...(task.lastLine === undefined ? {} : { summary: task.lastLine }),
+            ...(task.revived === true ? {} : { status: "running" })
+          },
+          task.turnId
+        )
+      );
+    }
     return events;
   }
 
@@ -2942,7 +2983,7 @@ export class GrokNormalizer {
       taskId,
       taskType: track.taskType,
       agentKind: "background",
-      agentId: track.scope.owner ?? taskId,
+      agentId: track.scope.owner !== undefined && track.ownerEnded !== true ? track.scope.owner : taskId,
       title: track.description ?? track.command,
       ...(track.toolUseId === undefined ? {} : { toolUseId: track.toolUseId })
     };
@@ -2964,6 +3005,12 @@ export class GrokNormalizer {
    */
   stopBackgroundTasks(): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
+    // Shells and monitors first: a subagent's own ones are closed with the
+    // rest, so its end below leaves none to count on its own.
+    for (const [taskId, track] of [...this.tasks.entries()]) {
+      this.endShell(taskId, "adapter");
+      events.push(this.event("task.completed", { ...this.shellLinkage(taskId, track), status: "stopped" }, track.turnId));
+    }
     for (const track of this.subagents.values()) {
       if (!track.live) {
         continue;
@@ -2973,10 +3020,6 @@ export class GrokNormalizer {
         owner.settled = true;
       }
       events.push(...this.closeSubagent(track, "stopped", "adapter"));
-    }
-    for (const [taskId, track] of [...this.tasks.entries()]) {
-      this.endShell(taskId, "adapter");
-      events.push(this.event("task.completed", { ...this.shellLinkage(taskId, track), status: "stopped" }, track.turnId));
     }
     return events;
   }
