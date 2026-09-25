@@ -1162,6 +1162,7 @@ export class GrokNormalizer {
       !launch.inputIds.has(id) &&
       id !== this.sessionId &&
       !this.tasks.has(id) &&
+      !this.hasEnded(id) &&
       !this.subagentIds.has(id);
     const structured = uuidsIn(update.rawOutput).filter(usable);
     const ids = structured.length > 0 ? structured : uuidsIn(update.content).filter(usable);

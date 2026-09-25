@@ -868,6 +868,23 @@ test("an ended subagent's ids outlive its launch's memory: a snapshot listing on
   assert.deepEqual(agentRows(listed), []);
 });
 
+test("an ended shell's id quoted in a subagent's answer is never taken for the agent's", () => {
+  const grok = normalizer();
+  grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-sh", SHELL));
+  poll(grok, [{ task_id: SHELL, command: "npm run dev", status: "completed", output: "bye" }]);
+  const input = { prompt: "p", description: "run tests", background: true };
+  grok.handleSessionUpdate(spawnStart("call-bg", input));
+  const lead = `Subagent started; it reads the log ${SHELL} left.`;
+  grok.handleSessionUpdate(spawnEnd("call-bg", "completed", lead, textAnswer(SUB_B, lead)));
+  const listed = listShell(grok, "completed");
+  assert.deepEqual(agentRows(listed), [], "the shell's listing is not the agent's end");
+  assert.deepEqual(
+    statuses(taskRows(grok.stopBackgroundTasks())),
+    [["task.completed", "call-bg", "stopped"]],
+    "the agent was still running"
+  );
+});
+
 test("a resume clears `listed`: a snapshot without the resumed agent does not end it mid-resume", () => {
   const grok = normalizer();
   backgroundLaunched(grok);
