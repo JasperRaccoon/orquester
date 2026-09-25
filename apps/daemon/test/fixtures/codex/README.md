@@ -758,20 +758,24 @@ a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`
   if `06-…`'s one frame 1 ms after the turn's end is that resolution. "client request" could also
   name a client→server request, so this is the likelier reading, not a fact. The adapter
   (`withdrawRequests`, `session.ts`) is built to be right either way:
-  - a collab child's own `turn/completed` (any status) and its `thread/closed` (with or without a
-    turn end) settle every card of that child still open; a `serverRequest/resolved` settles the
-    card it names — the parent's own included, since a card still parked cannot be the ack of our
-    own answer (every path that answers takes the card out before it writes), and a parent card
-    left parked paused the session's watchdog for every later turn, held one of the 32 in-flight
-    slots, and was answered by a later Stop long after the server had dropped it;
+  - the end of the turn that raised a card — `turn/completed`, any status; the parent's own turn
+    for its cards, a child's own turn for a child's — settles it; so does its thread's close
+    (`thread/closed`, with or without a turn end), for every card of that thread, and a
+    `serverRequest/resolved` naming it, whoever's (a card still parked cannot be the ack of our own
+    answer: every path that answers takes the card out before it writes). A card asked outside any
+    turn (an MCP elicitation with `turnId: null`) is not ended by a turn's end. A card left parked
+    paused the session's watchdog for every later turn, held one of the 32 in-flight slots, kept an
+    approval blocking the composer, and was answered by a later Stop long after anything waited on
+    it;
   - each such card gets one `request.resolved {decision: "cancel", withdrawn: true}` /
     `user-input.resolved {answers: {}, withdrawn: true}` on the stamp it was opened with (an
     approval: its own turn, or for a child's the parent turn it rode; a question: its own turn, or
     none for a child's), which ingestion writes as the host's own Stop row, "Request cancelled" /
-    "Question cancelled" (`cancelledRequestActivity`), before the call closures and the task row a
-    child's end writes — unless the host closed the card itself first: a question on a turn that
-    ended was dismissed then ("User input dismissed", §6.2), and the host writes no second row for
-    it (`repeatsHostClosure`, the orchestrator);
+    "Question cancelled" (`cancelledRequestActivity`) — a child's before the call closures and the
+    task row its end writes, the parent's own after its turn's end, so a question the host
+    dismissed at that end ("User input dismissed", §6.2) keeps the dismissal as its one row: the
+    host writes no second row for a closure it wrote itself (`repeatsHostClosure`, the
+    orchestrator);
   - nothing is answered on the wire (`CodexRequestWithdrawn`, `protocol.ts`). If the server
     resolved the request itself, an answer lands on nothing; if it still holds it, the turn or
     thread that asked is over and nothing consumes the answer; answering is wrong in the first
@@ -779,12 +783,10 @@ a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`
 
   Left open, the card blocked the composer and the MCP's `send_message` until the user answered a
   request nothing waited on, or pressed Stop. A card the user answered first is settled once, by
-  the answer. A parent card whose turn ends with no `serverRequest/resolved` keeps its old
-  behaviour: the user's to answer, or a Stop's to settle — and a Stop answers every card it
-  cancels on the wire and writes one row for it (the host's; the adapter's report of that cancel
-  is not written, `repeatsHostClosure`). A capture of a child asking, then `turn/interrupt` on the
-  child's thread — and of a parent's turn ending with a card open — would settle the server's
-  side.
+  the answer. A Stop still answers every card it cancels on the wire, before it interrupts, and
+  writes one row for it (the host's; the adapter's report of that cancel is not written,
+  `repeatsHostClosure`). A capture of a child asking, then `turn/interrupt` on the child's thread —
+  and of a parent's turn ending with a card open — would settle the server's side.
 - `commandExecution.aggregatedOutput` is "The command's output, aggregated from stdout and stderr";
   the bindings document no bound. The completion keeps it in `data.item.aggregatedOutput` — where
   `commandOutputText` and the wire slimmer's `projectCommandData` already read Codex's output — up

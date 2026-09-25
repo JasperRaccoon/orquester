@@ -984,16 +984,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   never answered), which on the parent's turn swept the child's open card while the child stayed
   blocked, and a turn the thread never had (the child's own) is dropped by every rewind; nothing
   settles an approval by its turn, so approvals stay on the parent's. **The end of the wait on a
-  card nobody answered settles it** (`withdrawRequests`): a child's own `turn/completed` whatever
-  the status and its `thread/closed` with or without a turn end settle every card of that child
-  still open, and a `serverRequest/resolved` the card it names — the parent's own too: a card still
-  parked is never the ack of our own answer (every path that answers takes it out first), and left
-  parked it paused the session's watchdog for every later turn, held one of the 32 in-flight slots
-  and was answered by a later Stop. Each gets one row, the host's own Stop row ("Request
-  cancelled" / "Question cancelled", `cancelledRequestActivity`, through ingestion's `withdrawn`
-  rule), on the stamp the card was opened with — none for a question the host already dismissed
-  at its turn's end (`repeatsHostClosure`) — and nothing is answered on the wire
-  (`CodexRequestWithdrawn`). Whether the server still holds such a request is read, not captured:
+  card nobody answered settles it** (`withdrawRequests`), the parent's own as a child's: the end
+  of the turn that raised it (`turn/completed`, whatever the status; a child's own turn for a
+  child's card — never the turn a card is merely stamped with), its thread's close
+  (`thread/closed`, with or without a turn end), or a `serverRequest/resolved` naming it (a card
+  still parked is never the ack of our own answer: every path that answers takes it out first). A
+  card asked outside any turn (an MCP elicitation with `turnId: null`) is not ended by a turn's
+  end. Left parked, a card paused the session's watchdog for every later turn, held one of the 32
+  in-flight slots, kept an approval blocking the composer, and was answered by a later Stop. Each
+  gets one row, the host's own Stop row ("Request cancelled" / "Question cancelled",
+  `cancelledRequestActivity`, through ingestion's `withdrawn` rule), on the stamp the card was
+  opened with — a child's before the rows its end writes, the parent's own after its turn's end, so
+  a question the host dismissed at that end keeps the dismissal as its one row
+  (`repeatsHostClosure`) — and nothing is answered on the wire (`CodexRequestWithdrawn`). Whether the server still holds such a request is read, not captured:
   the 0.155.1 binary's "client request resolved because the turn state was changed" reads as the
   server resolving a thread's pending requests itself at its turn's end, but "client request"
   could also name a client→server request (codex fixtures README observations 5 and 20). Writing

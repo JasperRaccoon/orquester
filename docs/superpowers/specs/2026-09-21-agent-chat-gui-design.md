@@ -1426,17 +1426,17 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   the parent's card on NO turn: a turn's end dismisses the native-callback questions on it (§6.2), so
   on the parent's turn a parent whose `wait` returned swept the card while the child still waited
   for its answer (fixtures README observation 20).*
-  *Built (follow-ups 2026-09-25): a card nobody answered is closed when the wait on it ends — a
-  child's cards at the child's own turn end (whatever the status) or its thread's close, and any
-  card, the parent's own included, that a `serverRequest/resolved` names. It gets the one row a
-  Stop gives a card it cancels, "Request cancelled" / "Question cancelled"
-  (`cancelledRequestActivity`, through ingestion's `withdrawn` rule), on the stamp it was opened
-  with — none for a question the host already dismissed at its turn's end — and no answer on the
-  wire (`withdrawRequests`, `CodexRequestWithdrawn`). Whether the server still holds such a request
-  is read from its binary, not captured, and writing no answer is safe either way (fixtures README
-  observations 5 and 20). Left open, the card blocked the composer and the MCP's `send_message`
-  until the user answered a request nothing waited on, or pressed Stop; a parent card left parked
-  also paused the session's watchdog for every later turn.*
+  *Built (follow-ups 2026-09-25): a card nobody answered is closed when the wait on it ends — at
+  the end of the turn that raised it (the parent's own or a child's, whatever the status; a card
+  asked outside any turn excepted), at its thread's close, or when a `serverRequest/resolved` names
+  it. It gets the one row a Stop gives a card it cancels, "Request cancelled" / "Question
+  cancelled" (`cancelledRequestActivity`, through ingestion's `withdrawn` rule), on the stamp it
+  was opened with — a question the host dismissed at its turn's end keeps the dismissal as its one
+  row — and no answer on the wire (`withdrawRequests`, `CodexRequestWithdrawn`). Whether the server
+  still holds such a request is read from its binary, not captured, and writing no answer is safe
+  either way (fixtures README observations 5 and 20). Left open, the card blocked the composer and
+  the MCP's `send_message` until the user answered a request nothing waited on, or pressed Stop; a
+  parked card also paused the session's watchdog for every later turn.*
 
 #### OpenCode
 
