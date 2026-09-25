@@ -338,11 +338,15 @@ timeline. An unmapped provider message is a `satisfies never` typecheck error an
 --test $(find src -name '*.test.ts')` per package. The daemon and UI scripts also preload
 `./test/quiet-mock-timers.mjs`, which drops node:test's "The MockTimers API is an experimental
 feature" `ExperimentalWarning` — only that one, every other warning still prints — so a run's output
-stays pristine (`node --test` hands `--import` on to each file's child process). Every test script
-(the UI's `.check.ts` loop too) also preloads the shared `scripts/test/assert-ok.mjs`: without it, a
+stays pristine (`node --test` hands `--import` on to each file's child process). The daemon and UI
+scripts then run every `*.check.ts` script as a plain node script, which fails the run on a throw;
+a check must build its own inputs, never read the machine's — `usage-sources.check.ts` clears
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GROK_HOME` first, because the sources honour those
+overrides as the CLIs do, and an agent session points them at a real account. Every test script
+(the `.check.ts` loops too) also preloads the shared `scripts/test/assert-ok.mjs`: without it, a
 failing `assert.ok(x)` or `assert(x)` with no message either quotes the wrong code in its message or
-hangs its whole file, because Node 20 looks the call up in the `.ts` file at a position in tsx's one-line output, and its
-`findColumn` can then re-parse the file until the stack overflows. The preload writes that one message
+hangs its whole file, because Node 20 looks the call up in the `.ts` file at a position in tsx's
+one-line output, and its `findColumn` can then re-parse the file until the stack overflows. The preload writes that one message
 itself, through the source map and the TypeScript parser, and changes nothing else — keep it on any
 new test invocation (`apps/daemon/src/assert-ok.test.ts` pins it). Replay tests live
 **under `src/`** (the daemon's test glob only walks `src`) and read recorded real-CLI captures from

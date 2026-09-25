@@ -6,6 +6,14 @@ import { createClaudeSource, createCodexSource, createGrokSource } from "./usage
 
 const NOW = Date.parse("2026-07-07T08:00:00Z");
 const now = () => NOW;
+
+// Each source prefers its CLI's own home override — CLAUDE_CONFIG_DIR, CODEX_HOME, GROK_HOME — over
+// `userhome`, as the CLI itself does (see homeOverrideTests). An agent session sets them to a real
+// account's home, so left in place the cases below read that account's real credentials: "no creds"
+// found some, and the signed-in cases passed only while the real plan matched the fixture's. Every
+// case builds its own homes; the overrides are cleared before any runs.
+const HOME_OVERRIDES = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME"] as const;
+for (const name of HOME_OVERRIDES) delete process.env[name];
 const jsonRes = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers });
 
@@ -270,7 +278,60 @@ async function grokTests() {
 }
 
 
+/**
+ * The overrides themselves, pinned: CLAUDE_CONFIG_DIR / CODEX_HOME win over `userhome`, and an
+ * explicit `claudeHome` / `codexHome` over both. Set only inside this case and cleared after it.
+ */
+async function homeOverrideTests() {
+  const empty = await mkdtemp(join(tmpdir(), "usage-override-empty-"));
+
+  const claudeDir = await mkdtemp(join(tmpdir(), "usage-override-claude-"));
+  await writeFile(
+    join(claudeDir, ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "tok", expiresAt: NOW - 1, subscriptionType: "pro" } })
+  );
+  const codexDir = await mkdtemp(join(tmpdir(), "usage-override-codex-"));
+  await writeFile(join(codexDir, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-x" }));
+  const codexLogs = await mkdtemp(join(tmpdir(), "usage-override-codex-logs-"));
+  const codexDay = join(codexLogs, "sessions", "2026", "07", "07");
+  await mkdir(codexDay, { recursive: true });
+  const rollout = join(codexDay, "rollout-2026-07-07T06-00-00-dddd.jsonl");
+  await writeFile(
+    rollout,
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", plan_type: "plus", primary: { used_percent: 9, window_minutes: 300 } } }
+    }) + "\n"
+  );
+  await utimes(rollout, new Date(NOW - 60_000), new Date(NOW - 60_000));
+
+  try {
+    process.env.CLAUDE_CONFIG_DIR = claudeDir;
+    const viaEnv = await createClaudeSource({ userhome: empty, now, fetchImpl: async () => jsonRes(200, {}) })();
+    assert.equal(viaEnv?.plan, "Pro", "CLAUDE_CONFIG_DIR wins over userhome, as the CLI reads it");
+    const pinned = await createClaudeSource({
+      userhome: empty,
+      claudeHome: join(empty, ".claude"),
+      now,
+      fetchImpl: async () => jsonRes(200, {})
+    })();
+    assert.equal(pinned, null, "an explicit claudeHome wins over CLAUDE_CONFIG_DIR");
+
+    process.env.CODEX_HOME = codexDir;
+    assert.equal(
+      await createCodexSource({ userhome: empty, now, fetchImpl: async () => jsonRes(500, {}) })(),
+      null,
+      "CODEX_HOME wins over userhome: its API-key auth reads as no subscription"
+    );
+    const pinnedCodex = await createCodexSource({ userhome: empty, codexHome: codexLogs, now, fetchImpl: async () => jsonRes(500, {}) })();
+    assert.equal(pinnedCodex?.session?.percent, 9, "an explicit codexHome wins over CODEX_HOME");
+  } finally {
+    for (const name of HOME_OVERRIDES) delete process.env[name];
+  }
+}
+
 await claudeTests();
 await codexTests();
 await grokTests();
+await homeOverrideTests();
 console.log("usage-sources.check OK");
