@@ -1625,14 +1625,16 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   *Built: a shell's start comes from `_x.ai/task_backgrounded`, the `background_tasks` snapshot and
   the `BackgroundTaskStarted` discriminant, joined on the task id; its end from the snapshot or
   from the `TaskOutput`/`KillTask` answers T3 reads — no end was ever captured, so the §3.1
-  liveness registry's TTL bounds it — and it counts as live at all only because a row whose
+  liveness registry's TTL bounds it; an ended task's id is remembered, so a snapshot still listing
+  it never starts it again — and it counts as live at all only because a row whose
   `agentId` is its own `taskId` is its own, not an agent's internal work (Grok stamps every shell
   with itself; `orchestration/liveness.ts`). A subagent is its `spawn_subagent` call plus the poll
   answers naming it: the call's first frame starts the agent under the call's id; only an answer
   tagged `SubagentCompleted` ends it through the call, with the call's result; any other answer —
   a `background: true` launch's, or a foreground run the CLI moved to the background — and a
   foreground call its turn cut leave it running in the background, where a `TaskOutput` answer
-  ends it with its `output` (a `KillTask` answer, `stopped`) — T3's reader, which skips a
+  ends it with its `output` (a `KillTask` answer ends it too — T3's `outcome: "killed"`, or the
+  binary's `explicitly_killed`/`already_exited` fields) — T3's reader, which skips a
   subagent's entries, read for them too — and Stop or exit closes what is left. Its rows carry
   `livenessTtlMs`, so an agent nobody polls stops holding "working" an hour after its latest row.
   `resume_from` starts the same task again under the new call (`adapters/grok/normalize.ts`,

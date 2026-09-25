@@ -210,8 +210,12 @@ function isTerminalToolStatus(status: ToolCallStatus | null | undefined): boolea
 /**
  * The tool that launches a subagent, in the CLI's own tool namespace — the
  * CLI's embedded docs and its Claude-compat tool table (`Agent` →
- * `spawn_subagent`); every captured call names its namespace `grok_build`. No
- * capture holds a spawn (fixtures README observation 36).
+ * `spawn_subagent`). A tool's namespace is the module it lives in, in the
+ * binary: `implementations/opencode/write` is the `write` whose captured calls
+ * name `opencode`, `implementations/grok_build/read_file` the `read_file`
+ * whose calls name `grok_build`, and the spawn lives at
+ * `implementations/grok_build/task/coordinator/spawn`. No capture holds a
+ * spawn (fixtures README observation 36).
  */
 export const SPAWN_SUBAGENT_TOOL = "spawn_subagent";
 const GROK_TOOL_NAMESPACE = "grok_build";

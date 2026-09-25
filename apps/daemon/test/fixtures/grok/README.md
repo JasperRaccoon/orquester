@@ -866,10 +866,13 @@ What the CLI says a client gets:
   `KillTaskResult`). T3's reader and tests give their shape: `{type: "TaskOutput", Result}` or
   `{…, MultiResult: {results}}`, each `{task_id, command, status, exit_code, output}`, a subagent's
   `command` reading `"[subagent:<type>] <description>"`; `{type: "KillTask", Result: {task_id,
-  outcome: "killed"}}`. A spawn that answers without running to the end answers in text: T3's tests
-  name `{type: "Text", text: "subagent_id: …\ntype: …\ndescription: …"}`, and the binary holds the
-  same three labels after "Subagent took longer than the foreground budget and was moved to the
-  background to keep the conversation responsive. It is still running".
+  outcome: "killed"}}`. The binary may spell a kill differently: `KillTaskResult` has three fields,
+  and beside `TaskNotFound` and `MultiResult` the 1.0.34 strings list `already_exited`,
+  `explicitly_killed` and `kill_result_delivered` (field names only; no shape is recoverable). A
+  spawn that answers without running to the end answers in text: T3's tests name `{type: "Text",
+  text: "subagent_id: …\ntype: …\ndescription: …"}`, and the binary holds the same three labels
+  after "Subagent took longer than the foreground budget and was moved to the background to keep the
+  conversation responsive. It is still running".
 - **A foreground run is not bound to its call.** "foreground subagent exceeded await budget;
   auto-backgrounding (child keeps running)" (`GROK_SUBAGENT_AWAIT_BUDGET_MS` sets the budget) and
   "foreground subagent caller gone; auto-backgrounding (child keeps running)" — the binary's own
@@ -906,13 +909,17 @@ What the adapter builds from it (`adapters/grok/normalize.ts`, `subagentFromTool
 - **A background run ends by what the model asks for.** A `TaskOutput` answer naming the id its
   launch reported ends it with `output` as its result (`completed`/`failed` by T3's status and
   exit-code rules, `stopped` for killed/cancelled), or — still `running` — re-arms it with a
-  progress row; a completed `KillTask` answer with `outcome: "killed"` ends it `stopped`; an answer
-  arriving between turns (the CLI woke the parent) counts the same, on the turn the run started
-  in; a run already ended gets no second end. T3 skips a subagent's entries; the adapter reads
-  them, and — unlike T3 — starts no row for an id no launch reported. Shells ride the same reader.
-  A `background_tasks` entry or `_x.ai/task_backgrounded` frame joined to the spawn (by the call's
-  `tool_call_id`, or an id its launch reported) is the agent too, never a shell row — whether the
-  CLI sends either for a subagent is not captured. Stop, the session's stop and the process's
+  progress row; a completed `KillTask` answer ends it `stopped` on `outcome: "killed"` (T3's) or
+  `explicitly_killed: true` (the binary's field names, not captured), and on `already_exited: true`
+  with the answer's own terminal status when it carries one, else `stopped`; an answer arriving
+  between turns (the CLI woke the parent) counts the same, on the turn the run started in; a run
+  already ended gets no second end, and an ended task — shell or subagent — never starts again: a
+  snapshot still listing it (an entry's status may be terminal, so a finished task can be listed) or
+  a late frame naming it starts nothing (`endedTasks`). T3 skips a subagent's entries; the adapter
+  reads them, and — unlike T3 — starts no row for an id no launch reported. Shells ride the same
+  reader. A `background_tasks` entry or `_x.ai/task_backgrounded` frame joined to the spawn (by the
+  call's `tool_call_id`, or an id its launch reported) is the agent too, never a shell row — whether
+  the CLI sends either for a subagent is not captured. Stop, the session's stop and the process's
   exit close whatever is left `stopped`.
 - **A run nobody asks about stops counting after an hour.** Every row naming a Grok agent carries
   `livenessTtlMs` = one hour (`GROK_AGENT_LIVENESS_TTL_MS`): the host's liveness registry counts it

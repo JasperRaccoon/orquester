@@ -933,61 +933,69 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
   `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
   a surfaced subagent.
-- **Grok: shells are live work, a subagent is its `spawn_subagent` call plus the poll answers
-  naming it, and a run nobody asks about stops counting after an hour.** (1) Grok stamps every task
-  row of a background shell with the shell itself (`agentId` = `taskId`), and the liveness registry
-  read any stamped non-agent task as "a subagent's own work, covered by its owner" and dropped it: a
-  dev server left running in the background never read "monitoring" and never held a deploy's
-  drain. An `agentId` names an owner only when it is not the row's own `taskId`
-  (`orchestration/liveness.ts`) — Claude stamps only a real owner and Codex/OpenCode type every live
-  row `subagent` (Codex's typeless Stop/exit closer is terminal either way), so none reads
-  differently — and a Grok shell is a watch loop like any other, bounded by the registry's TTL and
-  turn-boundary sweep. (2) `grok_build`'s `spawn_subagent` call (matched by its vendor block's name
-  AND namespace; nothing captured — fixtures README observation 36) starts a `taskType: "subagent"`
-  task under the call's id, stamped with itself, `toolUseId` = the call (its rows are
-  `collab_agent_tool_call`, hidden behind the agent's row like a Claude `Agent` call). **Only the
-  completion tag ends a run through its call**: an answer whose `rawOutput.type` is
-  `SubagentCompleted` ends the agent with the call's `content` text as the result, and a call that
-  fails before its run went on fails it. Any other answer — a `background: true` launch's, or a
-  foreground one the CLI moved to the background ("foreground subagent exceeded await budget;
-  auto-backgrounding (child keeps running)", the binary's own log line) — and a foreground call its
-  turn settles without (a Stop, a steer's cancel, the watchdog: "caller gone; auto-backgrounding";
-  a cancelled call gets no terminal frame — fixture 05) send the run on in the background
-  (`task.updated {isBackgrounded: true}`, once): it once read `completed`/`interrupted` with a
-  "moved to background" notice as its result while the child worked on, and liveness dropped it.
-  (3) **A background run ends by what the model asks for** — T3's reader
-  (`XAiBackgroundTasks.ts`) plus the binary, not captured here: a `get_command_or_subagent_output`
-  answer (`TaskOutput`, a `Result` or `MultiResult.results[]` of `{task_id, command, status,
-  exit_code, output}`) naming the id its launch reported ends it with `output` as the result — or,
-  still `running`, re-arms it with a progress row; a completed `kill_command_or_subagent` answer
-  (`KillTask`, `outcome: "killed"`) ends it `stopped`; answers between turns count (the CLI wakes
-  the parent when a background task finishes), on the turn the run started in, and a run already
-  ended gets no second end (`taskAnswers`). T3 skips a subagent's entries (`[subagent:…]`); the
-  adapter reads them, and never starts a row for an id no launch reported — a cut call reported
-  none, so its run joins a poll only through a `_x.ai/task_backgrounded` frame naming the call (not
-  captured for a subagent). Shells ride the same reader. Else Stop, the session's stop or the
-  process's exit closes it. (4) **An hour, not
-  forever**: every row naming a Grok agent carries `livenessTtlMs` (`GROK_AGENT_LIVENESS_TTL_MS`, 60
-  min), and the registry counts it "working" — holding a deploy's drain — for at most that long
-  after the latest such row; a poll answering running re-arms it. Only liveness lapses: the roster
-  keeps the row and a later end is recorded as any end is. (5) `resume_from` finds its task by the
-  subagent id the source's result reported: the UUIDs in it (the CLI's ids are UUIDv7), read without
-  assuming a shape — `rawOutput` first, the text only when that names none, never an id the
-  launch's own input, the session or a live shell names (a summary may quote any id, and a shell's
-  id taken for an agent's would let the shell's snapshot end the agent); an id no launch reported (a
-  host restart since) starts a row under that id; a resume the CLI refuses fails the call, never the
-  agent; and any launch resets the agent's snapshot listing, so a snapshot without it cannot end
-  the resumed run. `hasSubagents` is "this turn launched one" (Codex's rule), never "one is live".
-  (6) The `subagent_spawned` / `subagent_progress` / `subagent_finished` updates and
-  `x.ai/task_completed` stay `runtime.warning`s: the binary names them but its twenty-field task
-  snapshot's fields cannot be read off it (observation 29), and a guess would be worse; the adapter
-  does not filter frames by `sessionId`, so a child session's own frames, if a stdio client ever
-  gets them, would read as the parent's. (7) A finished call never starts again: a frame of a call
-  the CLI already ended is dropped (`finishedCalls`, 1 024 ids) — a status-less one re-opened the
-  call as a new `item.started` and the exit sweep then failed a command that had completed; a
-  terminal restatement wrote a second `tool.completed` and closed the open assistant bubble — but
-  the CLI's end of a call the adapter closed itself (a Stop's `failOpenTools`) is its first real
-  end, and lands.
+- **Grok: shells are live work, a subagent is its `spawn_subagent` call plus the poll answers naming
+  it, and a run nobody asks about stops counting after an hour.** (1) Grok stamps every task row of
+  a background shell with the shell itself (`agentId` = `taskId`), and the liveness registry read
+  any stamped non-agent task as "a subagent's own work, covered by its owner" and dropped it: a dev
+  server left running in the background never read "monitoring" and never held a deploy's drain. An
+  `agentId` names an owner only when it is not the row's own `taskId` (`orchestration/liveness.ts`)
+  — Claude stamps only a real owner and Codex/OpenCode type every live row `subagent` (Codex's
+  typeless Stop/exit closer is terminal either way), so none reads differently — and a Grok shell is
+  a watch loop like any other, bounded by the registry's TTL and turn-boundary sweep. (2)
+  `grok_build`'s `spawn_subagent` call (matched by its vendor block's name AND namespace; nothing
+  captured — fixtures README observation 36) starts a `taskType: "subagent"` task under the call's
+  id, stamped with itself, `toolUseId` = the call (its rows are `collab_agent_tool_call`, hidden
+  behind the agent's row like a Claude `Agent` call). **Only the completion tag ends a run through
+  its call**: an answer whose `rawOutput.type` is `SubagentCompleted` ends the agent with the call's
+  `content` text as the result, and a call that fails before its run went on fails it. Any other
+  answer — a `background: true` launch's, or a foreground one the CLI moved to the background
+  ("foreground subagent exceeded await budget; auto-backgrounding (child keeps running)", the
+  binary's own log line) — and a foreground call its turn settles without (a Stop, a steer's cancel,
+  the watchdog: "caller gone; auto-backgrounding"; a cancelled call gets no terminal frame — fixture
+  05) send the run on in the background (`task.updated {isBackgrounded: true}`, once): it once read
+  `completed`/`interrupted` with a "moved to background" notice as its result while the child worked
+  on, and liveness dropped it. (3) **A background run ends by what the model asks for** — T3's
+  reader (`XAiBackgroundTasks.ts`) plus the binary, not captured here: a
+  `get_command_or_subagent_output` answer (`TaskOutput`, a `Result` or `MultiResult.results[]` of
+  `{task_id, command, status, exit_code, output}`) naming the id its launch reported ends it with
+  `output` as the result — or, still `running`, re-arms it with a progress row; a completed
+  `kill_command_or_subagent` answer (`KillTask`) ends it — `stopped` on T3's `outcome: "killed"` or,
+  from the binary's field names (not captured), on `explicitly_killed: true`, and on
+  `already_exited: true` with the answer's own terminal status when it carries one, else `stopped`
+  (`killEnd`); answers between turns count (the CLI wakes the parent when a background task
+  finishes), on the turn the run started in, and a run already ended gets no second end
+  (`taskAnswers`). T3 skips a subagent's entries (`[subagent:…]`); the adapter reads them, and never
+  starts a row for an id no launch reported — a cut call reported none, so its run joins a poll only
+  through a `_x.ai/task_backgrounded` frame naming the call (not captured for a subagent). Shells
+  ride the same reader. Else Stop, the session's stop or the process's exit closes it. (4) **An
+  hour, not forever**: every row naming a Grok agent carries `livenessTtlMs`
+  (`GROK_AGENT_LIVENESS_TTL_MS`, 60 min), and the registry counts it "working" — holding a deploy's
+  drain — for at most that long after the latest such row; a poll answering running re-arms it. Only
+  liveness lapses: the roster keeps the row and a later end is recorded as any end is. (5)
+  `resume_from` finds its task by the subagent id the source's result reported: the UUIDs in it (the
+  CLI's ids are UUIDv7), read without assuming a shape — `rawOutput` first, the text only when that
+  names none, never an id the launch's own input, the session or a live shell names (a summary may
+  quote any id, and a shell's id taken for an agent's would let the shell's snapshot end the agent);
+  an id no launch reported (a host restart since) starts a row under that id; a resume the CLI
+  refuses fails the call, never the agent; and any launch resets the agent's snapshot listing, so a
+  snapshot without it cannot end the resumed run. `hasSubagents` is "this turn launched one"
+  (Codex's rule), never "one is live". (6) The `subagent_spawned` / `subagent_progress` /
+  `subagent_finished` updates and `x.ai/task_completed` stay `runtime.warning`s: the binary names
+  them but its twenty-field task snapshot's fields cannot be read off it (observation 29), and a
+  guess would be worse; the adapter does not filter frames by `sessionId`, so a child session's own
+  frames, if a stdio client ever gets them, would read as the parent's. (7) A finished call never
+  starts again: a frame of a call the CLI already ended is dropped (`finishedCalls`, 1 024 ids) — a
+  status-less one re-opened the call as a new `item.started` and the exit sweep then failed a
+  command that had completed; a terminal restatement wrote a second `tool.completed` and closed the
+  open assistant bubble — but the CLI's end of a call the adapter closed itself (a Stop's
+  `failOpenTools`) is its first real end, and lands. Nor does an ended task: the id of every shell
+  whose end was written (its snapshot status, dropping out, a poll or kill answer, Stop, exit) and
+  of every id that named an ended subagent run is remembered (`endedTasks`, 1 024 ids), and a
+  snapshot entry or a late `_x.ai/task_backgrounded` / `BackgroundTaskStarted` naming one starts
+  nothing — a snapshot entry's status may be terminal, so a finished task can still be listed, and
+  that listing started the shell again under its id, put it back in the liveness registry as a watch
+  loop (holding a deploy's drain up to its 10-minute TTL) and ended it a second time when it dropped
+  out.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
