@@ -409,6 +409,55 @@ test("a Grok shell Stop closed counts live again while a snapshot lists it runni
   assert.equal(agent(s, shell).status, closed, "the roster reads the start as a late delivery");
 });
 
+test("a Grok shell Stop closed counts live again when a poll answers running", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  const shell = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
+  const command = "npm run dev";
+  const update = { sessionUpdate: "task_backgrounded", tool_call_id: "call-sh", task_id: shell, command };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
+  await s.feed(s.grok.stopBackgroundTasks());
+  const closed = agent(s, shell).status;
+  assert.equal(s.liveness.liveness(THREAD), null);
+
+  await poll(s, { task_id: shell, command, status: "running" });
+  assert.equal(s.liveness.liveness(THREAD), "monitoring", "the CLI still runs it: a deploy must wait");
+  assert.equal(agent(s, shell).status, closed, "the roster keeps the adapter's end");
+  await poll(s, { task_id: shell, command, status: "running" });
+  assert.equal(s.liveness.liveness(THREAD), "monitoring");
+  assert.equal(agent(s, shell).status, closed, "a further report re-arms it, and reopens nothing");
+  assert.equal(agent(s, shell).activationCount, 1);
+});
+
+test("a Grok subagent Stop closed counts live again when a poll answers running, for its hour", async () => {
+  const clock = createTestClock(0);
+  const s = seam(clock);
+  await s.startTurn("turn-1");
+  const input = { prompt: "Run the suite.", description: "run tests", background: true };
+  await s.update(spawnStart("call-bg", input));
+  await s.update(spawnEnd("call-bg", "completed", "Subagent started.", textAnswer(SUB_B)));
+  // The session-scoped Stop: `session/cancel` probably leaves a background
+  // child running (the CLI auto-backgrounds a child whose caller is gone).
+  await s.feed(s.grok.stopBackgroundTasks());
+  assert.equal(agent(s, "call-bg").status, "interrupted");
+  assert.equal(s.liveness.liveness(THREAD), null);
+
+  const command = "[subagent:general-purpose] run tests";
+  await poll(s, { task_id: SUB_B, command, status: "running" });
+  assert.equal(s.liveness.liveness(THREAD), "working", "the CLI still runs it: a deploy must wait");
+  const kept = agent(s, "call-bg");
+  assert.equal(kept.status, "interrupted", "the roster keeps the adapter's end");
+  assert.equal(kept.activationCount, 1, "a late delivery, not a new run");
+
+  clock.set(GROK_AGENT_LIVENESS_TTL_MS - 1);
+  await poll(s, { task_id: SUB_B, command, status: "running" });
+  clock.set(2 * GROK_AGENT_LIVENESS_TTL_MS - 2);
+  assert.equal(s.liveness.liveness(THREAD), "working", "re-armed by the next report");
+  clock.set(2 * GROK_AGENT_LIVENESS_TTL_MS - 1);
+  assert.equal(s.liveness.liveness(THREAD), null, "its hour applies");
+  assert.equal(agent(s, "call-bg").status, "interrupted");
+});
+
 test("a Grok agent nobody polls holds working for an hour, re-armed by a running poll", async () => {
   const clock = createTestClock(0);
   const s = seam(clock);

@@ -731,7 +731,8 @@ test("a poll ends a known shell with its first output line; an id nobody reporte
 
 // ---------------------------------------------------------------------------
 // A task whose end the CLI reported never starts again; one the adapter
-// closed itself counts live again while the CLI still lists it running
+// closed itself — shell or subagent — counts live again on any CLI report
+// that it still runs (a listing, a start frame, a poll)
 // ---------------------------------------------------------------------------
 
 const SNAPSHOTS = "_x.ai/session_notification";
@@ -824,6 +825,89 @@ test("a terminal listing of a shell the adapter closed is the CLI's end: no row,
   assert.deepEqual(agentRows(listShell(grok, "running")), [], "and now it is the CLI's word");
   assert.deepEqual(agentRows(lateStarts(grok)), []);
   assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing is live");
+});
+
+test("a shell Stop closed counts live again when a poll answers running — its own start row", () => {
+  const grok = normalizer();
+  grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-sh", SHELL));
+  assert.deepEqual(statuses(taskRows(grok.stopBackgroundTasks())), [["task.completed", SHELL, "stopped"]]);
+  const dev = { task_id: SHELL, command: "c" };
+  const revived = agentRows(poll(grok, [{ ...dev, status: "running" }]));
+  assert.deepEqual(statuses(revived), [["task.started", SHELL, undefined]]);
+  assert.equal(revived[0]!.payload.toolUseId, "call-sh", "its own start, re-emitted: a late delivery");
+  const again = agentRows(poll(grok, [{ ...dev, status: "running" }]));
+  assert.deepEqual(statuses(again), [["task.progress", SHELL, undefined]], "re-armed, with no status");
+  assert.deepEqual(
+    statuses(agentRows(listShell(grok, "pending"))),
+    [["task.progress", SHELL, undefined]],
+    "a status change says no status either: it would reopen the roster's row"
+  );
+  const done = poll(grok, [{ ...dev, status: "completed", output: "bye" }]);
+  assert.deepEqual(statuses(taskRows(done)), [["task.completed", SHELL, "completed"]]);
+  assert.deepEqual(agentRows(poll(grok, [{ ...dev, status: "running" }])), [], "the CLI's end is final");
+  assert.deepEqual(agentRows(listShell(grok, "running")), []);
+});
+
+test("a subagent Stop closed counts live again on any CLI report that it still runs", () => {
+  const running = { task_id: SUB_B, command: RUN_TESTS, status: "running" };
+  const reports: Array<[string, (grok: GrokNormalizer) => RuntimeEvent[]]> = [
+    ["a poll answering running", (grok) => poll(grok, [running])],
+    [
+      "a snapshot listing it",
+      (grok) => grok.handleXaiNotification(SNAPSHOTS, snapshot(SUB_B, "subagent", "running"))
+    ],
+    [
+      "a start frame naming its launch",
+      (grok) => grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-bg", SUB_B))
+    ]
+  ];
+  for (const [how, report] of reports) {
+    const grok = normalizer();
+    backgroundLaunched(grok);
+    const stopped = grok.stopBackgroundTasks();
+    assert.deepEqual(statuses(taskRows(stopped)), [["task.completed", "call-bg", "stopped"]], how);
+    const revived = agentRows(report(grok));
+    assert.deepEqual(statuses(revived), [["task.started", "call-bg", undefined]], how);
+    assert.equal(revived[0]!.payload.toolUseId, "call-bg", `${how}: its own launch — a late delivery`);
+    assert.equal(revived[0]!.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS, `${how}: its hour`);
+    assert.deepEqual(
+      statuses(agentRows(poll(grok, [running]))),
+      [["task.progress", "call-bg", undefined]],
+      `${how}: re-armed, with no status that would reopen the roster's row`
+    );
+    const done = poll(grok, [{ ...running, status: "completed", output: "ok" }]);
+    assert.deepEqual(statuses(taskRows(done)), [["task.completed", "call-bg", "completed"]], how);
+    assert.deepEqual(agentRows(poll(grok, [running])), [], `${how}: the CLI's end is final`);
+  }
+});
+
+test("the CLI's end of a task Stop closed writes no second end, and is final", () => {
+  const grok = normalizer();
+  grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-sh", SHELL));
+  backgroundLaunched(grok);
+  grok.stopBackgroundTasks();
+  const ends = poll(grok, [
+    { task_id: SHELL, command: "c", status: "completed", output: "bye" },
+    { task_id: SUB_B, command: RUN_TESTS, status: "completed", output: "ok" }
+  ]);
+  assert.deepEqual(agentRows(ends), [], "the adapter already wrote both ends");
+  const running = poll(grok, [
+    { task_id: SHELL, command: "c", status: "running" },
+    { task_id: SUB_B, command: RUN_TESTS, status: "running" }
+  ]);
+  assert.deepEqual(agentRows(running), [], "and the CLI's word is final");
+  assert.deepEqual(agentRows(listShell(grok, "running")), []);
+});
+
+test("a resting listing of a task Stop closed says nothing — neither a run nor an end", () => {
+  const grok = normalizer();
+  listShell(grok, "running");
+  backgroundLaunched(grok);
+  grok.stopBackgroundTasks();
+  assert.deepEqual(agentRows(listShell(grok, "paused")), [], "a resting shell");
+  const resting = grok.handleXaiNotification(SNAPSHOTS, snapshot(SUB_B, "subagent", "idle"));
+  assert.deepEqual(agentRows(resting), [], "a resting subagent");
+  assert.equal(only(listShell(grok, "running"), "task.started").length, 1, "a later run still counts");
 });
 
 test("the ended-task memory is bounded: the oldest id is forgotten first", () => {
