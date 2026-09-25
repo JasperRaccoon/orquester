@@ -747,13 +747,18 @@ run's result, once, as it takes a foreground part's output (`takeBackgroundResul
 that comes before the child's own `session.idle` rides that end instead. A part that is not
 `synthetic`, or names no child of the thread, is no result.
 
-How that prompt renders: live, it is no row at all — a user-role text part is never emitted,
-being the client's own prompt, which the host already wrote. A thread adopted from OpenCode's
-own history (`history.ts`) skips every `synthetic` user text part the same way — the server
-wrote it, the user never typed it — so a prompt made only of such parts replays no `You` row,
-and the reply keeps its turn. History replays no roster rows at all (it reads the thread's own
-session, whose `task` parts replay as plain collab-agent calls), so a background run's result is
-filled on the live path only.
+Only a run whose launching part answered in the background takes such an answer, and only one
+whose summary, where it names the call's description, names this run's: an answer that arrives
+after a relaunch is the earlier run's, and never becomes the new run's result.
+
+How that prompt renders: live, it is no row at all — the demux emits no user-role text part,
+whoever wrote it (the host writes a thread's own prompts from its `/turn` commands, never from
+the stream, and this one it never wrote at all). A thread adopted from OpenCode's own history
+(`history.ts`) skips every `synthetic` user text part — the server wrote it, the user never
+typed it — so a prompt made only of such parts replays no `You` row, and the reply keeps its
+turn. History replays no roster rows at all (it reads the thread's own session, whose `task`
+parts replay as plain collab-agent calls), so a background run's result is filled on the live
+path only.
 
 **Known gap:** the parent's reply to that prompt streams as rows with no turn, and the thread
 reads idle while the parent's model writes it — no `/turn` opened one, and the session's `busy`
@@ -809,12 +814,18 @@ appends what its final `output` holds past them, before its own item event close
 output buffer (`finalOutputRemainder`): the rest of a final output that extends the stream;
 else what follows the LAST place it holds the stream's end — the stream's last 512 characters,
 or all of a shorter one, and none under 64, which recur in any output by chance; else nothing,
-and the stream stays short of the final output, which the completion row's data keeps whole. A
-stream that showed nothing adds nothing: its completion's own output is the row's. An errored
-part — `Tool execution aborted` included — has no final output and adds nothing either: the
-stream is the command's output, and the error is the call's status and detail, which the row's
-failed status carries and the MCP transcript shows as text; it is never written into the stream.
-A part's mark goes when it settles, when it is removed and when its message is.
+and the stream stays short of the final output, which the completion row's data keeps whole.
+A final output the tool cut opens with its own note —
+`...output truncated...\n\nFull output saved to: <file>\n\n`, before the stream's end and so
+never in what follows it — and that note's pointer, `\n\nFull output saved to: <file>`, closes
+what the completion appends whichever way the rest went, after any `<shell_metadata>`: the
+GUI's full-output viewer reads the join, and this is how it learns where the whole output was
+saved. A final output that extends the stream was never cut, and needs none. A stream that
+showed nothing adds nothing: its completion's own output is the row's. An errored part —
+`Tool execution aborted` included — has no final output and adds nothing either: the stream is
+the command's output, and the error is the call's status and detail, which the row's failed
+status carries and the MCP transcript shows as text; it is never written into the stream. A
+part's mark goes when it settles, when it is removed and when its message is.
 
 ---
 

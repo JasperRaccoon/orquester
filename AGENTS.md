@@ -939,11 +939,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the BACKGROUND answers "still working" at once, and 1.18.32 delivers its answer as a prompt to
   the calling session instead — a user message whose one text part is `synthetic` and wraps it in
   the same envelope, naming the child — which gives the run its result the same way
-  (`takeBackgroundResult`; carried by the child's own end when it comes first). That prompt is
-  still no row, live or replayed: E6 history skips `synthetic` user text parts (`history.ts`). No
-  result follows an end by `session.error` or a stop. (2) Every running frame of a `bash` part
-  restates ALL its output so far in `state.metadata.output`, which rode only the
-  item row's `data.state` — dropped by the wire slimmer — so nothing showed until the
+  (`takeBackgroundResult`; carried by the child's own end when it comes first) — only for a run
+  whose launching part answered in the background (`answersInBackground`) and whose call's
+  description the answer's summary names, so an answer arriving after a relaunch is never the new
+  run's. That prompt is still no row, live or replayed: E6 history skips `synthetic` user text
+  parts (`history.ts`). No result follows an end by `session.error` or a stop. (2) Every running
+  frame of a `bash` part restates ALL its output so far in `state.metadata.output`, which rode only
+  the item row's `data.state` — dropped by the wire slimmer — so nothing showed until the
   completion. Each frame is cut against the value last seen for the part (`advanceOutputMark`,
   `OpenCodeSessionState.outputMarks`) into `content.delta {command_output}` of just what it adds,
   on the call's item and under its owner: past 30 000 characters the tool keeps `"...\n\n"` and a
@@ -956,8 +958,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   carried): the completion first appends what it holds past the stream (`finalOutputRemainder`: the
   rest of a final output that extends it, else what follows the LAST place it holds the stream's
   last 512 characters — no anchor under 64 — else nothing), BEFORE its own item event closes the
-  call's output buffer. A stream that showed nothing adds nothing, and an errored part has no final
-  output.
+  call's output buffer; a final output the tool cut ends that with its note's pointer,
+  `Full output saved to: <file>`, which the join otherwise never holds. A stream that showed
+  nothing adds nothing, and an errored part has no final output.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
