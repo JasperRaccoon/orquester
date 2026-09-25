@@ -130,16 +130,19 @@ export function commandOutputText(data: unknown): string | undefined {
  *
  * - An item stored whole holds its output whole ({@link commandOutputText} of
  *   its data): `whole: true`, answered first.
- * - A COMPLETION stored cut (`payload.truncated`) holds its output's head: its
- *   adapter kept only the start of a long output and said so — Codex's
+ * - A COMPLETION stored cut (`payload.truncated`) holds only part of its
+ *   output, and its adapter said so: Codex keeps the start of a long
  *   `aggregatedOutput`, its first 64 KiB (`COMMAND_OUTPUT_MAX_BYTES`,
- *   `apps/daemon/src/agent-host/adapters/codex/items.ts`). `whole: false`: a
+ *   `apps/daemon/src/agent-host/adapters/codex/items.ts`); OpenCode's `bash`
+ *   tool keeps the END of one past its limits, behind a note naming the file
+ *   that holds all of it (`isCutFinalOutput`,
+ *   `apps/daemon/src/agent-host/adapters/opencode/state.ts`). `whole: false`: a
  *   reader asks the call's streamed output first, which the host joins whole,
- *   and answers the head only when that comes back empty, saying it is only
- *   the start — never as JSON, and never as the whole output. (A host's first
- *   load closes a call a dead process left open with a completion that may
- *   carry an update's cut copy, marked the same way: its preview reads the
- *   same way, the start of the output.)
+ *   and answers the kept part only when that comes back empty, saying it is
+ *   only part of the output — never as JSON, and never as the whole output.
+ *   (A host's first load closes a call a dead process left open with a
+ *   completion that may carry an update's cut copy, marked the same way: its
+ *   preview reads the same way, a part of the output.)
  * - An UPDATE stored cut holds no part of it: ingestion persists every
  *   `tool.updated` already slimmed (§5.6), its data a one-line preview that is
  *   never labelled as the output — `undefined`, as for an item that is no

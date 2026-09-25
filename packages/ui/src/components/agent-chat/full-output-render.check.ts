@@ -4,9 +4,9 @@
  * `full-output.test.ts` owns what the row asks for and what the viewer reads;
  * this exists because "the expanded row of a command whose output streamed
  * offers the button, and a plain one does not" and "the viewer says a
- * running call's output is so far, and a cut join is its head" are claims
- * about markup — and a prop mistake typechecks perfectly while rendering
- * nothing.
+ * running call's output is so far, a cut join is its head, and a kept part is
+ * only part" are claims about markup — and a prop mistake typechecks
+ * perfectly while rendering nothing.
  *
  * Static markup only — no DOM, no effects — like every other `*.check.ts`.
  */
@@ -161,5 +161,15 @@ assert.ok(
   soFar.indexOf("Still running") < soFar.indexOf("PASS a.test.ts"),
   "said before the text, where the viewer opens"
 );
+
+// What a completion kept when no join answers: Codex's head, OpenCode's end —
+// neither is the whole output, and which part it is the note does not claim.
+const kept = pane({
+  loading: false,
+  text: "...output truncated...\n\nFull output saved to: /tmp/tool_1\n\nline 2999\n",
+  notes: fullOutputNotes({ kind: "kept", text: "line 2999\n" })
+});
+assert.ok(kept.includes("Only part of this output was kept."), "a kept part is only part of the output");
+assert.ok(!kept.includes("Only the start"), "never that it is the start: OpenCode keeps the end");
 
 console.log("full-output render checks passed");

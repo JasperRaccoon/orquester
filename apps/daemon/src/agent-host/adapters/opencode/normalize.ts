@@ -64,6 +64,7 @@ import {
   addRelatedSession,
   advanceOutputMark,
   finalOutputRemainder,
+  isCutFinalOutput,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
   stepTotalTokens,
@@ -1690,6 +1691,16 @@ function emitContextWindow(
   });
 }
 
+/**
+ * A tool part as its lifecycle row. A command's completion carries its final
+ * `output` in `data.result`, where both readers of a row's whole output look
+ * (`storedCommandOutput`). When the tool cut that output itself — past its
+ * limits it keeps only the END, behind a note naming the file that holds all
+ * of it ({@link isCutFinalOutput}) — the completion says so (`truncated`, as
+ * Codex marks the head it bounded): the MCP's `read_tool_output` then reads the
+ * call's streamed join first, as the GUI's viewer does, and answers the kept
+ * part as the command's output, only a part of it, when no join answers.
+ */
 function emitToolItem(
   part: Extract<OpenCodePart, { type: "tool" }>,
   turnId: string | undefined,
@@ -1710,6 +1721,11 @@ function emitToolItem(
         ? "completed"
         : "inProgress";
   const command = part.state.input?.command;
+  const cut =
+    part.state.status === "completed" &&
+    itemType === "command_execution" &&
+    typeof part.state.output === "string" &&
+    isCutFinalOutput(part.state.output);
 
   out.push({
     ...out.base({ turnId, itemId: part.callID, agentId, createdAt: toolCreatedAt(part), raw }),
@@ -1735,7 +1751,8 @@ function emitToolItem(
         (itemType === "command_execution" || itemType === "mcp_tool_call")
           ? { result: part.state.output }
           : {})
-      }
+      },
+      ...(cut ? { truncated: true } : {})
     }
   });
 }

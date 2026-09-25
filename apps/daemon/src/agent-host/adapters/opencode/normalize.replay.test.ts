@@ -2168,6 +2168,64 @@ test("a cut final output closes the stream with where the whole output was saved
   );
 });
 
+test("a completion whose final output the tool cut is stored marked cut; any other is not", () => {
+  const bash = bashFrames();
+  const saved = "/tmp/opencode/tool_output_3";
+  const printed = numberedLines(0, 3_000);
+  // What 1.18.32's `ShellTool.run` keeps of an output past its limits: its
+  // END (`es` walks the lines from the last one), behind the note.
+  const tail = printed.split("\n").slice(-2_001).join("\n");
+  const kept = `${cutNote(saved)}${tail}`;
+  const completionOf = (events: readonly RuntimeEvent[]) => {
+    const done = eventsOfType(events, "item.completed").find((event) => event.itemId === BASH_CALL);
+    assert.ok(done !== undefined, "the call's completion");
+    return done.payload;
+  };
+
+  const cut = feed(liveSession(BASH_SESSION_ID), [
+    bash.pending,
+    bash.running,
+    withOutput(bash.grown, outputWindow(printed)),
+    settledAs(bash.completed, kept, outputWindow(printed), { truncated: true, outputPath: saved })
+  ]).flat();
+  const stored = completionOf(cut);
+  assert.equal(stored.truncated, true, "its data keeps only the part the tool kept");
+  assert.equal((stored.data as { result?: string }).result, kept, "that part, as the tool wrote it");
+  for (const row of [...eventsOfType(cut, "item.started"), ...eventsOfType(cut, "item.updated")]) {
+    assert.equal("truncated" in row.payload, false, "only the completion is marked");
+  }
+
+  // Nothing streamed before it: the completion is marked all the same.
+  const unseen = feed(liveSession(BASH_SESSION_ID), [
+    bash.pending,
+    settledAs(bash.completed, kept, outputWindow(printed), { truncated: true, outputPath: saved })
+  ]).flat();
+  assert.equal(completionOf(unseen).truncated, true);
+
+  // Whole: a final output the tool never cut, even one that quotes the note
+  // somewhere other than at its start, is stored whole and says nothing.
+  for (const final of ["one\ntwo\n", `grep found:\n${cutNote(saved)}done\n`]) {
+    const whole = feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "one\n"),
+      settledAs(bash.completed, final, "one\n")
+    ]).flat();
+    assert.equal("truncated" in completionOf(whole), false, JSON.stringify(final));
+  }
+
+  // A tool that is not a command keeps its output as it is: no reader takes
+  // its data for a command's output.
+  const read = JSON.parse(JSON.stringify(settledAs(bash.completed, kept, ""))) as {
+    type: string;
+    properties: { part: { tool: string } };
+  };
+  read.properties.part.tool = "read";
+  const readDone = eventsOfType(feed(liveSession(BASH_SESSION_ID), [read]).flat(), "item.completed")[0];
+  assert.equal(readDone?.payload.itemType, "dynamic_tool_call");
+  assert.equal("truncated" in (readDone?.payload ?? {}), false);
+});
+
 test("a final output that neither extends the stream nor holds its end adds nothing", () => {
   const session = liveSession(BASH_SESSION_ID);
   const bash = bashFrames();

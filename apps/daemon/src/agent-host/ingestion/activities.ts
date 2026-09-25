@@ -182,8 +182,9 @@ function toolLifecyclePayload(
     ...(p.data !== undefined ? { data: p.data } : {}),
     ...(p.agentId !== undefined ? { agentId: p.agentId } : {}),
     ...(p.parentToolUseId !== undefined ? { parentToolUseId: p.parentToolUseId } : {}),
-    // The adapter stored only a head of the item's output (Codex's bounded
-    // `aggregatedOutput`): the row says so, as a row stored slimmed does.
+    // The item's data holds only part of its output (Codex's bounded
+    // `aggregatedOutput`, the end OpenCode's `bash` tool kept): the row says
+    // so, as a row stored slimmed does.
     ...(p.truncated === true ? { truncated: true } : {})
   };
 }

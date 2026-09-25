@@ -228,12 +228,12 @@ describe("a Codex completion that kept only its output's head (stored cut past 6
     assert.deepEqual(viewer.asked, ["item done-7", "output done-7"], "the item first, then (stored cut) the join");
   });
 
-  it("shows the head as the command printed it, saying only the start was kept, where no join answers", async () => {
+  it("shows the head as the command printed it, saying only part was kept, where no join answers", async () => {
     for (const answer of [join("", { toolUseId: "item_7" }), null]) {
       const viewer = reads({ item: async () => ({ item: stored }), streamedOutput: async () => answer });
       const output = await readFullOutput(viewer, stored.id, "item");
-      assert.deepEqual(output, { kind: "head", text: head });
-      assert.deepEqual(fullOutputNotes(output), ["Only the start of this output was kept."]);
+      assert.deepEqual(output, { kind: "kept", text: head });
+      assert.deepEqual(fullOutputNotes(output), ["Only part of this output was kept."]);
     }
   });
 
@@ -242,7 +242,7 @@ describe("a Codex completion that kept only its output's head (stored cut past 6
       item: async () => ({ item: stored }),
       streamedOutput: async () => join("", { toolUseId: "item_7" })
     });
-    assert.deepEqual(await readFullOutput(viewer, stored.id, "streamed"), { kind: "head", text: head });
+    assert.deepEqual(await readFullOutput(viewer, stored.id, "streamed"), { kind: "kept", text: head });
     assert.deepEqual(viewer.asked, ["output done-7", "item done-7"]);
   });
 
@@ -277,6 +277,47 @@ describe("a Codex completion that kept only its output's head (stored cut past 6
     assert.deepEqual(output, { kind: "item", item: update });
     assert.equal(fullOutputText(update), JSON.stringify(update.payload, null, 2));
     assert.deepEqual(viewer.asked, ["item live-7", "output live-7"]);
+  });
+});
+
+describe("an OpenCode completion whose final output the tool cut (the END of it, behind its note)", () => {
+  // As the OpenCode adapter stores a `bash` completion that 1.18.32's `ShellTool.run` cut past its limits: the final
+  // output in `data.result` — the note naming the saved file, then the LAST lines — and the payload marked `truncated`.
+  const printed = Array.from({ length: 3_000 }, (_, index) => `line ${index}\n`).join("");
+  const saved = "/home/u/.local/share/opencode/tool-output/tool_0c9a";
+  const kept = `...output truncated...\n\nFull output saved to: ${saved}\n\n${printed.slice(-2_000)}`;
+  const stored = activity(
+    "tool.completed",
+    {
+      itemType: "command_execution",
+      toolUseId: "call_bash",
+      title: "seq 0 2999",
+      status: "completed",
+      truncated: true,
+      data: { tool: "bash", toolUseId: "call_bash", command: "seq 0 2999", result: kept }
+    },
+    { id: "done-oc", turnId: "t1" }
+  );
+
+  it("reads the call's join first: every line the command printed, and where the whole was saved", async () => {
+    const whole = `${printed}\n\nFull output saved to: ${saved}`;
+    const viewer = reads({ streamedOutput: async () => join(whole, { toolUseId: "call_bash" }) });
+    assert.deepEqual(await readFullOutput(viewer, stored.id, "streamed"), {
+      kind: "streamed",
+      text: whole,
+      running: false,
+      cut: false
+    });
+    assert.deepEqual(viewer.asked, ["output done-oc"]);
+  });
+
+  it("with no join to give, shows the part the tool kept as text, saying only part was kept — never that it is the start", async () => {
+    for (const answer of [join("", { toolUseId: "call_bash" }), null]) {
+      const viewer = reads({ item: async () => ({ item: stored }), streamedOutput: async () => answer });
+      const output = await readFullOutput(viewer, stored.id, "streamed");
+      assert.deepEqual(output, { kind: "kept", text: kept });
+      assert.deepEqual(fullOutputNotes(output), ["Only part of this output was kept."]);
+    }
   });
 });
 

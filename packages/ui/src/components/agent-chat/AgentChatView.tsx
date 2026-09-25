@@ -118,7 +118,7 @@ interface ChatViewerState {
   loading: boolean;
   diff?: string;
   text?: string;
-  /** What the read says of `text` (`fullOutputNotes`): so far, or its head. */
+  /** What the read says of `text` (`fullOutputNotes`): so far, its head, or only part of it. */
   notes?: readonly string[];
   error?: string;
 }

@@ -649,12 +649,14 @@ export interface ItemLifecyclePayload {
   agentId?: string;
   parentToolUseId?: string;
   /**
-   * The adapter bounded the item's output and `data` holds only a head of it —
-   * Codex keeps a command's `aggregatedOutput` up to 64 KiB. Ingestion carries
-   * it onto the row as the payload's `truncated` (§5.6), the mark every reader
-   * already takes for "the stored item is cut": the MCP's `read_tool_output`
-   * then reads the call's streamed join instead of answering the head as the
-   * whole output. Absent when nothing was cut.
+   * The item's output was bounded and `data` holds only part of it — Codex
+   * keeps a command's `aggregatedOutput` up to 64 KiB (its head); OpenCode's
+   * `bash` tool keeps the end of an output past its limits, behind its own
+   * note. Ingestion carries it onto the row as the payload's `truncated`
+   * (§5.6), the mark every reader already takes for "the stored item is cut":
+   * the MCP's `read_tool_output` then reads the call's streamed join instead
+   * of answering the kept part as the whole output. Absent when nothing was
+   * cut.
    */
   truncated?: boolean;
 }

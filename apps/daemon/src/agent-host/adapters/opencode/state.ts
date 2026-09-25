@@ -153,6 +153,17 @@ const FINAL_ANCHOR_FLOOR = 64;
 const FINAL_OUTPUT_CUT_NOTE = /^\.\.\.output truncated\.\.\.\n\nFull output saved to: ([^\n]+)\n\n/;
 
 /**
+ * Whether a command's final `output` is one the tool cut: it opens with
+ * {@link FINAL_OUTPUT_CUT_NOTE}. What follows the note is only the part the
+ * tool kept — the END of the output (`es` in 1.18.32's `ShellTool.run` walks
+ * the lines from the last one, read from the source) — so a completion
+ * carrying it holds no whole output, and says so (`emitToolItem`).
+ */
+export function isCutFinalOutput(final: string): boolean {
+  return FINAL_OUTPUT_CUT_NOTE.test(final);
+}
+
+/**
  * What a command's final `output` holds past the stream a client was shown —
  * `mark`, its last running value — for its completion to append before it
  * closes the call. 1.18.32's final output is not always that value
