@@ -103,18 +103,30 @@ export function removeQueued(
 /**
  * Put a message back at the head, held for user action — used when its send
  * failed, so the queue keeps its order and nothing behind it overtakes.
- * `index` places it behind that many messages already held there: two sends
- * that fail one after the other keep the order they were posted in.
+ * `behind` names the messages (by id) it must follow: sends that fail one
+ * after the other, each held right behind the last of those still queued,
+ * keep the order they were posted in; with none of them left it goes to the
+ * very front. Never a count of held messages — the user may have sent one of
+ * them meanwhile, and a message queued later can be held for another reason,
+ * so a count could land it behind a message queued after it.
  *
  * *T3: `queuedMessageStore.ts:128-140`.*
  */
 export function holdAtFront(
   state: QueueState,
   message: QueuedComposerMessage,
-  index = 0
+  behind?: ReadonlySet<string>
 ): QueueState {
   const rest = state.messages.filter((entry) => entry.id !== message.id);
-  const at = Math.max(0, Math.min(index, rest.length));
+  let at = 0;
+  if (behind !== undefined) {
+    for (let index = rest.length - 1; index >= 0; index -= 1) {
+      if (behind.has(rest[index]!.id)) {
+        at = index + 1;
+        break;
+      }
+    }
+  }
   return {
     ...state,
     messages: [...rest.slice(0, at), { ...message, holdUntilUserAction: true }, ...rest.slice(at)]

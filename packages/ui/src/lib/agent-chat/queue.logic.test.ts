@@ -100,7 +100,7 @@ describe("the three guards", () => {
     const first = takeQueued(state, ids[0]!, "boundary-1");
     const second = takeQueued(first.state, ids[1]!, "boundary-1");
     const heldFirst = holdAtFront(second.state, first.message!);
-    const heldBoth = holdAtFront(heldFirst, second.message!, 1);
+    const heldBoth = holdAtFront(heldFirst, second.message!, new Set([ids[0]!]));
     assert.deepEqual(
       heldBoth.messages.map((message) => [message.id, message.holdUntilUserAction]),
       [
@@ -108,6 +108,19 @@ describe("the three guards", () => {
         [ids[1], true],
         [ids[2], false]
       ]
+    );
+  });
+
+  it("guard 2, in order: with the ones it follows gone, a failure goes to the very front — never behind one queued after it", () => {
+    const { state, ids } = queueOf("one", "two", "three");
+    const taken = takeQueued(state, ids[1]!, "boundary-1");
+    // A message queued later, but held for another reason, sits at the front.
+    const later = { ...taken.state.messages[1]!, holdUntilUserAction: true };
+    const withHeldLater = { ...taken.state, messages: [later, taken.state.messages[0]!] };
+    const held = holdAtFront(withHeldLater, taken.message!, new Set(["gone"]));
+    assert.deepEqual(
+      held.messages.map((message) => message.id),
+      [ids[1], ids[2], ids[0]]
     );
   });
 

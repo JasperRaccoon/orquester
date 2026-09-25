@@ -195,6 +195,26 @@ describe("the composer outbox", () => {
     assert.equal(holdOutboxQueuedAtFront("A", held), false, "no tab storage: the caller keeps it elsewhere");
   });
 
+  it("holds a later failure behind the ones it follows, keeping their order", () => {
+    writeOutboxQueue("A", [queued("w", "waiting")]);
+    const first = { ...queued("f1", "first"), holdUntilUserAction: true, holdReason: "no" };
+    const second = { ...queued("f2", "second"), holdUntilUserAction: true, holdReason: "no" };
+    holdOutboxQueuedAtFront("A", first);
+    holdOutboxQueuedAtFront("A", second, new Set(["f1"]));
+    assert.deepEqual(outboxQueue("A").map((message) => message.text), ["first", "second", "waiting"]);
+  });
+
+  it("says whether a queue write reached the storage", () => {
+    assert.equal(writeOutboxQueue("A", [queued("q1", "one")]), true);
+    const stub = (globalThis as unknown as { sessionStorage: { setItem: (key: string, value: string) => void } })
+      .sessionStorage;
+    stub.setItem = () => {
+      throw new Error("QuotaExceededError");
+    };
+    assert.equal(writeOutboxQueue("A", [queued("q1", "one"), queued("q2", "two")]), false);
+    assert.deepEqual(outboxQueue("A").map((message) => message.text), ["one"], "what was stored stays");
+  });
+
   it("keeps a thread's last-shown stamp while it has queued messages, and forgets it with them", () => {
     stampOutboxQueueShown("A", 5_000);
     assert.equal(outboxQueueShownAt("A"), null, "no queue, nothing to stamp");

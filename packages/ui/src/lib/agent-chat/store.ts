@@ -890,9 +890,10 @@ const repostFailedNotice = (reason: string): string =>
 /**
  * A queued message coming back — after a reload, or into a generation that
  * starts from the queue its page kept — as it may be shown: held, with the
- * reason it waits, once its queue has been off screen longer than
- * `OUTBOX_QUEUE_ABSENCE_MAX_MS` (`outboxQueueFresh`); as it was otherwise. A
- * message already held keeps its own reason.
+ * reason it waits, once its queue has been neither on screen nor driven by a
+ * live page for longer than `OUTBOX_QUEUE_ABSENCE_MAX_MS`
+ * (`outboxQueueFresh`); as it was otherwise. A message already held keeps its
+ * own reason.
  */
 function heldIfUnseen(
   message: QueuedComposerMessage,
@@ -950,7 +951,11 @@ function attemptCommand(run: (signal: AbortSignal) => Promise<unknown>): Promise
 
 /** A generation's hook for the thread's other generations (§7.4) — see `holdQueuedMessageInThread`. */
 type HoldingThreadStore = ThreadStore & {
-  holdQueuedAtFront?: (message: QueuedComposerMessage, reason?: string, index?: number) => void;
+  holdQueuedAtFront?: (
+    message: QueuedComposerMessage,
+    reason?: string,
+    behind?: ReadonlySet<string>
+  ) => void;
 };
 
 export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): ThreadStore {
@@ -1197,20 +1202,21 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
     /**
      * Guard 2's hold (§7.4): the failed message goes back to the FRONT, held
-     * for the user — behind `index` messages already held there, so failures
-     * that land one after the other keep the order they were posted in.
-     * `reason` is the failure's banner, for a message another generation sent:
-     * its own banner went to that generation, and a held row with no banner
-     * never says why it waits. A banner the user closed for this thread stays
-     * closed, as `withCommandRetries` has it.
+     * for the user — right behind the last of the messages `behind` names
+     * still in the queue (`holdAtFront`), so failures that land one after the
+     * other keep the order they were posted in. `reason` is the failure's
+     * banner, for a message another generation sent: its own banner went to
+     * that generation, and a held row with no banner never says why it waits.
+     * A banner the user closed for this thread stays closed, as
+     * `withCommandRetries` has it.
      */
     const holdQueuedAtFront = (
       message: QueuedComposerMessage,
       reason?: string,
-      index = 0
+      behind?: ReadonlySet<string>
     ): void => {
       update((state) => {
-        const queue = holdAtFront(state.queue, message, index);
+        const queue = holdAtFront(state.queue, message, behind);
         const banner =
           reason === undefined || dismissedErrorBanners.has(`${sessionId}\u0000${reason}`)
             ? {}
@@ -1288,12 +1294,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * it always was — the old one may be recorded as refused, and a receipt
      * only replays a refusal.
      */
-    const holdFailedQueued = (message: QueuedComposerMessage, reason: string, index = 0): void => {
+    const holdFailedQueued = (
+      message: QueuedComposerMessage,
+      reason: string,
+      behind?: ReadonlySet<string>
+    ): void => {
       const held = { ...message, commandId: newId(), holdReason: reason };
       if (closed) {
-        holdQueuedMessageInThread(sessionId, held, reason);
+        holdQueuedMessageInThread(sessionId, held, reason, behind);
       } else {
-        holdQueuedAtFront(held, reason, index);
+        holdQueuedAtFront(held, reason, behind);
       }
     };
 
@@ -1303,14 +1313,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * a re-post after a reload shares, so the host's receipt dedupes the two —
      * and holding the thread's queue meanwhile (`beginQueuedSend`), in every
      * generation of it. Delivered, its outbox entry goes and the queue moves
-     * on; failed, it is held at the front FIRST (behind `holdIndex` messages
-     * held there before it) and only then is the queue let go, so the next
-     * message never slips ahead of it. `describe` words the failure — a
-     * re-post after a reload says so.
+     * on; failed, it is held at the front FIRST (behind the messages `behind`
+     * names) and only then is the queue let go, so the next message never
+     * slips ahead of it. `describe` words the failure — a re-post after a
+     * reload says so.
      */
     const postQueued = async (
       message: OutboxQueuedMessage,
-      holdIndex = 0,
+      behind?: ReadonlySet<string>,
       describe: (reason: string) => string = (reason) => reason
     ): Promise<void> => {
       const settleQueued = beginQueuedSend(sessionId);
@@ -1327,7 +1337,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         );
         removeOutboxEntry(message.commandId);
       } catch (error) {
-        holdFailedQueued(message, describe(errorMessage(error)), holdIndex);
+        holdFailedQueued(message, describe(errorMessage(error)), behind);
         removeOutboxEntry(message.commandId);
         throw error;
       } finally {
@@ -1341,32 +1351,39 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * land ahead of one posted before it (§7.4). The queue holds for the whole
      * run: what waits in it goes only once every one of these has settled.
      * Each composer send reads "Sending" from the start, not only on its turn.
-     * A queued one the host refuses is held behind the ones held before it
-     * (`heldBefore` of them already are), in order, ahead of the rest.
+     * A queued one the host refuses is held right behind the last message the
+     * run has held so far (`placed`: the stale ones held when the thread took
+     * the leftovers over, then each failure), in post order, ahead of the
+     * rest. One step going wrong never strands the others: each runs on its
+     * own, and every "Sending" the run opened is settled when it ends.
      */
     const replayInOrder = async (
       ordered: ReadonlyArray<OutboxSend | OutboxQueued>,
-      heldBefore: number
+      placed: Set<string>
     ): Promise<void> => {
       const settleQueue = beginQueuedSend(sessionId);
       const sending = new Map<OutboxSend, () => void>();
       for (const entry of ordered) {
         if (entry.kind === "send") sending.set(entry, beginComposerSend(sessionId));
       }
-      let held = heldBefore;
       try {
         for (const entry of ordered) {
-          if (entry.kind === "send") {
-            await replaySend(entry, sending.get(entry)!);
-            continue;
+          try {
+            if (entry.kind === "send") {
+              await replaySend(entry, sending.get(entry)!);
+              continue;
+            }
+            const failed = await postQueued(entry.message, placed, repostFailedNotice).then(
+              () => false,
+              () => true
+            );
+            if (failed) placed.add(entry.message.id);
+          } catch {
+            /* the step's own settle and restore ran as far as they could; the rest still go */
           }
-          const failed = await postQueued(entry.message, held, repostFailedNotice).then(
-            () => false,
-            () => true
-          );
-          if (failed) held += 1;
         }
       } finally {
+        for (const settle of sending.values()) settle();
         settleQueue();
       }
     };
@@ -1452,7 +1469,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         const bySentAt = (entry: OutboxSend | OutboxQueued): number => entry.sentAt ?? 0;
         void replayInOrder(
           [...replays].sort((left, right) => bySentAt(left) - bySentAt(right)),
-          held.length
+          new Set(held.map((message) => message.id))
         );
       }
     };
@@ -2286,19 +2303,29 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     // snapshot. Dropping it when the snapshot expired lost every message still
     // waiting; a queue nobody has seen for a while comes back held.
     const keptQueue = outboxQueue(sessionId);
-    const seedFrom = keptQueue.length > 0 ? keptQueue : (warm?.queue.messages ?? []);
+    const seedFrom = seedQueueFrom({
+      kept: keptQueue,
+      keptCurrent: keptQueueCurrent.get(sessionId) !== false,
+      retained: warm?.queue.messages ?? null
+    });
     const seedShownAt = outboxQueueShownAt(sessionId);
     const seedAt = clock();
     const seedMessages = seedFrom.map((message) => heldIfUnseen(message, seedShownAt, seedAt));
-    // Unchanged when it is exactly the retained queue: that one's rows are
-    // already painted, and nothing needs projecting again.
+    // Unchanged when it is the retained queue — the same messages, held the
+    // same way — whose rows are already painted: the kept copy parses into
+    // fresh objects, and taking those would project every row again.
     const retainedMessages = warm?.queue.messages;
-    const seedChanged =
-      retainedMessages === undefined ||
-      seedMessages.length !== retainedMessages.length ||
-      seedMessages.some((message, index) => message !== retainedMessages[index]);
+    const sameAsRetained =
+      retainedMessages !== undefined &&
+      seedMessages.length === retainedMessages.length &&
+      seedMessages.every(
+        (message, index) =>
+          message.commandId === retainedMessages[index]!.commandId &&
+          message.holdUntilUserAction === retainedMessages[index]!.holdUntilUserAction
+      );
+    const seedChanged = !sameAsRetained;
     const seededQueue: QueueState =
-      warm !== null && !seedChanged
+      warm !== null && sameAsRetained
         ? warm.queue
         : seedMessages.length === 0
           ? EMPTY_QUEUE
@@ -2348,11 +2375,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       if (closed) {
         return;
       }
-      // The queue this generation starts from, held flags and all, is the
-      // page's copy from here on: a message held because nobody had seen it
-      // stays held across the next reload, whose stamp will be fresh.
-      if (seededQueue.messages.length > 0) {
-        writeOutboxQueue(sessionId, seededQueue.messages);
+      // The queue this generation holds, held flags and all, is the page's
+      // copy from here on: a message held because nobody had seen it stays
+      // held across the next reload, whose stamp will be fresh. The queue as
+      // it stands NOW, never the seed: a torn-down generation's failing send
+      // may have been held into it since it was created.
+      const live = get().queue.messages;
+      if (live.length > 0 || seededQueue.messages.length > 0) {
+        keptQueueCurrent.set(sessionId, writeOutboxQueue(sessionId, live));
       }
       // Before the stream: what a reload interrupted is on its way again, and
       // the queue back, before the thread's first frame can make anything due.
@@ -2411,14 +2441,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   // queue is a snapshot of the past.
   const unsubscribeQueueMirror = store.subscribe((state, previous) => {
     if (state.queue.messages !== previous.queue.messages) {
-      writeOutboxQueue(sessionId, state.queue.messages);
+      keptQueueCurrent.set(sessionId, writeOutboxQueue(sessionId, state.queue.messages));
     }
   });
 
-  // When this thread's queue was last on screen (§7.4), for the absence bound
-  // a queue coming back is measured against: stamped as the page is hidden, on
-  // `pagehide`, and when this generation is torn down — unless the page is
-  // hidden then, when the stamp it took on hiding stands.
+  // When this thread's queue was last on screen or driven by this live page
+  // (§7.4), for the absence bound a queue coming back is measured against:
+  // stamped as the page is hidden, on `pagehide`, and when this generation is
+  // torn down — unless the page is hidden then, when the stamp it took on
+  // hiding stands.
   const stampQueueShown = (): void => stampOutboxQueueShown(sessionId, clock());
   const pageHidden = (): boolean =>
     typeof document !== "undefined" && document.visibilityState === "hidden";
@@ -2654,21 +2685,56 @@ export function updateThreadDraft(
 function holdQueuedMessageInThread(
   sessionId: string,
   message: QueuedComposerMessage,
-  reason: string
+  reason: string,
+  behind?: ReadonlySet<string>
 ): void {
   const live = registry.get(sessionId)?.store as HoldingThreadStore | undefined;
   if (live?.holdQueuedAtFront) {
-    live.holdQueuedAtFront(message, reason);
+    live.holdQueuedAtFront(message, reason, behind);
     return;
   }
   const { commandId } = message;
   if (
     commandId !== undefined &&
-    holdOutboxQueuedAtFront(sessionId, { ...message, commandId, holdReason: reason })
+    holdOutboxQueuedAtFront(sessionId, { ...message, commandId, holdReason: reason }, behind)
   ) {
     return;
   }
   updateThreadDraft(sessionId, (draft) => persistedDraftAfterReturn({ persisted: draft, message }));
+}
+
+/**
+ * Per thread, whether the last write of its queue to the tab's outbox reached
+ * the storage (§7.4). A write that failed — the storage full — leaves the kept
+ * queue behind the thread's own, so a generation does not start from it as
+ * if it were current (`seedQueueFrom`). Module-level, as the queue it
+ * describes outlives every generation; forgotten with the page.
+ */
+const keptQueueCurrent = new Map<string, boolean>();
+
+/**
+ * Which queue a store generation starts from (§7.4): the page's kept queue —
+ * the thread's queue as it last stood, a message held while no generation was
+ * live included, which the retained snapshot (taken at the teardown) lacks —
+ * unless its last write failed and a snapshot was retained: then the snapshot,
+ * with any held message only the kept queue has (a hold stored after the
+ * failed write) put back in front. With no snapshot, the kept queue is all
+ * there is, current or not.
+ */
+function seedQueueFrom(input: {
+  kept: readonly QueuedComposerMessage[];
+  keptCurrent: boolean;
+  retained: readonly QueuedComposerMessage[] | null;
+}): QueuedComposerMessage[] {
+  const { kept, keptCurrent, retained } = input;
+  if (retained === null) return [...kept];
+  if (kept.length === 0) return [...retained];
+  if (keptCurrent) return [...kept];
+  const retainedIds = new Set(retained.map((message) => message.commandId));
+  return [
+    ...kept.filter((message) => message.holdUntilUserAction && !retainedIds.has(message.commandId)),
+    ...retained
+  ];
 }
 
 /** Test seam: drop every slice immediately, retained snapshots included. */
@@ -2681,6 +2747,7 @@ export function resetThreadStores(): void {
     ).destroy?.({ retain: false });
   }
   retention.clear();
+  keptQueueCurrent.clear();
 }
 
 export type { AttachmentRef, ComposerContextRecord, InteractionMode };

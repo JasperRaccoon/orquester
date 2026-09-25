@@ -954,6 +954,235 @@ describe("a reload never loses or duplicates a message", () => {
     assert.equal(host.attempts.length, 2);
   });
 
+  const destroy = (thread: ThreadStore, retain = true): void =>
+    (thread as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({ retain });
+
+  /** A tab storage that refuses every write while `full`. */
+  function fillableSessionStorage(): { full(value: boolean): void } {
+    let full = false;
+    const base = storage(() => session);
+    (globalThis as unknown as { sessionStorage: unknown }).sessionStorage = {
+      ...base,
+      getItem: base.getItem,
+      removeItem: base.removeItem,
+      setItem: (key: string, value: string) => {
+        if (full) throw new Error("QuotaExceededError");
+        session.set(key, value);
+      }
+    };
+    return { full: (value) => void (full = value) };
+  }
+
+  it("stores the queue as it stands when its first microtask runs — a message held into it just before included", async () => {
+    const host = fakeHost();
+    const first = open("A", host, "first-");
+    await flush();
+    host.push(running("A"));
+    first.getState().actions.queueMessage(queuedInput("one"));
+    destroy(first, false);
+
+    const next = retainThreadStore("A", { transport: host.transport, newId: ids("next-"), now, delay: async () => {} });
+    // What a torn-down generation's failing queued send does to the live one
+    // (`holdQueuedMessageInThread`) — landing before `next`'s creation microtask.
+    (next as unknown as { holdQueuedAtFront(message: unknown, reason?: string): void }).holdQueuedAtFront(
+      {
+        id: "q-held",
+        commandId: "c-held",
+        text: "held",
+        attachments: [],
+        context: [],
+        interactionMode: "default",
+        queuedAfterToolActivityId: null,
+        holdUntilUserAction: true,
+        holdReason: "no",
+        queuedAt: stamp(1)
+      },
+      "no"
+    );
+    await flush();
+
+    reload();
+    const after = open("A", fakeHost(), "after-");
+    await flush();
+    assert.deepEqual(
+      after.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["held", true],
+        ["one", false]
+      ]
+    );
+  });
+
+  it("never holds a failed re-post behind a waiting message once the user has sent the one held before it", async () => {
+    left([
+      queuedLeft("q0", "stale", { sentAt: NOW - OUTBOX_REPLAY_MAX_AGE_MS - 1 }),
+      queuedLeft("q1", "young", { sentAt: NOW }),
+      queuedLeft("q2", "waiting")
+    ]);
+    const host = fakeHost();
+    const thread = open("A", host);
+    await flush();
+    assert.deepEqual(thread.getState().slice.queue.map((message) => message.text), ["stale", "waiting"]);
+    void thread.getState().actions.sendQueuedNow(thread.getState().slice.queue[0]!.id).catch(() => {});
+    await settle();
+    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["young", true],
+        ["waiting", false]
+      ]
+    );
+  });
+
+  it("holds a failed re-post ahead of messages queued after it, even ones held because nobody saw them", async () => {
+    const later = NOW + 11 * MINUTE;
+    left([
+      queuedLeft("q0", "stale", { sentAt: later - OUTBOX_REPLAY_MAX_AGE_MS - 1 }),
+      queuedLeft("q1", "young", { sentAt: later - 1_000 }),
+      queuedLeft("q2", "waiting")
+    ]);
+    const host = fakeHost();
+    const thread = open("A", host, "id", at(later));
+    await flush();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["stale", true],
+        ["waiting", true]
+      ]
+    );
+    void thread.getState().actions.sendQueuedNow(thread.getState().slice.queue[0]!.id).catch(() => {});
+    await settle();
+    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => message.text),
+      ["young", "waiting"],
+      "it was on its way before that one was queued"
+    );
+  });
+
+  it("keeps the order of consecutive failures that land with no live generation", async () => {
+    left([
+      queuedLeft("q1", "first", { sentAt: NOW - 2_000 }),
+      queuedLeft("q2", "second", { sentAt: NOW - 1_000 }),
+      queuedLeft("q3", "waiting")
+    ]);
+    const host = fakeHost();
+    const thread = open("A", host);
+    await flush();
+    destroy(thread);
+    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+    host.attempts[1]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+
+    const next = open("A", host, "next-");
+    await flush();
+    assert.deepEqual(
+      next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["first", true],
+        ["second", true],
+        ["waiting", false]
+      ]
+    );
+  });
+
+  it("never leaves a thread reading Sending when giving a refused re-post back throws — and still re-posts the rest", async () => {
+    const unregister = registerComposerHandle("A", {
+      insertText: () => {},
+      stageAttachment: () => false,
+      returnMessage: () => [],
+      focusAtEnd: () => {},
+      openControl: () => {},
+      restoreFailedSend: () => {
+        throw new Error("the composer could not take it");
+      }
+    });
+    try {
+      left([
+        sendLeft({ commandId: "c1", sentAt: NOW - 2_000, turn: { input: "one" } }),
+        sendLeft({ commandId: "c2", sentAt: NOW - 1_000, turn: { input: "two" } })
+      ]);
+      const host = fakeHost();
+      open("A", host);
+      await flush();
+      host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+      await settle();
+      assert.deepEqual(host.posted(), [
+        ["one", "c1"],
+        ["two", "c2"]
+      ]);
+      host.attempts[1]!.answer();
+      await settle();
+      assert.equal(isComposerSending("A"), false);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("does not trust a kept queue whose last write failed: the retained snapshot has what came after", async () => {
+    const storageFill = fillableSessionStorage();
+    const host = fakeHost();
+    const first = open("A", host, "first-");
+    await flush();
+    host.push(running("A"));
+    first.getState().actions.queueMessage(queuedInput("one"));
+    storageFill.full(true);
+    first.getState().actions.queueMessage(queuedInput("two"));
+    destroy(first);
+
+    const next = open("A", host, "next-");
+    await flush();
+    assert.deepEqual(next.getState().slice.queue.map((message) => message.text), ["one", "two"]);
+  });
+
+  it("takes a held message only the kept queue has into the snapshot's queue after a failed write", async () => {
+    const storageFill = fillableSessionStorage();
+    const host = fakeHost();
+    const first = open("A", host, "first-");
+    await flush();
+    host.push(running("A"));
+    first.getState().actions.queueMessage(queuedInput("first"));
+    host.push(ready("A"));
+    await settle();
+    assert.deepEqual(host.posted().map(([input]) => input), ["first"]);
+    storageFill.full(true);
+    first.getState().actions.queueMessage(queuedInput("second"));
+    destroy(first);
+    storageFill.full(false);
+    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+
+    const next = open("A", host, "next-");
+    await flush();
+    assert.deepEqual(
+      next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["first", true],
+        ["second", false]
+      ]
+    );
+  });
+
+  it("repaints nothing on a warm remount whose queue is the one it retained", async () => {
+    const host = fakeHost();
+    const first = open("A", host, "first-");
+    await flush();
+    host.push(running("A"));
+    first.getState().actions.queueMessage(queuedInput("one"));
+    const rows = first.getState().rows;
+    const message = first.getState().slice.queue[0];
+    destroy(first);
+
+    const next = open("A", host, "next-");
+    assert.equal(next.getState().rows, rows, "the retained rows, not a projection of stored copies");
+    assert.equal(next.getState().slice.queue[0], message);
+  });
+
   it("ignores a stored value it cannot read, and still resumes every entry it can", async () => {
     session.set(COMPOSER_OUTBOX_KEY, "{not json");
     const host = fakeHost();

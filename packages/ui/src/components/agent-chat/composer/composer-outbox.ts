@@ -33,10 +33,13 @@
  * their thread, which rewrites them as its own. An entry stays stored until it
  * settles, so a second reload mid-re-post finds it again.
  *
- * Beside the entries, the moment each thread's queue was last on screen
- * (`shown`, {@link stampOutboxQueueShown}) — stamped by the thread's store
- * when the page is hidden, on `pagehide`, and when the store generation is
- * torn down — which is what the absence bound measures.
+ * Beside the entries, the moment each thread's queue was last on screen or
+ * last driven by a live page (`shown`, {@link stampOutboxQueueShown}) —
+ * stamped by the thread's store when the page is hidden, on `pagehide`, and
+ * when the store generation is torn down — which is what the absence bound
+ * measures. A page hidden for hours still drives its queue (each message goes
+ * out as it falls due), so its `pagehide` stamps it: an unload of a live page
+ * is never an absence.
  *
  * Loaded field-wise with a fallback (AGENTS.md: an old bundle's payload
  * outlives a deploy): a value that is not a v1 outbox reads as empty, an entry
@@ -93,10 +96,11 @@ export const OUTBOX_REPLAY_MAX_AGE_MS = 10 * 60_000;
  * is right after an ordinary reload; it is not for a queue nobody has looked
  * at for an hour or a day (a tab the browser discarded and reloaded, a
  * restored session), whose "push and deploy" may no longer be what the user
- * wants. Past this bound, measured from when the queue was last on screen —
- * never from when a message was queued: one queued twenty minutes ago behind a
- * turn still running is live after a quick reload — every message comes back
- * held, in order, under its own `commandId`, waiting for its Send now.
+ * wants. Past this bound, measured from when the queue was last on screen or
+ * last driven by a live page — never from when a message was queued: one
+ * queued twenty minutes ago behind a turn still running is live after a quick
+ * reload — every message comes back held, in order, under its own
+ * `commandId`, waiting for its Send now.
  */
 export const OUTBOX_QUEUE_ABSENCE_MAX_MS = 10 * 60_000;
 
@@ -146,7 +150,7 @@ export interface OutboxQueued {
 
 export type OutboxEntry = OutboxSend | OutboxQueued;
 
-/** The stored document: the entries, and when each thread's queue was last on screen. */
+/** The stored document: the entries, and when each thread's queue was last on screen or driven. */
 interface OutboxDocument {
   entries: OutboxEntry[];
   shown: Record<string, number>;
@@ -184,9 +188,10 @@ export function outboxReplayable(sentAt: number, now: number): boolean {
 
 /**
  * Whether a queued message coming back may still go out by itself at `now`:
- * its queue was on screen within {@link OUTBOX_QUEUE_ABSENCE_MAX_MS} — at the
- * thread's last stamp (`shownAt`), or when the message was queued, whichever
- * is later (queued in plain sight after the last stamp, it was seen then).
+ * its queue was on screen, or driven by a live page, within
+ * {@link OUTBOX_QUEUE_ABSENCE_MAX_MS} — at the thread's last stamp
+ * (`shownAt`), or when the message was queued, whichever is later (queued in
+ * plain sight after the last stamp, it was seen then).
  * Nothing to measure from, or a clock that ran backwards, is not fresh: such
  * a message waits for the user rather than going out on a guess.
  */
@@ -385,7 +390,9 @@ function writeDocument(document: OutboxDocument): boolean {
     if (typeof sessionStorage === "undefined") return false;
     const entries = bounded(document.entries);
     // A stamp is kept only for a thread that still has a queue to measure.
-    const queued = new Set(entries.filter((entry) => entry.kind === "queued").map((entry) => entry.sessionId));
+    const queued = new Set(
+      entries.filter((entry) => entry.kind === "queued").map((entry) => entry.sessionId)
+    );
     const shown = Object.fromEntries(
       Object.entries(document.shown).filter(([sessionId]) => queued.has(sessionId))
     );
@@ -464,16 +471,21 @@ export function recordOutboxQueuedPost(
  * them, should the page that adopted it have failed to store that — and leaves
  * alone every send in flight, every other thread's entries and whatever a
  * previous page left. A message without a `commandId` is not kept — none is
- * queued without one.
+ * queued without one. `false` when the write did not reach the storage (none,
+ * or full): the kept queue is then behind the thread's own, and the caller
+ * must not start a generation from it as if it were current.
  */
-export function writeOutboxQueue(sessionId: string, messages: readonly QueuedComposerMessage[]): void {
+export function writeOutboxQueue(
+  sessionId: string,
+  messages: readonly QueuedComposerMessage[]
+): boolean {
   const queued = messages.flatMap((message): OutboxQueued[] =>
     message.commandId === undefined
       ? []
       : [{ kind: "queued", pageId, sessionId, message: { ...message, commandId: message.commandId } }]
   );
   const ids = new Set(queued.map((entry) => entry.message.commandId));
-  rewrite((entries) => [
+  return rewrite((entries) => [
     ...entries.filter((entry) => !ownQueueOf(entry, sessionId) && !ids.has(commandIdOf(entry))),
     ...queued
   ]);
@@ -483,10 +495,17 @@ export function writeOutboxQueue(sessionId: string, messages: readonly QueuedCom
  * A held message put at the FRONT of this page's queue of a thread — a queued
  * send that failed while no store generation of the thread was live, whose
  * queue is then only here (§7.4): the next generation starts from it, the
- * message first, so nothing queued behind it drains ahead of it. `false` when
- * the tab has no storage to keep it in, for the caller to keep it elsewhere.
+ * message first, so nothing queued behind it drains ahead of it. `behind`
+ * names the messages (by id) it must follow, as `holdAtFront` has it: sends
+ * failing one after the other keep the order they were posted in. `false`
+ * when the tab has no storage to keep it in, for the caller to keep it
+ * elsewhere.
  */
-export function holdOutboxQueuedAtFront(sessionId: string, message: OutboxQueuedMessage): boolean {
+export function holdOutboxQueuedAtFront(
+  sessionId: string,
+  message: OutboxQueuedMessage,
+  behind?: ReadonlySet<string>
+): boolean {
   const held: OutboxQueued = {
     kind: "queued",
     pageId,
@@ -495,8 +514,21 @@ export function holdOutboxQueuedAtFront(sessionId: string, message: OutboxQueued
   };
   return rewrite((entries) => {
     const rest = entries.filter((entry) => commandIdOf(entry) !== message.commandId);
-    const first = rest.findIndex((entry) => ownQueueOf(entry, sessionId));
-    return first === -1 ? [...rest, held] : [...rest.slice(0, first), held, ...rest.slice(first)];
+    let at = -1;
+    if (behind !== undefined) {
+      for (let index = rest.length - 1; index >= 0; index -= 1) {
+        const entry = rest[index]!;
+        if (ownQueueOf(entry, sessionId) && behind.has(entry.message.id)) {
+          at = index + 1;
+          break;
+        }
+      }
+    }
+    if (at === -1) {
+      const first = rest.findIndex((entry) => ownQueueOf(entry, sessionId));
+      at = first === -1 ? rest.length : first;
+    }
+    return [...rest.slice(0, at), held, ...rest.slice(at)];
   });
 }
 
@@ -511,9 +543,9 @@ export function removeOutboxEntry(commandId: string): void {
 }
 
 /**
- * A thread's queue was on screen until `at` (epoch ms): the page is being
- * hidden or unloaded, or the thread's store generation is being torn down.
- * Kept only while the thread has a queue to measure.
+ * A thread's queue was on screen, or driven by a live page, until `at` (epoch
+ * ms): the page is being hidden or unloaded, or the thread's store generation
+ * is being torn down. Kept only while the thread has a queue to measure.
  */
 export function stampOutboxQueueShown(sessionId: string, at: number): void {
   const document = readDocument();
@@ -539,7 +571,10 @@ export function outboxQueue(sessionId: string): OutboxQueuedMessage[] {
     .map((entry) => entry.message);
 }
 
-/** When a thread's queue was last on screen, by {@link stampOutboxQueueShown}; `null` if never. */
+/**
+ * When a thread's queue was last on screen or driven, by
+ * {@link stampOutboxQueueShown}; `null` if never.
+ */
 export function outboxQueueShownAt(sessionId: string): number | null {
   return readDocument().shown[sessionId] ?? null;
 }
