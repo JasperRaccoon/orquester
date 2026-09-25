@@ -388,6 +388,27 @@ test("a Grok shell a poll ended stays ended while a snapshot lists it: one start
   assert.equal(agent(s, shell).status, "completed");
 });
 
+test("a Grok shell Stop closed counts live again while a snapshot lists it running", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  const shell = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
+  const command = "npm run dev";
+  const update = { sessionUpdate: "task_backgrounded", tool_call_id: "call-sh", task_id: shell, command };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
+  // The session-scoped Stop writes the end itself; whether `session/cancel`
+  // kills the CLI's background shell is not captured.
+  await s.feed(s.grok.stopBackgroundTasks());
+  const closed = agent(s, shell).status;
+  assert.notEqual(closed, "running");
+  assert.equal(s.liveness.liveness(THREAD), null);
+
+  const task = { task_id: shell, command, kind: "bash", status: "running" };
+  const snapshot = { sessionId: SESSION, update: { sessionUpdate: "background_tasks", tasks: [task] } };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", snapshot));
+  assert.equal(s.liveness.liveness(THREAD), "monitoring", "the CLI still runs it: a deploy must wait");
+  assert.equal(agent(s, shell).status, closed, "the roster reads the start as a late delivery");
+});
+
 test("a Grok agent nobody polls holds working for an hour, re-armed by a running poll", async () => {
   const clock = createTestClock(0);
   const s = seam(clock);

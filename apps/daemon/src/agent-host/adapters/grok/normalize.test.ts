@@ -730,7 +730,8 @@ test("a poll ends a known shell with its first output line; an id nobody reporte
 });
 
 // ---------------------------------------------------------------------------
-// An ended task never starts again
+// A task whose end the CLI reported never starts again; one the adapter
+// closed itself counts live again while the CLI still lists it running
 // ---------------------------------------------------------------------------
 
 const SNAPSHOTS = "_x.ai/session_notification";
@@ -748,35 +749,81 @@ test("a snapshot still listing a shell a poll ended starts nothing, and ends not
   assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing is live");
 });
 
-test("a shell ended any other way never starts again either — by a snapshot or a late frame", () => {
-  const list = (grok: GrokNormalizer, status: string) =>
-    grok.handleXaiNotification(SNAPSHOTS, snapshot(SHELL, "bash", status));
-  const ends: Array<[string, string, (grok: GrokNormalizer) => RuntimeEvent[]]> = [
-    ["its snapshot status", "completed", (grok) => list(grok, "completed")],
-    ["dropping out", "completed", (grok) => grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT)],
-    ["Stop", "stopped", (grok) => grok.stopBackgroundTasks()]
-  ];
-  for (const [how, status, end] of ends) {
-    const grok = normalizer();
-    list(grok, "running");
-    assert.deepEqual(statuses(taskRows(end(grok))), [["task.completed", SHELL, status]], how);
-    for (const listed of ["running", "completed"]) {
-      assert.deepEqual(agentRows(list(grok, listed)), [], `${how}, then listed ${listed}`);
-    }
-    const late = grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-late", SHELL));
-    assert.deepEqual(agentRows(late), [], `${how}, then a late task_backgrounded`);
-    const restated = grok.handleSessionUpdate(
+/** A snapshot listing SHELL alone, with this status. */
+function listShell(grok: GrokNormalizer, status: string): RuntimeEvent[] {
+  return grok.handleXaiNotification(SNAPSHOTS, snapshot(SHELL, "bash", status));
+}
+
+/** The late start frames: `_x.ai/task_backgrounded`, and the `BackgroundTaskStarted` discriminant. */
+function lateStarts(grok: GrokNormalizer): RuntimeEvent[] {
+  return [
+    ...grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-late", SHELL)),
+    ...grok.handleSessionUpdate(
       frame({
         sessionUpdate: "tool_call_update",
         toolCallId: "call-late-2",
         status: "completed",
         rawOutput: { type: "BackgroundTaskStarted", task_id: SHELL, command: "c" }
       })
-    );
-    assert.deepEqual(agentRows(restated), [], `${how}, then a late BackgroundTaskStarted`);
+    )
+  ];
+}
+
+test("a shell whose end the CLI reported never starts again — by a snapshot or a late frame", () => {
+  const ends: Array<[string, string, (grok: GrokNormalizer) => RuntimeEvent[]]> = [
+    ["its snapshot status", "completed", (grok) => listShell(grok, "completed")],
+    ["a poll", "failed", (grok) => poll(grok, [{ task_id: SHELL, command: "c", exit_code: 1 }])],
+    ["a kill", "stopped", (grok) => poll(grok, [{ task_id: SHELL, explicitly_killed: true }], "KillTask")]
+  ];
+  for (const [how, status, end] of ends) {
+    const grok = normalizer();
+    listShell(grok, "running");
+    assert.deepEqual(statuses(taskRows(end(grok))), [["task.completed", SHELL, status]], how);
+    for (const listed of ["running", "completed"]) {
+      assert.deepEqual(agentRows(listShell(grok, listed)), [], `${how}, then listed ${listed}`);
+    }
+    assert.deepEqual(agentRows(lateStarts(grok)), [], `${how}, then a late start frame`);
     assert.deepEqual(agentRows(grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT)), [], how);
     assert.deepEqual(grok.stopBackgroundTasks(), [], `${how}: nothing is live`);
   }
+});
+
+test("a shell the adapter closed itself counts live again while the CLI still lists it running", () => {
+  // Stop, the session's stop and the exit write the end themselves, and so
+  // does a task dropping out of a snapshot unannounced: none is the CLI's
+  // word that the shell stopped (whether `session/cancel` kills it is not
+  // captured), and a deploy must never kill running work.
+  const ends: Array<[string, string, (grok: GrokNormalizer) => RuntimeEvent[]]> = [
+    ["Stop", "stopped", (grok) => grok.stopBackgroundTasks()],
+    ["dropping out", "completed", (grok) => grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT)]
+  ];
+  for (const [how, status, end] of ends) {
+    const grok = normalizer();
+    listShell(grok, "running");
+    assert.deepEqual(statuses(taskRows(end(grok))), [["task.completed", SHELL, status]], how);
+    const again = listShell(grok, "running");
+    assert.deepEqual(statuses(agentRows(again)), [["task.started", SHELL, undefined]], `${how}, listed`);
+    assert.deepEqual(
+      statuses(grok.stopBackgroundTasks()),
+      [["task.completed", SHELL, "stopped"]],
+      `${how}: live again, so Stop closes it again`
+    );
+  }
+  const grok = normalizer();
+  listShell(grok, "running");
+  grok.stopBackgroundTasks();
+  const late = grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-late", SHELL));
+  assert.deepEqual(statuses(agentRows(late)), [["task.started", SHELL, undefined]], "a late start frame");
+});
+
+test("a terminal listing of a shell the adapter closed is the CLI's end: no row, and final", () => {
+  const grok = normalizer();
+  listShell(grok, "running");
+  grok.stopBackgroundTasks();
+  assert.deepEqual(agentRows(listShell(grok, "completed")), [], "the end is already written");
+  assert.deepEqual(agentRows(listShell(grok, "running")), [], "and now it is the CLI's word");
+  assert.deepEqual(agentRows(lateStarts(grok)), []);
+  assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing is live");
 });
 
 test("the ended-task memory is bounded: the oldest id is forgotten first", () => {
@@ -785,13 +832,16 @@ test("the ended-task memory is bounded: the oldest id is forgotten first", () =>
     { length: ENDED_TASKS_REMEMBERED + 1 },
     (_, index) => `01a0c1ac-0000-7000-8000-${String(index).padStart(12, "0")}`
   );
-  const tasks = ids.map((task_id) => ({ task_id, command: "c", kind: "bash", status: "running" }));
-  grok.handleXaiNotification(SNAPSHOTS, {
+  const listing = (status: string) => ({
     sessionId: SESSION,
-    update: { sessionUpdate: "background_tasks", tasks }
+    update: {
+      sessionUpdate: "background_tasks",
+      tasks: ids.map((task_id) => ({ task_id, command: "c", kind: "bash", status }))
+    }
   });
-  const ended = grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT);
-  assert.equal(only(ended, "task.completed").length, ids.length, "every one dropped out");
+  grok.handleXaiNotification(SNAPSHOTS, listing("running"));
+  const ended = grok.handleXaiNotification(SNAPSHOTS, listing("completed"));
+  assert.equal(only(ended, "task.completed").length, ids.length, "the CLI ended every one");
   const newest = grok.handleXaiNotification(SNAPSHOTS, snapshot(ids.at(-1)!, "bash", "completed"));
   assert.deepEqual(agentRows(newest), [], "the newest end is remembered");
   const oldest = grok.handleXaiNotification(SNAPSHOTS, snapshot(ids[0]!, "bash", "completed"));

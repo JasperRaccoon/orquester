@@ -179,6 +179,25 @@ interface FinishedCall {
   readonly by: "cli" | "adapter";
 }
 
+/**
+ * Who wrote a background task's end. `cli`: the CLI reported it — a poll or
+ * kill answer, a snapshot's terminal status, the completion tag, a failed
+ * spawn call. `adapter`: the adapter wrote it itself — Stop, the session's
+ * stop, the exit ({@link GrokNormalizer.stopBackgroundTasks}), or a task that
+ * dropped out of a snapshot unannounced.
+ */
+type TaskEndSource = "cli" | "adapter";
+
+/** A snapshot status that says the task no longer runs. */
+function isEndedTaskStatus(status: RuntimeTaskStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "interrupted"
+  );
+}
+
 const TOOL_STATUS_TO_ITEM_STATUS: Record<ToolCallStatus, RuntimeItemStatus> = {
   pending: "inProgress",
   in_progress: "inProgress",
@@ -388,15 +407,14 @@ export class GrokNormalizer {
   private readonly finishedCalls = new Map<string, FinishedCall>();
   private readonly tasks = new Map<string, BackgroundTrack>();
   /**
-   * Background task ids (lower-cased) whose end this adapter already wrote — a
-   * shell's, and every id that named an ended subagent run — bounded by
-   * {@link ENDED_TASKS_REMEMBERED}. Nothing starts under one again: a snapshot
-   * entry's status may be terminal, so a finished shell can still be listed,
-   * and that listing started it again under its id, put it back in the
-   * liveness registry as a watch loop, and ended it a second time when it
-   * dropped out.
+   * Background task ids (lower-cased) whose end was written — a shell's, and
+   * every id that named an ended subagent run — and who wrote it, bounded by
+   * {@link ENDED_TASKS_REMEMBERED}; see {@link startsAgain}. A snapshot entry's
+   * status may be terminal, so a finished shell can still be listed, and that
+   * listing started it again under its id, put it back in the liveness
+   * registry as a watch loop, and ended it a second time when it dropped out.
    */
-  private readonly endedTasks = new Map<string, true>();
+  private readonly endedTasks = new Map<string, TaskEndSource>();
   /** Roster agents, by task id; see {@link subagentFromToolCall}. */
   private readonly subagents = new Map<string, SubagentTrack>();
   /** `spawn_subagent` calls, by call id. */
@@ -1088,12 +1106,12 @@ export class GrokNormalizer {
       if (launch.detached || !track.live) {
         return [];
       }
-      return [this.closeSubagent(track, "failed", toolContentText(update.content), raw)];
+      return [this.closeSubagent(track, "failed", "cli", toolContentText(update.content), raw)];
     }
     this.learnSubagentIds(launch, update);
     if (asRecord(update.rawOutput)?.["type"] === SUBAGENT_COMPLETED_OUTPUT) {
       return track.live
-        ? [this.closeSubagent(track, "completed", toolContentText(update.content), raw)]
+        ? [this.closeSubagent(track, "completed", "cli", toolContentText(update.content), raw)]
         : [];
     }
     launch.detached = true;
@@ -1161,10 +1179,10 @@ export class GrokNormalizer {
     evictOldest(this.subagentIds, SUBAGENTS_REMEMBERED);
   }
 
-  /** A shell's end was written: its track goes, and its id is remembered. */
-  private endShell(taskId: string): void {
+  /** A shell's end was written: its track goes, and who wrote it is remembered. */
+  private endShell(taskId: string, by: TaskEndSource): void {
     this.tasks.delete(taskId);
-    this.rememberEndedTask(taskId);
+    this.rememberEndedTask(taskId, by);
   }
 
   /**
@@ -1172,25 +1190,61 @@ export class GrokNormalizer {
    * no frame naming one — once its launch is forgotten — becomes a shell. A
    * resumed run is found through its launch first, so this never hides it.
    */
-  private rememberEndedSubagent(track: SubagentTrack): void {
-    this.rememberEndedTask(track.taskId);
+  private rememberEndedSubagent(track: SubagentTrack, by: TaskEndSource): void {
+    this.rememberEndedTask(track.taskId, by);
     for (const [id, taskId] of this.subagentIds) {
       if (taskId === track.taskId) {
-        this.rememberEndedTask(id);
+        this.rememberEndedTask(id, by);
       }
     }
   }
 
-  /** Oldest first out, so the memory stays within {@link ENDED_TASKS_REMEMBERED}. */
-  private rememberEndedTask(id: string): void {
+  /**
+   * Oldest first out, so the memory stays within
+   * {@link ENDED_TASKS_REMEMBERED}. The CLI's word is never replaced by the
+   * adapter's.
+   */
+  private rememberEndedTask(id: string, by: TaskEndSource): void {
     const key = id.toLowerCase();
+    const previous = this.endedTasks.get(key);
     this.endedTasks.delete(key);
-    this.endedTasks.set(key, true);
+    this.endedTasks.set(key, previous === "cli" ? "cli" : by);
     evictOldest(this.endedTasks, ENDED_TASKS_REMEMBERED);
   }
 
+  /** Whether any end of the task was written, by the CLI or by the adapter. */
   private hasEnded(taskId: string): boolean {
     return this.endedTasks.has(taskId.toLowerCase());
+  }
+
+  /**
+   * Whether a snapshot entry (with its status) or a start frame naming a task
+   * with no live track starts it.
+   *
+   * - An end the CLI reported is final: nothing starts again.
+   * - An end the adapter wrote itself is not the CLI's word — whether
+   *   `session/cancel` kills Grok's background shells is not captured, and a
+   *   deploy must never kill running work, which outranks a duplicate row. So
+   *   a listing that says the task still runs, or a start frame, counts it
+   *   live again (its start row as for any new task: the roster reads it as a
+   *   late delivery and keeps the end). A terminal listing is the CLI's end,
+   *   remembered as such, with no row: the adapter already wrote one.
+   */
+  private startsAgain(taskId: string, status: RuntimeTaskStatus | undefined): boolean {
+    const key = taskId.toLowerCase();
+    const ended = this.endedTasks.get(key);
+    if (ended === undefined) {
+      return true;
+    }
+    if (ended === "cli") {
+      return false;
+    }
+    if (status !== undefined && isEndedTaskStatus(status)) {
+      this.rememberEndedTask(taskId, "cli");
+      return false;
+    }
+    this.endedTasks.delete(key);
+    return true;
   }
 
   /** The task a background-task frame's ids name, when they are a subagent's. */
@@ -1232,11 +1286,12 @@ export class GrokNormalizer {
   private closeSubagent(
     track: SubagentTrack,
     status: "completed" | "failed" | "stopped",
+    by: TaskEndSource,
     summary?: string,
     raw?: RuntimeEventRaw
   ): RuntimeEvent {
     track.live = false;
-    this.rememberEndedSubagent(track);
+    this.rememberEndedSubagent(track, by);
     // The rows that close a run after its turn name the turn it ran in, as a
     // shell's closers do; a foreground end within its own turn is that turn.
     return this.event(
@@ -1473,7 +1528,7 @@ export class GrokNormalizer {
         events.push(...this.subagentFromSnapshot(subagentTask, status, raw));
         continue;
       }
-      if (existing === undefined && this.hasEnded(task.task_id)) {
+      if (existing === undefined && !this.startsAgain(task.task_id, status)) {
         continue;
       }
       const turnId = existing?.turnId ?? this.deps.activeTurnId();
@@ -1505,7 +1560,7 @@ export class GrokNormalizer {
       }
       existing.status = status;
       if (status === "completed" || status === "failed") {
-        this.endShell(task.task_id);
+        this.endShell(task.task_id, "cli");
         events.push(this.event("task.completed", { ...linkage, status }, turnId, raw));
       } else {
         events.push(this.event("task.updated", { ...linkage, status }, turnId, raw));
@@ -1516,7 +1571,7 @@ export class GrokNormalizer {
       if (seen.has(taskId) || track.status === "pending") {
         continue;
       }
-      this.endShell(taskId);
+      this.endShell(taskId, "adapter");
       events.push(
         this.event(
           "task.completed",
@@ -1535,7 +1590,7 @@ export class GrokNormalizer {
     }
     for (const track of this.subagents.values()) {
       if (track.live && track.listed && !listedSubagents.has(track.taskId)) {
-        events.push(this.closeSubagent(track, "completed", undefined, raw));
+        events.push(this.closeSubagent(track, "completed", "adapter", undefined, raw));
       }
     }
     return events;
@@ -1554,12 +1609,12 @@ export class GrokNormalizer {
     track.listed = true;
     switch (status) {
       case "completed":
-        return [this.closeSubagent(track, "completed", undefined, raw)];
+        return [this.closeSubagent(track, "completed", "cli", undefined, raw)];
       case "failed":
-        return [this.closeSubagent(track, "failed", undefined, raw)];
+        return [this.closeSubagent(track, "failed", "cli", undefined, raw)];
       case "cancelled":
       case "interrupted":
-        return [this.closeSubagent(track, "stopped", undefined, raw)];
+        return [this.closeSubagent(track, "stopped", "cli", undefined, raw)];
       default:
         return [];
     }
@@ -1594,7 +1649,7 @@ export class GrokNormalizer {
       existing.toolUseId ??= toolUseId;
       return [];
     }
-    if (this.hasEnded(taskId)) {
+    if (!this.startsAgain(taskId, undefined)) {
       return [];
     }
     this.tasks.set(taskId, {
@@ -1771,7 +1826,7 @@ export class GrokNormalizer {
   ): RuntimeEvent[] {
     const shell = this.tasks.get(id);
     if (shell !== undefined) {
-      this.endShell(id);
+      this.endShell(id, "cli");
       const firstLine = output
         ?.split("\n")
         .find((line) => line.trim().length > 0)
@@ -1797,7 +1852,7 @@ export class GrokNormalizer {
     if (owner !== undefined) {
       owner.settled = true;
     }
-    return [this.closeSubagent(track, status, output, raw)];
+    return [this.closeSubagent(track, status, "cli", output, raw)];
   }
 
   /** The live agent an answer's id names, through the ids its launches reported. */
@@ -1845,10 +1900,10 @@ export class GrokNormalizer {
       if (owner !== undefined) {
         owner.settled = true;
       }
-      events.push(this.closeSubagent(track, "stopped"));
+      events.push(this.closeSubagent(track, "stopped", "adapter"));
     }
     for (const [taskId, track] of [...this.tasks.entries()]) {
-      this.endShell(taskId);
+      this.endShell(taskId, "adapter");
       events.push(
         this.event(
           "task.completed",
