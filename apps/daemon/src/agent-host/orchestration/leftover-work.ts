@@ -95,8 +95,8 @@
  * without losing a row. A later rewind that keeps that turn and drops the ones
  * after it clips the range at its cut (`clipAtCut`), as it clips every
  * surviving range: no history page serves the dropped turns' rows, and the
- * closer, past the cut, leaves the history with them — the fold keeps it by
- * its turn, and the window shows it while retention does.
+ * closer, past the cut, is served by the page that holds the cut, by the turn
+ * it names (`historyBlockEvents` in `orchestrator.ts`), as the fold keeps it.
  *
  * **A first load also names the launches an older host never wrote**
  * ({@link legacyLaunchStarts}): an OpenCode or Codex agent launched before

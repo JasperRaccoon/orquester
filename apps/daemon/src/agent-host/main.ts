@@ -787,6 +787,9 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
     eventPositionBySeq: (threadId, seq) => target.eventPositionBySeq(threadId, seq),
     messageSpan: (threadId, messageId) => target.messageSpan(threadId, messageId),
     messagesSpanning: (threadId, seq) => target.messagesSpanning(threadId, seq),
+    firstBoundaryAfter: (threadId, seq) => target.firstBoundaryAfter(threadId, seq),
+    latestRevertSeq: (threadId) => target.latestRevertSeq(threadId),
+    turnByPrompt: (threadId, messageId) => target.turnByPrompt(threadId, messageId),
     search: (input) => target.search(input),
     stop: async (): Promise<void> => {
       // Like `close`: an index opened after this is closed on arrival.

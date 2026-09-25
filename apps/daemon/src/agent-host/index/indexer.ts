@@ -83,6 +83,7 @@ import type { EventPosition } from "../services.ts";
 import type { IndexedThreadMeta } from "./index.ts";
 import type { IndexedMarkerKind } from "./schema.ts";
 import { describeError, type SqliteDatabase } from "./sqlite.ts";
+import { referencedTurnId } from "./turn-reference.ts";
 
 /** The longest text one FTS row indexes; a longer body is indexed by its head. */
 export const MAX_INDEXED_TEXT_CHARS = 131_072;
@@ -867,14 +868,16 @@ export function createThreadIndexer(input: {
    * (`extendReferenced`) — a turn-end capture, a first-load closer, every row
    * of a call a background agent started in it and finished later — so a
    * turn a rewind keeps can reach into the turns it removes; history planning
-   * folds whatever lies in a turn's range (`eventsOutsideRevertCuts` in
+   * folds whatever lies in a turn's range (`historyBlockEvents` in
    * `orchestrator.ts`), and "Load older" served the removed turns' rows again.
    * Cut back to the line before the cut, as the removed turn's start once cut
    * it (`openTurn`). What goes with it lies past the cut like the rest this
-   * revert drops from the index — its items, text and markers — so its late
-   * rows leave the history with them; the fold keeps them by their turn
-   * (`reduceReverted`), and the window shows them while retention does. The
-   * range is sealed from here on (`revertSeq`), so nothing grows it back.
+   * revert drops from the index — its items, text and markers — and its late
+   * rows lose their positions with them; history planning folds out of the
+   * cut what the fold keeps of it (`keptOutOfGap` in `orchestrator.ts`: a
+   * late row by the turn it names, `referencedTurnId`; a turnless row by
+   * `reduceReverted`'s own arms). The range is sealed from here on
+   * (`revertSeq`), so nothing grows it back.
    */
   function clipAtCut(memory: ThreadMemory, cut: Position): void {
     memory.turns.forEach((turn, index) => {
@@ -1333,22 +1336,6 @@ export function createThreadIndexer(input: {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * The turn an event says it belongs to: an activity's or a message's
- * `turnId`, a checkpoint's `turnId`. Null for everything else.
- */
-function referencedTurnId(event: DomainEvent): string | null {
-  switch (event.type) {
-    case "thread.activity-appended":
-      return toStringOrNull(asRecord(event.payload?.activity)?.turnId);
-    case "thread.turn-diff-completed":
-    case "thread.message-sent":
-      return toStringOrNull(event.payload?.turnId);
-    default:
-      return null;
-  }
-}
 
 /** Same rows, same order — the reducer merely returned a fresh array. */
 function sameTurns(prev: readonly Turn[], next: readonly Turn[]): boolean {

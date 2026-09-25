@@ -2963,7 +2963,11 @@ retention class (the parent's 500, an agent's 200, the 2 000 across agents), nev
 oldest activity the fold holds: anchors and open questions survive out of age order, and a fleet
 whose agents lost their early rows would read as having nothing older at all. With no class full,
 the oldest indexed activity is the boundary — so a thread whose only evictions are messages
-reports `hasOlder: false`. (2) **`GET /api/sessions/:id/history?before=<cursor>&turns=<n>`** →
+reports `hasOlder: false`. Once a rewound thread has evicted an activity, the boundary never lies
+before the first line the index positions past the latest revert (else the index's end): a revert
+leaves a class below its limit with the rows it evicted still gone, and a kept turn's rows in a
+cut have no index position; that boundary gets no cursor, and the client asks without one.
+(2) **`GET /api/sessions/:id/history?before=<cursor>&turns=<n>`** →
 `ThreadHistoryPage {threadId, turns, items, checkpoints, page: {beforeCursor}, seq}`. A page is a
 BLOCK of the log walked back 400 activities through the index — below the 500 rows at which
 retention starts dropping anything, so the block's fold is lossless — and not N turns: one
@@ -2971,14 +2975,18 @@ subagent-fleet turn runs to thousands of events, more than the window, and a tur
 back exactly what the window already shows. `turns` (default 20, at most 100) is only a soft cap.
 The bytes are read by range, folded from empty and projected like a snapshot (§5.6); both
 boundaries move back to a streamed message's first chunk, so no message is split; a revert's cut —
-the removed turns' lines and the `thread.reverted` itself — is never folded into a page; and
-`turns` lists every indexed turn the block meets, with `rewindable` (no settled compaction after
-its prompt), so one turn can appear on two pages. The cursor is `base64url(JSON {t, a, i, s?})` —
-thread, anchor `requestedAt`, turn id, optional in-turn sequence bound — derived from content, so
-it survives an index rebuild and a revert; a malformed or foreign one is a first-page request. No
-usable index is a 503 `INDEX_UNAVAILABLE`. The daemon forwards the page without noting its `seq` as
-the tab's reconnect cursor: that is the thread's CURRENT sequence while the page holds only old
-turns, and moving the cursor to it would let a reconnect skip live events.
+the removed turns' lines and the `thread.reverted` itself — is never folded into a page, but what
+the fold keeps of it is — a kept turn's late rows, turnless rows, rows written after the latest
+revert — on the page that holds it, counted against its 400 (`historyBlockEvents`); and `turns`
+lists every indexed turn the block meets — and such a row's turn when it meets no later one — with
+`rewindable` (no settled compaction after its prompt), so one turn can appear on two pages. A
+search reveal judges a page by the rows it shows, never by its `turns` (`planReveal`). The cursor
+is `base64url(JSON {t, a, i, s?})` — thread, anchor `requestedAt`, turn id, optional in-turn
+sequence bound — derived from content, so it survives an index rebuild and a revert; a malformed or
+foreign one is a first-page request. No usable index is a 503 `INDEX_UNAVAILABLE`. The daemon
+forwards the page without noting its `seq` as the tab's reconnect cursor: that is the thread's
+CURRENT sequence while the page holds only old turns, and moving the cursor to it would let a
+reconnect skip live events.
 (3) **`GET /api/agent/search?q=&limit=&projectPath=`** → `{query, hits, truncated, indexed}`: FTS5
 over the message and activity text of every thread on the host, `bm25`-ranked, `«…»` snippets,
 `limit` 20 by default and at most 50, `q` at most 200 code points and quoted as a phrase per
@@ -3454,7 +3462,9 @@ the composer's, carry the file-type icon of §7.4 (`icons/files`). The plan prop
 into `fsRoot` from a render path. An older-history row ("Load older", `LoadOlderRow`) appears
 once the retained window has evicted a visible row, and pages the turns below it from the host's
 thread index (`GET …/history`; design `2026-09-23-thread-index-and-lazy-boot-design.md`)
-(`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
+(`packages/ui/src/components/agent-chat/timeline/`); one click pages on past a page that shows no
+row the timeline did not already show — right after a rewind the first pages repeat what the
+window holds — up to five pages, busy throughout. Codex's `commentary` phase is a visible
 assistant message between tool calls, in both live and replayed turns. The phase remains metadata
 so commentary cannot become the turn's terminal answer.*
 

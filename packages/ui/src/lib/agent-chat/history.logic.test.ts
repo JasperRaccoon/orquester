@@ -34,6 +34,7 @@ import {
   EMPTY_HISTORY_ITEMS,
   EMPTY_HISTORY_ROWS,
   EMPTY_LIVE_SPLIT,
+  HISTORY_PAGES_PER_LOAD,
   HISTORY_REVEAL_PAGE_CAP,
   HISTORY_ROW_CAP,
   historyAfterEvent,
@@ -55,6 +56,7 @@ import {
   projectHistoryRows,
   resetHistory,
   rowIdForTurn,
+  showsNewRow,
   spawnGroupKeyOf,
   splitLiveItems,
   withoutOrphanBridge,
@@ -600,6 +602,16 @@ describe("the load-older cursor", () => {
       "never without an index"
     );
   });
+
+  it("pages on only past a page that shows no row the timeline did not show (showsNewRow)", () => {
+    const row = (id: string): AgentChatTimelineRow => ({ kind: "working", id, createdAt: null });
+    const before = [row("a"), row("b")];
+    assert.equal(showsNewRow(before, before), false);
+    assert.equal(showsNewRow(before, [row("a"), row("b")]), false, "the same rows, re-derived");
+    assert.equal(showsNewRow(before, [row("b")]), false, "a row folded away shows nothing new");
+    assert.equal(showsNewRow(before, [row("z"), row("a"), row("b")]), true);
+    assert.equal(HISTORY_PAGES_PER_LOAD, 5, "the MCP's read_transcript bound");
+  });
 });
 
 describe("historyAfterRevert", () => {
@@ -988,36 +1000,74 @@ describe("planReveal", () => {
 
   it("is present when the live window holds the turn", () => {
     assert.equal(
-      planReveal("t9", { liveTurnIds: new Set(["t9"]), pages: [], hasOlder: true }),
+      planReveal("t9", { liveTurnIds: new Set(["t9"]), pageTurnIds: new Set(), pages: [], hasOlder: true }),
       "present"
     );
   });
 
-  it("is present when a loaded page holds the turn", () => {
-    assert.equal(planReveal("t5", { liveTurnIds: new Set(), pages: withTurn, hasOlder: true }), "present");
+  it("is present when a loaded page shows the turn", () => {
+    const pages = [historyPage({ items: [toolRow("x5", 1, { turnId: "t5" })] })];
+    const pageTurnIds = liveTurnIdsOf(pages.flatMap((page) => page.items), []);
+    assert.equal(
+      planReveal("t5", { liveTurnIds: new Set(), pageTurnIds, pages, hasOlder: true }),
+      "present"
+    );
+  });
+
+  it("loads more while the pages only list the turn — a subagent's late row of it shows nowhere", () => {
+    // What a host lists beside a page's rows (a late row's turn, for the rewind reach check) is not
+    // what the page shows: its row for the turn is an agent's, which the parent timeline never renders.
+    const pages = [
+      historyPage({
+        turns: [historyTurn("t5", 5)],
+        items: [toolRow("late", 1, { turnId: "t5", agentId: "agent-1" })]
+      })
+    ];
+    const pageTurnIds = liveTurnIdsOf(pages.flatMap((page) => page.items), []);
+    assert.equal(
+      planReveal("t5", { liveTurnIds: new Set(), pageTurnIds, pages, hasOlder: true }),
+      "load-more"
+    );
   });
 
   it("is present when only the bridge holds the turn — no page load for it", () => {
     const bridgeTurnIds = liveTurnIdsOf([toolRow("x7", 1, { turnId: "t7" })], []);
     assert.equal(
-      planReveal("t7", { liveTurnIds: new Set(), bridgeTurnIds, pages: withTurn, hasOlder: true }),
+      planReveal("t7", {
+        liveTurnIds: new Set(),
+        bridgeTurnIds,
+        pageTurnIds: new Set(),
+        pages: withTurn,
+        hasOlder: true
+      }),
       "present"
     );
   });
 
   it("loads more while older history exists", () => {
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: withTurn, hasOlder: true }), "load-more");
+    const nothing = new Set<string>();
+    assert.equal(
+      planReveal("t1", { liveTurnIds: nothing, pageTurnIds: nothing, pages: withTurn, hasOlder: true }),
+      "load-more"
+    );
   });
 
   it("is absent once nothing older exists", () => {
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: withTurn, hasOlder: false }), "absent");
+    const nothing = new Set<string>();
+    assert.equal(
+      planReveal("t1", { liveTurnIds: nothing, pageTurnIds: nothing, pages: withTurn, hasOlder: false }),
+      "absent"
+    );
   });
 
   it(`gives up after ${HISTORY_REVEAL_PAGE_CAP} pages`, () => {
     const loaded = (count: number): ThreadHistoryPage[] =>
       Array.from({ length: count }, () => historyPage());
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: loaded(24), hasOlder: true }), "load-more");
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: loaded(25), hasOlder: true }), "absent");
+    const nothing = new Set<string>();
+    const plan = (pages: ThreadHistoryPage[]) =>
+      planReveal("t1", { liveTurnIds: nothing, pageTurnIds: nothing, pages, hasOlder: true });
+    assert.equal(plan(loaded(24)), "load-more");
+    assert.equal(plan(loaded(25)), "absent");
   });
 });
 
@@ -1516,6 +1566,66 @@ describe("bridge rows above the live window", () => {
 
     const spawns = rows.filter((row) => row.kind === "work" && row.groupedEntries.some((entry) => entry.agentSpawn));
     assert.deepEqual(ids(spawns), ["ks"], "one spawn row, keyed and placed by its launch");
+  });
+});
+
+describe("the window's rows no page holds join the history in the window's order", () => {
+  const input = (collected: HistoryRowsInput["history"], sharedLive: readonly ThreadItem[]): HistoryRowsInput => ({
+    history: collected,
+    sharedLive,
+    expandedTurnIds: new Set(["t9"]),
+    expandedWorkGroupIds: new Set(),
+    turns: [foldTurn("t9", "u9")],
+    supportsConversationRollback: true,
+    liveCompacted: false
+  });
+
+  it("keeps a row replaced in place where it was first written when a page that ends at the log's end takes the whole window", () => {
+    // Right after a rewind the first page ends at the index's end: it repeats the window's newest rows, and its end
+    // takes the whole window into the history — the older rows no page holds with it. One of them was replaced in
+    // place: first written right after the prompt, it carries the stamp of its latest write.
+    const windowItems = [
+      message("user", "go", { id: "u9", createdAt: stamp(1) }),
+      toolRow("kp", 151),
+      ...Array.from({ length: 100 }, (_, index) => toolRow(`o${index}`, 10 + 2 * index)),
+      ...Array.from({ length: 50 }, (_, index) => toolRow(`r${index}`, 500 + index))
+    ];
+    const page = historyPage({
+      items: windowItems.slice(-50).map((row) => ({ ...(row as ThreadActivityItem), summary: "as the page saw it" })),
+      page: { beforeCursor: "below", endItemId: null }
+    });
+    const cut = pageEndCut(windowItems, page);
+    assert.equal(cut, windowItems.length, "the page's end takes the whole window");
+    const collected = collectHistoryItems(EMPTY_HISTORY_ITEMS, [page]);
+    const split = splitLiveItems(EMPTY_LIVE_SPLIT, windowItems, collected, cut);
+
+    const projected = projectHistoryRows(EMPTY_HISTORY_ROWS, input(collected, split.shared));
+
+    assert.deepEqual(ids(projected.items), ids(windowItems), "the window's order: the rewritten row where it was");
+    assert.ok(
+      projected.items.every((item, index) => item === windowItems[index]),
+      "every row as the window holds it"
+    );
+  });
+
+  it("puts a row no page holds ahead of the rows a page shares with the window that follow it there; its stamp decides among the rest", () => {
+    // The window holds `J` — replaced in place since, its stamp now past the page's end — and after it `A`, a row the
+    // page holds as well. `h1` and `h2` are only on the page. By its stamp alone J would land below the whole page.
+    const onPage = [toolRow("h1", 10), toolRow("A", 20), toolRow("h2", 30)];
+    const collected = collectHistoryItems(EMPTY_HISTORY_ITEMS, [historyPage({ items: onPage })]);
+
+    const projected = projectHistoryRows(EMPTY_HISTORY_ROWS, input(collected, [toolRow("J", 40), onPage[1]!]));
+
+    assert.deepEqual(ids(projected.items), ["h1", "J", "A", "h2"]);
+  });
+
+  it("never re-sorts the rows no page holds by their stamps: a later one keeps its place below an earlier one", () => {
+    const collected = collectHistoryItems(EMPTY_HISTORY_ITEMS, [historyPage({ items: [toolRow("h1", 500)] })]);
+    const joining = [toolRow("first", 90), toolRow("second", 20), toolRow("third", 30)];
+
+    const projected = projectHistoryRows(EMPTY_HISTORY_ROWS, input(collected, joining));
+
+    assert.deepEqual(ids(projected.items), ["first", "second", "third", "h1"]);
   });
 });
 

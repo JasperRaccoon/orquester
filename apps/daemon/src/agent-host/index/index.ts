@@ -11,7 +11,9 @@
  * - `sqlite.ts` — driver resolution (once, at load) and the file lifecycle;
  * - `schema.ts` — the tables;
  * - `indexer.ts` — domain events → rows, one transaction per batch;
- * - `queries.ts` — turn lookups, paging, search.
+ * - `queries.ts` — turn lookups, paging, search;
+ * - `turn-reference.ts` — the turn a line says it belongs to, which history
+ *   planning reads too.
  *
  * Writes are applied per thread, in order, on an internal queue: `observe`
  * returns at once, `catchUp` rides the same queue so a live append and a
@@ -206,6 +208,15 @@ export interface ThreadIndex {
    * the oldest one's `firstSeq`.
    */
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
+  /**
+   * The first line past `seq` a page boundary may sit on — the lowest
+   * activity line or message first line above it — or null when there is none.
+   */
+  firstBoundaryAfter(threadId: string, seq: number): IndexedItemPosition | null;
+  /** The seq of the thread's latest `thread.reverted`, 0 for a thread never rewound. */
+  latestRevertSeq(threadId: string): number;
+  /** The turn that names `messageId` as its opening prompt (`userMessageId`), or null. */
+  turnByPrompt(threadId: string, messageId: string): IndexedTurn | null;
   search(input: { q: string; limit: number; projectPath?: string }): ThreadSearchHit[];
   /**
    * The host's shutdown. At once: `available` turns false, every read answers
@@ -585,6 +596,18 @@ function createOpenThreadIndex(input: {
       return serving() ? read(() => queries.messagesSpanning(threadId, seq), []) : [];
     },
 
+    firstBoundaryAfter(threadId, seq) {
+      return serving() ? read(() => queries.firstBoundaryAfter(threadId, seq), null) : null;
+    },
+
+    latestRevertSeq(threadId) {
+      return serving() ? read(() => queries.latestRevertSeq(threadId), 0) : 0;
+    },
+
+    turnByPrompt(threadId, messageId) {
+      return serving() ? read(() => queries.turnByPrompt(threadId, messageId), null) : null;
+    },
+
     search(request) {
       return serving() ? read(() => queries.search(request), []) : [];
     },
@@ -654,6 +677,9 @@ export function createUnavailableThreadIndex(): ThreadIndex {
     eventPositionBySeq: () => null,
     messageSpan: () => null,
     messagesSpanning: () => [],
+    firstBoundaryAfter: () => null,
+    latestRevertSeq: () => 0,
+    turnByPrompt: () => null,
     search: () => [],
     stop: async () => undefined,
     close: () => undefined

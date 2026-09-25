@@ -10,7 +10,8 @@
  * The late rows those closings write stretch an old turn's range in the
  * thread index, and so does a background agent's late completion: the "Load
  * older" walks over a real index are here, a rewind that keeps such a turn
- * among them.
+ * among them — whose late rows past the rewind's cut stay on a page once the
+ * window evicts them.
  */
 
 import assert from "node:assert/strict";
@@ -20,12 +21,16 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  decodeHistoryCursor,
   derivePendingRequests,
   foldSubagentActivities,
+  foldThread,
   openWorkOf,
+  THREAD_HISTORY_DEFAULT_TURNS,
   type DomainEvent,
   type ThreadActivityItem,
   type ThreadHistoryPage,
+  type ThreadHistoryQuery,
   type ThreadItem
 } from "@orquester/api/agent-chat";
 
@@ -39,7 +44,7 @@ import { MAX_LATE_REFERENCE_BYTES } from "../index/indexer.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createThreadStore } from "../store/index.ts";
 import { LEFTOVER_CALL_DETAIL } from "./leftover-work.ts";
-import { PENDING_TURN_GRACE_MS } from "./orchestrator.ts";
+import { HISTORY_PAGE_ACTIVITIES, PENDING_TURN_GRACE_MS } from "./orchestrator.ts";
 import {
   createRecordingLogger,
   createScriptedAdapter,
@@ -2113,14 +2118,16 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
   /**
    * "Load older" after the rewinds that removed `removedTurnIds`: none of
    * their rows is on a page or in the window, and every other row the log
-   * wrote is on one of them — no activity on two pages.
+   * wrote is on one of them — no activity on two pages. `unserved` names the
+   * other rows a test expects neither to show.
    */
   function assertRewoundHistory(
     store: FakeThreadStore,
     threadId: string,
     window: readonly ThreadItem[],
     pages: readonly ThreadHistoryPage[],
-    removedTurnIds: readonly string[]
+    removedTurnIds: readonly string[],
+    unserved: ReadonlySet<string> = new Set()
   ): void {
     const removed = removedRows(store, threadId, removedTurnIds);
     assert.ok(removed.size > 0, "the rewind removed rows");
@@ -2132,7 +2139,7 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     assert.deepEqual([...removed].filter((id) => shown.has(id)), [], "nor does the window");
     assert.deepEqual(
       [...everyRowOf(store, threadId)].filter((id) => !removed.has(id) && !shown.has(id)),
-      [],
+      [...unserved],
       "and every kept turn's row is still served"
     );
   }
@@ -2235,6 +2242,600 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     await plainTurn(host, threadId, "r-5", 600);
     const { window, before } = await readWindow(host, index, threadId);
     assertRewoundHistory(host.store, threadId, window, await walkHistory(host, threadId, before), ["r-2", "r-4"]);
+    await host.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // A kept turn's late rows past the cut, once the window has evicted them
+  // -------------------------------------------------------------------------
+
+  /** `count` rows of the agent `agentId`, in `turnId`: they fill its own window (200) and evict its oldest rows. */
+  const agentRows = (host: TestHost, threadId: string, agentId: string, turnId: string, count: number): Promise<void> =>
+    host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: count }, (_, i) =>
+        sunkRow(threadId, `${agentId}:${turnId}-row-${i}`, "runtime.warning", {}, { turnId, agentId })
+      )
+    );
+
+  /** `turnId`'s turn-end capture, landing after the next turn's prompt — a slow capture on a big tree. */
+  const lateCapture = (host: TestHost, threadId: string, turnId: string, turnCount: number): Promise<void> =>
+    host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.turn-diff-completed", {
+        turnCount,
+        turnId,
+        ref: `turn/${turnCount}`,
+        status: "ready",
+        files: [{ path: "src/app.ts", additions: 3, deletions: 1 }],
+        assistantMessageId: null,
+        completedAt: "2026-09-24T10:00:00.000Z"
+      })
+    ]);
+
+  /** A background shell `shell-<turn>` started in `turnId`: its item's opening row, there. */
+  const startShell = (host: TestHost, threadId: string, turnId: string): Promise<void> =>
+    host.orchestrator.ingestionSink(threadId, [
+      sunkRow(threadId, `shell-start:${turnId}`, "tool.started", {
+        itemType: "command_execution",
+        toolUseId: `bgshell:shell-${turnId}`,
+        status: "inProgress",
+        title: "Background shell",
+        agentId: `shell-${turnId}`,
+        data: { toolName: "Bash", input: { command: "npm run dev" }, background: true }
+      }, { turnId, agentId: `shell-${turnId}`, status: "inProgress" })
+    ]);
+
+  /** That shell's `lines` output rows and its completion, landing later — each stamped with the turn it started in. */
+  const shellOutput = (host: TestHost, threadId: string, turnId: string, lines: number): Promise<void> =>
+    host.orchestrator.ingestionSink(threadId, [
+      ...Array.from({ length: lines }, (_, i) =>
+        sunkRow(threadId, `shell-line:${turnId}:${i}`, "tool.output", {
+          toolUseId: `bgshell:shell-${turnId}`,
+          streamKind: "command_output",
+          delta: `ready in ${i} ms\n`
+        }, { turnId, agentId: `shell-${turnId}` })
+      ),
+      sunkRow(threadId, `shell-done:${turnId}`, "tool.completed", {
+        itemType: "command_execution",
+        toolUseId: `bgshell:shell-${turnId}`,
+        status: "completed",
+        title: "Background shell",
+        agentId: `shell-${turnId}`,
+        data: { toolName: "Bash", input: { command: "npm run dev" }, background: true }
+      }, { turnId, agentId: `shell-${turnId}`, status: "completed" })
+    ]);
+
+  /** The pages that hold row `id`. */
+  const pagesHolding = (pages: readonly ThreadHistoryPage[], id: string): ThreadHistoryPage[] =>
+    pages.filter((page) => page.items.some((item) => item.id === id));
+
+  const activityCount = (page: ThreadHistoryPage): number =>
+    page.items.filter((item) => item.kind === "activity").length;
+
+  it("a rewind to r-1: once evicted, r-1's late completion and capture are on a page, no row of r-2", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 40);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 100);
+    await completeAgentCall(host, threadId, "r-1");
+    await lateCapture(host, threadId, "r-1", 1);
+    await parentRows(host, threadId, "r-2", 100);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    // The agent works on in r-3 and its own window evicts the call; the parent's evicts the rest of r-1.
+    await startTurn(host, threadId, "r-3");
+    await agentRows(host, threadId, "agent-r-1", "r-3", 300);
+    await parentRows(host, threadId, "r-3", 600);
+    await settleTurn(host, threadId);
+    const { window, before } = await readWindow(host, index, threadId);
+    assert.ok(!window.some((item) => item.id === "call-done:r-1"), "the window evicted the completion");
+
+    const pages = await walkHistory(host, threadId, before);
+    const holding = pagesHolding(pages, "call-done:r-1");
+    assert.equal(holding.length, 1, "the completion is on exactly one page");
+    assert.ok(holding[0]!.turns.some((turn) => turn.turnId === "r-1"), "which lists the turn it belongs to");
+    assert.deepEqual(
+      pages.flatMap((page) => page.checkpoints.map((checkpoint) => checkpoint.turnId)),
+      ["r-1"],
+      "r-1's late capture is on a page too"
+    );
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("a rewind to r-1: once evicted, a first-load closer on r-1 is on a page", async (t) => {
+    const index = await realIndex(t);
+    const first = createTestHost({ index });
+    const threadId = await first.createThread();
+    await startTurn(first, threadId, "r-1");
+    await first.orchestrator.ingestionSink(threadId, [
+      sunkRow(threadId, "parent-call:r-1", "tool.started", {
+        itemType: "command_execution",
+        toolUseId: "toolu_parent:r-1",
+        status: "inProgress",
+        title: "Bash",
+        data: { toolName: "Bash", input: { command: "npm test" } }
+      }, { turnId: "r-1", status: "inProgress" })
+    ]);
+    await parentRows(first, threadId, "r-1", 40);
+    await settleTurn(first, threadId);
+    await plainTurn(first, threadId, "r-2", 200);
+    await first.settle();
+    await index.drain();
+    await first.stop();
+
+    // The next host's first load closes the parent's call on r-1, after every row of r-2.
+    const next = createTestHost({ store: first.store, index });
+    const logLength = first.store.logs.get(threadId)!.length;
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await index.drain();
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    // Found by its call, not by its place: a first load may append more than the closings.
+    const closer = appended.find(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.activityKind === "tool.completed" &&
+        (event.payload.activity.payload as Record<string, unknown>).toolUseId === "toolu_parent:r-1"
+    );
+    const closerId = closer?.type === "thread.activity-appended" ? closer.payload.activity.id : "";
+    assert.ok(closerId.length > 0, "the first load closed the parent's call");
+
+    await rewind(next, threadId, 1);
+    await plainTurn(next, threadId, "r-3", 600);
+    const { window, before } = await readWindow(next, index, threadId);
+    assert.ok(!window.some((item) => item.id === closerId), "the window evicted the closer");
+    const pages = await walkHistory(next, threadId, before);
+    assert.equal(pagesHolding(pages, closerId).length, 1, "the closer is on exactly one page");
+    assertRewoundHistory(first.store, threadId, window, pages, ["r-2"]);
+    await next.stop();
+  });
+
+  it("several rewinds: each kept turn's late rows are on a page once evicted, a removed turn's never", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    // r-1's agent call completes during r-2; a rewind to r-1 removes r-2 and the agent r-2 launched.
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 40);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await launchAgent(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 60);
+    await completeAgentCall(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-2", 60);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    // r-3's call completes during r-4 — and so does r-2's, a removed turn's; a rewind to two turns keeps r-1 and r-3.
+    await startTurn(host, threadId, "r-3");
+    await launchAgent(host, threadId, "r-3");
+    await parentRows(host, threadId, "r-3", 40);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-4");
+    await parentRows(host, threadId, "r-4", 60);
+    await completeAgentCall(host, threadId, "r-3");
+    await completeAgentCall(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-4", 60);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 2);
+    // Both kept agents work on in r-5: their own windows evict their calls.
+    await startTurn(host, threadId, "r-5");
+    await agentRows(host, threadId, "agent-r-1", "r-5", 300);
+    await agentRows(host, threadId, "agent-r-3", "r-5", 300);
+    await parentRows(host, threadId, "r-5", 600);
+    await settleTurn(host, threadId);
+    const { window, before } = await readWindow(host, index, threadId);
+    for (const id of ["call-done:r-1", "call-done:r-3"]) {
+      assert.ok(!window.some((item) => item.id === id), `the window evicted ${id}`);
+    }
+
+    const pages = await walkHistory(host, threadId, before);
+    for (const id of ["call-done:r-1", "call-done:r-3"]) {
+      assert.equal(pagesHolding(pages, id).length, 1, `${id} is on exactly one page`);
+    }
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2", "r-4"]);
+    await host.stop();
+  });
+
+  it("a kept turn's late rows count toward a page's activities: no page folds more than a lossless one", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    // r-1 starts a dev server, which prints 300 lines during r-2 — every one of them r-1's row.
+    await startTurn(host, threadId, "r-1");
+    await startShell(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 300);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 50);
+    await shellOutput(host, threadId, "r-1", 300);
+    await parentRows(host, threadId, "r-2", 50);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    await plainTurn(host, threadId, "r-3", 600);
+    const { window, before } = await readWindow(host, index, threadId);
+    assert.ok(!window.some((item) => item.id === "shell-line:r-1:0"), "the window evicted the shell's first lines");
+
+    const pages = await walkHistory(host, threadId, before);
+    for (const page of pages) {
+      assert.ok(activityCount(page) <= HISTORY_PAGE_ACTIVITIES, `a page of ${activityCount(page)} activities`);
+    }
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("a cut with more late rows than a page holds is served without them, as before, and says so", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await startShell(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 300);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 50);
+    await shellOutput(host, threadId, "r-1", 600);
+    await parentRows(host, threadId, "r-2", 50);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    await plainTurn(host, threadId, "r-3", 600);
+    const { window, before } = await readWindow(host, index, threadId);
+
+    const pages = await walkHistory(host, threadId, before);
+    const late = new Set([...Array.from({ length: 600 }, (_, i) => `shell-line:r-1:${i}`), "shell-done:r-1"]);
+    assert.deepEqual(
+      pages.flatMap((page) => page.items.map((item) => item.id)).filter((id) => late.has(id)),
+      [],
+      "no page serves the cut's late rows"
+    );
+    for (const page of pages) {
+      assert.ok(activityCount(page) <= HISTORY_PAGE_ACTIVITIES, `a page of ${activityCount(page)} activities`);
+    }
+    // What the window no longer holds of them is all that is missing.
+    const inWindow = new Set(window.map((item) => item.id));
+    const unserved = new Set([...everyRowOf(host.store, threadId)].filter((id) => late.has(id) && !inWindow.has(id)));
+    assert.ok(unserved.size > 0, "the window evicted some of them");
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"], unserved);
+    assert.ok(
+      host.logger.entries.some((entry) => entry.level === "warn" && entry.message.includes("gap rows")),
+      "the host says a page went without them"
+    );
+    await host.stop();
+  });
+
+  it("a page lists a late row's turn only when it lists no later one: a rewind of it reaches the page either way", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    // r-1's agent call completes during r-3, more than MAX_LATE_REFERENCE_BYTES past r-2's start — so r-1's range
+    // stays where r-2 begins — and a rewind to two turns keeps r-1 and r-2.
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 40);
+    await settleTurn(host, threadId);
+    await plainTurn(host, threadId, "r-2", 2_200);
+    await startTurn(host, threadId, "r-3");
+    await parentRows(host, threadId, "r-3", 50);
+    await completeAgentCall(host, threadId, "r-1");
+    await settleTurn(host, threadId);
+    await host.settle();
+    await index.drain();
+    assert.equal(index.turnById(threadId, "r-1")?.endByte, index.turnById(threadId, "r-2")?.firstByte, "r-1 never stretched");
+    await rewind(host, threadId, 2);
+    await startTurn(host, threadId, "r-4");
+    await agentRows(host, threadId, "agent-r-1", "r-4", 300);
+    await parentRows(host, threadId, "r-4", 600);
+    await settleTurn(host, threadId);
+    const { window, before } = await readWindow(host, index, threadId);
+    const pages = await walkHistory(host, threadId, before);
+    const [holding] = pagesHolding(pages, "call-done:r-1");
+    assert.ok(holding, "the completion is on a page");
+    const listed = holding.turns.map((turn) => turn.turnId);
+    assert.ok(listed.includes("r-2"), "which meets r-2, after r-1: a rewind that removes r-1 removes r-2 too");
+    assert.ok(!listed.includes("r-1"), "so r-1 is left to the page that holds its own rows");
+    assert.ok(pages.some((page) => page !== holding && page.turns.some((turn) => turn.turnId === "r-1")));
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-3"]);
+    await host.stop();
+  });
+
+  it("late rows written after the rewind: a page of them alone lists their turn, and the index's count is not doubled", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await startShell(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 40);
+    await settleTurn(host, threadId);
+    await plainTurn(host, threadId, "r-2", 50);
+    await rewind(host, threadId, 1);
+    // The dev server r-1 started prints on after the rewind, before the next prompt: a thousand rows of r-1 that
+    // no turn's range holds, each one an activity the index positions.
+    await shellOutput(host, threadId, "r-1", 1_000);
+    await plainTurn(host, threadId, "r-3", 600);
+    const { window, before } = await readWindow(host, index, threadId);
+    const pages = await walkHistory(host, threadId, before);
+    const shellOnly = pages.filter((page) => page.items.length > 0 && page.items.every((item) => item.id.startsWith("shell-")));
+    assert.ok(shellOnly.length > 0, "a page holds nothing but the shell's lines");
+    for (const page of shellOnly) {
+      assert.deepEqual(page.turns.map((turn) => turn.turnId), ["r-1"], "and lists their turn, which no range of it meets");
+      assert.equal(activityCount(page), HISTORY_PAGE_ACTIVITIES, "a whole page: the index counts those rows already");
+    }
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("a thread with no rewind: every page is exactly its block of the log, folded — late rows as ever", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 300);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 100);
+    await completeAgentCall(host, threadId, "r-1");
+    await lateCapture(host, threadId, "r-1", 1);
+    await parentRows(host, threadId, "r-2", 600);
+    await settleTurn(host, threadId);
+    const { window, before } = await readWindow(host, index, threadId);
+    const capture = host.store.logs.get(threadId)!.find((event) => event.type === "thread.turn-diff-completed");
+    assert.equal(index.turnById(threadId, "r-1")?.lastSeq, capture?.seq, "r-1 stretched over r-2's start");
+
+    const pages = await walkHistory(host, threadId, before);
+    assert.ok(pages.length >= 2);
+    const log = host.store.logs.get(threadId)!;
+    let end = decodeHistoryCursor(before!, threadId)!.beforeSeq!;
+    for (const page of pages) {
+      const cursor = page.page.beforeCursor;
+      const start = cursor === null ? 1 : decodeHistoryCursor(cursor, threadId)!.beforeSeq!;
+      const folded = foldThread(log.filter((event) => event.seq >= start && event.seq < end));
+      assert.deepEqual(page.items.map((item) => item.id), folded.items.map((item) => item.id));
+      assert.deepEqual(page.checkpoints, folded.checkpoints);
+      end = start;
+    }
+    assertNothingLost(host.store, threadId, window, pages);
+    await host.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // Right after a rewind: nothing a revert hid from the per-class windows is out of reach
+  // -------------------------------------------------------------------------
+
+  /**
+   * The snapshot a client reads once the index has taken every append, and every page "Load older"
+   * then reads — as the client asks (the store's `loadHistoryPages`): first by the snapshot's cursor,
+   * or without one when the snapshot has none (`nextHistoryCursor`), then by each page's own; always
+   * with the default `turns`.
+   */
+  async function walkAsTheClient(host: TestHost, index: ThreadIndex, threadId: string) {
+    await host.settle();
+    await index.drain();
+    const read = await host.orchestrator.readThread(threadId);
+    if (read.kind !== "snapshot") throw new Error("a whole-thread read is a snapshot");
+    assert.equal(read.thread.history?.hasOlder, true, "the window has evicted: there is history to page");
+    const pages: ThreadHistoryPage[] = [];
+    const asked = (before: string | null | undefined): ThreadHistoryQuery => ({
+      ...(before ? { before } : {}),
+      turns: THREAD_HISTORY_DEFAULT_TURNS
+    });
+    let query: ThreadHistoryQuery | null = asked(read.thread.history?.beforeCursor);
+    while (query !== null) {
+      assert.ok(pages.length < 50, "paging terminates");
+      const page = await host.orchestrator.readHistory(threadId, query);
+      pages.push(page);
+      query = page.page.beforeCursor === null ? null : asked(page.page.beforeCursor);
+    }
+    return { window: read.thread.items, pages };
+  }
+
+  /** `count` rows the agent `agentId` writes between parent turns: no turn, however long it runs. */
+  const turnlessAgentRows = (
+    host: TestHost,
+    threadId: string,
+    agentId: string,
+    label: string,
+    count: number
+  ): Promise<void> =>
+    host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: count }, (_, i) =>
+        sunkRow(threadId, `${agentId}:${label}-${i}`, "runtime.warning", {}, { turnId: null, agentId })
+      )
+    );
+
+  it("after a rewind that left the parent below its limit, every evicted row is reachable (setup A)", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await startShell(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 560);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 30);
+    await shellOutput(host, threadId, "r-1", 300);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    // No new turn: the shell's window lies wholly in the cut, and the parent's is below its limit.
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    for (const id of ["r-1-row-0", "shell-line:r-1:0"]) {
+      assert.ok(!window.some((item) => item.id === id), `the window evicted ${id}`);
+    }
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("after a rewind whose only full window lies in its cut, every evicted row is reachable (setup B)", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await startShell(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 400);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 200);
+    await shellOutput(host, threadId, "r-1", 300);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    for (const id of ["r-1-row-0", "shell-line:r-1:0"]) {
+      assert.ok(!window.some((item) => item.id === id), `the window evicted ${id}`);
+    }
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("after a rewind with no full window left, an old launch row does not strand r-1's evicted rows", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 600);
+    await settleTurn(host, threadId);
+    await plainTurn(host, threadId, "r-2", 100);
+    await rewind(host, threadId, 1);
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    assert.ok(window.some((item) => item.id === "launch:r-1"), "the launch row outlives the rows after it");
+    assert.ok(!window.some((item) => item.id === "r-1-row-0"), "the window evicted r-1's first rows");
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("an agent's turnless rows reach a page once evicted: in the cut, and before the next prompt", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 40);
+    // r-1 answers, so a revert's message fallback restores nothing (`retainMessagesAfterRevert`).
+    await host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: "assistant:r-1",
+        role: "assistant",
+        text: "Started the agent.",
+        streaming: false,
+        turnId: "r-1"
+      })
+    ]);
+    await settleTurn(host, threadId);
+    await plainTurn(host, threadId, "r-2", 60);
+    // Between r-2 and the rewind — in the cut — the agent works on with no turn, says something, and a legacy
+    // turnless capture lands twice: counted 1, which a rewind to one turn keeps, and 2, which it drops.
+    await turnlessAgentRows(host, threadId, "agent-r-1", "cut", 150);
+    await host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: "agent-r-1:cut-words",
+        role: "assistant",
+        text: "Still exploring.",
+        streaming: false,
+        turnId: null,
+        agentId: "agent-r-1"
+      }),
+      ...[1, 2].map((turnCount) =>
+        sunk(threadId, "thread.turn-diff-completed", {
+          turnCount,
+          turnId: null,
+          ref: `legacy/${turnCount}`,
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: "2026-09-24T10:00:00.000Z"
+        })
+      )
+    ]);
+    await rewind(host, threadId, 1);
+    // After the rewind, before any prompt: more of the agent's turnless rows and words.
+    await turnlessAgentRows(host, threadId, "agent-r-1", "after", 400);
+    await host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: "agent-r-1:after-words",
+        role: "assistant",
+        text: "Found it.",
+        streaming: false,
+        turnId: null,
+        agentId: "agent-r-1"
+      })
+    ]);
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    for (const id of ["agent-r-1:cut-0", "agent-r-1:after-0"]) {
+      assert.ok(!window.some((item) => item.id === id), `the agent's window evicted ${id}`);
+    }
+    // The revert dropped the words spoken in its cut; the fold keeps what came after it.
+    assert.ok(!window.some((item) => item.id === "agent-r-1:cut-words"));
+    assert.ok(window.some((item) => item.id === "agent-r-1:after-words"));
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"], new Set(["agent-r-1:cut-words"]));
+    const turnless = (page: ThreadHistoryPage): number[] =>
+      page.checkpoints.flatMap((checkpoint) => (checkpoint.turnId === null ? [checkpoint.checkpointTurnCount] : []));
+    assert.deepEqual(pages.flatMap(turnless), [1], "the capture the rewind kept, alone");
+    await host.stop();
+  });
+
+  it("asks the index which turn a turnless message opens once per page, however many chunks streamed it", async (t) => {
+    const index = await realIndex(t);
+    const asked = new Map<string, number>();
+    const counting = new Proxy(index, {
+      get(target, key) {
+        if (key === "turnByPrompt") {
+          return (threadId: string, messageId: string) => {
+            asked.set(messageId, (asked.get(messageId) ?? 0) + 1);
+            return target.turnByPrompt(threadId, messageId);
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    const host = createTestHost({ index: counting });
+    const threadId = await host.createThread();
+    await plainTurn(host, threadId, "r-1", 560);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 30);
+    // In the cut: an agent's words with no turn, streamed in eight chunks.
+    await host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: 8 }, (_, chunk) =>
+        sunk(threadId, "thread.message-sent", {
+          messageId: "agent-x:words",
+          role: "assistant",
+          text: `part ${chunk} `,
+          streaming: chunk < 7,
+          turnId: null,
+          agentId: "agent-x"
+        })
+      )
+    );
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    await host.settle();
+    await index.drain();
+    const read = await host.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    let query: ThreadHistoryQuery | null = { turns: THREAD_HISTORY_DEFAULT_TURNS };
+    let pages = 0;
+    let everAsked = 0;
+    while (query !== null) {
+      assert.ok(pages < 50, "paging terminates");
+      asked.clear();
+      const page = await host.orchestrator.readHistory(threadId, query);
+      pages += 1;
+      everAsked += asked.get("agent-x:words") ?? 0;
+      for (const [messageId, times] of asked) {
+        assert.equal(times, 1, `one page asked ${times} times which turn ${messageId} opens`);
+      }
+      query = page.page.beforeCursor === null ? null : { before: page.page.beforeCursor, turns: THREAD_HISTORY_DEFAULT_TURNS };
+    }
+    assert.ok(everAsked > 0, "a page planned the chunks");
     await host.stop();
   });
 });

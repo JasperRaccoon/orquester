@@ -502,6 +502,49 @@ describe("thread index: activity paging", () => {
     );
   });
 
+  it("latestRevertSeq and firstBoundaryAfter: where a page may end just past the latest revert", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      ...liveTurn({ n: 2, prompt: "two" })
+    ]);
+    const id = log.threadId;
+    assert.equal(index.latestRevertSeq(id), 0, "never rewound");
+
+    await indexed(log, [reverted(1)]);
+    const firstRevert = log.lastSeq;
+    assert.equal(index.latestRevertSeq(id), firstRevert);
+    // Nothing a page may end at comes after it yet: no activity, no message.
+    await indexed(log, [session("ready", null)]);
+    assert.equal(index.firstBoundaryAfter(id, firstRevert), null);
+
+    // A prompt's first line, then an activity: the lower of the two answers.
+    await indexed(log, [userMessage("u3", "three"), activity("after", "info", { summary: "Rewound" })]);
+    const prompt = log.at(firstRevert + 2);
+    assert.deepEqual(index.firstBoundaryAfter(id, firstRevert), prompt);
+    assert.deepEqual(index.firstBoundaryAfter(id, prompt.seq), log.at(prompt.seq + 1));
+
+    await indexed(log, [reverted(1)]);
+    assert.equal(index.latestRevertSeq(id), log.lastSeq, "the latest one");
+    assert.equal(index.latestRevertSeq("another-thread"), 0);
+  });
+
+  it("turnByPrompt: the turn that names a message as its opening prompt", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      ...liveTurn({ n: 2, prompt: "two" })
+    ]);
+    const id = log.threadId;
+    assert.equal(index.turnByPrompt(id, "u2")?.turnId, "t2");
+    assert.equal(index.turnByPrompt(id, "a1"), null, "an answer opens no turn");
+    await indexed(log, [reverted(1)]);
+    assert.equal(index.turnByPrompt(id, "u2"), null, "a removed turn's prompt opens nothing any more");
+    assert.equal(index.turnByPrompt(id, "u1")?.turnId, "t1");
+  });
+
   it("walks one fleet turn of 1 000 activities back in contiguous 400-activity blocks", async () => {
     const log = new TestLog();
     const fleet: Draft[] = [];
