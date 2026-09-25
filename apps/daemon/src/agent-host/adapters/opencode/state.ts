@@ -146,6 +146,13 @@ const FINAL_ANCHOR_CHARS = 512;
 const FINAL_ANCHOR_FLOOR = 64;
 
 /**
+ * The note 1.18.32's `ShellTool.run` opens a final output it cut with, by
+ * lines or bytes (read from the source, not captured):
+ * `...output truncated...\n\nFull output saved to: <file>\n\n`.
+ */
+const FINAL_OUTPUT_CUT_NOTE = /^\.\.\.output truncated\.\.\.\n\nFull output saved to: ([^\n]+)\n\n/;
+
+/**
  * What a command's final `output` holds past the stream a client was shown —
  * `mark`, its last running value — for its completion to append before it
  * closes the call. 1.18.32's final output is not always that value
@@ -162,17 +169,24 @@ const FINAL_ANCHOR_FLOOR = 64;
  *   anchors nothing.
  * - Not found: nothing. The stream then stays as it was shown, and the
  *   completion's own output is what the row's data keeps.
+ *
+ * A final output the tool cut opens with {@link FINAL_OUTPUT_CUT_NOTE}, which
+ * sits before the stream's end and so is never in what follows it: its
+ * pointer — where the whole output was saved — closes the remainder whichever
+ * way the rest went, so the stream says it too. It repeats nothing.
  */
 export function finalOutputRemainder(mark: string, final: string): string {
   if (final.startsWith(mark)) {
     return final.slice(mark.length);
   }
+  const saved = FINAL_OUTPUT_CUT_NOTE.exec(final)?.[1];
+  const pointer = saved === undefined ? "" : `\n\nFull output saved to: ${saved}`;
   if (mark.length < FINAL_ANCHOR_FLOOR) {
-    return "";
+    return pointer;
   }
   const anchor = mark.slice(-FINAL_ANCHOR_CHARS);
   const at = final.lastIndexOf(anchor);
-  return at === -1 ? "" : final.slice(at + anchor.length);
+  return `${at === -1 ? "" : final.slice(at + anchor.length)}${pointer}`;
 }
 
 /** How much of the mark's end the overlap search looks for first. */
@@ -471,6 +485,14 @@ export interface OpenCodeChildAgent {
    * `session.idle` ended the run: that end carries it. Cleared by a relaunch.
    */
   pendingResult?: string;
+  /**
+   * The current run's launching part answered in the BACKGROUND
+   * (`metadata.background`): only such a run takes an answer the tool injects
+   * into its parent (`takeBackgroundResult`) — a foreground run's answer is its
+   * part's, and an injected one is an earlier run's, late. Cleared by a
+   * relaunch.
+   */
+  answersInBackground?: boolean;
 }
 
 /**

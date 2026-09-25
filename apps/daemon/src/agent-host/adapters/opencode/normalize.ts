@@ -1094,6 +1094,7 @@ function linkChildFromTaskPart(
     known.lastStatus = undefined;
     known.resultPending = false;
     known.pendingResult = undefined;
+    known.answersInBackground = false;
   }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;
@@ -1120,6 +1121,8 @@ function linkChildFromTaskPart(
     // once while the child works on; the child's own `session.idle` settles
     // it, and this answer ("still working") is no run's result.
     if (part.state.status === "completed" && metadata?.background === true) {
+      // Its answer comes as a prompt to the parent (`takeBackgroundResult`).
+      agent.answersInBackground = true;
       return;
     }
     const text =
@@ -1156,17 +1159,34 @@ function linkChildFromTaskPart(
  */
 const TASK_OUTPUT_ENVELOPE = new RegExp(
   String.raw`^<task id="(?<id>[^"\n]*)" state="[^"\n]*">\n` +
-    String.raw`(?:<summary>[\s\S]*?</summary>\n)?` +
+    String.raw`(?:<summary>(?<summary>[\s\S]*?)</summary>\n)?` +
     String.raw`<(?<tag>task_result|task_error)>\n(?<text>[\s\S]*)\n</\k<tag>>\n</task>\s*$`
 );
 
-/** The child an envelope names and the text inside it, or nothing for any other shape. */
-function taskEnvelopeOf(output: string): { taskId: string; text: string } | undefined {
+/**
+ * The child an envelope names, its summary line when it has one, and the text
+ * inside it — or nothing for any other shape.
+ */
+function taskEnvelopeOf(
+  output: string
+): { taskId: string; summary?: string; text: string } | undefined {
   const groups = TASK_OUTPUT_ENVELOPE.exec(output)?.groups;
-  return groups?.id !== undefined && groups.text !== undefined
-    ? { taskId: groups.id, text: groups.text }
-    : undefined;
+  if (groups?.id === undefined || groups.text === undefined) {
+    return undefined;
+  }
+  return {
+    taskId: groups.id,
+    ...(groups.summary !== undefined ? { summary: groups.summary } : {}),
+    text: groups.text
+  };
 }
+
+/**
+ * The call description a background answer's summary names — 1.18.32 writes
+ * `Background task completed: <description>` (or `failed`), the `task` call's
+ * own `description` — or nothing for a summary of any other shape.
+ */
+const BACKGROUND_SUMMARY = /^Background task (?:completed|failed): (?<description>[\s\S]*)$/;
 
 /**
  * What a child answered, out of its parent `task` part's output: the text
@@ -1191,7 +1211,10 @@ export function taskResultText(output: string | undefined): string | undefined {
  * {@link TASK_OUTPUT_ENVELOPE}, naming the child. That part is the run's
  * result, as a foreground call's own completion is: the run's end gets it
  * once (`resultPending`), or, the answer coming before the child's own
- * `session.idle`, that end carries it (`pendingResult`). A part that is not
+ * `session.idle`, that end carries it (`pendingResult`). Only for a run whose
+ * launching part answered in the background (`answersInBackground`), and only
+ * when the summary, where it names the call's description, names this run's:
+ * an answer arriving after a relaunch is the earlier run's. A part that is not
  * synthetic, or names no child of this thread, is none. The prompt is still
  * no message of the thread's: this adds the result and nothing else.
  */
@@ -1210,7 +1233,14 @@ function takeBackgroundResult(
   }
   const envelope = taskEnvelopeOf(text.text);
   const agent = envelope === undefined ? undefined : state.childAgents.get(envelope.taskId);
-  if (envelope === undefined || agent === undefined) {
+  // Only a run whose launching part answered in the background takes one: an
+  // answer that reaches a foreground run is an earlier run's, late. And one
+  // whose summary names another call's description is another run's.
+  if (envelope === undefined || agent === undefined || agent.answersInBackground !== true) {
+    return;
+  }
+  const described = BACKGROUND_SUMMARY.exec(envelope.summary ?? "")?.groups?.description;
+  if (described !== undefined && described !== agent.description) {
     return;
   }
   if (!agent.completed) {

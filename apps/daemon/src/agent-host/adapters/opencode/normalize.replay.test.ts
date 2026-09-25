@@ -1413,7 +1413,11 @@ function launchInBackground(run: Replay): RuntimeEvent[] {
  * tool's envelope, naming the child. Cloned from fixture 12's own prompt
  * (lines 122-123) under new ids.
  */
-function injectedResult(childId: string, answer: string, state = "completed"): OpenCodeRawEvent[] {
+function injectedResult(
+  childId: string,
+  answer: string,
+  options: { state?: string; description?: string } = {}
+): OpenCodeRawEvent[] {
   const [message, part] = childFixtureFrames([122, 123], {
     msg_01a0c202b1b56tqi5gdjmgr8y9: "msg_injected",
     prt_0c202b1d8001Ef7fckL6t7C4aG: "prt_injected"
@@ -1423,11 +1427,13 @@ function injectedResult(childId: string, answer: string, state = "completed"): O
     type: string;
     properties: { part: Record<string, unknown> };
   };
+  const state = options.state ?? "completed";
   const tag = state === "error" ? "task_error" : "task_result";
+  const outcome = state === "error" ? "failed" : "completed";
   copy.properties.part.synthetic = true;
   copy.properties.part.text = [
     `<task id="${childId}" state="${state}">`,
-    `<summary>Background task ${state === "error" ? "failed" : "completed"}: list files</summary>`,
+    `<summary>Background task ${outcome}: ${options.description ?? "list files"}</summary>`,
     `<${tag}>`,
     answer,
     `</${tag}>`,
@@ -1503,6 +1509,71 @@ test("an injected envelope naming no child of this thread, or not synthetic, is 
   };
   delete unmarked.properties.part.synthetic;
   assert.deepEqual(taskRows(feed(run, [message, unmarked]).flat()), []);
+});
+
+test("a previous background run's late answer never becomes a relaunched run's result", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  // A FOREGROUND relaunch of the child, and the first run's answer after it.
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume", { [CHILD_SESSION_ID]: "ses_background_child" });
+  const events = feed(run, [
+    resume.pending,
+    resume.running,
+    ...injectedResult("ses_background_child", "RUN 1 ANSWER"),
+    ...resume.work,
+    ...resume.settle,
+    resume.completed
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(events, "task.completed").map((event) => [
+      event.payload.toolUseId,
+      event.payload.summary
+    ]),
+    [
+      ["call_resume", undefined],
+      ["call_resume", CHILD_RESULT]
+    ],
+    "the relaunched run ends by its own idle and takes its own part's answer"
+  );
+});
+
+test("a background run takes no answer written for another run's task", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  // Relaunched in the background too, under another description.
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume", {
+    [CHILD_SESSION_ID]: "ses_background_child",
+    "list files": "list hidden files"
+  });
+  const events = feed(run, [
+    resume.pending,
+    inBackground(resume.running),
+    inBackground(resume.completed),
+    ...injectedResult("ses_background_child", "RUN 1 ANSWER"),
+    ...resume.work,
+    ...resume.settle,
+    ...injectedResult("ses_background_child", "RUN 2 ANSWER", {
+      description: "list hidden files"
+    })
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(events, "task.completed").map((event) => [
+      event.payload.toolUseId,
+      event.payload.summary
+    ]),
+    [
+      ["call_resume", undefined],
+      ["call_resume", "RUN 2 ANSWER"]
+    ]
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -2001,6 +2072,11 @@ test("a completion that extends the last running value adds what the frames miss
   );
 });
 
+/** The note 1.18.32's `ShellTool.run` opens a final output it cut with (read from the source). */
+function cutNote(saved: string): string {
+  return `...output truncated...\n\nFull output saved to: ${saved}\n\n`;
+}
+
 test("a windowed output killed at the timeout: its note reaches the joined output", async () => {
   const session = liveSession(BASH_SESSION_ID);
   const bash = bashFrames();
@@ -2015,15 +2091,17 @@ test("a windowed output killed at the timeout: its note reaches the joined outpu
   // lines within the tool's limits, then the timeout's note.
   const saved = "/tmp/opencode/tool_output_1";
   const tail = printed.split("\n").slice(-2_001).join("\n");
-  const cut = `...output truncated...\n\nFull output saved to: ${saved}\n\n`;
-  const final = `${cut}${tail}${TIMEOUT_NOTE}`;
+  const final = `${cutNote(saved)}${tail}${TIMEOUT_NOTE}`;
   frames.push(
     settledAs(bash.completed, final, outputWindow(printed), { truncated: true, outputPath: saved })
   );
   const events = feed(session, frames).flat();
+  // The cut's own note opens the final output, before the stream's end: it
+  // could never be in the remainder, so its pointer closes the stream.
+  const pointer = `\n\nFull output saved to: ${saved}`;
   assert.deepEqual(
     outputChunks(events).map((chunk) => chunk.payload.delta),
-    [...pieces, TIMEOUT_NOTE]
+    [...pieces, `${TIMEOUT_NOTE}${pointer}`]
   );
 
   const { log } = await throughHost(events);
@@ -2037,10 +2115,57 @@ test("a windowed output killed at the timeout: its note reaches the joined outpu
   assert.ok(completion !== undefined);
   assert.deepEqual(joinToolOutput(log, completion.id), {
     toolUseId: BASH_CALL,
-    output: `${printed}${TIMEOUT_NOTE}`,
+    output: `${printed}${TIMEOUT_NOTE}${pointer}`,
     complete: true,
     truncated: false
   });
+});
+
+test("a cut final output closes the stream with where the whole output was saved", () => {
+  const bash = bashFrames();
+  const saved = "/tmp/opencode/tool_output_2";
+  const printed = numberedLines(0, 3_000);
+  const tail = printed.split("\n").slice(-2_001).join("\n");
+  const pointer = `\n\nFull output saved to: ${saved}`;
+  // Nothing past the stream's end but the pointer.
+  const plain = outputChunks(
+    feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, outputWindow(printed)),
+      settledAs(bash.completed, `${cutNote(saved)}${tail}`, outputWindow(printed))
+    ]).flat()
+  );
+  assert.deepEqual(
+    plain.map((chunk) => chunk.payload.delta),
+    [outputWindow(printed), pointer]
+  );
+  // Where the stream's end cannot be placed, the pointer alone: it repeats nothing.
+  const lost = outputChunks(
+    feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, numberedLines(9_000, 10)),
+      settledAs(bash.completed, `${cutNote(saved)}${tail}`, numberedLines(9_000, 10))
+    ]).flat()
+  );
+  assert.deepEqual(
+    lost.map((chunk) => chunk.payload.delta),
+    [numberedLines(9_000, 10), pointer]
+  );
+  // A final output that extends the stream was never cut: no pointer.
+  const whole = outputChunks(
+    feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "one\n"),
+      settledAs(bash.completed, "one\ntwo\n", "one\n")
+    ]).flat()
+  );
+  assert.deepEqual(
+    whole.map((chunk) => chunk.payload.delta),
+    ["one\n", "two\n"]
+  );
 });
 
 test("a final output that neither extends the stream nor holds its end adds nothing", () => {
