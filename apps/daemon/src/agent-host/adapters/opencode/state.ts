@@ -153,6 +153,38 @@ const FINAL_ANCHOR_FLOOR = 64;
 const FINAL_OUTPUT_CUT_NOTE = /^\.\.\.output truncated\.\.\.\n\nFull output saved to: ([^\n]+)\n\n/;
 
 /**
+ * The note 1.18.32's generic `Truncate.output` closes an output it cut with
+ * (read from the source, not captured): every tool but the shell goes through
+ * it — `Tool.define` wraps each built-in one whose result does not say
+ * `metadata.truncated` itself, and every MCP tool's result is cut by it — and
+ * it keeps the HEAD, its default direction and the only one any tool asks
+ * for. `\n\n...<n> lines|bytes truncated...\n\nThe tool call succeeded but the
+ * output was truncated. Full output saved to: <file>\n<hint>`, the hint one of
+ * two lines, by whether the agent may hand the file to the Task tool; an
+ * output whose first line alone passes the byte limit keeps nothing before it.
+ */
+const GENERIC_OUTPUT_CUT_NOTE = new RegExp(
+  String.raw`\n\n\.\.\.\d+ (?:lines|bytes) truncated\.\.\.\n\n` +
+    String.raw`The tool call succeeded but the output was truncated\. Full output saved to: [^\n]+\n` +
+    String.raw`(?:Use Grep to search the full content or Read with offset/limit to view specific sections\.` +
+    String.raw`|Use the Task tool to have explore agent process this file with Grep and Read \(with offset/limit\)\. ` +
+    String.raw`Do NOT read the full file yourself - delegate to save context\.)$`
+);
+
+/**
+ * Whether a command's final `output` is one OpenCode cut, and so holds only
+ * part of it: the shell's own cut opens with {@link FINAL_OUTPUT_CUT_NOTE} and
+ * keeps the END of the output (`es` in 1.18.32's `ShellTool.run` walks the
+ * lines from the last one); the generic cut every other tool goes through
+ * keeps the HEAD and closes with {@link GENERIC_OUTPUT_CUT_NOTE} — a
+ * command-named MCP tool's, say. Either way a completion carrying it holds no
+ * whole output, and says so (`emitToolItem`).
+ */
+export function isCutFinalOutput(final: string): boolean {
+  return FINAL_OUTPUT_CUT_NOTE.test(final) || GENERIC_OUTPUT_CUT_NOTE.test(final);
+}
+
+/**
  * What a command's final `output` holds past the stream a client was shown —
  * `mark`, its last running value — for its completion to append before it
  * closes the call. 1.18.32's final output is not always that value
@@ -279,7 +311,14 @@ export interface OpenCodeStepUsage {
 
 export interface OpenCodeTurnTokenUsageAccumulator {
   partIds: Set<string>;
-  /** Client-minted user message ids this turn submitted. */
+  /**
+   * The prompts whose replies' steps count as this turn's own: the ids the
+   * host minted for it (its prompt, each steer's) and every prompt the server
+   * wrote itself that the turn claimed (`claimReply` in `normalize.ts` — a
+   * background answer that woke the parent, the `continue` prompt an automatic
+   * compaction writes). Never a compaction's own prompt: its summary is no
+   * reply of the conversation, and stays off the meter.
+   */
   promptMessageIds: Set<string>;
   assistantOwnershipByMessageId: Map<string, "owned" | "other" | "unknown">;
   unresolvedStepsByMessageId: Map<string, Map<string, OpenCodeStepUsage>>;
@@ -489,8 +528,9 @@ export interface OpenCodeChildAgent {
    * The current run's launching part answered in the BACKGROUND
    * (`metadata.background`): only such a run takes an answer the tool injects
    * into its parent (`takeBackgroundResult`) — a foreground run's answer is its
-   * part's, and an injected one is an earlier run's, late. Cleared by a
-   * relaunch.
+   * part's, and an injected one is an earlier run's, late — and only such a
+   * run, with every run inside it, outlives a turn that fails on its own
+   * (`closeLiveChildAgents`). Cleared by a relaunch.
    */
   answersInBackground?: boolean;
 }
@@ -535,6 +575,37 @@ export interface OpenCodeSessionState {
   childAgents: Map<string, OpenCodeChildAgent>;
 
   activeTurnId?: string;
+  /**
+   * The prompts whose replies a turn owns: every message the host sent
+   * (`sendTurn` — a turn's prompt and each steer's), every prompt the server
+   * wrote itself that a turn claimed when its reply began (`claimReply` in
+   * `normalize.ts`: the turn running then, or the turn that reply opened), and
+   * every prompt a rewind's fork copied (`rollbackThread` — the past, under
+   * new ids). A reply to any other prompt, beginning while no turn runs, is
+   * one the host never started — the parent woken by a background `task`
+   * call's answer — and opens a turn of its own. Bounded ({@link claimPrompt}).
+   */
+  claimedPromptIds: Set<string>;
+  /**
+   * The thread's own session is running: a `busy` (or `retry`) status since
+   * its last `idle` — 1.18.32's `SessionPrompt.run` sets it at the top of
+   * every loop iteration, before it writes a reply. A reply the host never
+   * started opens a turn only on that evidence (`claimReply`): with no run
+   * behind it no `idle` would ever settle the turn, and `turn.started` alone
+   * never arms the watchdog, so it would hold a deploy's drain until the user
+   * acted. Cleared by `idle` and `session.idle`, and by a reconnect, after
+   * which nothing seen before is evidence.
+   */
+  parentBusy: boolean;
+  /**
+   * The host's own `/compact` is running: `compact()` in `session.ts` holds it
+   * up across its `summarize` request, which answers only once the
+   * compaction's run has ended. Its summary is no reply, and opens no turn
+   * (`claimReply`). A summary written while it is down and no turn runs is a
+   * run's own compaction — one a background answer woke that found its
+   * context full — and opens the woken turn.
+   */
+  hostCompacting: boolean;
   activeAgent?: string;
   activeVariant?: string;
   interruptedTurnId?: string;
@@ -610,6 +681,9 @@ export function createSessionState(input: {
     processedTokens: 0,
     relatedSessionIds: new Set([input.openCodeSessionId]),
     childAgents: new Map(),
+    claimedPromptIds: new Set(),
+    parentBusy: false,
+    hostCompacting: false,
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
     promptGeneration: 0,
@@ -637,12 +711,55 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.outputMarks.clear();
   state.turnTokenUsage = undefined;
   state.activeTurnId = undefined;
+  // A fork re-mints every message id (fixtures README observation 17): no
+  // prompt the source session held is named in this one, and no run of the
+  // source is the fork's.
+  state.claimedPromptIds.clear();
+  state.parentBusy = false;
   state.interruptedTurnId = undefined;
   state.reconcileIdleStatus = false;
   state.awaitingBusyAfterInterruption = false;
   state.pendingIdleReconciliation = undefined;
   state.lastSessionErrorMessage = undefined;
   state.lastEmittedTitle = undefined;
+}
+
+/**
+ * Open turn `turnId`: a new prompt generation — so no completion machine
+ * armed for an earlier turn can settle this one — a fresh usage accumulator,
+ * no `session.error` carried over, and, after a Stop, the wait for the new
+ * run's first `busy` (`awaitingBusyAfterInterruption`). The one setup both
+ * ways a turn opens share, so they cannot drift: the host's own prompt
+ * (`sendTurn` in `session.ts`) and a reply the server started on its own
+ * (`claimReply` in `normalize.ts`). Returns the generation.
+ */
+export function openTurn(state: OpenCodeSessionState, turnId: string): number {
+  state.promptGeneration += 1;
+  state.activeTurnId = turnId;
+  state.turnTokenUsage = makeTurnTokenUsageAccumulator();
+  state.lastSessionErrorMessage = undefined;
+  state.awaitingBusyAfterInterruption = state.interruptedTurnId !== undefined;
+  return state.promptGeneration;
+}
+
+/**
+ * How many prompts {@link OpenCodeSessionState.claimedPromptIds} remembers. A
+ * reply names the prompt it answers as it begins — the newest user message of
+ * its run — so only recent prompts are ever named; the oldest go first.
+ */
+const CLAIMED_PROMPTS_CAP = 256;
+
+/** Record that a turn owns the replies to `promptId`. */
+export function claimPrompt(state: OpenCodeSessionState, promptId: string): void {
+  state.claimedPromptIds.delete(promptId);
+  state.claimedPromptIds.add(promptId);
+  while (state.claimedPromptIds.size > CLAIMED_PROMPTS_CAP) {
+    const oldest = state.claimedPromptIds.values().next();
+    if (oldest.done === true) {
+      break;
+    }
+    state.claimedPromptIds.delete(oldest.value);
+  }
 }
 
 /**

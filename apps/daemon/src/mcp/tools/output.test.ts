@@ -330,6 +330,23 @@ for (const [host, answering] of HOSTS) {
     assert.deepEqual(await read(answering(cut, miss), { itemId: cut.id }), expected);
   });
 
+  test(`${host}: an OpenCode completion whose output the tool cut reads the join; with none, the part it kept — its END — answers, truncated`, async () => {
+    // As the OpenCode adapter stores a `bash` completion 1.18.32's ShellTool cut past its limits: its final output in
+    // `data.result` — the note naming the saved file, then the LAST lines, never the first — and the payload marked.
+    const whole = `${Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n")}\n`;
+    const kept = `...output truncated...\n\nFull output saved to: /home/u/.local/share/opencode/tool-output/tool_1\n\n${whole.slice(-600)}`;
+    const cut = commandRow({ tool: "bash", toolUseId: "call-1", state: { status: "completed" }, command: "seq 0 399", result: kept }, { truncated: true });
+    const joined = await readAll(answering(cut, joinedOutput({ toolUseId: "call-1", output: whole })), cut.id);
+    assert.equal(joined.text, whole, "every line the command printed, from the join");
+    const expected = { itemId: cut.id, kind: "command-output", text: kept, offset: 0, totalBytes: Buffer.byteLength(kept), truncated: true };
+    assert.deepEqual(await read(answering(cut, joinedOutput({ toolUseId: "call-1", output: "" })), { itemId: cut.id }), expected);
+    // Uncut, the same completion's output is whole: step 1 answers it, and the join is never asked.
+    const intact = commandRow({ tool: "bash", toolUseId: "call-1", state: { status: "completed" }, command: "seq 0 399", result: whole });
+    const api = answering(intact, joinedOutput({ toolUseId: "call-1", output: "the streamed copy" }));
+    assert.deepEqual(await read(api, { itemId: intact.id }), { itemId: intact.id, kind: "command-output", text: whole, offset: 0, totalBytes: Buffer.byteLength(whole) });
+    assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), "the join was never read");
+  });
+
   test(`${host}: a host without the join — an older one's route miss, or its own 404 — falls back to the item's text, never an error`, async () => {
     const row = shellDone();
     const payloadText = JSON.stringify(row.payload, null, 2);

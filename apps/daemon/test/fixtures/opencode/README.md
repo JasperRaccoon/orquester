@@ -760,10 +760,82 @@ turn. History replays no roster rows at all (it reads the thread's own session, 
 parts replay as plain collab-agent calls), so a background run's result is filled on the live
 path only.
 
-**Known gap:** the parent's reply to that prompt streams as rows with no turn, and the thread
-reads idle while the parent's model writes it — no `/turn` opened one, and the session's `busy`
-with no active turn is ignored. Giving it a turn needs the shapes of that turn on the wire (a
-synthetic turn, like Claude's woken parent), which no capture has yet.
+**That prompt wakes the parent, and its reply is a turn.** Read from 1.18.32's source, not
+captured: `injectBackgroundResult` calls the session's `prompt` with no `messageID` — the server
+mints the prompt's id — through `SessionPrompt.prompt`, the same path a `prompt_async` takes, so
+the frames are the ones fixture 12 shows for any prompt (lines 122-123, then 186-202): the user
+message and its `synthetic` part, the run's `busy`, the reply's assistant `message.updated` naming
+the prompt as its `parentID` (the run answers the NEWEST user message, `MessageV2.latest`), its
+parts and completion, then `busy` → `idle` → `session.idle` when the run ends. A prompt that
+arrives while a run is going joins it (`SessionRunState.ensureRunning` awaits a running run), so
+the run answers it before it goes idle.
+
+The reply used to stream as rows with no turn, and the thread read idle while the parent's model
+wrote it. Now the first `message.updated` of an assistant message decides whose reply it is
+(`claimReply`): a reply to a prompt the host sent (`sendTurn` claims each one it mints before
+sending it) or one a turn already claimed is that turn's; a reply to any other prompt is claimed
+by the turn running when it begins, and while none runs it opens one — `turn.started` named by the
+prompt's id, as a live turn is named by its prompt (a rewind finds it again), before any row of
+the reply, and a `turn-woken` signal the session's record follows. From there it is any turn: the
+run's idle settles it, a `session.error` fails it, a Stop aborts it, the session's stop closes it,
+a message the user sends meanwhile steers it (OpenCode queues it into the same run), a second
+answer arriving mid-run joins it, and a host that dies mid-reply leaves it to the next host's
+reconcile, like any running turn. Its steps count as the turn's own (`promptMessageIds`).
+
+It opens only with a run behind it: the parent's `busy` since its last `idle` (`parentBusy` —
+`SessionPrompt.run` sets `busy` at the top of every loop iteration, before it writes a reply).
+With no run, no `idle` would ever settle the turn, and `turn.started` alone never arms the host's
+watchdog, so it would hold a deploy's drain until the user acted. A reconnect clears the evidence;
+a live run says `busy` again at its next iteration. Never opened: a reply that has already
+ended — a fork copies a session's messages whole, completed ones included (fixture 10), and a
+rewind claims every prompt its fork copied, so a copy its dead run never completed opens nothing
+either — and anything that follows an interruption, which the demux drops first. That last guard
+lasts until a later turn settles, by ANY path: a later turn that failed (a rate limit) used to
+leave the Stop's id behind for good (`completeTurn` alone cleared it), and every woken reply after
+it was dropped — never written, the thread idle.
+
+A compaction's summary (`summary: true`, fixture 09) answers no prompt of the conversation: its
+prompt is claimed but never joins `promptMessageIds`, so the summary call stays off the meter and
+the turn's usage. While no turn runs it is either the host's own `/compact` — `compact()` holds
+`hostCompacting` up across its `summarize` request, which answers only once the compaction's run
+ended — and stays turnless, or a woken run's own: a run whose last answer already overflows the
+model's context compacts FIRST (`SessionPrompt.run` → `SessionCompaction.create {auto: true}`;
+read from the source), so the summary opens the woken turn, named by the compaction's prompt, and
+the thread reads working through the compaction. The reply to the prompt the compaction writes to
+go on with — one `synthetic` text part marked `metadata.compaction_continue` — then joins it like
+any mid-run prompt, and counts.
+
+**A background run outlives a turn that fails.** Read from 1.18.32's source: a background job
+ends by itself or by `SessionRunState.cancel` — which the `abort` route (`SessionHttpApi.abort` →
+`SessionPrompt.cancel`) runs, cancelling every job the session launched (`cancelBackgroundJobs`,
+children's children included) — and by nothing else: a turn that fails on its own (a
+`session.error`, a rate limit) leaves it running, and its answer comes later as ever. The adapter
+closed every live child `stopped` on any failed turn, so such a child read "interrupted" while it
+worked, left the liveness a deploy's drain waits on, and found no run to take its answer as the
+result. A turn that fails on its own now closes only the runs that fail with it — a child whose
+launching part answered in the background (`answersInBackground`), or one running inside such a
+child, lives on (`closeLiveChildAgents` with `scope: "foreground"`) and ends as any background run
+does: its own idle and answer, a Stop, the session's stop or the exit. A failed admission still
+closes every child: its abort IS `SessionRunState.cancel`. And the failed turn returns the session
+to `ready`, as Claude's and Grok's do after every settled turn: an `error` session reads, to the
+roster, as a dead one (every running row `interrupted`), and refuses the thread's commands until a
+Stop, which would cancel the very job that lives on. The turn itself stays `failed`, and the
+`runtime.error` the frame raised keeps the reason on the timeline.
+
+**The child's end always precedes the answer's prompt.** Read from 1.18.32's source: a run
+fiber's exit handler (the session runner's `onExit`) runs `onIdle` — which publishes the child's
+`session.status {idle}` and `session.idle` — BEFORE it resolves the run's `done`; only then does
+the child's `prompt` return, `TaskTool.runTask` end, the job complete, and
+`notifyBackgroundResult` → `injectBackgroundResult` prompt the parent. So on the one ordered
+event stream the child's `task.completed` is written while no turn runs (the launching turn has
+ended, the woken one has not opened), and so is the result the answer carries — the woken turn
+opens at the REPLY, never at the prompt. Were the order reversed, the child's end would ride the
+woken turn, and a rewind of that turn would drop the agent's end while its start stayed on the
+launching turn: the roster would read it running again. The adapter still takes an answer that
+comes first (`pendingResult`) — defensively.
+
+No capture holds a woken parent: the replay tests clone fixture 12's frames under new ids, and
+assert that no capture opens a turn of its own.
 
 ### 28. A running `bash` part restates its whole output on every frame
 
@@ -826,6 +898,29 @@ showed nothing adds nothing: its completion's own output is the row's. An errore
 the command's output, and the error is the call's status and detail, which the row's failed
 status carries and the MCP transcript shows as text; it is never written into the stream. A
 part's mark goes when it settles, when it is removed and when its message is.
+
+A completion whose final output the tool cut — it opens with that note — holds only what the tool
+kept, and that is the output's END: `es` in `ShellTool.run` walks the lines from the last one
+(read from the source, not captured). The completion row keeps it in `data.result`, so the row is
+marked `truncated` (`isCutFinalOutput`, the same note `finalOutputRemainder` reads): unmarked, the
+MCP's `read_tool_output` answered that end as the whole output. Both readers now take the call's
+join — every line the command printed — first, and show the kept end, as only part of the output,
+only where no join answers (`storedCommandOutput`).
+
+Only `bash` writes that note. Every other tool goes through the generic `Truncate.output` — read
+from 1.18.32's source, not captured: `Tool.define` wraps each built-in tool whose result does not
+set `metadata.truncated` itself (the shell does), and every MCP tool's result is cut by it too —
+which keeps the HEAD (its default direction, the only one any tool asks for) and closes with its
+own note: `\n\n...<n> lines|bytes truncated...\n\nThe tool call succeeded but the output was
+truncated. Full output saved to: <file>\n` and one hint line — "Use Grep to search the full
+content or Read with offset/limit to view specific sections." or, where the agent may delegate,
+"Use the Task tool to have explore agent process this file with Grep and Read (with
+offset/limit). Do NOT read the full file yourself - delegate to save context." A command-named
+tool that is not the shell (an MCP server's `run_command`, say: the adapter reads any tool whose
+name holds "bash" or "command" as a command) can therefore end its completion with that note, and
+such a completion is marked `truncated` the same way (`isCutFinalOutput`). It streams nothing, so
+no join answers: both readers show the kept head as only part of the output. Only at the very end:
+the note anywhere else is output.
 
 ---
 

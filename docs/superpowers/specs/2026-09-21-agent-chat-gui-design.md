@@ -1547,6 +1547,40 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   note's `Full output saved to: <file>` pointer, which the full-output viewer's join would
   otherwise never hold (`adapters/opencode/normalize.ts`, `state.ts`; fixtures README
   observations 27-28).*
+  *Built (follow-ups 2026-09-25): that background answer WAKES the parent. 1.18.32 prompts the
+  calling session through `SessionPrompt.prompt` — the path a `prompt_async` takes (read from the
+  source, not captured) — and runs the parent's reply, which no `/turn` opened: it streamed as
+  turnless rows, the thread read idle while the agent wrote it, and its end raised no "finished".
+  The first `message.updated` of an assistant message now decides whose reply it is (`claimReply`,
+  `claimedPromptIds`): one answering a prompt the host sent (`sendTurn` claims each id it mints
+  before sending it) or a prompt a turn already claimed is that turn's; one answering any other
+  prompt is claimed by the turn running when it begins (the server answers a prompt that arrives
+  mid-run in the same run), and while none runs it opens a turn — `turn.started` named by the
+  prompt's id, as a live turn is named by its prompt, before any row of the reply. That turn is
+  then any turn: the run's idle settles it, a `session.error` fails it, a Stop aborts it, the
+  session's stop closes it, the next host's reconcile settles it after a crash, a second answer
+  arriving mid-run joins it, and a message the user sends meanwhile steers it — unlike §4.5
+  Claude's stale synthetic turn, which a send auto-closes: this run is live and OpenCode queues the
+  prompt into it. A reply that has already ended (a fork's copied history — a rewind also claims
+  every prompt its fork copied) and output after an interruption open nothing
+  (`adapters/opencode/normalize.ts`, `session.ts`, `state.ts`; fixtures README observation 27).*
+  *Built (the sweep after it): the turn opens only with a run behind it — the parent's `busy`
+  since its last `idle` — or no `idle` would ever settle it and a deploy's drain would wait on it.
+  A compaction's summary claims its prompt off the meter: the host's own `/compact` stays turnless
+  (`compact()` holds `hostCompacting` up across its `summarize`), and a woken run that compacts
+  first — its context already full — opens the turn at the summary, so the thread reads working
+  through the compaction. An interruption's guard ends when any later turn settles, a failed one
+  included: a Stop followed by a turn that failed on a rate limit used to drop every woken reply
+  after it. And the child's end always precedes the answer's prompt (1.18.32's runner publishes
+  its idle before it resolves the run), so neither the child's end nor its result rides the woken
+  turn, and a rewind of that turn can never take an agent's end while its start stays.*
+  *Built (addendum): a run in the background outlives a turn that fails on its own (a
+  `session.error`, a rate limit) — 1.18.32 cancels a background job only through
+  `SessionRunState.cancel`, the `abort` a Stop, a session stop or a failed admission sends — so
+  that turn closes only the runs that fail with it, and returns the session to `ready`, as Claude
+  and Grok do after every settled turn: an `error` session reads, to §7.6's roster, as a dead one,
+  and refuses commands until a Stop, which would cancel that job. The child keeps working in the
+  roster and in liveness, and ends by its own idle and answer.*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.
@@ -3098,6 +3132,18 @@ host's first load closes a call a dead process left open with a completion that 
 update's cut copy, marked the same way, whose head is a one-line preview. So what stays out of reach
 is a completion stored whole that holds no output — a Codex command's from a host before task 3 —
 none of whose chunks the window or the loaded history holds: its payload shows.*
+
+*Built (follow-ups 2026-09-25, OpenCode): an OpenCode `bash` completion whose final output the tool
+cut past its own limits is stored cut too. 1.18.32's `ShellTool.run` keeps the END of such an output
+behind `...output truncated...` / `Full output saved to: <file>` (read from the source), and the
+completion carried it in `data.result` unmarked, so the MCP's `read_tool_output` answered that end as
+the whole output while this viewer read the call's join. The adapter now marks it `truncated`
+(`isCutFinalOutput`, the note `finalOutputRemainder` already reads; `adapters/opencode/state.ts`), and
+both readers take the join first and the kept end only where none answers. The note above a kept part
+is now "Only part of this output was kept." (the `kept` arm of `FullOutput`): "Only the start" was
+untrue of OpenCode's end, and which part a completion kept is its adapter's to know, not the viewer's.
+A command-named tool of another kind (an MCP server's) that OpenCode's generic `Truncate.output` cut
+— the head, its own note at the end — is marked the same way.*
 
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured

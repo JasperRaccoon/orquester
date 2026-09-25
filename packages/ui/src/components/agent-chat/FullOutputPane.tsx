@@ -7,7 +7,8 @@ export interface FullOutputPaneProps {
   text: string;
   /**
    * What the host said about it (`fullOutputNotes`): a running call's output
-   * is what exists now, a join past the host's cap is its head.
+   * is what exists now, a join past the host's cap is its head, and what a
+   * completion kept is only part of the output.
    */
   notes: readonly string[];
 }

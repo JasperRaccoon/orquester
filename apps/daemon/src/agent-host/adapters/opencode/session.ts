@@ -73,8 +73,9 @@ import { buildOpenCodePermissionRules, toOpenCodePermissionReply } from "./rules
 import type { OpenCodeServerHandle } from "./server.ts";
 import { readSseFrames } from "./sse.ts";
 import {
+  claimPrompt,
   createSessionState,
-  makeTurnTokenUsageAccumulator,
+  openTurn,
   repointSession,
   takeTurnTokenUsage,
   type OpenCodeCancellation,
@@ -488,8 +489,8 @@ export class OpenCodeThreadSession {
    * which the roster folds to `interrupted` (§7.6) — before the turn or the
    * session settles. A subagent row must never outlive the process that ran it.
    */
-  private closeChildAgents(reason?: string): void {
-    for (const event of closeLiveChildAgents(this.state, this.normalizeContext(), reason)) {
+  private closeChildAgents(reason?: string, scope: "all" | "foreground" = "all"): void {
+    for (const event of closeLiveChildAgents(this.state, this.normalizeContext(), reason, scope)) {
       this.emit(event);
     }
   }
@@ -597,6 +598,10 @@ export class OpenCodeThreadSession {
     if (this.state.turnTokenUsage !== undefined) {
       this.state.turnTokenUsage.complete = false;
     }
+    // Frames were missed: a run's `busy` seen before the gap may have ended
+    // in it, so it is no evidence for a reply after it (`claimReply`). A live
+    // run says `busy` again at its next loop iteration.
+    this.state.parentBusy = false;
     const turnId = this.state.activeTurnId;
     if (turnId === undefined) {
       return;
@@ -694,6 +699,17 @@ export class OpenCodeThreadSession {
         return;
       }
       case "compacted": {
+        return;
+      }
+      case "turn-woken": {
+        // The parent's reply to a prompt the server wrote itself — a
+        // background `task` call's answer — opened this turn (`claimReply`).
+        // From here it is any turn: the machines above settle it.
+        this.cancelIdleReconciliation();
+        this.updateRecord(
+          { status: "running", activeTurnId: signal.turnId },
+          { lastError: true }
+        );
         return;
       }
       default: {
@@ -982,9 +998,11 @@ export class OpenCodeThreadSession {
     this.state.activeTurnId = undefined;
     this.state.activeAgent = undefined;
     this.state.activeVariant = undefined;
-    this.state.awaitingBusyAfterInterruption = false;
-    this.state.reconcileIdleStatus = false;
+    this.endInterruptionBefore(admission.turnId);
     this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
+    // Every child, a background one too: the abort above is 1.18.32's
+    // `SessionRunState.cancel`, which cancels the session's background jobs
+    // (read from the source) — unlike a turn that fails on its own.
     this.closeChildAgents(detail);
     this.emit({
       ...this.base({ turnId: admission.turnId }),
@@ -1008,9 +1026,7 @@ export class OpenCodeThreadSession {
     this.state.activeTurnId = undefined;
     this.state.activeAgent = undefined;
     this.state.activeVariant = undefined;
-    this.state.interruptedTurnId = undefined;
-    this.state.awaitingBusyAfterInterruption = false;
-    this.state.reconcileIdleStatus = false;
+    this.endInterruptionBefore(turnId);
     this.state.lastSessionErrorMessage = undefined;
     for (const requestId of this.state.autoRepliedRequestIds) {
       this.state.emittedTerminalRequestIds.add(requestId);
@@ -1044,8 +1060,17 @@ export class OpenCodeThreadSession {
     this.state.activeAgent = undefined;
     this.state.activeVariant = undefined;
     this.state.reconcileIdleStatus = false;
-    this.updateRecord({ status: "error", lastError: message }, { activeTurnId: true });
-    this.closeChildAgents(message);
+    if (turnId !== undefined) {
+      this.endInterruptionBefore(turnId);
+    }
+    this.updateRecord(
+      { status: turnId !== undefined ? "ready" : "error", lastError: message },
+      { activeTurnId: true }
+    );
+    // A run in the background outlives the failure: 1.18.32 cancels its job
+    // only through `SessionRunState.cancel` — a Stop, a session stop, a failed
+    // admission's abort — and this sends none (`closeLiveChildAgents`).
+    this.closeChildAgents(message, "foreground");
     void this.recoverPendingRequests();
     if (turnId !== undefined) {
       this.emit({
@@ -1053,7 +1078,38 @@ export class OpenCodeThreadSession {
         type: "turn.completed",
         payload: { state: "failed", errorMessage: message, ...(tokenUsage ? { tokenUsage } : {}) }
       });
+      // The failure was the turn's, not the session's: OpenCode's session
+      // lives on, and so does any run in the background — which the roster
+      // reads as interrupted, and the thread's commands refuse, while the
+      // session reads `error`. So it goes back to `ready`, as Claude's and
+      // Grok's do after every settled turn; the turn stays `failed`, and the
+      // `runtime.error` the frame raised keeps the reason on the timeline.
+      this.emit({
+        ...this.base({ turnId }),
+        type: "session.state.changed",
+        payload: { state: "ready", reason: "turn:failed" }
+      });
     }
+  }
+
+  /**
+   * `turnId` has settled, and it is not the turn a Stop interrupted: that
+   * turn's run ended before this one's began, so the Stop's leftovers are
+   * over and nothing of it may keep dropping the parent's output
+   * (`suppressInterruptedOutput` in `normalize.ts`) — a background answer that
+   * wakes the parent later included, whose reply would otherwise never be
+   * written. Every path a turn settles by calls it: only `completeTurn` used
+   * to clear these, so a later turn that failed (a rate limit, say) left the
+   * Stop's id behind for good. The interrupted turn's own settle keeps them,
+   * as does a submit the server refused (`rollbackAdmission`): no run began.
+   */
+  private endInterruptionBefore(turnId: string): void {
+    if (this.state.interruptedTurnId === turnId) {
+      return;
+    }
+    this.state.interruptedTurnId = undefined;
+    this.state.awaitingBusyAfterInterruption = false;
+    this.state.reconcileIdleStatus = false;
   }
 
   // -- requests -----------------------------------------------------------
@@ -1391,14 +1447,19 @@ export class OpenCodeThreadSession {
 
       // A sendTurn while a turn is active is a STEER: OpenCode queues the
       // prompt into the running session, so the active turn id is reused
-      // (§4.1 "Steering"). A new turn is NAMED by the OpenCode id of the prompt
-      // that opens it — OpenCode keeps a client-minted `messageID` verbatim
-      // (fixtures README observations 8 and 15) — so the id the fold keeps is
-      // the provider's own and a rewind finds the turn again in
-      // `GET /session/:id/message`, across a host restart too (§5.5).
+      // (§4.1 "Steering") — a turn a background answer woke included, whose
+      // run the prompt joins as it would any. A new turn is NAMED by the
+      // OpenCode id of the prompt that opens it — OpenCode keeps a
+      // client-minted `messageID` verbatim (fixtures README observations 8
+      // and 15) — so the id the fold keeps is the provider's own and a rewind
+      // finds the turn again in `GET /session/:id/message`, across a host
+      // restart too (§5.5).
       const steeringTurnId = this.state.activeTurnId;
       const messageId = mintOpenCodeMessageId();
       const turnId = steeringTurnId ?? messageId;
+      // Claimed before it is sent: a reply to it is this turn's, never one
+      // the server started on its own (`claimReply`).
+      claimPrompt(this.state, messageId);
       const agent =
         selectedOption(selection, "agent") ??
         (input.interactionMode === "plan" ? "plan" : undefined);
@@ -1411,7 +1472,19 @@ export class OpenCodeThreadSession {
           : undefined;
       this.cancelIdleReconciliation();
 
-      const generation = this.state.promptGeneration + 1;
+      // Read before the turn opens, which may start a wait for a new busy: a
+      // steer the server refuses restores it (`rollbackAdmission`).
+      const priorAwaitingBusy = this.state.awaitingBusyAfterInterruption;
+      let generation: number;
+      if (steeringTurnId === undefined) {
+        generation = openTurn(this.state, turnId);
+      } else {
+        // A steer joins the running turn: a new admission generation, the
+        // turn's usage and its wait kept.
+        generation = this.state.promptGeneration + 1;
+        this.state.promptGeneration = generation;
+        this.state.lastSessionErrorMessage = undefined;
+      }
       const admission: OpenCodePromptAdmission = {
         generation,
         turnId,
@@ -1423,19 +1496,12 @@ export class OpenCodeThreadSession {
         cancelled: false,
         idleStatusConfirmations: 0,
         ...(priorIdle !== undefined ? { priorIdle } : {}),
-        priorAwaitingBusy: this.state.awaitingBusyAfterInterruption,
+        priorAwaitingBusy,
         recovering: false
       };
-      this.state.promptGeneration = generation;
       this.state.promptAdmission = admission;
-      this.state.activeTurnId = turnId;
       this.state.activeAgent = agent;
       this.state.activeVariant = variant;
-      this.state.lastSessionErrorMessage = undefined;
-      if (steeringTurnId === undefined) {
-        this.state.turnTokenUsage = makeTurnTokenUsageAccumulator();
-        this.state.awaitingBusyAfterInterruption = this.state.interruptedTurnId !== undefined;
-      }
       this.state.turnTokenUsage?.promptMessageIds.add(messageId);
 
       this.updateRecord(
@@ -1896,14 +1962,22 @@ export class OpenCodeThreadSession {
       if (this.state.activeTurnId !== undefined) {
         throw new Error("OpenCode cannot compact while a turn is running.");
       }
-      await this.client.post<unknown>(openCodeRoutes.summarize(this.state.openCodeSessionId), {
-        timeoutMs: COMPACTION_TIMEOUT_MS,
-        body: {
-          providerID: parsedModel.providerID,
-          modelID: parsedModel.modelID,
-          auto: false
-        } satisfies SummarizeBody
-      });
+      // The summary this writes is the host's own, no reply: it opens no turn
+      // (`claimReply`). `summarize` answers once the compaction's run ended,
+      // so the flag covers every frame of it that can open one.
+      this.state.hostCompacting = true;
+      try {
+        await this.client.post<unknown>(openCodeRoutes.summarize(this.state.openCodeSessionId), {
+          timeoutMs: COMPACTION_TIMEOUT_MS,
+          body: {
+            providerID: parsedModel.providerID,
+            modelID: parsedModel.modelID,
+            auto: false
+          } satisfies SummarizeBody
+        });
+      } finally {
+        this.state.hostCompacting = false;
+      }
     });
   }
 
@@ -1998,6 +2072,14 @@ export class OpenCodeThreadSession {
       this.rememberFork(list, forked);
       await this.settlePendingRequests().catch(() => undefined);
       repointSession(this.state, fork.id);
+      // Every prompt the fork holds is the past, re-minted: a copied reply
+      // whose frame reaches the stream after this — one its run never
+      // completed, say — is no reply beginning, and opens no turn.
+      for (const entry of forked) {
+        if (entry?.info?.role === "user" && typeof entry.info.id === "string") {
+          claimPrompt(this.state, entry.info.id);
+        }
+      }
       this.updateRecord({ status: "ready" }, { activeTurnId: true });
       this.emit({
         ...this.base({}),

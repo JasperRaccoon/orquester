@@ -63,9 +63,12 @@ import {
   accumulateStepUsage,
   addRelatedSession,
   advanceOutputMark,
+  claimPrompt,
   finalOutputRemainder,
+  isCutFinalOutput,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
+  openTurn,
   stepTotalTokens,
   type OpenCodeChildAgent,
   type OpenCodeSessionState,
@@ -100,7 +103,13 @@ export type NormalizerSignal =
   /** A request event from a session whose ancestry is not yet known. */
   | { kind: "ancestry-probe"; sessionId: string; raw: OpenCodeRawEvent }
   /** `session.compacted` landed; the thread state event has already been emitted. */
-  | { kind: "compacted" };
+  | { kind: "compacted" }
+  /**
+   * A reply the host never started began while no turn ran — the parent
+   * woken by a background `task` call's answer — and opened turn `turnId`
+   * (`claimReply`); its `turn.started` has already been emitted.
+   */
+  | { kind: "turn-woken"; turnId: string };
 
 export interface NormalizeResult {
   events: RuntimeEvent[];
@@ -530,20 +539,27 @@ function demux(
         admission.messageObserved = true;
         out.signal({ kind: "user-message-observed", messageId: info.id });
       }
+      // Read before the role is recorded: a reply begins on its first frame.
+      const firstSighting = !state.messageRoleById.has(info.id);
       state.messageRoleById.set(info.id, info.role);
       if (info.role === "user") {
         state.textPartsByMessageId.delete(info.id);
       }
       if (info.role === "assistant") {
+        if (firstSighting) {
+          claimReply(state, info, raw, out);
+        }
+        // The turn the reply belongs to, which it may just have opened.
+        const replyTurnId = state.activeTurnId;
         emitContextWindow(
           state,
           resolveAssistantOwnership(state, info.id, info.parentID),
-          turnId,
+          replyTurnId,
           raw,
           out
         );
         for (const part of state.textPartsByMessageId.get(info.id)?.values() ?? []) {
-          emitTextDelta(part, turnId, raw, out);
+          emitTextDelta(part, replyTurnId, raw, out);
         }
       }
       return;
@@ -727,6 +743,9 @@ function demux(
     case "session.status": {
       const status = event.properties.status;
       if (status.type === "busy" || status.type === "retry") {
+        // A run is going, whoever started it: the evidence a reply the host
+        // never started needs before it opens a turn (`claimReply`).
+        state.parentBusy = true;
         if (turnId !== undefined) {
           out.signal({ kind: "status-busy" });
         }
@@ -742,13 +761,17 @@ function demux(
         }
         return;
       }
-      if (status.type === "idle" && turnId !== undefined) {
-        out.signal({ kind: "status-idle", raw });
+      if (status.type === "idle") {
+        state.parentBusy = false;
+        if (turnId !== undefined) {
+          out.signal({ kind: "status-idle", raw });
+        }
       }
       return;
     }
 
     case "session.idle": {
+      state.parentBusy = false;
       // After an abort this is the ONLY idle signal — no `session.status`
       // follows (fixtures README observation 6).
       if (state.activeTurnId !== undefined) {
@@ -1013,19 +1036,52 @@ function emitTaskResult(
  * with `task.completed {status: "stopped"}`, which the roster folds to
  * `interrupted` (§7.6). Called by `session.ts` before `session.exited`, and
  * when a turn is interrupted or fails.
+ *
+ * `scope: "foreground"` is a turn that FAILED on its own (a `session.error`,
+ * a rate limit): only the runs that fail with it close. A run in the
+ * background outlives it ({@link outlivesFailedTurn}) — 1.18.32 cancels a
+ * background job only through `SessionRunState.cancel` (the abort a Stop, a
+ * session stop or a failed admission sends), never because the turn that
+ * launched it failed — as a Claude background agent outlives its parent's
+ * turn. Closed, it read "interrupted" while it worked, left the liveness a
+ * deploy's drain waits on, and its answer, when the job settled, found no run
+ * to be the result of. It ends as any background run does: its own idle and
+ * answer, a Stop, the session's stop or the exit.
  */
 export function closeLiveChildAgents(
   state: OpenCodeSessionState,
   ctx: NormalizeContext,
-  reason?: string
+  reason?: string,
+  scope: "all" | "foreground" = "all"
 ): RuntimeEvent[] {
   const out = new Emitter(state, ctx);
   for (const agent of state.childAgents.values()) {
-    if (!agent.completed) {
+    if (!agent.completed && (scope === "all" || !outlivesFailedTurn(state, agent))) {
       emitTaskCompleted(state, agent, "stopped", undefined, out, reason);
     }
   }
   return out.events;
+}
+
+/** How far up its launchers {@link outlivesFailedTurn} looks: grandchildren and theirs. */
+const MAX_LAUNCHER_DEPTH = 8;
+
+/**
+ * Whether `agent` runs in the background: its run's launching part answered
+ * in the background (`answersInBackground`), or it runs inside an agent that
+ * does — a grandchild's launch sits in its parent's session, where this
+ * adapter reads no `task` part, so it is known only by its `parentAgentId`.
+ */
+function outlivesFailedTurn(state: OpenCodeSessionState, agent: OpenCodeChildAgent): boolean {
+  let current: OpenCodeChildAgent | undefined = agent;
+  for (let depth = 0; current !== undefined && depth < MAX_LAUNCHER_DEPTH; depth += 1) {
+    if (current.answersInBackground === true) {
+      return true;
+    }
+    current =
+      current.parentAgentId === undefined ? undefined : state.childAgents.get(current.parentAgentId);
+  }
+  return false;
 }
 
 /** Are any subagents still live? Feeds §6.4's `backgroundLiveness`. */
@@ -1210,10 +1266,13 @@ export function taskResultText(output: string | undefined): string | undefined {
  * message whose one text part is `synthetic` and wraps the answer in
  * {@link TASK_OUTPUT_ENVELOPE}, naming the child. That part is the run's
  * result, as a foreground call's own completion is: the run's end gets it
- * once (`resultPending`), or, the answer coming before the child's own
- * `session.idle`, that end carries it (`pendingResult`). Only for a run whose
- * launching part answered in the background (`answersInBackground`), and only
- * when the summary, where it names the call's description, names this run's:
+ * once (`resultPending`) — 1.18.32 publishes the child's `session.idle`
+ * before the job completes and the prompt is written, so the end comes first
+ * — or, defensively, the answer coming before it, that end carries it
+ * (`pendingResult`). Both are written before any reply to the prompt opens a
+ * turn (`claimReply` opens at the reply), so neither rides it. Only for a run
+ * whose launching part answered in the background (`answersInBackground`), and
+ * only when the summary, where it names the call's description, names this run's:
  * an answer arriving after a relaunch is the earlier run's. A part that is not
  * synthetic, or names no child of this thread, is none. The prompt is still
  * no message of the thread's: this adds the result and nothing else.
@@ -1576,6 +1635,96 @@ function emitTextDelta(
 }
 
 /**
+ * The turn a reply belongs to, decided on the first frame of its assistant
+ * message — `parentID` names the prompt it answers, the newest user message
+ * of the session's run (1.18.32's `MessageV2.latest`, read from the source).
+ *
+ * A reply to a prompt the host sent, or to one a turn already claimed, is
+ * that turn's (`claimedPromptIds`). Any other prompt the SERVER wrote: 1.18.32
+ * answers a background `task` call by prompting the calling session with the
+ * child's answer (`injectBackgroundResult`, fixtures README observation 27),
+ * through `SessionPrompt.prompt` — the path a `prompt_async` takes — and that
+ * prompt starts a run of its own, the parent's reply, which no `/turn` ever
+ * opened. Its rows were turnless, and the thread read idle while the agent
+ * worked. So:
+ *
+ * - While a turn runs, the reply is that turn's: the server answers a prompt
+ *   that arrives mid-run in the same run (`SessionRunState.ensureRunning`
+ *   awaits a running run), so the turn claims it, and its steps count as the
+ *   turn's own (`promptMessageIds`).
+ * - While none runs, it opens one — the woken turn — named by the prompt, as
+ *   a live turn is named by the prompt that opened it (a rewind finds it again
+ *   in `GET /session/:id/message`): `openTurn`, `turn.started` before any row
+ *   of the reply, and a `turn-woken` signal for the session's record. From
+ *   there it is any turn: the session's idle (or error) settles it, a Stop
+ *   aborts it, the session's stop closes it, and a message the user sends
+ *   meanwhile steers it — the server queues it into the same run. Only with a
+ *   run behind it (`parentBusy`): with none, no idle would ever settle it.
+ *
+ * A compaction's summary (`summary: true`) answers no prompt of the
+ * conversation, so its prompt is claimed but never joins `promptMessageIds`:
+ * the summary call stays off the meter and the turn's usage, as it always has
+ * inside a turn the host started. While no turn runs it is either the host's
+ * own `/compact` (`hostCompacting`), which stays turnless, or a run's own —
+ * one a background answer woke that found its context full and compacts
+ * before it replies (1.18.32's `SessionPrompt.run`) — which opens the woken
+ * turn there, named by the compaction's prompt, so the thread reads working
+ * through the compaction; the reply to the prompt it goes on with then joins
+ * it as any mid-run prompt does.
+ *
+ * Only a reply BEGINNING: a message that already ended (a fork copies a
+ * session's messages whole — fixture 10) answers no running prompt, and a
+ * rewind claims every prompt its fork copied (`rollbackThread`), so neither
+ * does a copy its dead run never completed. Output that follows an
+ * interruption never reaches here (the demux drops it first), so it opens
+ * nothing either.
+ */
+function claimReply(
+  state: OpenCodeSessionState,
+  info: { parentID?: string; summary?: unknown; time?: { completed?: number } },
+  raw: unknown,
+  out: Emitter
+): void {
+  const promptId =
+    typeof info.parentID === "string" && info.parentID.length > 0 ? info.parentID : undefined;
+  if (
+    promptId === undefined ||
+    state.claimedPromptIds.has(promptId) ||
+    info.time?.completed !== undefined
+  ) {
+    return;
+  }
+  const summary = info.summary === true;
+  if (state.activeTurnId !== undefined) {
+    claimPrompt(state, promptId);
+    if (!summary) {
+      state.turnTokenUsage?.promptMessageIds.add(promptId);
+    }
+    return;
+  }
+  if (summary && state.hostCompacting) {
+    claimPrompt(state, promptId);
+    return;
+  }
+  // No run behind it, no turn: a reply beginning comes after its run's `busy`
+  // (`parentBusy`). Unclaimed, a later reply of a live run can still open it.
+  if (!state.parentBusy) {
+    return;
+  }
+  claimPrompt(state, promptId);
+  openTurn(state, promptId);
+  if (!summary) {
+    state.turnTokenUsage?.promptMessageIds.add(promptId);
+  }
+  out.push({
+    ...out.base({ turnId: promptId, raw }),
+    type: "turn.started",
+    payload: {}
+  });
+  out.signal({ kind: "turn-woken", turnId: promptId });
+}
+
+/**
  * Decide whether an assistant message is this turn's, and flush the steps that
  * were deferred while the answer was unknown. Returns the steps it counted, so
  * the caller can move the meter on them too — a step that resolved late is
@@ -1690,6 +1839,18 @@ function emitContextWindow(
   });
 }
 
+/**
+ * A tool part as its lifecycle row. A command's completion carries its final
+ * `output` in `data.result`, where both readers of a row's whole output look
+ * (`storedCommandOutput`). When OpenCode cut that output itself — the shell
+ * keeps only the END past its limits, behind a note naming the file that holds
+ * all of it; the generic cut any other command-named tool goes through (an
+ * MCP server's) keeps the HEAD, its note at the end ({@link isCutFinalOutput})
+ * — the completion says so (`truncated`, as Codex marks the head it bounded):
+ * the MCP's `read_tool_output` then reads the call's streamed join first, as
+ * the GUI's viewer does, and answers the kept part as the command's output,
+ * only a part of it, when no join answers.
+ */
 function emitToolItem(
   part: Extract<OpenCodePart, { type: "tool" }>,
   turnId: string | undefined,
@@ -1710,6 +1871,11 @@ function emitToolItem(
         ? "completed"
         : "inProgress";
   const command = part.state.input?.command;
+  const cut =
+    part.state.status === "completed" &&
+    itemType === "command_execution" &&
+    typeof part.state.output === "string" &&
+    isCutFinalOutput(part.state.output);
 
   out.push({
     ...out.base({ turnId, itemId: part.callID, agentId, createdAt: toolCreatedAt(part), raw }),
@@ -1735,7 +1901,8 @@ function emitToolItem(
         (itemType === "command_execution" || itemType === "mcp_tool_call")
           ? { result: part.state.output }
           : {})
-      }
+      },
+      ...(cut ? { truncated: true } : {})
     }
   });
 }

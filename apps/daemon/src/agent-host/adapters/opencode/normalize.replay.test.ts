@@ -55,11 +55,13 @@ import { modelContextLimits } from "./snapshot.ts";
 import {
   advanceOutputMark,
   borderOverlap,
+  claimPrompt,
   createSessionState,
   makeTurnTokenUsageAccumulator,
   suffixPrefixOverlap,
   type OpenCodeSessionState
 } from "./state.ts";
+import { compactionContinues, compactionPrompt, compactionSummary, wokenReply } from "./testing/woken.ts";
 
 const FIXTURE_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -156,9 +158,45 @@ function replay(
   const signals: NormalizerSignal[] = [];
   let turnSeq = 0;
 
+  // The runtime's half, again: `sendTurn` claims the prompt it mints before
+  // it submits it, so no reply to it is ever taken for one the server wrote
+  // itself — and a blocking `/command` is recorded only when it returns,
+  // after the frames of its reply (fixture 11).
+  for (const record of records) {
+    const http = record.data as HttpRecord;
+    const body = http.requestBody as { messageID?: string } | undefined;
+    if (
+      record.kind === "http" &&
+      http.method === "POST" &&
+      (http.path.includes("/prompt_async") || http.path.includes("/command")) &&
+      http.path.includes(parent) &&
+      typeof body?.messageID === "string"
+    ) {
+      claimPrompt(state, body.messageID);
+    }
+  }
+
+  // And `compact()` holds `hostCompacting` up while its `summarize` runs. That
+  // request too is recorded only when it returns (fixture 09), so the flag
+  // goes up at its own first frame — its prompt's manual `compaction` part —
+  // and down at its record.
+  let summarizing = records.filter((record) => {
+    const http = record.data as HttpRecord;
+    return (
+      record.kind === "http" &&
+      http.method === "POST" &&
+      http.path.includes("/summarize") &&
+      http.path.includes(parent)
+    );
+  }).length;
+
   for (const record of records) {
     if (record.kind === "http") {
       const http = record.data as HttpRecord;
+      if (http.method === "POST" && http.path.includes("/summarize") && http.path.includes(parent)) {
+        state.hostCompacting = false;
+        summarizing -= 1;
+      }
       // The runtime's half: a submitted prompt opens a turn.
       if (
         http.method === "POST" &&
@@ -182,6 +220,11 @@ function replay(
     const raw = asRawEvent(record.data);
     if (raw === null) {
       continue;
+    }
+    const part = (raw.properties as { part?: { type?: unknown; auto?: unknown; sessionID?: unknown } } | undefined)
+      ?.part;
+    if (summarizing > 0 && part?.type === "compaction" && part.auto === false && part.sessionID === parent) {
+      state.hostCompacting = true;
     }
     const result = normalizeOpenCodeEvent(state, raw, ctx);
     events.push(...result.events);
@@ -1416,11 +1459,12 @@ function launchInBackground(run: Replay): RuntimeEvent[] {
 function injectedResult(
   childId: string,
   answer: string,
-  options: { state?: string; description?: string } = {}
+  options: { state?: string; description?: string; messageId?: string } = {}
 ): OpenCodeRawEvent[] {
+  const messageId = options.messageId ?? "msg_injected";
   const [message, part] = childFixtureFrames([122, 123], {
-    msg_01a0c202b1b56tqi5gdjmgr8y9: "msg_injected",
-    prt_0c202b1d8001Ef7fckL6t7C4aG: "prt_injected"
+    msg_01a0c202b1b56tqi5gdjmgr8y9: messageId,
+    prt_0c202b1d8001Ef7fckL6t7C4aG: `prt_${messageId}`
   });
   assert.ok(message && part);
   const copy = JSON.parse(JSON.stringify(part)) as {
@@ -1574,6 +1618,285 @@ test("a background run takes no answer written for another run's task", () => {
       ["call_resume", "RUN 2 ANSWER"]
     ]
   );
+});
+
+// ---------------------------------------------------------------------------
+// A background answer wakes the parent: its reply is a turn (obs. 27)
+// ---------------------------------------------------------------------------
+
+/** Fixture 12's session C — the one with a child — whose own reply the frames below clone. */
+const CHILD_PARENT_ID = "ses_f3dfd4e50ffe7r6H3Rf8jBDXUl";
+
+/**
+ * The parent's reply to a prompt the server wrote itself. 1.18.32's
+ * `injectBackgroundResult` prompts the calling session through
+ * `SessionPrompt.prompt`, the path `prompt_async` takes (read from the
+ * source, not captured): the prompt's user message, then the run — `busy`,
+ * the reply's assistant message naming the prompt as its parent, its parts,
+ * its completion — then `busy` → `idle` → `session.idle`. So the frames are
+ * fixture 12's own reply to its prompt (lines 186-187, 197-202) answering
+ * `promptId` under new ids, its completion (202 with `time.completed`), and
+ * the settle (177-179, the child's, as the parent's).
+ */
+function wokenReplyFrames(
+  promptId: string,
+  replyId: string
+): { begins: OpenCodeRawEvent[]; streams: OpenCodeRawEvent[]; ends: OpenCodeRawEvent[]; settle: OpenCodeRawEvent[] } {
+  const renames = {
+    msg_0c202cdef001WhUEivs8Y0ozoo: replyId,
+    msg_01a0c202b1b56tqi5gdjmgr8y9: promptId,
+    prt_0c202d300001iPUUe8kF98xzzI: `prt_start_${replyId}`,
+    prt_0c202d308001SGe0qwNz3du3Ri: `prt_text_${replyId}`,
+    prt_0c202d3d20012r6QX7WcsIYfVJ: `prt_step_${replyId}`
+  };
+  const [busy, begins, start, open, delta, close, step, stopped] = childFixtureFrames(
+    [186, 187, 197, 198, 199, 200, 201, 202],
+    renames
+  );
+  assert.ok(busy && begins && start && open && delta && close && step && stopped);
+  const completed = JSON.parse(JSON.stringify(stopped)) as {
+    type: string;
+    properties: { info: { time: Record<string, unknown> } };
+  };
+  completed.properties.info.time.completed = 1789961359000;
+  return {
+    begins: [busy, begins],
+    streams: [start, open, delta],
+    ends: [close, step, stopped, completed],
+    settle: [
+      busy,
+      ...childFixtureFrames([178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID })
+    ]
+  };
+}
+
+/**
+ * Fixture 12's parent at rest after a background launch, its child settled:
+ * what a wake finds. The capture ends mid-run (line 202), so the parent's own
+ * run is settled here too — `busy` → `idle` → `session.idle`, lines 177-179 as
+ * the parent's.
+ */
+function parentAtRest(): Replay {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  run.state.turnTokenUsage = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  feed(run, childFixtureFrames([177, 178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID }));
+  return run;
+}
+
+test("a background answer wakes the parent: its reply opens a turn named by the injected prompt, and every row rides it", () => {
+  const run = parentAtRest();
+  const prompt = feed(run, injectedResult("ses_background_child", "Found README.md and a.ts.")).flat();
+  assert.deepEqual(eventsOfType(prompt, "turn.started"), [], "a prompt alone is no reply: nothing opens yet");
+  // The child's end came first (1.18.32's runner publishes its idle before the
+  // job completes), and the result its answer carries lands before the reply
+  // opens the turn: neither rides it, so a rewind of it takes neither.
+  assert.deepEqual(
+    eventsOfType(prompt, "task.completed").map((event) => [event.payload.summary, event.turnId]),
+    [["Found README.md and a.ts.", undefined]]
+  );
+
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const [busy, begins] = reply.begins.map((frame) => normalizeOpenCodeEvent(run.state, frame, run.ctx));
+  assert.deepEqual(busy?.events, [], "the run's busy comes first, before any reply exists");
+  assert.equal(begins?.events[0]?.type, "turn.started", "the reply's first frame opens the turn, before any row of it");
+  assert.equal(begins?.events[0]?.turnId, "msg_injected", "named by the prompt it answers, as a live turn is");
+  assert.deepEqual(begins?.signals, [{ kind: "turn-woken", turnId: "msg_injected" }]);
+  assert.equal(run.state.activeTurnId, "msg_injected");
+
+  const rows = feed(run, [...reply.streams, ...reply.ends]).flat();
+  assert.ok(rows.length > 0);
+  for (const event of rows) {
+    assert.equal(event.turnId, "msg_injected", `${event.type} rides the woken turn`);
+  }
+  assert.deepEqual(
+    eventsOfType(rows, "content.delta").map((event) => event.payload.delta).join(""),
+    "The files in this directory are README.md and a.ts."
+  );
+  assert.equal(eventsOfType(rows, "thread.token-usage.updated").length, 1, "its step is the turn's own");
+  assert.equal(eventsOfType([...rows], "turn.started").length, 0, "one turn, however many frames");
+
+  // The run's settle is the session's to act on, as for any turn.
+  const settle = reply.settle.flatMap((frame) => normalizeOpenCodeEvent(run.state, frame, run.ctx).signals);
+  assert.deepEqual(
+    settle.map((signal) => signal.kind),
+    ["status-busy", "status-idle", "session-idle"]
+  );
+});
+
+test("a reply the host asked for, a compaction's summary, or a message that already ended opens no turn", () => {
+  // Fixture 12's own prompt was the host's: a new reply to it, while nothing runs, is a late one.
+  const hosts = parentAtRest();
+  const late = wokenReplyFrames("msg_01a0c202b1b56tqi5gdjmgr8y9", "msg_late");
+  assert.deepEqual(eventsOfType(feed(hosts, late.begins).flat(), "turn.started"), []);
+  assert.equal(hosts.state.activeTurnId, undefined);
+
+  // A message that already ended — a fork copies a session's messages whole,
+  // completed ones included (fixture 10, lines at t=9362) — is no reply beginning.
+  const copied = parentAtRest();
+  const done = wokenReplyFrames("msg_copied_prompt", "msg_copied").ends.at(-1);
+  assert.ok(done !== undefined);
+  assert.deepEqual(eventsOfType(feed(copied, [done]).flat(), "turn.started"), []);
+
+  // The host's own `/compact` (fixture 09): `compact()` holds `hostCompacting`
+  // up while its `summarize` runs, and the summary opens nothing — its run
+  // `busy` and all.
+  const compacting = parentAtRest();
+  compacting.state.hostCompacting = true;
+  const summary = compactionSummary({
+    sessionId: CHILD_PARENT_ID,
+    promptId: "msg_compaction",
+    replyId: "msg_summary",
+    text: "## Objective"
+  });
+  const own = feed(compacting, [
+    ...compactionPrompt({ sessionId: CHILD_PARENT_ID, promptId: "msg_compaction", auto: false }),
+    ...summary.begins,
+    ...summary.streams,
+    ...summary.ends
+  ]).flat();
+  assert.deepEqual(eventsOfType(own, "turn.started"), []);
+  assert.equal(compacting.state.activeTurnId, undefined);
+});
+
+test("a woken run that compacts first runs as one turn from its summary on, the summary off the meter", () => {
+  const run = parentAtRest();
+  const sessionId = CHILD_PARENT_ID;
+  feed(run, injectedResult("ses_background_child", "Found README.md and a.ts."));
+  // 1.18.32's `SessionPrompt.run` (read from the source): the run's first
+  // iteration finds the last answer's context over the model's limit and
+  // writes an automatic compaction's prompt; the next summarises; the one
+  // after answers the prompt the compaction writes to go on with.
+  const busy: OpenCodeRawEvent = { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } };
+  const summary = compactionSummary({ sessionId, promptId: "msg_compaction", replyId: "msg_summary", text: "## Goal" });
+  const reply = wokenReply({ sessionId, promptId: "msg_continue", replyId: "msg_reply", text: "Done." });
+  const before = feed(run, [busy, ...compactionPrompt({ sessionId, promptId: "msg_compaction", auto: true })]).flat();
+  assert.deepEqual(before, [], "a compaction's prompt is no reply: nothing opens yet");
+
+  const perFrame = feed(run, [
+    ...summary.begins,
+    ...summary.streams,
+    ...summary.ends,
+    ...compactionContinues({ sessionId, promptId: "msg_continue" }),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends
+  ]);
+  const events = perFrame.flat();
+  assert.deepEqual(
+    eventsOfType(events, "turn.started").map((event) => event.turnId),
+    ["msg_compaction"],
+    "the summary opens the turn — the thread reads working through the compaction — named by the prompt it answers"
+  );
+  assert.equal(perFrame[1]?.[0]?.type, "turn.started", "on the summary's first frame, before any row of it");
+  for (const event of events) {
+    assert.equal(event.turnId, "msg_compaction", `${event.type} rides the woken turn`);
+  }
+  assert.ok(events.some((event) => event.type === "thread.state.changed"), "the compaction lands on it too");
+  // The summary call answers no prompt of the conversation, so its step stays
+  // off the meter, as inside a turn the host started; the reply's counts.
+  assert.equal(eventsOfType(events, "thread.token-usage.updated").length, 1, "only the reply's step moves the meter");
+  assert.equal(run.state.turnTokenUsage?.promptMessageIds.has("msg_compaction"), false);
+  assert.equal(run.state.turnTokenUsage?.promptMessageIds.has("msg_continue"), true);
+  assert.equal(run.state.claimedPromptIds.has("msg_compaction"), true);
+});
+
+test("a reply with no `busy` since the parent's last idle — no run behind it — opens no turn", () => {
+  const run = parentAtRest();
+  feed(run, injectedResult("ses_background_child", "Found README.md and a.ts."));
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const [busy, begins] = reply.begins;
+  assert.ok(busy && begins);
+  // The assistant frame alone: every loop iteration of 1.18.32's
+  // `SessionPrompt.run` sets `busy` before it writes the reply, so a reply
+  // with none before it has no run to end it — a turn opened on it would
+  // never settle, and hold a deploy's drain until the user acted.
+  const lone = feed(run, [begins, ...reply.streams]).flat();
+  assert.deepEqual(eventsOfType(lone, "turn.started"), []);
+  assert.equal(run.state.activeTurnId, undefined);
+
+  // The run's own `busy`, then its next reply: that one opens the turn.
+  const next = wokenReplyFrames("msg_injected", "msg_woken_2");
+  const opened = feed(run, next.begins).flat();
+  assert.deepEqual(eventsOfType(opened, "turn.started").map((event) => event.turnId), ["msg_injected"]);
+
+  // A run that ended (`idle`) is no evidence for the next reply.
+  const ended = parentAtRest();
+  feed(ended, [
+    ...injectedResult("ses_background_child", "Found it."),
+    busy,
+    ...childFixtureFrames([178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID })
+  ]);
+  assert.deepEqual(eventsOfType(feed(ended, [begins]).flat(), "turn.started"), []);
+});
+
+test("no capture opens a turn of its own: every reply in them answers a prompt the host sent, or is a compaction", () => {
+  for (const name of fixtureNames()) {
+    for (const sessionId of sessionIds(readFixture(name))) {
+      const { events, signals } = replay(name, { sessionId });
+      assert.deepEqual(eventsOfType(events, "turn.started"), [], `${name} as ${sessionId}`);
+      assert.ok(!signals.some((signal) => signal.kind === "turn-woken"), `${name} as ${sessionId}`);
+    }
+  }
+});
+
+test("while a turn runs, a reply to a prompt the server wrote belongs to it, and its steps count as the turn's", () => {
+  const run = parentAtRest();
+  run.state.activeTurnId = "turn-host";
+  run.state.turnTokenUsage = makeTurnTokenUsageAccumulator();
+  run.state.turnTokenUsage.promptMessageIds.add("msg_host_prompt");
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const events = feed(run, [
+    ...injectedResult("ses_background_child", "Found it."),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends
+  ]).flat();
+  assert.deepEqual(eventsOfType(events, "turn.started"), []);
+  for (const event of events.filter((candidate) => !candidate.type.startsWith("task."))) {
+    assert.equal(event.turnId, "turn-host", `${event.type} rides the running turn`);
+  }
+  assert.equal(eventsOfType(events, "thread.token-usage.updated").length, 1, "the reply's step counts");
+  assert.equal(run.state.activeTurnId, "turn-host");
+});
+
+test("a second answer that arrives while the woken reply runs joins its turn", () => {
+  const run = parentAtRest();
+  const first = wokenReplyFrames("msg_injected", "msg_woken");
+  const second = wokenReplyFrames("msg_injected_2", "msg_woken_2");
+  const events = feed(run, [
+    ...injectedResult("ses_background_child", "Found it."),
+    ...first.begins,
+    ...first.streams,
+    ...injectedResult("ses_background_child", "And more.", { messageId: "msg_injected_2" }),
+    ...first.ends,
+    ...second.begins,
+    ...second.streams,
+    ...second.ends
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(events, "turn.started").map((event) => event.turnId),
+    ["msg_injected"],
+    "the server answers the second prompt in the same run: one turn"
+  );
+  const rows = events.filter((event) => !event.type.startsWith("task.") && event.type !== "turn.started");
+  for (const event of rows) {
+    assert.equal(event.turnId, "msg_injected", `${event.type} rides the woken turn`);
+  }
+  assert.equal(eventsOfType(events, "thread.token-usage.updated").length, 2, "both replies' steps count");
+});
+
+test("output that follows an interruption opens nothing, a woken reply's included", () => {
+  const run = parentAtRest();
+  run.state.interruptedTurnId = "turn-stopped";
+  run.state.reconcileIdleStatus = true;
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const events = feed(run, [...reply.begins, ...reply.streams, ...reply.ends]).flat();
+  assert.deepEqual(events, []);
+  assert.equal(run.state.activeTurnId, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -2166,6 +2489,116 @@ test("a cut final output closes the stream with where the whole output was saved
     whole.map((chunk) => chunk.payload.delta),
     ["one\n", "two\n"]
   );
+});
+
+test("a completion whose final output the tool cut is stored marked cut; any other is not", () => {
+  const bash = bashFrames();
+  const saved = "/tmp/opencode/tool_output_3";
+  const printed = numberedLines(0, 3_000);
+  // What 1.18.32's `ShellTool.run` keeps of an output past its limits: its
+  // END (`es` walks the lines from the last one), behind the note.
+  const tail = printed.split("\n").slice(-2_001).join("\n");
+  const kept = `${cutNote(saved)}${tail}`;
+  const completionOf = (events: readonly RuntimeEvent[]) => {
+    const done = eventsOfType(events, "item.completed").find((event) => event.itemId === BASH_CALL);
+    assert.ok(done !== undefined, "the call's completion");
+    return done.payload;
+  };
+
+  const cut = feed(liveSession(BASH_SESSION_ID), [
+    bash.pending,
+    bash.running,
+    withOutput(bash.grown, outputWindow(printed)),
+    settledAs(bash.completed, kept, outputWindow(printed), { truncated: true, outputPath: saved })
+  ]).flat();
+  const stored = completionOf(cut);
+  assert.equal(stored.truncated, true, "its data keeps only the part the tool kept");
+  assert.equal((stored.data as { result?: string }).result, kept, "that part, as the tool wrote it");
+  for (const row of [...eventsOfType(cut, "item.started"), ...eventsOfType(cut, "item.updated")]) {
+    assert.equal("truncated" in row.payload, false, "only the completion is marked");
+  }
+
+  // Nothing streamed before it: the completion is marked all the same.
+  const unseen = feed(liveSession(BASH_SESSION_ID), [
+    bash.pending,
+    settledAs(bash.completed, kept, outputWindow(printed), { truncated: true, outputPath: saved })
+  ]).flat();
+  assert.equal(completionOf(unseen).truncated, true);
+
+  // Whole: a final output the tool never cut, even one that quotes the note
+  // somewhere other than at its start, is stored whole and says nothing.
+  for (const final of ["one\ntwo\n", `grep found:\n${cutNote(saved)}done\n`]) {
+    const whole = feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "one\n"),
+      settledAs(bash.completed, final, "one\n")
+    ]).flat();
+    assert.equal("truncated" in completionOf(whole), false, JSON.stringify(final));
+  }
+
+  // A tool that is not a command keeps its output as it is: no reader takes
+  // its data for a command's output.
+  const read = JSON.parse(JSON.stringify(settledAs(bash.completed, kept, ""))) as {
+    type: string;
+    properties: { part: { tool: string } };
+  };
+  read.properties.part.tool = "read";
+  const readDone = eventsOfType(feed(liveSession(BASH_SESSION_ID), [read]).flat(), "item.completed")[0];
+  assert.equal(readDone?.payload.itemType, "dynamic_tool_call");
+  assert.equal("truncated" in (readDone?.payload ?? {}), false);
+});
+
+/**
+ * What 1.18.32's generic `Truncate.output` makes of a tool's output past its
+ * limits (read from the source, not captured): the HEAD — its default
+ * direction, the only one any tool uses — then its note at the END, whose last
+ * line depends on whether the agent may delegate to the Task tool. Every tool
+ * but the shell goes through it (`Tool.define`, and every MCP tool), with
+ * `metadata.truncated` and `outputPath` set beside it.
+ */
+function genericCut(head: string, cut: string, saved: string, taskHint = false): string {
+  const hint = taskHint
+    ? "Use the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context."
+    : "Use Grep to search the full content or Read with offset/limit to view specific sections.";
+  return `${head}\n\n...${cut} truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: ${saved}\n${hint}`;
+}
+
+test("a command's completion the generic truncation cut — the head kept, its note at the end — is stored marked cut too", () => {
+  const bash = bashFrames();
+  const saved = "/home/u/.local/share/opencode/tool-output/tool_1";
+  // A command-named tool that is not the shell: an MCP server's, say.
+  const asTool = (frame: OpenCodeRawEvent, tool: string): OpenCodeRawEvent => {
+    const copy = JSON.parse(JSON.stringify(frame)) as { type: string; properties: { part: { tool: string } } };
+    copy.properties.part.tool = tool;
+    return copy;
+  };
+  const completionFor = (tool: string, output: string) =>
+    eventsOfType(
+      feed(liveSession(BASH_SESSION_ID), [
+        asTool(settledAs(bash.completed, output, "", { truncated: true, outputPath: saved }), tool)
+      ]).flat(),
+      "item.completed"
+    )[0]?.payload;
+
+  const head = numberedLines(0, 2_000);
+  for (const output of [
+    genericCut(head, "1200 lines", saved),
+    genericCut(head, "1200 lines", saved, true),
+    // A first line past the byte limit: nothing of it kept, the note alone.
+    genericCut("", "80000 bytes", saved)
+  ]) {
+    const stored = completionFor("shell_run_command", output);
+    assert.equal(stored?.itemType, "command_execution");
+    assert.equal(stored?.truncated, true, JSON.stringify(output.slice(-120)));
+  }
+  // The note anywhere but at the end is output, not the tool's cut.
+  const quoted = completionFor("shell_run_command", `${genericCut(head, "5 lines", saved)}\nmore output\n`);
+  assert.equal("truncated" in (quoted ?? {}), false);
+  // A tool that is not a command keeps its output as it is.
+  const read = completionFor("read", genericCut(head, "1200 lines", saved));
+  assert.equal(read?.itemType, "dynamic_tool_call");
+  assert.equal("truncated" in (read ?? {}), false);
 });
 
 test("a final output that neither extends the stream nor holds its end adds nothing", () => {

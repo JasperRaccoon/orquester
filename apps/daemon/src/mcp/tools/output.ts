@@ -27,9 +27,11 @@ type ToolOutputKind = "command-output" | "message" | "payload";
 /**
  * What an item answers, and — for a call's streamed output — the two things the host's join says about it: the call has
  * not completed (`running`: the text is its output so far), and the join passed the host's cap (`truncated`: the text
- * is its head, `THREAD_ITEM_OUTPUT_MAX_BYTES`). `truncated` also marks the head a completion's item kept of a long
- * output (`storedCommandOutput`: Codex's first 64 KiB). Either the whole `text`, which this tool windows itself, or —
- * from a host that windows — the one `window` of a streamed output the call asked for.
+ * is its head, `THREAD_ITEM_OUTPUT_MAX_BYTES`). `truncated` also marks the part a completion's item kept of a long
+ * output (`storedCommandOutput`: Codex's first 64 KiB, the end OpenCode's `bash` tool kept behind its note, the head its
+ * generic cut kept before its own). Either
+ * the whole `text`, which this tool windows itself, or — from a host that windows — the one `window` of a streamed
+ * output the call asked for.
  */
 type StreamFlags = { running?: true; truncated?: true };
 type ItemOutput =
@@ -86,14 +88,15 @@ async function streamedOutput(api: DaemonApi, sessionId: string, itemId: string,
  * 1. a `command_execution` activity whose own data carries output answers it whole (`storedCommandOutput`, from
  *    `commandOutputText`: the first place, in the preview's reading order, that holds output in the unslimmed item) —
  *    unless the item is stored cut (`payload.truncated`): an update, persisted already slimmed (§5.6), whose data holds
- *    only the preview, or a completion that kept only its output's head (Codex's past 64 KiB);
+ *    only the preview, or a completion that kept only part of its output (Codex's head past 64 KiB, the end OpenCode's
+ *    `bash` tool kept behind its "output truncated" note, the head OpenCode's generic cut kept of another command's);
  * 2. else a command's row naming its call (`payload.toolUseId`) — a `command_execution` activity, or a `tool.output`
  *    chunk of `command_output` — answers the call's streamed output, which is in no item's data at all (a Claude
  *    background shell's, a running command's so far), joined by the host, when the call streamed any — one window of
  *    it from a host that windows (`window`, the one this call asked for), else the whole join. Never a file change:
  *    Claude streams an Edit's or a Write's result text too (`file_change_output`, "File created successfully at: …"),
  *    which is no command's output, and its payload — the edit — is what the GUI's viewer shows;
- * 3. else a completion stored cut answers the head it kept as the command's output, `truncated` — as the GUI's viewer
+ * 3. else a completion stored cut answers the part it kept as the command's output, `truncated` — as the GUI's viewer
  *    shows it, never as the payload's JSON and never as the whole output (an update's preview never answers here);
  * 4. else a message's text, a string payload as it is, else the payload as indented JSON, else — no payload to write —
  *    the row's summary.
@@ -117,7 +120,7 @@ async function itemOutput(api: DaemonApi, sessionId: string, item: ThreadItem, w
       }
     }
   }
-  // What a completion stored cut kept of a long output: its head, the command's output as printed — only its start.
+  // What a completion stored cut kept of a long output — Codex's head, an OpenCode cut's end or head — as printed: only part of it.
   if (stored !== undefined) return { kind: "command-output", text: stored.text, truncated: true };
   if (typeof item.payload === "string") return { kind: "payload", text: item.payload };
   let json: string | undefined;
@@ -195,7 +198,7 @@ function windowPage(args: { itemId: string } & ByteWindow, output: { kind: "comm
 const readToolOutput = defineTool({
   name: "read_tool_output",
   title: "Read a tool's full output",
-  description: "A tool call's whole output, as the GUI's \"Load full output\" reads it: pass a tool row's outputItemId from read_transcript as itemId. kind: command-output (a command's output — so far if running is true; only its head if truncated is true), message or payload (the item's payload as JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
+  description: "A tool call's whole output, as the GUI's \"Load full output\" reads it: pass a tool row's outputItemId from read_transcript as itemId. kind: command-output (a command's output — so far if running is true; only part of it if truncated is true), message or payload (the item's payload as JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
   input: {
     sessionId: z.string().min(1).describe("The session id from list_sessions."),
     itemId: z.string().min(1).describe("The item to read: a tool row's outputItemId from read_transcript."),
