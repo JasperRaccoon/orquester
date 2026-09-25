@@ -3306,8 +3306,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       const rules: GapRules = {
         latestRevertSeq: index.latestRevertSeq(threadId),
-        turnOf: turnLookup(index, threadId),
-        turnOfPrompt: (messageId) => index.turnByPrompt(threadId, messageId)
+        turnOf: askedOnce((turnId) => index.turnById(threadId, turnId)),
+        turnOfPrompt: askedOnce((messageId) => index.turnByPrompt(threadId, messageId))
       };
       const whole = historyBlockEvents(range.events, plan.turns, plan.firstTurnSeq, rules);
       let served = plan;
@@ -5350,16 +5350,20 @@ function keptOutOfGap(
   }
 }
 
-/** The index's turn by id, asked once per id for one page. */
-function turnLookup(index: ThreadIndex, threadId: string): (turnId: string) => IndexedTurn | null {
-  const known = new Map<string, IndexedTurn | null>();
-  return (turnId) => {
-    let turn = known.get(turnId);
-    if (turn === undefined) {
-      turn = index.turnById(threadId, turnId);
-      known.set(turnId, turn);
+/**
+ * `read`, asked once per key for one page: a turn's rows name its id, and a
+ * streamed message's chunks its message id, line after line — one index query
+ * each.
+ */
+function askedOnce<T>(read: (key: string) => T | null): (key: string) => T | null {
+  const known = new Map<string, T | null>();
+  return (key) => {
+    let value = known.get(key);
+    if (value === undefined) {
+      value = read(key);
+      known.set(key, value);
     }
-    return turn;
+    return value;
   };
 }
 

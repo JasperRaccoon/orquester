@@ -26,9 +26,11 @@ import {
   foldSubagentActivities,
   foldThread,
   openWorkOf,
+  THREAD_HISTORY_DEFAULT_TURNS,
   type DomainEvent,
   type ThreadActivityItem,
   type ThreadHistoryPage,
+  type ThreadHistoryQuery,
   type ThreadItem
 } from "@orquester/api/agent-chat";
 
@@ -2609,8 +2611,9 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
 
   /**
    * The snapshot a client reads once the index has taken every append, and every page "Load older"
-   * then reads — as the client asks: first by the snapshot's cursor, or without one when the snapshot
-   * has none (`nextHistoryCursor`), then by each page's own.
+   * then reads — as the client asks (the store's `loadHistoryPages`): first by the snapshot's cursor,
+   * or without one when the snapshot has none (`nextHistoryCursor`), then by each page's own; always
+   * with the default `turns`.
    */
   async function walkAsTheClient(host: TestHost, index: ThreadIndex, threadId: string) {
     await host.settle();
@@ -2619,13 +2622,16 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     if (read.kind !== "snapshot") throw new Error("a whole-thread read is a snapshot");
     assert.equal(read.thread.history?.hasOlder, true, "the window has evicted: there is history to page");
     const pages: ThreadHistoryPage[] = [];
-    const first = read.thread.history?.beforeCursor;
-    let query: { before?: string } | null = first ? { before: first } : {};
+    const asked = (before: string | null | undefined): ThreadHistoryQuery => ({
+      ...(before ? { before } : {}),
+      turns: THREAD_HISTORY_DEFAULT_TURNS
+    });
+    let query: ThreadHistoryQuery | null = asked(read.thread.history?.beforeCursor);
     while (query !== null) {
       assert.ok(pages.length < 50, "paging terminates");
       const page = await host.orchestrator.readHistory(threadId, query);
       pages.push(page);
-      query = page.page.beforeCursor === null ? null : { before: page.page.beforeCursor };
+      query = page.page.beforeCursor === null ? null : asked(page.page.beforeCursor);
     }
     return { window: read.thread.items, pages };
   }
@@ -2772,6 +2778,64 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     const turnless = (page: ThreadHistoryPage): number[] =>
       page.checkpoints.flatMap((checkpoint) => (checkpoint.turnId === null ? [checkpoint.checkpointTurnCount] : []));
     assert.deepEqual(pages.flatMap(turnless), [1], "the capture the rewind kept, alone");
+    await host.stop();
+  });
+
+  it("asks the index which turn a turnless message opens once per page, however many chunks streamed it", async (t) => {
+    const index = await realIndex(t);
+    const asked = new Map<string, number>();
+    const counting = new Proxy(index, {
+      get(target, key) {
+        if (key === "turnByPrompt") {
+          return (threadId: string, messageId: string) => {
+            asked.set(messageId, (asked.get(messageId) ?? 0) + 1);
+            return target.turnByPrompt(threadId, messageId);
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    const host = createTestHost({ index: counting });
+    const threadId = await host.createThread();
+    await plainTurn(host, threadId, "r-1", 560);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 30);
+    // In the cut: an agent's words with no turn, streamed in eight chunks.
+    await host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: 8 }, (_, chunk) =>
+        sunk(threadId, "thread.message-sent", {
+          messageId: "agent-x:words",
+          role: "assistant",
+          text: `part ${chunk} `,
+          streaming: chunk < 7,
+          turnId: null,
+          agentId: "agent-x"
+        })
+      )
+    );
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    await host.settle();
+    await index.drain();
+    const read = await host.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    let query: ThreadHistoryQuery | null = { turns: THREAD_HISTORY_DEFAULT_TURNS };
+    let pages = 0;
+    let everAsked = 0;
+    while (query !== null) {
+      assert.ok(pages < 50, "paging terminates");
+      asked.clear();
+      const page = await host.orchestrator.readHistory(threadId, query);
+      pages += 1;
+      everAsked += asked.get("agent-x:words") ?? 0;
+      for (const [messageId, times] of asked) {
+        assert.equal(times, 1, `one page asked ${times} times which turn ${messageId} opens`);
+      }
+      query = page.page.beforeCursor === null ? null : { before: page.page.beforeCursor, turns: THREAD_HISTORY_DEFAULT_TURNS };
+    }
+    assert.ok(everAsked > 0, "a page planned the chunks");
     await host.stop();
   });
 });
