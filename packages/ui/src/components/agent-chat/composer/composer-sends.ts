@@ -20,19 +20,61 @@
  * Module-level, like the composer bridge's handles and the dismissed error
  * banners, because it must outlive the thread store's generation too: that is
  * torn down 2 s after the tab unmounts, while the post keeps running. In
- * memory only: a reload aborts the post, and whatever landed arrives on the
- * stream. Nothing clears an entry but its own settle — not an unmount, not a
- * tab close (a project switch unmounts too).
+ * memory only — what survives a reload is the tab's outbox
+ * (`composer-outbox.ts`), and the thread store that picks a send up from it
+ * after the reload opens an entry here for its re-post, so the thread reads
+ * "Sending" again until that settles. Nothing clears an entry but its own
+ * settle — not an unmount, not a tab close (a project switch unmounts too).
+ *
+ * Beside it, the same kind of marker for the thread's QUEUED sends
+ * ({@link beginQueuedSend}): the queue sends one message at a time, and the
+ * one on its way may belong to a store generation that is already gone.
  */
+
+/**
+ * One token per send, per thread: a thread counts while any of its tokens is
+ * open, and each settle closes its own token only, once.
+ */
+function perThreadTokens(onChange: (sessionId: string) => void) {
+  const open = new Map<string, Set<symbol>>();
+  return {
+    begin(sessionId: string): () => void {
+      const token = Symbol(sessionId);
+      let tokens = open.get(sessionId);
+      if (!tokens) {
+        tokens = new Set();
+        open.set(sessionId, tokens);
+      }
+      tokens.add(token);
+      onChange(sessionId);
+      let settled = false;
+      return () => {
+        if (settled) return;
+        settled = true;
+        const current = open.get(sessionId);
+        if (!current || !current.delete(token)) return;
+        if (current.size === 0) open.delete(sessionId);
+        onChange(sessionId);
+      };
+    },
+    has(sessionId: string): boolean {
+      return (open.get(sessionId)?.size ?? 0) > 0;
+    },
+    /** Forget every token; answers the threads that had one. */
+    clear(): string[] {
+      const threads = [...open.keys()];
+      open.clear();
+      return threads;
+    }
+  };
+}
 
 type Listener = () => void;
 
-const inFlight = new Map<string, Set<symbol>>();
 const listeners = new Set<Listener>();
-
-function notify(): void {
+const composerSends = perThreadTokens(() => {
   for (const listener of [...listeners]) listener();
-}
+});
 
 /**
  * Open one send from `sessionId`. Returns its settle: idempotent, and it
@@ -40,28 +82,12 @@ function notify(): void {
  * each close their own.
  */
 export function beginComposerSend(sessionId: string): () => void {
-  const token = Symbol(sessionId);
-  let sends = inFlight.get(sessionId);
-  if (!sends) {
-    sends = new Set();
-    inFlight.set(sessionId, sends);
-  }
-  sends.add(token);
-  notify();
-  let settled = false;
-  return () => {
-    if (settled) return;
-    settled = true;
-    const current = inFlight.get(sessionId);
-    if (!current || !current.delete(token)) return;
-    if (current.size === 0) inFlight.delete(sessionId);
-    notify();
-  };
+  return composerSends.begin(sessionId);
 }
 
 /** True while any send from this thread is in flight. */
 export function isComposerSending(sessionId: string): boolean {
-  return (inFlight.get(sessionId)?.size ?? 0) > 0;
+  return composerSends.has(sessionId);
 }
 
 /** Hear about every change. Returns the unsubscribe. */
@@ -72,8 +98,54 @@ export function subscribeComposerSends(listener: Listener): () => void {
   };
 }
 
-/** Test seam: forget every send in flight. */
+// ---------------------------------------------------------------------------
+// The queue's send in flight (§7.4)
+// ---------------------------------------------------------------------------
+
+type QueuedListener = (sessionId: string) => void;
+
+const queuedListeners = new Set<QueuedListener>();
+const queuedSends = perThreadTokens((sessionId) => {
+  for (const listener of [...queuedListeners]) listener(sessionId);
+});
+
+/**
+ * Open one QUEUED send of `sessionId` — a queued message on its way out, from
+ * whichever generation of the thread's store took it. Until every one of them
+ * settles, no generation of the thread sends the next queued message: the
+ * generation a project switch tore down may still be posting the head of the
+ * queue when the thread's next generation — seeded without it, the head had
+ * already left the queue — reaches a boundary, and sending the next one then
+ * could land it first, or overtake the head outright when that fails and is
+ * held at the front. When the last one settles the queue proceeds, in order:
+ * a delivered one lets the next go; a failed one is back at the front, held,
+ * before its settle is heard.
+ *
+ * Not a composer send: a queued message never makes the thread read
+ * "Sending", as it never did.
+ */
+export function beginQueuedSend(sessionId: string): () => void {
+  return queuedSends.begin(sessionId);
+}
+
+/** True while a queued send of this thread is in flight, from any generation. */
+export function isQueuedSendInFlight(sessionId: string): boolean {
+  return queuedSends.has(sessionId);
+}
+
+/** Hear which thread's queued send opened or settled. Returns the unsubscribe. */
+export function subscribeQueuedSends(listener: QueuedListener): () => void {
+  queuedListeners.add(listener);
+  return () => {
+    queuedListeners.delete(listener);
+  };
+}
+
+/** Test seam: forget every send in flight, composer and queued. */
 export function resetComposerSends(): void {
-  inFlight.clear();
-  notify();
+  composerSends.clear();
+  for (const listener of [...listeners]) listener();
+  for (const sessionId of queuedSends.clear()) {
+    for (const listener of [...queuedListeners]) listener(sessionId);
+  }
 }

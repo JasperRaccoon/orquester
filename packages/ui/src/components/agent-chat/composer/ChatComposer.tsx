@@ -1156,12 +1156,13 @@ export function ChatComposer({
         const outcome = await sendComposerTurn({
           text,
           ...(resolveText ? { resolveText } : {}),
-          send: (resolved) =>
+          send: (resolved, { generatedPrompt }) =>
             actions.sendTurn({
               text: resolved,
               ...(refs.length > 0 ? { attachments: refs } : {}),
               interactionMode: mode,
-              ...(modelSelection ? { modelSelection } : {})
+              ...(modelSelection ? { modelSelection } : {}),
+              ...(generatedPrompt ? { generatedPrompt: true } : {})
             })
         });
         if (outcome.kind === "sent") {
@@ -1294,7 +1295,10 @@ export function ChatComposer({
       setDraft(EMPTY_DRAFT);
       // The persisted draft is cleared NOW rather than on the debounce: a
       // reload between the send and the next window would otherwise resurrect
-      // a message that is already on its way (§7.4).
+      // a message that is already on its way (§7.4). From here the message is
+      // the thread store's — sent or queued, it is kept in the tab's outbox
+      // until it settles, and a reload finishes it from there
+      // (`composer-outbox.ts`), never from the draft.
       carriedContextRef.current = [];
       persistRef.current?.write(EMPTY_PERSISTED_DRAFT);
       applyCaret(0);

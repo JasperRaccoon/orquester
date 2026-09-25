@@ -489,12 +489,15 @@ export function implementationTextResolver<Proposal>(input: {
  * Left out, the plan stays actionable and Implement is pressed again.
  *
  * `send` is the transport (the store's `sendTurn`), passed in so every branch
- * is testable without a renderer.
+ * is testable without a renderer. It is told when the text is a resolved
+ * prompt (`generatedPrompt`): the store keeps every send in the tab's outbox
+ * until it settles, and gives one a reload left behind back to the draft when
+ * it cannot re-post it — never an Implement's, for the same reason.
  */
 export async function sendComposerTurn(input: {
   text: string;
   resolveText?: () => Promise<string>;
-  send: (text: string) => Promise<void>;
+  send: (text: string, options: { generatedPrompt: boolean }) => Promise<void>;
 }): Promise<ComposerSendOutcome> {
   let text = input.text;
   if (input.resolveText) {
@@ -513,7 +516,7 @@ export async function sendComposerTurn(input: {
     if (validation) return { kind: "refused", notice: validation };
   }
   try {
-    await input.send(text);
+    await input.send(text, { generatedPrompt: input.resolveText !== undefined });
     return { kind: "sent" };
   } catch (error) {
     return {

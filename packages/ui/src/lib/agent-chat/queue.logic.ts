@@ -6,7 +6,11 @@
  * This is the client's own queue of messages it has **not dispatched yet**, and
  * it is a different thing from the host-side queue that holds already-posted
  * `/turn`s behind a running compaction (§3.4). A queued message is a full draft
- * snapshot held **in memory only**: a live intent, not a draft worth persisting.
+ * snapshot: a live intent, not a draft — never merged into the persisted draft
+ * while it waits. The thread store keeps the queue in the tab's outbox as well
+ * (`composer-outbox.ts`, `sessionStorage`), each message with the `commandId`
+ * it was queued with, so a reload of the tab brings it back as it was — held
+ * for Send now once nobody has seen it for ten minutes.
  *
  * It flushes at the **next tool-call boundary or at turn end**, whichever comes
  * first; taking one re-anchors every remaining message to the new boundary, so
@@ -99,12 +103,34 @@ export function removeQueued(
 /**
  * Put a message back at the head, held for user action — used when its send
  * failed, so the queue keeps its order and nothing behind it overtakes.
+ * `behind` names the messages (by id) it must follow: sends that fail one
+ * after the other, each held right behind the last of those still queued,
+ * keep the order they were posted in; with none of them left it goes to the
+ * very front. Never a count of held messages — the user may have sent one of
+ * them meanwhile, and a message queued later can be held for another reason,
+ * so a count could land it behind a message queued after it.
  *
  * *T3: `queuedMessageStore.ts:128-140`.*
  */
-export function holdAtFront(state: QueueState, message: QueuedComposerMessage): QueueState {
+export function holdAtFront(
+  state: QueueState,
+  message: QueuedComposerMessage,
+  behind?: ReadonlySet<string>
+): QueueState {
   const rest = state.messages.filter((entry) => entry.id !== message.id);
-  return { ...state, messages: [{ ...message, holdUntilUserAction: true }, ...rest] };
+  let at = 0;
+  if (behind !== undefined) {
+    for (let index = rest.length - 1; index >= 0; index -= 1) {
+      if (behind.has(rest[index]!.id)) {
+        at = index + 1;
+        break;
+      }
+    }
+  }
+  return {
+    ...state,
+    messages: [...rest.slice(0, at), { ...message, holdUntilUserAction: true }, ...rest.slice(at)]
+  };
 }
 
 /**

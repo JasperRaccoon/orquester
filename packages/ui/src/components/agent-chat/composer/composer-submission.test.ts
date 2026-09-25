@@ -638,6 +638,23 @@ test("a failed Implement leaves the draft alone: its prompt is the composer's, n
   assert.deepEqual(refusing.sent, [whole], "the whole prompt is what the host refused");
 });
 
+test("the wire is told an Implement's prompt is the composer's, so no send of it — a reload's re-post included — gives it back", async () => {
+  // The store keeps every send in the tab's outbox until it settles, and one a
+  // reload left behind comes back to the draft if it cannot be re-posted: an
+  // Implement's must not, for the reason a failed one does not (above).
+  const seen: unknown[] = [];
+  const send = async (text: string, options?: { generatedPrompt: boolean }): Promise<void> => {
+    seen.push({ text, ...options });
+  };
+  const whole = buildPlanImplementationPrompt("# Ship it\n\nevery step");
+  await sendComposerTurn({ text: CUT_PROMPT, resolveText: async () => whole, send });
+  await sendComposerTurn({ text: "fix the tests", send });
+  assert.deepEqual(seen, [
+    { text: whole, generatedPrompt: true },
+    { text: "fix the tests", generatedPrompt: false }
+  ]);
+});
+
 test("every Implement reads its plan at send time, intact or cut, and no other send does", async () => {
   const reads: string[] = [];
   const read = async (plan: { id: string; planMarkdown: string }) => {
