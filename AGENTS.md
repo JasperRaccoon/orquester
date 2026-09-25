@@ -1061,8 +1061,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   whole join, taken as it comes. Never a file change's join: its chunks are its result text (the
   MCP's rule). The subagent drill-in opens the same viewer: a read, not a command. The read is not
   routed through the thread store: an output the user asked to see once is not thread state.
-- **OpenCode: a subagent's answer arrives after its run ended, and a running command restates its
-  output.** (fixtures README observations 27-28, `adapters/opencode/normalize.ts`.) (1) The
+- **OpenCode: a subagent's answer arrives after its run ended — a background one's as a prompt that
+  wakes the parent into a turn of its own — and a running command restates its output.** (fixtures
+  README observations 27-28, `adapters/opencode/normalize.ts`.) (1) The
   child's own `session.idle` ends a run just BEFORE the parent's `task` part completes with the
   answer (fixture 12, lines 179-180), and the once-per-run end guard dropped that part: every
   OpenCode roster row read `result: null`. The part now gives the run's end its result — one more
@@ -1099,7 +1100,26 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `ShellTool.run` walks the lines from the last) — so it is marked `truncated` (`isCutFinalOutput`,
   the note `finalOutputRemainder` reads): unmarked, the MCP's `read_tool_output` answered that end
   as the whole output while the GUI's viewer read the join; now both read the join first and show
-  the kept end only when none answers, as "only part of" the output (`storedCommandOutput`).
+  the kept end only when none answers, as "only part of" the output (`storedCommandOutput`). (3)
+  That background answer WAKES the parent: 1.18.32 prompts the calling session through
+  `SessionPrompt.prompt` (the `prompt_async` path; read from the source) and runs a reply no `/turn`
+  opened — it streamed turnless, the thread read idle, and its end raised no "finished". The first
+  `message.updated` of an assistant message now decides whose reply it is (`claimReply`,
+  `claimedPromptIds`): a reply to a prompt the host sent (`sendTurn` claims the id it mints before
+  sending it) or one a turn already claimed is that turn's; a reply to any other prompt is claimed
+  by the turn running when it begins (the server answers a prompt that arrives mid-run in the same
+  run, `ensureRunning`), and while none runs it opens the WOKEN turn — `turn.started` named by the
+  prompt's id, as a live turn is by its prompt (a rewind finds it), before any row of the reply,
+  and a `turn-woken` signal for the session's record. From there it is any turn: the run's idle
+  settles it, a `session.error` fails it, a Stop aborts it, the session's stop closes it, a
+  restart's reconcile settles it, and a user message steers it — never Claude's auto-close of a
+  synthetic turn: this run is live, and the prompt joins it. Its steps are its own. Never opened
+  for a reply that already ended (a fork copies completed messages — fixture 10; a rewind also
+  claims every prompt its fork copied, so a copy its dead run never completed opens nothing
+  either), a compaction's summary (`summary: true`: the host's own `/compact` runs with no turn
+  open) or output after an interruption (the demux drops it first). The replay harness claims the
+  host's prompt ids up front for the same reason `sendTurn` does: a blocking `/command` is
+  recorded after its frames.
 - **Grok: shells are live work, a subagent is its `spawn_subagent` call plus the poll answers naming
   it, and a run nobody asks about stops counting after an hour.** (1) Grok stamps every task row of
   a background shell with the shell itself (`agentId` = `taskId`), and the liveness registry read

@@ -1547,6 +1547,24 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   note's `Full output saved to: <file>` pointer, which the full-output viewer's join would
   otherwise never hold (`adapters/opencode/normalize.ts`, `state.ts`; fixtures README
   observations 27-28).*
+  *Built (follow-ups 2026-09-25): that background answer WAKES the parent. 1.18.32 prompts the
+  calling session through `SessionPrompt.prompt` — the path a `prompt_async` takes (read from the
+  source, not captured) — and runs the parent's reply, which no `/turn` opened: it streamed as
+  turnless rows, the thread read idle while the agent wrote it, and its end raised no "finished".
+  The first `message.updated` of an assistant message now decides whose reply it is (`claimReply`,
+  `claimedPromptIds`): one answering a prompt the host sent (`sendTurn` claims each id it mints
+  before sending it) or a prompt a turn already claimed is that turn's; one answering any other
+  prompt is claimed by the turn running when it begins (the server answers a prompt that arrives
+  mid-run in the same run), and while none runs it opens a turn — `turn.started` named by the
+  prompt's id, as a live turn is named by its prompt, before any row of the reply. That turn is
+  then any turn: the run's idle settles it, a `session.error` fails it, a Stop aborts it, the
+  session's stop closes it, the next host's reconcile settles it after a crash, a second answer
+  arriving mid-run joins it, and a message the user sends meanwhile steers it — unlike §4.5
+  Claude's stale synthetic turn, which a send auto-closes: this run is live and OpenCode queues the
+  prompt into it. A reply that has already ended (a fork's copied history — a rewind also claims
+  every prompt its fork copied), a compaction's summary (`summary: true` — the host's own
+  `/compact` runs while no turn is open) and output after an interruption open nothing
+  (`adapters/opencode/normalize.ts`, `session.ts`, `state.ts`; fixtures README observation 27).*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

@@ -760,10 +760,33 @@ turn. History replays no roster rows at all (it reads the thread's own session, 
 parts replay as plain collab-agent calls), so a background run's result is filled on the live
 path only.
 
-**Known gap:** the parent's reply to that prompt streams as rows with no turn, and the thread
-reads idle while the parent's model writes it — no `/turn` opened one, and the session's `busy`
-with no active turn is ignored. Giving it a turn needs the shapes of that turn on the wire (a
-synthetic turn, like Claude's woken parent), which no capture has yet.
+**That prompt wakes the parent, and its reply is a turn.** Read from 1.18.32's source, not
+captured: `injectBackgroundResult` calls the session's `prompt` with no `messageID` — the server
+mints the prompt's id — through `SessionPrompt.prompt`, the same path a `prompt_async` takes, so
+the frames are the ones fixture 12 shows for any prompt (lines 122-123, then 186-202): the user
+message and its `synthetic` part, the run's `busy`, the reply's assistant `message.updated` naming
+the prompt as its `parentID` (the run answers the NEWEST user message, `MessageV2.latest`), its
+parts and completion, then `busy` → `idle` → `session.idle` when the run ends. A prompt that
+arrives while a run is going joins it (`SessionRunState.ensureRunning` awaits a running run), so
+the run answers it before it goes idle.
+
+The reply used to stream as rows with no turn, and the thread read idle while the parent's model
+wrote it. Now the first `message.updated` of an assistant message decides whose reply it is
+(`claimReply`): a reply to a prompt the host sent (`sendTurn` claims each one it mints before
+sending it) or one a turn already claimed is that turn's; a reply to any other prompt is claimed
+by the turn running when it begins, and while none runs it opens one — `turn.started` named by the
+prompt's id, as a live turn is named by its prompt (a rewind finds it again), before any row of
+the reply, and a `turn-woken` signal the session's record follows. From there it is any turn: the
+run's idle settles it, a `session.error` fails it, a Stop aborts it, the session's stop closes it,
+a message the user sends meanwhile steers it (OpenCode queues it into the same run), a second
+answer arriving mid-run joins it, and a host that dies mid-reply leaves it to the next host's
+reconcile, like any running turn. Its steps count as the turn's own (`promptMessageIds`). Never
+opened: a reply that has already ended — a fork copies a session's messages whole, completed ones
+included (fixture 10), and a rewind claims every prompt its fork copied, so a copy its dead run
+never completed opens nothing either — a compaction's summary (`summary: true`, fixture 09: the
+host's own `/compact` runs one while no turn is open), and anything that follows an
+interruption, which the demux drops first. No capture holds a woken parent: the replay tests clone fixture 12's frames
+under new ids, and assert that no capture opens a turn of its own.
 
 ### 28. A running `bash` part restates its whole output on every frame
 
