@@ -62,6 +62,8 @@ export interface AcpConnectionOptions {
   handshakeTimeoutMs?: number;
   /** Default per-request deadline. */
   defaultTimeoutMs?: number;
+  /** Passed to the peer: see {@link AcpPeerOptions.agentOwnReplyIds}. */
+  agentOwnReplyIds?: ReadonlySet<string>;
 }
 
 export class AcpConnection {
@@ -104,7 +106,8 @@ export class AcpConnection {
         options.onRawFrame(direction, redactAcpFrame(frame, { homeDirs: options.homeDirs }));
       },
       onWarning: options.onWarning,
-      defaultTimeoutMs: options.defaultTimeoutMs
+      defaultTimeoutMs: options.defaultTimeoutMs,
+      ...(options.agentOwnReplyIds === undefined ? {} : { agentOwnReplyIds: options.agentOwnReplyIds })
     });
 
     const connection = new AcpConnection(options, child, peer, stderr);

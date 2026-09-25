@@ -23,7 +23,7 @@ interface Harness {
   replyError(error: { code: number; message: string; data?: unknown }): void;
 }
 
-function harness(): Harness {
+function harness(options: { agentOwnReplyIds?: ReadonlySet<string> } = {}): Harness {
   const sent: Array<Record<string, unknown>> = [];
   const warnings: Array<{ message: string; detail?: unknown }> = [];
   const peer = new AcpPeer({
@@ -33,7 +33,8 @@ function harness(): Harness {
     onWarning: (message, detail) => {
       warnings.push({ message, detail });
     },
-    defaultTimeoutMs: 0
+    defaultTimeoutMs: 0,
+    ...(options.agentOwnReplyIds === undefined ? {} : { agentOwnReplyIds: options.agentOwnReplyIds })
   });
   const lastId = (): number => {
     const outbound = [...sent].reverse().find((frame) => typeof frame["id"] === "number" && "method" in frame);
@@ -348,4 +349,20 @@ test("a re-emitted error keeps the peer's own message, undecorated", async () =>
   h.recv({ jsonrpc: "2.0", id: 7, method: "boom" });
   await tick();
   assert.deepEqual(h.sent[0]["error"], { code: -32602, message: "Invalid params", data: "bad" });
+});
+
+test("a reply carrying one of the agent's own request ids is its own traffic: no warning", () => {
+  // Grok's child session answers its own `skills-reload` / `workflows-reload`
+  // requests on our stdout (fixture 15). The peer mints numeric ids only.
+  const h = harness({ agentOwnReplyIds: new Set(["skills-reload", "workflows-reload"]) });
+  h.recv({ jsonrpc: "2.0", id: "skills-reload", result: { result: { reloaded: 1 } } });
+  h.recv({ jsonrpc: "2.0", id: "workflows-reload", result: { result: { reloaded: 1 } } });
+  assert.equal(h.warnings.length, 0);
+  h.recv({ jsonrpc: "2.0", id: "something-else", result: {} });
+  h.recv({ jsonrpc: "2.0", id: 99, result: {} });
+  assert.deepEqual(
+    h.warnings.map((warning) => (warning.detail as { id?: unknown }).id),
+    ["something-else", 99],
+    "any other reply to nothing still warns"
+  );
 });

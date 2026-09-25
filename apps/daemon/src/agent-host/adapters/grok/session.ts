@@ -118,15 +118,15 @@ const MAX_RECORDED_TURNS = 200;
 const HELD_FRAMES_MAX = 256;
 
 /**
- * Replies the CLI writes to requests it sent ITSELF, never ours: a subagent's
- * child session reloading its skills and workflows answered
+ * Ids the CLI gives requests it sends ITSELF and answers on our stdout: a
+ * subagent's child session reloading its skills and workflows answered
  * `{"id": "skills-reload", …}` four times and `"workflows-reload"` once
  * (fixture 15's spawn, the first of its day; the later captures' spawns sent
- * none). The peer mints numeric ids only, so these can reply to nothing of
- * ours; warning on each put five rows in the timeline. Any other stray reply
- * still warns.
+ * none). The peer drops a reply carrying one structurally
+ * (`AcpPeerOptions.agentOwnReplyIds`) — warning on each put five rows in the
+ * timeline; any other stray reply still warns.
  */
-const CLI_INTERNAL_REPLY_IDS: ReadonlySet<string> = new Set(["skills-reload", "workflows-reload"]);
+const CLI_OWN_REPLY_IDS: ReadonlySet<string> = new Set(["skills-reload", "workflows-reload"]);
 
 /** `{schemaVersion: 1, sessionId}` — the only thing persisted for resume (§4.1). */
 export const GROK_RESUME_SCHEMA_VERSION = 1;
@@ -378,13 +378,9 @@ export class GrokSession {
       homeDirs: this.options.homeDirs,
       onRawFrame: (direction, frame) => this.options.logRaw(direction, frame),
       onStderrLine: (line) => this.onStderr(line),
-      onWarning: (message, detail) => {
-        if (isCliInternalReply(message, detail)) {
-          this.options.logger.debug("grok: the CLI's reply to its own request", detail);
-          return;
-        }
-        this.emitEvent(this.normalizer.event("runtime.warning", { message, detail }));
-      },
+      onWarning: (message, detail) =>
+        this.emitEvent(this.normalizer.event("runtime.warning", { message, detail })),
+      agentOwnReplyIds: CLI_OWN_REPLY_IDS,
       onExit: (reason, tail) => this.onExit(reason, tail)
     });
     this.connection = connection;
@@ -1543,15 +1539,6 @@ export class GrokSession {
   private touch(): void {
     this.updatedAt = this.options.stamp().createdAt;
   }
-}
-
-/** The peer's warning about a reply to nothing, when the reply is the CLI's own ({@link CLI_INTERNAL_REPLY_IDS}). */
-function isCliInternalReply(message: string, detail: unknown): boolean {
-  if (message !== "acp: response for an unknown request id") {
-    return false;
-  }
-  const id = (detail as { id?: unknown } | null | undefined)?.id;
-  return typeof id === "string" && CLI_INTERNAL_REPLY_IDS.has(id);
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
