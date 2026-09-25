@@ -348,8 +348,9 @@ open. T3 never has that window, and its three mechanisms are adopted whole
    "unknown"}`, the sentence "… provider status has not been checked in this
    session yet.", and **the best catalogue the adapter can name without I/O**:
    Claude's bundled family aliases (`FALLBACK_CLAUDE_MODELS` — `default`,
-   `opus`, `sonnet`, `haiku`, `fable`) and Grok's two, so those launchers work
-   on a cold host. Codex and OpenCode read their catalogues off a live server
+   `opus`, `sonnet`, `haiku`, `fable`) and Grok's four (`FALLBACK_GROK_MODELS`,
+   the catalogue its CLI advertised on the newest capture, `grok-4.7` the
+   default), so those launchers work on a cold host. Codex and OpenCode read their catalogues off a live server
    and answer `[]`; their row exists (the provider is listed, not missing) and
    layers two and three close their window. **Never `status:"error"`** — that
    would make §7.7's toast fire for a provider nobody has looked at. A pending

@@ -676,9 +676,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (`agent-host/adapters/pending.ts`, wired through `ADAPTER_PENDING_SNAPSHOTS`) supplies a row with
   `status:"unknown"`, `auth:{status:"unknown"}`, "… has not been checked in this session yet." and
   the best catalogue it can name without I/O (Claude's `FALLBACK_CLAUDE_MODELS` family aliases,
-  Grok's two; Codex/OpenCode read theirs off a live server and honestly answer `[]`). A pending row
-  is **never `status:"error"`** — that spelling makes the client raise "sign in again" for a
-  provider nobody has looked at — and is never persisted or hydrated. **(2) The disk cache is
+  Grok's four, the list its CLI advertised on the newest capture; Codex/OpenCode read theirs off a
+  live server and honestly answer `[]`). A pending row is **never `status:"error"`** — that
+  spelling makes the client raise "sign in again" for a provider nobody has looked at — and is
+  never persisted or hydrated. **(2) The disk cache is
   correlated, not just keyed**: `provider-snapshots.json` is v2, each row `{identity, snapshot}`
   with `{adapterId, hostProtocolVersion, binPath, version}` inside the file, and a row hydrates
   only when the adapter id agrees in all three places, the protocol version matches and the CLI is

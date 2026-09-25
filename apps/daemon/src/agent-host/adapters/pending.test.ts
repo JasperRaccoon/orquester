@@ -13,6 +13,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import type { InitializeResponse } from "./grok/acp/_generated/schema.ts";
+import { initializeResponse, readCapture } from "./grok/fixtures.ts";
+import { modelsFromInitialize } from "./grok/probe.ts";
 import { ADAPTER_IDS, ADAPTER_PENDING_SNAPSHOTS } from "./index.ts";
 import { isPendingSnapshot, pendingStatusMessage } from "./pending.ts";
 
@@ -105,6 +108,19 @@ describe("§3.2 layer one: every adapter's pendingSnapshot()", () => {
       models.map((model) => model.slug),
       ["default", "opus", "sonnet", "haiku", "fable"]
     );
+  });
+
+  it("Grok's pending catalogue is the one its newest captured CLI advertised", () => {
+    // Fixture 23 is the newest capture (grok 1.0.34, 2026-09-25); its
+    // `initialize` names the models and the default. The seed carries no
+    // effort descriptors — the probe that replaces it does.
+    const advertised = modelsFromInitialize(
+      initializeResponse(readCapture("23-stop-cuts-foreground-subagent.ndjson")) as unknown as InitializeResponse
+    );
+    const shape = (models: ReadonlyArray<{ slug: string; name: string; isDefault?: boolean }>) =>
+      models.map(({ slug, name, isDefault }) => ({ slug, name, isDefault: isDefault === true }));
+    assert.ok(advertised.length > 0, "the capture advertises a catalogue");
+    assert.deepEqual(shape(ADAPTER_PENDING_SNAPSHOTS.grok(CHECKED_AT).models), shape(advertised));
   });
 
   it("every pending catalogue is free of duplicate slugs", () => {
