@@ -11,13 +11,17 @@
  *   on the wire and reports — and that report was a second row, "Approval
  *   resolved" / "User input submitted", saying someone answered. One row now,
  *   and the answer still reaches the provider.
- * - **The server resolving the card itself** (`serverRequest/resolved` naming
- *   a card still parked, mid-turn or after the turn ended). The card stayed
- *   parked in the adapter: a later Stop answered a request the server had
- *   dropped and wrote a second row. Now it is settled once — "Request
- *   cancelled" / "Question cancelled" on the card's own stamp, or, for a
- *   question the host already dismissed at its turn's end, the dismissal
- *   alone — and a later Stop writes nothing more.
+ * - **The wait on the card ending** — the server resolving it
+ *   (`serverRequest/resolved` naming a card still parked), or its turn ending,
+ *   interrupted or failed, with or without that resolution. The card stayed
+ *   parked in the adapter: an approval kept blocking the composer, and a later
+ *   Stop answered a request nothing waited on and wrote a second row. Now it is
+ *   settled once — "Request cancelled" / "Question cancelled" on the card's own
+ *   stamp, or, for a question the host dismissed at its turn's end, the
+ *   dismissal alone — and a later Stop writes and sends nothing.
+ *
+ * And a card the user answered before its turn ended is settled once, by the
+ * answer.
  */
 
 import assert from "node:assert/strict";
@@ -118,7 +122,7 @@ describe("a host Stop cancels the parent's own card with one row (sweep)", () =>
   }
 });
 
-describe("a parent card the server resolved itself (sweep)", () => {
+describe("a parent card nobody answered, when the wait on it ends (sweep)", () => {
   for (const item of ["command", "question"] as const) {
     it(`the ${item} card resolved mid-turn: one '${CANCELLED[item]}' row on its turn; a later Stop writes nothing more`, async () => {
       const host = await asking(askScript(item, ["resolved"]));
@@ -143,28 +147,72 @@ describe("a parent card the server resolved itself (sweep)", () => {
       await host.stop();
     });
 
-    it(`the ${item} card resolved after its turn ended: one closing row; a later Stop writes nothing more`, async () => {
-      const host = await asking(askScript(item, ["turn-interrupted", "resolved"]));
+    const turnEnds = [["turn-interrupted"], ["turn-failed"], ["turn-interrupted", "resolved"]] as const;
+    for (const steps of turnEnds) {
+      it(`the ${item} card open as its turn ends (${steps.join(", then ")}): one closing row; a later Stop writes and sends nothing`, async () => {
+        const host = await asking(askScript(item, [...steps]));
+        await waitUntil(() => openedCard(host) !== null, "the card opened");
+        const card = openedCard(host)!;
+        await handledResolution(host, card.requestId);
+
+        const turnEnd = host.handled.find((event) => event.type === "turn.completed");
+        assert.ok(turnEnd !== undefined);
+        // A question on the ended turn was dismissed by the host at the turn's
+        // end (§6.2) — that dismissal is its one row; an approval, which no turn
+        // end settles, gets the cancelled row.
+        assert.deepEqual(
+          closingRows(host, card.requestId).map((row) => [row.id, row.summary]),
+          item === "command"
+            ? [[`settle-cancel:${card.requestId}`, "Request cancelled"]]
+            : [[`turn-end-dismiss:${String(turnEnd.turnId)}:${card.requestId}`, "User input dismissed"]]
+        );
+        assert.deepEqual(host.orchestrator.summary("thread-1")?.pendingRequests, []);
+
+        await hostStop(host, "c-stop");
+        assert.equal(closingRows(host, card.requestId).length, 1, "a later Stop writes nothing more");
+        assert.deepEqual(answersTo(host, card.providerRequestId), [], "and never answers it");
+        await host.stop();
+      });
+    }
+  }
+});
+
+describe("a parent card the user answered before its turn ended (sweep)", () => {
+  for (const item of ["command", "question"] as const) {
+    it(`the ${item} card: settled once, by the answer, and the answer reaches the provider`, async () => {
+      const host = await asking(askScript(item));
       await waitUntil(() => openedCard(host) !== null, "the card opened");
+      await host.orchestrator.drain();
       const card = openedCard(host)!;
+      if (item === "command") {
+        await host.orchestrator.command("thread-1", "approval", {
+          commandId: "c-answer",
+          requestId: card.requestId,
+          decision: "accept"
+        });
+      } else {
+        await host.orchestrator.command("thread-1", "answer", {
+          commandId: "c-answer",
+          requestId: card.requestId,
+          answers: { branch: "main" }
+        });
+      }
       await handledResolution(host, card.requestId);
-
-      const turnEnd = host.handled.find((event) => event.type === "turn.completed");
-      assert.ok(turnEnd !== undefined);
-      // A question on the ended turn was dismissed by the host at the turn's
-      // end (§6.2) — that dismissal is its one row; an approval, which no turn
-      // end settles, gets the cancelled row.
-      assert.deepEqual(
-        closingRows(host, card.requestId).map((row) => [row.id, row.summary]),
-        item === "command"
-          ? [[`settle-cancel:${card.requestId}`, "Request cancelled"]]
-          : [[`turn-end-dismiss:${String(turnEnd.turnId)}:${card.requestId}`, "User input dismissed"]]
+      // The turn then ends on its own — and finds nothing left to settle.
+      await waitUntil(
+        () => host.handled.some((event) => event.type === "turn.completed"),
+        "the host handled the turn's end"
       );
-      assert.deepEqual(host.orchestrator.summary("thread-1")?.pendingRequests, []);
+      await host.orchestrator.drain();
 
-      await hostStop(host, "c-stop");
-      assert.equal(closingRows(host, card.requestId).length, 1, "a later Stop writes nothing more");
-      assert.deepEqual(answersTo(host, card.providerRequestId), [], "and never answers it");
+      assert.deepEqual(
+        closingRows(host, card.requestId).map((row) => row.summary),
+        [item === "command" ? "Approval resolved" : "User input submitted"]
+      );
+      assert.deepEqual(answersTo(host, card.providerRequestId), [
+        item === "command" ? { decision: "accept" } : { answers: { branch: { answers: ["main"] } } }
+      ]);
+      assert.deepEqual(host.orchestrator.summary("thread-1")?.pendingRequests, []);
       await host.stop();
     });
   }

@@ -692,7 +692,7 @@ describe("codex session — interrupt ordering", () => {
     assert.ok(answerIndex !== -1 && interruptIndex !== -1);
     assert.ok(
       answerIndex < interruptIndex,
-      "settle, THEN interrupt — the server silently abandons unanswered requests"
+      "settle, THEN interrupt — the answer must reach a request the server still holds"
     );
     await r.stop();
   });
@@ -1744,40 +1744,16 @@ describe("codex session — a collab child's open cards end with the child (foll
     assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), [{ decision: "accept" }]);
     await r.stop();
   });
-
-  it("the parent's own turn end alone settles nothing in the adapter: its card stays parked until a Stop answers it", async () => {
-    const r = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
-    await r.session.start();
-    const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
-    const opened = await r.events.waitForType("request.opened");
-    const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
-    r.session.injectNotificationForTest("turn/completed", {
-      threadId: parentThreadId,
-      turn: turnOf(turn.turnId, "interrupted")
-    });
-    await wireBarrier(r);
-    assert.equal(
-      r.events.types().includes("request.resolved"),
-      false,
-      "the adapter settles nothing at its own turn's end"
-    );
-    assert.equal(r.session.openServerRequestsForTest, 1);
-
-    await r.session.interruptTurn();
-    const resolved = await r.events.waitForType("request.resolved");
-    assert.deepEqual(resolved.payload, { requestType: "command_execution_approval", decision: "cancel" });
-    await wireBarrier(r);
-    assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), [{ decision: "cancel" }]);
-    await r.stop();
-  });
 });
 
-describe("codex session — the parent's own card the server resolved itself (sweep, follow-ups 2026-09-25)", () => {
-  // A `serverRequest/resolved` naming a card still parked cannot be the ack
-  // of our own answer: every path that answers takes the card out before it
-  // writes. Left parked, the card paused the session's watchdog for every
-  // later turn, held one of the 32 in-flight slots, and a later Stop answered
-  // a request the server had dropped and wrote a second row for it.
+describe("codex session — the parent's own card nobody answered (sweep, follow-ups 2026-09-25)", () => {
+  // Its turn's end, its thread's close, or a `serverRequest/resolved` naming
+  // it ends the wait on it (a card still parked is never the ack of our own
+  // answer: every path that answers takes the card out before it writes).
+  // Left parked, the card paused the session's watchdog for every later turn,
+  // held one of the 32 in-flight slots, kept an approval blocking the
+  // composer, and a later Stop answered a request nothing waited on and wrote
+  // a second row for it.
   for (const item of ["command", "question"] as const) {
     const ask = (afterAsking: MockParentAskEnd): MockTurnScript =>
       item === "command"
@@ -1825,37 +1801,116 @@ describe("codex session — the parent's own card the server resolved itself (sw
       await r.stop();
     });
 
-    it(`a parent ${item} card resolved after its turn ended is cancelled once, and the next turn's watchdog arms`, async () => {
-      const r = rig({ turns: [ask(["turn-interrupted", "resolved"]), { kind: "silent" }] });
-      await r.session.start();
-      const turn = await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "plan" });
-      const opened = await r.events.waitFor(
-        (event) => event.type === "request.opened" || event.type === "user-input.requested",
-        "the parent's card"
-      );
-      const resolved = await r.events.waitFor(
-        (event) =>
-          (event.type === "request.resolved" || event.type === "user-input.resolved") &&
-          event.requestId === opened.requestId,
-        "the card settled"
-      );
-      assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
-      assert.equal(resolved.turnId, turn.turnId, "the card's own turn, ended as it was");
-      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
-      assert.equal(r.session.currentTurnId, null);
+    const turnEnds = [["turn-interrupted"], ["turn-failed"], ["turn-interrupted", "resolved"]] as const;
+    for (const steps of turnEnds) {
+      it(`a parent ${item} card open as its turn ends (${steps.join(", then ")}) is cancelled once after the end; the next turn is watched`, async () => {
+        const r = rig({ turns: [ask([...steps]), { kind: "silent" }] });
+        await r.session.start();
+        const turn = await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "plan" });
+        const opened = await r.events.waitFor(
+          (event) => event.type === "request.opened" || event.type === "user-input.requested",
+          "the parent's card"
+        );
+        const turnEnded = await r.events.waitFor(
+          (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+          "the turn's end"
+        );
+        const resolved = await r.events.waitFor(
+          (event) =>
+            (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+            event.requestId === opened.requestId,
+          "the card settled"
+        );
+        assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
+        assert.equal(resolved.turnId, turn.turnId, "the card's own turn, ended as it was");
+        assert.ok(
+          indexOf(r, turnEnded) < indexOf(r, resolved),
+          "after the turn's end, so the host's own dismissal of a question on it comes first"
+        );
+        await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+        assert.equal(r.session.currentTurnId, null);
 
-      // The next turn is watched again: no stale card pauses it.
-      const next = await r.session.sendTurn({ input: "again", attachments: [], interactionMode: "plan" });
-      assert.equal(r.session.currentTurnId, next.turnId);
-      assert.equal(r.session.livenessArmedForTest, true);
+        // The next turn is watched again: no stale card pauses it.
+        const next = await r.session.sendTurn({ input: "again", attachments: [], interactionMode: "plan" });
+        assert.equal(r.session.currentTurnId, next.turnId);
+        assert.equal(r.session.livenessArmedForTest, true);
 
-      await r.session.interruptTurn();
-      await wireBarrier(r);
-      assert.equal(resolutionsOf(r, opened.requestId).length, 1, "a later Stop writes nothing more");
-      assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
-      await r.stop();
-    });
+        await r.session.interruptTurn();
+        await wireBarrier(r);
+        assert.equal(resolutionsOf(r, opened.requestId).length, 1, "a later Stop writes nothing more");
+        assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), [], "and sends nothing");
+        await r.stop();
+      });
+    }
   }
+
+  it("the parent's own thread closing with a card open cancels it once, never answered", async () => {
+    const r = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
+    await r.session.start();
+    const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
+    r.session.injectNotificationForTest("thread/closed", { threadId: parentThreadId });
+    const resolved = await r.events.waitForType("request.resolved");
+    assert.equal(resolved.requestId, opened.requestId);
+    assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
+    assert.equal(resolved.turnId, turn.turnId);
+    await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+    await wireBarrier(r);
+    assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
+    await r.stop();
+  });
+
+  it("a parent card the user answered before its turn ended is settled once, by the answer", async () => {
+    const r = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
+    await r.session.start();
+    const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
+    r.session.respondToApproval(opened.requestId!, "accept");
+    r.session.injectNotificationForTest("turn/completed", {
+      threadId: parentThreadId,
+      turn: turnOf(turn.turnId, "interrupted")
+    });
+    await r.events.waitFor(
+      (event) => event.type === "item.completed" && event.itemId === opened.itemId,
+      "the answered call ran on"
+    );
+    await wireBarrier(r);
+    const resolutions = resolutionsOf(r, opened.requestId);
+    assert.equal(resolutions.length, 1);
+    assert.deepEqual(resolutions[0]!.payload, {
+      requestType: "command_execution_approval",
+      decision: "accept"
+    });
+    assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), [{ decision: "accept" }]);
+    await r.stop();
+  });
+
+  it("a card no turn raised outlives a turn's end; its thread's close ends it", async () => {
+    // An MCP server may ask outside any turn (`turnId: null`): a turn's end
+    // says nothing about whether anything still waits on it.
+    const r = rig({ turns: [{ kind: "elicitation", serverName: "serena", message: "Allow it?", turnless: true }] });
+    await r.session.start();
+    const turn = await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    assert.equal(opened.providerRefs?.providerTurnId, undefined, "asked outside any turn");
+    const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
+    r.session.injectNotificationForTest("turn/completed", {
+      threadId: parentThreadId,
+      turn: turnOf(turn.turnId, "interrupted")
+    });
+    await wireBarrier(r);
+    assert.equal(resolutionsOf(r, opened.requestId).length, 0, "the turn's end is not its end");
+    assert.equal(r.session.openServerRequestsForTest, 1);
+
+    r.session.injectNotificationForTest("thread/closed", { threadId: parentThreadId });
+    const resolved = await r.events.waitForType("request.resolved");
+    assert.equal(resolved.requestId, opened.requestId);
+    assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
+    await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+    await r.stop();
+  });
 });
 
 describe("codex session — the liveness watchdog really pauses (Q1 finding 16)", () => {

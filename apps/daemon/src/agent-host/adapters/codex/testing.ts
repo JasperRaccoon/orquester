@@ -81,11 +81,12 @@ export function createFakeContext(
 
 /**
  * What the server does with the parent's own card instead of waiting for its
- * answer, one frame per step, in order: the turn's `turn/completed`
- * (`interrupted`), or its own `serverRequest/resolved` naming the request.
- * `["resolved"]` resolves it mid-turn — the turn runs on until a Stop.
+ * answer, one frame per step, in order: the turn's `turn/completed` with that
+ * status (`turn-interrupted`, `turn-failed`), or its own
+ * `serverRequest/resolved` naming the request. `["resolved"]` resolves it
+ * mid-turn — the turn runs on until a Stop.
  */
-export type MockParentAskEnd = ("turn-interrupted" | "resolved")[];
+export type MockParentAskEnd = ("turn-interrupted" | "turn-failed" | "resolved")[];
 
 /** One programmed turn. */
 export type MockTurnScript =
@@ -93,7 +94,13 @@ export type MockTurnScript =
   | { kind: "command-approval"; command: string; availableDecisions?: unknown[]; afterAsking?: MockParentAskEnd }
   | { kind: "file-change-approval"; path: string; diff: string; /** Stay SILENT this long after the answer, so no notification shields the watchdog. */ holdAfterApprovalMs?: number }
   | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[]; isOther?: boolean; isBlocking?: boolean; /** Append a question the filter must drop, to exercise the partial-refusal rule. */ withUnrenderable?: boolean; afterAsking?: MockParentAskEnd }
-  | { kind: "elicitation"; serverName: string; message: string }
+  | {
+      kind: "elicitation";
+      serverName: string;
+      message: string;
+      /** Sent with `turnId: null`, as an MCP server may ask outside any turn. */
+      turnless?: boolean;
+    }
   | { kind: "mcp-form"; serverName: string; message: string }
   | { kind: "async-questions"; title: string; options: string[] }
   /**
@@ -370,7 +377,7 @@ const endParentAsk = (turnId, requestId, steps) => {
     if (step === "resolved") {
       send({ method: "serverRequest/resolved", params: { threadId, requestId } });
     } else {
-      send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, "interrupted") } });
+      send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, step.slice("turn-".length)) } });
       activeTurnId = null;
     }
   }
@@ -444,7 +451,7 @@ async function runTurn(turnId, script) {
     }
     case "elicitation": {
       await askServerRequest("mcpServer/elicitation/request", {
-        threadId, turnId, serverName: script.serverName, mode: "form",
+        threadId, turnId: script.turnless ? null : turnId, serverName: script.serverName, mode: "form",
         _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"] },
         message: script.message, requestedSchema: { type: "object", properties: {} }
       });
