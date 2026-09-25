@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
+import { createLivenessRegistry } from "../../orchestration/liveness.ts";
+import { createTestClock } from "../../orchestration/testing/fakes.ts";
 import { GROK_FIXTURES_DIR } from "./fixtures.ts";
 import { createGrokAdapter } from "./index.ts";
 
@@ -41,7 +43,9 @@ async function replayRig(fixture: string): Promise<ReplayRig> {
   let ids = 0;
   const context: AdapterContext = {
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
-    clock: { now: () => new Date(0), nowIso: () => "2026-09-25T00:00:00.000Z" },
+    // Real time: the mock paces frames by their recorded gaps, so a registry
+    // whose clock follows `createdAt` sees the capture's order of events.
+    clock: { now: () => new Date(), nowIso: () => new Date().toISOString() },
     ids: {
       eventId: () => `e${(ids += 1)}`,
       messageId: (prefix) => `${prefix}-${(ids += 1)}`,
@@ -232,6 +236,32 @@ test("20 replayed: a monitor's first event wakes the agent before the prompt set
     for (const turnId of turns.slice(1)) {
       assert.equal(textOn(r.events, turnId!), "SEEN");
     }
+
+    // Each prompt's own `user_prompt_submit` hook lands on its own turn — the
+    // first wake's arrives while the user's turn is still settling, and is
+    // held for the wake by the prompt id it names.
+    const promptHooks = r.events
+      .filter((event) => event.type === "hook.started" && (event.payload as { hookEvent?: string }).hookEvent === "user_prompt_submit")
+      .map((event) => event.turnId);
+    assert.deepEqual(promptHooks, turns, "one prompt hook per turn, each on its own");
+
+    // Fed as the host feeds it — every event, on a clock following its
+    // stamps — the monitor stays live through its own wakes.
+    const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    const readings: string[] = [];
+    for (const event of r.events) {
+      clock.set(Date.parse(event.createdAt));
+      registry.observe(event);
+      if (event.type === "task.completed" && event.payload.taskId === MONITOR) {
+        break;
+      }
+      if (event.type === "turn.completed") {
+        readings.push(String(registry.liveness("t1")));
+      }
+    }
+    assert.deepEqual(readings, ["monitoring", "monitoring", "monitoring"], "never dropped while it runs");
   } finally {
     await r.dispose();
   }

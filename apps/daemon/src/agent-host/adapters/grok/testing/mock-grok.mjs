@@ -455,6 +455,41 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "wake-pending-stop") {
+    // The CLI finished our prompt and already runs a prompt of its own (it is
+    // announced, and its first frame names it) — but our RPC result is not
+    // out yet: fixture 20's 15 ms window, held open until the client's Stop.
+    // The cancel then ends the CLI's prompt, the one running.
+    const wake = "notifications-01a0d913-68c6-71f3-9a84-ffc23e5f43ed";
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "WATCHING" } },
+      _meta: { totalTokens: 1700, promptId }
+    });
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: { sessionUpdate: "turn_completed", prompt_id: promptId, stop_reason: "end_turn" }
+    });
+    notify("_x.ai/queue/changed", {
+      sessionId,
+      entries: [],
+      runningPromptId: wake,
+      runningText: '<monitor-event task_id="task-mon-1">\n[tick watch] tick 1\n</monitor-event>',
+      runningKind: "prompt"
+    });
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: { sessionUpdate: "hook_run_started", event_name: "user_prompt_submit", prompt_id: wake, count: 1 }
+    });
+    await waitFor(() => cancelled);
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: { sessionUpdate: "turn_completed", prompt_id: wake, stop_reason: "cancelled" }
+    });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
   if (scenario === "wake-steer" && promptSeq === 2) {
     // The adapter's steer of the woken turn: an ordinary prompt of ours.
     notify("session/update", {

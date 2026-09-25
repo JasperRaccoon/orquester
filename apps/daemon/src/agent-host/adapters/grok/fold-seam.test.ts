@@ -513,13 +513,22 @@ interface CaptureSeam {
   state(): ReturnType<typeof fold>;
 }
 
-/** Drive a capture (`testing/capture-driver.ts`) and hand its events to the real seam, on demand. */
+/**
+ * Drive a capture (`testing/capture-driver.ts`) and hand its events to the
+ * real seam, on demand — fed as the host feeds them: the orchestrator hands
+ * EVERY event to the liveness registry (`orchestrator.ts`, the adapter event
+ * loop: `turn.started` / `turn.completed` run its turn-boundary sweep), then
+ * to ingestion, which observes the task rows again (`main.ts` wires one
+ * registry into both). The registry's clock follows each event's
+ * `createdAt` — the capture's own times — so the sweep sees the real order.
+ */
 function captureSeam(file: string, options: Parameters<typeof driveCapture>[1] = {}): CaptureSeam {
   const run = driveCapture(file, options);
   const clock = new FakeClock();
   const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
-  const liveness = createLivenessRegistry({ clock: createTestClock(0) });
+  const livenessClock = createTestClock(0);
+  const liveness = createLivenessRegistry({ clock: livenessClock });
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness,
@@ -534,7 +543,10 @@ function captureSeam(file: string, options: Parameters<typeof driveCapture>[1] =
     liveness,
     feedThrough: async (index) => {
       for (; next <= index && next < run.events.length; next += 1) {
-        await ingestion.ingest(run.events[next]!);
+        const event = run.events[next]!;
+        livenessClock.set(Date.parse(event.createdAt));
+        liveness.observe(event);
+        await ingestion.ingest(event);
       }
       await ingestion.drain();
     },
@@ -722,4 +734,27 @@ test("a resume in a later turn keeps each run's words and thinking apart, each o
       ["think-2", "turn-2"]
     ]
   );
+});
+
+test("20 fed as the host feeds it: the monitor stays live through its own wakes until task_completed", async () => {
+  const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
+  const s = captureSeam("20-monitor.ndjson");
+  const started = indexOf(s.events, (event) => event.type === "task.started" && event.payload.taskId === MONITOR);
+  const ended = indexOf(s.events, taskEnd(MONITOR));
+  const readings: string[] = [];
+  for (let index = started; index < ended; index += 1) {
+    await s.feedThrough(index);
+    const event = s.events[index]!;
+    if (event.type === "turn.completed") {
+      readings.push(`${event.turnId}: ${String(s.liveness.liveness(THREAD))}`);
+    }
+  }
+  assert.equal(readings.length, 3, "the user's turn and the two line wakes end while it runs");
+  assert.deepEqual(
+    readings.filter((reading) => !reading.endsWith("monitoring")),
+    [],
+    "a line's wake is the monitor reporting: its end must not drop it"
+  );
+  await s.feedThrough(s.events.length);
+  assert.equal(s.liveness.liveness(THREAD), null, "its end ends it");
 });

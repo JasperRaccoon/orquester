@@ -161,6 +161,8 @@ interface BackgroundTrack {
    * of this track names a status that would reopen it.
    */
   revived?: boolean;
+  /** A monitor's latest line (`_x.ai/monitor_event`), which its progress row shows. */
+  lastLine?: string;
 }
 
 /**
@@ -2630,6 +2632,9 @@ export class GrokNormalizer {
       return this.shellReport(taskId, "running", raw) ?? [];
     }
     const line = textArgument(update, "event_text");
+    if (line !== undefined) {
+      track.lastLine = line;
+    }
     const linkage = this.shellLinkage(taskId, track);
     return [
       this.event(
@@ -2637,13 +2642,49 @@ export class GrokNormalizer {
         {
           ...linkage,
           description: linkage.title,
-          ...(line === undefined ? {} : { summary: line }),
+          ...(track.lastLine === undefined ? {} : { summary: track.lastLine }),
           ...(track.revived === true ? {} : { status: "running" })
         },
         track.turnId,
         raw
       )
     ];
+  }
+
+  /**
+   * The monitors a wake carries lines of, re-armed as its turn opens. A
+   * monitor's line arrives just BEFORE the wake it causes (fixture 20: a line,
+   * then the CLI's own prompt carrying it), so the liveness registry's
+   * turn-boundary sweep — a watch loop that reported nothing during a turn
+   * was not live — read the monitor as silent through that wake and dropped
+   * it at its end, and a code-only deploy stopped waiting for it between
+   * lines. One status-less `task.progress` per live monitor the wake names
+   * (the registry re-arms only a live entry), carrying its latest line —
+   * the row replaces the monitor's own progress row, so this costs no row.
+   * Only the monitors the wake names: re-arming every live monitor at every
+   * wake would let unrelated wakes hold a silent one forever.
+   */
+  rearmMonitors(taskIds: readonly string[]): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    for (const taskId of taskIds) {
+      const track = this.tasks.get(taskId);
+      if (track === undefined || track.taskType !== "monitor") {
+        continue;
+      }
+      const linkage = this.shellLinkage(taskId, track);
+      events.push(
+        this.event(
+          "task.progress",
+          {
+            ...linkage,
+            description: linkage.title,
+            ...(track.lastLine === undefined ? {} : { summary: track.lastLine })
+          },
+          track.turnId
+        )
+      );
+    }
+    return events;
   }
 
   /**

@@ -305,9 +305,18 @@ test("20 monitor: one monitor task, its events as progress, its end by task_comp
   assert.equal(started[0]!.payload.title, "tick watch");
   assert.equal(started[0]!.payload.toolUseId, MONITOR_CALL);
   assert.deepEqual(
-    only(rows, "task.progress").map((row) => row.payload.summary),
+    only(rows, "task.progress")
+      .filter((row) => (row.payload as { status?: string }).status === "running")
+      .map((row) => row.payload.summary),
     ["tick 1", "tick 2"],
     "each monitor_event is the monitor's latest line"
+  );
+  assert.deepEqual(
+    only(rows, "task.progress")
+      .filter((row) => (row.payload as { status?: string }).status === undefined)
+      .map((row) => row.payload.summary),
+    ["tick 1", "tick 2"],
+    "each line's wake re-arms the monitor as it opens, status-less, keeping its latest line"
   );
   const ends = only(rows, "task.completed");
   assert.deepEqual(

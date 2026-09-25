@@ -70,6 +70,7 @@ import {
   selectPermissionOptionId
 } from "./permissions.ts";
 import { XAI_EMPTY_PLAN_MARKDOWN, XAI_EXIT_PLAN_FEEDBACK, type PlanPathHost } from "./plan.ts";
+import { framePromptId, GrokPromptQueue, type CliPrompt } from "./prompt-queue.ts";
 import { answersToXaiResponse } from "./questions.ts";
 import { parsePromptResultUsage, parseXaiUsage } from "./usage.ts";
 import { agentVersionOf, contextWindowFromModelState, modelStateOf, promptIdOf } from "./xai-meta.ts";
@@ -109,12 +110,12 @@ export const GROK_REGISTERED_METHODS: readonly string[] = [
 const MAX_RECORDED_TURNS = 200;
 
 /**
- * How many prompt ids the session remembers seeing QUEUED — listed in
- * `_x.ai/queue/changed` `entries` — to tell its own prompts from the CLI's
- * (see {@link GrokSession.onQueueChanged}), and how many CLI prompts it keeps
- * waiting for a turn. Oldest forgotten first; memory only.
+ * How many frames of a CLI prompt waiting for its turn are held (see
+ * {@link GrokSession.holdForWake}). The wait lasts until the turn open before
+ * it settles — 15 ms in fixture 20, one hook frame — so this bound is only a
+ * guard: past it a frame is folded at once, as before.
  */
-const PROMPT_IDS_REMEMBERED = 256;
+const HELD_FRAMES_MAX = 256;
 
 /**
  * Replies the CLI writes to requests it sent ITSELF, never ours: a subagent's
@@ -251,12 +252,10 @@ export class GrokSession {
   private readonly recordedTurns: RecordedTurn[] = [];
   private epoch = 0;
 
-  /** Prompt ids the parent's queue listed — ours (see {@link onQueueChanged}). */
-  private readonly listedPromptIds = new Set<string>();
-  /** Prompt ids the CLI started on its own, never listed. */
-  private readonly cliPromptIds = new Set<string>();
-  /** CLI prompts running while a turn was still open: each gets a turn when it settles. */
-  private readonly pendingWakes: string[] = [];
+  /** The CLI's prompt queue: ours, its own, and its own waiting for a turn (`prompt-queue.ts`). */
+  private readonly prompts = new GrokPromptQueue();
+  /** Frames naming a CLI prompt that waits for its turn, held until it opens. */
+  private readonly heldFrames = new Map<string, Array<() => void>>();
 
 
   /** A serial queue: one mutating command at a time per thread (§3.1). */
@@ -493,15 +492,7 @@ export class GrokSession {
   private registerHandlers(connection: AcpConnection): void {
     const peer = connection.peer;
 
-    peer.onNotification("session/update", (params) => {
-      const notification = params as SessionNotification;
-      // A subagent's child session streams under its own id (fixture 15):
-      // its prompt ids are its own, never a turn of ours.
-      if (this.isParentSession(notification.sessionId)) {
-        this.notePromptId(promptIdOf(notification._meta));
-      }
-      this.emitAll(this.normalizer.handleSessionUpdate(notification));
-    });
+    peer.onNotification("session/update", (params) => this.onSessionUpdate(params as SessionNotification));
 
     // BOTH private channels. An adapter that registers only the live one
     // silently loses every replayed row on `session/load`.
@@ -509,12 +500,7 @@ export class GrokSession {
       XAI_EXTENSION_NOTIFICATIONS.session_notification,
       XAI_EXTENSION_NOTIFICATIONS.session_update
     ]) {
-      peer.registerExtensionNotification(method, (params) => {
-        this.emitAll(this.normalizer.handleXaiNotification(method, params));
-        if (method === XAI_EXTENSION_NOTIFICATIONS.session_notification) {
-          this.onPrivateUpdate(params);
-        }
-      });
+      peer.registerExtensionNotification(method, (params) => this.onPrivateChannel(method, params));
     }
 
     // Background work reported by methods of their own: a task started, a
@@ -776,6 +762,7 @@ export class GrokSession {
         this.activeTurn!.providerPromptId = undefined;
         this.activeTurn!.wakePromptId = undefined;
         await this.settlePendingAsCancelled();
+        this.dropWakeTheCancelEnds();
         try {
           this.peer().notify("session/cancel", { sessionId: this.acpSessionId });
         } catch {
@@ -785,22 +772,7 @@ export class GrokSession {
         // closed stream silently drops every chunk the steered prompt streams.
         this.normalizer.beginTurn();
       } else {
-        this.activeTurn = { turnId, epoch, settled: false, interrupted: false };
-        this.normalizer.clearPlanFallback();
-        this.normalizer.beginTurn();
-        this.status = "running";
-        this.touch();
-        this.emitEvent(this.normalizer.event("session.state.changed", { state: "running" }, turnId));
-        this.emitEvent(
-          this.normalizer.event(
-            "turn.started",
-            {
-              ...(this.currentModelId === undefined ? {} : { model: this.currentModelId }),
-              ...(this.currentReasoningEffort === undefined ? {} : { effort: this.currentReasoningEffort })
-            },
-            turnId
-          )
-        );
+        this.openTurn({ turnId, epoch, settled: false, interrupted: false });
       }
 
       if (input.modelSelection !== undefined) {
@@ -902,7 +874,7 @@ export class GrokSession {
    * the prompt that actually produced the answer.
    */
   private notePromptId(promptId: string | undefined): void {
-    if (promptId === undefined || promptId.length === 0 || this.cliPromptIds.has(promptId)) {
+    if (promptId === undefined || promptId.length === 0 || this.prompts.isCliPrompt(promptId)) {
       return;
     }
     const turn = this.activeTurn;
@@ -917,87 +889,122 @@ export class GrokSession {
     return typeof sessionId !== "string" || this.acpSessionId.length === 0 || sessionId === this.acpSessionId;
   }
 
+  /** One `session/update`: held while it names a CLI prompt waiting for its turn. */
+  private onSessionUpdate(notification: SessionNotification): void {
+    if (this.holdForWake(notification, () => this.onSessionUpdate(notification))) {
+      return;
+    }
+    // A subagent's child session streams under its own id (fixture 15): its
+    // prompt ids are its own, never a turn of ours.
+    if (this.isParentSession(notification.sessionId)) {
+      this.notePromptId(promptIdOf(notification._meta));
+    }
+    this.emitAll(this.normalizer.handleSessionUpdate(notification));
+  }
+
+  /** One private-channel frame: held likewise; the live one may settle a CLI prompt's turn. */
+  private onPrivateChannel(method: string, params: unknown): void {
+    if (
+      method === XAI_EXTENSION_NOTIFICATIONS.session_notification &&
+      this.holdForWake(params, () => this.onPrivateChannel(method, params))
+    ) {
+      return;
+    }
+    this.emitAll(this.normalizer.handleXaiNotification(method, params));
+    if (method === XAI_EXTENSION_NOTIFICATIONS.session_notification) {
+      this.onPrivateUpdate(params);
+    }
+  }
+
+  /**
+   * Hold a parent frame that names a CLI prompt still waiting for its turn —
+   * fixture 20's `hook_run_started {prompt_id: <the wake>}` arrives between
+   * the wake's announcement and the RPC result that settles the turn before
+   * it — and replay it when that prompt's turn opens ({@link openWakeTurn}).
+   * By the prompt id the frame names, so nothing is guessed.
+   */
+  private holdForWake(params: unknown, replay: () => void): boolean {
+    const promptId = framePromptId(params);
+    if (
+      promptId === undefined ||
+      !this.isParentSession((params as { sessionId?: unknown } | null)?.sessionId) ||
+      !this.prompts.isPending(promptId)
+    ) {
+      return false;
+    }
+    const held = this.heldFrames.get(promptId) ?? [];
+    if (held.length >= HELD_FRAMES_MAX) {
+      return false;
+    }
+    held.push(replay);
+    this.heldFrames.set(promptId, held);
+    return true;
+  }
+
   /**
    * `_x.ai/queue/changed`, the parent session's prompt queue — which also
-   * tells a prompt of ours from one the CLI starts ON ITS OWN. Every prompt a
-   * client sends is first LISTED in `entries`, then named `runningPromptId`;
-   * a prompt the CLI starts itself is never listed: `subagent-completed-<id>`
-   * when a background subagent's end wakes the parent, `task-completed-<id>`
-   * when a monitor ends, `notifications-<uuid>` for a monitor's line (fixtures
-   * 16, 19, 20, 22; README observation 40). Such a prompt streams the
-   * parent's reply like any turn — and no RPC of ours answers it — so it gets
-   * a turn of its own ({@link openWakeTurn}), as Claude's woken parent gets a
-   * synthetic one. A child session's queue is its own and never read here.
+   * tells a prompt of ours from one the CLI starts ON ITS OWN
+   * (`prompt-queue.ts`): `subagent-completed-<id>` when a background
+   * subagent's end wakes the parent, `task-completed-<id>` when a monitor
+   * ends, `notifications-<uuid>` for a monitor's line (fixtures 16, 19, 20,
+   * 22; README observation 40). Such a prompt streams the parent's reply like
+   * any turn — and no RPC of ours answers it — so it gets a turn of its own
+   * ({@link openWakeTurn}), as Claude's woken parent gets a synthetic one. A
+   * child session's queue is its own and never read here.
    */
   private onQueueChanged(params: unknown): void {
-    const record = params as
-      | { sessionId?: unknown; entries?: ReadonlyArray<{ id?: unknown }>; runningPromptId?: unknown }
-      | null;
-    if (!this.isParentSession(record?.sessionId)) {
+    if (!this.isParentSession((params as { sessionId?: unknown } | null)?.sessionId)) {
       return;
     }
-    for (const entry of record?.entries ?? []) {
-      if (typeof entry.id === "string") {
-        rememberBounded(this.listedPromptIds, entry.id);
-      }
-    }
-    const running = record?.runningPromptId;
-    if (typeof running === "string") {
-      if (this.listedPromptIds.has(running)) {
-        this.notePromptId(running);
-      } else {
-        this.onCliPrompt(running);
-      }
-      return;
-    }
-    const first = record?.entries?.[0]?.id;
-    if (typeof first === "string") {
-      this.notePromptId(first);
+    const seen = this.prompts.observe(params);
+    switch (seen.kind) {
+      case "ours":
+        this.notePromptId(seen.promptId);
+        return;
+      case "cli":
+        this.onCliPrompt(seen.prompt);
+        return;
+      case "queued":
+        this.notePromptId(seen.firstListed);
+        return;
+      case "known":
+        return;
     }
   }
 
   /**
-   * A prompt the CLI started itself. It gets a turn once no other is open:
-   * the CLI runs its queue in order, so one arriving while our turn is still
-   * unsettled — fixture 20's first monitor line is announced 15 ms BEFORE
-   * the user's prompt's RPC result — waits for that turn to settle
-   * ({@link settleTurn} opens it). Otherwise it opens AT ONCE, before the
-   * next frame is read: its reply may follow in the same read, and a chunk
-   * with no open turn is dropped. That is safe against a `sendTurn` in
-   * flight, which decides steer-or-new inside the per-thread lock by reading
-   * the open turn — and opens its own before its first await.
+   * A prompt the CLI started itself. It gets a turn once no other is open: a
+   * CLI prompt announced while our turn is still unsettled is already the one
+   * running and waits for that turn to settle ({@link settleTurn} opens it).
+   * Otherwise it opens AT ONCE, before the next frame is read: its reply may
+   * follow in the same read, and a chunk with no open turn is dropped. That is
+   * safe against a `sendTurn` in flight, which decides steer-or-new inside the
+   * per-thread lock by reading the open turn — and opens its own before its
+   * first await.
    */
-  private onCliPrompt(promptId: string): void {
-    if (this.stopped || this.cliPromptIds.has(promptId) || this.activeTurn?.wakePromptId === promptId) {
+  private onCliPrompt(prompt: CliPrompt): void {
+    if (this.stopped) {
       return;
     }
-    rememberBounded(this.cliPromptIds, promptId);
     const turn = this.activeTurn;
     if (turn !== null && !turn.settled) {
-      this.pendingWakes.push(promptId);
-      this.pendingWakes.splice(0, Math.max(0, this.pendingWakes.length - PROMPT_IDS_REMEMBERED));
+      this.prompts.pend(prompt);
       return;
     }
-    this.openWakeTurn(promptId);
+    this.openWakeTurn(prompt);
   }
 
-  /** A turn for the CLI's own prompt: `turn.started`, the thread running, no RPC. */
-  private openWakeTurn(promptId: string): void {
-    const turnId = `grok-turn-${this.options.uuid()}`;
-    this.epoch += 1;
-    this.activeTurn = {
-      turnId,
-      epoch: this.epoch,
-      settled: false,
-      interrupted: false,
-      providerPromptId: promptId,
-      wakePromptId: promptId
-    };
+  /**
+   * Open a turn and announce it: `turn.started`, the thread running. The one
+   * place a turn opens — a `sendTurn` and a CLI prompt alike.
+   */
+  private openTurn(turn: ActiveTurn): void {
+    this.activeTurn = turn;
     this.normalizer.clearPlanFallback();
     this.normalizer.beginTurn();
     this.status = "running";
     this.touch();
-    this.emitEvent(this.normalizer.event("session.state.changed", { state: "running" }, turnId));
+    this.emitEvent(this.normalizer.event("session.state.changed", { state: "running" }, turn.turnId));
     this.emitEvent(
       this.normalizer.event(
         "turn.started",
@@ -1005,17 +1012,65 @@ export class GrokSession {
           ...(this.currentModelId === undefined ? {} : { model: this.currentModelId }),
           ...(this.currentReasoningEffort === undefined ? {} : { effort: this.currentReasoningEffort })
         },
-        turnId
+        turn.turnId
       )
     );
+  }
+
+  /**
+   * A turn for the CLI's own prompt — no RPC. The monitors whose lines it
+   * carries are re-armed inside it: the lines arrived just before it, and the
+   * liveness registry's turn-boundary sweep would otherwise read them as
+   * silent through it ({@link GrokNormalizer.rearmMonitors}). Then the frames
+   * held for it are replayed.
+   */
+  private openWakeTurn(prompt: CliPrompt): void {
+    this.epoch += 1;
+    this.openTurn({
+      turnId: `grok-turn-${this.options.uuid()}`,
+      epoch: this.epoch,
+      settled: false,
+      interrupted: false,
+      providerPromptId: prompt.promptId,
+      wakePromptId: prompt.promptId
+    });
+    this.emitAll(this.normalizer.rearmMonitors(prompt.monitorTaskIds));
+    const held = this.heldFrames.get(prompt.promptId) ?? [];
+    this.heldFrames.delete(prompt.promptId);
+    for (const replay of held) {
+      replay();
+    }
+  }
+
+  /**
+   * About to send `session/cancel`: the CLI prompt waiting for a turn, if
+   * any, is the one the CLI runs (it runs one prompt at a time), so the cancel
+   * ends IT — fixtures 05 and 23: a cancel ends the running prompt. It gets no
+   * turn: opened after our turn settles, it would be an empty turn the
+   * cancel's `turn_completed {cancelled}` then settles. What it streamed
+   * before the cancel — its prompt's hook, one frame in fixture 20's window —
+   * goes with it.
+   */
+  private dropWakeTheCancelEnds(): void {
+    const running = this.prompts.newestPending();
+    if (running === undefined) {
+      return;
+    }
+    this.prompts.dropPending(running.promptId);
+    const held = this.heldFrames.get(running.promptId)?.length ?? 0;
+    this.heldFrames.delete(running.promptId);
+    this.options.logger.debug("grok: a cancel ended the CLI's own prompt before its turn opened", {
+      promptId: running.promptId,
+      heldFrames: held
+    });
   }
 
   /**
    * The parent's private channel, after the normaliser: the `turn_completed`
    * of a prompt the CLI started itself settles its turn with that frame's
    * stop reason and usage — the only report such a prompt gets (no
-   * `prompt_complete`, no RPC result). One that ended before its turn could
-   * open no longer needs one.
+   * `prompt_complete`, no RPC result). One that ended while still waiting
+   * (past the held-frame bound) no longer needs one.
    */
   private onPrivateUpdate(params: unknown): void {
     const record = params as { sessionId?: unknown; update?: Record<string, unknown> } | null;
@@ -1024,16 +1079,15 @@ export class GrokSession {
       return;
     }
     const promptId = update["prompt_id"];
-    if (typeof promptId !== "string" || !this.cliPromptIds.has(promptId)) {
+    if (typeof promptId !== "string" || !this.prompts.isCliPrompt(promptId)) {
       return;
     }
     const stopReason = typeof update["stop_reason"] === "string" ? update["stop_reason"] : null;
     const usage = parseXaiUsage(update["usage"]);
     void this.serialize(async () => {
       await Promise.resolve();
-      const pending = this.pendingWakes.indexOf(promptId);
-      if (pending !== -1) {
-        this.pendingWakes.splice(pending, 1);
+      if (this.prompts.dropPending(promptId)) {
+        this.heldFrames.delete(promptId);
         return;
       }
       const turn = this.activeTurn;
@@ -1142,7 +1196,7 @@ export class GrokSession {
       this.touch();
       this.emitEvent(this.normalizer.event("session.state.changed", { state: "ready" }));
       // The CLI moved on to a prompt of its own while this turn was settling.
-      const wake = this.pendingWakes.shift();
+      const wake = this.prompts.takePending();
       if (wake !== undefined) {
         this.openWakeTurn(wake);
       }
@@ -1208,6 +1262,7 @@ export class GrokSession {
 
     await this.serialize(async () => {
       await this.settlePendingAsCancelled();
+      this.dropWakeTheCancelEnds();
       try {
         this.peer().notify("session/cancel", { sessionId: this.acpSessionId });
       } catch {
@@ -1388,7 +1443,8 @@ export class GrokSession {
   private settleEverythingForExit(reason: ChildExitReason, stderrTail: string): void {
     const turn = this.activeTurn;
     const detail = stderrTail.trim().length > 0 ? `\n${stderrTail.trim()}` : "";
-    this.pendingWakes.length = 0;
+    this.prompts.clearPending();
+    this.heldFrames.clear();
 
     for (const [requestId, pending] of [...this.pendingApprovals.entries()]) {
       this.pendingApprovals.delete(requestId);
@@ -1452,7 +1508,8 @@ export class GrokSession {
     }
     this.stopped = true;
     this.hostInitiatedStop = true;
-    this.pendingWakes.length = 0;
+    this.prompts.clearPending();
+    this.heldFrames.clear();
     await this.settlePendingAsCancelled();
     this.emitAll(this.normalizer.failOpenTools("The session was stopped."));
     this.emitAll(this.normalizer.stopBackgroundTasks());
@@ -1485,18 +1542,6 @@ export class GrokSession {
 
   private touch(): void {
     this.updatedAt = this.options.stamp().createdAt;
-  }
-}
-
-/** Add to a set, forgetting the oldest entry past {@link PROMPT_IDS_REMEMBERED}. */
-function rememberBounded(set: Set<string>, value: string): void {
-  set.delete(value);
-  set.add(value);
-  if (set.size > PROMPT_IDS_REMEMBERED) {
-    const oldest = set.values().next().value;
-    if (oldest !== undefined) {
-      set.delete(oldest);
-    }
   }
 }
 

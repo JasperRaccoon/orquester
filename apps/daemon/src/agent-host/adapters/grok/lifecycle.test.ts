@@ -880,6 +880,33 @@ test("the CLI's own prompt after a turn is a turn of its own; a message during i
   await r.dispose();
 });
 
+test("a Stop while the CLI's own prompt waits for its turn opens no turn for it — the cancel ended it", async () => {
+  const r = await rig({ scenario: "wake-pending-stop" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "watch", attachments: [], interactionMode: "default" });
+  await r.waitFor(
+    (event) => event.type === "content.delta" && event.turnId === turnId,
+    "the turn's words, before the CLI's own prompt is announced"
+  );
+  await r.adapter.interruptTurn("t1", turnId);
+  await r.waitFor((event) => event.type === "turn.completed", "the stopped turn");
+  await r.waitFor(
+    (event) => event.type === "session.state.changed" && (event.payload as { state: string }).state === "ready",
+    "ready after the Stop"
+  );
+  await r.drain();
+  const turnIds = r.events
+    .filter((event) => event.type === "turn.started" || event.type === "turn.completed")
+    .map((event) => `${event.type}:${event.turnId === turnId ? "ours" : "other"}`);
+  assert.deepEqual(turnIds, ["turn.started:ours", "turn.completed:ours"], "no empty turn for the prompt the Stop ended");
+  assert.equal(
+    r.events.some((event) => event.type === "hook.started"),
+    false,
+    "what that prompt streamed before the cancel went with it"
+  );
+  await r.dispose();
+});
+
 function advisories(events: readonly RuntimeEvent[]): number {
   return events.filter(
     (event) => event.type === "runtime.warning" && /support_permission/.test(event.payload.message)
