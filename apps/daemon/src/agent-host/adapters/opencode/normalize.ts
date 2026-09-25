@@ -63,8 +63,10 @@ import {
   accumulateStepUsage,
   addRelatedSession,
   advanceOutputMark,
+  claimPrompt,
   finalOutputRemainder,
   isCutFinalOutput,
+  makeTurnTokenUsageAccumulator,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
   stepTotalTokens,
@@ -101,7 +103,13 @@ export type NormalizerSignal =
   /** A request event from a session whose ancestry is not yet known. */
   | { kind: "ancestry-probe"; sessionId: string; raw: OpenCodeRawEvent }
   /** `session.compacted` landed; the thread state event has already been emitted. */
-  | { kind: "compacted" };
+  | { kind: "compacted" }
+  /**
+   * A reply the host never started began while no turn ran — the parent
+   * woken by a background `task` call's answer — and opened turn `turnId`
+   * (`claimReply`); its `turn.started` has already been emitted.
+   */
+  | { kind: "turn-woken"; turnId: string };
 
 export interface NormalizeResult {
   events: RuntimeEvent[];
@@ -531,20 +539,27 @@ function demux(
         admission.messageObserved = true;
         out.signal({ kind: "user-message-observed", messageId: info.id });
       }
+      // Read before the role is recorded: a reply begins on its first frame.
+      const firstSighting = !state.messageRoleById.has(info.id);
       state.messageRoleById.set(info.id, info.role);
       if (info.role === "user") {
         state.textPartsByMessageId.delete(info.id);
       }
       if (info.role === "assistant") {
+        if (firstSighting) {
+          claimReply(state, info, raw, out);
+        }
+        // The turn the reply belongs to, which it may just have opened.
+        const replyTurnId = state.activeTurnId;
         emitContextWindow(
           state,
           resolveAssistantOwnership(state, info.id, info.parentID),
-          turnId,
+          replyTurnId,
           raw,
           out
         );
         for (const part of state.textPartsByMessageId.get(info.id)?.values() ?? []) {
-          emitTextDelta(part, turnId, raw, out);
+          emitTextDelta(part, replyTurnId, raw, out);
         }
       }
       return;
@@ -1574,6 +1589,77 @@ function emitTextDelta(
       }
     });
   }
+}
+
+/**
+ * The turn a reply belongs to, decided on the first frame of its assistant
+ * message — `parentID` names the prompt it answers, the newest user message
+ * of the session's run (1.18.32's `MessageV2.latest`, read from the source).
+ *
+ * A reply to a prompt the host sent, or to one a turn already claimed, is
+ * that turn's (`claimedPromptIds`). Any other prompt the SERVER wrote: 1.18.32
+ * answers a background `task` call by prompting the calling session with the
+ * child's answer (`injectBackgroundResult`, fixtures README observation 27),
+ * through `SessionPrompt.prompt` — the path a `prompt_async` takes — and that
+ * prompt starts a run of its own, the parent's reply, which no `/turn` ever
+ * opened. Its rows were turnless, and the thread read idle while the agent
+ * worked. So:
+ *
+ * - While a turn runs, the reply is that turn's: the server answers a prompt
+ *   that arrives mid-run in the same run (`SessionRunState.ensureRunning`
+ *   awaits a running run), so the turn claims it, and its steps count as the
+ *   turn's own (`promptMessageIds`).
+ * - While none runs, it opens one — the woken turn — named by the prompt, as
+ *   a live turn is named by the prompt that opened it (a rewind finds it again
+ *   in `GET /session/:id/message`): a fresh generation and usage accumulator,
+ *   `turn.started` before any row of the reply, and a `turn-woken` signal for
+ *   the session's record. From there it is any turn: the session's idle (or
+ *   error) settles it, a Stop aborts it, the session's stop closes it, and a
+ *   message the user sends meanwhile steers it — the server queues it into
+ *   the same run.
+ *
+ * Only a reply BEGINNING: a message that already ended (a fork copies a
+ * session's messages whole — fixture 10) answers no running prompt, and a
+ * rewind claims every prompt its fork copied (`rollbackThread`), so neither
+ * does a copy its dead run never completed. And never a compaction's summary
+ * (`summary: true`), which answers no prompt of the conversation — the host's
+ * own `/compact` runs one while no turn is open. Output that follows an
+ * interruption never reaches here (the demux drops it first), so it opens
+ * nothing either.
+ */
+function claimReply(
+  state: OpenCodeSessionState,
+  info: { parentID?: string; summary?: unknown; time?: { completed?: number } },
+  raw: unknown,
+  out: Emitter
+): void {
+  const promptId =
+    typeof info.parentID === "string" && info.parentID.length > 0 ? info.parentID : undefined;
+  if (
+    promptId === undefined ||
+    state.claimedPromptIds.has(promptId) ||
+    info.time?.completed !== undefined ||
+    info.summary === true
+  ) {
+    return;
+  }
+  claimPrompt(state, promptId);
+  if (state.activeTurnId !== undefined) {
+    state.turnTokenUsage?.promptMessageIds.add(promptId);
+    return;
+  }
+  const usage = makeTurnTokenUsageAccumulator();
+  usage.promptMessageIds.add(promptId);
+  state.promptGeneration += 1;
+  state.activeTurnId = promptId;
+  state.turnTokenUsage = usage;
+  state.lastSessionErrorMessage = undefined;
+  out.push({
+    ...out.base({ turnId: promptId, raw }),
+    type: "turn.started",
+    payload: {}
+  });
+  out.signal({ kind: "turn-woken", turnId: promptId });
 }
 
 /**

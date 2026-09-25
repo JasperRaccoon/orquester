@@ -161,6 +161,13 @@ export interface OpenCodeMessageInfo {
   parentID?: string;
   agent?: string;
   mode?: string;
+  /**
+   * `true` on a compaction's assistant message (`mode` and `agent`
+   * `"compaction"`: fixture 09; 1.18.32's `SessionCompaction.process`, read
+   * from the source) — a summary, the answer to no prompt of the
+   * conversation. A user message carries its diffs here instead (fixture 09).
+   */
+  summary?: unknown;
   tokens?: OpenCodeTokens;
   cost?: number;
   finish?: string;

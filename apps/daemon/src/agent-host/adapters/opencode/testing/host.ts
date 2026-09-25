@@ -65,9 +65,14 @@ export interface HostIngestion {
   fold(): ThreadFoldState;
 }
 
-/** One thread's ingestion, driven step by step, and the log it writes. */
-export function createHostIngestion(): HostIngestion {
-  const clock = new FakeClock();
+/**
+ * One thread's ingestion, driven step by step, and the log it writes. Its
+ * clock starts at `startIso`: ingestion stamps a line with its runtime event's
+ * `createdAt` and only a buffer's flush with its own clock, so a test that
+ * reads the log's times runs both as one.
+ */
+export function createHostIngestion(options: { startIso?: string } = {}): HostIngestion {
+  const clock = new FakeClock(options.startIso);
   const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
   const ingestion = createIngestion({

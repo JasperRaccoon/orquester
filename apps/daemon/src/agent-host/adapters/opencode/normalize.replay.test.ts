@@ -55,6 +55,7 @@ import { modelContextLimits } from "./snapshot.ts";
 import {
   advanceOutputMark,
   borderOverlap,
+  claimPrompt,
   createSessionState,
   makeTurnTokenUsageAccumulator,
   suffixPrefixOverlap,
@@ -155,6 +156,24 @@ function replay(
   const events: RuntimeEvent[] = [];
   const signals: NormalizerSignal[] = [];
   let turnSeq = 0;
+
+  // The runtime's half, again: `sendTurn` claims the prompt it mints before
+  // it submits it, so no reply to it is ever taken for one the server wrote
+  // itself — and a blocking `/command` is recorded only when it returns,
+  // after the frames of its reply (fixture 11).
+  for (const record of records) {
+    const http = record.data as HttpRecord;
+    const body = http.requestBody as { messageID?: string } | undefined;
+    if (
+      record.kind === "http" &&
+      http.method === "POST" &&
+      (http.path.includes("/prompt_async") || http.path.includes("/command")) &&
+      http.path.includes(parent) &&
+      typeof body?.messageID === "string"
+    ) {
+      claimPrompt(state, body.messageID);
+    }
+  }
 
   for (const record of records) {
     if (record.kind === "http") {
@@ -1416,11 +1435,12 @@ function launchInBackground(run: Replay): RuntimeEvent[] {
 function injectedResult(
   childId: string,
   answer: string,
-  options: { state?: string; description?: string } = {}
+  options: { state?: string; description?: string; messageId?: string } = {}
 ): OpenCodeRawEvent[] {
+  const messageId = options.messageId ?? "msg_injected";
   const [message, part] = childFixtureFrames([122, 123], {
-    msg_01a0c202b1b56tqi5gdjmgr8y9: "msg_injected",
-    prt_0c202b1d8001Ef7fckL6t7C4aG: "prt_injected"
+    msg_01a0c202b1b56tqi5gdjmgr8y9: messageId,
+    prt_0c202b1d8001Ef7fckL6t7C4aG: `prt_${messageId}`
   });
   assert.ok(message && part);
   const copy = JSON.parse(JSON.stringify(part)) as {
@@ -1574,6 +1594,191 @@ test("a background run takes no answer written for another run's task", () => {
       ["call_resume", "RUN 2 ANSWER"]
     ]
   );
+});
+
+// ---------------------------------------------------------------------------
+// A background answer wakes the parent: its reply is a turn (obs. 27)
+// ---------------------------------------------------------------------------
+
+/** Fixture 12's session C — the one with a child — whose own reply the frames below clone. */
+const CHILD_PARENT_ID = "ses_f3dfd4e50ffe7r6H3Rf8jBDXUl";
+
+/**
+ * The parent's reply to a prompt the server wrote itself. 1.18.32's
+ * `injectBackgroundResult` prompts the calling session through
+ * `SessionPrompt.prompt`, the path `prompt_async` takes (read from the
+ * source, not captured): the prompt's user message, then the run — `busy`,
+ * the reply's assistant message naming the prompt as its parent, its parts,
+ * its completion — then `busy` → `idle` → `session.idle`. So the frames are
+ * fixture 12's own reply to its prompt (lines 186-187, 197-202) answering
+ * `promptId` under new ids, its completion (202 with `time.completed`), and
+ * the settle (177-179, the child's, as the parent's).
+ */
+function wokenReplyFrames(
+  promptId: string,
+  replyId: string
+): { begins: OpenCodeRawEvent[]; streams: OpenCodeRawEvent[]; ends: OpenCodeRawEvent[]; settle: OpenCodeRawEvent[] } {
+  const renames = {
+    msg_0c202cdef001WhUEivs8Y0ozoo: replyId,
+    msg_01a0c202b1b56tqi5gdjmgr8y9: promptId,
+    prt_0c202d300001iPUUe8kF98xzzI: `prt_start_${replyId}`,
+    prt_0c202d308001SGe0qwNz3du3Ri: `prt_text_${replyId}`,
+    prt_0c202d3d20012r6QX7WcsIYfVJ: `prt_step_${replyId}`
+  };
+  const [busy, begins, start, open, delta, close, step, stopped] = childFixtureFrames(
+    [186, 187, 197, 198, 199, 200, 201, 202],
+    renames
+  );
+  assert.ok(busy && begins && start && open && delta && close && step && stopped);
+  const completed = JSON.parse(JSON.stringify(stopped)) as {
+    type: string;
+    properties: { info: { time: Record<string, unknown> } };
+  };
+  completed.properties.info.time.completed = 1789961359000;
+  return {
+    begins: [busy, begins],
+    streams: [start, open, delta],
+    ends: [close, step, stopped, completed],
+    settle: [
+      busy,
+      ...childFixtureFrames([178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID })
+    ]
+  };
+}
+
+/** Fixture 12's parent at rest after a background launch, its child settled: what a wake finds. */
+function parentAtRest(): Replay {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  run.state.turnTokenUsage = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  return run;
+}
+
+test("a background answer wakes the parent: its reply opens a turn named by the injected prompt, and every row rides it", () => {
+  const run = parentAtRest();
+  const prompt = feed(run, injectedResult("ses_background_child", "Found README.md and a.ts.")).flat();
+  assert.deepEqual(eventsOfType(prompt, "turn.started"), [], "a prompt alone is no reply: nothing opens yet");
+
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const [busy, begins] = reply.begins.map((frame) => normalizeOpenCodeEvent(run.state, frame, run.ctx));
+  assert.deepEqual(busy?.events, [], "the run's busy comes first, before any reply exists");
+  assert.equal(begins?.events[0]?.type, "turn.started", "the reply's first frame opens the turn, before any row of it");
+  assert.equal(begins?.events[0]?.turnId, "msg_injected", "named by the prompt it answers, as a live turn is");
+  assert.deepEqual(begins?.signals, [{ kind: "turn-woken", turnId: "msg_injected" }]);
+  assert.equal(run.state.activeTurnId, "msg_injected");
+
+  const rows = feed(run, [...reply.streams, ...reply.ends]).flat();
+  assert.ok(rows.length > 0);
+  for (const event of rows) {
+    assert.equal(event.turnId, "msg_injected", `${event.type} rides the woken turn`);
+  }
+  assert.deepEqual(
+    eventsOfType(rows, "content.delta").map((event) => event.payload.delta).join(""),
+    "The files in this directory are README.md and a.ts."
+  );
+  assert.equal(eventsOfType(rows, "thread.token-usage.updated").length, 1, "its step is the turn's own");
+  assert.equal(eventsOfType([...rows], "turn.started").length, 0, "one turn, however many frames");
+
+  // The run's settle is the session's to act on, as for any turn.
+  const settle = reply.settle.flatMap((frame) => normalizeOpenCodeEvent(run.state, frame, run.ctx).signals);
+  assert.deepEqual(
+    settle.map((signal) => signal.kind),
+    ["status-busy", "status-idle", "session-idle"]
+  );
+});
+
+test("a reply the host asked for, a compaction's summary, or a message that already ended opens no turn", () => {
+  // Fixture 12's own prompt was the host's: a new reply to it, while nothing runs, is a late one.
+  const hosts = parentAtRest();
+  const late = wokenReplyFrames("msg_01a0c202b1b56tqi5gdjmgr8y9", "msg_late");
+  assert.deepEqual(eventsOfType(feed(hosts, late.begins).flat(), "turn.started"), []);
+  assert.equal(hosts.state.activeTurnId, undefined);
+
+  // A message that already ended — a fork copies a session's messages whole,
+  // completed ones included (fixture 10, lines at t=9362) — is no reply beginning.
+  const copied = parentAtRest();
+  const done = wokenReplyFrames("msg_copied_prompt", "msg_copied").ends.at(-1);
+  assert.ok(done !== undefined);
+  assert.deepEqual(eventsOfType(feed(copied, [done]).flat(), "turn.started"), []);
+
+  // A compaction's summary (`summary: true`) answers no prompt of the
+  // conversation — the host's own `/compact` among them (fixture 09).
+  const compacting = parentAtRest();
+  const summary = JSON.parse(JSON.stringify(wokenReplyFrames("msg_compaction", "msg_summary").begins[1])) as {
+    type: string;
+    properties: { info: Record<string, unknown> };
+  };
+  Object.assign(summary.properties.info, { mode: "compaction", agent: "compaction", summary: true });
+  assert.deepEqual(eventsOfType(feed(compacting, [summary]).flat(), "turn.started"), []);
+});
+
+test("no capture opens a turn of its own: every reply in them answers a prompt the host sent, or is a compaction", () => {
+  for (const name of fixtureNames()) {
+    for (const sessionId of sessionIds(readFixture(name))) {
+      const { events, signals } = replay(name, { sessionId });
+      assert.deepEqual(eventsOfType(events, "turn.started"), [], `${name} as ${sessionId}`);
+      assert.ok(!signals.some((signal) => signal.kind === "turn-woken"), `${name} as ${sessionId}`);
+    }
+  }
+});
+
+test("while a turn runs, a reply to a prompt the server wrote belongs to it, and its steps count as the turn's", () => {
+  const run = parentAtRest();
+  run.state.activeTurnId = "turn-host";
+  run.state.turnTokenUsage = makeTurnTokenUsageAccumulator();
+  run.state.turnTokenUsage.promptMessageIds.add("msg_host_prompt");
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const events = feed(run, [
+    ...injectedResult("ses_background_child", "Found it."),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends
+  ]).flat();
+  assert.deepEqual(eventsOfType(events, "turn.started"), []);
+  for (const event of events.filter((candidate) => !candidate.type.startsWith("task."))) {
+    assert.equal(event.turnId, "turn-host", `${event.type} rides the running turn`);
+  }
+  assert.equal(eventsOfType(events, "thread.token-usage.updated").length, 1, "the reply's step counts");
+  assert.equal(run.state.activeTurnId, "turn-host");
+});
+
+test("a second answer that arrives while the woken reply runs joins its turn", () => {
+  const run = parentAtRest();
+  const first = wokenReplyFrames("msg_injected", "msg_woken");
+  const second = wokenReplyFrames("msg_injected_2", "msg_woken_2");
+  const events = feed(run, [
+    ...injectedResult("ses_background_child", "Found it."),
+    ...first.begins,
+    ...first.streams,
+    ...injectedResult("ses_background_child", "And more.", { messageId: "msg_injected_2" }),
+    ...first.ends,
+    ...second.begins,
+    ...second.streams,
+    ...second.ends
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(events, "turn.started").map((event) => event.turnId),
+    ["msg_injected"],
+    "the server answers the second prompt in the same run: one turn"
+  );
+  const rows = events.filter((event) => !event.type.startsWith("task.") && event.type !== "turn.started");
+  for (const event of rows) {
+    assert.equal(event.turnId, "msg_injected", `${event.type} rides the woken turn`);
+  }
+  assert.equal(eventsOfType(events, "thread.token-usage.updated").length, 2, "both replies' steps count");
+});
+
+test("output that follows an interruption opens nothing, a woken reply's included", () => {
+  const run = parentAtRest();
+  run.state.interruptedTurnId = "turn-stopped";
+  run.state.reconcileIdleStatus = true;
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const events = feed(run, [...reply.begins, ...reply.streams, ...reply.ends]).flat();
+  assert.deepEqual(events, []);
+  assert.equal(run.state.activeTurnId, undefined);
 });
 
 // ---------------------------------------------------------------------------

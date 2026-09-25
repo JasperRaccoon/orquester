@@ -12,7 +12,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import {
+  isMessageStreaming,
+  messageStreamingContext,
+  type RuntimeEvent,
+  type ThreadMessageItem
+} from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
@@ -24,6 +29,8 @@ import {
 } from "./session.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
 import { OpenCodeClient } from "./http.ts";
+import { createHostIngestion } from "./testing/host.ts";
+import { injectedAnswer, runSettles, wokenReply } from "./testing/woken.ts";
 import { deferred } from "./util.ts";
 
 // ---------------------------------------------------------------------------
@@ -1583,6 +1590,303 @@ test("stop is idempotent and emits exactly one session.exited", async () => {
     eventsOfType(harness.events, "session.exited").length,
     1
   );
+  harness.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// A background answer wakes the parent (fixtures README observation 27)
+// ---------------------------------------------------------------------------
+
+/** Push `frames`, in order, onto the session's stream. */
+function pushAll(fake: FakeOpenCode, frames: readonly unknown[]): void {
+  for (const frame of frames) {
+    fake.push(frame);
+  }
+}
+
+/**
+ * A frame whose event proves the ones pushed before it were handled — the
+ * stream is one ordered queue — so a test can assert what did NOT happen
+ * without waiting on a clock.
+ */
+async function drainedWith(harness: Harness, sessionId: string, title: string): Promise<void> {
+  harness.fake.push({
+    type: "session.updated",
+    properties: { sessionID: sessionId, info: { id: sessionId, title } }
+  });
+  await waitFor(
+    harness,
+    "thread.metadata.updated",
+    (event) => (event as Extract<RuntimeEvent, { type: "thread.metadata.updated" }>).payload.name === title
+  );
+}
+
+/** The reply a background answer wakes the parent into, answering the prompt `msg_injected`. */
+const FIRST = { promptId: "msg_injected", replyId: "msg_woken", text: "The child found README.md." };
+
+/** The parent at rest, then a background answer woken into its reply: the turn opened, the reply streaming. */
+async function wokenMidReply(harness: Harness): Promise<{ session: OpenCodeThreadSession; sessionId: string }> {
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins,
+    ...reply.streams
+  ]);
+  await waitFor(harness, "content.delta");
+  assert.deepEqual(
+    eventsOfType(harness.events, "turn.started").map((event) => event.turnId),
+    [FIRST.promptId],
+    "the reply opened a turn, named by the prompt it answers"
+  );
+  return { session, sessionId };
+}
+
+test("a background answer wakes the parent: its reply runs as a turn named by the injected prompt, and the run's idle settles it", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await wokenMidReply(harness);
+
+  const started = eventsOfType(harness.events, "turn.started");
+  assert.deepEqual(started.map((event) => event.turnId), ["msg_injected"]);
+  const order = typesOf(harness.events);
+  assert.ok(order.indexOf("turn.started") < order.indexOf("content.delta"), "the turn opens before any row of the reply");
+  assert.deepEqual(
+    [session.session.status, session.session.activeTurnId],
+    ["running", "msg_injected"],
+    "the session reads running while the reply streams"
+  );
+
+  pushAll(harness.fake, [...wokenReply({ sessionId, ...FIRST }).ends, ...runSettles(sessionId)]);
+  const completed = await waitFor(harness, "turn.completed");
+  assert.equal(completed.turnId, "msg_injected");
+  assert.equal(completed.payload.state, "completed");
+  // input + cache.read + cache.write; output + reasoning — the reply's own step.
+  assert.equal(completed.payload.tokenUsage?.usageStatus, "complete");
+  assert.equal(completed.payload.tokenUsage?.inputTokens, 1_346 + 42_514);
+  assert.equal(completed.payload.tokenUsage?.outputTokens, 13 + 77);
+  for (const event of harness.events) {
+    if (event.type === "content.delta" || event.type === "item.completed" || event.type === "thread.token-usage.updated") {
+      assert.equal(event.turnId, "msg_injected", `${event.type} rides the woken turn`);
+    }
+  }
+  assert.deepEqual([session.session.status, session.session.activeTurnId], ["ready", undefined]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a session.error during the woken reply fails its turn, as it fails any", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await wokenMidReply(harness);
+  harness.fake.push({
+    type: "session.error",
+    properties: { sessionID: sessionId, error: { name: "UnknownError", data: { message: "Rate limit exceeded" } } }
+  });
+  const completed = await waitFor(harness, "turn.completed");
+  assert.deepEqual(
+    [completed.turnId, completed.payload.state, completed.payload.errorMessage],
+    ["msg_injected", "failed", "Rate limit exceeded"]
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("the user's message during the woken reply steers it: one turn, which the run's idle ends", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await wokenMidReply(harness);
+
+  const steer = await session.sendTurn({
+    threadId: "thread-1",
+    input: "check b.ts too",
+    attachments: [],
+    interactionMode: "default"
+  });
+  assert.equal(steer.turnId, "msg_injected", "the server queues it into the same run");
+  const messageId = (harness.fake.find("POST", "/prompt_async")?.body as { messageID: string }).messageID;
+  // Its user message, then — after the first reply ends — the reply to it, in the same run.
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: messageId, role: "user", sessionID: sessionId } } },
+    ...wokenReply({ sessionId, ...FIRST }).ends
+  ]);
+  const second = wokenReply({ sessionId, promptId: messageId, replyId: "msg_steered", text: "b.ts is there too." });
+  pushAll(harness.fake, [...second.begins, ...second.streams, ...second.ends, ...runSettles(sessionId)]);
+
+  const completed = await waitFor(harness, "turn.completed");
+  assert.equal(completed.turnId, "msg_injected");
+  assert.equal(completed.payload.state, "completed");
+  assert.deepEqual(eventsOfType(harness.events, "turn.started").map((event) => event.turnId), ["msg_injected"]);
+  assert.equal(completed.payload.tokenUsage?.inputTokens, 2 * (1_346 + 42_514), "both replies' steps are the turn's");
+  assert.equal(
+    eventsOfType(harness.events, "content.delta").filter((event) => event.turnId === "msg_injected").length,
+    2
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a second answer that arrives while the woken reply runs joins its turn: one turn, one completion", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await wokenMidReply(harness);
+  const second = wokenReply({ sessionId, promptId: "msg_injected_2", replyId: "msg_woken_2", text: "And a.ts." });
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: "msg_injected_2", childId: "ses_child_2", answer: "Found a.ts." }),
+    ...wokenReply({ sessionId, ...FIRST }).ends,
+    ...second.begins,
+    ...second.streams,
+    ...second.ends,
+    ...runSettles(sessionId)
+  ]);
+  const completed = await waitFor(harness, "turn.completed");
+  assert.equal(completed.turnId, "msg_injected");
+  assert.deepEqual(eventsOfType(harness.events, "turn.started").map((event) => event.turnId), ["msg_injected"]);
+  assert.equal(eventsOfType(harness.events, "turn.completed").length, 1);
+  assert.equal(completed.payload.tokenUsage?.inputTokens, 2 * (1_346 + 42_514));
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a Stop during the woken reply aborts its turn, and what the aborted run still sends opens nothing", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await wokenMidReply(harness);
+
+  await session.interruptTurn("msg_injected");
+  const aborted = firstOfType(harness.events, "turn.aborted");
+  assert.equal(aborted?.turnId, "msg_injected");
+  assert.ok(harness.fake.find("POST", `/session/${sessionId}/abort`) !== undefined, "the run is aborted provider-side");
+  assert.deepEqual([session.session.status, session.session.activeTurnId], ["ready", undefined]);
+
+  // The aborted reply's own end, then a reply to another prompt the server wrote: nothing reopens.
+  pushAll(harness.fake, [
+    ...wokenReply({ sessionId, ...FIRST }).ends,
+    ...wokenReply({ sessionId, promptId: "msg_late_answer", replyId: "msg_late", text: "late" }).begins
+  ]);
+  await drainedWith(harness, sessionId, "after the stop");
+  assert.deepEqual(eventsOfType(harness.events, "turn.started").map((event) => event.turnId), ["msg_injected"]);
+  assert.equal(session.session.activeTurnId, undefined);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("the session stopping during the woken reply settles its turn before session.exited", async () => {
+  const harness = makeHarness();
+  const { session } = await wokenMidReply(harness);
+  await session.stop({ reason: "tab closed", hostInitiated: true });
+  const completed = firstOfType(harness.events, "turn.completed");
+  assert.deepEqual([completed?.turnId, completed?.payload.state], ["msg_injected", "interrupted"]);
+  const order = typesOf(harness.events);
+  assert.ok(order.lastIndexOf("turn.completed") < order.lastIndexOf("session.exited"));
+  harness.dispose();
+});
+
+test("the host's own /compact runs no turn: a compaction's summary is no reply", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  await session.compact();
+  // As fixture 09 shows it: the compaction's prompt, then its summary — an
+  // assistant message with `summary: true` — streaming, then the run's end.
+  const summary = wokenReply({ sessionId, promptId: "msg_compaction", replyId: "msg_summary", text: "## Objective" });
+  const asSummary = (frame: unknown): unknown => {
+    const copy = JSON.parse(JSON.stringify(frame)) as { type: string; properties: { info?: Record<string, unknown> } };
+    if (copy.type === "message.updated" && copy.properties.info !== undefined) {
+      Object.assign(copy.properties.info, { mode: "compaction", agent: "compaction", summary: true });
+    }
+    return copy;
+  };
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: "msg_compaction", role: "user", sessionID: sessionId } } },
+    ...[...summary.begins, ...summary.streams, ...summary.ends].map(asSummary),
+    { type: "session.compacted", properties: { sessionID: sessionId } },
+    ...runSettles(sessionId)
+  ]);
+  await drainedWith(harness, sessionId, "after the compaction");
+  assert.deepEqual(eventsOfType(harness.events, "turn.started"), []);
+  assert.equal(session.session.activeTurnId, undefined);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a rewind's fork is the past: its copied messages, delivered late, open no turn", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  // The first exchange's reply never completed: its run died with a server
+  // (`time.completed` unset). A fork copies it whole, under new ids.
+  harness.fake.faithfulForks = true;
+  harness.fake.messages = [
+    { info: { id: "msg_p0", role: "user" }, parts: [] },
+    { info: { id: "msg_a0", role: "assistant" }, parts: [] },
+    { info: { id: "msg_p1", role: "user" }, parts: [] },
+    { info: { id: "msg_a1", role: "assistant" }, parts: [] }
+  ];
+  await session.rollbackThread(1, {
+    firstRemovedTurnId: "msg_p1",
+    droppedTurnIds: ["msg_p1"],
+    retainedTurnIds: ["msg_a0"]
+  });
+  const forkId = session.sessionId;
+  // The copy's frames, reaching the stream only after the thread moved onto the fork.
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: forkId, info: { id: `${forkId}-msg-1`, role: "user", sessionID: forkId } } },
+    {
+      type: "message.updated",
+      properties: {
+        sessionID: forkId,
+        info: { id: `${forkId}-msg-2`, role: "assistant", parentID: `${forkId}-msg-1`, sessionID: forkId, time: { created: 1 } }
+      }
+    }
+  ]);
+  await drainedWith(harness, forkId, "after the rewind");
+  assert.deepEqual(eventsOfType(harness.events, "turn.started"), []);
+  assert.equal(session.session.activeTurnId, undefined);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("end to end: through the host's real ingestion and fold, the woken reply reads as a running turn, then a settled one", async () => {
+  const harness = makeHarness();
+  const host = createHostIngestion();
+  let fed = 0;
+  const ingestNew = async (): Promise<void> => {
+    const fresh = harness.events.slice(fed);
+    fed = harness.events.length;
+    await host.ingest(fresh);
+  };
+  const { session, sessionId } = await wokenMidReply(harness);
+  await ingestNew();
+
+  const mid = host.fold();
+  assert.deepEqual(
+    [mid.head?.session.status, mid.head?.session.activeTurnId],
+    ["running", "msg_injected"],
+    "the thread reads working: nobody sent a /turn, and it is running"
+  );
+  const turn = mid.turns.find((candidate) => candidate.turnId === "msg_injected");
+  assert.equal(turn?.state, "running");
+  const answer = mid.items.find(
+    (item): item is ThreadMessageItem => item.kind === "message" && item.role === "assistant"
+  );
+  assert.ok(answer !== undefined, "the reply's words are on the timeline");
+  assert.equal(answer.turnId, "msg_injected", "the reply's words ride the turn");
+  assert.equal(answer.streaming, true);
+  assert.equal(isMessageStreaming(answer, messageStreamingContext(mid)), true, "and read as streaming");
+
+  pushAll(harness.fake, [...wokenReply({ sessionId, ...FIRST }).ends, ...runSettles(sessionId)]);
+  await waitFor(harness, "turn.completed");
+  await ingestNew();
+
+  const end = host.fold();
+  assert.deepEqual([end.head?.session.status, end.head?.session.activeTurnId], ["ready", null]);
+  const settled = end.turns.find((candidate) => candidate.turnId === "msg_injected");
+  assert.equal(settled?.state, "completed");
+  assert.ok(settled?.completedAt !== null, "a settled turn, whose end raises the thread's 'finished'");
+  const done = end.items.find(
+    (item): item is ThreadMessageItem => item.kind === "message" && item.id === answer.id
+  );
+  assert.ok(done !== undefined);
+  assert.equal(done.text, "The child found README.md.");
+  assert.equal(isMessageStreaming(done, messageStreamingContext(end)), false, "and reads as settled");
+  assert.equal(end.turns.length, 1, "one turn, and no other");
+  await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
 

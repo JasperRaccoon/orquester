@@ -546,6 +546,17 @@ export interface OpenCodeSessionState {
   childAgents: Map<string, OpenCodeChildAgent>;
 
   activeTurnId?: string;
+  /**
+   * The prompts whose replies a turn owns: every message the host sent
+   * (`sendTurn` — a turn's prompt and each steer's), every prompt the server
+   * wrote itself that a turn claimed when its reply began (`claimReply` in
+   * `normalize.ts`: the turn running then, or the turn that reply opened), and
+   * every prompt a rewind's fork copied (`rollbackThread` — the past, under
+   * new ids). A reply to any other prompt, beginning while no turn runs, is
+   * one the host never started — the parent woken by a background `task`
+   * call's answer — and opens a turn of its own. Bounded ({@link claimPrompt}).
+   */
+  claimedPromptIds: Set<string>;
   activeAgent?: string;
   activeVariant?: string;
   interruptedTurnId?: string;
@@ -621,6 +632,7 @@ export function createSessionState(input: {
     processedTokens: 0,
     relatedSessionIds: new Set([input.openCodeSessionId]),
     childAgents: new Map(),
+    claimedPromptIds: new Set(),
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
     promptGeneration: 0,
@@ -648,12 +660,35 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.outputMarks.clear();
   state.turnTokenUsage = undefined;
   state.activeTurnId = undefined;
+  // A fork re-mints every message id (fixtures README observation 17): no
+  // prompt the source session held is named in this one.
+  state.claimedPromptIds.clear();
   state.interruptedTurnId = undefined;
   state.reconcileIdleStatus = false;
   state.awaitingBusyAfterInterruption = false;
   state.pendingIdleReconciliation = undefined;
   state.lastSessionErrorMessage = undefined;
   state.lastEmittedTitle = undefined;
+}
+
+/**
+ * How many prompts {@link OpenCodeSessionState.claimedPromptIds} remembers. A
+ * reply names the prompt it answers as it begins — the newest user message of
+ * its run — so only recent prompts are ever named; the oldest go first.
+ */
+const CLAIMED_PROMPTS_CAP = 256;
+
+/** Record that a turn owns the replies to `promptId`. */
+export function claimPrompt(state: OpenCodeSessionState, promptId: string): void {
+  state.claimedPromptIds.delete(promptId);
+  state.claimedPromptIds.add(promptId);
+  while (state.claimedPromptIds.size > CLAIMED_PROMPTS_CAP) {
+    const oldest = state.claimedPromptIds.values().next();
+    if (oldest.done === true) {
+      break;
+    }
+    state.claimedPromptIds.delete(oldest.value);
+  }
 }
 
 /**

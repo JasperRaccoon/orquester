@@ -73,6 +73,7 @@ import { buildOpenCodePermissionRules, toOpenCodePermissionReply } from "./rules
 import type { OpenCodeServerHandle } from "./server.ts";
 import { readSseFrames } from "./sse.ts";
 import {
+  claimPrompt,
   createSessionState,
   makeTurnTokenUsageAccumulator,
   repointSession,
@@ -694,6 +695,17 @@ export class OpenCodeThreadSession {
         return;
       }
       case "compacted": {
+        return;
+      }
+      case "turn-woken": {
+        // The parent's reply to a prompt the server wrote itself — a
+        // background `task` call's answer — opened this turn (`claimReply`).
+        // From here it is any turn: the machines above settle it.
+        this.cancelIdleReconciliation();
+        this.updateRecord(
+          { status: "running", activeTurnId: signal.turnId },
+          { lastError: true }
+        );
         return;
       }
       default: {
@@ -1391,14 +1403,19 @@ export class OpenCodeThreadSession {
 
       // A sendTurn while a turn is active is a STEER: OpenCode queues the
       // prompt into the running session, so the active turn id is reused
-      // (§4.1 "Steering"). A new turn is NAMED by the OpenCode id of the prompt
-      // that opens it — OpenCode keeps a client-minted `messageID` verbatim
-      // (fixtures README observations 8 and 15) — so the id the fold keeps is
-      // the provider's own and a rewind finds the turn again in
-      // `GET /session/:id/message`, across a host restart too (§5.5).
+      // (§4.1 "Steering") — a turn a background answer woke included, whose
+      // run the prompt joins as it would any. A new turn is NAMED by the
+      // OpenCode id of the prompt that opens it — OpenCode keeps a
+      // client-minted `messageID` verbatim (fixtures README observations 8
+      // and 15) — so the id the fold keeps is the provider's own and a rewind
+      // finds the turn again in `GET /session/:id/message`, across a host
+      // restart too (§5.5).
       const steeringTurnId = this.state.activeTurnId;
       const messageId = mintOpenCodeMessageId();
       const turnId = steeringTurnId ?? messageId;
+      // Claimed before it is sent: a reply to it is this turn's, never one
+      // the server started on its own (`claimReply`).
+      claimPrompt(this.state, messageId);
       const agent =
         selectedOption(selection, "agent") ??
         (input.interactionMode === "plan" ? "plan" : undefined);
@@ -1998,6 +2015,14 @@ export class OpenCodeThreadSession {
       this.rememberFork(list, forked);
       await this.settlePendingRequests().catch(() => undefined);
       repointSession(this.state, fork.id);
+      // Every prompt the fork holds is the past, re-minted: a copied reply
+      // whose frame reaches the stream after this — one its run never
+      // completed, say — is no reply beginning, and opens no turn.
+      for (const entry of forked) {
+        if (entry?.info?.role === "user" && typeof entry.info.id === "string") {
+          claimPrompt(this.state, entry.info.id);
+        }
+      }
       this.updateRecord({ status: "ready" }, { activeTurnId: true });
       this.emit({
         ...this.base({}),
