@@ -1,5 +1,5 @@
 import { SYSTEM_ACCOUNT_ID, type AgentAccountsResponse, type RegistryResponse, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes, isUnfinishedGoal, parseAgentGoal, parseThreadGoal, SETTLED_TURN_STATES as TURN_SETTLED_STATES, startedTurns } from "@orquester/api/agent-chat";
+import { agentChatRoutes, isUnfinishedGoal, parseAgentGoal, parseThreadGoal, reEmittedAssistantCopies, repairsReEmittedAssistantCopies, SETTLED_TURN_STATES as TURN_SETTLED_STATES, startedTurns } from "@orquester/api/agent-chat";
 import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, AgentGoalStatus, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, Turn, UserInputQuestion } from "@orquester/api/agent-chat";
 import { resolveChatActivity, type ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 import { projectNamesFor, type ProjectRef } from "./addressing.ts";
@@ -41,8 +41,10 @@ export type SessionReason = ChatActivityRung | "new" | "exited";
  * The provider's goal, where `reason` alone cannot tell "finished" from a goal that stopped short: every settled turn
  * reads "completed", whether the goal is paused, blocked or limited. `continuing` is the host's word (goals §4.7):
  * the provider starts the next turn by itself (a Codex goal), and `reason` reads "goal-continuing" between its turns.
+ * `heldForUpdate` (goals §5.7): an Orquester update paused the goal between two of its turns, and the agent host sets it
+ * going again by itself once it has restarted — `paused` and still continuing, the GUI's "paused for update".
  */
-export interface GoalView { objective: string; status: AgentGoalStatus; continuing: boolean }
+export interface GoalView { objective: string; status: AgentGoalStatus; continuing: boolean; heldForUpdate?: true }
 /**
  * The fold's goal — an unfinished one, and a finished one where the provider's last update still carries it (Codex and
  * Grok report a met goal as `complete`) — with every fact the GUI's chip shows, each only when the provider reported it.
@@ -92,11 +94,15 @@ export function sessionReason(s: SessionSummary): SessionReason | null {
 
 /**
  * The summary's goal, read as the GUI's tab marker reads it (`goalSummaryMarker`): the host reports only an unfinished
- * one (goals §4.7), and one without a usable objective and status, or a finished one, is none.
+ * one (goals §4.7), and one without a usable objective and status, or a finished one, is none. A `paused` goal the host
+ * reports continuing is one an Orquester update holds (goals §5.7, the GUI's `isGoalHeldForUpdate`): the host's own
+ * predicate needs an `active` goal otherwise.
  */
 export function goalView(s: SessionSummary): GoalView | null {
   const g = parseAgentGoal(s.goal);
-  return g && isUnfinishedGoal(g) ? { objective: clipText(g.objective, GOAL_LABEL_CHARS), status: g.status, continuing: s.goal?.continuing === true } : null;
+  if (!g || !isUnfinishedGoal(g)) return null;
+  const continuing = s.goal?.continuing === true;
+  return { objective: clipText(g.objective, GOAL_LABEL_CHARS), status: g.status, continuing, ...(continuing && g.status === "paused" ? { heldForUpdate: true as const } : {}) };
 }
 
 /**
@@ -104,11 +110,15 @@ export function goalView(s: SessionSummary): GoalView | null {
  * the end as no goal (Claude's met or failed goal), when it does not read, and from a host that predates goals.
  * `continuing` is the summary's, the host's word, held to the snapshot's own status.
  */
-export function goalDetailView(snap: ThreadSnapshotPayload, continuing: boolean): GoalDetailView | null {
+export function goalDetailView(snap: ThreadSnapshotPayload, summaryGoal: SessionSummary["goal"]): GoalDetailView | null {
   const g = parseThreadGoal(snap.goal);
   if (!g) return null;
-  // The summary trails the snapshot by a host poll, and the host's own `goalContinues` needs an `active` goal.
-  const v: GoalDetailView = { objective: clipText(g.objective, GOAL_OBJECTIVE_CHARS), status: g.status, continuing: continuing && g.status === "active", updatedAt: g.updatedAt };
+  // The summary trails the snapshot by a host poll — right after a `/goal pause` it can still say continuing — and the
+  // host's own predicate needs an `active` goal, unless an Orquester update holds it (goals §5.7): then the host's
+  // reading is `paused` and continuing, the summary's status `paused` too, as the GUI's `isGoalHeldForUpdate` asks.
+  const said = summaryGoal?.continuing === true;
+  const held = said && g.status === "paused" && summaryGoal?.status === "paused";
+  const v: GoalDetailView = { objective: clipText(g.objective, GOAL_OBJECTIVE_CHARS), status: g.status, continuing: said && (g.status === "active" || held), ...(held ? { heldForUpdate: true as const } : {}), updatedAt: g.updatedAt };
   if (g.phase !== undefined) v.phase = clipText(g.phase, GOAL_LABEL_CHARS);
   if (g.rounds !== undefined) v.rounds = g.rounds;
   if (g.lastCheck !== undefined) v.lastCheck = clipText(g.lastCheck, GOAL_CHECK_CHARS);
@@ -284,19 +294,26 @@ export function latestSettledTurn(turns: readonly Turn[]): Turn | null {
  * (Codex's `phase`, carried as `messageKind`) is the running "I'll do X next" narration, not the answer, while the turn
  * has one (`isCommentaryAssistantMessage`). A turn with none — interrupted, ended on a tool, a Codex goal turn the Stop
  * paused then interrupted — ends on its last commentary, as the GUI's timeline does (`deriveTerminalAssistantMessageIds`).
+ * A message `skip` names is no part of the turn at all, neither answer nor commentary: a re-emitted copy (`lastReply`).
  */
-export function assistantTextForTurn(items: readonly ThreadItem[], turnId: string): string {
-  const own = items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId);
+export function assistantTextForTurn(items: readonly ThreadItem[], turnId: string, skip?: ReadonlySet<string>): string {
+  const own = items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId && !skip?.has(i.id));
   const answer = own.filter((i) => i.messageKind !== "commentary").map((i) => i.text).filter(Boolean).join("\n\n");
   if (answer) return answer;
   for (let i = own.length - 1; i >= 0; i -= 1) if (own[i]!.messageKind === "commentary") return own[i]!.text;
   return "";
 }
 
+/**
+ * The latest settled turn's answer, as the parent's timeline shows it. On a Claude thread that leaves out the opening
+ * paragraph a host before the pre-turn-stream fix wrote a second time at `result`, which an old log keeps: the GUI's
+ * rule, from the one implementation (`reEmittedAssistantCopies`, `@orquester/api/agent-chat`), counted over the window.
+ */
 export function lastReply(snap: ThreadSnapshotPayload): SessionDetail["lastReply"] | null {
   const t = latestSettledTurn(snap.turns);
   if (!t?.turnId) return null;
-  const capped = capText(assistantTextForTurn(snap.items, t.turnId), VIEW_TEXT_CAP);
+  const copies = repairsReEmittedAssistantCopies(snap.head.adapter) ? reEmittedAssistantCopies(snap.items) : undefined;
+  const capped = capText(assistantTextForTurn(snap.items, t.turnId, copies), VIEW_TEXT_CAP);
   return { turnId: t.turnId, text: capped.text, truncated: capped.truncated, completedAt: t.completedAt };
 }
 
@@ -330,7 +347,7 @@ export function sessionDetail(s: SessionSummary, snap: ThreadSnapshotPayload, ct
   const head = snap.head;
   const caps = ctx.capabilitiesByAdapter.get(head.adapter);
   const chat: SessionDetail["chat"] = {
-    ...(base.chat as NonNullable<SessionView["chat"]>), goal: goalDetailView(snap, s.goal?.continuing === true),
+    ...(base.chat as NonNullable<SessionView["chat"]>), goal: goalDetailView(snap, s.goal),
     model: head.modelSelection.model, options: optionsObject(head.modelSelection.options), runtimeMode: head.runtimeMode, home: head.home,
     // Turns are numbered by START ORDER (turns.ts), never by the sparse checkpoint list — this is the number revert_session/get_turn_diff speak in.
     activeTurnId: head.session.activeTurnId, turnCount: startedTurns(snap.turns).length, continueAfterRestart: head.continueAfterRestart !== undefined,

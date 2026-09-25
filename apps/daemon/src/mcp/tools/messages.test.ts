@@ -1031,3 +1031,23 @@ test("goals §5.1: an answer is cut by bytes, and says so, so the result keeps i
   assert.ok((r.answer as string).startsWith("Goal: 語語"));
   assert.ok(resultBytes(r) <= MAX_RESULT_BYTES);
 });
+
+test("goals §5.7: a deploy's hold row is no answer: /goal status settles on its own status row", async (t) => {
+  // The host writes one `goal.status` row when it holds a goal for a deploy; it can land between the command and
+  // its answer.
+  const held = activity("goal.status", { heldForUpdate: true }, { summary: "Goal paused for an Orquester update. It resumes by itself once the agent host has restarted." });
+  let phase = 1;
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), held, ...(phase === 2 ? [goalStatusRow()] : [])] })); t.after(h.close);
+  let now = Date.parse("2026-09-22T12:00:00.000Z");
+  const p = tool("send_message").run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
+  const settled = settledFlag(p);
+  await ticks(10);
+  assert.equal(settled(), false, "the hold's row settled nothing");
+  phase = 2;
+  now += 200;
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ refId: "codex" }), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, "Goal: Ship the parser (active, 2 rounds)");
+});
+

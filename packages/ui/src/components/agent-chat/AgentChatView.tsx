@@ -19,6 +19,7 @@ import {
   chatAccountSwitchSupported,
   isGoalContinuing
 } from "../../lib/agent-chat/account-switch";
+import { isGoalHeldForUpdate } from "../../lib/agent-chat/goal.logic";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
 import { Modal, ModalCloseButton } from "../ui";
@@ -601,7 +602,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // is one, else a coarser form of the host's predicate (`isGoalContinuing`).
   // A stopped or errored session may switch, except one whose resume mark is
   // still pending (after a handover it may read `stopped` or `error`), which
-  // reads as continuing.
+  // reads as continuing — and so does a goal a deploy holds (§5.7), whose
+  // mark the head carries on a snapshot.
   const accountSwitchState = {
     isTurnActive: turnActive,
     hasPendingRequest: pending.totalCount > 0,
@@ -614,7 +616,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       goal: slice.goal,
       support: provider?.capabilities?.goals,
       sessionStatus: slice.sessionStatus,
-      resumeGoalAfterRestart: slice.head?.resumeGoalAfterRestart === true
+      resumeGoalAfterRestart: slice.head?.resumeGoalAfterRestart === true,
+      goalHeldForHandover: slice.head?.goalHeldForHandover === true
     }),
     // The host refuses a switch for a running compaction first (and the chip
     // then names it, as the host would).
@@ -631,6 +634,15 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // sends — so a nudge is withheld while either says work is still running.
   const goalSupport = provider?.capabilities?.goals ?? null;
   const threadGoal = paintOnly ? null : slice.goal;
+  // Goals §5.7: a deploy's drain paused the goal between two of its turns and
+  // the next host resumes it — the fold reads `paused`, the tab reads working.
+  // The chip says so rather than showing the user's pause; the actions stay a
+  // paused goal's (Resume, Clear), since the user wins.
+  const goalHeldForUpdate = isGoalHeldForUpdate({
+    goal: threadGoal,
+    summaryGoal: session.goal,
+    goalHeldForHandover: slice.head?.goalHeldForHandover === true
+  });
   const goalBackgroundLive = roster.backgroundLiveness !== null || session.backgroundLiveness != null;
   const { goalActionList, goalNote } = React.useMemo(() => {
     const input = {
@@ -866,6 +878,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 latestCheckpoint={latestCheckpoint}
                 modelLabel={slice.head?.modelSelection.model ?? session.model ?? null}
                 goal={threadGoal}
+                goalHeldForUpdate={goalHeldForUpdate}
                 goalActions={goalActionList}
                 goalActionsNote={goalNote}
                 onGoalAction={paintOnly ? noop : sendGoalAction}

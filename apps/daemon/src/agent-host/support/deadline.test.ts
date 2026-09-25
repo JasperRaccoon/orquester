@@ -108,6 +108,7 @@ test("the documented windows are the ones the spec states", () => {
   assert.equal(AGENT_HOST_DEADLINES.interruptAllMs, 10_000);
   // goals §6.2.4: the pause in front of a Stop never blocks it for long.
   assert.equal(AGENT_HOST_DEADLINES.goalPauseMs, 1_500);
+  assert.equal(AGENT_HOST_DEADLINES.goalResumeMs, 12_000);
   assert.equal(TURN_LIVENESS_WINDOWS.idleMs, 600_000);
   assert.equal(TURN_LIVENESS_WINDOWS.activeToolMs, 1_800_000);
   // goals §5.2: while the thread's goal is active.

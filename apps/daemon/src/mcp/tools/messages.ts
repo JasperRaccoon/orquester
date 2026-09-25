@@ -254,6 +254,8 @@ function goalAnswerRows(items: readonly ThreadItem[], input: string, seen: Reado
       const detail = (item.payload as { detail?: unknown } | null)?.detail;
       rows.push({ text: typeof detail === "string" && detail ? `${item.summary}: ${detail}` : item.summary, failed: true, settles: true });
     } else if (item.activityKind === GOAL_STATUS_ACTIVITY_KIND) {
+      // A deploy's hold writes one of these too (goals §5.7, `heldForUpdate`): it answers nobody's `/goal`.
+      if ((item.payload as { heldForUpdate?: unknown } | null)?.heldForUpdate === true) continue;
       rows.push({ text: item.summary, failed: false, settles: true });
     } else if (item.activityKind === GOAL_ACTIVITY_KIND) {
       // A row whose payload does not parse is still shown, by the GUI and by read_transcript.

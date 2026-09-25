@@ -28,6 +28,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import {
   ACTIVE_SUBAGENT_STATUSES,
   DEFAULT_INTERACTION_MODE,
+  repairsReEmittedAssistantCopies,
   THREAD_HISTORY_DEFAULT_TURNS,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
@@ -548,10 +549,12 @@ function deriveBackgroundLiveness(
 
 function project(state: InternalState): InternalState {
   // Only a Claude log can hold the re-emitted opening paragraphs older hosts
-  // wrote (`reEmittedAssistantCopies`); nothing else is second-guessed. The
-  // window, its row timeline and the history pages all ask the same way.
-  const repair =
-    state.slice.head?.adapter === "claude" ? ({ dropRepeatedAssistantMessages: true } as const) : undefined;
+  // wrote (`reEmittedAssistantCopies`); nothing else is second-guessed, and
+  // `repairsReEmittedAssistantCopies` decides it, for the MCP too. The window,
+  // its row timeline and the history pages all ask the same way.
+  const repair = repairsReEmittedAssistantCopies(state.slice.head?.adapter)
+    ? ({ dropRepeatedAssistantMessages: true } as const)
+    : undefined;
   const timeline0 = deriveTimelineEntriesFromItems(state.slice.entries, state.timeline, repair);
   const contextWindowEntry = latestContextWindowActivity(timeline0.activities);
   const backgroundLiveness = deriveBackgroundLiveness(state.slice.roster);

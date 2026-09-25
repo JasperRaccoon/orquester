@@ -485,3 +485,99 @@ test("final wave (2) + micro-fix: the goal popover closes when its tab is LEFT, 
   stop();
   setActiveChatTab(null);
 });
+
+// ---------------------------------------------------------------------------
+// Goals §5.7: a goal HELD for an Orquester update
+// ---------------------------------------------------------------------------
+
+test("goals §5.7: a held goal reads `paused for update`, in the in-motion tone, never live", () => {
+  const held = deriveGoalChip(goal({ status: "paused", rounds: 4 }), false, { heldForUpdate: true });
+  assert.equal(held?.detail, "paused for update");
+  assert.equal(held?.detailShort, "update", "the short form the chip shows below `sm`");
+  assert.equal(held?.tone, "info", "nothing went wrong: it goes on by itself");
+  assert.equal(held?.live, false);
+  assert.equal(
+    deriveGoalChip(goal({ status: "paused" }), true, { heldForUpdate: true })?.live,
+    false,
+    "not even while the turn the hold lets finish is running: the goal itself is not being worked on"
+  );
+  assert.equal(held?.title, "Make CI green", "the tooltip is still the objective");
+  assert.equal(held?.tokens, null);
+});
+
+test("goals §5.7: a held goal's spoken name says the pause is Orquester's and ends by itself", () => {
+  assert.equal(
+    deriveGoalChip(goal({ status: "paused" }), false, { heldForUpdate: true })?.ariaLabel,
+    "Goal: Make CI green (paused for an Orquester update — it resumes by itself)"
+  );
+  assert.equal(
+    deriveGoalChip(goal({ status: "paused", tokensUsed: 12_400, tokenBudget: 50_000 }), false, {
+      heldForUpdate: true
+    })?.ariaLabel,
+    "Goal: Make CI green (paused for an Orquester update — it resumes by itself), 12k/50k tok",
+    "the tokens are still part of what the chip says"
+  );
+});
+
+test("goals §5.7: the popover's status says the same", () => {
+  const now = new Date("2026-09-24T12:00:00.000Z");
+  const facts = {
+    status: "paused" as const,
+    rounds: 4,
+    tokensUsed: 12_400,
+    tokenBudget: 50_000,
+    elapsedMs: 725_000,
+    setAt: "2026-09-24T08:15:00.000Z"
+  };
+  const held = deriveGoalPanel(goal(facts), now, { heldForUpdate: true });
+  assert.equal(held.statusLabel, "Paused for an Orquester update — it resumes by itself");
+  assert.deepEqual(
+    { ...held, statusLabel: "Paused" },
+    deriveGoalPanel(goal(facts), now),
+    "every other fact of the readout is the paused goal's own"
+  );
+});
+
+test("goals §5.7: an ordinary pause is unchanged — the warn tone, `paused`, `Paused`", () => {
+  for (const options of [undefined, {}, { heldForUpdate: false }]) {
+    const chip = deriveGoalChip(goal({ status: "paused" }), false, options);
+    assert.deepEqual(
+      [chip?.detail, chip?.detailShort, chip?.tone, chip?.ariaLabel],
+      ["paused", "paused", "warn", "Goal: Make CI green (paused)"],
+      JSON.stringify(options)
+    );
+    assert.equal(deriveGoalPanel(goal({ status: "paused" }), new Date(), options).statusLabel, "Paused");
+  }
+});
+
+test("goals §5.7: the held flag changes nothing on a goal that is not paused", () => {
+  const now = new Date("2026-09-24T12:00:00.000Z");
+  for (const status of ["active", "blocked", "budget-limited", "usage-limited"] as const) {
+    for (const turnRunning of [false, true]) {
+      const facts = goal({ status, rounds: 3, phase: "verifying", tokensUsed: 12_400, tokenBudget: 50_000 });
+      assert.deepEqual(
+        deriveGoalChip(facts, turnRunning, { heldForUpdate: true }),
+        deriveGoalChip(facts, turnRunning),
+        `${status}, turn ${turnRunning ? "running" : "idle"}`
+      );
+    }
+    assert.deepEqual(
+      deriveGoalPanel(goal({ status }), now, { heldForUpdate: true }),
+      deriveGoalPanel(goal({ status }), now),
+      status
+    );
+  }
+  assert.equal(deriveGoalChip(goal({ status: "complete" }), false, { heldForUpdate: true }), null);
+  assert.equal(deriveGoalChip(null, false, { heldForUpdate: true }), null);
+});
+
+test("goals §5.7: the user wins — a held goal offers what any paused goal offers", () => {
+  // The matrix never reads the hold: the fold says `paused`, so Codex offers
+  // Resume and Clear, and either releases the hold on the host.
+  assert.deepEqual(
+    goalActions({ goal: goal({ status: "paused" }), support: CODEX, ...SITUATIONS.running }).map(
+      (model) => model.action
+    ),
+    ["resume", "clear"]
+  );
+});

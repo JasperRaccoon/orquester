@@ -1,4 +1,4 @@
-import { ACTIVE_SUBAGENT_STATUSES, commandDisplayDetail, compactionMarkerState, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isAgentOwnedActivity, isCompactionActivity, isHiddenGoalChange, isPlanImplementationMessage, parseGoalUpdatedPayload, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { ACTIVE_SUBAGENT_STATUSES, commandDisplayDetail, compactionMarkerState, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isAgentOwnedActivity, isCompactionActivity, isHiddenGoalChange, isPlanImplementationMessage, parseGoalUpdatedPayload, reEmittedAssistantCopies, repairsReEmittedAssistantCopies, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { capText } from "./result.ts";
 
 export type TranscriptInclude = "reasoning" | "tools" | "activity";
@@ -394,6 +394,10 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const roster = new Map(snap.roster.map((r) => [r.id, r]));
   const latestPlan = proposedPlan(opts.windowItems ?? snap.items);
   const actionablePlan = latestPlan?.actionable ? latestPlan.item.id : null;
+  // An old Claude log's re-emitted opening paragraphs (`reEmittedAssistantCopies`, `@orquester/api/agent-chat`) are no
+  // row of the parent view, as the GUI's timeline leaves them out; counted over every item this read holds, the window
+  // and any older page merged under it (history.ts). A drill-in shows its agent's messages as they are, as the GUI's does.
+  const copies = !opts.agentId && repairsReEmittedAssistantCopies(snap.head.adapter) ? reEmittedAssistantCopies(snap.items) : null;
   const build = (): TranscriptEntry[] => {
     const selected = new Set(ordered.slice(start - 1, end).map((t) => t.turnId));
     // A row with no turn — a turn the host never started: its message, its failure — belongs to the range by its time:
@@ -451,6 +455,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       if (!inTurns(item)) continue;
       if (item.kind === "message") {
         if (item.role === "reasoning" && !opts.include.has("reasoning")) continue;
+        if (copies?.has(item.id)) continue;
         const e = base(item, item.role === "user" ? "user" : item.role === "assistant" ? "assistant" : "reasoning");
         e.text = item.text;
         if (item.role === "assistant" && item.messageKind === "commentary") e.commentary = true;

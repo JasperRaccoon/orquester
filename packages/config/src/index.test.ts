@@ -98,3 +98,39 @@ test("a malformed goal-resume marker is dropped, never the whole head", () => {
     assert.equal(parsed.resumeGoalAfterRestart, undefined, JSON.stringify(value));
   }
 });
+
+// --- goals §5.7: the head's `goalHeldForHandover` ---------------------------
+
+test("a head carrying the goal-hold marker round-trips it, beside the other two", () => {
+  const parsed = parseAgentThreadHead({ ...persistedHead, goalHeldForHandover: true });
+  assert.ok(parsed, "the head parses");
+  assert.equal(parsed.goalHeldForHandover, true);
+  const all = parseAgentThreadHead({
+    ...persistedHead,
+    continueAfterRestart: { turnId: "turn-7" },
+    resumeGoalAfterRestart: true,
+    goalHeldForHandover: true
+  });
+  assert.deepEqual(all?.continueAfterRestart, { turnId: "turn-7" });
+  assert.equal(all?.resumeGoalAfterRestart, true);
+  assert.equal(all?.goalHeldForHandover, true);
+  // Through JSON, as meta.json holds it.
+  const reread = parseAgentThreadHead(JSON.parse(JSON.stringify(parsed)));
+  assert.equal(reread?.goalHeldForHandover, true);
+});
+
+test("a head without the goal-hold marker says no, and writes none back", () => {
+  const parsed = parseAgentThreadHead(persistedHead);
+  assert.ok(parsed, "the head parses");
+  assert.equal(parsed.goalHeldForHandover, undefined);
+  assert.equal("goalHeldForHandover" in JSON.parse(JSON.stringify(parsed)), false);
+});
+
+test("a malformed goal-hold marker is dropped, never the whole head", () => {
+  for (const value of [false, "yes", 1, null, { held: true }]) {
+    const parsed = parseAgentThreadHead({ ...persistedHead, goalHeldForHandover: value });
+    assert.ok(parsed, JSON.stringify(value));
+    assert.equal(parsed.goalHeldForHandover, undefined, JSON.stringify(value));
+    assert.equal(parsed.id, "t1", "the rest of the head is untouched");
+  }
+});

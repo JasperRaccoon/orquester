@@ -174,6 +174,15 @@ export interface MockConfig {
    * earlier, trailing the reply — and only then the set's own `updated`.
    */
   staleGoalUpdateAfterSet?: boolean;
+  /**
+   * A `thread/goal/set`'s reply goes out alone, and its notifications wait for
+   * the next `thread/goal/get`: the stale `updated` (the goal as it was BEFORE
+   * the set — a progress flush queued earlier) goes out before that get's
+   * reply, the set's own `updated` 30 ms after it. The tracker then reads the
+   * stale goal just as the reply carries the real one, and still does once
+   * the reply has been acted on.
+   */
+  setUpdatesStraddleNextGet?: boolean;
   /** `thread/settings/update` answers THIS error instead of `{}`. */
   settingsError?: { code: number; message: string };
   /**
@@ -379,6 +388,8 @@ const noGoalError = () => ({ code: -32600, message: "cannot update goal for thre
 const goalLater = (fn) => {
   if (typeof config.goalReplyDelayMs === "number") { setTimeout(fn, config.goalReplyDelayMs); } else { fn(); }
 };
+// \`setUpdatesStraddleNextGet\`: a set's two notifications, held for the next get.
+let straddlingUpdates = null;
 
 const askServerRequest = (method, params) => new Promise((resolve) => {
   const id = serverRequestId++;
@@ -529,6 +540,16 @@ function handle(frame) {
     case "thread/goal/get":
       goalLater(() => {
         if (config.goalError) { send({ id, error: config.goalError }); return; }
+        if (straddlingUpdates !== null) {
+          const { before, after } = straddlingUpdates;
+          straddlingUpdates = null;
+          send({ method: "thread/goal/updated", params: { threadId, turnId: null, goal: before } });
+          send({ id, result: { goal: goalCopy() } });
+          setTimeout(() => {
+            send({ method: "thread/goal/updated", params: { threadId, turnId: null, goal: after } });
+          }, 30);
+          return;
+        }
         if (config.goalMovesDuringGet && goal !== null) {
           const asRead = goalCopy();
           goal = { ...goal, status: config.goalMovesDuringGet, updatedAt: goalNow() };
@@ -567,6 +588,10 @@ function handle(frame) {
         }
         // The reply first, then the notification — the app-server's order.
         send({ id, result: { goal: goalCopy() } });
+        if (config.setUpdatesStraddleNextGet && before !== null) {
+          straddlingUpdates = { before, after: goalCopy() };
+          return;
+        }
         if (config.staleGoalUpdateAfterSet && before !== null) {
           // Queued before the set, delivered a moment after its reply: the
           // reply has been read by the time the stale update lands.

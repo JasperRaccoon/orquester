@@ -32,14 +32,27 @@ function isTurnActive(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
 /**
  * The goal continues (goals §4.7): the summary's `continuing` — the host's own predicate, grace included — while the
  * thread just read still holds the goal `active`. The summary trails the host by up to one poll (right after a
- * `/goal pause` it can still say continuing), and the host never reports a goal continuing unless it is active.
+ * `/goal pause` it can still say continuing), and the host reports a goal continuing only while it is active — or while
+ * an Orquester update holds it ({@link goalHeldForUpdate}).
  */
 function goalContinuing(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
-  return s.goal?.continuing === true && parseThreadGoal(snap.goal)?.status === "active";
+  return (s.goal?.continuing === true && parseThreadGoal(snap.goal)?.status === "active") || goalHeldForUpdate(s, snap);
+}
+
+/**
+ * Goals §5.7: an Orquester update holds the goal — paused between two of its turns, and set going again by the agent
+ * host itself once it has restarted. The host reports it `paused` and continuing, and the thread just read holds it
+ * `paused`: the GUI's "paused for update" (`isGoalHeldForUpdate`).
+ */
+function goalHeldForUpdate(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
+  return s.goal?.continuing === true && s.goal.status === "paused" && parseThreadGoal(snap.goal)?.status === "paused";
 }
 
 /** The GUI's `canSwitchChatAccount` / the host's `identitySwitchRefusal`; the host stays authoritative. */
 function switchRefusal(s: SessionSummary, snap: ThreadSnapshotPayload): string | null {
+  // Goals §5.7: the host refuses the switch while it holds the goal, which it will set going again by itself. Any
+  // `/goal` but `status` takes the goal back from the hold and leaves it paused, and a paused goal may switch.
+  if (goalHeldForUpdate(s, snap)) return "The goal is held for an Orquester update and resumes by itself once the agent host has restarted. Switch accounts after that, or take the goal back first: send_message \"/goal pause\" keeps it paused.";
   // Goals §5.5, ahead of the turn check as on the host: between a continuing goal's turns idle never comes, so "wait for
   // the turn" is advice that never comes true — and a switch let through between two of them would be the host's 409
   // only after the other fields were written. A `/goal pause` only stops the NEXT turn; interrupt_session stops both.
@@ -305,8 +318,9 @@ const updateSession = defineTool({
     // value is skipped below and cuts nothing.
     if (modeFields.length && isTurnActive(summary, snap) && !args.force) {
       // Under a continuing goal the next turn starts as this one ends (goals §4.7): waiting never helps, and a
-      // `/goal pause` alone lets this turn run to its end — interrupt_session pauses the goal and stops the turn.
-      throw new ToolError("SESSION_BUSY", goalContinuing(summary, snap)
+      // `/goal pause` alone lets this turn run to its end — interrupt_session pauses the goal and stops the turn. A goal
+      // an Orquester update holds (§5.7) starts no next turn here: waiting does help.
+      throw new ToolError("SESSION_BUSY", goalContinuing(summary, snap) && !goalHeldForUpdate(summary, snap)
         ? "A goal turn is running, and the goal starts the next one by itself; changing the model or permission mode restarts the agent and would cut it. interrupt_session pauses the goal and stops the turn — or pass force:true."
         : "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, interrupt_session, or pass force:true.");
     }

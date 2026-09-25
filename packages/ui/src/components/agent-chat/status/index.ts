@@ -19,6 +19,7 @@ export {
   type GoalActionsInput,
   type GoalChipModel,
   type GoalChipTone,
+  type GoalHoldOptions,
   type GoalPanelModel
 } from "./goal-chip";
 

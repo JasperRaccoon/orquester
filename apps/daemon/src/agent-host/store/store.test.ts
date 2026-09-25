@@ -519,6 +519,38 @@ test("the goal-resume marker is head-only state that survives a reopen (goals §
   after.close();
 });
 
+test("the goal-hold marker is head-only state that survives a reopen (goals §5.7)", async () => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  await store.append({ threadId: "t1", events: [created()] });
+  await store.saveHead({ ...(await headOf(store, "t1")), goalHeldForHandover: true });
+  // Carried forward across appends by the store's own projection: no domain
+  // event names it, and a crash between the hold and the next head save must
+  // still find it.
+  await store.append({ threadId: "t1", events: [message("t1", "m1")] });
+  assert.equal((await headOf(store, "t1")).goalHeldForHandover, true);
+  await store.drain();
+  store.close();
+
+  // The boot's candidate check reads meta.json alone.
+  const metaOnly = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const persisted = await metaOnly.loadHead("t1", { seedRuntime: false });
+  assert.equal(persisted?.goalHeldForHandover, true);
+  metaOnly.close();
+
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  const loaded = await headOf(reopened, "t1");
+  assert.equal(loaded.goalHeldForHandover, true);
+  const { goalHeldForHandover: _cleared, ...cleared } = loaded;
+  void _cleared;
+  await reopened.saveHead(cleared);
+  await reopened.drain();
+  reopened.close();
+  const after = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  assert.equal((await headOf(after, "t1")).goalHeldForHandover, undefined);
+  after.close();
+});
+
 test("deleteThread deletes the thread's checkpoint refs before its directory", async () => {
   const rootDir = await tempRoot();
   const calls: Array<{ threadId: string; cwd: string }> = [];

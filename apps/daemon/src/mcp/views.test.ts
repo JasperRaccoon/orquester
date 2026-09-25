@@ -402,6 +402,29 @@ test("a stale summary's continuing never outlives the snapshot's goal: only an a
   assert.equal(detailWith("active").chat.goal?.continuing, true);
 });
 
+test("goals §5.7: a goal an Orquester update holds reads paused, continuing and heldForUpdate — in a list and in a detail, the GUI's \"paused for update\"", () => {
+  // The host's own reading of a hold: `paused`, and continuing — its predicate needs an `active` goal otherwise.
+  const held = chatSummary({ refId: "codex", goal: { objective: "Migrate the parser", status: "paused", continuing: true } });
+  // The activity the daemon stamps from the same ladder (AgentChatSummaryService.applyFields).
+  const { state, attention } = resolveChatActivity(held);
+  const view = sessionView({ ...held, activity: { state, attention, lastOutputAt: null, needsAttentionAt: null } }, ctx);
+  assert.deepEqual(view.chat?.goal, { objective: "Migrate the parser", status: "paused", continuing: true, heldForUpdate: true });
+  assert.deepEqual([view.reason, view.status, view.attention], ["goal-continuing", "working", null], "the tab reads working: no finished stamp mid-deploy");
+  const detailWith = (summary: typeof held, status: AgentGoalStatus) =>
+    sessionDetail(summary, snapshot({ head: head({ adapter: "codex", refId: "codex" }), goal: { objective: "Migrate the parser", status, updatedAt: stamp(6) } }), ctx).chat.goal;
+  assert.deepEqual(detailWith(held, "paused"), { objective: "Migrate the parser", status: "paused", continuing: true, heldForUpdate: true, updatedAt: stamp(6) });
+  // Set going again since the summary was read: the goal continues, held no longer.
+  assert.deepEqual(detailWith(held, "active"), { objective: "Migrate the parser", status: "active", continuing: true, updatedAt: stamp(6) });
+  // Ended, blocked or limited during its final turn: nothing continues and nothing is held.
+  for (const status of ["blocked", "budget-limited", "usage-limited", "complete", "failed"] as const) {
+    assert.deepEqual(detailWith(held, status), { objective: "Migrate the parser", status, continuing: false, updatedAt: stamp(6) }, status);
+  }
+  // The user's own pause is never a hold, in a list or a detail.
+  const userPaused = chatSummary({ refId: "codex", goal: { objective: "Migrate the parser", status: "paused", continuing: false } });
+  assert.deepEqual(sessionView(userPaused, ctx).chat?.goal, { objective: "Migrate the parser", status: "paused", continuing: false });
+  assert.deepEqual(detailWith(userPaused, "paused"), { objective: "Migrate the parser", status: "paused", continuing: false, updatedAt: stamp(6) });
+});
+
 test("a snapshot without a goal reads null even while a stale summary still names one: Claude reports a met goal as no goal", () => {
   // Claude's last goal row was `achieved`: `goal: null`, the ended goal only as `previous`, which the fold does not keep.
   const stale = chatSummary({ goal: { objective: "Make the suite green", status: "active", continuing: false } });
@@ -452,4 +475,49 @@ test("a goal at its caps stays whole beside a 16 KB plan and reply and a large r
   assert.deepEqual([d.lastReply!.text, d.lastReply!.truncated, d.plan!.truncated], ["", true, true]);
   assert.ok(headOf(d.plan!.markdown, plan) && d.plan!.markdown.length > 0, "the plan keeps a head");
   assert.ok(detailOf(false, plan, reply).plan!.markdown.length > d.plan!.markdown.length, "the goal's room comes out of the plan");
+});
+
+// ---- An old Claude log's re-emitted opening paragraph (spec §7.3): left out of the reply, as the GUI leaves it out. ----
+
+const OPENING = "The subagent finished; merging its findings.";
+const ANSWER = "Merged: the parser now skips empty lines.";
+/** A CLI-started turn as a host before the pre-turn-stream fix wrote it: its opening paragraph again at `result`, under a new id. */
+const reEmittedTurn = () => [
+  message("assistant", OPENING, { turnId: "t1", id: "m-open" }),
+  activity("tool.completed", { itemType: "command_execution", toolUseId: "tu1", title: "Run pnpm check", status: "completed" }, { turnId: "t1", tone: "tool" }),
+  message("assistant", ANSWER, { turnId: "t1", id: "m-answer" }),
+  message("assistant", OPENING, { turnId: "t1", id: "m-copy" })
+];
+
+test("lastReply leaves out a Claude thread's re-emitted opening paragraph, as the GUI's timeline does; a Codex thread keeps the same items whole", () => {
+  const items = reEmittedTurn();
+  const claude = snapshot({ items });
+  assert.deepEqual(lastReply(claude), { turnId: "t1", text: `${OPENING}\n\n${ANSWER}`, truncated: false, completedAt: stamp(1) }, "the opening stays where it was said, and the reply ends on the answer");
+  // get_session's lastReply, and so send_message's reply, is that same answer.
+  assert.equal(sessionDetail(chatSummary(), claude, ctx).lastReply?.text, `${OPENING}\n\n${ANSWER}`);
+  // Only a Claude log holds such a copy: a Codex thread's repeat is its own words.
+  const codex = snapshot({ head: head({ adapter: "codex", refId: "codex" }), items });
+  assert.equal(lastReply(codex)?.text, `${OPENING}\n\n${ANSWER}\n\n${OPENING}`);
+  assert.equal(sessionDetail(chatSummary({ refId: "codex" }), codex, ctx).lastReply?.text, `${OPENING}\n\n${ANSWER}\n\n${OPENING}`);
+  // A turn whose opening paragraph was all it said: the reply is that paragraph, once.
+  const alone = snapshot({ items: [message("assistant", OPENING, { turnId: "t1", id: "m-open" }), message("assistant", OPENING, { turnId: "t1", id: "m-copy" })] });
+  assert.equal(lastReply(alone)?.text, OPENING);
+});
+
+test("a Claude turn whose final answer repeats a message other than its opening is untouched, and so is a repeat of the opening that more of its turn follows", () => {
+  // A goal run is ONE turn of many rounds, and two of them can end on the same words: the later one is the turn's answer.
+  const rounds = snapshot({ items: [
+    message("assistant", "Working through the failing checks.", { turnId: "t1", id: "m-open" }),
+    message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-1" }),
+    activity("goal.updated", { goal: { objective: "Make CI green", status: "active", rounds: 1 }, change: "checked" }, { turnId: "t1" }),
+    message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-2" })
+  ] });
+  assert.equal(lastReply(rounds)?.text, "Working through the failing checks.\n\nAll checks pass.\n\nAll checks pass.");
+  // The copy was flushed at `result`: a repeat of the opening that the turn goes on after is the agent's own words.
+  const again = snapshot({ items: [
+    message("assistant", "Running the tests again.", { turnId: "t1", id: "m-open" }),
+    message("assistant", "Running the tests again.", { turnId: "t1", id: "m-again" }),
+    message("assistant", "All green: 212 passing.", { turnId: "t1", id: "m-answer" })
+  ] });
+  assert.equal(lastReply(again)?.text, "Running the tests again.\n\nRunning the tests again.\n\nAll green: 212 passing.");
 });

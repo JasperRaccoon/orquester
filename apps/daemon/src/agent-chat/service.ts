@@ -76,6 +76,16 @@ export const PROVIDER_REFRESH_DEBOUNCE_MS = 10_000;
  */
 const PROVIDER_REFRESH_DEADLINE_MS = 30_000;
 
+/**
+ * Deadline on the agent goals §5.7 `POST /goals/hold`. Short: the host only
+ * pauses goals (each bounded by its own `goalPauseMs`) and writes a few head
+ * files, while the supervisor awaits the answer inside its transition queue —
+ * on boot adoption's evaluation too — so a slow host must never hold
+ * supervision up for long. A missed renewal costs nothing: the next
+ * evaluation asks again, well inside the host's lease.
+ */
+const GOAL_HOLD_DEADLINE_MS = 5_000;
+
 /** One launch-env contribution, mirroring `index.ts`'s `LaunchEnv`. */
 export interface ChatLaunchEnv {
   env: Record<string, string>;
@@ -212,6 +222,9 @@ export class AgentChatService {
       adapters: {
         probe: () => this.probe(),
         requestStop: () => this.requestHostStop(),
+        // Agent goals §5.7: asked on every blocked drain evaluation while a
+        // deploy waits, which is what keeps the host's hold lease alive.
+        requestHoldGoals: () => this.requestHostHoldGoals(),
         tmux: opts.tmux,
         spawnDirect: (bin, args, env) => {
           if (opts.spawnDirect) {
@@ -970,6 +983,31 @@ export class AgentChatService {
     this.lastMarkedThreadIds = Array.isArray(marked)
       ? marked.filter((id): id is string => typeof id === "string")
       : [];
+  }
+
+  /**
+   * Agent goals §5.7: `POST /goals/hold` → the threads the host holds after
+   * this request (`AgentHostHoldGoalsResponse`). `null` is a host that predates
+   * the route — its generic route-miss 404 — which the supervisor then stops
+   * asking; every other non-200 throws, for the supervisor to log. The answer
+   * is another process's JSON, so it is read field-wise: anything but an array
+   * reads as nothing held, and a non-string entry is dropped.
+   */
+  private async requestHostHoldGoals(): Promise<readonly string[] | null> {
+    const response = await this.client.json<{
+      heldThreadIds?: unknown;
+      error?: { message?: unknown };
+    }>("POST", agentHostRoutes.holdGoals, {}, { timeoutMs: GOAL_HOLD_DEADLINE_MS });
+    if (response.status === 404) return null;
+    if (response.status !== 200) {
+      const message = response.value?.error?.message;
+      throw new Error(
+        `agent host answered ${response.status} to the goal hold` +
+          (typeof message === "string" && message ? `: ${message}` : "")
+      );
+    }
+    const held = response.value?.heldThreadIds;
+    return Array.isArray(held) ? held.filter((id): id is string => typeof id === "string") : [];
   }
 }
 

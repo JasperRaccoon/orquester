@@ -2350,6 +2350,82 @@ describe("codex session — replies are read only where no notification follows 
   });
 });
 
+describe("codex session — the host's conditional resume of a held goal (goals §5.7)", () => {
+  it("resumes a goal Codex holds paused; any other is left alone — only the get, and no text", async () => {
+    const paused = rig(
+      { goal: { ...STORED_GOAL, status: "paused" }, turns: [{ kind: "silent" }] },
+      { resumeCursor: { threadId: "prior-thread" }, knownGoal: knownGoal({ status: "paused" }) }
+    );
+    await paused.session.start();
+    assert.deepEqual(await paused.session.goalCommand({ kind: "resume" }, { onlyIfPaused: true }), {
+      summary: ""
+    });
+    await waitForGoalRow(paused, "resumed");
+    assert.deepEqual(
+      goalRequests(paused).map((request) => request.method),
+      ["thread/goal/get", "thread/goal/set"]
+    );
+    await paused.stop();
+
+    // Going already, at its budget (which no resume moves), met, or gone: a
+    // user's `/goal resume` would answer or re-activate some of these; the
+    // host's own resume leaves every one as it is, and says nothing.
+    const others: [string, { objective: string; status: string } | null, Partial<CodexSessionOptions>][] = [
+      ["active", STORED_GOAL, RESUMED_WITH_GOAL],
+      [
+        "budget-limited",
+        { ...STORED_GOAL, status: "budgetLimited" },
+        { resumeCursor: { threadId: "prior-thread" }, knownGoal: knownGoal({ status: "budget-limited" }) }
+      ],
+      [
+        "complete",
+        { ...STORED_GOAL, status: "complete" },
+        { resumeCursor: { threadId: "prior-thread" }, knownGoal: knownGoal({ status: "complete" }) }
+      ],
+      ["none", null, {}]
+    ];
+    for (const [label, goal, options] of others) {
+      const r = rig({ goal, turns: [{ kind: "silent" }] }, options);
+      await r.session.start();
+      assert.deepEqual(
+        await r.session.goalCommand({ kind: "resume" }, { onlyIfPaused: true }),
+        { summary: "", notPaused: true },
+        label
+      );
+      assert.deepEqual(
+        goalRequests(r).map((request) => request.method),
+        ["thread/goal/get"],
+        `${label}: never a set`
+      );
+      await r.stop();
+    }
+  });
+
+  it("decides on Codex's reply, not on a stale update the get let through first: a held goal is still resumed", async () => {
+    // The hold's pause is answered, its notifications still queued behind a
+    // progress flush that says `active`. The release's `get` meets that flush
+    // first — the tracker reads `active` — while the reply carries `paused`.
+    const r = rig(
+      { goal: STORED_GOAL, setUpdatesStraddleNextGet: true, turns: [{ kind: "silent" }] },
+      RESUMED_WITH_GOAL
+    );
+    await r.session.start();
+    assert.deepEqual(await r.session.goalCommand({ kind: "pause" }), { summary: "" });
+    assert.deepEqual(await r.session.goalCommand({ kind: "resume" }, { onlyIfPaused: true }), {
+      summary: ""
+    });
+    assert.deepEqual(
+      goalRequests(r).map((request) => [request.method, request.params.status]),
+      [
+        ["thread/goal/set", "paused"],
+        ["thread/goal/get", undefined],
+        ["thread/goal/set", "active"]
+      ]
+    );
+    await r.stop();
+  });
+});
+
 describe("codex session — one deadline per /goal command (fix round 1)", () => {
   it("a slow goal store fails the whole command at ONE deadline, and starts nothing after it", async () => {
     // Each reply takes 150 ms: with a deadline per request, the replace's

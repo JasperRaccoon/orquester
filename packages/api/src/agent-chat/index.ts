@@ -22,6 +22,7 @@ export * from "./fold-snapshot.ts";
 export * from "./history-cursor.ts";
 export * from "./pending.ts";
 export * from "./plan.ts";
+export * from "./re-emitted.ts";
 export * from "./roster.ts";
 export * from "./slim.ts";
 export * from "./turn-state.ts";

@@ -108,8 +108,8 @@ export interface ChatAccountSwitchState {
   /** A background shell or task is still reporting. */
   backgroundLive: boolean;
   /**
-   * The thread's goal is continuing — {@link isGoalContinuing} (goals §5.5).
-   * Absent reads as no.
+   * The thread's goal is continuing — {@link isGoalContinuing} (goals §5.5),
+   * a goal a deploy holds included (§5.7). Absent reads as no.
    *
    * *Added with agent goals; additive.*
    */
@@ -125,7 +125,7 @@ export interface ChatAccountSwitchState {
 }
 
 /**
- * Goals §5.5: the goal is **continuing** — the provider will start the
+ * Goals §5.5, §5.7: the goal is **continuing** — the provider will start the
  * thread's next turn by itself, so the gaps between its turns are not idle.
  *
  * The host computes exactly this for the tab summary
@@ -133,14 +133,26 @@ export interface ChatAccountSwitchState {
  * it wins: `null` there means the host holds no unfinished goal for the
  * thread. Without one — a host that predates the field, a summary not yet
  * received, a malformed one — a coarser form of the host's predicate, with no
- * running-turn or grace check: an `active` goal, on an adapter that continues
- * across turns (Codex), with a provider session that is live
- * (`starting`/`ready`/`running`) or a head marked for a resume after a restart
- * (`resumeGoalAfterRestart`). A stopped or errored session starts nothing, so
- * it may switch — unless its resume mark is still pending (after a handover it
- * may read `stopped` or `error`), which reads as continuing. A paused, blocked
- * or limited goal may switch too, and so may Claude's and Grok's, which run
- * inside turns the user sends.
+ * running-turn or grace check, in the host's order:
+ *
+ *  - First a goal a deploy HELD (goals §5.7, the head's
+ *    `goalHeldForHandover`; the host's `goalHeld`): paused between two of its
+ *    turns so the drain could go ahead, and set going again by the next host,
+ *    so it continues whatever the session says — on an adapter that continues
+ *    across turns (Codex), and only while the goal reads `paused` (or still
+ *    `active`, the pause's update on its way). One that ended, blocked or hit
+ *    a limit during its final turn is set going by nobody.
+ *  - Then an `active` goal on such an adapter with a provider session that is
+ *    live (`starting`/`ready`/`running`) or a head marked for a resume after a
+ *    restart (`resumeGoalAfterRestart`).
+ *
+ * A stopped or errored session starts nothing, so it may switch — unless one
+ * of those marks is still pending (after a handover it may read `stopped` or
+ * `error`), which reads as continuing. Any other paused goal may switch, and
+ * so may a blocked or limited one, and Claude's and Grok's, which run inside
+ * turns the user sends. Both marks are head-only state, refreshed by a
+ * snapshot and never live — which is why the summary's verdict, when there is
+ * one, still wins over them: a hold the user ended can outlive its mark here.
  */
 export function isGoalContinuing(input: {
   /** `SessionSummary.goal` for this thread — wire data, read field-wise. */
@@ -153,6 +165,13 @@ export function isGoalContinuing(input: {
   sessionStatus: ThreadSessionStatus | null | undefined;
   /** The head carries `resumeGoalAfterRestart` (a deploy handover's mark). */
   resumeGoalAfterRestart?: boolean;
+  /**
+   * The head carries `goalHeldForHandover` (goals §5.7: a deploy's drain
+   * holds the goal between its turns, and the next host resumes it).
+   *
+   * *Added with the deploy hold; additive.*
+   */
+  goalHeldForHandover?: boolean;
 }): boolean {
   const summary = input.summaryGoal;
   if (summary === null) return false;
@@ -160,13 +179,22 @@ export function isGoalContinuing(input: {
     const continuing = (summary as { continuing?: unknown }).continuing;
     if (typeof continuing === "boolean") return continuing;
   }
+  const status = input.goal?.status;
+  const continuesAcrossTurns = input.support?.continuesAcrossTurns === true;
+  if (
+    input.goalHeldForHandover === true &&
+    continuesAcrossTurns &&
+    (status === "paused" || status === "active")
+  ) {
+    return true;
+  }
   const live =
     input.sessionStatus === "starting" ||
     input.sessionStatus === "ready" ||
     input.sessionStatus === "running";
   return (
-    input.goal?.status === "active" &&
-    input.support?.continuesAcrossTurns === true &&
+    status === "active" &&
+    continuesAcrossTurns &&
     (live || input.resumeGoalAfterRestart === true)
   );
 }

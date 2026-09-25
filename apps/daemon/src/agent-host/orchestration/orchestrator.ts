@@ -100,6 +100,7 @@ import type {
   AdapterLogger,
   AgentAdapter,
   GoalCommandOptions,
+  GoalCommandResult,
   HostGoalCommand
 } from "../adapter.ts";
 import {
@@ -131,7 +132,10 @@ import { joinToolOutput } from "../store/tool-output.ts";
 import { projectSnapshotActivities } from "../ingestion/index.ts";
 import {
   AGENT_HOST_DEADLINES,
+  DeadlineExceededError,
   GOAL_CONTINUATION_GRACE_MS,
+  GOAL_HOLD_IDLE_MS,
+  GOAL_HOLD_LEASE_MS,
   withDeadline
 } from "../support/deadline.ts";
 import { attachedFileLine } from "../adapters/attachment-lines.ts";
@@ -324,12 +328,32 @@ interface ThreadRuntime {
    */
   resumeGoalAfterRestart: true | undefined;
   /**
+   * Goals §5.7, head-only like {@link resumeGoalAfterRestart}: this thread's
+   * continuing goal is HELD for a deploy — paused between two of its turns —
+   * and owed a resume. Set by this host's hold BEFORE its pause is sent, and
+   * cleared again when the pause does not land (the thread joins `goalsHeld`
+   * once it has); or read off `meta.json` for a hold the previous host handed
+   * over. The goal reads `continuing` while it is set.
+   */
+  goalHeldForHandover: true | undefined;
+  /**
    * When this host last started a provider session for the thread (epoch ms),
    * or null. A (re)started session is an idle point a provider continues its
    * goal from (Codex, right after a resume), so it opens the
    * {@link GOAL_CONTINUATION_GRACE_MS} window as a settled turn does.
    */
   sessionStartedAt: number | null;
+  /**
+   * Goals §5.7: when this host last set a paused goal going again (epoch ms)
+   * — a HELD goal it released or handed over, or the user's own `/goal
+   * resume` — or null. A set that leaves a goal active is an idle point the
+   * provider continues from (Codex, §3.2), exactly as a session start is, so
+   * it opens the same grace — and through that grace the goal reads
+   * continuing even while the fold still says `paused`, the provider's own
+   * update being on its way ({@link goalJustResumed}); a Stop in that moment
+   * still pauses it. The user's own goal action or Stop clears it.
+   */
+  goalResumedAt: number | null;
   /**
    * `binding.json` — the durable provider-session binding (§3.3, §4.1) and the
    * AUTHORITY for the resume cursor. `null` until the thread has one; the head's
@@ -447,6 +471,32 @@ const EMPTY_LOG_DERIVED: LogDerived = { revertedTo: null, titleManual: false };
  */
 export const PENDING_TURN_GRACE_MS = 5 * 60_000;
 
+/**
+ * Goals §5.7: the row a goal held for a deploy leaves on its timeline, the one
+ * word the user gets for why a working goal stopped between two turns. It is a
+ * `goal.status` row, like a `/goal status` answer, so it carries the payload
+ * flag {@link GOAL_HELD_FOR_UPDATE_KEY} for a reader to tell the two apart by.
+ */
+export const GOAL_HELD_FOR_UPDATE_SUMMARY =
+  "Goal paused for an Orquester update. It resumes by itself once the agent host has restarted.";
+
+/**
+ * Goals §5.7: the payload key every `goal.status` row a deploy's hold writes
+ * sets to `true` — {@link GOAL_HELD_FOR_UPDATE_SUMMARY} and
+ * {@link GOAL_RESUME_FAILED_SUMMARY} alike, and the provider's own words when
+ * it refuses the hold's resume. None of them answers a `/goal` the user sent,
+ * which is what the MCP's wait for a `/goal` answer must not mistake them for.
+ */
+export const GOAL_HELD_FOR_UPDATE_KEY = "heldForUpdate";
+
+/**
+ * Goals §5.7: the row that takes back the hold's promise when the resume it
+ * promised did not happen — the provider failed or ran out of time, or the
+ * held session could not be started again — and the goal stays paused.
+ */
+export const GOAL_RESUME_FAILED_SUMMARY =
+  "The goal could not be resumed after the update. Send /goal resume to continue it.";
+
 
 /** Events that change `meta.json`'s own fields, so the head is rewritten. */
 const HEAD_WRITING_EVENTS: ReadonlySet<string> = new Set([
@@ -543,6 +593,17 @@ export interface Orchestrator {
   liveThreadIds(): string[];
   activeTurnThreadIds(): string[];
   backgroundWorkThreadIds(): string[];
+
+  /**
+   * Goals §5.7, `POST /goals/hold`: a deploy's drain is waiting. Renews the
+   * hold lease to `GOAL_HOLD_LEASE_MS` from now and — once continuing goals
+   * are all that is left in the drain's way — pauses every continuing goal
+   * between its turns, marked so the next host resumes it (or this one, when
+   * the lease runs out). While other work is in the way it holds nothing new,
+   * and lets go of a held goal that has sat idle behind that work for
+   * `GOAL_HOLD_IDLE_MS`. Answers every thread held after the request.
+   */
+  holdContinuingGoals(): Promise<string[]>;
 
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
@@ -895,7 +956,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       state,
       continueAfterRestart: persistedHead?.continueAfterRestart,
       resumeGoalAfterRestart: persistedHead?.resumeGoalAfterRestart === true ? true : undefined,
+      goalHeldForHandover: persistedHead?.goalHeldForHandover === true ? true : undefined,
       sessionStartedAt: null,
+      goalResumedAt: null,
       binding,
       eventsSinceHeadSave: 0,
       eventsSinceSnapshot: loaded.folded,
@@ -940,16 +1003,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return head ? withHeadOnlyState(runtime, head) : null;
   };
 
-  /** The two head-only markers, merged onto a projected head (§3.3, goals §5.5). */
+  /**
+   * The three head-only markers, merged onto a projected head (§3.3, goals
+   * §5.5, §5.7) — so every head rewrite, whoever triggers it, carries them.
+   */
   const withHeadOnlyState = (runtime: ThreadRuntime, head: ThreadHead): ThreadHead =>
-    runtime.continueAfterRestart === undefined && runtime.resumeGoalAfterRestart === undefined
+    runtime.continueAfterRestart === undefined &&
+    runtime.resumeGoalAfterRestart === undefined &&
+    runtime.goalHeldForHandover === undefined
       ? head
       : {
           ...head,
           ...(runtime.continueAfterRestart !== undefined
             ? { continueAfterRestart: runtime.continueAfterRestart }
             : {}),
-          ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {})
+          ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {}),
+          ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {})
         };
 
   const requireHead = (runtime: ThreadRuntime): ThreadHead => {
@@ -1196,14 +1265,72 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     head.session.status !== "error";
 
   /**
-   * Goals §4.7, §5.5: the goal is CONTINUING right now — the summary's
+   * Goals §5.7: the thread's goal is HELD for a deploy — paused by this host
+   * between two of its turns, or by the host before it with the resume still
+   * owed ({@link ThreadRuntime.goalHeldForHandover}) — on an adapter whose
+   * provider continues goals by itself. The fold reads `paused` once the
+   * provider has answered the pause, or still `active` while that update is
+   * on its way. Any other status means the goal ended, blocked or hit a limit
+   * during its final turn: nothing will set it going again, so it holds
+   * nothing up.
+   */
+  const goalHeld = (runtime: ThreadRuntime, adapter: AgentAdapter | undefined): boolean => {
+    if (runtime.goalHeldForHandover !== true) return false;
+    if (adapter?.capabilities.goals?.continuesAcrossTurns !== true) return false;
+    return heldGoalMayGoOn(runtime);
+  };
+
+  /**
+   * Goals §5.7: a held goal's fold status still owes it a resume — `paused`
+   * once the provider's update of the hold's pause has landed, or `active`
+   * while that update trails the pause's reply (or never came: the host
+   * stopped first). Any other status is the goal having ended, blocked or hit
+   * a limit, which nothing sets going again. Which of the first two the
+   * PROVIDER holds is its own word to give: the resume asks it
+   * (`onlyIfPaused`).
+   */
+  const heldGoalMayGoOn = (runtime: ThreadRuntime): boolean => {
+    const status = runtime.state.goal?.status;
+    return status === "paused" || status === "active";
+  };
+
+  /**
+   * Goals §5.7: a paused goal this host has just set going again — a held
+   * goal it released or handed over, or the user's own `/goal resume`. A
+   * held goal's marks go the moment the provider answers the resume, but the
+   * fold reads `paused` until the provider's own update lands — neither
+   * {@link goalHeld} nor {@link goalContinues} sees it then, and a summary
+   * poll in that moment would raise "finished" and a push. So it reads
+   * continuing while the fold still says `paused`, for as long as the grace of
+   * that resume lasts, on a live session (a session that failed or stopped
+   * since masks nothing), and a Stop then still pauses it. The user's own
+   * goal action or Stop ends it at once (`goalResumedAt` cleared).
+   */
+  const goalJustResumed = (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    adapter: AgentAdapter | undefined
+  ): boolean =>
+    runtime.goalResumedAt !== null &&
+    adapter?.capabilities.goals?.continuesAcrossTurns === true &&
+    runtime.state.goal?.status === "paused" &&
+    sessionIsLive(runtime, head, adapter) &&
+    clock.now().getTime() - runtime.goalResumedAt < GOAL_CONTINUATION_GRACE_MS;
+
+  /**
+   * Goals §4.7, §5.5, §5.7: the goal is CONTINUING right now — the summary's
    * `continuing`, and the one expression the account-switch gate and the
    * `/compact` advice read too, so none of them can disagree with what the
-   * tab shows. The goal continues ({@link goalContinues}), and either
+   * tab shows. Either the goal is held for a deploy ({@link goalHeld}) —
+   * whatever the fold and the session say, since only its handover (or the
+   * lease's end) keeps it from going on — or this host has just set a held
+   * goal going again ({@link goalJustResumed}), or it continues
+   * ({@link goalContinues}), and either
    * - a restart's resume is still owed (the mark), whatever the session says; or
    * - a provider session is live, AND a turn is running or the provider is
    *   still inside {@link GOAL_CONTINUATION_GRACE_MS} of an idle point it
-   *   continues from — its last turn settling, or its session (re)starting.
+   *   continues from — its last turn settling, its session (re)starting, or
+   *   this host setting a held goal going again.
    *
    * The grace is what keeps a continuation that never starts from reading as
    * "working" forever. Read against the clock on every call: the summary poll
@@ -1214,6 +1341,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     head: ThreadHead,
     adapter: AgentAdapter | undefined
   ): boolean => {
+    // First: a held goal reads `paused`, and every check below would take the
+    // pause for the end of the work — the settled final turn would raise a
+    // "finished" stamp and a push in the middle of a deploy. The same holds
+    // for the moment after this host resumed one, before the fold knows.
+    if (goalHeld(runtime, adapter) || goalJustResumed(runtime, head, adapter)) return true;
     if (!goalContinues(runtime, adapter)) return false;
     if (runtime.resumeGoalAfterRestart === true) return true;
     if (!sessionIsLive(runtime, head, adapter)) return false;
@@ -1222,14 +1354,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return idleSince !== null && clock.now().getTime() - idleSince < GOAL_CONTINUATION_GRACE_MS;
   };
 
-  /** The latest idle point a provider continues a goal from, or null (epoch ms). */
+  /**
+   * The latest idle point a provider continues a goal from, or null (epoch
+   * ms): its last turn settling, its session (re)starting, or this host
+   * setting a held goal going again (goals §5.7).
+   */
   const lastContinuationPoint = (runtime: ThreadRuntime): number | null => {
+    const points = [
+      lastTurnSettledAt(runtime) ?? Number.NaN,
+      runtime.sessionStartedAt ?? Number.NaN,
+      runtime.goalResumedAt ?? Number.NaN
+    ].filter((point) => Number.isFinite(point));
+    return points.length === 0 ? null : Math.max(...points);
+  };
+
+  /** When the thread's latest turn settled (epoch ms), or null — none, or still running. */
+  const lastTurnSettledAt = (runtime: ThreadRuntime): number | null => {
     const turns = runtime.state.turns ?? [];
     const settledAt = Date.parse(turns[turns.length - 1]?.completedAt ?? "");
-    const points = [settledAt, runtime.sessionStartedAt ?? Number.NaN].filter((point) =>
-      Number.isFinite(point)
-    );
-    return points.length === 0 ? null : Math.max(...points);
+    return Number.isFinite(settledAt) ? settledAt : null;
   };
 
   // -------------------------------------------------------------------------
@@ -1693,9 +1836,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.bound = null;
     releaseProviderThreads(runtime.id);
     liveness.clear(runtime.id);
-    // Goals §5.5: a session the user stopped is not a goal to resume — the
-    // Stop wins over a handover's mark the boot has not acted on yet.
-    if (runtime.resumeGoalAfterRestart === true) {
+    // Goals §5.5, §5.7: a session the user stopped — or a thread they deleted,
+    // which comes through here — is not a goal to resume. The stop wins over a
+    // handover's mark the boot has not acted on yet, and over a deploy's hold,
+    // which is taken back with nothing resumed.
+    const heldReleased = releaseGoalHoldForUser(runtime);
+    if (runtime.resumeGoalAfterRestart === true || heldReleased) {
       runtime.resumeGoalAfterRestart = undefined;
       await saveHeadNow(runtime);
     }
@@ -1922,6 +2068,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
+    // Goals §5.7, the user wins: their own goal command takes a deploy's hold
+    // back, resuming nothing — the command below then does exactly what it
+    // says (a `/goal resume` sets the goal going again, and the drain waits
+    // for it as it did before holds existed). Except `status`, which acts on
+    // nothing: a read must not cancel the resume the hold's row promised.
+    if (command.kind !== "status" && releaseGoalHoldForUser(runtime)) {
+      await saveHeadNow(runtime);
+    }
     try {
       const adapter = adapterFor(head.adapter);
       if (!adapter.goalCommand) {
@@ -1929,7 +2083,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       await ensureSession(runtime);
       const result = await adapter.goalCommand(runtime.id, command, goalOptions);
-      if (typeof result.summary === "string" && result.summary.length > 0) {
+      const worded = typeof result.summary === "string" && result.summary.length > 0;
+      if (command.kind === "resume" && !worded) {
+        // Goals §5.7: the provider's own `active` update trails this answer,
+        // and until it lands the fold still reads `paused` — the same moment
+        // a host resume leaves ({@link goalJustResumed}): no "finished", and a
+        // Stop then still pauses the goal.
+        runtime.goalResumedAt = clock.now().getTime();
+      }
+      if (worded) {
         await appendActivity(runtime, {
           kind: GOAL_STATUS_ACTIVITY_KIND,
           tone: "info",
@@ -1959,12 +2121,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * {@link AGENT_HOST_DEADLINES.goalPauseMs}, and a failure or a timeout is
    * logged and the Stop goes on. No row either way — the user asked to stop,
    * and the goal's own update tells the timeline it is paused.
+   *
+   * `resumeInFlight` (goals §5.7): the goal was set going again a moment ago
+   * ({@link goalJustResumed}) and the fold, still reading `paused`, has not
+   * heard of it yet — it is paused all the same, or the provider starts its
+   * next turn as soon as its own update lands.
    */
   const pauseContinuingGoal = async (
     runtime: ThreadRuntime,
-    adapter: AgentAdapter
+    adapter: AgentAdapter,
+    resumeInFlight = false
   ): Promise<void> => {
-    if (!goalPauseApplies(runtime, adapter)) {
+    if (
+      adapter.goalCommand === undefined ||
+      (!resumeInFlight && !goalPauseApplies(runtime, adapter))
+    ) {
       return;
     }
     try {
@@ -2015,8 +2186,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * Goals §5.5: a Stop on a thread whose goal CONTINUES. The goal is paused
-   * first, then the turn to stop is read AGAIN — the provider may have ended
+   * Goals §5.5: a Stop on a thread whose goal CONTINUES — or was set going
+   * again a moment ago, its update still on its way (§5.7,
+   * `resumeInFlight`). The goal is paused first, then the turn to stop is
+   * read AGAIN — the provider may have ended
    * the Stop's turn and started its next goal turn before the Stop, or while
    * the pause was being asked:
    * - no turn named, or the named turn still running → it is interrupted, as
@@ -2031,9 +2204,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const stopContinuingGoal = async (
     runtime: ThreadRuntime,
     adapter: AgentAdapter,
-    turnId: string | undefined
+    turnId: string | undefined,
+    resumeInFlight = false
   ): Promise<void> => {
-    await pauseContinuingGoal(runtime, adapter);
+    await pauseContinuingGoal(runtime, adapter, resumeInFlight);
     const activeTurnId = currentSession(runtime).activeTurnId;
     if (turnId === undefined || activeTurnId === turnId) {
       await interruptTurnNow(runtime, adapter, turnId);
@@ -2048,6 +2222,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime: ThreadRuntime,
     turnId: string | undefined
   ): Promise<void> => {
+    // Goals §5.7: a goal set going again a moment ago — a held goal this host
+    // released, or the user's own `/goal resume` — reads `paused` until the
+    // provider's own update lands, and a Stop in that moment must pause it
+    // all the same. Read before the release below forgets the resume.
+    const stoppedHead = headOf(runtime);
+    const resumeInFlight =
+      stoppedHead !== null &&
+      goalJustResumed(runtime, stoppedHead, options.adapters.get(stoppedHead.adapter));
+    // Goals §5.7, the user wins: a Stop takes a deploy's hold back and resumes
+    // nothing. The held goal is paused already — `goalPauseApplies` reads
+    // false below — so what follows is an ordinary interrupt of whatever runs.
+    if (releaseGoalHoldForUser(runtime)) {
+      await saveHeadNow(runtime);
+    }
     await cancelQueuedTurns(
       runtime,
       "Context compaction was interrupted. Send this message again to continue."
@@ -2057,8 +2245,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const session = currentSession(runtime);
     const live =
       adapter !== undefined && adapter.hasSession(runtime.id) && session.status !== "stopped";
-    if (live && goalPauseApplies(runtime, adapter)) {
-      await stopContinuingGoal(runtime, adapter, turnId);
+    if (live && (goalPauseApplies(runtime, adapter) || resumeInFlight)) {
+      await stopContinuingGoal(runtime, adapter, turnId, resumeInFlight);
       return;
     }
     // Interrupt is turn-scoped (§4.1): a Stop the client aimed at a turn that
@@ -4494,7 +4682,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // applies. `binding.json` is small too and stays the cursor authority, so
     // a head written by an older version still works. A continuing goal
     // (goals §5.5) needs no rule of its own here: it has a live session, so
-    // its thread is a candidate already.
+    // its thread is a candidate already. Nor does a goal a deploy HOLDS (goals
+    // §5.7): its `goalHeldForHandover` is on `meta.json` since the pause
+    // landed, it IS the resume mark the next host acts on, and it is left as
+    // it is — every head rewrite below carries it (`withHeadOnlyState`).
     const candidates = new Set<string>(runtimes.keys());
     const liveSessions = new Set<string>();
     for (const adapter of options.adapters.values()) {
@@ -4591,6 +4782,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.warn(`agent-host: failed to clear the continuation marker on ${threadId}`, error);
       }
     }
+    // Goals §5.7: a deploy's hold is not one of this stop's markers — it has
+    // its own lease, which the stop only suspended. This host lives on, so
+    // the lease counts again: re-armed, or released at once if it ran out
+    // while the stop was under way.
+    checkGoalHoldLease();
   };
 
   const settleAsError = async (runtime: ThreadRuntime, message: string): Promise<void> => {
@@ -4693,9 +4889,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * Goals §5.5: threads whose persisted head asks for their continuing goal's
-   * provider session back, as the reconcile found them from `meta.json` alone.
-   * Resumed only once the gate is open — never on the readiness path.
+   * Goals §5.5, §5.7: threads whose persisted head asks for their goal's
+   * provider session back — a handover's `resumeGoalAfterRestart`, or a
+   * deploy's hold (`goalHeldForHandover`), which also owes the goal its
+   * resume — as the reconcile found them from `meta.json` alone. Resumed only
+   * once the gate is open — never on the readiness path.
    */
   const goalResumePending = new Set<string>();
   /** The resume pass in flight; `drain` waits on it (§9). */
@@ -4737,16 +4935,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * Goals §5.5: bring back the provider session of a thread whose goal was
-   * continuing when the previous host stopped — through the same ensure-session
-   * path a turn uses, and WITHOUT sending a turn: the provider continues the
-   * goal by itself once its session is back (Codex, §3.2). The mark is then
-   * cleared, success or not; a failure is logged and never retried.
+   * Goals §5.5, §5.7: bring back the provider session of a thread whose goal
+   * was continuing when the previous host stopped — through the same
+   * ensure-session path a turn uses, and WITHOUT sending a turn: the provider
+   * continues an active goal by itself once its session is back (Codex,
+   * §3.2). A goal a deploy HELD is paused, and a paused goal does not continue
+   * by itself, so it is then resumed too ({@link resumeHeldGoal}) — only while
+   * it still reads `paused`. Both marks are then cleared, success or not; a
+   * failure is logged and never retried.
    *
    * Except when a stop cut the resume short ({@link hostStopping}, checked
-   * before the provider is asked and again once it has answered): the mark is
-   * KEPT for the next host, and a session the resume did start is stopped
-   * again — `stopAll` may already have run, and nothing else would stop it.
+   * before the provider is asked and again after each of its answers): both
+   * marks are KEPT for the next host, and a session the resume did start is
+   * stopped again — `stopAll` may already have run, and nothing else would
+   * stop it.
    */
   const resumeGoalSession = async (threadId: string): Promise<void> => {
     if (hostStopping()) return;
@@ -4760,8 +4962,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return;
     }
     await runEffect(runtime, async () => {
-      // Cleared since — the user's own Stop, an aborted handover: nothing owed.
-      if (runtime.resumeGoalAfterRestart !== true) return;
+      // Cleared since — the user's own session stop or goal command, an
+      // aborted handover: nothing owed.
+      if (runtime.resumeGoalAfterRestart !== true && runtime.goalHeldForHandover !== true) return;
+      // Read once: nothing but this effect clears it while it runs — every
+      // user action that could lives on this same queue.
+      const heldGoal = runtime.goalHeldForHandover === true;
       let keepMark = false;
       try {
         const head = headOf(runtime);
@@ -4773,6 +4979,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         }
         if (persistedResumeCursor(runtime, head) === undefined) {
           logger.warn(`agent-host: ${threadId}'s goal has no resume cursor; not resuming it`);
+          // A held goal stays paused: its row must stop promising otherwise.
+          if (heldGoal) await appendGoalResumeFailed(runtime);
           return;
         }
         if (hostStopping()) {
@@ -4785,8 +4993,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           await stopResumedSession(runtime);
           return;
         }
+        if (heldGoal) {
+          await resumeHeldGoal(runtime, options.adapters.get(head.adapter));
+          // The goal may be going again, but the session this starts is the
+          // one a stop kills: the next host owes both, and a paused-in-the-
+          // fold goal it finds is simply resumed a second time.
+          if (hostStopping()) {
+            keepMark = true;
+            await stopResumedSession(runtime);
+            return;
+          }
+        }
         logger.info("agent-host: resumed a continuing goal's session after a restart", {
-          threadId
+          threadId,
+          ...(heldGoal ? { heldForHandover: true } : {})
         });
       } catch (error) {
         if (hostStopping()) {
@@ -4796,9 +5016,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           return;
         }
         logger.warn(`agent-host: could not resume ${threadId}'s goal session after a restart`, error);
+        // The session did not come back, so neither does a held goal: its row
+        // promised it would.
+        if (heldGoal) await appendGoalResumeFailed(runtime);
       } finally {
         if (!keepMark) {
           runtime.resumeGoalAfterRestart = undefined;
+          runtime.goalHeldForHandover = undefined;
           if (!runtime.deleted) {
             await saveHeadNow(runtime);
           }
@@ -4806,6 +5030,91 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     });
   };
+
+  /**
+   * Goals §5.7: resume a goal a deploy held — after the handover's session
+   * resume, or when this host lets go of it — but ONLY a goal the provider
+   * still holds `paused`: a goal achieved, cleared, blocked or limited during
+   * its final turn is not set going again (a plain `resume` would re-activate
+   * even a completed Codex goal), and one going already needs nothing. The
+   * fold cannot say which: it trails the provider — the pause's own update
+   * can still be on its way, or never have reached the host that paused — so
+   * a fold reading `paused` or `active` hands the question to the provider
+   * (`goalCommand {kind:"resume"}` with `onlyIfPaused`), and any other status
+   * is the answer already. Bounded by `AGENT_HOST_DEADLINES.goalResumeMs`.
+   * Never throws.
+   *
+   * The hold's row promised the goal would go on by itself, so a resume that
+   * does not happen says so: a failure or an expiry appends
+   * {@link GOAL_RESUME_FAILED_SUMMARY}, a refusal in the provider's own words
+   * appends those words — the better advice there. Neither while the host is
+   * stopping: the caller then keeps the marks, and the next host owes the
+   * resume. A resume that lands appends nothing — the goal's own update says
+   * it is going again — and neither does a goal the provider does not hold
+   * paused: its own updates say what became of it.
+   */
+  const resumeHeldGoal = async (
+    runtime: ThreadRuntime,
+    adapter: AgentAdapter | undefined
+  ): Promise<void> => {
+    if (!heldGoalMayGoOn(runtime)) {
+      logger.info("agent-host: a held goal has ended, blocked or hit a limit; not resuming it", {
+        threadId: runtime.id,
+        status: runtime.state.goal?.status ?? null
+      });
+      return;
+    }
+    if (adapter?.goalCommand === undefined) return;
+    try {
+      const answer = await withDeadline(
+        () => adapter.goalCommand!(runtime.id, { kind: "resume" }, { onlyIfPaused: true }),
+        { timeoutMs: AGENT_HOST_DEADLINES.goalResumeMs, label: `goal-resume:${adapter.id}` }
+      );
+      if (answer.notPaused === true) {
+        logger.info("agent-host: the provider does not hold the held goal paused; nothing to resume", {
+          threadId: runtime.id
+        });
+        return;
+      }
+      if (typeof answer.summary === "string" && answer.summary.length > 0) {
+        logger.info("agent-host: the provider did not resume a held goal", {
+          threadId: runtime.id,
+          answer: answer.summary
+        });
+        if (!hostStopping()) await appendGoalHoldRow(runtime, answer.summary);
+        return;
+      }
+      // An idle point the provider continues from: the goal reads continuing
+      // through the grace while its next turn is on its way.
+      runtime.goalResumedAt = clock.now().getTime();
+    } catch (error) {
+      logger.warn(`agent-host: could not resume ${runtime.id}'s held goal; it stays paused`, {
+        threadId: runtime.id,
+        error: describeFailure(error)
+      });
+      if (!hostStopping()) await appendGoalResumeFailed(runtime);
+    }
+  };
+
+  /**
+   * One `goal.status` row of a deploy's hold (goals §5.7): tone `info`, and the
+   * {@link GOAL_HELD_FOR_UPDATE_KEY} flag that tells it from a `/goal status`
+   * answer. A row that cannot be written is logged, never thrown: the hold
+   * and its resumes stand without it.
+   */
+  const appendGoalHoldRow = (runtime: ThreadRuntime, summary: string): Promise<void> =>
+    appendActivity(runtime, {
+      kind: GOAL_STATUS_ACTIVITY_KIND,
+      tone: "info",
+      summary,
+      payload: { [GOAL_HELD_FOR_UPDATE_KEY]: true }
+    }).catch((error: unknown) => {
+      logger.warn(`agent-host: could not write a goal hold row on ${runtime.id}`, error);
+    });
+
+  /** The hold's promise taken back: the goal stays paused (goals §5.7). */
+  const appendGoalResumeFailed = (runtime: ThreadRuntime): Promise<void> =>
+    appendGoalHoldRow(runtime, GOAL_RESUME_FAILED_SUMMARY);
 
   /**
    * Take back a session the goal resume started after the host began to stop.
@@ -4828,16 +5137,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * The mark of a thread this host cannot even load: the resume failed, so the
-   * mark goes, once (goals §5.5). Off `meta.json` itself — the read the
-   * reconcile found it with — since there is no runtime to clear it on.
+   * The marks of a thread this host cannot even load: the resume failed, so
+   * both go, once (goals §5.5, §5.7). Off `meta.json` itself — the read the
+   * reconcile found them with — since there is no runtime to clear them on.
    */
   const clearGoalResumeMarkOnDisk = async (threadId: string): Promise<void> => {
     try {
       const persisted = await store.loadHead(threadId, { seedRuntime: false });
-      if (persisted === null || persisted.resumeGoalAfterRestart !== true) return;
-      const { resumeGoalAfterRestart: _resumed, ...cleared } = persisted;
+      if (
+        persisted === null ||
+        (persisted.resumeGoalAfterRestart !== true && persisted.goalHeldForHandover !== true)
+      ) {
+        return;
+      }
+      const {
+        resumeGoalAfterRestart: _resumed,
+        goalHeldForHandover: _held,
+        ...cleared
+      } = persisted;
       void _resumed;
+      void _held;
       await store.saveHead(cleared);
     } catch (error) {
       logger.warn(`agent-host: could not clear ${threadId}'s goal resume mark`, error);
@@ -4862,9 +5181,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         .catch(() => null);
       if (persistedHead !== null && !isOrphanedHead(persistedHead)) {
         bootSettlePending.add(threadId);
-        // Goals §5.5, decided off the same `meta.json` read: the handover
-        // marked this thread's continuing goal for a resume after the gate.
-        if (persistedHead.resumeGoalAfterRestart === true) {
+        // Goals §5.5, §5.7, decided off the same `meta.json` read: the
+        // handover marked this thread's continuing goal for a resume after the
+        // gate, or a deploy held it (a crash while holding leaves the same).
+        if (
+          persistedHead.resumeGoalAfterRestart === true ||
+          persistedHead.goalHeldForHandover === true
+        ) {
           goalResumePending.add(threadId);
         }
         return;
@@ -4877,9 +5200,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // never affects other threads or host startup (§5.1).
       return;
     }
-    // Goals §5.5 on the full path too: an orphan the handover also marked (a
-    // manual stop mid-turn), or a thread already in memory.
-    if (head.resumeGoalAfterRestart === true) {
+    // Goals §5.5, §5.7 on the full path too: an orphan the handover also
+    // marked (a manual stop mid-turn, a crash during a held goal's final
+    // turn), or a thread already in memory.
+    if (head.resumeGoalAfterRestart === true || head.goalHeldForHandover === true) {
       goalResumePending.add(threadId);
     }
     const session = head.session;
@@ -4983,6 +5307,435 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   // -------------------------------------------------------------------------
+  // The drain's view (`GET /health`), and goals §5.7 — a deploy holds a
+  // continuing goal between its turns
+  // -------------------------------------------------------------------------
+  //
+  // A code-only deploy's drain waits until no thread has a turn running or
+  // background work live. A continuing goal's turns follow each other within
+  // milliseconds, so that moment never came while one ran — hours, for a long
+  // goal. While the daemon waits on such a drain it renews a LEASE here
+  // (`POST /goals/hold`); under it the host pauses each continuing goal
+  // between two of its turns — the turn running finishes as it would have, no
+  // next one starts — marks it for the next host, and the drain goes ahead.
+  // Only while goals are the last thing in the way: a goal never waits long
+  // behind other work (GOAL_HOLD_IDLE_MS), and the user's own action on a
+  // goal always takes it back.
+
+  /** Threads with a turn running: the drain-restart waits on these (§3.1). */
+  const activeTurnThreadIds = (): string[] =>
+    [...runtimes.values()]
+      .filter((runtime) => currentSession(runtime).activeTurnId !== null)
+      .map((runtime) => runtime.id);
+
+  /**
+   * Threads with live BACKGROUND work, which the drain waits on too. Both
+   * buckets count: an agent fleet ("working") is hours of real work, and a
+   * watch loop ("monitoring") loses its output the same way. The registry's
+   * own TTL bounds a silent watch loop, so a dev server left running cannot
+   * defer a deploy for longer than that window.
+   */
+  const backgroundWorkThreadIds = (): string[] =>
+    [...runtimes.values()]
+      .filter((runtime) => liveness.liveness(runtime.id) !== null)
+      .map((runtime) => runtime.id);
+
+  /**
+   * When the hold lease runs out (epoch ms), or null while no deploy is asking.
+   * Each request pushes it to {@link GOAL_HOLD_LEASE_MS} from now, and the
+   * daemon renews it on every blocked drain evaluation, whatever blocks it — so
+   * one that runs out means the daemon stopped asking: the deploy was
+   * withdrawn, or a daemon running this host's own code adopted it, and what
+   * is held here is resumed here.
+   */
+  let goalHoldUntil: number | null = null;
+  /** The one timer that notices the lease ran out; re-armed for the rest of a renewed one. */
+  let goalHoldTimer: unknown = null;
+  /** Threads THIS host paused under the lease — each owed a resume. */
+  const goalsHeld = new Set<string>();
+  /**
+   * Threads the user acted on while the lease ran (the user wins), held at the
+   * time or not: not held again before it runs out, then forgotten.
+   */
+  const goalHoldReleased = new Set<string>();
+  /**
+   * Since when each held goal has sat idle — its own turn over — while OTHER
+   * work keeps the drain waiting (epoch ms). Emptied whenever nothing but goals
+   * is in the way; past {@link GOAL_HOLD_IDLE_MS} the goal is let go of.
+   */
+  const goalHoldIdleSince = new Map<string, number>();
+
+  /**
+   * `POST /goals/hold`, the lease's renewal: hold goals only when they are the
+   * last thing in the drain's way, and let go of a held one that has sat idle
+   * behind other work for too long. Answers every thread held after the
+   * request.
+   *
+   * IN THE WAY is every thread with background work — a hold never ends
+   * background work, a held or holdable thread's own included — and every
+   * thread with a turn running that is neither held nor holdable: a subagent
+   * fleet or a Claude run in another tab, the user's own turn. While anything
+   * is, the deploy waits anyway and holding goals would only leave them idle
+   * for as long as it runs, so nothing new is held; and because the daemon
+   * renews the lease for as long as ANYTHING blocks, a goal held earlier would
+   * otherwise stay paused behind work that began after it — for hours. So a
+   * held goal whose own turn is over starts an idle clock, and once it has sat
+   * idle for {@link GOAL_HOLD_IDLE_MS} this host lets go of it
+   * ({@link letGoOfIdleHolds}); it may be held again when goals are once more
+   * all that is left. Once nothing is in the way, the clocks are cleared and
+   * EVERY holdable goal is held — the one between two of its turns too, which
+   * would otherwise start its next turn the moment the others settle.
+   *
+   * The answer waits for this request's pauses, each on its thread's effect
+   * queue and bounded there: the daemon awaits it so a `/stop` never overtakes
+   * a hold being applied, and one that gives up first loses nothing — the next
+   * renewal answers what landed. It does NOT wait for a release, which may
+   * have to start a session again first: a thread being let go of counts as
+   * held until its release has run.
+   */
+  const holdContinuingGoals = async (): Promise<string[]> => {
+    // A stop is under way: the handover carries every mark there is, and a
+    // pause sent now would race the teardown.
+    if (hostStopping()) return [...goalsHeld];
+    const now = clock.now().getTime();
+    goalHoldUntil = now + GOAL_HOLD_LEASE_MS;
+    if (goalHoldTimer === null) armGoalHoldTimer(GOAL_HOLD_LEASE_MS);
+    const holdable = new Map<string, { runtime: ThreadRuntime; adapter: AgentAdapter }>();
+    for (const runtime of runtimes.values()) {
+      const adapter = holdableGoalAdapter(runtime);
+      if (adapter !== null) holdable.set(runtime.id, { runtime, adapter });
+    }
+    const inTheWay = new Set(backgroundWorkThreadIds());
+    for (const threadId of activeTurnThreadIds()) {
+      if (!goalsHeld.has(threadId) && !holdable.has(threadId)) inTheWay.add(threadId);
+    }
+    if (inTheWay.size > 0) {
+      logger.debug("agent-host: other work keeps the drain waiting; no new goal is held", {
+        inTheWay: inTheWay.size,
+        threadId: inTheWay.values().next().value
+      });
+      letGoOfIdleHolds(now);
+      return [...goalsHeld];
+    }
+    goalHoldIdleSince.clear();
+    await Promise.all(
+      [...holdable.values()].map(({ runtime, adapter }) => holdGoal(runtime, adapter))
+    );
+    return [...goalsHeld];
+  };
+
+  /**
+   * While other work is in the way: the idle clock of every held goal. One
+   * whose own turn runs has none; one whose turn is over starts one at this
+   * renewal, restarted by a turn that came and went since — the user's own
+   * message to it; one idle-held for {@link GOAL_HOLD_IDLE_MS} is let go of.
+   * A HOST release, through the lease's own ({@link releaseHeldGoal}): only a
+   * still-`paused` goal is resumed, both marks go, and nothing bars the thread
+   * — it is held again once goals are the last blockers again.
+   */
+  const letGoOfIdleHolds = (now: number): void => {
+    for (const threadId of goalsHeld) {
+      const runtime = runtimes.get(threadId);
+      if (runtime === undefined) continue;
+      if (currentSession(runtime).activeTurnId !== null) {
+        goalHoldIdleSince.delete(threadId);
+        continue;
+      }
+      const started = goalHoldIdleSince.get(threadId);
+      if (started === undefined) {
+        goalHoldIdleSince.set(threadId, now);
+        continue;
+      }
+      const since = Math.max(started, lastTurnSettledAt(runtime) ?? started);
+      if (now - since < GOAL_HOLD_IDLE_MS) {
+        goalHoldIdleSince.set(threadId, since);
+        continue;
+      }
+      goalHoldIdleSince.delete(threadId);
+      logger.info("agent-host: letting go of a goal held idle behind other work", {
+        threadId,
+        idleMs: now - since
+      });
+      void runEffect(runtime, () => releaseHeldGoal(runtime, "idle"));
+    }
+  };
+
+  /**
+   * The adapter to pause a thread's goal through, when it can be held: the
+   * goal continues ({@link goalContinues} — the grace ignored, as at the
+   * handover: a late continuation must not slip through) on a live session,
+   * the provider takes goal commands, the thread is not held already, and the
+   * user did not act on its goal during this lease. Scope follows: only a
+   * provider that continues goals by itself (Codex) holds — a Claude or Grok
+   * goal runs inside one turn, which the drain waits for anyway.
+   */
+  const holdableGoalAdapter = (runtime: ThreadRuntime): AgentAdapter | null => {
+    if (runtime.deleted || goalsHeld.has(runtime.id) || goalHoldReleased.has(runtime.id)) {
+      return null;
+    }
+    const head = headOf(runtime);
+    const adapter = head === null ? undefined : options.adapters.get(head.adapter);
+    if (head === null || adapter?.goalCommand === undefined) return null;
+    return goalContinues(runtime, adapter) && sessionIsLive(runtime, head, adapter)
+      ? adapter
+      : null;
+  };
+
+  /**
+   * Hold one thread's goal, on its effect queue: behind whatever the thread
+   * already owes the provider, and never beside the user's own goal command,
+   * Stop or session stop, which run there too. Decided again there — the goal
+   * may have ended, the user acted on it, the lease run out or a stop begun
+   * while the pause waited its turn.
+   *
+   * The MARK comes first, in memory and on `meta.json`, and only then the
+   * pause (`goalCommand {kind:"pause"}`, no options — the Stop's own, bounded
+   * by `AGENT_HOST_DEADLINES.goalPauseMs`): a crash between a pause that landed
+   * and a mark written after it would leave a paused goal nobody resumes,
+   * while a mark on a goal the pause never reached is harmless — every resume
+   * of a held goal skips one that does not read `paused`, and the provider
+   * continues an active goal by itself once its session is back. A pause that
+   * fails, or that the provider answers in words (no goal left to pause, one
+   * already at its budget), clears the mark again and holds nothing: logged,
+   * and the next renewal tries again. One that lands is held
+   * ({@link completeHold}). The pause stops only the NEXT continuation (goals
+   * §3.2): a turn running finishes as it would have.
+   */
+  const holdGoal = (runtime: ThreadRuntime, adapter: AgentAdapter): Promise<void> =>
+    runEffect(runtime, async () => {
+      if (goalHoldUntil === null || hostStopping() || holdableGoalAdapter(runtime) === null) {
+        return;
+      }
+      runtime.goalHeldForHandover = true;
+      await saveHeadNow(runtime);
+      let pausing: Promise<GoalCommandResult> | undefined;
+      let answer: GoalCommandResult;
+      try {
+        pausing = adapter.goalCommand!(runtime.id, { kind: "pause" });
+        answer = await withDeadline(pausing, {
+          timeoutMs: AGENT_HOST_DEADLINES.goalPauseMs,
+          label: `goal-hold:${adapter.id}`
+        });
+      } catch (error) {
+        // A stop cut the pause short — its teardown rejects the request — but
+        // the request may have reached the provider, and a goal it paused with
+        // no mark would never be resumed. So the mark stays for the next host,
+        // whose resume asks the provider whether the goal is paused at all,
+        // and the thread counts as held: a stop that is aborted leaves it to
+        // this host's lease. No row — nobody knows whether it paused.
+        if (hostStopping()) {
+          goalsHeld.add(runtime.id);
+          logger.warn(`agent-host: a stop cut ${runtime.id}'s goal hold short; its mark stays for the next host`, {
+            threadId: runtime.id,
+            error: describeFailure(error)
+          });
+          return;
+        }
+        await unmarkUnheldGoal(runtime);
+        logger.warn(`agent-host: could not hold ${runtime.id}'s goal for a deploy; the next renewal retries`, {
+          threadId: runtime.id,
+          error: describeFailure(error)
+        });
+        // An expiry is no refusal: the pause may land yet, and a goal it
+        // pauses with no mark would never be resumed.
+        if (error instanceof DeadlineExceededError && pausing !== undefined) {
+          adoptLatePause(runtime, pausing);
+        }
+        return;
+      }
+      if (typeof answer.summary === "string" && answer.summary.length > 0) {
+        await unmarkUnheldGoal(runtime);
+        logger.info("agent-host: the provider paused no goal to hold", {
+          threadId: runtime.id,
+          answer: answer.summary
+        });
+        return;
+      }
+      await completeHold(runtime);
+    });
+
+  /**
+   * The pause landed: held from here on, whatever changed while the provider
+   * answered — a goal paused for a handover and left unmarked would never be
+   * resumed by anyone. The mark is on `meta.json` already; one row (with the
+   * {@link GOAL_HELD_FOR_UPDATE_KEY} flag) says why the goal stopped.
+   */
+  const completeHold = async (runtime: ThreadRuntime): Promise<void> => {
+    goalsHeld.add(runtime.id);
+    goalHoldIdleSince.delete(runtime.id);
+    await appendGoalHoldRow(runtime, GOAL_HELD_FOR_UPDATE_SUMMARY);
+    // The lease ran out while the provider answered: nobody asks any more,
+    // so the release it would have had is owed now.
+    if (goalHoldUntil === null) checkGoalHoldLease();
+  };
+
+  /** A pause that did not land: the mark set before it asked goes again. */
+  const unmarkUnheldGoal = async (runtime: ThreadRuntime): Promise<void> => {
+    runtime.goalHeldForHandover = undefined;
+    if (!runtime.deleted) await saveHeadNow(runtime);
+  };
+
+  /**
+   * A pause the hold stopped waiting for (its deadline expired) that lands
+   * after all is adopted as a hold, on the thread's effect queue — mark, then
+   * held with its row — unless the thread is held already (a renewal paused
+   * it again), the user acted on its goal during the lease, or it is gone.
+   */
+  const adoptLatePause = (runtime: ThreadRuntime, pausing: Promise<GoalCommandResult>): void => {
+    void pausing.then(
+      (late) => {
+        if (typeof late.summary === "string" && late.summary.length > 0) return;
+        void runEffect(runtime, async () => {
+          if (goalsHeld.has(runtime.id) || goalHoldReleased.has(runtime.id) || runtime.deleted) {
+            return;
+          }
+          logger.info("agent-host: a goal hold's late pause landed; the goal is held", {
+            threadId: runtime.id
+          });
+          runtime.goalHeldForHandover = true;
+          await saveHeadNow(runtime);
+          await completeHold(runtime);
+        });
+      },
+      () => undefined
+    );
+  };
+
+  const armGoalHoldTimer = (ms: number): void => {
+    if (goalHoldTimer !== null) clearTimer(goalHoldTimer);
+    goalHoldTimer = setTimer(
+      () => {
+        goalHoldTimer = null;
+        checkGoalHoldLease();
+      },
+      Math.max(0, ms)
+    );
+  };
+
+  /**
+   * The lease's clock: a lease renewed since the timer was set is waited out
+   * for its remainder; one that ran out ends — this lease's releases and idle
+   * clocks are forgotten — and every held goal is released. Nothing at all
+   * while a stop is under way: the handover carries every mark, and a resume
+   * sent now would start a turn the teardown kills; a stop that is aborted
+   * checks again (`clearContinuationMarkers`).
+   */
+  const checkGoalHoldLease = (): void => {
+    if (hostStopping()) return;
+    if (goalHoldUntil !== null) {
+      const remaining = goalHoldUntil - clock.now().getTime();
+      if (remaining > 0) {
+        armGoalHoldTimer(remaining);
+        return;
+      }
+      goalHoldUntil = null;
+      goalHoldReleased.clear();
+      goalHoldIdleSince.clear();
+    }
+    for (const threadId of goalsHeld) {
+      const runtime = runtimes.get(threadId);
+      if (runtime === undefined) {
+        goalsHeld.delete(threadId);
+        continue;
+      }
+      void runEffect(runtime, () => releaseHeldGoal(runtime, "lease"));
+    }
+  };
+
+  /**
+   * This host lets go of one held goal — the lease ran out with the host
+   * still up, or the goal sat idle behind other work for
+   * {@link GOAL_HOLD_IDLE_MS} — and resumes it ({@link resumeHeldSession}),
+   * then clears both of its marks, in memory and on `meta.json`. A resume
+   * that does not happen is said on the timeline and the marks go anyway: the
+   * goal stays paused for the user.
+   *
+   * On the thread's effect queue, and skipped when the user took the goal back
+   * first, when a new lease began before a LEASE release ran (it stays held
+   * under that one — no pointless resume-then-pause; an idle release is let go
+   * of under the lease it ran in), and while a stop is under way (the handover
+   * carries the mark). A stop that begins while the provider answers keeps the
+   * mark too: the goal may be going again, but the session is the one the stop
+   * kills, and the next host owes it back.
+   */
+  const releaseHeldGoal = async (runtime: ThreadRuntime, why: "lease" | "idle"): Promise<void> => {
+    if (!goalsHeld.has(runtime.id) || hostStopping()) return;
+    if (why === "lease" && goalHoldUntil !== null) return;
+    goalsHeld.delete(runtime.id);
+    goalHoldIdleSince.delete(runtime.id);
+    await resumeHeldSession(runtime);
+    if (hostStopping()) {
+      goalsHeld.add(runtime.id);
+      return;
+    }
+    runtime.goalHeldForHandover = undefined;
+    if (!runtime.deleted) {
+      await saveHeadNow(runtime);
+    }
+  };
+
+  /**
+   * A release's resume: the held session first, as a `/goal` command ensures
+   * it — a provider that died while the goal was held is started again from
+   * its cursor — then the goal ({@link resumeHeldGoal}). Only for a goal that
+   * may still go on ({@link heldGoalMayGoOn}): nothing is started for one
+   * that ended meanwhile. Never while a stop is under way: a session this
+   * starts then is stopped again (it would outlive `stopAll`), and the caller
+   * keeps the mark. A session that cannot be brought back is the resume's
+   * failure, said on the timeline.
+   */
+  const resumeHeldSession = async (runtime: ThreadRuntime): Promise<void> => {
+    const head = headOf(runtime);
+    const adapter = head === null ? undefined : options.adapters.get(head.adapter);
+    if (head !== null && heldGoalMayGoOn(runtime)) {
+      const wasLive = adapter?.hasSession(runtime.id) === true;
+      try {
+        await ensureSession(runtime);
+      } catch (error) {
+        if (hostStopping()) return;
+        logger.warn(`agent-host: could not bring back ${runtime.id}'s session to resume its held goal`, error);
+        await appendGoalResumeFailed(runtime);
+        return;
+      }
+      if (hostStopping()) {
+        if (!wasLive) await stopResumedSession(runtime);
+        return;
+      }
+    }
+    await resumeHeldGoal(runtime, adapter);
+  };
+
+  /**
+   * Goals §5.7, the user wins: the user's own action on a thread's goal — a
+   * host `/goal` command, a Stop, a session stop, deleting the thread — takes
+   * a hold back, and NOTHING is resumed: the action then runs exactly as it
+   * would have. While a lease runs, the thread is not held again before it
+   * runs out, held at the time or not: a hold queued behind the action decided
+   * on a fold that has not heard of it yet (a pause's own update trails its
+   * reply), and must not undo it. The continuing a host resume stood in for
+   * ends with it too ({@link goalJustResumed}). A pending mark a previous host
+   * handed over goes the same way, so the boot's resume cannot set going a
+   * goal the user has just paused.
+   *
+   * Called from that action's own effect, on the thread's effect queue — the
+   * queue every hold's pause takes — so a hold is either fully in place or
+   * not begun. Answers whether a mark was cleared; the caller writes the
+   * head, once.
+   */
+  const releaseGoalHoldForUser = (runtime: ThreadRuntime): boolean => {
+    if (goalHoldUntil !== null) goalHoldReleased.add(runtime.id);
+    runtime.goalResumedAt = null;
+    goalHoldIdleSince.delete(runtime.id);
+    const held = goalsHeld.delete(runtime.id) || runtime.goalHeldForHandover === true;
+    if (!held) return false;
+    runtime.goalHeldForHandover = undefined;
+    logger.info("agent-host: the user took back a goal held for a deploy; nothing is resumed", {
+      threadId: runtime.id
+    });
+    return true;
+  };
+
+  // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
 
@@ -5012,6 +5765,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   const runStop = async (): Promise<void> => {
     stopped = true;
+    // Goals §5.7: a held goal is the next host's to resume — its mark is on
+    // the head, which the saves below rewrite with it — never this host's.
+    if (goalHoldTimer !== null) {
+      clearTimer(goalHoldTimer);
+      goalHoldTimer = null;
+    }
     for (const runtime of runtimes.values()) {
       runtime.watchdog?.stop();
     }
@@ -5067,18 +5826,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       return [...live];
     },
-    activeTurnThreadIds: () =>
-      [...runtimes.values()]
-        .filter((runtime) => currentSession(runtime).activeTurnId !== null)
-        .map((runtime) => runtime.id),
-    // Both buckets count: an agent fleet ("working") is hours of real work,
-    // and a watch loop ("monitoring") loses its output the same way. The
-    // registry's own TTL bounds a silent watch loop, so a dev server left
-    // running cannot defer a deploy for longer than that window.
-    backgroundWorkThreadIds: () =>
-      [...runtimes.values()]
-        .filter((runtime) => liveness.liveness(runtime.id) !== null)
-        .map((runtime) => runtime.id),
+    activeTurnThreadIds,
+    backgroundWorkThreadIds,
+    holdContinuingGoals,
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,

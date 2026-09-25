@@ -262,6 +262,80 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
     assert.equal(canSwitchChatAccount(idle), true, "a state that never mentions a goal is unchanged");
   });
 
+  it("goals §5.7: a goal a deploy HELD is continuing — paused or not, whatever the session says", () => {
+    // Without a summary verdict, the head's `goalHeldForHandover` reads as
+    // the host's `goalHeld`: the next host sets the goal going again by itself.
+    for (const status of ["paused", "active"] as const) {
+      for (const sessionStatus of ["starting", "ready", "running", "stopped", "error", "idle", null, undefined] as const) {
+        assert.equal(
+          isGoalContinuing({ goal: goal(status), support: CODEX, sessionStatus, goalHeldForHandover: true }),
+          true,
+          `${status} goal, ${String(sessionStatus)} session, held`
+        );
+      }
+    }
+    const held = {
+      ...idle,
+      goalContinuing: isGoalContinuing({
+        goal: goal("paused"),
+        support: CODEX,
+        sessionStatus: "ready",
+        goalHeldForHandover: true
+      })
+    };
+    assert.equal(canSwitchChatAccount(held), false, "the switch stays refused while the goal is held");
+    assert.equal(chatAccountSwitchRefusal(held), GOAL_CONTINUING_SWITCH_REFUSAL, "in the host's own words");
+  });
+
+  it("goals §5.7: the head's hold mark continues nothing the provider would not set going again", () => {
+    for (const status of ["blocked", "budget-limited", "usage-limited", "complete", "failed"] as const) {
+      assert.equal(
+        isGoalContinuing({ goal: goal(status), support: CODEX, sessionStatus: "ready", goalHeldForHandover: true }),
+        false,
+        `a goal that went ${status} during its final turn holds nothing up`
+      );
+    }
+    assert.equal(
+      isGoalContinuing({ goal: goal("paused"), support: CLAUDE, sessionStatus: "ready", goalHeldForHandover: true }),
+      false,
+      "only an adapter that continues goals by itself (Codex) holds one"
+    );
+    assert.equal(
+      isGoalContinuing({ goal: goal("paused"), support: null, sessionStatus: "ready", goalHeldForHandover: true }),
+      false
+    );
+    assert.equal(
+      isGoalContinuing({ goal: null, support: CODEX, sessionStatus: "ready", goalHeldForHandover: true }),
+      false
+    );
+    assert.equal(
+      isGoalContinuing({ goal: goal("paused"), support: CODEX, sessionStatus: "ready", goalHeldForHandover: false }),
+      false,
+      "without the mark a paused goal is an ordinary pause"
+    );
+  });
+
+  it("goals §5.7: the host's verdict still wins over the head's hold mark", () => {
+    // The mark is head-only: a snapshot refreshes it, no live event does, so
+    // a hold the user ended (a Stop, `/goal …`) can outlive it here.
+    const summary = (continuing: boolean) => ({ objective: "Make CI green", status: "paused", continuing });
+    assert.equal(
+      isGoalContinuing({
+        summaryGoal: summary(false),
+        goal: goal("paused"),
+        support: CODEX,
+        sessionStatus: "ready",
+        goalHeldForHandover: true
+      }),
+      false
+    );
+    assert.equal(
+      isGoalContinuing({ summaryGoal: summary(true), goal: goal("paused"), support: CODEX, sessionStatus: "ready" }),
+      true,
+      "the host holds it and says so"
+    );
+  });
+
   it("the goal's reason wins over the wait-for-idle one: between its turns, idle never comes", () => {
     const busy = { ...idle, isTurnActive: true, goalContinuing: true };
     assert.equal(canSwitchChatAccount(busy), false);

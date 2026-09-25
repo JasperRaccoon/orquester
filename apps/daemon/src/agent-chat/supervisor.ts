@@ -122,6 +122,16 @@ export interface SupervisorAdapters {
   probe(): Promise<ProbeOutcome>;
   /** Ask a healthy host to write continuation markers and drain (§3.3, §6.3). */
   requestStop(): Promise<void>;
+  /**
+   * Agent goals §5.7: `POST /goals/hold` — a deploy's drain is blocked, so ask
+   * the host to hold every continuing goal between two of its turns. Each call
+   * renews a lease the host drops `GOAL_HOLD_LEASE_MS` after the last one.
+   * Resolves to every thread the host holds after the request, or `null` when
+   * the host predates the route (its route-miss 404); throws on anything else.
+   * Must be bounded: the supervisor awaits it inside its transition queue.
+   * Optional — without it the drain waits exactly as it did before §5.7.
+   */
+  requestHoldGoals?(): Promise<readonly string[] | null>;
   /** Null on a host without a usable tmux — the host then dies with the daemon. */
   tmux: SupervisorTmux | null;
   /** No-tmux fallback: a direct, non-detached child. */
@@ -188,6 +198,21 @@ export interface AgentHostStatus {
 }
 
 /**
+ * Agent goals §5.7 bookkeeping for the host a pending version restart waits
+ * on, so each fact is logged once rather than per evaluation. Scoped to ONE
+ * host instance: whatever another instance answered says nothing about this one.
+ */
+interface GoalHoldState {
+  hostInstanceId: string;
+  /** The host answered its route-miss 404: it predates §5.7 and is not asked again. */
+  unsupported: boolean;
+  /** The held set last logged, sorted and space-joined; "" while nothing is held. */
+  held: string;
+  /** The failure last logged, or null since the last answer. */
+  failure: string | null;
+}
+
+/**
  * Owns the lifetime of the agent host. One instance per daemon; created in
  * `startDaemon` after `sessions.reattach()`, exactly where cliproxy is.
  */
@@ -204,6 +229,8 @@ export class AgentHostSupervisor {
   private missedProbes = 0;
   /** The last logged reason a pending version restart was deferred. */
   private lastDrainDeferral: string | null = null;
+  /** What the host a deploy waits on answered to its §5.7 goal hold ({@link GoalHoldState}). */
+  private goalHold: GoalHoldState | null = null;
   /**
    * True once `init()` has run. Distinguishes "never started" from "a spawn
    * failed and the state is `stopped`" — without it the health interval would
@@ -405,6 +432,10 @@ export class AgentHostSupervisor {
    * The §6.3 `POST /api/agent-host/stop`: ask the host to write continuation
    * markers and drain, then restart it. Returns the new instance id, or null
    * when the replacement never reached readiness.
+   *
+   * It never asks for an agent goals §5.7 hold: a manual stop restarts at once
+   * rather than waiting for a quiet moment, and the host's `/stop` writes the
+   * §5.5 resume marks that carry a continuing goal across it.
    */
   restartNow(): Promise<string | null> {
     return this.transition(async () => {
@@ -417,6 +448,7 @@ export class AgentHostSupervisor {
    * Re-evaluate the drain window (§3.1 case 3). Called when a turn settles —
    * and when a thread's background work ends — so a deploy's version handover
    * happens the moment the host goes quiet rather than on the next 15 s tick.
+   * Still blocked, it renews the agent goals §5.7 hold instead.
    */
   handleTurnSettled(): void {
     if (!this.pendingVersionRestart || this.state !== "healthy") return;
@@ -504,10 +536,78 @@ export class AgentHostSupervisor {
         this.lastDrainDeferral = blockers;
         this.log("log", `agent host restart deferred: ${blockers}`);
       }
+      // Agent goals §5.7. A continuing Codex goal starts its next turn within
+      // milliseconds of the last, so `activeTurnThreadIds` is almost never
+      // empty and this drain used to wait out the whole goal — hours. Ask the
+      // host to hold it between two turns: the running one finishes, none
+      // follows, and that settle re-runs this on a drained host
+      // (`handleTurnSettled`). Asked on EVERY blocked evaluation — boot
+      // adoption, a settled turn, ended background work, the 15 s tick —
+      // because the hold is a lease: when the asking stops (a withdrawn deploy)
+      // the host resumes what it held. Whatever the blocker: only the host can
+      // tell whether goals are all that is in the way, and it holds nothing
+      // while a fleet in another tab would leave a goal idle for as long as it
+      // ran. Awaited here, inside the transition and bounded by the client's
+      // deadline, so a `/stop` never overtakes a hold the host is still
+      // applying.
+      await this.requestGoalHold(probed.health.hostInstanceId);
       return;
     }
     this.lastDrainDeferral = null;
     await this.drainAndRestart();
+  }
+
+  /**
+   * One agent goals §5.7 hold request against the host instance the drain
+   * waits on. It never throws and decides nothing about the drain. A failure
+   * is logged once per change of reason and simply asked again on the next
+   * evaluation — the lease outlives several missed renewals. A host that
+   * predates the route (`null`) is remembered and not asked again until a
+   * different instance is adopted: the deploy that ships §5.7 waits as it
+   * always did, the next one holds. The held set is logged when it changes,
+   * never per tick — the host answers the whole set on every renewal.
+   */
+  private async requestGoalHold(hostInstanceId: string): Promise<void> {
+    const request = this.opts.adapters.requestHoldGoals;
+    if (!request) return;
+    let hold = this.goalHold;
+    if (hold === null || hold.hostInstanceId !== hostInstanceId) {
+      // A replacement or a respawn starts over: another instance may know the
+      // route, and it holds nothing yet.
+      hold = { hostInstanceId, unsupported: false, held: "", failure: null };
+      this.goalHold = hold;
+    }
+    if (hold.unsupported) return;
+    try {
+      const held = await request();
+      hold.failure = null;
+      if (held === null) {
+        hold.unsupported = true;
+        this.log(
+          "log",
+          "agent host predates the goal hold; a continuing goal keeps the restart waiting until it pauses or ends"
+        );
+        return;
+      }
+      const ids = [...new Set(held)].sort();
+      const key = ids.join(" ");
+      if (key === hold.held) return;
+      hold.held = key;
+      this.log(
+        "log",
+        ids.length > 0
+          ? `agent host holding ${ids.length} continuing goal(s) for the restart`
+          : "agent host no longer holding goals for the restart"
+      );
+    } catch (error) {
+      // A throw — synchronous or not — is logged, never passed on: this runs
+      // inside `init()` and behind the fire-and-forget `handleTurnSettled`.
+      const reason = error instanceof Error ? error.message : String(error);
+      if (reason !== hold.failure) {
+        hold.failure = reason;
+        this.log("warn", "agent host goal hold request failed; the restart keeps waiting", error);
+      }
+    }
   }
 
   /**

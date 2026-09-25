@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildPlanImplementationPrompt, commandOutputText, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, slimActivityPayload, type ThreadActivityItem, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
-import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
+import { activity, head, message, snapshot, stamp, turn } from "./fixtures.ts";
 import { mergeHistoryPages } from "./history.ts";
 import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, transcriptRange, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
 
@@ -1202,4 +1202,57 @@ test("a goal that can't be met and a failed /goal command are error rows with th
   ]);
   const lean = transcriptEntries(snapshot({ items }), { turns: 5, include: new Set(["tools"]), maxChars: 100_000 });
   assert.deepEqual(lean.entries.map((e) => e.kind), ["user"], "error-toned goal rows are activity rows too");
+});
+
+// ---- An old Claude log's re-emitted opening paragraph (spec §7.3): no row of the parent view, as the GUI leaves it out. ----
+
+const OPENING = "The subagent finished; merging its findings.";
+const ANSWER = "Merged: the parser now skips empty lines.";
+/**
+ * A CLI-started turn as a host before the pre-turn-stream fix wrote it: its opening paragraph again at `result`, under a
+ * new id. `over` stamps every assistant message of it — a subagent's own turn.
+ */
+const reEmittedTurn = (over: { agentId?: string } = {}): ThreadItem[] => [
+  message("user", "go", { turnId: "t1" }),
+  message("assistant", OPENING, { turnId: "t1", id: "m-open", ...over }),
+  activity("tool.completed", { itemType: "command_execution", toolUseId: "tu1", title: "Run pnpm check", status: "completed" }, { turnId: "t1", tone: "tool" }),
+  message("assistant", ANSWER, { turnId: "t1", id: "m-answer", ...over }),
+  message("assistant", OPENING, { turnId: "t1", id: "m-copy", ...over })
+];
+const assistantTexts = (r: TranscriptResult): (string | undefined)[] => r.entries.filter((e) => e.kind === "assistant").map((e) => e.text);
+
+test("the parent view of a Claude thread has no row for a re-emitted opening paragraph: the first occurrence stays where it was said", () => {
+  const r = transcriptEntries(snapshot({ items: reEmittedTurn() }), { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "go"], ["assistant", OPENING], ["tool", undefined], ["assistant", ANSWER]]);
+  // So a shed spares the turn's real answer, never the copy: a budget for one row keeps the answer.
+  const long = (text: string): string => `${text} ${"x".repeat(900)}`;
+  const tight = snapshot({ items: [
+    message("user", "go", { turnId: "t1" }), message("assistant", long(OPENING), { turnId: "t1", id: "l-open" }),
+    message("assistant", long(ANSWER), { turnId: "t1", id: "l-answer" }), message("assistant", long(OPENING), { turnId: "t1", id: "l-copy" })
+  ] });
+  const shed = transcriptEntries(tight, { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(shed.truncated && budgetSize(shed) <= 2_000 - TRANSCRIPT_HINT_BYTES, `trimmed within the budget (${budgetSize(shed)})`);
+  assert.deepEqual(assistantTexts(shed), [long(ANSWER)]);
+});
+
+test("a drill-in and a Codex thread keep every message: only a Claude thread's parent view drops a copy, as in the GUI", () => {
+  // A subagent's own turn with the same shape: its drill-in shows its messages as they are, on a Claude thread too.
+  const roster = [{ id: "task-1", kind: "subagent", agentKind: "agent", title: "Explore", status: "completed" } as never];
+  const sub = snapshot({ items: [activity("task.started", { taskId: "task-1", title: "Explore", agentKind: "agent", status: "running" }, { turnId: "t1" }), ...reEmittedTurn({ agentId: "task-1" })], roster });
+  assert.deepEqual(assistantTexts(transcriptEntries(sub, { turns: 5, agentId: "task-1", include: ALL, maxChars: 100_000 })), [OPENING, ANSWER, OPENING]);
+  assert.deepEqual(assistantTexts(transcriptEntries(sub, { turns: 5, include: ALL, maxChars: 100_000 })), [], "the subagent's messages stay out of the parent view, as ever");
+  // Only a Claude log holds such a copy: a Codex thread's repeat is its own words.
+  const codex = snapshot({ head: head({ adapter: "codex", refId: "codex" }), items: reEmittedTurn() });
+  assert.deepEqual(assistantTexts(transcriptEntries(codex, { turns: 5, include: ALL, maxChars: 100_000 })), [OPENING, ANSWER, OPENING]);
+});
+
+test("a read with older pages merged under the window counts the copies over all of it: the opening a page brought back finds the copy", () => {
+  const [prompt, open, tool, answer, copy] = reEmittedTurn();
+  // The window starts mid-turn, the opening evicted: it compares with its own first message, where the copy is none.
+  const window = snapshot({ items: [tool, answer, copy] });
+  assert.deepEqual(assistantTexts(transcriptEntries(window, { turns: 5, include: ALL, maxChars: 100_000 })), [ANSWER, OPENING]);
+  // read_transcript's page merged under it (history.ts) holds the turn's start: now the copy is found, and has no row.
+  const merged = mergeHistoryPages(window, [{ items: [prompt, open], checkpoints: [] }]);
+  const r = transcriptEntries(merged, { turns: 5, include: ALL, maxChars: 100_000, windowItems: window.items });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "go"], ["assistant", OPENING], ["tool", undefined], ["assistant", ANSWER]]);
 });

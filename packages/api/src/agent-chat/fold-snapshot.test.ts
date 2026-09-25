@@ -467,6 +467,21 @@ test("a head carrying the goals §5.5 resume marker round-trips", () => {
   assert.equal(throughDisk(state)?.head?.resumeGoalAfterRestart, undefined);
 });
 
+test("a head carrying the goals §5.7 hold marker round-trips", () => {
+  const state = foldThread(richLog());
+  const held: ThreadFoldState = {
+    ...state,
+    head: { ...state.head!, goalHeldForHandover: true }
+  };
+  assert.deepEqual(throughDisk(held), held);
+  const both: ThreadFoldState = {
+    ...state,
+    head: { ...state.head!, resumeGoalAfterRestart: true, goalHeldForHandover: true }
+  };
+  assert.deepEqual(throughDisk(both), both);
+  assert.equal(throughDisk(state)?.head?.goalHeldForHandover, undefined);
+});
+
 // --- snapshot + tail ≡ the whole log -----------------------------------------
 
 test("a snapshot at ANY point plus the tail folds to exactly the whole log", () => {
@@ -642,6 +657,7 @@ test("a field of the wrong shape anywhere in the state is rejected", () => {
     ["a model selection without a model", (copy) => (copy.head.modelSelection.model = 1)],
     ["a malformed continuation marker", (copy) => (copy.head.continueAfterRestart = { prepared: true })],
     ["a goal-resume marker that is not `true`", (copy) => (copy.head.resumeGoalAfterRestart = false)],
+    ["a goal-hold marker that is not `true`", (copy) => (copy.head.goalHeldForHandover = "yes")],
     ["a head folded to another seq than the state", (copy) => (copy.head.seq = copy.seq + 1)]
   ];
   for (const [label, corrupt] of corruptions) {

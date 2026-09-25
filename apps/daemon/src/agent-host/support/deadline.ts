@@ -122,6 +122,16 @@ export const AGENT_HOST_DEADLINES = {
    * which must never wait on it.
    */
   goalPauseMs: 1_500,
+  /**
+   * The host's own `goalCommand {kind:"resume"}` of a goal it held for a
+   * deploy (goals §5.7) — when the hold's lease runs out, and after a
+   * handover's session resume. Longer than the pause: right after a session
+   * (re)start Codex first waits for its resume snapshot to settle (up to 2 s)
+   * and then reads and sets the goal, all inside its own 10 s command window —
+   * which this outlasts, so the adapter's more precise refusal is what gets
+   * logged.
+   */
+  goalResumeMs: 12_000,
   /** A prompt submit call (OpenCode's `promptAsync`). */
   submitMs: 10_000,
   /** A generic provider probe (version). */
@@ -161,6 +171,29 @@ export const TURN_LIVENESS_WINDOWS = {
   activeToolMs: 30 * 60_000,
   goalMs: 60 * 60_000
 } as const;
+
+/**
+ * Agent goals §5.7: how long a `POST /goals/hold` keeps continuing goals held.
+ * The daemon renews it on every drain re-evaluation — each settled turn, each
+ * 15 s health tick — while a deploy waits, so eight missed ticks mean it has
+ * stopped asking (the deploy was withdrawn, or a daemon with this host's own
+ * code adopted it), and the host resumes what it held.
+ */
+export const GOAL_HOLD_LEASE_MS = 120_000;
+
+/**
+ * Agent goals §5.7: how long a held goal may sit idle — its own turn over,
+ * paused — while OTHER work still keeps the deploy's drain waiting. The
+ * daemon renews the lease on every blocked evaluation whatever blocks it, so
+ * without this bound a goal held while goals were the last thing in the way
+ * would stay paused for as long as a fleet or a long run started later in
+ * another tab keeps going — hours. Once idle-held this long it is released
+ * (resumed) and may be held again when goals are once more all that is left.
+ * Three minutes: other work that is short — a quick question in another tab —
+ * must not cause a pause/resume churn of rows, and work that is long must not
+ * leave the goal idle for its whole length.
+ */
+export const GOAL_HOLD_IDLE_MS = 3 * 60_000;
 
 /**
  * Goals §4.7, §5.5: how long a goal the provider continues by itself (Codex)

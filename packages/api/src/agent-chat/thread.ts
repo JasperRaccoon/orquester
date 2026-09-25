@@ -108,6 +108,26 @@ export interface ThreadHead {
    * build ignores it.
    */
   resumeGoalAfterRestart?: true;
+  /**
+   * Goals §5.7: a deploy's drain HELD this thread's continuing goal — the host
+   * paused it between two of its turns so the drain could go ahead — and the
+   * goal is owed a resume. Written just BEFORE the pause is sent, and cleared
+   * again when the pause does not land, so a crash between the two leaves a
+   * mark rather than a paused goal nobody resumes. Whichever host acts on it
+   * next resumes the provider session as for {@link resumeGoalAfterRestart}
+   * and then RESUMES THE GOAL, a paused one not continuing by itself — only
+   * while the PROVIDER still holds it `paused` (asked, since the fold can
+   * trail it): one achieved, cleared, blocked or limited meanwhile is not set
+   * going again, and one going already needs nothing. The holding host
+   * clears it itself when it lets go of the goal — the hold lease runs out,
+   * or the goal sat idle behind other work for `GOAL_HOLD_IDLE_MS` — and a
+   * user's own action on the goal clears it with nothing resumed. Head-only
+   * state like {@link continueAfterRestart}; an older build ignores it, and
+   * then resumes neither the session nor the goal (a held goal reads
+   * `paused` at the handover, so {@link resumeGoalAfterRestart} is not
+   * written for it): the goal stays paused until the user resumes it.
+   */
+  goalHeldForHandover?: true;
   createdAt: string;
   updatedAt: string;
 }

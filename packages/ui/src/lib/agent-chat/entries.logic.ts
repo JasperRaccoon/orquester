@@ -29,7 +29,8 @@ import {
   isAgentOwnedActivity,
   isCompactionActivity,
   isPlanImplementationMessage,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
+  reEmittedAssistantCopies
 } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
@@ -760,60 +761,13 @@ export interface SplitThreadItems {
 const isMessage = (item: ThreadItem): item is ThreadMessageItem => item.kind === "message";
 
 export interface SplitThreadItemsOptions {
-  /** Drop re-emitted assistant copies (see `reEmittedAssistantCopies`): Claude threads only. */
+  /**
+   * Drop the re-emitted assistant copies an old Claude log holds
+   * (`reEmittedAssistantCopies`, `@orquester/api/agent-chat` — the one rule
+   * the MCP applies too). Claude threads only: the store asks
+   * `repairsReEmittedAssistantCopies` with the thread head's adapter.
+   */
   readonly dropRepeatedAssistantMessages?: boolean;
-}
-
-/**
- * The re-emitted assistant copies in one view — `ownerAgentId`'s messages, so
- * one author's: per turn, its LAST assistant message when it is finished and
- * repeats the turn's FIRST finished one word for word. That is exactly where
- * the copy sits and what it copies: hosts before the pre-turn-stream fix
- * flushed a CLI-started Claude turn's opening paragraph AGAIN at `result`,
- * under a new id, where it rendered below the final summary, became the turn's
- * answer and folded the real one away (live thread 19976137, seq 38664/38963;
- * 160 turns across three threads). `events.ndjson` is never rewritten, so
- * those logs keep the copy; the first occurrence stays where it was said.
- * Only a Claude log can hold one, so only a Claude projection asks for this
- * ({@link SplitThreadItemsOptions}): Codex narration may legitimately repeat
- * itself. And nothing else is dropped, because a long Claude turn — a goal run
- * is ONE turn of many rounds — may well repeat itself, or end two rounds on
- * the same words: dropping the later one would take the turn's real answer.
- * Counted in the view, as every repair here is: a view that starts mid-turn
- * (retention, a history page) compares with its own first message.
- */
-function reEmittedAssistantCopies(
-  items: readonly ThreadItem[],
-  ownerAgentId: string | undefined
-): Set<string> {
-  const firstFinished = new Map<string, ThreadMessageItem>();
-  const last = new Map<string, ThreadMessageItem>();
-  for (const item of items) {
-    if (!isMessage(item) || item.role !== "assistant" || item.turnId === null) {
-      continue;
-    }
-    const owner = item.agentId !== undefined && item.agentId.length > 0 ? item.agentId : undefined;
-    if (owner !== ownerAgentId) {
-      continue;
-    }
-    last.set(item.turnId, item);
-    if (!item.streaming && item.text.trim().length > 0 && !firstFinished.has(item.turnId)) {
-      firstFinished.set(item.turnId, item);
-    }
-  }
-  const copies = new Set<string>();
-  for (const [turnId, message] of last) {
-    const opening = firstFinished.get(turnId);
-    if (
-      opening !== undefined &&
-      !message.streaming &&
-      message.id !== opening.id &&
-      message.text === opening.text
-    ) {
-      copies.add(message.id);
-    }
-  }
-  return copies;
 }
 
 /**

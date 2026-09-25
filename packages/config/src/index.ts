@@ -836,6 +836,10 @@ export const agentThreadSessionSchema = z.object({
  * a thread whose goal was continuing: the next host resumes its provider
  * session. Additive — an older build strips it — and read with a fallback: a
  * malformed value is no mark, never an unreadable thread.
+ *
+ * `goalHeldForHandover` (agent goals §5.7) is the same kind of mark for a goal
+ * a deploy's drain paused between its turns: the next host resumes the session
+ * AND the goal. Additive and read with the same fallback.
  */
 export const agentThreadHeadSchema = z.object({
   id: z.string().min(1),
@@ -855,6 +859,7 @@ export const agentThreadHeadSchema = z.object({
     .object({ turnId: z.string().min(1), prepared: z.boolean().optional() })
     .optional(),
   resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),
+  goalHeldForHandover: z.literal(true).optional().catch(undefined),
   createdAt: z.string(),
   updatedAt: z.string()
 });

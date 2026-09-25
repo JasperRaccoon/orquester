@@ -409,6 +409,25 @@ test("update_session: a summary still saying continuing after the goal was pause
   assert.deepEqual((await tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, cleared.ctx)).applied, ["accountId"]);
 });
 
+test("update_session: a goal an Orquester update holds refuses the switch with its own advice before anything is written; mid-turn, a mode change is told to wait", async (t) => {
+  const HELD_SWITCH_REFUSAL = "The goal is held for an Orquester update and resumes by itself once the agent host has restarted. Switch accounts after that, or take the goal back first: send_message \"/goal pause\" keeps it paused.";
+  // Goals §5.7: the host reports a held goal `paused` and continuing, and refuses the switch itself.
+  const held = await harness([chatSummary(summaryGoal("paused", true))], snapshot(threadGoal("paused"))); t.after(held.close);
+  held.api.on("PUT", "/api/sessions/c1", { status: 200, body: chatSummary({ title: "Renamed" }) }).on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
+  for (const args of [{ accountId: "acc-1" }, { title: "Renamed", accountId: "acc-1" }]) {
+    await assert.rejects(tool("update_session").run({ sessionId: "c1", ...args, force: false }, held.ctx),
+      (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === HELD_SWITCH_REFUSAL);
+  }
+  assert.ok(!held.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written");
+  // Its final turn still running: a held goal starts no next turn, so waiting helps — the plain turn advice.
+  const finalTurn = await harness([chatSummary({ ...midTurnFields, ...summaryGoal("paused", true) })], snapshot({ ...midTurnHead, ...threadGoal("paused") })); t.after(finalTurn.close);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", runtimeMode: "auto", force: false }, finalTurn.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === TURN_MODE_REFUSAL);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, finalTurn.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === HELD_SWITCH_REFUSAL);
+  assert.ok(!finalTurn.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written mid-turn");
+});
+
 test("the goal cases are in the descriptions: Stop pauses a continuing goal first, compaction and an account switch are refused while one continues", () => {
   assert.match(tool("interrupt_session").description, /\(Codex\), Stop pauses the goal first/);
   assert.match(tool("interrupt_session").description, /send_message "\/goal resume"/);

@@ -142,8 +142,24 @@ export const agentHostRoutes = {
    * aborted, every marker written for it is cleared, so a cancelled restart
    * does not inject a phantom "Continue where you left off." on the next boot.
    */
-  stop: "/stop"
+  stop: "/stop",
+
+  /**
+   * Agent goals §5.7: `POST` → {@link AgentHostHoldGoalsResponse}. A deploy's
+   * drain is waiting, so hold every continuing goal between its turns once
+   * goals are all that is left in the way — a lease, extended by every request
+   * to `GOAL_HOLD_LEASE_MS`, after which the host resumes what it held. A host
+   * that predates the route answers its generic route-miss 404, which the
+   * daemon ignores.
+   */
+  holdGoals: "/goals/hold"
 } as const;
+
+/** `POST /goals/hold` (agent goals §5.7). */
+export interface AgentHostHoldGoalsResponse {
+  /** Every thread the host holds after this request, the ones held before it included. */
+  heldThreadIds: string[];
+}
 
 /** `GET /health` on the host socket. */
 export interface AgentHostHealthResponse {

@@ -18,9 +18,10 @@ import {
 import { Broadcaster } from "../broadcaster.ts";
 import { createServer as createDaemonApp, relayedUploadClosesConnection } from "../index.ts";
 import { InjectDaemonApi } from "../mcp/daemon-api.ts";
-import type {
-  CreateHostThreadRequest,
-  SetThreadIdentityRequest
+import {
+  AGENT_HOST_PROTOCOL_VERSION,
+  type CreateHostThreadRequest,
+  type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import {
   AgentChatService,
@@ -80,6 +81,14 @@ interface Fixture {
   seededRefusal: { code: string; message: string } | null;
   /** Adapter ids the daemon asked the host to re-probe, in order. */
   refreshes: string[];
+  /** Merged into the fake host's `/health` answer (`makeFixture`'s `health` option). */
+  health: Record<string, unknown>;
+  /** Agent goals §5.7: every `POST /goals/hold` the fake host received. */
+  holdRequests: Array<{ body: string; headers: IncomingMessage["headers"] }>;
+  /** What the fake host answers `POST /goals/hold`. */
+  holdAnswer: { status: number; body: unknown };
+  /** Every line the service and its supervisor logged. */
+  logs: Array<{ level: "log" | "warn" | "error"; text: string }>;
   cleanup(): Promise<void>;
 }
 
@@ -115,7 +124,13 @@ const OPENCODE: RegistryEntry = {
 async function makeFixture(
   entry: RegistryEntry,
   launch: { env: Record<string, string>; unset?: string[]; accountId?: string } | null,
-  options: { now?: () => number; adopt?: boolean; uploadLimitBytes?: number } = {}
+  options: {
+    now?: () => number;
+    adopt?: boolean;
+    uploadLimitBytes?: number;
+    /** Set before boot adoption, which is the first thing to read `/health`. */
+    health?: Record<string, unknown>;
+  } = {}
 ): Promise<Fixture> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-chat-service-"));
   // The REAL paths, so boot adoption probes the fake host rather than deciding
@@ -138,6 +153,10 @@ async function makeFixture(
     accounts: [],
     seededRefusal: null,
     refreshes: [],
+    health: options.health ?? {},
+    holdRequests: [],
+    holdAnswer: { status: 200, body: { heldThreadIds: [] } },
+    logs: [],
     service: null as unknown as AgentChatService,
     cleanup: async () => {
       // An upload a test left open would otherwise hold `close` forever.
@@ -174,9 +193,17 @@ async function makeFixture(
             liveThreadIds: [],
             activeTurnThreadIds: [],
             pid: 111,
-            startedAt: "2026-09-21T00:00:00.000Z"
+            startedAt: "2026-09-21T00:00:00.000Z",
+            ...state.health
           })
         );
+        return;
+      }
+      if (req.url === "/goals/hold" && req.method === "POST") {
+        state.holdRequests.push({ body, headers: req.headers });
+        res
+          .writeHead(state.holdAnswer.status, { "content-type": "application/json" })
+          .end(JSON.stringify(state.holdAnswer.body));
         return;
       }
       const refresh = /^\/providers\/([^/]+)\/refresh$/.exec(req.url ?? "");
@@ -249,6 +276,11 @@ async function makeFixture(
       return resolvedPath === root || resolvedPath.startsWith(root + sep) ? resolvedPath : null;
     },
     sendAttachment: async (reply) => reply,
+    logger: {
+      log: (...a: unknown[]) => state.logs.push({ level: "log", text: a.map(String).join(" ") }),
+      warn: (...a: unknown[]) => state.logs.push({ level: "warn", text: a.map(String).join(" ") }),
+      error: (...a: unknown[]) => state.logs.push({ level: "error", text: a.map(String).join(" ") })
+    },
     nodeBin: "/usr/bin/node",
     ...(options.now ? { now: options.now } : {}),
     ...(options.uploadLimitBytes !== undefined ? { uploadLimitBytes: options.uploadLimitBytes } : {}),
@@ -752,6 +784,74 @@ test("an entry with no chat adapter never nudges a provider", async () => {
   await f.service.drainProviderRefreshes();
   assert.deepEqual(f.refreshes, []);
   await f.cleanup();
+});
+
+// Agent goals §5.7: a deploy's drain blocked by a continuing goal asks the host
+// to hold it between two turns. The supervisor decides WHEN — every blocked
+// evaluation; the service owns the hop: route, body, deadline, and reading
+// another process's answer field-wise.
+
+/** A host a deploy has made stale (another protocol version), busy with one turn. */
+const STALE_BUSY_HOST = {
+  protocolVersion: AGENT_HOST_PROTOCOL_VERSION + 1,
+  activeTurnThreadIds: ["thread-G"],
+  backgroundWorkThreadIds: []
+};
+
+test("agent goals §5.7: a blocked deploy drain posts the goal hold, and reads the answer field-wise", async () => {
+  const f = await makeFixture(CLAUDEX, null, { health: STALE_BUSY_HOST });
+  try {
+    assert.equal(f.holdRequests.length, 1, "boot adoption found the drain blocked and asked at once");
+    assert.equal(f.holdRequests[0]!.body, "{}");
+    assert.equal(f.holdRequests[0]!.headers["content-type"], "application/json");
+    assert.equal(f.holdRequests[0]!.headers.authorization, "Bearer test-token");
+    assert.equal(f.service.supervisor.status().pendingVersionRestart, true, "the drain still waits");
+
+    // Entries that are not thread ids are dropped, never trusted.
+    f.holdAnswer = { status: 200, body: { heldThreadIds: ["thread-G", 7, null, "thread-H"] } };
+    await f.service.supervisor.checkHealth();
+    assert.equal(f.holdRequests.length, 2, "the health tick renews the lease");
+    const said = (): string[] =>
+      f.logs.filter((line) => line.level === "log" && /goal/.test(line.text)).map((line) => line.text);
+    assert.deepEqual(said(), ["agent host holding 2 continuing goal(s) for the restart"]);
+
+    // Anything but an array reads as nothing held.
+    f.holdAnswer = { status: 200, body: { heldThreadIds: "thread-G" } };
+    await f.service.supervisor.checkHealth();
+    assert.deepEqual(said().slice(1), ["agent host no longer holding goals for the restart"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent goals §5.7: a host without the route is asked once; any other refusal is a logged failure, asked again", async () => {
+  const f = await makeFixture(CLAUDEX, null, { health: STALE_BUSY_HOST });
+  try {
+    f.holdAnswer = {
+      status: 503,
+      body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is stopping." } }
+    };
+    await f.service.supervisor.checkHealth();
+    await f.service.supervisor.checkHealth();
+    assert.equal(f.holdRequests.length, 3, "a failed renewal is simply asked again");
+    const failures = f.logs.filter(
+      (line) => line.level === "warn" && /goal hold request failed/.test(line.text)
+    );
+    assert.equal(failures.length, 1, "and logged once, not per tick");
+    assert.match(failures[0]!.text, /answered 503 to the goal hold: The agent host is stopping\./);
+
+    // The generic route-miss 404 of a host that predates §5.7.
+    f.holdAnswer = {
+      status: 404,
+      body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /goals/hold." } }
+    };
+    await f.service.supervisor.checkHealth();
+    await f.service.supervisor.checkHealth();
+    assert.equal(f.holdRequests.length, 4, "an older host is asked once, then remembered");
+    assert.equal(f.service.supervisor.status().pendingVersionRestart, true, "and the deploy waits as before");
+  } finally {
+    await f.cleanup();
+  }
 });
 
 test("resolveHomeKind and the conversation-id shape check", () => {

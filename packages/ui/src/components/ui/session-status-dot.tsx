@@ -46,10 +46,12 @@ export const SessionStatusDot: React.FC<{
   /**
    * The thread's unfinished goal, read straight off `SessionSummary` (goals
    * §8.3): a 9px target before the dot, in the in-motion tone while the goal
-   * is active and the warn tone once it has stopped short. Validated
-   * field-wise — the summary is wire data from a host that may be older or
-   * newer than this client — and a goal it cannot read draws nothing. Without
-   * one the dot renders exactly as it always did, unwrapped.
+   * is active and the warn tone once it has stopped short — except a goal a
+   * deploy holds (§5.7, paused and still continuing), which keeps the
+   * in-motion tone beside its working dot and says why it is paused.
+   * Validated field-wise — the summary is wire data from a host that may be
+   * older or newer than this client — and a goal it cannot read draws nothing.
+   * Without one the dot renders exactly as it always did, unwrapped.
    */
   goal?: AgentChatGoalSummary | null;
   className?: string;

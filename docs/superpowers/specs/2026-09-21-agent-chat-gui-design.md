@@ -421,9 +421,10 @@ first, so an adopted host is not reconciled against itself.
 *T3: `apps/server/src/serverRuntimeStartup.ts:503-540` — live thread ids from `listSessions()` subtracted, the `starting | running | activeTurnId !== null | prepared-while-ready` orphan filter*
 
 *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): the input also takes, off the same
-`meta.json` read, every thread whose head carries a goal resume mark (`resumeGoalAfterRestart` →
-`goalResumePending`), whatever its session says and whether or not a turn was active; its session
-is resumed after the gate, without a turn (goals §5.5).*
+`meta.json` read, every thread whose head carries a goal resume mark (`resumeGoalAfterRestart`, or
+a held goal's `goalHeldForHandover` → `goalResumePending`), whatever its session says and whether
+or not a turn was active; its session is resumed after the gate, without a turn, and a held goal is
+then resumed too (goals §5.5, §5.7).*
 
 1. Mark `continueAfterRestart` in `meta.json` before doing anything.
 2. Resume the session from its resume cursor.
@@ -490,7 +491,9 @@ every marker written for it is cleared, so a cancelled restart does not inject a
 *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a second mark rides the same intentional
 stop — `resumeGoalAfterRestart`, a boolean — for a thread whose Codex goal continues on a live
 session: there is no turn to name, since the goal's next turn is the provider's to start. An
-aborted stop clears it with the rest (goals §5.5).*
+aborted stop clears it with the rest (goals §5.5). Before a deploy's stop, the drain HOLDS such a
+goal between its turns (`POST /goals/hold`, `goalHeldForHandover`), so the stop finds no turn
+running and the next host resumes the goal itself (goals §5.7).*
 
 **Archived and deleted threads are settled, never continued.** A thread the user closed or
 deleted while a turn was running is settled as an error on the next boot; resuming it would
@@ -2267,7 +2270,9 @@ upsertSessionBinding({ threadId, adapter, patch: Partial<ProviderSessionBinding>
 *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): the head also carries
 `resumeGoalAfterRestart?: true` — head-only like `continueAfterRestart`, written by the `/stop`
 handover for a continuing Codex goal and cleared once the next host's resume has succeeded or
-failed; a resume that a stop cuts short keeps it (goals §5.5).*
+failed; a resume that a stop cuts short keeps it (goals §5.5) — and `goalHeldForHandover?: true`,
+written when a deploy's drain holds that goal between its turns and read as the same kind of mark
+(goals §5.7).*
 
 The projected timeline is a fold over `events.ndjson`. Items are one of two shapes:
 
@@ -3194,8 +3199,8 @@ a turn error (upstream `ActiveGoalStopReason::TurnError`), and that goal update 
 so the rung holds only until the update lands and the failure then shows. An errored SESSION
 reads continuing only while a goals §5.5 resume mark is pending. `continuing` never feeds
 `backgroundWorkThreadIds`, but a goal's turns follow each other within milliseconds, so a
-code-only deploy's drain waits for the goal to pause, block or end like any running work; a
-goal-aware drain is an open follow-up. Goals §4.7.*
+code-only deploy's drain would wait for the whole goal; once goals are all that blocks it, the
+host holds them between their turns instead (goals §5.7). Goals §4.7.*
 
 **Amendment (implementation): the trust grant is confined to `projectPath`.** A chat launch
 auto-accepts Claude's project-trust dialog for the thread's project (a never-seen directory is

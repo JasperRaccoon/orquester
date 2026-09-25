@@ -95,6 +95,16 @@ the orchestrator, whose last commits still feed it: every queued observe is appl
 catch-up in flight ends at its next check with its cursor left behind the log, then the file
 closes — so indexing never holds a deploy's stop) → store close.
 
+Before that stop, a deploy's drain may ask for a **goal hold** (`POST /goals/hold`, agent goals
+§5.7): while goals are all that blocks the drain, the orchestrator holds every continuing Codex
+goal between its turns (`holdContinuingGoals`) — it marks the head `goalHeldForHandover` (a resume
+mark the next host's reconcile acts on, written before the pause is sent), pauses the goal, and
+keeps reporting it as continuing. The request is a lease (`GOAL_HOLD_LEASE_MS`) the daemon renews
+while it waits; when it runs out with this host still up — or a held goal has sat idle behind
+other work for `GOAL_HOLD_IDLE_MS` — the host resumes what it held itself. Every such resume, and
+the next host's, is conditional (`onlyIfPaused`): the provider, not the fold, says whether the
+goal is still paused.
+
 ## Rules that apply to everything under this directory
 
 - **No lazy dynamic `import()`** (§8). A host that survives a deploy runs old code until the

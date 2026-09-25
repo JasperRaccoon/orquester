@@ -936,6 +936,9 @@ export class CodexSession {
    * The goal itself moves only through `thread.goal.updated` rows; the
    * summary is text only for `status`, for a goal a command found missing (or,
    * on `resume`, out of budget) and for a `clear` that found nothing to clear.
+   * A `resume` handed `onlyIfPaused` — the host's own, of a goal it held for a
+   * deploy (goals §5.7) — sets the goal going only when Codex's reply to the
+   * `get` says `paused`, and otherwise answers `notPaused` with no text.
    */
   async goalCommand(
     command: HostGoalCommand,
@@ -988,12 +991,24 @@ export class CodexSession {
             ? { summary: "" }
             : { summary: NO_GOAL_SUMMARY };
         case "resume": {
-          const goal = await this.readGoal(peer, threadId, budget);
-          if (goal === null) {
-            return { summary: NO_GOAL_SUMMARY };
-          }
-          if (goal.status === "budget-limited") {
-            return { summary: GOAL_BUDGET_REACHED_SUMMARY };
+          const { goal, replied } = await this.readGoalReply(peer, threadId, budget);
+          if (options.onlyIfPaused === true) {
+            // Goals §5.7, the host's own resume of a goal it held: decided on
+            // what Codex REPLIED, not on the tracker — a notification queued
+            // before the hold's pause (a progress flush still saying `active`)
+            // can have reached the tracker during the `get`, and the goal
+            // would stay paused for good. A goal going already, or one that
+            // ended, blocked or hit a limit meanwhile, is left as it is.
+            if (replied?.status !== "paused") {
+              return { summary: "", notPaused: true };
+            }
+          } else {
+            if (goal === null) {
+              return { summary: NO_GOAL_SUMMARY };
+            }
+            if (goal.status === "budget-limited") {
+              return { summary: GOAL_BUDGET_REACHED_SUMMARY };
+            }
           }
           return (await this.setGoalUnlessMissing(peer, { threadId, status: "active" }, budget))
             ? { summary: "" }
@@ -1056,24 +1071,42 @@ export class CodexSession {
     threadId: string,
     budget: GoalBudget
   ): Promise<AgentGoal | null> {
+    return (await this.readGoalReply(peer, threadId, budget)).goal;
+  }
+
+  /**
+   * {@link readGoal}'s answer (`goal`), and the goal the reply itself carried
+   * (`replied`: `null` for none, and for one this version cannot read) —
+   * what Codex held as it answered. The two differ only when a notification
+   * was observed during the `get`, and that notification can be OLDER than
+   * the reply (goal notifications trail replies, fixtures README observation
+   * 20): the tracker's word is what may be emitted, but a decision about the
+   * goal as it stands — the host's conditional resume (goals §5.7) — is taken
+   * on the reply.
+   */
+  private async readGoalReply(
+    peer: CodexPeer,
+    threadId: string,
+    budget: GoalBudget
+  ): Promise<{ goal: AgentGoal | null; replied: AgentGoal | null }> {
     const sentAt = this.goals.notificationCount;
     const response = await this.goalRequest(peer, "thread/goal/get", { threadId }, budget);
-    if (this.goals.isStale(sentAt)) {
-      return this.goals.current;
-    }
     const raw: unknown = (response as { goal?: unknown }).goal ?? null;
+    const replied = raw === null ? null : agentGoalFromCodex(raw);
+    if (this.goals.isStale(sentAt)) {
+      return { goal: this.goals.current, replied };
+    }
     if (raw === null) {
       this.emitGoal(this.goals.responded(null, sentAt));
-      return null;
+      return { goal: null, replied };
     }
-    const goal = agentGoalFromCodex(raw);
-    if (goal === null) {
+    if (replied === null) {
       // Refused rather than read as "no goal": a `set` would then skip the
       // clear and edit a goal the user never saw.
       throw new Error("codex answered with a goal this version cannot read");
     }
-    this.emitGoal(this.goals.responded(goal, sentAt));
-    return goal;
+    this.emitGoal(this.goals.responded(replied, sentAt));
+    return { goal: replied, replied };
   }
 
   /**

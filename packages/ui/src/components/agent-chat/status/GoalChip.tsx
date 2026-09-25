@@ -5,6 +5,9 @@
  * plan chip — `Goal round 3`, `Goal paused`, `Goal budget 48k/50k tok` — in
  * the in-motion tone while the goal is active and the warn tone once it has
  * stopped short. Its label shimmers only while a turn is actually running.
+ * A goal a deploy HELD (goals §5.7) reads `Goal paused for update` in the
+ * in-motion tone, and its popover says it resumes by itself: the tab reads
+ * working, and nothing went wrong.
  *
  * **Click, not hover.** The context meter opens on hover because reading it is
  * a glance; this popover carries actions, and an action is a decision. The
@@ -65,6 +68,12 @@ export interface GoalChipProps {
   goal: AgentGoal;
   /** The status line's own "a turn is running": an active goal's label shimmers. */
   turnRunning: boolean;
+  /**
+   * The paused goal is held for an Orquester update (goals §5.7,
+   * `isGoalHeldForUpdate`), for the chip and its popover alike. Ignored on
+   * any other status.
+   */
+  heldForUpdate?: boolean;
   /** Already gated by the §8.2 matrix; empty ⇒ the popover is a readout. */
   actions: readonly GoalActionModel[];
   /** Why there are no actions right now, when that needs saying. */
@@ -76,13 +85,14 @@ export function GoalChip({
   sessionId,
   goal,
   turnRunning,
+  heldForUpdate = false,
   actions,
   actionsNote = null,
   onAction
 }: GoalChipProps): React.ReactElement | null {
   // One identity per thread: the Dropdown's dismiss effect is keyed on it.
   const popoverProps = React.useMemo(() => goalPopoverProps(sessionId ?? null), [sessionId]);
-  const chip = deriveGoalChip(goal, turnRunning);
+  const chip = deriveGoalChip(goal, turnRunning, { heldForUpdate });
   if (chip === null) return null;
   return (
     <Dropdown
@@ -123,13 +133,21 @@ export function GoalChip({
         </span>
       }
     >
-      <GoalPanel goal={goal} actions={actions} actionsNote={actionsNote} onAction={onAction} />
+      <GoalPanel
+        goal={goal}
+        heldForUpdate={heldForUpdate}
+        actions={actions}
+        actionsNote={actionsNote}
+        onAction={onAction}
+      />
     </Dropdown>
   );
 }
 
 export interface GoalPanelProps {
   goal: AgentGoal;
+  /** The paused goal is held for an Orquester update (goals §5.7): its status says so. */
+  heldForUpdate?: boolean;
   actions: readonly GoalActionModel[];
   actionsNote?: string | null;
   onAction: (action: GoalAction) => void;
@@ -162,12 +180,13 @@ function Fact({
  */
 export function GoalPanel({
   goal,
+  heldForUpdate = false,
   actions,
   actionsNote = null,
   onAction
 }: GoalPanelProps): React.ReactElement {
   const { close } = React.useContext(DropdownContext);
-  const panel = deriveGoalPanel(goal);
+  const panel = deriveGoalPanel(goal, new Date(), { heldForUpdate });
   return (
     <div className="flex flex-col gap-2 p-3">
       <div className="flex items-baseline justify-between gap-3">

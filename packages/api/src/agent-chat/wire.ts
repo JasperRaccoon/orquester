@@ -694,6 +694,11 @@ export type BackgroundLiveness = "working" | "monitoring";
  *   the field on every read;
  * - a host restart's resume of it is still owed (goals §5.5, the head's
  *   `resumeGoalAfterRestart`), even while the session reads `error`.
+ * It is also true while the host HOLDS the goal for a deploy (goals §5.7, the
+ * head's `goalHeldForHandover`) — then `status` reads `paused`: the next host
+ * sets it going again by itself — and through the grace after a host sets a
+ * held goal going again, until the provider's own update turns the status
+ * `active`. Those are the only cases a paused goal is continuing.
  * A settled latest turn is then not "finished", and the host's word is final:
  * no surface re-derives it. Without a pending resume the host never reports
  * it for a stopped or errored session, so a goal never masks an error.

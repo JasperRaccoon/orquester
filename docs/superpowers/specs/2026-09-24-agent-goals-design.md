@@ -356,7 +356,9 @@ pause of §5.6 passes no options.
   of an idle point it continues from: its last turn settling, or its session (re)starting. The
   grace keeps a continuation that never starts (plan mode, an upstream `NotSubmitted`) from
   reading "working" forever; the summary is recomputed on every read, so the grace ends without
-  an event.
+  an event. It is also true while the host holds the goal for a deploy, and through the grace
+  after the host sets a held goal going again while the fold still reads `paused` (§5.7, amended
+  2026-09-24) — the only cases a `paused` goal is continuing.
 - `SessionSummary.goal?: AgentChatGoalSummary | null` (`packages/api/src/index.ts`, in the agent
   chat block — now seven derived fields). The daemon's `summary.ts` validates it field-wise,
   `chat-sessions.ts` copies it in `applyFields` and compares it in `sameDerivedFields`.
@@ -370,10 +372,10 @@ pause of §5.6 passes no options.
   mark is pending.
 - **Deploys** (amended 2026-09-24): `continuing` never feeds `backgroundWorkThreadIds`, but a
   continuing goal's turns follow each other within milliseconds, so `activeTurnThreadIds` is
-  almost never empty: a code-only deploy's drain waits for the goal to pause, block or end, like
-  any running work. §5.5's mark covers a stop that comes anyway — a manual
-  `POST /api/agent-host/stop`. A goal-aware drain (pause at a turn boundary while a restart is
-  pending, re-activate after) needs a new daemon↔host signal and is an open follow-up.
+  almost never empty and a code-only deploy's drain would wait for the goal to pause, block or end.
+  It does not: once goals are all that blocks the drain, the host HOLDS them between their turns
+  and the next host picks them up again (§5.7). §5.5's mark covers a stop that comes anyway — a
+  manual `POST /api/agent-host/stop`.
 
 ## 5. Host behaviour (`apps/daemon/src/agent-host/orchestration/**`)
 
@@ -455,7 +457,8 @@ A goal **continues** while the fold's goal is `active` on an adapter whose
 `goals.continuesAcrossTurns` is true (Codex): the provider will start its next turn by itself, so
 the gaps between its turns are not "idle". It is **continuing** — the summary's word, §4.7 —
 while it also has a live session running a turn or still inside the grace, or a resume mark
-pending (amended 2026-09-24).
+pending (amended 2026-09-24), or while a deploy holds it or the host has just set a held goal
+going again (§5.7).
 The first implementation showed two ways a continuing goal silently stopped; both are closed here.
 
 - **Account switch.** `identitySwitchRefusal` (`orchestration/session-policy.ts`) also refuses
@@ -476,7 +479,9 @@ The first implementation showed two ways a continuing goal silently stopped; bot
   verdict, `false`, since the host then holds no unfinished goal — and only without one (a host
   that predates the field, a summary not yet received, a malformed one) a coarser form of the
   host's predicate: an `active` goal on a `continuesAcrossTurns` adapter with a live session
-  (`starting`, `ready` or `running`) or a resume mark — no running-turn or grace check.
+  (`starting`, `ready` or `running`) or a resume mark — no running-turn or grace check — or a
+  `paused` or `active` goal whose head carries a deploy's hold mark, `goalHeldForHandover` (§5.7),
+  whatever the session says; the summary's verdict still wins.
 - **Deploy handover.** `markThreadsForContinuation` also marks a thread whose goal continues on a
   live session and has a usable resume cursor (the binding's, else the head's) — **without** the
   per-project continuation opt-in: setting a goal is the user's opt-in to autonomous work. It
@@ -484,9 +489,10 @@ The first implementation showed two ways a continuing goal silently stopped; bot
   whose session the user stopped is not revived by a deploy. The mark is a new optional head
   field `resumeGoalAfterRestart?: true` (`ThreadHead` in `thread.ts`, the `meta.json` schema in
   `packages/config`, the head check in `fold-snapshot.ts`) — additive, ignored by older builds. It
-  is head-only state like `continueAfterRestart`: no domain event carries it. A continuing goal
-  holds a deploy's drain (§4.7), so in practice the mark serves a stop that comes anyway — a
-  manual `POST /api/agent-host/stop`.
+  is head-only state like `continueAfterRestart`: no domain event carries it. A deploy's drain
+  holds a continuing goal between its turns (§5.7, amended 2026-09-24), so this mark serves a
+  stop that comes anyway — a manual `POST /api/agent-host/stop`, or a host whose deploy has no
+  hold route yet.
 - **Boot.** The reconcile finds the mark on the same `meta.json` read `isOrphanedHead` makes
   (`goalResumePending`). After the gate opens — a macrotask later, never on the readiness path —
   every marked thread's provider session is resumed, side by side, through the same
@@ -527,6 +533,143 @@ A Stop (`/interrupt`) on a live thread whose goal continues (an `active` goal on
 The adapter's own `interruptTurn` still pauses an `active` goal before `turn/interrupt` (§6.2.4);
 after the host's pause it finds the goal paused, or pauses it a second time when that
 notification trails the reply — harmless.
+
+The same order applies to a goal set going again a moment ago whose `active` update has not
+reached the fold yet (amended 2026-09-24, §5.7) — the host's own resume of a held goal, or the
+user's own `/goal resume` (`goalResumedAt`, `goalJustResumed`, within the continuation grace): the
+fold still reads `paused`, but Codex starts its next turn as soon as that update lands, so the Stop
+pauses it all the same (`resumeInFlight`, read before the Stop's own release forgets the resume).
+
+### 5.7 A deploy holds a continuing goal between its turns (amendment, 2026-09-24)
+
+A continuing goal's turns follow each other within milliseconds, so `activeTurnThreadIds` is
+almost never empty and a code-only deploy's drain (the chat spec's §3.1 case 3) waited for the
+whole goal — possibly hours. A deploy now **holds** the goal between two of its turns instead: the
+turn running finishes, no next one starts, the drain goes ahead, and the next host picks the goal
+up again. Nothing running is cut, as the drain rule wants.
+
+- **The signal.** While the supervisor holds a pending version restart and the drain is blocked,
+  every re-evaluation — a settled turn, background work ending, the 15 s health tick — also sends
+  `POST /goals/hold` (`agentHostRoutes.holdGoals`), answered `{heldThreadIds}`. It is a lease:
+  each request extends it to `GOAL_HOLD_LEASE_MS` (120 s, `support/deadline.ts`) from now. A host
+  that predates the route answers its route-miss 404, which the daemon ignores: the deploy that
+  ships this waits as before; the next one has the route.
+- **Only when goals are the last thing in the way.** The host holds nothing while anything else
+  blocks the drain: its own `activeTurnThreadIds` ∪ `backgroundWorkThreadIds` must all be threads
+  whose goal it can hold (below) or already holds. Otherwise a subagent fleet running in another
+  tab would leave the goals idle for as long as it runs. Once that holds, EVERY holdable goal is
+  held, including one in the gap between its turns, which would otherwise start its next turn the
+  moment the others settle.
+- **Holding.** A thread is holdable when its goal continues (§5.5 `goalContinues`) on a live
+  session (`sessionIsLive`), it is not held already, and the user has not released it in this
+  lease (below). In the thread's effect queue the host first writes the mark — the head field
+  `goalHeldForHandover: true`, in memory and at once on `meta.json` (`saveHeadNow`) — and only then
+  pauses the goal through `adapter.goalCommand(threadId, {kind:"pause"})`, bounded by
+  `AGENT_HOST_DEADLINES.goalPauseMs`: a crash between a pause that landed and a mark written after
+  it would leave a paused goal nobody resumes, while a mark on a goal the pause never reached is
+  harmless (every resume of a held goal skips one that does not read `paused`). On success the
+  thread is held and one `goal.status` row is appended: `Goal paused for an Orquester update. It
+  resumes by itself once the agent host has restarted.` A pause stops only the NEXT continuation
+  (§3.2): the running turn finishes as it would have. A pause that fails clears the mark again and
+  is logged, and the next renewal tries again — unless this host's own stop cut it short (its
+  teardown rejects the request): the request may have reached the provider, so the mark stays and
+  the thread counts as held, for the next host's resume or, if that stop is aborted, this host's
+  lease. Either resume asks the provider (below).
+- **Continuing.** A held goal reads as continuing: `goalContinuingNow` answers true while the
+  thread is held, whatever the fold's status says (it reads `paused` once Codex has answered). So
+  the turn settling raises no "finished" stamp and no push, the tab reads working
+  (`goal-continuing`), and the account switch stays refused (§5.5). The GUI names the hold rather
+  than showing it as the user's own pause (§8.2, §8.3).
+- **The handover.** The head field is the resume mark: `markThreadsForContinuation` leaves it as
+  it is. The next host's reconcile treats `goalHeldForHandover` like `resumeGoalAfterRestart`
+  (`goalResumePending`, off the same `meta.json` read). After the gate, `resumeGoalSession`
+  resumes the provider session as §5.5 does and then RESUMES THE GOAL —
+  `adapter.goalCommand(threadId, {kind:"resume"}, {onlyIfPaused: true})`, bounded — since a
+  paused goal does not continue by itself; whether it is still paused is the PROVIDER's word (the
+  fold can trail it, below). Both marks are cleared as §5.5 clears its own. A resume cut short by this
+  host's own stop keeps them. A crash while holding leaves the head mark, and the next host
+  resumes the goal the same way.
+- **Release.** When the lease runs out with the host still up — the daemon stopped asking: the
+  deploy was withdrawn, or a daemon with the host's own code adopted it — the host resumes every
+  goal it holds, in the thread's effect queue, and clears the marks, then forgets the lease's
+  releases (below). A goal that may still go on — the fold reads `paused`, or `active` while the
+  pause's own update trails — has its session started again first if its provider died meanwhile
+  (as a `/goal` command ensures it), then the same conditional resume as the handover's. A resume
+  that does not happen says so, since the hold's row promised it: a failure, an expiry or a
+  session that cannot be started again appends `The goal could not be resumed after the update.
+  Send /goal resume to continue it.`, and a refusal in the provider's own words (no goal left, a
+  goal at its budget) appends those words, the better advice there. The marks are cleared anyway,
+  and the goal stays paused for the user to resume.
+- **The user wins.** While a lease runs, any user action on a thread's goal — held at the time or
+  not — releases that thread and resumes nothing: a host `/goal` command (which then runs as
+  usual — `/goal resume` sets the goal going again, and the drain waits for it as it did before
+  this amendment), a Stop, a session stop, deleting the thread. The marks are cleared, and
+  renewals do not hold that thread again until the lease has run out: a hold queued behind the
+  action was decided on a fold that has not heard of it yet (a pause's own update trails its
+  reply), and must not undo it.
+- **Scope.** Only `continuesAcrossTurns` adapters (Codex) hold. A Claude or Grok goal runs inside
+  one turn, which the drain already waits for.
+- **As built** (amended 2026-09-24; `holdContinuingGoals`, `goalHeld`, `releaseGoalHoldForUser`
+  in `orchestration/orchestrator.ts`; the daemon's `requestGoalHold` in
+  `apps/daemon/src/agent-chat/supervisor.ts`):
+  - `/goal status` does not release a hold: it changes nothing, and releasing on a read would
+    silently cancel the resume the row promises. Every other host `/goal` command does.
+  - A held goal reads as continuing only while the fold says `paused` or `active`. One achieved,
+    cleared, blocked or limited during its final turn holds nothing up, and its "finished" shows
+    at once, not at the handover.
+  - A pause the provider answers in words ("No goal is set.", a goal at its token budget) paused
+    nothing: the mark is cleared again, no hold, no row, and the next renewal tries again.
+    Holdable also requires the adapter to take goal commands at all.
+  - A pause that runs past its deadline is not a refusal: it may land yet, and a goal it paused
+    with no mark would never be resumed. So its mark is cleared, but one that lands late after all
+    is adopted as a hold — mark, held, row — unless the thread was held again meanwhile, the user
+    acted on its goal, or it is gone.
+  - Every resume of a held goal is CONDITIONAL (`GoalCommandOptions.onlyIfPaused`, amended at
+    the final review): the fold can trail the provider — a set's own update trails its reply
+    (fixtures README observation 20), and a host can stop before it lands — so a fold reading
+    `paused` or `active` hands the question to the provider, and any other status is the answer
+    already. The Codex adapter reads the goal (`thread/goal/get`) and sets it going only when
+    Codex's REPLY says `paused` — not its tracker, which a progress notification queued before the
+    hold's pause can have set back to `active` during that `get` — and otherwise sends nothing and
+    answers `notPaused`, which writes no row: the goal's own updates say what became of it. So a
+    lease that runs out while the pause's update is still on its way resumes the goal, the next
+    host resumes one whose pause never reached the old host's fold, and a goal Codex still runs (a
+    crash between the mark and the pause) is left alone.
+  - Every row the hold writes — the hold's own, the failed resume's, the provider's refusal —
+    carries `payload.heldForUpdate: true` (`GOAL_HELD_FOR_UPDATE_KEY`): none answers a `/goal`
+    the user sent, and the MCP's wait for a `/goal` answer skips them (§8.6).
+  - Setting a held goal going again (a release, the next host) opens the same continuation grace
+    a session start does, so the gap before Codex's next turn does not read "finished". Through
+    that grace the goal reads continuing even while the fold still says `paused` — the provider's
+    own update on its way — on a live session (`goalJustResumed`); the user's own goal action or
+    Stop ends it at once, and a Stop in that moment still pauses the goal (§5.6). The user's own
+    `/goal resume` opens the same moment.
+  - The resume is bounded by `AGENT_HOST_DEADLINES.goalResumeMs` (12 s): right after a session
+    start Codex first waits for its resume snapshot (up to 2 s) inside its own 10 s window. On the
+    next host, a held goal whose session does not come back, or that has no resume cursor, gets
+    the failure row too; a §5.5-only resume (never held) gets none — no row promised it.
+  - The rule is applied on every renewal, not only to new holds. What is in the way is every
+    thread with background work — a hold never ends background work, the goal's own thread's
+    included — and every running turn that is neither held nor holdable. A held goal whose own
+    turn has ended waits behind such work for at most `GOAL_HOLD_IDLE_MS` (3 min,
+    `support/deadline.ts`): short work — a quick question in another tab — causes no pause-resume
+    churn, and long work — a fleet — does not leave the goal idle. Past that, the host releases
+    it as the lease's end does (a host release, not the user's): the goal goes on, and is held
+    again once goals are the last thing in the way.
+  - The daemon awaits the hold inside its serialized transition queue (5 s client timeout), so a
+    restart never overtakes a hold still being applied; it asks whatever the blocker is (only the
+    host can tell which are goals), including from its first check at boot, and remembers a host
+    instance that answered 404.
+  - Known limit: while a goal is held, `/compact` (with its last turn running) and the account
+    switch still advise pausing a goal that is already paused — the refusal text is the host's,
+    mirrored word for word by the GUI; the MCP names the hold in its own account-switch refusal
+    (§8.6).
+- **Compatibility.** `goalHeldForHandover?: true` is one more optional head field (`ThreadHead`,
+  the `meta.json` schema in `packages/config`, the head check in `fold-snapshot.ts`), ignored by an
+  older build — whose host then resumes neither the session nor the goal (a held goal reads
+  `paused` at the `/stop`, so no `resumeGoalAfterRestart` is written for it either): the goal stays
+  paused until the user resumes it. The route is additive; `AGENT_HOST_PROTOCOL_VERSION` is
+  unchanged.
 
 ## 6. Adapters
 
@@ -646,8 +789,9 @@ next session's §6.3.4 comparison).
    (1.5 s deadline, failure logged, never blocking the interrupt) when the tracked goal is
    `active`, then `turn/interrupt`. Every interrupt through the adapter does (amended
    2026-09-24): the user's Stop — whose host-side pause of §5.6 comes earlier still, ahead of
-   the card cancels — and the host watchdog's stall interrupt (§5.2). A session stop (a deploy's
-   drain-restart, §5.5) never pauses: Codex continues the goal on resume.
+   the card cancels — and the host watchdog's stall interrupt (§5.2). A session stop never pauses
+   by itself: a deploy's hold (§5.7) has paused the goal before its drain-restart, and the next
+   host resumes it; a stop without one (§5.5) leaves it active, and Codex continues it on resume.
 5. A `get` result older than a later notification is discarded (#8615's stale re-emit); no goal
    request runs on session start except the carry of 2.
 6. Capability per §4.5.
@@ -751,6 +895,14 @@ block ⇒ absent).
 - tone `info` while active (the label shimmers only while a turn is running), `warn` for
   paused/blocked/limited; `title` = the objective, capped at 200 characters like the spoken label
   (amended 2026-09-24).
+- A goal a deploy HOLDS (§5.7) is not the user's pause (amended 2026-09-24): `isGoalHeldForUpdate`
+  (`lib/agent-chat/goal.logic.ts`) reads it as held when the fold says `paused` and either the
+  summary's verdict is `{status: "paused", continuing: true}` — the summary's own status, since
+  the summary trails the fold by one 1.5 s poll and a user's Pause would otherwise flash as a hold —
+  or, with no verdict, the head carries `goalHeldForHandover`. The chip then reads `paused for
+  update` (`update` below `sm`) in the `info` tone, never live; the aria label and the popover's
+  status say `Paused for an Orquester update — it resumes by itself`. The actions are a paused
+  goal's: the user may still resume or clear it, and the host then releases the hold.
 - Click opens a popover, a `dialog`: the full objective (wrapping, scrolls past ~12 lines), status
   and phase, rounds, last check, tokens (and budget), elapsed (`<1s` under a second, left out at
   zero — amended 2026-09-24), set time — each only when known — and the actions. It takes focus
@@ -789,7 +941,9 @@ block ⇒ absent).
 before the dot (`text-info-300` active, `text-warn-300` otherwise), with `aria-label`/`title`
 `Goal: <objective> (<status>)`, the objective capped at 200 characters (amended 2026-09-24). The
 summary is read field-wise: a goal the client cannot read draws nothing. Every caller that passes
-`backgroundLiveness` passes `goal`.
+`backgroundLiveness` passes `goal`. A summary reading `{status: "paused", continuing: true}` is a
+goal a deploy holds (§5.7): it draws the `info` tone, labelled `Goal: <objective> (paused for an
+Orquester update — it resumes by itself)` (amended 2026-09-24).
 
 ### 8.4 Timeline
 
@@ -832,8 +986,9 @@ sessions the way the GUI does, so goals reach it as the GUI shows them:
   host's answer row instead — a `goal.status`, a visible `goal.updated`, or a `goal.command.failed`;
   ≤ 15 s once the session is up, half a second for a pause of a paused goal or a resume of an active
   one — and returns it as `answer` with `outcome: "goal"`, or `"failed"` for a failed command; a
-  command that changes nothing writes no row and returns without one, with a hint. While the
-  capabilities cannot be read, a `/goal` is refused: which side takes it is theirs to say.
+  command that changes nothing writes no row and returns without one, with a hint. A deploy's own
+  rows on a goal it holds (§5.7, `payload.heldForUpdate`) answer no `/goal` and are skipped. While
+  the capabilities cannot be read, a `/goal` is refused: which side takes it is theirs to say.
 - **Turn waits** never end on a turn that settles while the goal continues: the `goal-continuing`
   rung (§4.7) is not an outcome, so a message steering a continuing goal waits until the goal stops
   or the timeout. `wait_for_session` needs no change: the rung raises no attention.
@@ -842,11 +997,16 @@ sessions the way the GUI does, so goals reach it as the GUI shows them:
 - **Views**: a session carries `chat.goal` — the summary's `{objective, status, continuing}` in a
   list (objective cut to 200), the fold's goal in a detail (a finished one where the provider's last
   update still carries it; `continuing` only beside `active`, the summary trailing the snapshot by a
-  poll) — and an agent its `supports.goals`.
+  poll — or beside a `paused` goal a deploy holds, §5.7, which both views flag `heldForUpdate: true`
+  as the GUI's `isGoalHeldForUpdate` reads it, the chip's "paused for update") — and an agent its
+  `supports.goals`.
 - **`update_session`** refuses an account switch while the goal continues (§5.5) — judged on the
   summary and on the snapshot just read, so a stale "continuing" after a pause does not refuse —
   before writing anything, and advises `interrupt_session` (a pause alone lets the running turn
-  finish); `interrupt_session` and `compact_session` pass the host's goal rules through (§5.6).
+  finish); a goal a deploy holds (§5.7) refuses it the same way, with its own advice — wait for the
+  update, or take the goal back with `/goal pause` — and a mid-turn model or permission change under
+  a held goal gets the plain turn advice, since it starts no next turn. `interrupt_session` and
+  `compact_session` pass the host's goal rules through (§5.6).
 
 ## 9. Compatibility
 

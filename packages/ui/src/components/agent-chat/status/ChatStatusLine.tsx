@@ -47,6 +47,7 @@ export function ChatStatusLine({
   latestCheckpoint,
   modelLabel = null,
   goal = null,
+  goalHeldForUpdate = false,
   goalActions = NO_GOAL_ACTIONS,
   goalActionsNote = null,
   onGoalAction = noGoalAction
@@ -97,12 +98,14 @@ export function ChatStatusLine({
         ) : null}
 
         {/* Goals §8.2: the goal's slot, before the plan chip. The chip renders
-            nothing for a finished goal, so the line never keeps a gap. */}
+            nothing for a finished goal, so the line never keeps a gap. A
+            goal a deploy holds (§5.7) keeps the in-motion tone. */}
         {goal !== null ? (
           <GoalChip
             sessionId={sessionId}
             goal={goal}
             turnRunning={status.ticking}
+            heldForUpdate={goalHeldForUpdate}
             actions={goalActions}
             actionsNote={goalActionsNote}
             onAction={onGoalAction}

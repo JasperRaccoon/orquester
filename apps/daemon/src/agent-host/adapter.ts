@@ -130,6 +130,12 @@ export type HostGoalCommand =
 export interface GoalCommandResult {
   /** Human text for a visible `goal.status` row; "" when the provider's own updates tell the story. */
   summary: string;
+  /**
+   * A `resume` handed {@link GoalCommandOptions.onlyIfPaused} found the goal
+   * not paused, so nothing was sent: it was going already, or it ended,
+   * blocked or hit a limit, or there is none. `summary` is then "".
+   */
+  notPaused?: true;
 }
 
 /** What the host hands a `/goal …` besides the command itself (goals §4.6). */
@@ -144,6 +150,15 @@ export interface GoalCommandOptions {
    * is logged and never fails the command. Absent: nothing changes.
    */
   modelSelection?: ModelSelection;
+  /**
+   * Goals §5.7, `resume` only — the host's own resume of a goal it held for a
+   * deploy: set the goal going again only if the PROVIDER holds it `paused`
+   * as it answers. The host's fold can trail the provider (a set's own
+   * notification trails its reply), so the host cannot decide this itself; a
+   * goal going already, or one that ended, blocked or hit a limit meanwhile,
+   * is left as it is and answered {@link GoalCommandResult.notPaused}.
+   */
+  onlyIfPaused?: true;
 }
 
 // ---------------------------------------------------------------------------

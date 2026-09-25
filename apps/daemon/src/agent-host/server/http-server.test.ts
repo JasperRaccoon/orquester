@@ -16,6 +16,8 @@ import {
   THREAD_SEARCH_MAX_QUERY_CHARS,
   THREAD_SEARCH_MAX_RESULTS,
   type AgentChatStreamFrame,
+  type RuntimeEvent,
+  type ThreadActivityItem,
   type ThreadHistoryPage,
   type ThreadSearchHit,
   type ThreadSearchResponse
@@ -24,10 +26,18 @@ import {
 import {
   AGENT_HOST_PROTOCOL_VERSION,
   agentHostRoutes,
-  type AgentHostHealthResponse
+  type AgentHostHealthResponse,
+  type AgentHostHoldGoalsResponse
 } from "../host-protocol.ts";
 import type { ThreadIndex } from "../index/index.ts";
-import { createTestHost, type TestHost } from "../orchestration/testing/index.ts";
+import { runtimeEventToActivities } from "../ingestion/activities.ts";
+import { GOAL_HELD_FOR_UPDATE_SUMMARY } from "../orchestration/orchestrator.ts";
+import {
+  createScriptedAdapter,
+  createTestHost,
+  type TestHost,
+  type TestHostOptions
+} from "../orchestration/testing/index.ts";
 import { createFakeThreadIndex } from "../orchestration/testing/fake-index.ts";
 import {
   agentHostExtraRoutes,
@@ -59,13 +69,19 @@ interface Harness {
 }
 
 async function harness(
-  options: { openGate?: boolean; index?: ThreadIndex; afterStopResponse?: () => void } = {}
+  options: {
+    openGate?: boolean;
+    index?: ThreadIndex;
+    afterStopResponse?: () => void;
+    adapters?: TestHostOptions["adapters"];
+  } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "agent-host-test-"));
   const socketPath = join(dir, "agent-host.sock");
   const host = createTestHost({
     openGate: options.openGate ?? true,
-    ...(options.index ? { index: options.index } : {})
+    ...(options.index ? { index: options.index } : {}),
+    ...(options.adapters ? { adapters: options.adapters } : {})
   });
   const server = createAgentHostServer({
     orchestrator: host.orchestrator,
@@ -818,5 +834,65 @@ describe("agent host server — indexed history and search (design 2026-09-23, C
       });
       await h.stop();
     }
+  });
+});
+
+describe("agent host server — goals §5.7, the deploy's goal hold", () => {
+  it("POST /goals/hold renews the lease and answers every thread held after it", async () => {
+    const codex = createScriptedAdapter({
+      id: "codex",
+      capabilities: {
+        goals: { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true }
+      },
+      goalCommand: async () => ({ summary: "" })
+    });
+    const h = await harness({ adapters: { codex } });
+
+    const nothing = await h.call("POST", agentHostRoutes.holdGoals);
+    assert.equal(nothing.status, 200);
+    assert.deepEqual(nothing.body, { heldThreadIds: [] } satisfies AgentHostHoldGoalsResponse);
+
+    // A Codex thread whose goal continues, its turn running.
+    const threadId = await h.host.createThread({ refId: "codex" });
+    await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-work", input: "work" });
+    await h.host.settle();
+    const goalEvent = {
+      eventId: "goal-set",
+      threadId,
+      createdAt: "1970-01-01T00:00:00.000Z",
+      type: "thread.goal.updated",
+      payload: { goal: { objective: "ship it", status: "active" }, change: "set" }
+    } as RuntimeEvent;
+    await h.host.orchestrator.ingestionSink(
+      threadId,
+      runtimeEventToActivities(goalEvent).map((activity) => ({
+        eventId: "ingest-goal-set",
+        threadId,
+        type: "thread.activity-appended" as const,
+        payload: { activity },
+        occurredAt: "1970-01-01T00:00:00.000Z",
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }))
+    );
+
+    const held = await h.call("POST", agentHostRoutes.holdGoals);
+    assert.equal(held.status, 200);
+    assert.deepEqual(held.body, { heldThreadIds: [threadId] });
+    assert.equal(h.host.store.heads.get(threadId)?.goalHeldForHandover, true);
+    const rows = (h.host.store.logs.get(threadId) ?? [])
+      .filter((event) => event.type === "thread.activity-appended")
+      .map((event) => (event.payload as { activity: ThreadActivityItem }).activity)
+      .filter((activity) => activity.activityKind === "goal.status");
+    assert.deepEqual(rows.map((row) => row.summary), [GOAL_HELD_FOR_UPDATE_SUMMARY]);
+
+    // A renewal answers the thread already held.
+    assert.deepEqual((await h.call("POST", agentHostRoutes.holdGoals)).body, {
+      heldThreadIds: [threadId]
+    });
+    // Only POST is the route.
+    assert.equal((await h.call("GET", agentHostRoutes.holdGoals)).status, 404);
+    await h.stop();
   });
 });

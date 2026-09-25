@@ -44,6 +44,15 @@ interface Harness {
   hostExitsAfterPolls: number | null;
   /** Whether the service session still existed at the moment it was killed. */
   killedSessionWasAlive: boolean | null;
+  /** Agent goals §5.7: `POST /goals/hold` requests that reached the fake host. */
+  holdRequests: number;
+  /**
+   * What the fake host answers a hold request; absent = holds nothing. May
+   * throw synchronously or reject, as a failed request does.
+   */
+  holdHook?: () => Promise<readonly string[] | null>;
+  /** Every line the supervisor logged. */
+  logs: Array<{ level: "log" | "warn" | "error"; text: string }>;
   cleanup(): Promise<void>;
 }
 
@@ -119,6 +128,8 @@ async function makeHarness(
     providerRevisions: 0,
     hostExitsAfterPolls: null,
     killedSessionWasAlive: null,
+    holdRequests: 0,
+    logs: [],
     advance: (ms) => {
       clock += ms;
     },
@@ -183,6 +194,18 @@ async function makeHarness(
       ...(opts.daemonBackground ? { backgroundWorkThreadIds: opts.daemonBackground } : {}),
       requestStop: async () => {
         harness.stopRequests++;
+      },
+      // Not `async`: a hook that throws synchronously must reach the
+      // supervisor as a synchronous throw.
+      requestHoldGoals: () => {
+        harness.holdRequests++;
+        harness.order.push("hold");
+        return harness.holdHook ? harness.holdHook() : Promise.resolve([]);
+      },
+      logger: {
+        log: (...a) => harness.logs.push({ level: "log", text: a.map(String).join(" ") }),
+        warn: (...a) => harness.logs.push({ level: "warn", text: a.map(String).join(" ") }),
+        error: (...a) => harness.logs.push({ level: "error", text: a.map(String).join(" ") })
       },
       tmux,
       spawnDirect: (_bin, args) => {
@@ -736,6 +759,218 @@ test("a host with only background work gets the same extra patience as a busy on
     await h.supervisor.checkHealth();
   }
   assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
+// Agent goals §5.7: a continuing Codex goal starts its next turn within
+// milliseconds of the last, so a deploy's drain used to wait out the whole
+// goal — possibly hours. While the drain is blocked the supervisor asks the
+// host to hold its continuing goals between two turns, and keeps asking: the
+// hold is a lease the host drops once the asking stops.
+
+/** The supervisor's goal-hold lines at one level. */
+function goalHoldLogs(h: Harness, level: "log" | "warn" = "log"): string[] {
+  return h.logs.filter((line) => line.level === level && /goal/.test(line.text)).map((line) => line.text);
+}
+
+test("agent goals §5.7: every blocked drain evaluation asks the host to hold its continuing goals", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let active: string[] = ["thread-G"];
+  let background: string[] = ["thread-F"];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active, background })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.holdRequests, 1, "boot adoption's own evaluation asks at once");
+  assert.deepEqual(h.order.slice(-2), ["probe", "hold"], "asked only after a FRESH probe found the drain blocked");
+  // A fleet in another tab blocks the drain too; whether goals are all that is
+  // in the way is the host's call, so the daemon asks whatever the blocker.
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 2, "the 15 s health tick renews the lease");
+  background = [];
+  h.supervisor.handleTurnSettled();
+  // Queued behind the settled turn's transition: awaiting it proves both ran.
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 4, "a settled turn, or ended background work, renews it too");
+  assert.equal(h.spawns.length, 0, "nothing was cut while the drain was blocked");
+  // The held goal's running turn settles and no next one starts: drained.
+  active = [];
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1, "the drain went ahead");
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.equal(h.holdRequests, 4, "a drained host is restarted, never asked to hold");
+  await h.cleanup();
+});
+
+test("agent goals §5.7: no hold is asked for without a deploy waiting, or on a drained host", async () => {
+  // Busy, but nothing is waiting on it.
+  const idle = await makeHarness([healthy({ active: ["thread-G"] })], { seedToken: "tok", tmux: true });
+  await idle.supervisor.init();
+  await idle.supervisor.checkHealth();
+  idle.supervisor.handleTurnSettled();
+  await idle.supervisor.checkHealth();
+  assert.equal(idle.holdRequests, 0, "no version restart is pending");
+  await idle.cleanup();
+
+  // A deploy is waiting on a host that is already drained: the restart goes ahead.
+  const drained = await makeHarness([], { seedToken: "tok", tmux: true });
+  drained.probeHook = mismatchUntilReplaced(drained);
+  await drained.supervisor.init();
+  assert.equal(drained.spawns.length, 1);
+  assert.equal(drained.holdRequests, 0);
+  await drained.cleanup();
+});
+
+test("agent goals §5.7: a manual restart never asks for a hold, even with a deploy's restart pending", async () => {
+  // `POST /api/agent-host/stop` restarts at once; the host's `/stop` writes the
+  // §5.5 resume marks that carry a continuing goal across it.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = mismatchUntilReplaced(h, ["thread-G"]);
+  await h.supervisor.init();
+  assert.equal(h.holdRequests, 1, "the blocked boot evaluation asked");
+  await h.supervisor.restartNow();
+  assert.equal(h.stopRequests, 1);
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.holdRequests, 1, "the manual restart itself asked nothing");
+  await h.cleanup();
+});
+
+test("agent goals §5.7: a failing hold request never stops the drain, and is logged once per reason", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let active: string[] = ["thread-G"];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active })
+      : healthy({ instance: "host-2" });
+  let answer: () => Promise<readonly string[] | null> = () =>
+    Promise.reject(new Error("agent host request timed out"));
+  h.holdHook = () => answer();
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "healthy", "a failed hold never fails boot adoption");
+  await h.supervisor.checkHealth();
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 4, "every blocked evaluation still asks");
+  assert.equal(goalHoldLogs(h, "warn").length, 1, "logged once, not on every tick");
+
+  // A new reason is news — a synchronous throw included.
+  const refused = (): never => {
+    throw new Error("agent host answered 503 to the goal hold");
+  };
+  answer = refused;
+  await h.supervisor.checkHealth();
+  await h.supervisor.checkHealth();
+  assert.equal(goalHoldLogs(h, "warn").length, 2);
+  // So is the same reason again after an answer in between.
+  answer = async () => [];
+  await h.supervisor.checkHealth();
+  answer = refused;
+  await h.supervisor.checkHealth();
+  assert.equal(goalHoldLogs(h, "warn").length, 3);
+
+  // The goal's turn settles with the hold still failing: the drain goes ahead.
+  active = [];
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1);
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.deepEqual(
+    h.logs.filter((line) => line.level === "error"),
+    [],
+    "no hold failure ever escaped a transition"
+  );
+  await h.cleanup();
+});
+
+test("agent goals §5.7: a host that predates the route is not asked again, but another instance is", async () => {
+  // The deploy that ships §5.7 finds a host without the route: its route-miss
+  // 404 reads `null`, and that deploy waits as it always did.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let instance = "host-1";
+  h.probeHook = () =>
+    healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-G"], instance });
+  let answer: readonly string[] | null = null;
+  h.holdHook = async () => answer;
+  await h.supervisor.init();
+  await h.supervisor.checkHealth();
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 1, "asked once, then remembered");
+  assert.equal(goalHoldLogs(h).filter((line) => /predates/.test(line)).length, 1, "and said once");
+  // Another instance — adopted in place, still stale, still busy — may know it.
+  instance = "host-1b";
+  answer = ["thread-G"];
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 2);
+  assert.ok(goalHoldLogs(h).includes("agent host holding 1 continuing goal(s) for the restart"));
+  await h.cleanup();
+});
+
+test("agent goals §5.7: the held set is logged when it changes, never per tick", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = () => healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-G"] });
+  let held: readonly string[] = [];
+  h.holdHook = async () => held;
+  await h.supervisor.init();
+  assert.deepEqual(goalHoldLogs(h), [], "nothing held is nothing to say");
+  held = ["thread-G"];
+  await h.supervisor.checkHealth();
+  await h.supervisor.checkHealth();
+  held = ["thread-H", "thread-G"];
+  await h.supervisor.checkHealth();
+  held = ["thread-G", "thread-H", "thread-G"]; // the same set, another spelling
+  await h.supervisor.checkHealth();
+  // The user took both back (`/goal …`, a Stop): the host holds nothing now.
+  held = [];
+  await h.supervisor.checkHealth();
+  await h.supervisor.checkHealth();
+  assert.deepEqual(goalHoldLogs(h), [
+    "agent host holding 1 continuing goal(s) for the restart",
+    "agent host holding 2 continuing goal(s) for the restart",
+    "agent host no longer holding goals for the restart"
+  ]);
+  await h.cleanup();
+});
+
+test("agent goals §5.7: a hold in flight is never overtaken by the restart", async () => {
+  // The hold is awaited inside the transition queue, so a turn settling while
+  // the host is still pausing goals re-evaluates only once it has answered: a
+  // `/stop` never races a hold the host is applying.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let active: string[] = ["thread-G"];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active })
+      : healthy({ instance: "host-2" });
+  let asked!: () => void;
+  const inFlight = new Promise<void>((resolve) => {
+    asked = resolve;
+  });
+  let answer!: (held: readonly string[]) => void;
+  h.holdHook = () => {
+    asked();
+    return new Promise((resolve) => {
+      answer = resolve;
+    });
+  };
+  const booted = h.supervisor.init();
+  await inFlight;
+  active = [];
+  h.supervisor.handleTurnSettled();
+  // One event-loop turn: the fake probe and stop are pure microtasks, so a
+  // restart that overtook the hold would already have asked for the stop.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.stopRequests, 0, "the settled turn waits for the hold's answer");
+  answer(["thread-G"]);
+  await booted;
+  // Queued behind the settled turn's transition: awaiting it proves that ran.
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1, "then the drained host is restarted");
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.holdRequests, 1, "and the drained evaluation asked nothing more");
   await h.cleanup();
 });
 

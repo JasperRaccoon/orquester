@@ -295,7 +295,7 @@ Tools that return a session return one of these two shapes.
            latestTurn: { turnId, state, startedAt, completedAt } | null,
            pending: { approvals: boolean, questions: boolean },
            planReady: boolean, backgroundLiveness: "working" | "monitoring" | null,
-           goal: { objective /* ≤ 200 characters */, status, continuing: boolean } | null },
+           goal: { objective /* ≤ 200 characters */, status, continuing: boolean, heldForUpdate?: true } | null },
   terminal?: { status: "running" | "exited", exitCode?, legacyAgent? }
 }
 ```
@@ -310,8 +310,14 @@ marker show (`null` once it is achieved, fails or is cleared). `status` is `"act
 limited goal reads like any settled session — `reason: "completed"`, or `"error"` when a failed
 turn is what blocked it — and `goal.status` tells them apart. `continuing: true` means the agent
 starts the goal's turns by itself (Codex): the tab reads `working`, `reason: "goal-continuing"`,
-even between two of its turns. `status`, `reason` and `continuing` come from the daemon's poll of
-the agent host, so they can trail a command by up to 1.5 s.
+even between two of its turns. `heldForUpdate: true` — beside `status: "paused"` and
+`continuing: true` — means an Orquester update paused the goal between two of its turns so the
+agent host could restart, and the host sets it going again by itself once it has: there is nothing
+to resume, and the tab keeps reading `working`. Any `/goal` but `/goal status`, `interrupt_session`
+or `stop_session` takes the goal back from the update — nothing resumes it by itself then — and the
+command does what it says: `/goal pause` keeps it paused, `/goal resume` sets it going again (and
+the update waits for it). `status`, `reason`, `continuing` and `heldForUpdate` come from the
+daemon's poll of the agent host, so they can trail a command by up to 1.5 s.
 
 `SessionDetail` — `get_session`, and every tool that changes a session — is the `SessionView`
 plus:
@@ -326,7 +332,8 @@ chat: { …SessionView.chat,
                 updatedAt } | null,      // the thread's goal as the GUI's chip reads it — an unfinished one, and a
                                          // finished one the agent still reports (Codex and Grok report a met goal as
                                          // "complete"); null once cleared, or when the agent reports the end as no goal
-                                         // (a Claude goal met or failed). continuing is never true beside another status.
+                                         // (a Claude goal met or failed). continuing is true beside no other status
+                                         // but a paused goal an Orquester update holds (heldForUpdate: true).
                                          // Each fact only when reported.
         supports: { planMode, rollback, compaction, backgroundTasks,
                     goals: { command: "provider" | "host", actions: ("continue" | "pause" | "resume" | "clear")[],
@@ -359,7 +366,9 @@ SubagentView        = { id, kind, agentKind: "agent" | "background", title /* �
 commentary (its running "I'll do X next" narration, which the GUI shows as narration, not as the
 answer) left out — unless the turn has no other message at all (interrupted, ended on a tool, a
 Codex goal turn ended by Stop): then it is the turn's last commentary, which is where the GUI's
-turn ends too.
+turn ends too. On a Claude thread, the copy of a turn's opening paragraph that older hosts wrote
+again at the turn's end, which an old log still holds, is left out as the GUI leaves it out (the
+opening itself stays).
 `contextWindow.percentUsed` stops at 100, like the GUI's ring; `usedTokens` stays as reported.
 `plan.actionable` is judged on the thread itself — the latest plan, until a message implements it —
 so it is right at once, while `chat.planReady` and `reason: "plan-ready"`, the tab strip's values,
@@ -505,7 +514,11 @@ and its default model (the flagged one, else the first) are never shed.
   written, with `SESSION_BUSY` `Pause the goal before switching accounts: interrupt_session pauses
   it and stops the running turn (or send_message "/goal pause", then let the turn finish).` — a
   pause alone stops only the NEXT goal turn, never the one running. A mid-turn model or permission
-  change under a continuing goal gets the same advice. If a write fails after others landed, the
+  change under a continuing goal gets the same advice. A goal an Orquester update holds
+  (`chat.goal.heldForUpdate`) refuses the switch too, with `The goal is held for an Orquester update
+  and resumes by itself once the agent host has restarted. Switch accounts after that, or take the
+  goal back first: send_message "/goal pause" keeps it paused.`; it starts no next turn, so a
+  mid-turn model or permission change under it gets the plain turn advice. If a write fails after others landed, the
   error's `detail` carries `applied`.
 - **`interrupt_session`** — interrupts the running turn (its pending requests are cancelled); with
   no turn running, stops every live subagent, background shell and watch loop. On an agent that
@@ -650,6 +663,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   nothing writes no row: a pause of a paused goal or a resume of an active one — which the call
   sees coming, and waits only half a second for — or an edit to the same objective. Then it comes
   back without `answer` and with a `hint`; `session.chat.goal` always shows the goal as it stands.
+  A row an Orquester update writes on a goal it holds (`Goal paused for an Orquester update. …`, or
+  that the goal could not be resumed after it) answers no `/goal`, and is never taken for one.
   A set goal then runs turns by itself — `wait_for_session` reports it once it stops. A `/goal`
   with attachments is refused (`INVALID_ARGUMENT`, before anything is uploaded), and one the host
   cannot parse — an objective over 4 000 characters, a bare `/goal edit` — with `INVALID_COMMAND`,
@@ -808,6 +823,9 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     commentary), not the turn's answer while the turn has one: `lastReply` and `send_message`'s
     `reply` leave it out, and it is not the "final reply" a shed always keeps. A turn with no other
     message ends on its last commentary, as in the GUI: that is its answer and the row a shed keeps.
+  - On a Claude thread, the copy of a turn's opening paragraph that older hosts wrote again at the
+    turn's end, which an old log still holds, is no row of the parent view, as the GUI leaves it
+    out; the opening itself stays, and a drill-in shows its subagent's messages as they are.
   - A `compaction` row's `state` is `compacting` (still running), `compacted` or
     `compaction-failed`. An old log's marker — one with no state, or the older
     `thread.state.changed` spelling — reads `compacted`, as the GUI shows it. A subagent compacting
@@ -833,7 +851,8 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
                                                   (include "activity"; never a subagent's own in the parent view)
   "error" | "warning" | "info"   text             (include "activity"; a failed hook is an error, a cancelled one a warning;
                                                    a goal's rows as the GUI shows them — set, checked, paused, resumed,
-                                                   blocked, limited, achieved, cleared, and a Codex /goal's answer — are
+                                                   blocked, limited, achieved, cleared, a Codex /goal's answer, and an
+                                                   Orquester update's notes on a goal it held — are
                                                    info, a goal that can't be met and a failed /goal errors; a goal's
                                                    progress ticks never show) }
 ```

@@ -408,11 +408,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
     can open one during `sendTurn`'s own awaits.
   - `events.ndjson` keeps the old copies, so for Claude threads only, the client's
     `splitThreadItems` drops a turn's LAST assistant message when it is finished and repeats the
-    turn's FIRST finished one, same author, word for word (`reEmittedAssistantCopies`) — exactly
-    where the copy sits and what it copies. It is opted in from the thread head's adapter in
-    `store.ts`; Codex narration may legitimately repeat itself, and so may a long Claude turn — a
-    goal run is one turn of many rounds, which can end two rounds on the same words — so no other
-    repeat is dropped.
+    turn's FIRST finished one, same author, word for word — exactly where the copy sits and what
+    it copies. The rule is `reEmittedAssistantCopies` in `@orquester/api` (`re-emitted.ts`), and
+    `repairsReEmittedAssistantCopies(adapter)` says where it applies — Claude threads only, the
+    parent view only — for the GUI (`store.ts`) and the MCP (`lastReply`/`reply`,
+    `read_transcript`) alike. Codex narration may legitimately repeat itself, and so may a long
+    Claude turn — a goal run is one turn of many rounds, which can end two rounds on the same
+    words — so no other repeat is dropped.
 - **A completion's `detail` stands in only for a message that delivered no text this turn.**
   Ingestion keeps `turnDeliveredMessageIds` past `finalizeMessage` because a prompt
   (`request.opened`, `user-input.requested`) closes an open message before its provider
@@ -481,9 +483,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   its readiness deadline latches `error`, but the health probe keeps running there and adopts it
   the moment it answers healthy (the respawn cap still holds) — `error` used to be terminal until
   the daemon restarted. A manual `POST /api/agent-host/stop` still restarts at once, by design.
-  A continuing Codex goal holds the drain like any running work — its turns follow each other
-  within milliseconds, though the goal never feeds `backgroundWorkThreadIds` (the Codex goal
-  gotcha below).
+  A continuing Codex goal would hold the drain for as long as it runs — its turns follow each
+  other within milliseconds, though it never feeds `backgroundWorkThreadIds` — so once goals are
+  all that blocks it, every drain re-evaluation asks the host to HOLD them between their turns
+  (`POST /goals/hold`, the Codex goal gotcha below).
 - **Boot folds only orphaned threads.** The §3.3 reconcile decides "orphaned" from `meta.json`
   alone (`isOrphanedHead`: `starting`/`running`, an `activeTurnId`, or `ready` with a prepared
   `continueAfterRestart`; `commit` rewrites the head on every session transition for exactly this
@@ -508,8 +511,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `foldForward`), and decoding a log yields every 8 ms (`DECODE_SLICE_MS`: `readLog`,
   `decodeWindow`): a multi-second fold or parse starved the 15 s health probe (5 s timeout), and
   two consecutive misses restart a healthy host.
-  The same `meta.json` read finds a handover's goal resume mark (`resumeGoalAfterRestart` →
-  `goalResumePending`), acted on only after the gate (the Codex goal gotcha below).
+  The same `meta.json` read finds a handover's goal resume marks (`resumeGoalAfterRestart`, and a
+  held goal's `goalHeldForHandover` → `goalResumePending`), acted on only after the gate (the Codex
+  goal gotcha below).
 - **The fold snapshot and the thread index are caches, never authorities.** `events.ndjson` stays
   the record; any doubt — another version, a seq or byte offset that does not line up, a file that
   does not parse — is resolved by discarding the cache and re-deriving from the log, never the
@@ -956,11 +960,37 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   grace keeps a continuation that never starts from reading "working" forever. While it is, a
   settled turn is not "finished": the ladder's `goal-continuing` rung (below approval, question,
   `starting` and a running turn) raises no finished stamp and no push, and the `error` rung yields
-  to it — Codex blocks the goal on a turn error, and that update ends `continuing`. **Deploys.** It
-  never feeds `backgroundWorkThreadIds`, but its turns follow each other within milliseconds, so
-  `activeTurnThreadIds` is almost never empty and a code-only deploy's drain waits for the goal to
-  pause, block or end, like any running work; a goal-aware drain is an open follow-up. A stop that
-  comes anyway (a manual `POST /api/agent-host/stop`) marks every goal that continues on a live
+  to it — Codex blocks the goal on a turn error, and that update ends `continuing`. **Deploys**
+  (goals §5.7). It never feeds `backgroundWorkThreadIds`, but its turns follow each other within
+  milliseconds, so `activeTurnThreadIds` is almost never empty and a code-only deploy's drain would
+  wait for the whole goal. So while a version restart is pending and the drain is blocked, the
+  supervisor's every re-evaluation (a settled turn, background work ending, the 15 s health tick)
+  sends `POST /goals/hold` (`requestHoldGoals` → `holdContinuingGoals`), a lease the host keeps for
+  `GOAL_HOLD_LEASE_MS` (120 s) past the last request. Once the host's own blockers are ALL goals it
+  can hold, it holds every continuing goal on a live session: the head field `goalHeldForHandover`
+  FIRST (written before the pause, cleared again if the pause does not land — a crash in between
+  must leave a mark, never a paused goal nobody resumes; a pause its own stop cuts short keeps the
+  mark, since the request may have landed), then `goalCommand {kind:"pause"}` (which
+  stops only the NEXT continuation — the running turn finishes), then one `goal.status` row with
+  `payload.heldForUpdate` (the MCP's `/goal` answer wait skips such rows); and it keeps reading the
+  goal as continuing (no "finished", no push). Nothing new is held while other work blocks the
+  drain (background work anywhere, a held goal's own thread's included, or a running turn on a
+  thread whose goal is neither held nor holdable), and a held goal idle behind such work for
+  `GOAL_HOLD_IDLE_MS` (3 min) is released until goals are the last thing in the way again. The turn
+  settles, the drain goes ahead, and the next host's reconcile takes the field as a resume mark:
+  it resumes the session and then the goal. Every resume of a held goal is CONDITIONAL
+  (`goalCommand {kind:"resume"}, {onlyIfPaused: true}`): the fold trails Codex — a set's own update
+  trails its reply, and a host can stop before it lands — so Codex's REPLY to a `thread/goal/get`
+  decides (not even the adapter's tracker, which a stale progress notification can have set back
+  to `active` meanwhile); a goal Codex does not hold paused is left alone (`notPaused`, no row). An
+  expired lease (the deploy withdrawn) resumes what the host held, starting a session whose
+  provider died first; a resume that does not happen says so in a row (`… Send /goal resume to
+  continue it.`). The user's
+  own `/goal` (but `status`), Stop or session stop releases the thread for the rest of the lease
+  and resumes nothing. The GUI names a held goal (`isGoalHeldForUpdate`: `Goal · paused for
+  update`, info tone) rather than showing it as the user's own pause, and the MCP flags it
+  `heldForUpdate`. An older host answers the route with a 404, and that deploy waits as before. A stop that comes anyway (a manual `POST /api/agent-host/stop`)
+  marks every goal that continues on a live
   session with a resume cursor — no project opt-in, the goal is the opt-in — as the head field
   `resumeGoalAfterRestart`, and the next host resumes that session after the gate WITHOUT sending a
   turn: Codex continues by itself. The mark is cleared on success, on failure, by the user's own
@@ -971,7 +1001,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `AGENT_HOST_DEADLINES.goalPauseMs`) runs before any card is cancelled — a Codex card `cancel` ends
   the turn by itself, and an active goal starts the next one at once — then the host re-reads the
   active turn and interrupts it; a stale Stop still pauses, and interrupts the running turn only
-  when the provider started it. An interrupt alone leaves the goal active and the next continuation
+  when the provider started it. A goal set going a moment ago — a host resume, the user's own
+  `/goal resume` — still reads `paused` until Codex's update lands, and reads continuing meanwhile
+  (`goalResumedAt`, `goalJustResumed`); a Stop in that moment pauses it too (`resumeInFlight`). An interrupt alone leaves the goal active and the next continuation
   starts at once (openai/codex #28104), which is also why the adapter's own `interruptTurn` pauses
   an `active` goal before `turn/interrupt` — the host watchdog's stall interrupt included. On Codex
   that watchdog owns a goal's turns: the adapter's own idle watchdog stands down while the goal is
@@ -1038,8 +1070,9 @@ a pause of a paused goal or a resume of an active one) and returns it as `answer
 an open request as the composer does; with the capabilities unread, a `/goal` is refused rather
 than guessed at. A turn wait never ends on a turn that settles
 while the goal continues (the `goal-continuing` rung). `read_transcript` shows the timeline's goal
-rows (a `progress` tick never), views carry `chat.goal` and `supports.goals`, and `update_session`
-refuses an account switch while the goal continues before writing anything.
+rows (a `progress` tick never), views carry `chat.goal` (with `heldForUpdate` while a deploy holds
+the goal) and `supports.goals`, and `update_session` refuses an account switch while the goal
+continues — or a deploy holds it — before writing anything.
 
 Addressing: sessions only by `sessionId` (titles are not unique, so there is no title matching);
 `project` as the absolute path or `"<workspace>/<project>"`, resolved by `resolveProject()`
@@ -1624,7 +1657,7 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Agent chat: client state, transport, timeline, composer, roster | `packages/ui/src/lib/agent-chat/`, `packages/ui/src/components/agent-chat/` |
 | Agent chat: fold performance (batch retention, fold caches, the per-task roster, the history bridge) | `docs/superpowers/specs/2026-09-23-fold-performance-design.md`, `packages/api/src/agent-chat/{fold.ts,roster.ts}`, `packages/ui/src/lib/agent-chat/history.logic.ts` |
 | Agent chat: lazy boot, fold snapshot, thread index, history pages, search | `docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, `apps/daemon/src/agent-host/index/`, `reconcileThread`/`foldFromDisk`/`readHistory`/`windowBoundary` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, `packages/api/src/agent-chat/{fold-snapshot.ts,history-cursor.ts}`, `packages/ui/src/lib/agent-chat/history.logic.ts`, `packages/ui/src/components/command-palette/conversation-search.ts` |
-| Agent chat: goals (the provider-owned goal mirror, per-provider goal handling, Codex's host `/goal`, the goal watchdog window, the goal chip) | `docs/superpowers/specs/2026-09-24-agent-goals-design.md`, `packages/api/src/agent-chat/goal.ts`, `apps/daemon/src/agent-host/adapters/{claude,codex,grok}/`, `parseHostGoalCommand` in `apps/daemon/src/agent-host/orchestration/slash.ts`, `decideGoalCommand`/`goalContinuingNow`/`stopContinuingGoal` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, the goal window in `apps/daemon/src/agent-host/{support/deadline.ts,orchestration/turn-watchdog.ts}`, the `goal-continuing` rung in `apps/daemon/src/agent-chat/activity-ladder.ts`, `packages/ui/src/components/agent-chat/status/` (the goal chip) |
+| Agent chat: goals (the provider-owned goal mirror, per-provider goal handling, Codex's host `/goal`, the goal watchdog window, the goal chip) | `docs/superpowers/specs/2026-09-24-agent-goals-design.md`, `packages/api/src/agent-chat/goal.ts`, `apps/daemon/src/agent-host/adapters/{claude,codex,grok}/`, `parseHostGoalCommand` in `apps/daemon/src/agent-host/orchestration/slash.ts`, `decideGoalCommand`/`goalContinuingNow`/`stopContinuingGoal`/`holdContinuingGoals` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, the deploy hold's daemon half in `apps/daemon/src/agent-chat/supervisor.ts` (`requestHoldGoals`), the goal window in `apps/daemon/src/agent-host/{support/deadline.ts,orchestration/turn-watchdog.ts}`, the `goal-continuing` rung in `apps/daemon/src/agent-chat/activity-ladder.ts`, `packages/ui/src/components/agent-chat/status/` (the goal chip) |
 | Agent chat: protocol fixtures (read the per-provider `README.md`) | `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/` |
 | Orquester MCP (tools, in-process client, waits) | `apps/daemon/src/mcp/server.ts`, `…/daemon-api.ts`, `…/wait.ts`, `…/tools/` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |

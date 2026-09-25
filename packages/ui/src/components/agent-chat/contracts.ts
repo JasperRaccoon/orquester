@@ -424,6 +424,16 @@ export interface ChatStatusLineProps {
    * *Added with agent goals; additive to the contract.*
    */
   goal?: AgentGoal | null;
+  /**
+   * The paused goal is HELD for an Orquester update (goals §5.7) —
+   * `isGoalHeldForUpdate` over the fold's goal, the tab summary and the
+   * head. The chip then reads `paused for update` in the in-motion tone, not
+   * a user's pause in the warn tone, and its popover says it resumes by
+   * itself. Absent reads as no.
+   *
+   * *Added with the deploy hold; additive to the contract.*
+   */
+  goalHeldForUpdate?: boolean;
   /** The chip's actions, already gated by the §8.2 matrix (`goalActions`). */
   goalActions?: readonly GoalActionModel[];
   /** Why the popover offers no action right now, when that needs saying. */

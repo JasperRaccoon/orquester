@@ -426,9 +426,10 @@ const isThreadHead = shaped<ThreadHead>({
   turnCount: isNumber,
   seq: isSequence,
   continueAfterRestart: optional(isContinueAfterRestart),
-  // Goals §5.5. Head-only state, so a fold's own head never holds it; only
-  // the shape is checked, as for the other marker.
+  // Goals §5.5 and §5.7. Head-only state, so a fold's own head never holds
+  // either; only the shape is checked, as for the other marker.
   resumeGoalAfterRestart: optional(isTrue),
+  goalHeldForHandover: optional(isTrue),
   createdAt: isString,
   updatedAt: isString
 });

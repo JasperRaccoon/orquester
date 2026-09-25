@@ -43,6 +43,7 @@ import {
   AGENT_HOST_PROTOCOL_VERSION,
   agentHostRoutes,
   type AgentHostHealthResponse,
+  type AgentHostHoldGoalsResponse,
   type CreateHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../host-protocol.ts";
@@ -426,6 +427,17 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     if (path === agentHostRoutes.stop && method === "POST") {
       const body = await options.onStop();
       response.once("finish", () => options.afterStopResponse?.());
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // Agent goals §5.7: a deploy's drain is waiting. Renews the hold lease and,
+    // once continuing goals are all that is left in the way, holds every one
+    // between its turns. No body is read: the request IS the renewal.
+    if (path === agentHostRoutes.holdGoals && method === "POST") {
+      const body: AgentHostHoldGoalsResponse = {
+        heldThreadIds: await orchestrator.holdContinuingGoals()
+      };
       sendJson(response, 200, body);
       return;
     }

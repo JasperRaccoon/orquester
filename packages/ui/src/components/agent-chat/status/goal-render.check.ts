@@ -1,12 +1,13 @@
 /**
- * Render smoke checks for the goal surfaces (goals §8.2–§8.5).
+ * Render smoke checks for the goal surfaces (goals §8.2–§8.5, and §5.7's goal
+ * held for an Orquester update).
  *
  * `goal-chip.test.ts`, `goal.logic.test.ts` and the row/menu tests own the
  * rules; this exists because "the chip sits before the plan chip", "it is a
  * click popover, not a hover readout", "the tab marker is a 9px target before
- * the dot" and "a goal that can't be met reads in the danger tone" are claims
- * about *markup* — and a React prop mistake typechecks perfectly while
- * rendering nothing.
+ * the dot", "a goal that can't be met reads in the danger tone" and "a held
+ * goal reaches the chip through the status line" are claims about *markup* —
+ * and a React prop mistake typechecks perfectly while rendering nothing.
  *
  * Static markup only — no DOM, no effects — like every other `*.check.ts`.
  */
@@ -409,6 +410,89 @@ assert.ok(
   checkpointClasses.includes("hidden") && checkpointClasses.includes("sm:flex"),
   "the checkpoint readout gives its width back below `sm`"
 );
+
+// ---------------------------------------------------------------------------
+// Goals §5.7: a goal a deploy HELD between two of its turns
+// ---------------------------------------------------------------------------
+
+const heldChip = render(
+  createElement(GoalChip, { goal: paused, turnRunning: true, heldForUpdate: true, actions: [], onAction: noop })
+);
+assert.ok(
+  /<span class="[^"]*\bhidden\b[^"]*\bsm:inline\b[^"]*">paused for update<\/span>/.test(heldChip),
+  "a held goal says it is paused for an update, not that the user paused it"
+);
+assert.ok(
+  /<span class="[^"]*\bmax-w-\[4\.5rem\][^"]*\bsm:hidden\b[^"]*">update<\/span>/.test(heldChip),
+  "below `sm`, `update`"
+);
+assert.ok(heldChip.includes("text-info-300"), "in the in-motion tone: nothing went wrong");
+assert.ok(!heldChip.includes("text-warn-300"), "never the warn tone of a pause the user made");
+assert.ok(
+  heldChip.includes('<span class="ac-shimmer-settled text-info-300">Goal</span>'),
+  "and never live, even while the turn the hold lets finish is running"
+);
+assert.ok(
+  heldChip.includes(
+    '<span class="sr-only">Goal: Make CI green (paused for an Orquester update — it resumes by itself), 12k/50k tok</span>'
+  ),
+  "a screen reader hears whose pause it is, and that it ends by itself"
+);
+
+const heldPanel = render(
+  createElement(GoalPanel, {
+    goal: paused,
+    heldForUpdate: true,
+    actions: goalActions({
+      goal: paused,
+      support: { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true },
+      turnRunning: true,
+      backgroundLive: false
+    }),
+    onAction: noop
+  })
+);
+assert.ok(
+  heldPanel.includes("Paused for an Orquester update — it resumes by itself"),
+  "the popover's status says the pause is Orquester's"
+);
+assert.ok(!heldPanel.includes(">Paused<"), "not the bare status of a user's pause");
+assert.ok(
+  heldPanel.includes(">Resume</button>") && heldPanel.includes(">Clear goal</button>"),
+  "the user wins: Resume and Clear, as for any paused goal"
+);
+
+const heldLine = render(
+  createElement(ChatStatusLine, { ...lineProps, goal: paused, goalHeldForUpdate: true })
+);
+assert.ok(heldLine.includes(">paused for update<"), "the status line hands the hold to its chip");
+const pausedLine = render(createElement(ChatStatusLine, { ...lineProps, goal: paused }));
+assert.ok(
+  pausedLine.includes(">paused<") && pausedLine.includes("text-warn-300"),
+  "an ordinary pause is unchanged"
+);
+
+const heldDot = render(
+  createElement(SessionStatusDot, {
+    sessionId: "s1",
+    status: "running",
+    goal: { ...summary, status: "paused", continuing: true }
+  })
+);
+assert.ok(heldDot.includes("text-info-300"), "the tab's target keeps the in-motion tone beside its working dot");
+assert.ok(
+  heldDot.includes('aria-label="Goal: Make CI green (paused for an Orquester update — it resumes by itself)"'),
+  "and says why the goal is paused"
+);
+const pausedDot = render(
+  createElement(SessionStatusDot, {
+    sessionId: "s1",
+    status: "running",
+    goal: { ...summary, status: "paused", continuing: false }
+  })
+);
+assert.ok(pausedDot.includes("text-warn-300"), "a pause the user made is still the warn tone");
+assert.ok(pausedDot.includes('aria-label="Goal: Make CI green (paused)"'));
 
 console.error = consoleError;
 console.log("goal render checks passed");
