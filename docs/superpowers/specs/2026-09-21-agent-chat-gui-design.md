@@ -1525,6 +1525,28 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   its own work with `agentId` — §7.6's roster shows what the provider actually reports while
   §7.2's re-homing keeps it out of the parent timeline. The ancestry-resolution retry loop above is
   kept (`apps/daemon/src/agent-host/adapters/opencode/normalize.ts`).*
+  *Built (2026-09-24): the child's own `session.idle` ends its run just BEFORE the parent's `task`
+  part completes with the answer, so the part gives that run's end its result — one more
+  `task.completed` of the same run, `completed`, carrying the text inside the tool's
+  `<task_result>` envelope — once per run, never for a stale part of an earlier call; §7.6's fold
+  takes a settled row's result from a later completion and reopens nothing. Before it, every
+  OpenCode roster row read `result: null`. A run in the background answers "still working" at
+  once, and its answer comes as a `synthetic` prompt to the calling session wrapping the same
+  envelope, which gives the run its result the same way — only a run launched in the background
+  takes one, so a late answer never lands on a relaunched run (the prompt is no row, live or
+  replayed). And a running command's output, which each `running` frame restates whole in
+  `state.metadata.output` and which reached nobody (it rode the item row's `data.state`, slimmed
+  off the wire), streams as §5.6's `command_output` chunks of what each frame adds, cut against a
+  per-part high-water mark and owned like the call's rows. Past the tool's 30 000 characters the
+  value is `"...\n\n"` and a sliding tail window; what follows the window's longest overlap with
+  the last value is new, and a value without that head that does not extend the last adds nothing
+  — never text already shown. The joined chunks are the settled row's output too, so the
+  completion first appends what its final `output` holds past them — a timeout's or an abort's
+  note, what a missed frame carried — from where it extends the stream or, when the final output
+  was cut, after the last place it holds the stream's last 512 characters, closing with the cut
+  note's `Full output saved to: <file>` pointer, which the full-output viewer's join would
+  otherwise never hold (`adapters/opencode/normalize.ts`, `state.ts`; fixtures README
+  observations 27-28).*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

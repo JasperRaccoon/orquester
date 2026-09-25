@@ -20,11 +20,27 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import {
+  applyDomainEvent,
+  createEmptyThreadState,
+  type DomainEvent,
+  type RuntimeEvent,
+  type RuntimeSubagent
+} from "@orquester/api/agent-chat";
 
+import { createIngestion } from "../../ingestion/index.ts";
+import {
+  FakeClock,
+  FakeTimers,
+  RecordingLiveness,
+  RecordingSink,
+  counterIdGen
+} from "../../ingestion/test-harness.ts";
+import { joinToolOutput } from "../../store/tool-output.ts";
 import {
   closeLiveChildAgents,
   normalizeOpenCodeEvent,
+  taskResultText,
   type NormalizeContext,
   type NormalizerSignal
 } from "./normalize.ts";
@@ -37,8 +53,11 @@ import {
 import type { ProviderListResponse } from "./routes.ts";
 import { modelContextLimits } from "./snapshot.ts";
 import {
+  advanceOutputMark,
+  borderOverlap,
   createSessionState,
   makeTurnTokenUsageAccumulator,
+  suffixPrefixOverlap,
   type OpenCodeSessionState
 } from "./state.ts";
 
@@ -183,8 +202,27 @@ function replay(
  * Feed frames on after a replay, on its state and its id counter. One list per
  * frame, so a test can say WHICH frame emitted an event.
  */
-function feed(replayed: Replay, frames: readonly OpenCodeRawEvent[]): RuntimeEvent[][] {
+function feed(
+  replayed: Pick<Replay, "state" | "ctx">,
+  frames: readonly OpenCodeRawEvent[]
+): RuntimeEvent[][] {
   return frames.map((frame) => normalizeOpenCodeEvent(replayed.state, frame, replayed.ctx).events);
+}
+
+/** A fresh thread on the upstream session `sessionId`, with a turn running. */
+function liveSession(sessionId: string): Pick<Replay, "state" | "ctx"> {
+  const state = createSessionState({
+    threadId: "thread-1",
+    openCodeSessionId: sessionId,
+    directory: "/repo",
+    runtimeMode: "approval-required"
+  });
+  state.activeTurnId = "turn-1";
+  let counter = 0;
+  return {
+    state,
+    ctx: { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "2026-09-21T00:00:00.000Z" }
+  };
 }
 
 /** Narrow a fold's output to one arm of the union, so payloads typecheck. */
@@ -202,6 +240,59 @@ function firstOfType<T extends RuntimeEvent["type"]>(
   type: T
 ): Extract<RuntimeEvent, { type: T }> | undefined {
   return eventsOfType(events, type)[0];
+}
+
+/**
+ * Run runtime events through the host's REAL ingestion and fold what it writes
+ * with the real thread fold: the log's events, and the roster the user reads.
+ */
+async function throughHost(
+  events: readonly RuntimeEvent[]
+): Promise<{ log: DomainEvent[]; roster: RuntimeSubagent[] }> {
+  const clock = new FakeClock();
+  const timers = new FakeTimers(clock);
+  const sink = new RecordingSink();
+  const ingestion = createIngestion({
+    sink: sink.sink,
+    liveness: new RecordingLiveness(),
+    clock,
+    idGen: counterIdGen(),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer
+  });
+  for (const event of events) {
+    await ingestion.ingest(event);
+  }
+  await ingestion.drain();
+  // `thread.created` is the host's, not ingestion's.
+  let state = applyDomainEvent(createEmptyThreadState(), {
+    seq: 1,
+    eventId: "created",
+    threadId: "thread-1",
+    occurredAt: "2026-09-21T00:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    metadata: {},
+    type: "thread.created",
+    payload: {
+      projectPath: "/repo",
+      cwd: "/repo",
+      title: "New thread",
+      adapter: "opencode",
+      refId: "opencode",
+      accountId: "",
+      home: "system",
+      modelSelection: { model: "openrouter/google/gemini-3.1-flash-lite" },
+      runtimeMode: "approval-required"
+    }
+  });
+  const log: DomainEvent[] = [];
+  for (const event of sink.events()) {
+    const stamped = { ...event, seq: log.length + 2 } as DomainEvent;
+    log.push(stamped);
+    state = applyDomainEvent(state, stamped);
+  }
+  return { log, roster: state.roster };
 }
 
 function sseTypes(name: string): Set<string> {
@@ -586,6 +677,12 @@ test("12: a co-tenant session's frames are dropped, not mixed into this thread",
 
 const CHILD_FIXTURE = "12-two-sessions-one-server-and-a-child-session.ndjson";
 const CHILD_SESSION_ID = "ses_f3dfd3d8fffeHrM6kT1FcC9I6q";
+/**
+ * What the child answered: the parent `task` part's output (line 180) inside
+ * the `<task id="…" state="completed"><task_result>` envelope the tool wraps
+ * it in for the parent's model.
+ */
+const CHILD_RESULT = "The files in the current directory are:\n\n- README.md\n- a.ts";
 
 function replayChildParent(): Replay {
   const parent = sessionIds(readFixture(CHILD_FIXTURE))[2];
@@ -602,7 +699,16 @@ function childFixtureFrames(
   lines: readonly number[],
   renames: Readonly<Record<string, string>> = {}
 ): OpenCodeRawEvent[] {
-  const records = readFixture(CHILD_FIXTURE);
+  return fixtureFrames(CHILD_FIXTURE, lines, renames);
+}
+
+/** A capture's frames by their 1-based line, with every id in `renames` swapped. */
+function fixtureFrames(
+  name: string,
+  lines: readonly number[],
+  renames: Readonly<Record<string, string>> = {}
+): OpenCodeRawEvent[] {
+  const records = readFixture(name);
   return lines.map((line) => {
     const record = records[line - 1];
     assert.equal(record?.kind, "sse", `line ${line} is an SSE frame`);
@@ -627,9 +733,12 @@ const CHILD_LAUNCH_CALL = "call_107260";
  * names that child before the child's own frames begin. Cloned from the
  * capture's lines 140/142/180 (the part), 148 and 156-160 (busy, then one
  * `bash` call) and 177-179 (the settle), with every call, part and message id
- * new.
+ * new — and any text in `edits` swapped too (the answer, say).
  */
-function resumeFrames(callId: string): {
+function resumeFrames(
+  callId: string,
+  edits: Readonly<Record<string, string>> = {}
+): {
   pending: OpenCodeRawEvent;
   running: OpenCodeRawEvent;
   /** Busy, then a `bash` call's pending → running → completed. */
@@ -644,7 +753,8 @@ function resumeFrames(callId: string): {
     msg_0c202b215001elzGd6pT1U41EE: `msg_parent_${callId}`,
     call_174911: `call_bash_${callId}`,
     prt_0c202c732001AGeN2DzE72amve: `prt_bash_${callId}`,
-    msg_0c202c2b2001xGlEiTF0IJjyd6: `msg_child_${callId}`
+    msg_0c202c2b2001xGlEiTF0IJjyd6: `msg_child_${callId}`,
+    ...edits
   };
   const [pending, running, completed] = childFixtureFrames([140, 142, 180], renames);
   assert.ok(pending && running && completed);
@@ -707,20 +817,30 @@ test("12: every emitted event belongs to this thread", () => {
   assert.ok(events.length > 0);
 });
 
-test("12: a child session becomes a roster task, started once and completed once", () => {
+test("12: a child session is a roster task: one start, one end, then the run's result", () => {
   const { events } = replayChildParent();
   const started = eventsOfType(events, "task.started");
   const completed = eventsOfType(events, "task.completed");
   assert.equal(started.length, 1, "exactly one subagent ran in this capture");
-  assert.equal(completed.length, 1);
 
   const start = started[0];
   assert.equal(start?.payload.taskId, CHILD_SESSION_ID, "the task id IS the child session id");
   assert.equal(start?.payload.agentId, CHILD_SESSION_ID);
   assert.equal(start?.agentId, CHILD_SESSION_ID, "and it is stamped on the envelope too");
   assert.equal(start?.payload.taskType, "subagent");
-  assert.equal(completed[0]?.payload.status, "completed");
-  assert.equal(completed[0]?.payload.taskId, CHILD_SESSION_ID);
+  // The child's own `session.idle` (line 179) ends the run; the parent's part
+  // that follows it (line 180) adds the result to that end, and ends nothing.
+  assert.deepEqual(
+    completed.map((event) => [event.payload.status, event.payload.summary]),
+    [
+      ["completed", undefined],
+      ["completed", CHILD_RESULT]
+    ]
+  );
+  for (const event of completed) {
+    assert.equal(event.payload.taskId, CHILD_SESSION_ID);
+    assert.equal(event.payload.toolUseId, CHILD_LAUNCH_CALL, "one run, the capture's own");
+  }
 });
 
 test("12: the child's first task.started names the call that launched it", () => {
@@ -799,7 +919,7 @@ test("12: a child's items and text are stamped with agentId; the parent's are no
   }
 
   const childText = eventsOfType(events, "content.delta").filter(
-    (event) => event.agentId === CHILD_SESSION_ID
+    (event) => event.agentId === CHILD_SESSION_ID && event.payload.streamKind === "assistant_text"
   );
   assert.ok(childText.length >= 1, "the child's answer must not land in the parent timeline");
   assert.ok(
@@ -968,12 +1088,18 @@ test("a `task_id` resume of a settled child launches it again, and its own idle 
   assert.equal(rows.at(-1), "task.completed:completed");
   const idle = resume.settle.at(-1);
   assert.ok(idle !== undefined);
+  const settledBy = eventsOfType(perFrame[frames.indexOf(idle)] ?? [], "task.completed");
   assert.deepEqual(
-    taskRows(perFrame[frames.indexOf(idle)] ?? []),
-    ["task.completed:completed"],
+    settledBy.map((event) => [event.payload.status, event.payload.summary]),
+    [["completed", undefined]],
     "settled by the child's own session.idle"
   );
-  assert.deepEqual(taskRows(perFrame.at(-1) ?? []), [], "the part's own end adds no second end");
+  // The part's own end ends nothing: it gives the run its result.
+  const result = eventsOfType(perFrame.at(-1) ?? [], "task.completed");
+  assert.deepEqual(
+    result.map((event) => [event.payload.status, event.payload.summary]),
+    [["completed", CHILD_RESULT]]
+  );
   for (const event of events) {
     if (event.type.startsWith("task.")) {
       assert.equal((event.payload as { toolUseId?: string }).toolUseId, "call_resume", event.type);
@@ -1093,6 +1219,1013 @@ test("a task part answered in the background does not settle the child it launch
 
   const idle = feed(run, childFixtureFrames([179], renames)).flat();
   assert.deepEqual(taskRows(idle), ["task.completed:completed"]);
+  // Its part's answer said the child was still working: never the run's result.
+  assert.deepEqual(taskRows(feed(run, [inBackground(completed)]).flat()), []);
+});
+
+// ---------------------------------------------------------------------------
+// A run's result: the parent part that settles after the child's own idle
+// ---------------------------------------------------------------------------
+
+/** A parent `task` part frame turned into its `error` state, as the tool fails. */
+function erroredPart(frame: OpenCodeRawEvent, error: string): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: Record<string, unknown> } };
+  };
+  const state = copy.properties.part.state;
+  delete state.output;
+  delete state.title;
+  state.status = "error";
+  state.error = error;
+  return copy;
+}
+
+test("12 end to end: the child's roster row ends with its task part's output as its result", async () => {
+  const { roster } = await throughHost(replayChildParent().events);
+  const child = roster.find((row) => row.id === CHILD_SESSION_ID);
+  assert.ok(child, `roster had ${JSON.stringify(roster.map((row) => row.id))}`);
+  assert.equal(child.status, "completed");
+  assert.equal(child.activationCount, 1);
+  assert.equal(child.result, CHILD_RESULT);
+  assert.equal(child.error, null);
+});
+
+test("a run gets its result once: the same part again adds nothing", () => {
+  const run = replayChildParent();
+  assert.deepEqual(taskRows(feed(run, childFixtureFrames([180])).flat()), []);
+});
+
+test("a resumed run's result is its own; a late part of the first call adds nothing", async () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume", {
+    "The files in the current directory are:": "On a second look, the files are:"
+  });
+  const second = "On a second look, the files are:\n\n- README.md\n- a.ts";
+  const perFrame = feed(run, [
+    resume.pending,
+    resume.running,
+    ...resume.work,
+    ...resume.settle,
+    resume.completed
+  ]);
+  assert.deepEqual(
+    eventsOfType(perFrame.at(-1) ?? [], "task.completed").map((event) => [
+      event.payload.toolUseId,
+      event.payload.summary
+    ]),
+    [["call_resume", second]]
+  );
+  const late = feed(run, childFixtureFrames([180])).flat();
+  assert.deepEqual(taskRows(late), [], "the first run's part is stale");
+
+  const { roster } = await throughHost([...run.events, ...perFrame.flat(), ...late]);
+  const child = roster.find((row) => row.id === CHILD_SESSION_ID);
+  assert.ok(child);
+  assert.equal(child.status, "completed");
+  assert.equal(child.activationCount, 2, "the resumed run");
+  assert.equal(child.result, second);
+});
+
+test("a part that errors after the child's idle gives the run its error, ending nothing", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work, ...resume.settle]);
+  const failure = `Subagent failed (task_id: ${CHILD_SESSION_ID}): the last tool call failed`;
+  const ends = eventsOfType(
+    feed(run, [erroredPart(resume.completed, failure)]).flat(),
+    "task.completed"
+  );
+  // The run's end is the child's own; the parent's verdict rides it as text.
+  assert.deepEqual(
+    ends.map((event) => [event.payload.status, event.payload.summary, event.payload.toolUseId]),
+    [["completed", failure, "call_resume"]]
+  );
+});
+
+test("a result is the text inside the task tool's envelope; other output stands as it is", () => {
+  const [completed] = childFixtureFrames([180]);
+  const part = (completed?.properties as { part: { state: { output: string } } }).part;
+  assert.equal(taskResultText(part.state.output), CHILD_RESULT);
+  // 1.18.32's `TaskTool` may put a summary line before the result.
+  assert.equal(
+    taskResultText(
+      [
+        '<task id="ses_x" state="completed">',
+        "<summary>Background task completed: list files</summary>",
+        "<task_result>",
+        "two lines\n</task_result> quoted inside",
+        "</task_result>",
+        "</task>"
+      ].join("\n")
+    ),
+    "two lines\n</task_result> quoted inside"
+  );
+  assert.equal(taskResultText("plain words"), "plain words");
+  const unclosed = '<task id="ses_x" state="completed">\nno result';
+  assert.equal(taskResultText(unclosed), unclosed);
+  assert.equal(taskResultText(undefined), undefined);
+});
+
+test("a part that settles BEFORE the child's idle ends the run itself, with its result", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  const ends = eventsOfType(
+    feed(run, [
+      resume.pending,
+      resume.running,
+      ...resume.work,
+      resume.completed,
+      ...resume.settle
+    ]).flat(),
+    "task.completed"
+  );
+  assert.deepEqual(
+    ends.map((event) => [event.payload.status, event.payload.summary]),
+    [["completed", CHILD_RESULT]],
+    "one end, the part's, and the idle after it adds nothing"
+  );
+});
+
+/** The child's own `session.error`, as fixture 13 shapes one. */
+function childSessionError(childId: string, message: string): OpenCodeRawEvent {
+  return {
+    type: "session.error",
+    properties: { sessionID: childId, error: { name: "UnknownError", data: { message } } }
+  };
+}
+
+test("no result after a run the child's own session.error ended", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work]);
+  const failed = feed(run, [childSessionError(CHILD_SESSION_ID, "Model not found: x")]).flat();
+  assert.deepEqual(taskRows(failed), ["task.completed:failed"]);
+  // Its error already fills the row; whatever the part then answers adds nothing.
+  assert.deepEqual(taskRows(feed(run, [...resume.settle, resume.completed]).flat()), []);
+});
+
+test("no result after a run the host stopped", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  feed(run, [resume.pending, resume.running, ...resume.work]);
+  assert.deepEqual(taskRows(closeLiveChildAgents(run.state, run.ctx, "interrupted")), [
+    "task.completed:stopped"
+  ]);
+  assert.deepEqual(taskRows(feed(run, [...resume.settle, resume.completed]).flat()), []);
+});
+
+// ---------------------------------------------------------------------------
+// A background run's answer arrives in the parent (fixtures README obs. 27)
+// ---------------------------------------------------------------------------
+
+/** Fixture 12's child and its launching call, renamed for a run in the background. */
+const BACKGROUND_RENAMES = {
+  [CHILD_SESSION_ID]: "ses_background_child",
+  [CHILD_LAUNCH_CALL]: "call_background",
+  prt_0c202c25e001GFB7AW0OKeLoLz: "prt_background",
+  msg_0c202b215001elzGd6pT1U41EE: "msg_background"
+};
+
+/**
+ * A `task` call run in the background: its part runs and completes at once
+ * (fixture 12, lines 140-142 and 180, with `inBackground`), and the child
+ * works on after it.
+ */
+function launchInBackground(run: Replay): RuntimeEvent[] {
+  const [pending, created, running, completed] = childFixtureFrames(
+    [140, 141, 142, 180],
+    BACKGROUND_RENAMES
+  );
+  assert.ok(pending && created && running && completed);
+  return feed(run, [pending, created, inBackground(running), inBackground(completed)]).flat();
+}
+
+/**
+ * 1.18.32's `TaskTool.injectBackgroundResult` (read from the source, not
+ * captured): a background run's answer reaches the PARENT as a new prompt — a
+ * user message whose one text part is `synthetic` and wraps the answer in the
+ * tool's envelope, naming the child. Cloned from fixture 12's own prompt
+ * (lines 122-123) under new ids.
+ */
+function injectedResult(
+  childId: string,
+  answer: string,
+  options: { state?: string; description?: string } = {}
+): OpenCodeRawEvent[] {
+  const [message, part] = childFixtureFrames([122, 123], {
+    msg_01a0c202b1b56tqi5gdjmgr8y9: "msg_injected",
+    prt_0c202b1d8001Ef7fckL6t7C4aG: "prt_injected"
+  });
+  assert.ok(message && part);
+  const copy = JSON.parse(JSON.stringify(part)) as {
+    type: string;
+    properties: { part: Record<string, unknown> };
+  };
+  const state = options.state ?? "completed";
+  const tag = state === "error" ? "task_error" : "task_result";
+  const outcome = state === "error" ? "failed" : "completed";
+  copy.properties.part.synthetic = true;
+  copy.properties.part.text = [
+    `<task id="${childId}" state="${state}">`,
+    `<summary>Background task ${outcome}: ${options.description ?? "list files"}</summary>`,
+    `<${tag}>`,
+    answer,
+    `</${tag}>`,
+    "</task>"
+  ].join("\n");
+  return [message, copy];
+}
+
+test("a background run's answer, injected into the parent, becomes its result, once", async () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  const launch = launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  const idle = feed(run, childFixtureFrames([179], BACKGROUND_RENAMES)).flat();
+  assert.deepEqual(
+    eventsOfType(idle, "task.completed").map((event) => event.payload.summary),
+    [undefined],
+    "the child's own idle ends the run with no answer yet"
+  );
+
+  const injected = injectedResult("ses_background_child", "Found README.md and a.ts.");
+  const result = feed(run, injected).flat();
+  assert.deepEqual(
+    eventsOfType(result, "task.completed").map((event) => [
+      event.payload.status,
+      event.payload.summary,
+      event.payload.toolUseId,
+      event.payload.taskId
+    ]),
+    [["completed", "Found README.md and a.ts.", "call_background", "ses_background_child"]]
+  );
+  assert.deepEqual(
+    result.filter((event) => event.type !== "task.completed"),
+    [],
+    "the injected prompt is no message of the user's, nor the agent's"
+  );
+  assert.deepEqual(taskRows(feed(run, injected).flat()), [], "once");
+
+  const { roster } = await throughHost([...run.events, ...launch, ...idle, ...result]);
+  const child = roster.find((row) => row.id === "ses_background_child");
+  assert.equal(child?.status, "completed");
+  assert.equal(child?.result, "Found README.md and a.ts.");
+});
+
+test("a background answer that arrives before the child's idle rides the run's own end", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  const early = feed(run, injectedResult("ses_background_child", "Found it.")).flat();
+  assert.deepEqual(taskRows(early), []);
+  const idle = feed(run, childFixtureFrames([179], BACKGROUND_RENAMES)).flat();
+  assert.deepEqual(
+    eventsOfType(idle, "task.completed").map((event) => [
+      event.payload.status,
+      event.payload.summary
+    ]),
+    [["completed", "Found it."]]
+  );
+});
+
+test("an injected envelope naming no child of this thread, or not synthetic, is no result", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  assert.deepEqual(taskRows(feed(run, injectedResult("ses_somebody_else", "x")).flat()), []);
+  const typed = injectedResult("ses_background_child", "typed by hand");
+  const [message, part] = typed;
+  assert.ok(message && part);
+  const unmarked = JSON.parse(JSON.stringify(part)) as {
+    type: string;
+    properties: { part: Record<string, unknown> };
+  };
+  delete unmarked.properties.part.synthetic;
+  assert.deepEqual(taskRows(feed(run, [message, unmarked]).flat()), []);
+});
+
+test("a previous background run's late answer never becomes a relaunched run's result", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  // A FOREGROUND relaunch of the child, and the first run's answer after it.
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume", { [CHILD_SESSION_ID]: "ses_background_child" });
+  const events = feed(run, [
+    resume.pending,
+    resume.running,
+    ...injectedResult("ses_background_child", "RUN 1 ANSWER"),
+    ...resume.work,
+    ...resume.settle,
+    resume.completed
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(events, "task.completed").map((event) => [
+      event.payload.toolUseId,
+      event.payload.summary
+    ]),
+    [
+      ["call_resume", undefined],
+      ["call_resume", CHILD_RESULT]
+    ],
+    "the relaunched run ends by its own idle and takes its own part's answer"
+  );
+});
+
+test("a background run takes no answer written for another run's task", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  // Relaunched in the background too, under another description.
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume", {
+    [CHILD_SESSION_ID]: "ses_background_child",
+    "list files": "list hidden files"
+  });
+  const events = feed(run, [
+    resume.pending,
+    inBackground(resume.running),
+    inBackground(resume.completed),
+    ...injectedResult("ses_background_child", "RUN 1 ANSWER"),
+    ...resume.work,
+    ...resume.settle,
+    ...injectedResult("ses_background_child", "RUN 2 ANSWER", {
+      description: "list hidden files"
+    })
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(events, "task.completed").map((event) => [
+      event.payload.toolUseId,
+      event.payload.summary
+    ]),
+    [
+      ["call_resume", undefined],
+      ["call_resume", "RUN 2 ANSWER"]
+    ]
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A running command's output streams as it grows (fixtures README obs. 28)
+// ---------------------------------------------------------------------------
+
+/** Fixture 04's first session, and the `bash` call it answered `always` for. */
+const BASH_FIXTURE = "04-permission-reply-reject-and-always.ndjson";
+const BASH_SESSION_ID = "ses_f3e6186f8ffenPAB8S3kFkEG5C";
+const BASH_CALL = "tool_bash_ScHQURJqKbvpqpPqfcWJ";
+
+/**
+ * That call's frames, verbatim: `pending` (line 103), `running` with no
+ * metadata yet (105), `running` with `metadata.output: ""` (110) and with
+ * `"two\n"` (111), then `completed` (114).
+ */
+function bashFrames(renames: Readonly<Record<string, string>> = {}): {
+  pending: OpenCodeRawEvent;
+  running: OpenCodeRawEvent;
+  empty: OpenCodeRawEvent;
+  grown: OpenCodeRawEvent;
+  completed: OpenCodeRawEvent;
+} {
+  const [pending, running, empty, grown, completed] = fixtureFrames(
+    BASH_FIXTURE,
+    [103, 105, 110, 111, 114],
+    renames
+  );
+  assert.ok(pending && running && empty && grown && completed);
+  return { pending, running, empty, grown, completed };
+}
+
+/** A tool part frame whose `metadata.output` — and a completion's output — read `output`. */
+function withOutput(frame: OpenCodeRawEvent, output: string): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: Record<string, unknown> } };
+  };
+  const state = copy.properties.part.state;
+  state.metadata = { ...(state.metadata as Record<string, unknown> | undefined), output };
+  if (state.status === "completed") {
+    state.output = output;
+  }
+  return copy;
+}
+
+/** The `command_output` chunks among `events`, in order. */
+function outputChunks(
+  events: readonly RuntimeEvent[]
+): Extract<RuntimeEvent, { type: "content.delta" }>[] {
+  return eventsOfType(events, "content.delta").filter(
+    (event) => event.payload.streamKind === "command_output"
+  );
+}
+
+function joined(chunks: readonly Extract<RuntimeEvent, { type: "content.delta" }>[]): string {
+  return chunks.map((chunk) => chunk.payload.delta).join("");
+}
+
+/**
+ * What 1.18.32's `ShellTool` puts in `metadata.output` for `printed` (`Ze`,
+ * read from the source): all of it up to 30 000 characters, then `"...\n\n"`
+ * and the last 30 000.
+ */
+function outputWindow(printed: string): string {
+  return printed.length <= 30_000 ? printed : `...\n\n${printed.slice(-30_000)}`;
+}
+
+/** `count` numbered lines from `from`, 11 characters each. */
+function numberedLines(from: number, count: number): string {
+  return Array.from(
+    { length: count },
+    (_, index) => `line ${String(from + index).padStart(5, "0")}\n`
+  ).join("");
+}
+
+test("03: a running bash part streams what it printed, on its call, in its turn", () => {
+  const { events } = replay("03-permission-ask-reply-once.ndjson");
+  const call = "tool_bash_hUFbWmc0v5dvHJZ6lgfR";
+  const chunks = outputChunks(events);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["hi\n"]
+  );
+  const completed = eventsOfType(events, "item.completed").find((event) => event.itemId === call);
+  assert.ok(completed !== undefined);
+  assert.equal(chunks[0]?.itemId, call, "the call's own item, which its rows join on");
+  assert.equal(chunks[0]?.turnId, completed.turnId);
+  assert.equal(chunks[0]?.agentId, undefined, "the thread's own command");
+  assert.equal(joined(chunks), (completed.payload.data as { result?: string }).result);
+});
+
+test("running bash parts yield chunks whose concatenation is the final output", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const final = "one\ntwo\nthree\n";
+  const perFrame = feed(session, [
+    bash.pending,
+    bash.running,
+    bash.empty,
+    withOutput(bash.grown, "one\n"),
+    withOutput(bash.grown, "one\n"),
+    withOutput(bash.grown, "one\ntwo\n"),
+    withOutput(bash.grown, final),
+    withOutput(bash.completed, final)
+  ]);
+  const chunks = outputChunks(perFrame.flat());
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["one\n", "two\n", "three\n"],
+    "only what each frame appended; a re-stated value adds nothing"
+  );
+  assert.equal(joined(chunks), final);
+  for (const chunk of chunks) {
+    assert.equal(chunk.itemId, BASH_CALL);
+    assert.equal(chunk.turnId, "turn-1");
+    assert.equal(chunk.agentId, undefined);
+  }
+  // The completion is what it was: its own output, and no chunk.
+  const last = perFrame.at(-1) ?? [];
+  assert.deepEqual(outputChunks(last), []);
+  const done = eventsOfType(last, "item.completed")[0];
+  assert.equal(done?.payload.detail, final);
+  assert.equal((done?.payload.data as { result?: string }).result, final);
+  assert.equal(session.state.outputMarks.size, 0, "a settled part keeps no mark");
+});
+
+test("12: a subagent's running bash streams under the subagent, like the call's rows", () => {
+  const { events } = replayChildParent();
+  const chunks = outputChunks(events);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["README.md\na.ts\n"]
+  );
+  const completed = eventsOfType(events, "item.completed").find(
+    (event) => event.itemId === "call_174911"
+  );
+  assert.equal(completed?.agentId, CHILD_SESSION_ID);
+  for (const chunk of chunks) {
+    assert.equal(chunk.itemId, "call_174911");
+    assert.equal(chunk.agentId, CHILD_SESSION_ID);
+  }
+  assert.equal(joined(chunks), (completed?.payload.data as { result?: string }).result);
+});
+
+test("a resumed subagent's growing bash output streams under it, every chunk once", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume");
+  const [busy, pending, running, empty, grown, completed] = resume.work;
+  assert.ok(busy && pending && running && empty && grown && completed);
+  const final = "README.md\na.ts\nsrc/\n";
+  const events = feed(run, [
+    resume.pending,
+    resume.running,
+    busy,
+    pending,
+    running,
+    empty,
+    withOutput(grown, "README.md\n"),
+    withOutput(grown, "README.md\na.ts\n"),
+    withOutput(grown, final),
+    withOutput(completed, final)
+  ]).flat();
+  const chunks = outputChunks(events);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["README.md\n", "a.ts\n", "src/\n"]
+  );
+  assert.equal(joined(chunks), final);
+  for (const chunk of chunks) {
+    assert.equal(chunk.agentId, CHILD_SESSION_ID);
+    assert.equal(chunk.itemId, "call_bash_call_resume");
+    assert.equal(chunk.turnId, "turn-resume");
+  }
+});
+
+test("12 through the host: the chunks are the child call's output, joined and closed", async () => {
+  const { log } = await throughHost(replayChildParent().events);
+  const rows = log.flatMap((event) =>
+    event.type === "thread.activity-appended" ? [event.payload.activity] : []
+  );
+  const ofCall = rows.filter(
+    (row) => (row.payload as { toolUseId?: unknown }).toolUseId === "call_174911"
+  );
+  const chunks = ofCall.filter((row) => row.activityKind === "tool.output");
+  const completion = ofCall.find((row) => row.activityKind === "tool.completed");
+  assert.ok(chunks.length >= 1 && completion !== undefined);
+  for (const chunk of chunks) {
+    assert.equal(chunk.agentId, CHILD_SESSION_ID, "the child's window and drill-in");
+    assert.ok(rows.indexOf(chunk) < rows.indexOf(completion), "written before the completion");
+  }
+  // What `read_tool_output` answers for the call (`store/tool-output.ts`).
+  assert.deepEqual(joinToolOutput(log, completion.id), {
+    toolUseId: "call_174911",
+    output: "README.md\na.ts\n",
+    complete: true,
+    truncated: false
+  });
+});
+
+test("a tool that is not a command streams nothing from its metadata", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const read = bashFrames({ '"tool":"bash"': '"tool":"read"' });
+  const events = feed(session, [
+    read.pending,
+    read.running,
+    withOutput(read.grown, "file contents\n")
+  ]).flat();
+  assert.deepEqual(outputChunks(events), []);
+});
+
+test("a tail window re-bases on what it keeps, and never repeats a character", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  // 29 700 characters, then past the 30 000 the tool keeps: 330, 11, 1 859.
+  const pieces = [
+    numberedLines(0, 2_700),
+    numberedLines(2_700, 30),
+    numberedLines(2_730, 1),
+    numberedLines(2_731, 169)
+  ];
+  let printed = "";
+  const frames = [bash.pending, bash.running, bash.empty];
+  for (const piece of pieces) {
+    printed += piece;
+    frames.push(withOutput(bash.grown, outputWindow(printed)));
+  }
+  assert.ok(printed.length > 30_000);
+  const chunks = outputChunks(feed(session, frames).flat());
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    pieces
+  );
+  assert.equal(joined(chunks), printed, "every character printed, once");
+});
+
+test("a window that keeps nothing already shown is shown whole, its head marking the gap", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const first = numberedLines(0, 100);
+  // A burst longer than the window between two frames.
+  const burst = numberedLines(100, 3_000);
+  const windowed = outputWindow(first + burst);
+  const chunks = outputChunks(
+    feed(session, [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, first),
+      withOutput(bash.grown, windowed)
+    ]).flat()
+  );
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    [first, windowed]
+  );
+  assert.ok(windowed.startsWith("...\n\n"));
+});
+
+test("a value that rewinds adds nothing, and the output goes on from the most shown", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const chunks = outputChunks(
+    feed(session, [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "one\ntwo\n"),
+      withOutput(bash.grown, ""),
+      withOutput(bash.grown, "one\n"),
+      withOutput(bash.grown, "one\ntwo\nthree\n")
+    ]).flat()
+  );
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["one\ntwo\n", "three\n"]
+  );
+});
+
+test("a value of no known shape shares nothing provable: it re-bases and adds nothing", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const chunks = outputChunks(
+    feed(session, [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "one\ntwo\n"),
+      withOutput(bash.grown, "[redrawn] 40%"),
+      withOutput(bash.grown, "[redrawn] 40%\ndone\n")
+    ]).flat()
+  );
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["one\ntwo\n", "\ndone\n"]
+  );
+});
+
+test("a removed part drops its mark; the marks are bounded, the longest unwritten first", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const partOf = (frame: OpenCodeRawEvent): string =>
+    (frame.properties as { part: { id: string } }).part.id;
+  const bash = bashFrames();
+  feed(session, [withOutput(bash.grown, "one\n")]);
+  assert.deepEqual([...session.state.outputMarks.keys()], [partOf(bash.grown)]);
+  feed(session, [
+    {
+      type: "message.part.removed",
+      properties: {
+        sessionID: BASH_SESSION_ID,
+        messageID: "msg_0c19e9533001yJC1rvPg6UFOT3",
+        partID: partOf(bash.grown)
+      }
+    }
+  ]);
+  assert.equal(session.state.outputMarks.size, 0);
+
+  // 64 commands running at once, none of them settling, then a 65th: the
+  // mark written longest ago is the one that goes.
+  const command = (index: number, output: string): OpenCodeRawEvent =>
+    withOutput(bashFrames({ prt_0c19e993b0013DG2Hi0JnCZ7bT: `prt_cmd_${index}` }).grown, output);
+  feed(
+    session,
+    Array.from({ length: 64 }, (_, index) => command(index, "x\n"))
+  );
+  const more = feed(session, [command(0, "x\ny\n"), command(64, "z\n")]).flat();
+  assert.deepEqual(
+    outputChunks(more).map((chunk) => chunk.payload.delta),
+    ["y\n", "z\n"]
+  );
+  assert.equal(session.state.outputMarks.size, 64);
+  assert.equal(session.state.outputMarks.has("prt_cmd_0"), true, "written again, so kept");
+  assert.equal(session.state.outputMarks.has("prt_cmd_1"), false);
+});
+
+test("a repeating output that slides into itself loses the repeat, never shows it twice", () => {
+  const bar = "=".repeat(30_000);
+  const window = outputWindow(`${bar}==`);
+  assert.deepEqual(advanceOutputMark(bar, window), { mark: window, chunk: "" });
+});
+
+test("the window's overlap is the longest suffix of the mark that starts it", () => {
+  // Against the obvious quadratic reading, on a two-letter alphabet where
+  // borders repeat and a wrong fallback shows: short words, and long ones
+  // made of a few repeated blocks, which past the 256-character anchor offer
+  // the search many places to try.
+  let seed = 7;
+  const next = (bound: number): number => {
+    seed = (seed * 48_271) % 2_147_483_647;
+    return seed % bound;
+  };
+  const letters = (length: number): string =>
+    Array.from({ length }, () => (next(2) === 0 ? "a" : "b")).join("");
+  const blocks = (): string => {
+    const block = letters(1 + next(4));
+    return `${block.repeat(Math.floor(next(700) / block.length))}${letters(next(3))}`;
+  };
+  const longest = (left: string, right: string): number => {
+    let length = Math.min(left.length, right.length);
+    while (length > 0 && !left.endsWith(right.slice(0, length))) {
+      length -= 1;
+    }
+    return length;
+  };
+  for (let round = 0; round < 2_000; round += 1) {
+    const long = round % 10 === 0;
+    const left = long ? blocks() : letters(next(13));
+    const right = long ? blocks() : letters(next(13));
+    const expected = longest(left, right);
+    assert.equal(suffixPrefixOverlap(left, right), expected, `${left} / ${right}`);
+    assert.equal(borderOverlap(left, right), expected, `${left} / ${right}`);
+  }
+  // Hundreds of places end with the anchor and only the last verifies: the
+  // linear pass answers.
+  const defect = `${"a".repeat(300)}b${"a".repeat(300)}`;
+  assert.equal(suffixPrefixOverlap(defect, "a".repeat(601)), 300);
+});
+
+test("a head-less value that does not extend the mark adds nothing, whatever it overlaps", () => {
+  // Its leading "\n" overlaps the mark's end; read as a window, it repeated one\ntwo.
+  const value = "\n[truncated]\none\ntwo\nthree\n";
+  assert.deepEqual(advanceOutputMark("one\ntwo\n", value), { mark: value, chunk: "" });
+});
+
+test("a removed message drops its parts' marks", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  feed(session, [withOutput(bash.grown, "one\n")]);
+  assert.equal(session.state.outputMarks.size, 1);
+  feed(session, [
+    {
+      type: "message.removed",
+      properties: { sessionID: BASH_SESSION_ID, messageID: "msg_0c19e9533001yJC1rvPg6UFOT3" }
+    }
+  ]);
+  assert.equal(session.state.outputMarks.size, 0);
+});
+
+// ---------------------------------------------------------------------------
+// A settled command's stream ends as its completion does (fixtures README
+// obs. 28): 1.18.32's final `output` is not always the last running value
+// ---------------------------------------------------------------------------
+
+/**
+ * What 1.18.32's `ShellTool.run` appends to a command's final `output` when
+ * it stopped the command (read from the source, not captured).
+ */
+function shellMetadata(...notes: string[]): string {
+  return `\n\n<shell_metadata>\n${notes.join("\n")}\n</shell_metadata>`;
+}
+const TIMEOUT_NOTE = shellMetadata(
+  "shell tool terminated command after exceeding timeout 120000 ms. If this command is " +
+    "expected to take longer and is not waiting for interactive input, retry with a larger " +
+    "timeout value in milliseconds."
+);
+const ABORT_NOTE = shellMetadata("User aborted the command");
+
+/**
+ * A completed `bash` part as 1.18.32 ends one: `output` the final text,
+ * `metadata.output` the last running value (`w || Ze(B)`, read from the
+ * source).
+ */
+function settledAs(
+  frame: OpenCodeRawEvent,
+  output: string,
+  last: string,
+  metadata: Record<string, unknown> = {}
+): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: Record<string, unknown> } };
+  };
+  const state = copy.properties.part.state;
+  state.output = output;
+  state.metadata = { output: last, exit: null, truncated: false, ...metadata };
+  return copy;
+}
+
+test("a timeout's note reaches the stream, before the completion closes it", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const printed = "starting\nready\n";
+  const final = `${printed}${TIMEOUT_NOTE}`;
+  const perFrame = feed(session, [
+    bash.pending,
+    bash.running,
+    bash.empty,
+    withOutput(bash.grown, "starting\n"),
+    withOutput(bash.grown, printed),
+    settledAs(bash.completed, final, printed)
+  ]);
+  const chunks = outputChunks(perFrame.flat());
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["starting\n", "ready\n", TIMEOUT_NOTE]
+  );
+  assert.equal(joined(chunks), final, "the settled row reads what the completion says");
+  assert.deepEqual(
+    (perFrame.at(-1) ?? []).map((event) => event.type),
+    ["content.delta", "item.completed"],
+    "the remainder goes out before the completion that closes the call's buffer"
+  );
+  assert.equal(session.state.outputMarks.size, 0);
+});
+
+test("an abort's note reaches the stream too", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const printed = "watching…\n";
+  const chunks = outputChunks(
+    feed(session, [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, printed),
+      settledAs(bash.completed, `${printed}${ABORT_NOTE}`, printed)
+    ]).flat()
+  );
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    [printed, ABORT_NOTE]
+  );
+});
+
+test("a completion that extends the last running value adds what the frames missed", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const chunks = outputChunks(
+    feed(session, [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "one\n"),
+      settledAs(bash.completed, "one\ntwo\n", "one\n")
+    ]).flat()
+  );
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.payload.delta),
+    ["one\n", "two\n"]
+  );
+});
+
+/** The note 1.18.32's `ShellTool.run` opens a final output it cut with (read from the source). */
+function cutNote(saved: string): string {
+  return `...output truncated...\n\nFull output saved to: ${saved}\n\n`;
+}
+
+test("a windowed output killed at the timeout: its note reaches the joined output", async () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  const pieces = [numberedLines(0, 2_700), numberedLines(2_700, 400)];
+  let printed = "";
+  const frames = [bash.pending, bash.running, bash.empty];
+  for (const piece of pieces) {
+    printed += piece;
+    frames.push(withOutput(bash.grown, outputWindow(printed)));
+  }
+  // The final output is its own cut: a note naming the saved file, the last
+  // lines within the tool's limits, then the timeout's note.
+  const saved = "/tmp/opencode/tool_output_1";
+  const tail = printed.split("\n").slice(-2_001).join("\n");
+  const final = `${cutNote(saved)}${tail}${TIMEOUT_NOTE}`;
+  frames.push(
+    settledAs(bash.completed, final, outputWindow(printed), { truncated: true, outputPath: saved })
+  );
+  const events = feed(session, frames).flat();
+  // The cut's own note opens the final output, before the stream's end: it
+  // could never be in the remainder, so its pointer closes the stream.
+  const pointer = `\n\nFull output saved to: ${saved}`;
+  assert.deepEqual(
+    outputChunks(events).map((chunk) => chunk.payload.delta),
+    [...pieces, `${TIMEOUT_NOTE}${pointer}`]
+  );
+
+  const { log } = await throughHost(events);
+  const completion = log
+    .flatMap((event) => (event.type === "thread.activity-appended" ? [event.payload.activity] : []))
+    .find(
+      (row) =>
+        row.activityKind === "tool.completed" &&
+        (row.payload as { toolUseId?: unknown }).toolUseId === BASH_CALL
+    );
+  assert.ok(completion !== undefined);
+  assert.deepEqual(joinToolOutput(log, completion.id), {
+    toolUseId: BASH_CALL,
+    output: `${printed}${TIMEOUT_NOTE}${pointer}`,
+    complete: true,
+    truncated: false
+  });
+});
+
+test("a cut final output closes the stream with where the whole output was saved", () => {
+  const bash = bashFrames();
+  const saved = "/tmp/opencode/tool_output_2";
+  const printed = numberedLines(0, 3_000);
+  const tail = printed.split("\n").slice(-2_001).join("\n");
+  const pointer = `\n\nFull output saved to: ${saved}`;
+  // Nothing past the stream's end but the pointer.
+  const plain = outputChunks(
+    feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, outputWindow(printed)),
+      settledAs(bash.completed, `${cutNote(saved)}${tail}`, outputWindow(printed))
+    ]).flat()
+  );
+  assert.deepEqual(
+    plain.map((chunk) => chunk.payload.delta),
+    [outputWindow(printed), pointer]
+  );
+  // Where the stream's end cannot be placed, the pointer alone: it repeats nothing.
+  const lost = outputChunks(
+    feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, numberedLines(9_000, 10)),
+      settledAs(bash.completed, `${cutNote(saved)}${tail}`, numberedLines(9_000, 10))
+    ]).flat()
+  );
+  assert.deepEqual(
+    lost.map((chunk) => chunk.payload.delta),
+    [numberedLines(9_000, 10), pointer]
+  );
+  // A final output that extends the stream was never cut: no pointer.
+  const whole = outputChunks(
+    feed(liveSession(BASH_SESSION_ID), [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "one\n"),
+      settledAs(bash.completed, "one\ntwo\n", "one\n")
+    ]).flat()
+  );
+  assert.deepEqual(
+    whole.map((chunk) => chunk.payload.delta),
+    ["one\n", "two\n"]
+  );
+});
+
+test("a final output that neither extends the stream nor holds its end adds nothing", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  // A stream too short to anchor on: its end proves nothing where it recurs.
+  const short = outputChunks(
+    feed(session, [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, "ok\n"),
+      settledAs(bash.completed, `...output truncated...\n\nok\nok\n${TIMEOUT_NOTE}`, "ok\n")
+    ]).flat()
+  );
+  assert.deepEqual(
+    short.map((chunk) => chunk.payload.delta),
+    ["ok\n"]
+  );
+  // A long stream whose end the final output does not hold.
+  const other = liveSession(BASH_SESSION_ID);
+  const printed = numberedLines(0, 100);
+  const long = outputChunks(
+    feed(other, [
+      bash.pending,
+      bash.running,
+      withOutput(bash.grown, printed),
+      settledAs(bash.completed, `...output truncated...\n\n${numberedLines(500, 10)}`, printed)
+    ]).flat()
+  );
+  assert.deepEqual(
+    long.map((chunk) => chunk.payload.delta),
+    [printed]
+  );
+});
+
+test("a command that printed nothing, or failed, adds nothing at its end", () => {
+  const session = liveSession(BASH_SESSION_ID);
+  const bash = bashFrames();
+  // Nothing streamed, so nothing replaces its completion's own "(no output)".
+  const silent = feed(session, [
+    bash.pending,
+    bash.running,
+    bash.empty,
+    settledAs(bash.completed, "(no output)", "(no output)")
+  ]).flat();
+  assert.deepEqual(outputChunks(silent), []);
+
+  // An errored part has no final output: its error stays the completion's.
+  const failing = liveSession(BASH_SESSION_ID);
+  const failed = feed(failing, [
+    bash.pending,
+    bash.running,
+    withOutput(bash.grown, "one\n"),
+    erroredPart(withOutput(bash.grown, "one\n"), "Tool execution aborted")
+  ]).flat();
+  assert.deepEqual(
+    outputChunks(failed).map((chunk) => chunk.payload.delta),
+    ["one\n"]
+  );
+  assert.equal(failing.state.outputMarks.size, 0);
 });
 
 test("a co-tenant session that is NOT a child of this thread is still dropped", () => {

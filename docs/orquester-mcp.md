@@ -736,7 +736,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       Claude background shell's output (tailed from the file the CLI writes it to: at most 1 MiB,
       then one notice naming that file), and a command's output while it runs, where the agent
       streams it (Codex's protocol can; a short command's output arrives whole with its
-      completion). A file change streams its result too (Claude's "File created successfully at:
+      completion. OpenCode streams every running command's output, a subagent's included, as
+      it grows). A file change streams its result too (Claude's "File created successfully at:
       …"), but that is no command's output, so it never earns an id this way. A background shell
       is listed in `subagents` and its rows are in its own drill-in (`read_transcript` with its
       `agentId`), as in the GUI.

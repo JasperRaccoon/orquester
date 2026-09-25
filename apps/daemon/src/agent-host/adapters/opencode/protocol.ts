@@ -184,6 +184,12 @@ export type OpenCodePart =
       messageID: string;
       sessionID?: string;
       text: string;
+      /**
+       * Set on a part the server wrote itself, not the client: in 1.18.32 the
+       * answer a background `task` call prompts its parent with (fixtures
+       * README observation 27).
+       */
+      synthetic?: boolean;
       time?: { start?: number; end?: number };
     }
   | {
