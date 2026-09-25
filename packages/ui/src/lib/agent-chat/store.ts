@@ -2421,7 +2421,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       }
       // Before the stream: what a reload interrupted is on its way again, and
       // the queue back, before the thread's first frame can make anything due.
-      resumeFromOutbox();
+      // The outbox is a safety net, never a failure: whatever throws while it
+      // gives a reload's leftovers back (a composer that could not take one,
+      // storage that refused a write) is said in the console, and the stream
+      // opens regardless — a throw here left the thread with no stream at all,
+      // stuck, and no banner to say so.
+      try {
+        resumeFromOutbox();
+      } catch (error) {
+        console.warn(`agent chat: could not resume what a reload left for session ${sessionId}`, error);
+      }
       stream = deps.transport.stream(
         sessionId,
         resumeOptions,
