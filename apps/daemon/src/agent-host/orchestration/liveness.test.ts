@@ -97,10 +97,10 @@ describe("background liveness registry (§3.1)", () => {
 });
 
 /**
- * No Grok frame reporting a backgrounded task's end is mapped (fixtures README
- * observation 29), so without a bound `backgroundLiveness` would read
- * `"monitoring"` for the rest of the host's life and the §6.4 ladder would keep
- * the tab out of "finished" forever.
+ * Grok reports a backgrounded task's end only in a snapshot or a poll the
+ * model asks for (fixtures README observation 29), so without a bound
+ * `backgroundLiveness` could read `"monitoring"` for the rest of the host's
+ * life and the §6.4 ladder would keep the tab out of "finished" forever.
  */
 describe("background liveness expiry (Grok: tasks that never complete)", () => {
   it("drops a watch loop that has been silent for the TTL", () => {
@@ -231,7 +231,7 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     assert.equal(registry.liveness("t1"), null);
   });
 
-  it("Claude's shapes are unchanged: a subagent's own shell is still its owner's, the parent's shell still monitors", () => {
+  it("Claude's shapes are unchanged: an agent's shell is its owner's, the parent's monitors", () => {
     const registry = createLivenessRegistry();
     // `claude/normalize.ts` stamps a task's OWNER (the agent whose tool call
     // launched it), never the task itself.
@@ -246,7 +246,7 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     assert.equal(registry.liveAgentCount("t1"), 1);
   });
 
-  it("Codex's and OpenCode's shapes are unchanged: an agent stamped with itself works, rests idle, stops", () => {
+  it("Codex's and OpenCode's shapes are unchanged: a self-stamped agent works, rests, stops", () => {
     const registry = createLivenessRegistry();
     // Every Codex/OpenCode task row carries `taskType: "subagent"` and the
     // child's own id as `agentId` (`codex/normalise.ts`, `opencode/normalize.ts`).
@@ -255,10 +255,12 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     assert.equal(registry.liveness("t1"), "working");
     registry.observe(task("task.updated", { ...child, status: "idle" }));
     assert.equal(registry.liveness("t1"), null, "a resting child is not live");
-    registry.observe(task("task.progress", { ...child, description: "agent child-1", status: "running" }));
+    const progress = { ...child, description: "agent child-1", status: "running" };
+    registry.observe(task("task.progress", progress));
     assert.equal(registry.liveness("t1"), "working");
     // Codex's Stop/exit closer names no taskType at all.
-    registry.observe(task("task.completed", { taskId: "child-1", agentId: "child-1", status: "stopped" }));
+    const closer = { taskId: "child-1", agentId: "child-1", status: "stopped" };
+    registry.observe(task("task.completed", closer));
     assert.equal(registry.liveness("t1"), null);
   });
 
@@ -269,5 +271,74 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     assert.equal(registry.liveness("t1"), "working");
     registry.observe(task("task.completed", { ...agent, status: "completed" }));
     assert.equal(registry.liveness("t1"), null);
+  });
+});
+
+/**
+ * A Grok agent's end is reported only when the model polls it or kills it, so
+ * an agent nobody polls again would hold "working" — and every code-only
+ * deploy — for as long as its chat stays open. Every Grok subagent row carries
+ * `livenessTtlMs`, and the registry counts the agent live for at most that long
+ * after the latest row naming it. Only liveness expires: the roster keeps the
+ * row, and a later end is recorded as any end is.
+ */
+describe("an agent row with a liveness TTL (Grok) expires; every row naming it re-arms it", () => {
+  const HOUR = 60 * 60_000;
+  const grokAgent = {
+    taskId: "call-9",
+    taskType: "subagent",
+    agentId: "call-9",
+    livenessTtlMs: HOUR
+  };
+  const poll = (status?: string) => ({ ...grokAgent, description: "find callers", status });
+
+  it("reads working for the TTL after its start, then drops out", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { ...grokAgent, toolUseId: "call-9" }));
+    assert.equal(registry.liveness("t1"), "working");
+    clock.set(HOUR - 1);
+    assert.equal(registry.liveness("t1"), "working", "still inside the hour");
+    assert.equal(registry.liveAgentCount("t1"), 1);
+    clock.set(HOUR);
+    assert.equal(registry.liveness("t1"), null, "an hour with no row naming it");
+    assert.equal(registry.liveAgentCount("t1"), 0);
+  });
+
+  it("a running poll re-arms the hour; a status-free row after expiry does not revive it", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { ...grokAgent, toolUseId: "call-9" }));
+    clock.set(HOUR - 1);
+    registry.observe(task("task.progress", poll("running")));
+    clock.set(2 * HOUR - 2);
+    assert.equal(registry.liveness("t1"), "working", "re-armed at the poll");
+    clock.set(2 * HOUR - 1);
+    assert.equal(registry.liveness("t1"), null);
+
+    registry.observe(task("task.progress", poll()));
+    assert.equal(registry.liveness("t1"), null, "no status: not a restart");
+    registry.observe(task("task.progress", poll("running")));
+    assert.equal(registry.liveness("t1"), "working", "a poll answering running is live work again");
+  });
+
+  it("its end drops it, and an end after expiry changes nothing", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { ...grokAgent, toolUseId: "call-9" }));
+    clock.set(HOUR);
+    assert.equal(registry.liveness("t1"), null);
+    registry.observe(task("task.completed", { ...grokAgent, status: "completed" }));
+    assert.equal(registry.liveness("t1"), null);
+  });
+
+  it("an agent without a TTL still never expires, beside one that does", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { ...grokAgent, toolUseId: "call-9" }));
+    registry.observe(task("task.started", { taskId: "claude-agent", taskType: "local_agent" }));
+    clock.set(HOUR * 5);
+    assert.equal(registry.liveness("t1"), "working");
+    assert.equal(registry.liveAgentCount("t1"), 1, "the Grok agent expired, the other did not");
   });
 });

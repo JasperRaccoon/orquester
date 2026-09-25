@@ -392,6 +392,15 @@ export interface TaskAgentLinkage {
    * the roster (§7.6), never the parent timeline.
    */
   timelineBypass?: boolean;
+  /**
+   * The host's background-liveness registry counts the task live for at most
+   * this many milliseconds after the latest row naming it, instead of until
+   * its end. Set by an adapter whose agents' ends can go unreported (Grok's:
+   * an end arrives only when the model polls or kills the agent); absent, an
+   * agent counts until its end. Runtime-only: ingestion never copies it onto
+   * an activity, so no log holds it.
+   */
+  livenessTtlMs?: number;
 }
 
 /**
