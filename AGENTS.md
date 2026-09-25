@@ -1133,8 +1133,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   words, tool calls, background tasks, turn ends, hooks, queue and catalog): the adapter routes them
   by session (`childSessionUpdate`, `childXaiUpdate`) — its calls, words and thinking become the
   agent's rows (`agentId` on the envelope and on an item's payload, on the turn live when each
-  STARTED, a turnless segment named by its own item id so its own `item.completed` closes it), its
-  background tasks the agent's own (`agentId` = the agent: the registry counts them through it), and
+  STARTED, a turnless segment named by its own item id so its own `item.completed` closes it — ids
+  that name the child session too, so a resume, a new child session under the same task, speaks in
+  messages of its own instead of streaming into the first run's), its background tasks the agent's
+  own (`agentId` = the agent: the registry counts them through it — until the agent ends, when each
+  one still running is re-stamped with itself and counts on its own until its own end,
+  `orphanAgentTasks`), and
   its context size, turn usage, catalog, title, mode, model, hooks and self-resolved interactions
   touch nothing of the parent's — a child's `_meta.totalTokens` moved the parent's meter, its
   `turn_completed` usage replaced the parent's turn usage, its `background_tasks` (which lists its
@@ -1152,7 +1156,7 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   starts from `_x.ai/task_backgrounded` (it carries `monitor_description`) or its call's `Monitor`
   answer (`{type, taskId, timeoutMs, persistent}`, T3's reader), is typed `monitor` (the registry's
   monitoring bucket), reports each line by `_x.ai/monitor_event` (a `task.progress`, replaced in
-  place, re-arming it), and ends by `task_completed`. Answers between turns count, on the turn the
+  place, re-arming it), and ends by `task_completed` with its LAST line as the summary. Answers between turns count, on the turn the
   run started in, and a run already ended gets no second end (`taskAnswers`). (5) **The CLI's own
   prompts get turns** (`session.ts`, `onQueueChanged`, `onPrivateUpdate`). A background subagent's
   end, a monitor's line and a monitor's end wake the agent: the CLI runs a prompt of its own
@@ -1166,14 +1170,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   for it by the prompt id they carry; its `turn_completed` settles it with that frame's usage; a user
   message during it steers it (cancel, then our prompt under the same turn id — the cancelled wake's
   `turn_completed` then settles nothing), and a cancel while it still waits ends IT (the CLI runs one
-  prompt at a time), so it opens no turn. One module holds the rule, `prompt-queue.ts`, which the
-  session and the capture-replay driver both use. **A monitor's wake re-arms it**: its line arrives
-  just BEFORE the wake it causes, so the liveness registry's turn-boundary sweep read it as silent
-  through that turn and dropped it at the wake's end — a code-only deploy stopped waiting for a
-  running monitor between its lines. The wake's turn opens with a status-less `task.progress` for
-  each live monitor its `runningText` names (`<monitor-event task_id="…">`, `rearmMonitors`),
-  replaced in place; only those, since re-arming every monitor at every wake would let unrelated
-  wakes hold a silent one forever. Before, the woken reply was dropped and the thread read idle. (6) **An hour, not forever**: every row naming a Grok agent carries `livenessTtlMs`
+  prompt at a time), so it opens no turn. Before, the woken reply was dropped and the thread read
+  idle. One module holds the rule, `prompt-queue.ts`, which the session and the capture-replay
+  driver both use. **A monitor's wake re-arms it**: its line arrives just BEFORE the wake it causes,
+  so the liveness registry's turn-boundary sweep read it as silent through that turn and dropped it
+  at the wake's end — a code-only deploy stopped waiting for a running monitor between its lines.
+  The wake's turn opens with a status-less `task.progress` for each live monitor its `runningText`
+  names (`<monitor-event task_id="…">`, `rearmMonitors`), replaced in place; only those, since
+  re-arming every monitor at every wake would let unrelated wakes hold a silent one forever.
+  (6) **An hour, not forever**: every row naming a Grok agent carries `livenessTtlMs`
   (`GROK_AGENT_LIVENESS_TTL_MS`, 60 min), and the registry counts it "working" — holding a deploy's
   drain — for at most that long after the latest such row; its heartbeat and a poll answering
   running re-arm it. Only liveness lapses: the roster keeps the row and a later end is recorded as
@@ -1211,7 +1216,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   heartbeat). (10) Teardown closes calls before tasks, as every adapter's does (Stop, the
   session's stop, the exit; a run's end closes its child's open calls before its task row). Noise
   the captures showed, silenced: a child's `skills-reload` / `workflows-reload` replies to requests
-  the CLI sent itself are not warnings; an MCP server's failure is said once until it recovers (the
+  the CLI sent itself are not warnings (the ACP peer drops a reply to nothing that carries an id the
+  adapter names, `agentOwnReplyIds`); an MCP server's failure is said once until it recovers (the
   CLI re-handshakes the thread's servers at every spawn); the self-resolved-approvals advisory is
   said once, and only where approval cards were promised (never under `auto` / `full-access`, where
   the CLI resolving its own interactions is the mode working).

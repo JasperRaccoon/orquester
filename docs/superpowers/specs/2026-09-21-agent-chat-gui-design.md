@@ -1702,7 +1702,7 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `background_tasks` snapshot and the `BackgroundTaskStarted` discriminant, joined on the task id; a
   monitor's from the same frame (it carries `monitor_description`) and the `Monitor` answer T3 reads
   (`{type, taskId, timeoutMs, persistent}`), typed `monitor`, its lines (`_x.ai/monitor_event`) its
-  progress; either's end from `_x.ai/task_completed` — the CLI's own end report, its final
+  progress and its last line its end's summary; either's end from `_x.ai/task_completed` — the CLI's own end report, its final
   `task_snapshot` with the exit code, `signal` and `explicitly_killed` — or the snapshot or a
   `TaskOutput`/`KillTask` answer (`{task_id, outcome: "killed", message}`). A snapshot entry of a
   tracked task emits a row only when its status, title or output file changed, and then one: the CLI
@@ -1720,10 +1720,11 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   background launch and a foreground run past its await budget go on without their call; a
   foreground call a Stop cuts does not — the CLI cancels its child. The child session's own frames
   reach the client under its own `sessionId`: its thinking, words, tool calls and background shells
-  become the agent's own rows (§7.6's drill-in), and its context size, usage, catalog, title, hooks
-  and plan mode never touch the parent's. `resume_from` spawns a new subagent id naming its source
-  (`resumed_from`) and starts the same task again under the new call (`adapters/grok/normalize.ts`,
-  `subagentSpawned`, `childSessionUpdate`, `taskCompleted`).*
+  become the agent's own rows (§7.6's drill-in) — a shell still running when the agent ends then
+  counts on its own — and its context size, usage, catalog, title, hooks and plan mode never touch
+  the parent's. `resume_from` spawns a new subagent id naming its source (`resumed_from`) and starts
+  the same task again under the new call, its new child session's words messages of their own
+  (`adapters/grok/normalize.ts`, `subagentSpawned`, `childSessionUpdate`, `taskCompleted`).*
 - **Prompts the CLI starts itself.** Not in T3. A background subagent's end, a monitor's line and
   a monitor's end wake the agent: the CLI runs a prompt of its own (`subagent-completed-<id>`,
   `notifications-<uuid>`, `task-completed-<id>`) and streams the parent's reply under it, with no
@@ -1732,9 +1733,13 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   such a prompt is the `runningPromptId` the parent's `_x.ai/queue/changed` never listed in
   `entries` (every client prompt is listed first); its turn opens as it is announced — or, when
   the CLI announces it before the previous turn's RPC result, right after that turn settles — and
-  its `turn_completed` settles it, with that frame's usage. A user message during it steers it:
-  cancel, then prompt under the same turn id (`adapters/grok/session.ts`, `onQueueChanged`,
-  `onPrivateUpdate`; the Grok fixtures README, observation 40).*
+  its `turn_completed` settles it, with that frame's usage; the frames that named it while it
+  waited (its prompt hook) are held by prompt id and replayed into it. A user message during it
+  steers it: cancel, then prompt under the same turn id; a cancel while it still waits ends it, and
+  no turn opens. A monitor's wake opens by re-arming the monitors its `runningText` carries lines
+  of, which the liveness registry's turn-boundary sweep would otherwise drop at the wake's end
+  (`adapters/grok/session.ts`, `onQueueChanged`, `onPrivateUpdate`, `prompt-queue.ts`; the Grok
+  fixtures README, observations 40–41).*
 - **Interrupt** marks the turn id as interrupted **synchronously, before taking the thread lock**,
   so late notifications and a late prompt result are dropped; then settles pending approvals and
   user-inputs as cancelled (the ACP spec requires a cancel to answer every pending permission

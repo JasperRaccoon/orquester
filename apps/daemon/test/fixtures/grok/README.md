@@ -1089,7 +1089,13 @@ prompt's RPC result (t=12044), right after its `turn_completed`.
 
 The session gives each such prompt a turn of its own (`onQueueChanged`, `onPrivateUpdate`): opened
 as announced — or right after a turn still settling — and settled by that prompt's
-`turn_completed`, with its usage. Dropped before, the woken reply never reached the timeline.
+`turn_completed`, with its usage. Dropped before, the woken reply never reached the timeline. What
+names a wake still waiting for its turn is the wake's: in 20 its `hook_run_started {prompt_id:
+"notifications-…"}` came at t=12030, before the user's prompt's RPC result, and the session holds
+such frames by the prompt id they carry and replays them into the wake's turn once it opens. A
+cancel while a wake waits ends that wake — the CLI runs one prompt at a time, so the waiting wake is
+the prompt running — and no turn opens for it (no capture has a Stop in that 15 ms window; the
+adapter follows 05 and 23, where a cancel ends the running prompt).
 
 ### 41. Monitors
 
@@ -1113,7 +1119,11 @@ and wakes the agent (40); the command's exit ends it — `task_completed` (`kind
 
 The adapter starts a monitor (`taskType: "monitor"`, so the registry reads it as monitoring) from
 whichever of `task_backgrounded` and the `Monitor` answer comes first, reports each line as its
-progress (replaced in place), and ends it at `task_completed`.
+progress (replaced in place), and ends it at `task_completed` with its last line as the summary.
+A line arrives just BEFORE the wake it causes (40), so the liveness registry's turn-boundary sweep
+would read the monitor as silent through that wake and drop it at the wake's end: the wake's turn
+opens with a status-less `task.progress` for each live monitor its `runningText` names, and for no
+other.
 
 ### 42. Kills
 
@@ -1148,7 +1158,9 @@ parent model reads of an answer — the `SubagentCompleted` call's content, a fi
 and `<subagent_result>\nsubagent_id: …\nsubagent_type: …\nTo continue this subagent's
 conversation, use resume_from="…".\n</subagent_result>`. `subagent_finished.output` and
 `SubagentCompleted.output` are the answer alone. The adapter keeps the answer alone as the result,
-and joins the resume's new id to the same roster task through `resumed_from`.
+and joins the resume's new id to the same roster task through `resumed_from`. The resume's child
+session is a new one, and its words and thinking are messages of their own: their ids name the
+child session, so they never stream into the first run's.
 
 ### 44. What a Stop does to subagents and shells
 
@@ -1178,7 +1190,9 @@ and joins the resume's new id to the same roster task through `resumed_from`.
   id being the call's own id (`call-88e8…-0`), and the call answered `BackgroundTaskStarted`
   (retitled `[bg] sleep 20 && echo bg-done (call-88e)`). The child then polled it with
   `timeout_ms: 15000` and got `completed`, and `task_completed` arrived in the child's session.
-  The adapter makes that shell the subagent's own (`agentId` = the agent).
+  The adapter makes that shell the subagent's own (`agentId` = the agent), and when the agent ends
+  with it still running, re-stamps it with itself: from then on it counts on its own until its own
+  end.
 
 ### 46. Noise a subagent brings
 
@@ -1186,7 +1200,8 @@ and joins the resume's new id to the same roster task through `resumed_from`.
   JSON-RPC responses with string ids, `{"id":"skills-reload","result":{"result":{"reloaded":1}}}`
   four times and `"workflows-reload"` once, as the child session reloaded its skills: the CLI's
   replies to its own requests, on our stdout. None of the eight later runs' spawns did. The client
-  mints numeric ids; the adapter drops these two instead of warning about a reply to nothing.
+  mints numeric ids; the ACP peer drops a reply carrying either of these two ids (the adapter's
+  `agentOwnReplyIds`) instead of warning about a reply to nothing.
 - **MCP re-handshakes.** Every spawn re-handshakes the thread's MCP servers: a server that fails
   (`stripe`, `status: "unavailable"`, `handshake_failed`) is reported again, under the PARENT's
   session id, at each spawn. The adapter says a server's failure once until it reports ready.
@@ -1210,11 +1225,14 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   never sends a foreground run to the background.
 - **Its child session's frames** are its own rows and touch nothing of the parent's.
 - **A resume** starts the same task again under the new call; its new id joins through
-  `resumed_from`.
+  `resumed_from`, and its child session's words are messages of their own.
 - **Shells and monitors** start from `task_backgrounded` / `background_tasks` /
   `BackgroundTaskStarted` / `Monitor`, report by `monitor_event`, polls and listings, and end by
-  `task_completed`, a finished poll or a kill; a subagent's own are its agent's.
-- **The CLI's own prompts** get turns of their own.
+  `task_completed`, a finished poll or a kill (a monitor's summary its last line); a subagent's own
+  are its agent's until the agent ends, then their own.
+- **The CLI's own prompts** get turns of their own, with the frames that named them while they
+  waited; a monitor's wake re-arms the monitors it carries lines of; a cancel while a wake waits
+  ends it, and no turn opens for it.
 - **An hour, not forever**: every agent row carries `livenessTtlMs` (60 min), re-armed by each row
   naming it — the heartbeat among them.
 - **Stop, the session's stop and the exit** close the calls first, then the tasks; an end the
