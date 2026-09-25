@@ -123,6 +123,21 @@ test("output that arrives before the command settles is already visible", () => 
   assert.equal(entries[0]?.command, "pnpm test --watch");
 });
 
+test("the row says its output streamed, running or settled: the whole of it is the host's join, a read away", () => {
+  const running = rendered([started(), output("one\n", "o1")]);
+  assert.equal(running[0]?.streamedOutput, true);
+  const settled = rendered([started(), output("one\n", "o1"), completed(0)]);
+  assert.equal(settled[0]?.streamedOutput, true);
+  assert.equal(settled[0]?.id, "started", "the read names the row's own item, which names the call");
+});
+
+test("a quiet shell whose every chunk aged out still offers the whole of its output", () => {
+  // A busy fleet's cross-agent ceiling evicts the chunks; retention keeps the start of running work.
+  const entries = rendered([started()]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]?.streamedOutput, true);
+});
+
 test("the row keeps the first frame's id, so a streaming row cannot close itself", () => {
   const live = backgroundShellRows([started(), output("one\n", "o1")], TASK);
   const settled = backgroundShellRows(

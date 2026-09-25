@@ -9,6 +9,7 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import { registerComposerHandle } from "../../components/agent-chat/composer/composer-bridge";
+import { resetComposerSends } from "../../components/agent-chat/composer/composer-sends";
 import { draftAfterReturn, loadComposerDraft } from "../../components/agent-chat/composer/composer-draft";
 import type { StagedAttachment } from "../../components/agent-chat/composer/ComposerAttachments";
 import { attachmentCountBlockSend } from "../../components/agent-chat/composer/composer-submission";
@@ -990,6 +991,8 @@ describe("a send outlives its store generation", () => {
 
   afterEach(() => {
     resetThreadStores();
+    // A post a test left out still holds its thread's queue: in-memory, like a reload.
+    resetComposerSends();
     mock.timers.reset();
     delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
   });
@@ -1097,6 +1100,71 @@ describe("a send outlives its store generation", () => {
       "no",
       "and its reason with it: a held row with no banner never says why it waits"
     );
+  });
+
+  /** Two queued messages on a thread whose turn just ended: the first leaves, the second waits behind it. */
+  async function firstQueuedSendInFlight(sessionId: string) {
+    const gated = gatedTransport();
+    const deps = { transport: gated.transport, delay: async () => {} };
+    const first = retainThreadStore(sessionId, deps);
+    await flush();
+    gated.push({
+      kind: "snapshot",
+      thread: snapshot({ seq: 1, head: head({ session: { status: "running", activeTurnId: "t1" } }) })
+    });
+    first.getState().actions.queueMessage(queued("first queued"));
+    first.getState().actions.queueMessage(queued("second queued"));
+    const ended: AgentChatStreamFrame = {
+      kind: "snapshot",
+      thread: snapshot({ seq: 2, head: head({ session: { status: "ready", activeTurnId: null } }) })
+    };
+    gated.push(ended);
+    await settle();
+    assert.deepEqual(gated.attempts.map((attempt) => attempt.body.input), ["first queued"]);
+    return { ...gated, deps, ended };
+  }
+
+  it("the live generation waits for the torn-down one's queued send in flight before sending the next", async () => {
+    const { attempts, push, deps, ended } = await firstQueuedSendInFlight("Q");
+
+    tearDown("Q");
+    const second = retainThreadStore("Q", deps);
+    await flush();
+    assert.deepEqual(second.getState().slice.queue.map((message) => message.text), ["second queued"]);
+    // The next boundary reaches the live generation while the first send is still out.
+    push({ ...ended, thread: { ...ended.thread, seq: 3 } });
+    await settle();
+    assert.deepEqual(
+      attempts.map((attempt) => attempt.body.input),
+      ["first queued"],
+      "the second waits: sent now it could land before the first, or overtake it if the first fails"
+    );
+
+    attempts[0]!.answer();
+    await settle();
+    assert.deepEqual(attempts.map((attempt) => attempt.body.input), ["first queued", "second queued"]);
+    attempts[1]!.answer();
+    await settle();
+  });
+
+  it("when the torn-down generation's queued send fails, it is held at the front and the next one still waits", async () => {
+    const { attempts, push, deps, ended } = await firstQueuedSendInFlight("Q");
+
+    tearDown("Q");
+    const second = retainThreadStore("Q", deps);
+    await flush();
+    push({ ...ended, thread: { ...ended.thread, seq: 3 } });
+    attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+
+    assert.deepEqual(
+      second.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["first queued", true],
+        ["second queued", false]
+      ]
+    );
+    assert.equal(attempts.length, 1, "nothing overtook the held message");
   });
 
   it("with no live generation, a queued send that fails after the teardown goes back to the persisted draft", async () => {

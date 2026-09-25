@@ -736,7 +736,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
       Claude background shell's output (tailed from the file the CLI writes it to: at most 1 MiB,
       then one notice naming that file), and a command's output while it runs, where the agent
       streams it (Codex's protocol can; a short command's output arrives whole with its
-      completion). A file change streams its result too (Claude's "File created successfully at:
+      completion. OpenCode streams every running command's output, a subagent's included, as
+      it grows). A file change streams its result too (Claude's "File created successfully at:
       …"), but that is no command's output, so it never earns an id this way. A background shell
       is listed in `subagents` and its rows are in its own drill-in (`read_transcript` with its
       `agentId`), as in the GUI.
@@ -815,7 +816,10 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
        is usually, not always, the text the preview was cut from: the snapshot's cut can leave a
        different place first (Grok's preview is its content blocks' first line, its whole output
        `output_for_prompt`). A running call's update is stored already cut, so its own data is
-       never read as its output.
+       never read as its output — nor is a Codex command's completion whose output passed 64 KiB:
+       the completion keeps only the first 64 KiB and says it was cut, so the output is read from
+       step 2 when the command streamed it, and otherwise the item answers as its `payload`, the
+       first 64 KiB inside it.
     2. **The call's streamed output**, when the item is a command's — a `command_execution` row,
        or a chunk of a command's output — and the call streamed any: output that is in no item's
        data at all — a Claude background shell's, a command's output while it runs — joined by the

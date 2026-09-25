@@ -4,11 +4,14 @@
  * scripted adapter and a temporary in-memory store; the assertions are on the
  * resulting head and on which continuation call the adapter received — and on
  * what a thread's first load closes of the work a dead process left open (one
- * of those on the real store, for what reaches the disk). The late rows those
- * closings write stretch an old turn's range in the thread index, and so does
- * a background agent's late completion: the "Load older" walks over a real
- * index are here, a rewind that keeps such a turn among them — whose late
- * rows past the rewind's cut stay on a page once the window evicts them.
+ * of those on the real store, for what reaches the disk), when a turn that
+ * process was running ends (its last write, never the restart), and the
+ * launch ids a first load gives the agents an older host launched with none.
+ * The late rows those closings write stretch an old turn's range in the
+ * thread index, and so does a background agent's late completion: the "Load
+ * older" walks over a real index are here, a rewind that keeps such a turn
+ * among them — whose late rows past the rewind's cut stay on a page once the
+ * window evicts them.
  */
 
 import assert from "node:assert/strict";
@@ -197,6 +200,28 @@ function sunkRow(
       ...over
     }
   });
+}
+
+/** `event` written at `at` — its envelope, and its row when it carries one — as a host whose clock read `at` wrote it. */
+function writtenAt(event: AppendableDomainEvent, at: string): AppendableDomainEvent {
+  if (event.type !== "thread.activity-appended") {
+    return { ...event, occurredAt: at } as AppendableDomainEvent;
+  }
+  return {
+    ...event,
+    occurredAt: at,
+    payload: { ...event.payload, activity: { ...event.payload.activity, createdAt: at, updatedAt: at } }
+  } as AppendableDomainEvent;
+}
+
+/** Every step of the log in time order: no line is stamped before the line above it. */
+function assertTimesNeverGoBack(events: readonly DomainEvent[]): void {
+  const back = events.flatMap((event, index) =>
+    index > 0 && Date.parse(event.occurredAt) < Date.parse(events[index - 1]!.occurredAt)
+      ? [`seq ${event.seq} (${event.type}) at ${event.occurredAt} after ${events[index - 1]!.occurredAt}`]
+      : []
+  );
+  assert.deepEqual(back, [], "the log's times never go back");
 }
 
 /**
@@ -1054,7 +1079,7 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await third.stop();
   });
 
-  it("the orphaned-thread reconcile closes them too, before it settles the turn", async () => {
+  it("the orphaned-thread reconcile closes them too, once it has settled the turn at the time its process last wrote", async () => {
     const first = createTestHost();
     const threadId = await first.createThread();
     await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
@@ -1064,6 +1089,7 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await first.stop();
     assert.equal(headOf(first.store, threadId).session.status, "running");
     const logLength = first.store.logs.get(threadId)!.length;
+    const lastWrite = first.store.logs.get(threadId)!.at(-1)!.occurredAt;
 
     const next = createTestHost({ store: first.store, continuationEnabled: () => false });
     await next.orchestrator.reconcile();
@@ -1074,15 +1100,23 @@ describe("reconcile — a host start closes what a dead process left open", () =
     const settledAt = appended.findIndex(
       (event) => event.type === "thread.session-set" && event.payload.session.status === "error"
     );
-    assert.ok(settledAt !== -1, "the orphaned turn was settled");
-    assert.deepEqual(closingsIn(appended.slice(0, settledAt)), LEFTOVER_CLOSINGS, "all of it before the settle");
-    // A task's row rides the turn the head said was running, as a teardown's does.
-    const stopped = appended.flatMap((event) =>
-      event.type === "thread.activity-appended" && event.payload.activity.activityKind === "task.completed"
-        ? [event.payload.activity.turnId]
-        : []
-    );
-    assert.deepEqual(stopped, ["turn-1", "turn-1"]);
+    // The turn ended when its process died: the reconcile's first row, stamped
+    // with the time of the last line that process wrote…
+    assert.equal(settledAt, 0, "the orphaned turn is settled first");
+    assert.equal(appended[0]!.occurredAt, lastWrite);
+    // …and what the host found it left open is noticed after it.
+    assert.deepEqual(closingsIn(appended.slice(settledAt + 1)), LEFTOVER_CLOSINGS, "all of it after the settle");
+    // A parked request's cancellation still rides the turn the head said was
+    // running, as a Stop's does, though the settle came first; a task's stop
+    // rides its start's turn, as a teardown's does.
+    const turnsOf = (kinds: readonly string[]) =>
+      appended.flatMap((event) =>
+        event.type === "thread.activity-appended" && kinds.includes(event.payload.activity.activityKind)
+          ? [event.payload.activity.turnId]
+          : []
+      );
+    assert.deepEqual(turnsOf(["approval.resolved", "user-input.resolved"]), ["turn-1", "turn-1"]);
+    assert.deepEqual(turnsOf(["task.completed"]), ["turn-1", "turn-1"]);
     assert.equal(headOf(first.store, threadId).session.status, "error");
 
     assertNothingRunning(snapshotItems(await next.orchestrator.readThread(threadId)));
@@ -1320,6 +1354,459 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await third.settle();
     assert.equal(first.store.logs.get(threadId)!.length, logLength + fleet, "a second load appends nothing");
     await third.stop();
+  });
+});
+
+describe("reconcile — a crash-settled turn ends when its process died", () => {
+  /**
+   * A turn that worked `workedMs` and then lost its host mid-call: the call's
+   * start is the last line the process wrote. Returns that line's time.
+   */
+  async function orphanedAfter(host: TestHost, threadId: string, workedMs: number): Promise<string> {
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await host.settle();
+    host.clock.advance(workedMs);
+    const lastWrite = host.clock.nowIso();
+    await host.orchestrator.ingestionSink(threadId, [
+      writtenAt(
+        sunkRow(threadId, "call-start", "tool.started", {
+          itemType: "command_execution",
+          toolUseId: "toolu_build",
+          status: "inProgress",
+          title: "Bash",
+          data: { toolName: "Bash", input: { command: "npm run build" } }
+        }, { turnId: "turn-1", status: "inProgress" }),
+        lastWrite
+      )
+    ]);
+    await host.settle();
+    return lastWrite;
+  }
+
+  const turnOf = (read: Awaited<ReturnType<TestHost["orchestrator"]["readThread"]>>, turnId: string | null) => {
+    assert.equal(read.kind, "snapshot");
+    const turn = read.kind === "snapshot" ? read.thread.turns.find((candidate) => candidate.turnId === turnId) : undefined;
+    assert.ok(turn, `turn ${turnId}`);
+    return turn;
+  };
+
+  it("settles an orphaned turn at the time its process last wrote: its duration is its own, not the downtime's", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    const lastWrite = await orphanedAfter(first, threadId, 90_000);
+    await first.stop();
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    // The host comes back an hour later.
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.set(Date.parse(lastWrite) + 3_600_000);
+    const restart = next.clock.nowIso();
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const turn = turnOf(await next.orchestrator.readThread(threadId), "turn-1");
+    assert.deepEqual([turn.state, turn.completedAt], ["failed", lastWrite]);
+    assert.equal(Date.parse(turn.completedAt!) - Date.parse(turn.startedAt!), 90_000, "90 s of work, not the hour it lay dead");
+
+    // The settle alone is backdated, to the line before it; what the host
+    // noticed at the restart — the error, the call it left open — says when.
+    const log = first.store.logs.get(threadId)!;
+    const appended = log.slice(logLength);
+    assert.deepEqual(
+      appended.map((event) => [
+        event.type === "thread.activity-appended" ? event.payload.activity.activityKind : event.type,
+        event.occurredAt
+      ]),
+      [
+        ["thread.session-set", lastWrite],
+        ["runtime.error", restart],
+        ["tool.completed", restart]
+      ]
+    );
+    assertTimesNeverGoBack(log);
+    await next.stop();
+  });
+
+  it("an orphan with a stale pending turn behind it: both turns end when the process last wrote", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await orphanedAfter(first, threadId, 30_000);
+    await first.stop();
+    // A second message landed while the turn ran, and its send never happened.
+    first.clock.advance(5_000);
+    const lastWrite = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, lastWrite);
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.set(Date.parse(lastWrite) + PENDING_TURN_GRACE_MS + 3_600_000);
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const read = await next.orchestrator.readThread(threadId);
+    assert.deepEqual(
+      [turnOf(read, "turn-1").completedAt, turnOf(read, null).completedAt],
+      [lastWrite, lastWrite]
+    );
+    const log = first.store.logs.get(threadId)!;
+    assert.deepEqual(
+      [log[logLength]!.type, log[logLength]!.occurredAt],
+      ["thread.session-set", lastWrite],
+      "the settle is the reconcile's first row"
+    );
+    assertTimesNeverGoBack(log);
+    await next.stop();
+  });
+
+  it("a stale pending turn a first load settles ends when its process last wrote, and its notice says when it was noticed", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.stop();
+    const requestedAt = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, requestedAt);
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+
+    const turn = turnOf(read, null);
+    assert.deepEqual([turn.state, turn.completedAt], ["interrupted", requestedAt]);
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(
+      appended.map((event) => [
+        event.type === "thread.activity-appended" ? event.payload.activity.activityKind : event.type,
+        event.occurredAt
+      ]),
+      [
+        ["thread.session-set", requestedAt],
+        ["provider.turn.start.failed", next.clock.nowIso()]
+      ]
+    );
+    await next.stop();
+  });
+
+  it("settles a stale pending turn behind a session already stopped, once: the next host's first load writes nothing", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await first.settle();
+    await first.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
+    await first.settle();
+    await first.stop();
+    assert.equal(headOf(first.store, threadId).session.status, "stopped");
+    // A message sent to the stopped session, its send never made.
+    const requestedAt = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, requestedAt);
+    const log = first.store.logs.get(threadId)!;
+    const logLength = log.length;
+    const notices = () =>
+      log.filter(
+        (event) =>
+          event.type === "thread.activity-appended" &&
+          event.payload.activity.activityKind === "provider.turn.start.failed"
+      ).length;
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await next.stop();
+    // The session was `stopped` already, and the settle is written all the
+    // same: it is what ends the turn, not a change of the session's state.
+    assert.deepEqual([turnOf(read, null).state, turnOf(read, null).completedAt], ["interrupted", requestedAt]);
+    assert.deepEqual(
+      log.slice(logLength).map((event) =>
+        event.type === "thread.activity-appended" ? event.payload.activity.activityKind : event.type
+      ),
+      ["thread.session-set", "provider.turn.start.failed"]
+    );
+    const settled = log.length;
+
+    // A later host lifetime finds nothing stale: no second notice, nothing at all.
+    const third = createTestHost({ store: first.store });
+    third.clock.advance(PENDING_TURN_GRACE_MS + 120_000);
+    await third.orchestrator.reconcile();
+    const again = await third.orchestrator.readThread(threadId);
+    await third.settle();
+    await third.stop();
+    assert.equal(log.length, settled, "the second load appends nothing");
+    assert.equal(turnOf(again, null).state, "interrupted");
+    assert.equal(notices(), 1, "one notice, once");
+  });
+
+  it("never ends a turn before it started: a line flushed out of order after the start does not set the time", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    const startedAt = first.clock.nowIso();
+    // Ingestion stamps a flushed message with its first delta's time: the
+    // last line the process wrote can read seconds before the turn's start.
+    await first.orchestrator.ingestionSink(threadId, [
+      writtenAt(
+        sunk(threadId, "thread.message-sent", {
+          messageId: "assistant:early",
+          role: "assistant",
+          text: "Starting on it",
+          streaming: false,
+          turnId: "turn-1"
+        }),
+        new Date(Date.parse(startedAt) - 2_000).toISOString()
+      )
+    ]);
+    await first.settle();
+    await first.stop();
+    const log = first.store.logs.get(threadId)!;
+    const logLength = log.length;
+    assert.ok(Date.parse(log.at(-1)!.occurredAt) < Date.parse(startedAt), "the last line reads before the start");
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.set(Date.parse(startedAt) + 3_600_000);
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    const turn = turnOf(await next.orchestrator.readThread(threadId), "turn-1");
+    assert.deepEqual([turn.state, turn.startedAt, turn.completedAt], ["failed", startedAt, startedAt]);
+    // Still never before the line above it.
+    const settle = log[logLength]!;
+    assert.equal(settle.type, "thread.session-set");
+    assert.ok(Date.parse(settle.occurredAt) >= Date.parse(log[logLength - 1]!.occurredAt));
+    await next.stop();
+  });
+
+  it("nor ends a turn that never started before it was requested", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.stop();
+    const requestedAt = first.clock.nowIso();
+    appendStrandedTurn(first.store, threadId, requestedAt);
+    const log = first.store.logs.get(threadId)!;
+    // A line written after the request, stamped seconds before it.
+    log.push({
+      seq: log.length + 1,
+      eventId: "late-flush",
+      threadId,
+      type: "thread.message-sent",
+      payload: { messageId: "assistant:late", role: "assistant", text: "late", streaming: false, turnId: null },
+      occurredAt: new Date(Date.parse(requestedAt) - 2_000).toISOString(),
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    } as DomainEvent);
+
+    const next = createTestHost({ store: first.store });
+    next.clock.advance(PENDING_TURN_GRACE_MS + 60_000);
+    await next.orchestrator.reconcile();
+    const read = await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.deepEqual([turnOf(read, null).state, turnOf(read, null).completedAt], ["interrupted", requestedAt]);
+    await next.stop();
+  });
+
+  it("settles at the restart, as it did, when the last line carries no time it can read", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    await first.stop();
+    const log = first.store.logs.get(threadId)!;
+    log.push({
+      seq: log.length + 1,
+      eventId: "no-time",
+      threadId,
+      type: "thread.message-sent",
+      payload: { messageId: "assistant:x", role: "assistant", text: "x", streaming: false, turnId: "turn-1" },
+      occurredAt: "not a time",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    } as DomainEvent);
+
+    const next = createTestHost({ store: first.store, continuationEnabled: () => false });
+    next.clock.advance(3_600_000);
+    const restart = next.clock.nowIso();
+    await next.orchestrator.reconcile();
+    await next.settle();
+    const turn = turnOf(await next.orchestrator.readThread(threadId), "turn-1");
+    assert.deepEqual([turn.state, turn.completedAt], ["failed", restart]);
+    await next.stop();
+  });
+});
+
+describe("reconcile — a first load gives a legacy agent the launch id an older host never wrote", () => {
+  /**
+   * An OpenCode child as the normaliser wrote it before the relaunch fix: its
+   * run started at its own `session.created`, so its start names no launching
+   * call, and every later row names the parent `task` part's `callID`.
+   */
+  const legacyChildRows = (threadId: string, childId: string): AppendableDomainEvent[] => [
+    sunkRow(threadId, `start:${childId}`, "task.started", {
+      taskId: childId,
+      detail: "Subagent",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId
+    }, { turnId: "turn-1", agentId: childId }),
+    sunkRow(threadId, `task-progress:${childId}`, "task.progress", {
+      taskId: childId,
+      title: "Explore the repo",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId,
+      toolUseId: `call_${childId}`
+    }, { turnId: "turn-1", agentId: childId }),
+    sunkRow(threadId, `done:${childId}`, "task.completed", {
+      taskId: childId,
+      status: "completed",
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childId,
+      title: "Explore the repo",
+      toolUseId: `call_${childId}`
+    }, { turnId: "turn-1", agentId: childId })
+  ];
+
+  type LegacyAdapter = "opencode" | "codex" | "claude";
+
+  const hostFor = (adapter: LegacyAdapter, store?: FakeThreadStore) =>
+    createTestHost({
+      ...(store !== undefined ? { store } : {}),
+      adapters: { [adapter]: createScriptedAdapter({ id: adapter }) }
+    });
+
+  /** A thread whose last host died after `legacyChildRows`, its head at rest. */
+  async function legacyThread(adapter: LegacyAdapter) {
+    const first = hostFor(adapter);
+    const threadId = await first.createThread({ refId: adapter });
+    await first.orchestrator.ingestionSink(threadId, legacyChildRows(threadId, "ses_child"));
+    await first.settle();
+    await first.stop();
+    return { store: first.store, threadId, logLength: first.store.logs.get(threadId)!.length };
+  }
+
+  /** Each appended launch row: its task, launch id and turn. */
+  const launchesIn = (events: readonly DomainEvent[]) =>
+    events.flatMap((event) => {
+      if (event.type !== "thread.activity-appended" || event.payload.activity.activityKind !== "task.started") return [];
+      const payload = event.payload.activity.payload as Record<string, unknown>;
+      return [[payload.taskId, payload.toolUseId, event.payload.activity.turnId]];
+    });
+
+  it("an OpenCode thread's first load names the agent's launch: it still reads completed, and a relaunch reopens it", async () => {
+    const { store, threadId, logLength } = await legacyThread("opencode");
+    const next = hostFor("opencode", store);
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength, "boot appends nothing to a thread it did not fold");
+
+    const read = await next.orchestrator.readThread(threadId);
+    const appended = store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(launchesIn(appended), [["ses_child", "legacy-launch:ses_child", "turn-1"]]);
+    assert.equal(appended.length, 1, "nothing else is written");
+    assert.deepEqual(
+      foldSubagentActivities(
+        snapshotItems(read).filter((item): item is ThreadActivityItem => item.kind === "activity"),
+        { sessionLive: true }
+      ).map((agent) => [agent.id, agent.status]),
+      [["ses_child", "completed"]]
+    );
+
+    // A host with the relaunch fix re-prompts the child under a new call,
+    // inside a live turn: the host's own fold reopens it.
+    await next.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.session-set", { session: { status: "running", activeTurnId: "turn-2" } }),
+      sunkRow(threadId, "relaunch", "task.started", {
+        taskId: "ses_child",
+        detail: "Explore the repo",
+        taskType: "subagent",
+        agentKind: "agent",
+        agentId: "ses_child",
+        toolUseId: "call_again"
+      }, { turnId: "turn-2", agentId: "ses_child" })
+    ]);
+    await next.settle();
+    const after = await next.orchestrator.readThread(threadId);
+    assert.equal(after.kind, "snapshot");
+    assert.deepEqual(
+      after.kind === "snapshot" ? after.thread.roster.map((agent) => [agent.id, agent.status, agent.activationCount]) : null,
+      [["ses_child", "running", 2]]
+    );
+    await next.stop();
+  });
+
+  it("a second load appends nothing", async () => {
+    const { store, threadId, logLength } = await legacyThread("opencode");
+    const next = hostFor("opencode", store);
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    await next.stop();
+    assert.equal(store.logs.get(threadId)!.length, logLength + 1);
+
+    const third = hostFor("opencode", store);
+    await third.orchestrator.reconcile();
+    await third.orchestrator.readThread(threadId);
+    await third.settle();
+    await third.stop();
+    assert.equal(store.logs.get(threadId)!.length, logLength + 1);
+  });
+
+  it("a Claude thread's first load names none: its agents always launched with an id", async () => {
+    const { store, threadId, logLength } = await legacyThread("claude");
+    const next = hostFor("claude", store);
+    await next.orchestrator.reconcile();
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength);
+    await next.stop();
+  });
+
+  it("an orphaned Codex thread gets it in the reconcile, before a continuation's process can relaunch anything", async () => {
+    const first = hostFor("codex");
+    const threadId = await first.createThread({ refId: "codex" });
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await first.settle();
+    await first.orchestrator.ingestionSink(threadId, legacyChildRows(threadId, "thr-child"));
+    await first.settle();
+    await first.stop();
+    const logLength = first.store.logs.get(threadId)!.length;
+
+    const next = createTestHost({
+      store: first.store,
+      adapters: { codex: createScriptedAdapter({ id: "codex", capabilities: { promptlessTurnContinuation: true } }) },
+      continuationEnabled: () => true
+    });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    const appended = first.store.logs.get(threadId)!.slice(logLength);
+    assert.deepEqual(launchesIn(appended), [["thr-child", "legacy-launch:thr-child", "turn-1"]]);
+    const launchAt = appended.findIndex((event) => launchesIn([event]).length > 0);
+    const preparedAt = appended.findIndex(
+      (event) => event.type === "thread.session-set" && event.payload.session.status === "starting"
+    );
+    assert.ok(preparedAt !== -1 && launchAt < preparedAt, "named before the continuation is prepared");
+    await next.stop();
+  });
+
+  it("never on a first load that finds the thread live", async () => {
+    const { store, threadId, logLength } = await legacyThread("opencode");
+    const next = hostFor("opencode", store);
+    await next.orchestrator.reconcile();
+    await next.adapter.startSession({
+      threadId,
+      cwd: "/work/project",
+      home: { kind: "account", path: "/tmp/home/acc1" },
+      modelSelection: { model: "test-model" },
+      runtimeMode: "approval-required"
+    });
+    await next.orchestrator.readThread(threadId);
+    await next.settle();
+    assert.equal(store.logs.get(threadId)!.length, logLength);
+    await next.stop();
   });
 });
 

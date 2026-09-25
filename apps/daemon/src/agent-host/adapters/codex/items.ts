@@ -28,6 +28,12 @@ export interface ClassifiedItem {
   /** The slimmed provider payload put on `item.*`'s `data`. */
   data?: unknown;
   /**
+   * `data` keeps only a head of the item's output: a command's
+   * `aggregatedOutput` past {@link COMMAND_OUTPUT_MAX_BYTES}. Rides the item
+   * event as its `truncated` (§5.6), so no reader takes the head for the whole.
+   */
+  truncated?: true;
+  /**
    * True when the item must not become a timeline row of its own: it is the
    * message/reasoning/plan stream, already carried by `content.delta` and the
    * message path, or a review marker that nothing renders (§4.2).
@@ -114,12 +120,21 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       // having no text ever (fixtures README observation 18).
       return { itemType: "reasoning", timelineBypass: true };
 
-    case "commandExecution":
+    case "commandExecution": {
+      // The output arrives whole in `aggregatedOutput`, and for a command that
+      // never streams (`item/commandExecution/outputDelta` fired in no capture,
+      // fixtures README observation 18) it is the only copy: `detail` is cut to
+      // a 180-character preview at ingestion. So the completion keeps it, in
+      // `data.item.aggregatedOutput` — where `commandOutputText` and the wire
+      // slimmer's `projectCommandData` already read Codex's output — bounded.
+      const output =
+        item.aggregatedOutput !== null ? boundCommandOutput(item.aggregatedOutput) : null;
       return {
         itemType: "command_execution",
         status: commandStatus(item.status),
         title: item.command,
         ...(item.aggregatedOutput !== null ? { detail: item.aggregatedOutput } : {}),
+        ...(output?.truncated === true ? { truncated: true } : {}),
         timelineBypass: false,
         data: {
           command: item.command,
@@ -127,9 +142,11 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
           source: item.source,
           commandActions: item.commandActions,
           exitCode: item.exitCode,
-          durationMs: item.durationMs
+          durationMs: item.durationMs,
+          ...(output !== null ? { item: { aggregatedOutput: output.text } } : {})
         }
       };
+    }
 
     case "fileChange":
       return {
@@ -253,6 +270,49 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       };
     }
   }
+}
+
+/**
+ * The most of a command's `aggregatedOutput` a completion stores, in UTF-8
+ * bytes: 64 KiB. The fold holds every retained row's payload whole, in the
+ * host's memory and in `state.json`, and a call's completion is at most every
+ * other row of a window (its start is one too), so this bounds what stored
+ * output can add to a thread at about 275 × 64 KiB (≈ 17 MiB) in the parent's
+ * window (500 rows + 50 slack) and about 1 100 × 64 KiB (≈ 69 MiB) across
+ * agents (2 000 + 200) — the worst case, every call printing past the cap. The
+ * wire never carries it: the slimmer cuts the field to its first line.
+ * Measured against what the fold already holds, it is about twice the 30 000
+ * characters of a Bash call's output Claude Code hands back by default
+ * (`BASH_MAX_OUTPUT_LENGTH`), which a Claude completion stores whole.
+ */
+export const COMMAND_OUTPUT_MAX_BYTES = 64 * 1024;
+
+/**
+ * `text` whole when its UTF-8 fits {@link COMMAND_OUTPUT_MAX_BYTES}, else its
+ * longest head that fits, cut on a character boundary — a surrogate pair is one
+ * 4-byte character, a lone surrogate counts as the 3 bytes of the U+FFFD it
+ * encodes as — and `truncated`.
+ *
+ * The head is copied out (a UTF-8 round trip) rather than sliced: V8 keeps a
+ * slice's whole source string alive behind it, and the source may be any size —
+ * the bound would hold on disk and not in the fold that keeps the row.
+ */
+export function boundCommandOutput(text: string): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text, "utf8") <= COMMAND_OUTPUT_MAX_BYTES) {
+    return { text, truncated: false };
+  }
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const codePoint = char.codePointAt(0)!;
+    const size = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
+    if (bytes + size > COMMAND_OUTPUT_MAX_BYTES) {
+      break;
+    }
+    bytes += size;
+    end += char.length;
+  }
+  return { text: Buffer.from(text.slice(0, end), "utf8").toString("utf8"), truncated: true };
 }
 
 function fileChangeTitle(changes: readonly CodexProtocol.v2.FileUpdateChange[]): string {

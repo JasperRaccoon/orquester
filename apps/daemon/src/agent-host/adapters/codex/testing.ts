@@ -102,6 +102,28 @@ export type MockTurnScript =
        */
       keepParentRunning?: boolean;
     }
+  /**
+   * A collab child asks the user about one of ITS items: the launch, the
+   * child's own turn and `item/started`, an approval request naming the
+   * child's thread, then the item's end as the answer decides it, and the
+   * child's turn. The child's item carries the raw id the parent's own item
+   * would in this turn — only the child's namespace tells the two apart.
+   *
+   * `item: "question"` asks instead (`item/tool/requestUserInput`, one
+   * question `branch` with the options `main` and `dev`), and the child's
+   * turn ends once it is answered.
+   *
+   * `parentSettles` ends the PARENT's turn while the child works on, as a
+   * parent whose `wait` returned does: `"before-asking"` between the child's
+   * `item/started` and its request, `"while-asking"` right after the request,
+   * with the card still open. Unset, the parent's turn ends after the child's.
+   */
+  | {
+      kind: "child-approval";
+      childThreadId: string;
+      item: "command" | "file-change" | "question";
+      parentSettles?: "before-asking" | "while-asking";
+    }
   | { kind: "silent" }
   | { kind: "exit-mid-turn"; exitCode: number };
 
@@ -410,6 +432,53 @@ async function runTurn(turnId, script) {
       send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, "completed") } });
       activeTurnId = null;
       return;
+    }
+    case "child-approval": {
+      const child = script.childThreadId;
+      const childTurn = child + "-turn";
+      let parentSettled = false;
+      const settleParent = () => {
+        send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, "completed") } });
+        activeTurnId = null;
+        parentSettled = true;
+      };
+      const ask = async (method, params) => {
+        if (script.parentSettles === "before-asking") settleParent();
+        const reply = askServerRequest(method, params);
+        if (script.parentSettles === "while-asking") settleParent();
+        return await reply;
+      };
+      send({ method: "item/started", params: { item: { type: "subAgentActivity", id: "sub-" + child, kind: "started", agentThreadId: child, agentPath: "/root/" + child }, threadId, turnId, startedAtMs: 0 } });
+      send({ method: "turn/started", params: { threadId: child, turn: turnObject(childTurn, "inProgress") } });
+      if (script.item === "question") {
+        await ask("item/tool/requestUserInput", {
+          threadId: child, turnId: childTurn, itemId,
+          questions: [{
+            id: "branch", header: "Branch", question: "Which branch?", isOther: false, isSecret: false,
+            options: [{ label: "main", description: "The default branch" }, { label: "dev", description: "The work branch" }]
+          }],
+          isBlocking: true, autoResolutionMs: null
+        });
+      } else if (script.item === "file-change") {
+        const changes = [{ path: "/tmp/child.txt", kind: { type: "add" }, diff: "+from the child\\n" }];
+        send({ method: "item/started", params: { item: { type: "fileChange", id: itemId, changes, status: "inProgress" }, threadId: child, turnId: childTurn, startedAtMs: 0 } });
+        const reply = await ask("item/fileChange/requestApproval", { threadId: child, turnId: childTurn, itemId, startedAtMs: 0, reason: null, grantRoot: null });
+        const accepted = reply && reply.result && reply.result.decision !== "decline" && reply.result.decision !== "cancel";
+        send({ method: "item/completed", params: { item: { type: "fileChange", id: itemId, changes, status: accepted ? "completed" : "declined" }, threadId: child, turnId: childTurn, completedAtMs: 1 } });
+      } else {
+        const item = (status, output) => ({ type: "commandExecution", id: itemId, pluginId: null, scriptPath: null, command: "ls -1", cwd: process.cwd(), processId: null, source: "agent", status, commandActions: [], aggregatedOutput: output, exitCode: output === null ? null : 0, durationMs: null });
+        send({ method: "item/started", params: { item: item("inProgress", null), threadId: child, turnId: childTurn, startedAtMs: 0 } });
+        const reply = await ask("item/commandExecution/requestApproval", {
+          kind: "command", threadId: child, turnId: childTurn, itemId, startedAtMs: 0, environmentId: "local",
+          command: "ls -1", cwd: process.cwd(), commandActions: [], proposedExecpolicyAmendment: null,
+          availableDecisions: ["accept", "decline", "cancel"]
+        });
+        const accepted = reply && reply.result && reply.result.decision === "accept";
+        send({ method: "item/completed", params: { item: item(accepted ? "completed" : "declined", accepted ? "a.ts\\n" : null), threadId: child, turnId: childTurn, completedAtMs: 1 } });
+      }
+      send({ method: "turn/completed", params: { threadId: child, turn: turnObject(childTurn, "completed") } });
+      if (parentSettled) return;
+      break;
     }
     case "silent":
       return;

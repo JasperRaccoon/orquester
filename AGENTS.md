@@ -435,7 +435,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `bootSettlePending`: §3.4's stale-`pending`-turn settle, which the reconcile used to run on every
   idle thread at boot, runs on the thread's **first load**, inside `loadRuntime` before the runtime
   is published — and so does the closing of the requests, calls and tasks its last process left
-  open (`closeLeftoverWork`, see "A running state never outlives its process"), which an orphan gets in
+  open and the naming of its legacy agents' launches (`repairLeftovers`, see "A running state never
+  outlives its process" and "Agent rows must survive resumes and retention"), which an orphan gets in
   the reconcile itself — so no read, stream snapshot or command can see the thread unsettled — and
   never at boot. A head that cannot be read is folded, as before. Measured before, on the owner's VPS
   (2026-09-23): 16 s of folding for 78 MB of logs, all of it on the readiness path — an 18 s
@@ -746,7 +747,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   request the fold shows pending but a message-mode question, cancelled with the host's own Stop
   rows (`settlePendingRequests`, one builder: `cancelledRequestActivity` in `events.ts` — "Request
   cancelled" `approval.resolved {decision: "cancel"}` / "Question cancelled" `user-input.resolved`,
-  on the turn the head says is running), which close it for good (`closedRequestIds`), never the
+  on the turn the head says is running — or said, when the orphan reconcile settled it first:
+  `runningTurnId`), which close it for good (`closedRequestIds`), never the
   provider's "resolved"/"submitted" rows, which would say someone answered; a message-mode question
   (`responseMode: "message"`) stays pending, where a Stop would cancel it too, since it parked no
   request and a later user message answers it; then for every open call a
@@ -758,7 +760,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   rides unmarked, the command kept — marked, it offered "Load full output" and an MCP `outputItemId`
   that read the same row back — while an output preview, Grok's `rawOutput` or a Claude update's
   result whose completion never landed, never passes for the whole output: the opening row's whole
-  data rides instead, and the cut copy rides marked `truncated` only when no row holds whole data) —
+  data rides instead, and the cut copy rides marked `truncated` only when no row holds whole data),
+  and the files that row names at its top level (`changedFiles`, the slimmer's promotion out of the
+  data: a Codex patch update is stored as `data: {}` beside them, so a closer that copied the data
+  alone listed no files in the GUI's row or the MCP's entry) —
   except a call no row of the window anchors (`anchorsCall`,
   `packages/api/src/agent-chat/call-anchor.ts`: every row of it turnless and ownerless — what a
   rewind leaves of a woken Claude parent's call, rule (6) below), which no view shows and which a
@@ -776,11 +781,28 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   log, so the first "Load older" page ended at its first chunk and every row between it and the
   window was on neither; its readers read it as settled instead (below). It runs in
   `settleOnFirstLoad` (the `bootSettlePending` settle, before the runtime is published) and in
-  `reconcileThread` after `settleStalePendingTurns` — for an orphan before its turn is settled or
-  continued, since a continuation's process owns none of it — never for a thread an adapter lists
-  as live (`listSessions()`); best-effort (a failed append is logged, the thread still loads); in
-  passes that skip what an earlier one closed, because the roster lists 100 rows, live first. A
-  second load finds nothing to close. A closer on an old turn is a late reference: the index grows
+  `reconcileThread` — for an orphan AFTER its turn is settled, BEFORE it is continued, since a
+  continuation's process owns none of it — never for a thread an adapter lists as live
+  (`listSessions()`); best-effort (a failed append is logged, the thread still loads); in passes
+  that skip what an earlier one closed, because the roster lists 100 rows, live first. A second load
+  finds nothing to close. **The turn that process was running ends when the process died, not at
+  the restart:** the fold settles a turn at its settling `thread.session-set`'s `occurredAt`, and a
+  reconcile that stamped its settle with the restart counted the whole downtime in the turn's
+  duration. So the reconcile's settle — `settleAsError` for an orphan it does not continue,
+  `settleStalePendingTurns` for a stale `pending` turn (and the running turn the same `stopped`
+  settles) — is its FIRST row, stamped `crashSettleAt`: the `occurredAt` of the log's last line
+  (`lastWriteAt`, which the fold keeps as `head.updatedAt`, so nothing is read for it), or the
+  start of a turn it settles — for a turn that never started, its request — when that is later:
+  ingestion stamps a flushed message with its first delta's time, so the last line can read seconds
+  before its own turn's start, and a settle there ended the turn before it began. Every row after
+  it — the notice, the closings, the launch names — keeps the clock's time, which is when the host
+  noticed, and the log's times never go back (a settle is never stamped earlier than the line
+  above it). The stale settle is written even when the session already reads `stopped`
+  (`persistSession`'s `force`): skipped there as an unchanged session, it left the turn `pending`
+  for good — the thread read "working" forever and every later first load wrote the notice again.
+  A continuation that fails later settles at its own time (it ran in this host's lifetime), and so
+  does a prepare that could not reach disk (the repairs before it are already at the clock's time).
+  A closer on an old turn is a late reference: the index grows
   that turn's range over it, within `MAX_LATE_REFERENCE_BYTES` of the next turn's start
   (`extendReferenced`), and "Load older" still serves every row; a later rewind that keeps that turn
   and drops the ones after it clips the range at its cut, as it clips every surviving range; the
@@ -812,7 +834,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   closer rides the turn its work started in, so a turn of seconds read "Worked for 50h". Only a turn
   still running, or one no row describes, is timed by its rows. A drill-in's folds are always timed
   by the agent's own rows (`drill-in.logic.ts` passes no `turns`): a background agent works long
-  past the parent turn its rows ride, and that turn's seconds would say nothing of it.
+  past the parent turn its rows ride, and that turn's seconds would say nothing of it. A thinking
+  block never holds a fold open, so there — no turn is unfolded as running — a thought still being
+  written can end a folded turn: a fold its rows time keeps a clock (`TurnFoldClock` in
+  `rows.logic.ts`: its start and the POSITIONS of its answer and its last row, which a token never
+  moves), and the streamed-text fast path relabels it off that clock, so its "Worked for …" follows
+  the tokens and closes on the thought's last write. The drill-in holds its disclosure sets across
+  projections for that fast path (`shallowEqualInput` compares them by identity; a fresh pair per
+  projection rebuilt every row on every token).
 - **The agent host is a protected kill target but its children are not.** `system-status.ts` takes
   the host pid in `protectedPids` and registers it as an extra tree **root** (`extraRootPids`), so
   a runaway provider child stays killable from Settings → System even though the host runs in a
@@ -843,9 +872,22 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `turn/started` after a settled run, or for a child this session never saw launched
   (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no end, and
   `interacted` carries no status — neither is evidence about the run in progress. An agent first
-  launched by a host older than this change has no launch id on its first start (such logs are
-  written until the deploy), so a relaunch from a terminal state does not reopen it; that would
-  need a fold change weakening the late-delivery guard, and is not made.
+  launched by a host older than this change has no launch id on its first start, so a relaunch from
+  a terminal state could not reopen it; rather than weaken the late-delivery guard in the fold, a
+  thread's first load in a host lifetime gives each settled one — OpenCode and Codex threads only
+  (the head's adapter): Claude always launched with an id, and Grok surfaced no agents before it did
+  so with ids — one appended `task.started` naming `legacy-launch:<taskId>` (`legacyLaunchStarts`
+  in `leftover-work.ts`, `recordLegacyLaunches`, after the leftover closings so an agent they stop
+  counts as settled). It rides the agent's first start's turn (a rewind keeps or drops the two
+  together) and owner, carries its newest row's linkage like a closer, and its row's
+  `createdAt`/`updatedAt` are the roster's own `updatedAt` for the agent (the event is stamped with
+  the load's time), so the roster reads exactly as before — a row stamped with the load's time
+  would rank every legacy agent newest among the settled rows and let the 100-row cap drop the
+  agents that really are — and only the launch id moves; it is that agent's anchor, merged into its
+  spawn row, never a row of its own. An `idle` agent gets none (any start reopens it, and this one
+  would), an active one is the closings' to settle first, and one with no start in the window gets
+  none (a start would create it in the roster, running, once retention dropped its other rows).
+  Once per agent: the next load finds a launch id and names nothing.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
@@ -893,7 +935,27 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   — `callOwnersOf` in `entries.logic.ts` (`itemsForAgent` puts it in its owner's drill-in,
   `deriveWorkLogEntries` keeps it out of every other view) and `unstampedChunkOwner` in
   `mcp/transcript.ts`. One whose call's rows are gone stays the parent's; the fold, its retention
-  and the history bridge keep mirroring the log.
+  and the history bridge keep mirroring the log. **A Codex collab child keeps the rule too**
+  (`childItemEvents`, `adapters/codex/normalise.ts`): its `item/*` became only the roster's
+  `task.progress` tick and its output deltas were dropped as chatter, so a Codex drill-in showed
+  ticks and never a command. A child's call is now the child's own rows — `agentId` on the envelope
+  (ingestion reads a row's author there: stamped on the payload alone, a child's call starting would
+  end the parent's thinking block) and on the payload — under `codex-child:<thread>:<item>`
+  (`childItemId`: a child's `call_1` is not the parent's), riding the parent turn live when the call
+  started; its own `turn/completed`, its `thread/closed`, a Stop or the exit closes what it
+  abandons, never the parent's settling turn (a Stop closes calls before tasks, as the exit does).
+  Its approvals stay the parent's card — no owner, on the parent turn live as the request arrives
+  (`requestTurnId`), like the call — joined to the namespaced call in the child's OWN request
+  bookkeeping (`requestsOf`, `session.ts`), which only the child's own turn end, its thread's close,
+  a Stop or the exit clears: cleared by the parent's settle, a decline on a card still open when a
+  parent's `wait` returned read "you were not asked", and a file change's card lost its diff. A
+  child's QUESTION rides no turn at all (`questionTurnId`): a turn's end dismisses the
+  native-callback questions on it (`settleStrandedQuestions`, in the log only — the adapter is
+  never answered), which on the parent's turn swept the child's open card while the child stayed
+  blocked, and a turn the thread never had (the child's own) is dropped by every rewind; nothing
+  settles an approval by its turn, so approvals stay on the parent's. A child's MCP progress is
+  its heartbeat (`tool.progress` on its task); its message and reasoning items stay ticks (codex
+  fixtures README observation 20).
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
@@ -946,6 +1008,62 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
   `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
   a surfaced subagent.
+- **"Load full output" on a command whose output streamed reads the host's join, never the row.**
+  A row holds only the chunks its window kept (a parent's 500 rows, an agent's 200), and a streamed
+  command's item holds at most a preview of what it printed (a Codex completion's 180-character
+  detail; a background shell's completion, its command and exit code) — reading the item back showed
+  that payload as JSON. So a row whose command streamed (`streamedOutput`, `WorkLogEntry`: a
+  `command_output` chunk, every lifecycle row of a call whose chunks the derivation input holds —
+  wherever they fall — the row `joinLifecycleDetails` puts them on, and every lifecycle row of a
+  Claude background shell's `bgshell:` call, whose chunks the cross-agent ceiling can evict while
+  retention keeps its start) offers the button whether or not its payload was cut — a running
+  command's start included (`fullOutputSourceOf`) — and the viewer reads the call's join
+  (`readFullOutput`, `packages/ui/src/lib/agent-chat/full-output.ts`) through the chat transport's
+  `readItemOutput`: `GET …/items/:itemId/output` one window at a time,
+  `THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide, each starting where the last ended — else the read
+  fails rather than stitch a text the call never printed — with "still running" / "only the first 8
+  MiB can be shown here" notes above the text (the log keeps every chunk; only the join stops at its
+  cap). A host from before windows answers the whole join, taken as it comes; a 404 or an empty join
+  falls back to the item read, never an error — which shows a command's own output as text
+  (`commandOutputText`, the MCP's first step; never out of an item stored cut, `payload.truncated`)
+  and anything else as before (`fullOutputText`). Never a file change's join: its chunks are its
+  result text (the MCP's rule). The subagent drill-in opens the same viewer: a read, not a command.
+  The read is not routed through the thread store: an output the user asked to see once is not
+  thread state.
+- **OpenCode: a subagent's answer arrives after its run ended, and a running command restates its
+  output.** (fixtures README observations 27-28, `adapters/opencode/normalize.ts`.) (1) The
+  child's own `session.idle` ends a run just BEFORE the parent's `task` part completes with the
+  answer (fixture 12, lines 179-180), and the once-per-run end guard dropped that part: every
+  OpenCode roster row read `result: null`. The part now gives the run's end its result — one more
+  `task.completed` of the same run, same linkage, `completed`, `summary` the text inside the tool's
+  `<task_result>` envelope (`taskResultText`) — once per run (`resultPending`), never for a stale
+  part of an earlier call; the roster fold takes a settled row's result from a later completion
+  and reopens nothing. A part that settles first ends the run itself, with the same text. A run in
+  the BACKGROUND answers "still working" at once, and 1.18.32 delivers its answer as a prompt to
+  the calling session instead — a user message whose one text part is `synthetic` and wraps it in
+  the same envelope, naming the child — which gives the run its result the same way
+  (`takeBackgroundResult`; carried by the child's own end when it comes first) — only for a run
+  whose launching part answered in the background (`answersInBackground`) and whose call's
+  description the answer's summary names, so an answer arriving after a relaunch is never the new
+  run's. That prompt is still no row, live or replayed: E6 history skips `synthetic` user text
+  parts (`history.ts`). No result follows an end by `session.error` or a stop. (2) Every running
+  frame of a `bash` part restates ALL its output so far in `state.metadata.output`, which rode only
+  the item row's `data.state` — dropped by the wire slimmer — so nothing showed until the
+  completion. Each frame is cut against the value last seen for the part (`advanceOutputMark`,
+  `OpenCodeSessionState.outputMarks`) into `content.delta {command_output}` of just what it adds,
+  on the call's item and under its owner: past 30 000 characters the tool keeps `"...\n\n"` and a
+  sliding tail window, and what follows the window's longest overlap with the last value is new —
+  only a value carrying that head is searched. Never text already shown: a value that rewinds, or
+  of any other shape, adds nothing, and output that repeats itself can overlap further than it
+  really did — a repeat is then lost, not doubled. The joined chunks are the call's output in the
+  GUI, settled too, and the final `output` is not always the last running value (a timeout's or an
+  abort's `<shell_metadata>` note, a cut behind "Full output saved to", what a missed frame
+  carried): the completion first appends what it holds past the stream (`finalOutputRemainder`: the
+  rest of a final output that extends it, else what follows the LAST place it holds the stream's
+  last 512 characters — no anchor under 64 — else nothing), BEFORE its own item event closes the
+  call's output buffer; a final output the tool cut ends that with its note's pointer,
+  `Full output saved to: <file>`, which the join otherwise never holds. A stream that showed
+  nothing adds nothing, and an errored part has no final output.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
@@ -1091,7 +1209,9 @@ it cannot read whole is named in `unavailableTurns` with a hint, and a failed pa
 error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
 row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
 output from the places the row's preview reads (`commandOutputText`, one list with
-`commandDisplayDetail`), unless the item is stored already cut (an update). A command's output
+`commandDisplayDetail`), unless the item is stored already cut (`truncated`: an update, or a Codex
+command's completion, which keeps its `aggregatedOutput` in `data.item` up to 64 KiB and past that
+only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`). A command's output
 that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
 command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
 and answered with `running`/`truncated`; never a file change's (Claude streams its result text as

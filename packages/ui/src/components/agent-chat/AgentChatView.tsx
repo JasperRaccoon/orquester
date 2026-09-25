@@ -7,7 +7,6 @@ import {
   startedTurns,
   TERMINAL_SUBAGENT_STATUSES
 } from "@orquester/api/agent-chat";
-import type { ThreadItem } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -50,6 +49,13 @@ import {
   type RewindTarget
 } from "../../lib/agent-chat/rewind.logic";
 import { cn } from "../../lib/cn";
+import {
+  createViewerReads,
+  fullOutputNotes,
+  fullOutputText,
+  readFullOutput,
+  type FullOutputSource
+} from "../../lib/agent-chat/full-output";
 import { canLoadOlderHistory } from "../../lib/agent-chat/history.logic";
 import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
@@ -67,6 +73,7 @@ const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
 import { ChatBannerDock } from "./banners/ChatBannerDock";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
+import { FullOutputPane } from "./FullOutputPane";
 import { ChatStatusLine } from "./status/ChatStatusLine";
 import { ChatTimeline } from "./timeline/ChatTimeline";
 import {
@@ -100,38 +107,27 @@ function dispatch(run: () => Promise<unknown>): void {
   });
 }
 
-/** The read-only overlay for a turn diff or one item's full, unslimmed payload. */
+/**
+ * The read-only overlay for a turn diff, or for one row's whole output: its
+ * item's full, unslimmed payload, or a streamed command's output as the host
+ * joins it (`readFullOutput`).
+ */
 interface ChatViewerState {
   kind: "diff" | "output";
   title: string;
   loading: boolean;
   diff?: string;
   text?: string;
+  /** What the read says of `text` (`fullOutputNotes`): so far, or its head. */
+  notes?: readonly string[];
   error?: string;
 }
+
+const NO_NOTES: readonly string[] = [];
 
 /** The daemon's own message where it sent one, else a plain fallback. */
 function errorText(error: unknown, fallback: string): string {
   return (error instanceof ApiError ? error.serverMessage : null) ?? fallback;
-}
-
-/**
- * An unslimmed item as text. The §5.6 allow-list is what the *row* renders; the
- * full payload is by definition whatever the adapter wrote, so it is shown as
- * pretty JSON rather than re-interpreted — a plain string payload stays plain.
- */
-function fullOutputText(item: ThreadItem): string {
-  if (item.kind === "message") {
-    return item.text;
-  }
-  if (typeof item.payload === "string") {
-    return item.payload;
-  }
-  try {
-    return JSON.stringify(item.payload, null, 2);
-  } catch {
-    return item.summary;
-  }
 }
 
 /**
@@ -633,56 +629,81 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // slice is deliberate — a 200 KB unslimmed payload is something the user
   // asked to look at once, not thread state every later render pays for.
   const [viewer, setViewer] = React.useState<ChatViewerState | null>(null);
+  // One read at a time (`createViewerReads`): opening another, or closing the
+  // viewer, retires the one in flight, whose answer is then dropped rather
+  // than painted over what the user looks at now — or reopening a viewer they
+  // closed — and a streamed output stops asking for its next window.
+  const [viewerReads] = React.useState(createViewerReads);
+  const closeViewer = React.useCallback(() => {
+    viewerReads.retire();
+    setViewer(null);
+  }, [viewerReads]);
   const openTurnDiff = React.useCallback(
     (turnCount: number) => {
+      const signal = viewerReads.begin();
       setViewer({ kind: "diff", title: `Turn ${turnCount}`, loading: true });
       void api
         .agentChatTurnDiff(sessionId, turnCount)
-        .then((response) =>
+        .then((response) => {
+          if (signal.aborted) return;
           setViewer({
             kind: "diff",
             title: `Turn ${turnCount}`,
             loading: false,
             diff: response.diff
-          })
-        )
-        .catch((error: unknown) =>
+          });
+        })
+        .catch((error: unknown) => {
+          if (signal.aborted) return;
           setViewer({
             kind: "diff",
             title: `Turn ${turnCount}`,
             loading: false,
             error: errorText(error, "That turn's diff could not be read.")
-          })
-        );
+          });
+        });
     },
-    [api, sessionId]
+    [api, sessionId, viewerReads]
   );
   const loadFullOutput = React.useCallback(
-    (itemId: string) => {
+    (itemId: string, source?: FullOutputSource) => {
+      const signal = viewerReads.begin();
       setViewer({ kind: "output", title: "Full output", loading: true });
-      void api
-        .agentChatItem(sessionId, itemId)
-        .then((response) =>
+      void readFullOutput(
+        {
+          item: (id) => api.agentChatItem(sessionId, id),
+          streamedOutput: (id) => api.agentChatItemOutput(sessionId, id, signal)
+        },
+        itemId,
+        source
+      )
+        .then((output) => {
+          if (signal.aborted) return;
           setViewer({
             kind: "output",
             title: "Full output",
             loading: false,
-            text: fullOutputText(response.item)
-          })
-        )
-        .catch((error: unknown) =>
+            text: output.kind === "streamed" ? output.text : fullOutputText(output.item),
+            notes: fullOutputNotes(output)
+          });
+        })
+        .catch((error: unknown) => {
+          if (signal.aborted) return;
           setViewer({
             kind: "output",
             title: "Full output",
             loading: false,
             error: errorText(error, "That output is no longer available.")
-          })
-        );
+          });
+        });
     },
-    [api, sessionId]
+    [api, sessionId, viewerReads]
   );
-  // A viewer belongs to the thread that opened it.
-  React.useEffect(() => setViewer(null), [sessionId]);
+  // A viewer belongs to the thread that opened it; its read, to the view.
+  React.useEffect(() => {
+    closeViewer();
+    return () => viewerReads.retire();
+  }, [closeViewer, sessionId, viewerReads]);
 
   /**
    * Click-through from a changed-file row to the file browser.
@@ -731,6 +752,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               roster={roster.agents}
               projectPath={projectPath}
               onBack={() => setDrillInAgentId(null)}
+              onLoadFullOutput={paintOnly ? noop : loadFullOutput}
             />
           ) : (
             <ChatTimeline
@@ -923,11 +945,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
 
       {/* Read-only §6.3 reads, on the app's own modal layer (z-100) — above the
           chat overlays by construction, so the ladder needs no new z-index. */}
-      <Modal open={viewer !== null} onClose={() => setViewer(null)} className="max-h-[85vh] max-w-4xl">
+      <Modal open={viewer !== null} onClose={closeViewer} className="max-h-[85vh] max-w-4xl">
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-11 shrink-0 items-center justify-between border-b border-neutral-800 px-3">
             <span className="truncate text-sm text-neutral-200">{viewer?.title}</span>
-            <ModalCloseButton onClose={() => setViewer(null)} />
+            <ModalCloseButton onClose={closeViewer} />
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {viewer?.error ? (
@@ -939,9 +961,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 emptyLabel="This turn changed no files."
               />
             ) : (
-              <pre className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs text-neutral-300">
-                {viewer?.loading ? "Loading…" : (viewer?.text ?? "")}
-              </pre>
+              <FullOutputPane
+                loading={viewer?.loading ?? false}
+                text={viewer?.text ?? ""}
+                notes={viewer?.notes ?? NO_NOTES}
+              />
             )}
           </div>
         </div>

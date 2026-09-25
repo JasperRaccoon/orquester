@@ -16,6 +16,9 @@
 import {
   agentChatCommandPath,
   agentChatRoutes,
+  isThreadItemOutputWindow,
+  THREAD_ITEM_OUTPUT_MAX_BYTES,
+  THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
   type AccountCommandBody,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
@@ -27,6 +30,8 @@ import {
   type RefreshProviderResponse,
   type ThreadHistoryPage,
   type ThreadHistoryQuery,
+  type ThreadItemOutputResponse,
+  type ThreadItemOutputWindowResponse,
   type ThreadItemResponse,
   type ThreadReadResponse,
   type ThreadSearchQuery,
@@ -130,6 +135,32 @@ export interface AgentChatTransport {
     options?: { after?: number; signal?: AbortSignal }
   ): Promise<ThreadReadResponse>;
   readItem(sessionId: string, itemId: string, signal?: AbortSignal): Promise<ThreadItemResponse>;
+  /**
+   * `GET …/items/:itemId/output`, whole — the streamed output of the tool
+   * call the item belongs to: its `tool.output` chunks, which no item's
+   * payload holds and the retained window may hold only part of, joined by
+   * the host from the log. Read ONE window at a time (`?offset=&maxBytes=`,
+   * each {@link THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES} wide: the reader wants
+   * all of it, so the fewest round trips) from 0 to the end, and answered in
+   * the whole join's own shape, flags from the last window — `complete`
+   * false while the call runs, `truncated` once the join passed the host's
+   * 8 MiB cap. A host from before windows ignores the query and answers that
+   * whole join itself, which is taken as it comes.
+   *
+   * `null` on a 404 — the host's own `ITEM_NOT_FOUND` (no such item, or one
+   * naming no call), or a host from before the route answering its route
+   * miss — so the caller reads the item instead; never an error. A body of
+   * neither shape, or windows that do not meet end to end, reject: a
+   * stitched text would hold what the call never printed.
+   *
+   * Optional: a transport a runtime supplies itself (`Transporter.agentChat()`)
+   * may predate it, and a caller then reads the item, as it always did.
+   */
+  readItemOutput?(
+    sessionId: string,
+    itemId: string,
+    signal?: AbortSignal
+  ): Promise<ThreadItemOutputResponse | null>;
   /**
    * `GET …/history` — a page of turns OLDER than what the client holds,
    * folded from the log by the host (design 2026-09-23 §C "History page").
@@ -300,6 +331,45 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
       });
     },
 
+    async readItemOutput(sessionId, itemId, signal) {
+      const path = agentChatRoutes.itemOutput(sessionId, itemId);
+      const texts: string[] = [];
+      let offset = 0;
+      let call: string | null = null;
+      for (;;) {
+        let body: unknown;
+        try {
+          body = await send<unknown>("GET", path, {
+            query: { offset, maxBytes: THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES },
+            ...(signal === undefined ? {} : { signal })
+          });
+        } catch (error) {
+          if (error instanceof AgentChatCommandError && error.status === 404) {
+            return null;
+          }
+          throw error;
+        }
+        if (!isThreadItemOutputWindow(body)) {
+          if (isWholeItemOutput(body)) {
+            return body;
+          }
+          throw new Error("Expected a tool call's streamed output.");
+        }
+        const next = nextWindowOffset(body, offset, call);
+        call = body.toolUseId;
+        texts.push(body.text);
+        if (next === undefined) {
+          return {
+            toolUseId: body.toolUseId,
+            output: texts.join(""),
+            complete: body.complete,
+            truncated: body.truncated
+          };
+        }
+        offset = next;
+      }
+    },
+
     readHistory(sessionId, query, signal) {
       return send<ThreadHistoryPage>("GET", agentChatRoutes.history(sessionId), {
         query: definedQuery({ before: query.before, turns: query.turns }),
@@ -384,6 +454,55 @@ function definedQuery(
     }
   }
   return defined;
+}
+
+/**
+ * The whole join ({@link ThreadItemOutputResponse}), as a host from before
+ * windows answers `GET …/items/:itemId/output` whatever the query asks: its
+ * route matches on the path alone.
+ */
+function isWholeItemOutput(body: unknown): body is ThreadItemOutputResponse {
+  return (
+    isRecord(body) &&
+    typeof body.toolUseId === "string" &&
+    typeof body.output === "string" &&
+    typeof body.complete === "boolean" &&
+    typeof body.truncated === "boolean"
+  );
+}
+
+const utf8 = new TextEncoder();
+
+/**
+ * Where the window after `window` starts — `undefined` once `window` reached
+ * the join's end — for a window the chain can take: the one asked for (at
+ * `offset`, which is 0 or the last window's `nextOffset`: a character
+ * boundary of a join that only grows at its end, so the host has no reason
+ * to move it), of the same call, within the host's caps, inside the join,
+ * and naming as its `nextOffset` exactly where its text ends — never where
+ * it began, so every read advances. Anything else throws: windows that do
+ * not meet end to end would stitch a text the call never printed.
+ */
+function nextWindowOffset(
+  window: ThreadItemOutputWindowResponse,
+  offset: number,
+  call: string | null
+): number | undefined {
+  const bytes = utf8.encode(window.text).length;
+  const end = window.offset + bytes;
+  const sane =
+    window.offset === offset &&
+    (call === null || window.toolUseId === call) &&
+    window.totalBytes <= THREAD_ITEM_OUTPUT_MAX_BYTES &&
+    bytes <= THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES &&
+    end <= window.totalBytes &&
+    (window.nextOffset === undefined
+      ? end === window.totalBytes
+      : bytes > 0 && window.nextOffset === end);
+  if (!sane) {
+    throw new Error("Expected the next window of a tool call's streamed output.");
+  }
+  return window.nextOffset;
 }
 
 /**

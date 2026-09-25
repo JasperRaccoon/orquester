@@ -181,7 +181,10 @@ function toolLifecyclePayload(
     ...(p.detail !== undefined ? { detail: truncateDetail(p.detail) } : {}),
     ...(p.data !== undefined ? { data: p.data } : {}),
     ...(p.agentId !== undefined ? { agentId: p.agentId } : {}),
-    ...(p.parentToolUseId !== undefined ? { parentToolUseId: p.parentToolUseId } : {})
+    ...(p.parentToolUseId !== undefined ? { parentToolUseId: p.parentToolUseId } : {}),
+    // The adapter stored only a head of the item's output (Codex's bounded
+    // `aggregatedOutput`): the row says so, as a row stored slimmed does.
+    ...(p.truncated === true ? { truncated: true } : {})
   };
 }
 

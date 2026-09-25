@@ -476,9 +476,9 @@ the roster shows whatever the provider reports. The mapping this capture support
 | the parent's `task` part going `running` (next frame) | `task.started` with `toolUseId` = the part's `callID`, the launch id a relaunch is told apart by (observation 26), then `task.progress` |
 | child `session.updated` | `task.progress` on a real title change (an unchanged title is re-stated on every recompute — observation 25) |
 | child `session.status` | `task.updated {status: running \| idle}` |
-| child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal |
+| child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal; the parent's `task` part that follows it gives that end its result (observation 27) |
 | child `session.error` | `task.completed {status:"failed"}` |
-| child `message.part.updated` (tool) | `task.progress {lastToolName}` **and** an `item.*` row stamped `agentId` |
+| child `message.part.updated` (tool) | `task.progress {lastToolName}` **and** an `item.*` row stamped `agentId`; while a command runs, its output as `command_output` chunks stamped the same (observation 28) |
 | child text / reasoning parts | `content.delta` stamped `agentId` |
 | child `todo.updated` | `task.progress` with an `n/m steps done` summary — a child's plan is its own, and must not overwrite the thread's `turn.plan` |
 
@@ -699,13 +699,133 @@ What the normaliser makes of it (`linkChildFromTaskPart`):
   retention").
 - A live part naming a **settled** child under a `callID` never seen for it is a relaunch: a
   new `task.started` naming it, before any row of the new run; the child's own
-  `session.idle` ends it.
+  `session.idle` ends it, and the part's own end then gives that run its result
+  (observation 27).
 - Any other part whose `callID` is not the child's current launch — a frame of any call
   seen for it before (an earlier launch, a call handed over while it worked), a call on a
   child that is still working — emits no task row: it can neither start a run nor end one.
 - A `completed` part with `metadata.background: true` does not settle the child.
 
 A capture of a real `task_id` resume would confirm the frame order; none has been made.
+
+### 27. A child's run ends before the part that carries its answer
+
+Fixture 12, lines 177-180: the child settles, and only THEN does the parent's `task` part
+complete with what the child said:
+
+```jsonc
+{"type":"session.status","properties":{"sessionID":"ses_f3dfd3d8…","status":{"type":"busy"}}}
+{"type":"session.status","properties":{"sessionID":"ses_f3dfd3d8…","status":{"type":"idle"}}}
+{"type":"session.idle","properties":{"sessionID":"ses_f3dfd3d8…"}}
+{"type":"message.part.updated","properties":{"part":{"tool":"task","callID":"call_107260",
+  "state":{"status":"completed","output":"<task id=\"ses_f3dfd3d8…\" state=\"completed\">\n<task_result>\nThe files in the current directory are:\n\n- README.md\n- a.ts\n</task_result>\n</task>",…}}}}
+```
+
+The child's `session.idle` is its run's end (observation 19), so that end carries no result,
+and a second end was never written: every OpenCode roster row read `result: null`. The part
+now gives the run's end its result — one more `task.completed` of the same run, same linkage,
+`status: "completed"`, `summary` the text inside `<task_result>` — which the roster fold takes
+the way it takes a result from any later completion of a settled row: status and times kept,
+nothing reopened. Once per run: a repeated frame of the part, a stale part of an earlier call
+(observation 26) and a background answer (`metadata.background`, "still working") add nothing.
+A part that errors after the idle gives its error text the same way; the run's end stays the
+child's `completed`. A part that settles FIRST ends the run itself, with the same text.
+
+The envelope is the `task` tool's wrapping for the parent's model: `<task id="…" state="…">`,
+an optional `<summary>` line, then `<task_result>` (or `<task_error>`) around the text. 1.18.5
+writes it as above; 1.18.32's `TaskTool` builds the same one (`Ur`, read from the source, not
+captured). An output of any other shape is the result as it stands.
+
+**A background run's answer never rides its part.** Read from 1.18.32's `TaskTool` source, not
+captured: a call run in the background completes at once with a `state="running"` envelope
+("Background task started", `metadata.background: true`), and when the child's job settles,
+`injectBackgroundResult` **prompts the session that made the call** with the answer — a user
+message whose one text part is `synthetic: true`, its text the same envelope naming the child in
+`id`, with a `<summary>Background task completed: <description></summary>` line
+(`state="error"` and `<task_error>` for a failed job). The normaliser takes that part as the
+run's result, once, as it takes a foreground part's output (`takeBackgroundResult`); an answer
+that comes before the child's own `session.idle` rides that end instead. A part that is not
+`synthetic`, or names no child of the thread, is no result.
+
+Only a run whose launching part answered in the background takes such an answer, and only one
+whose summary, where it names the call's description, names this run's: an answer that arrives
+after a relaunch is the earlier run's, and never becomes the new run's result.
+
+How that prompt renders: live, it is no row at all — the demux emits no user-role text part,
+whoever wrote it (the host writes a thread's own prompts from its `/turn` commands, never from
+the stream, and this one it never wrote at all). A thread adopted from OpenCode's own history
+(`history.ts`) skips every `synthetic` user text part — the server wrote it, the user never
+typed it — so a prompt made only of such parts replays no `You` row, and the reply keeps its
+turn. History replays no roster rows at all (it reads the thread's own session, whose `task`
+parts replay as plain collab-agent calls), so a background run's result is filled on the live
+path only.
+
+**Known gap:** the parent's reply to that prompt streams as rows with no turn, and the thread
+reads idle while the parent's model writes it — no `/turn` opened one, and the session's `busy`
+with no active turn is ignored. Giving it a turn needs the shapes of that turn on the wire (a
+synthetic turn, like Claude's woken parent), which no capture has yet.
+
+### 28. A running `bash` part restates its whole output on every frame
+
+Fixtures 03, 04 and 12: a command's `running` frames carry `state.metadata.output` — `""`
+first, then everything printed so far — sometimes after a `running` frame with no metadata yet
+(03 l.79, 04 l.76 and l.105, 12 l.157) and sometimes straight after `pending` (04 l.152-153); the
+`completed` frame repeats the value in `metadata.output` and `output` (fixture 04, lines
+110-114):
+
+```jsonc
+{"part":{"tool":"bash","callID":"tool_bash_ScHQ…","state":{"status":"running","metadata":{"output":""},…}}}
+{"part":{"tool":"bash","callID":"tool_bash_ScHQ…","state":{"status":"running","metadata":{"output":"two\n"},…}}}
+{"part":{"tool":"bash","callID":"tool_bash_ScHQ…","state":{"status":"completed","output":"two\n",
+  "metadata":{"output":"two\n","exit":0,"truncated":false},"title":"echo two",…}}}
+```
+
+Identical frames repeat (fixture 04, lines 153-154). **Read from 1.18.32's source, not
+captured:** `ShellTool.run` writes `metadata.output` once per chunk the process prints and
+keeps at most 30 000 characters of it — past that the value is `"...\n\n"` and the last 30 000
+(`Ze`), a window that slides instead of growing. The final `output` is built on its own, and is
+not always the last running value: output past the tool's limits is cut by lines and bytes
+behind `...output truncated...\n\nFull output saved to: <file>\n\n`; a command the tool stopped
+gains `\n\n<shell_metadata>\n…\n</shell_metadata>` saying why (`shell tool terminated command
+after exceeding timeout <n> ms. …`, `User aborted the command`); nothing printed reads
+`(no output)`; the completion's `metadata.output` stays the last running value. A call still
+running when its turn is aborted, and not done 250 ms later, is ended by the session instead:
+`status: "error"`, `error: "Tool execution aborted"`, its metadata kept plus `interrupted: true`.
+
+Nothing showed that output while the command ran: it rode the item row inside `data.state`,
+which the wire slimmer drops. The normaliser now cuts each running frame of a command-like
+part against the value it last saw for that part and emits what it adds as `content.delta
+{command_output}` on the call's item, under the call's owner (a child's carry its `agentId`)
+— the chunks ingestion joins onto the call's row (`advanceOutputMark`, `emitCommandOutput`):
+
+| The new value | Emits |
+|---|---|
+| extends the last one (every captured frame) | the appended text |
+| is a prefix of it, `""` included | nothing; the mark stays — a snapshot never rewinds output |
+| a `"...\n\n"` window | what follows its longest overlap with the end of the last value |
+| such a window keeping nothing of it (a burst longer than the window) | the whole window, its head marking the gap |
+| anything else — no window head | nothing, the mark re-basing on it: without the head, an overlap proves nothing |
+
+Never text already shown: output that repeats itself can overlap further than it really did,
+and then a repeat is lost, not doubled.
+
+The joined chunks are the call's output in the timeline, settled too, so the completion first
+appends what its final `output` holds past them, before its own item event closes the call's
+output buffer (`finalOutputRemainder`): the rest of a final output that extends the stream;
+else what follows the LAST place it holds the stream's end — the stream's last 512 characters,
+or all of a shorter one, and none under 64, which recur in any output by chance; else nothing,
+and the stream stays short of the final output, which the completion row's data keeps whole.
+A final output the tool cut opens with its own note —
+`...output truncated...\n\nFull output saved to: <file>\n\n`, before the stream's end and so
+never in what follows it — and that note's pointer, `\n\nFull output saved to: <file>`, closes
+what the completion appends whichever way the rest went, after any `<shell_metadata>`: the
+GUI's full-output viewer reads the join, and this is how it learns where the whole output was
+saved. A final output that extends the stream was never cut, and needs none. A stream that
+showed nothing adds nothing: its completion's own output is the row's. An errored part —
+`Tool execution aborted` included — has no final output and adds nothing either: the stream is
+the command's output, and the error is the call's status and detail, which the row's failed
+status carries and the MCP transcript shows as text; it is never written into the stream. A
+part's mark goes when it settles, when it is removed and when its message is.
 
 ---
 

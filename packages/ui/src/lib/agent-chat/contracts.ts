@@ -80,11 +80,24 @@ export type AgentChatConnectionState =
 /**
  * The client's own queue of messages it has not dispatched yet. A **different
  * thing** from the host-side queue that holds already-posted `/turn`s behind a
- * running compaction (§3.4). Held in memory only: a queued message is a live
- * intent, not a draft worth persisting (§7.4).
+ * running compaction (§3.4). A live intent, not a draft: it is never merged
+ * into the persisted draft while it waits, but the tab keeps it — with its
+ * `commandId` — in its outbox (`composer-outbox.ts`, `sessionStorage`), so a
+ * reload of the tab brings the queue back as it was, held for Send now once
+ * nobody has seen it for ten minutes (§7.4).
  */
 export interface QueuedComposerMessage {
   id: string;
+  /**
+   * Minted when the message is queued, and carried by every post of it — a
+   * re-post after a reload included — so the host's receipt dedupes it
+   * (§6.2). A failed send is held with a new one: the user's next send of it
+   * is a new command, as it always was. Optional so a message built elsewhere
+   * still types; the store mints one for any queued without it.
+   *
+   * *Added with the reload-safe queue; `contracts.ts` stays additive-only.*
+   */
+  commandId?: string;
   text: string;
   attachments: AttachmentRef[];
   context: ComposerContextRecord[];
@@ -93,6 +106,15 @@ export interface QueuedComposerMessage {
   queuedAfterToolActivityId: string | null;
   /** A failed send is re-inserted at the front with this, so nothing overtakes it. */
   holdUntilUserAction: boolean;
+  /**
+   * Why a held message waits — the failure that held it, or that nobody had
+   * seen its queue for a while — shown as the thread's banner wherever the
+   * queue comes back with it: the thread's next store generation, or the
+   * next page after a reload. A held row with no banner never says why.
+   *
+   * *Added with the reload-safe queue; `contracts.ts` stays additive-only.*
+   */
+  holdReason?: string;
   queuedAt: string;
 }
 
@@ -249,6 +271,21 @@ export interface WorkLogEntry {
    * *Added by W12; additive to the foundation's contract.*
    */
   truncated?: boolean;
+  /**
+   * The call streamed a command's output — `tool.output` chunks of
+   * `command_output` (§5.6's command-output buffer) — so its whole output is
+   * the host's join of them (`GET …/items/:itemId/output`), which no item's
+   * payload holds and the retained window may hold only the latest of. The
+   * expanded row offers "load full output" whether or not its own payload
+   * was cut, and the viewer reads that join. Set on those chunks, on every
+   * lifecycle row of a call whose chunks the derivation input holds
+   * (`entries.logic.ts`) — a Claude background shell's (`bgshell:`) with none
+   * of them in view, since its output only ever streams — and on the row
+   * `joinLifecycleDetails` puts the output on. Never on a file change's: its
+   * chunks are the tool's result text, no command's output (the MCP's
+   * `read_tool_output` rule).
+   */
+  streamedOutput?: boolean;
   /** Grouping key for subagent lifecycle rows — one row per agent. */
   taskId?: string;
   /**
@@ -498,13 +535,26 @@ export interface ActivePlanState {
  * user's message appears when its event arrives (§6.6).
  */
 export interface AgentChatActions {
-  /** `/turn`. Starts a turn, or steers the active one. */
+  /**
+   * `/turn`. Starts a turn, or steers the active one. Kept in the tab's
+   * outbox until it settles, so a reload mid-send re-posts it under the same
+   * `commandId` (§7.4).
+   */
   sendTurn(input: {
     text: string;
     attachments?: AttachmentRef[];
     context?: ComposerContextRecord[];
     interactionMode?: InteractionMode;
     modelSelection?: ModelSelection;
+    /**
+     * `text` is a prompt the composer wrote — an Implement's (§7.3) — not
+     * the user's words: a send that does not go out gives nothing back to the
+     * draft, a re-post after a reload included, and the plan stays there to
+     * implement again.
+     *
+     * *Added with the reload-safe sends; `contracts.ts` stays additive-only.*
+     */
+    generatedPrompt?: boolean;
   }): Promise<void>;
   /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
   steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;

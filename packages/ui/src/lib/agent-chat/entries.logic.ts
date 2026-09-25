@@ -259,6 +259,20 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   if (toolUseId) {
     entry.toolCallId = toolUseId;
   }
+  // A chunk of a command's streamed output: the call's whole output is the
+  // host's join of such chunks (`streamedOutput`). A file change streams its
+  // result text too, which is no command's output. A Claude background
+  // shell's lifecycle rows say so with no chunk in view: its output only ever
+  // streams (`isBackgroundShellCall`).
+  if (
+    toolUseId &&
+    ((outputChunk !== undefined && isCommandOutputChunk(payload)) ||
+      (CALL_LIFECYCLE_KINDS.has(activity.activityKind) &&
+        isBackgroundShellCall(toolUseId) &&
+        payload?.itemType !== "file_change"))
+  ) {
+    entry.streamedOutput = true;
+  }
   // Promoted by §5.1 so the presentation layer can nest a hook run or a
   // CLI-side denial under the call that triggered it (fix-wave R7-10).
   if (activity.parentToolUseId) {
@@ -312,10 +326,13 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     }
   }
 
-  // Gates the row's "Load full output": the rest is behind
-  // `GET …/items/:itemId` (§5.6, §6.3). Never a start's: what the read cut
-  // there is the call's input, not its output — the MCP names no start as a
-  // call's `outputItemId` for the same reason.
+  // Gates the row's ITEM read ("Load full output" where §5.6 cut the payload):
+  // the rest is behind `GET …/items/:itemId` (§5.6, §6.3). Never a start's:
+  // what the read cut there is the call's input, not its output — the MCP
+  // names no start as a call's `outputItemId` for a cut payload either. A
+  // start of a command whose output streamed does offer "Load full output",
+  // through `streamedOutput`: it reads the call's join, never the start's item
+  // (the GUI spec's §6.3 note on `GET …/items/:itemId/output`).
   if (payload?.truncated === true && activity.activityKind !== "tool.started") {
     entry.truncated = true;
   }
@@ -594,6 +611,74 @@ function headedChunk(activity: ThreadActivityItem, heading: CallHeading): Derive
   return entry;
 }
 
+// ---------------------------------------------------------------------------
+// A call that streamed a command's output
+// ---------------------------------------------------------------------------
+
+/** A `tool.output` payload that is a command's printed output — never a file change's result text. */
+function isCommandOutputChunk(payload: Record<string, unknown> | null): boolean {
+  return payload?.streamKind === "command_output";
+}
+
+/**
+ * The call id a Claude background shell's rows carry: the adapter names the
+ * shell's own item `bgshell:<taskId>` (`backgroundShellItemId`,
+ * `apps/daemon/src/agent-host/adapters/claude/normalize.ts`), and every
+ * lifecycle row of it has that `toolUseId`. Such a call's output only ever
+ * streams — the CLI writes it to a file the session tails into
+ * `command_output` chunks, and its rows carry at most the command and an exit
+ * code — so its rows say it streamed even with none of its chunks in view: in
+ * a busy fleet the cross-agent ceiling can evict every chunk of a quiet shell
+ * while retention keeps its start (open work). A shell that printed nothing
+ * answers an empty join, and the viewer falls back to the item read.
+ */
+const BACKGROUND_SHELL_CALL_PREFIX = "bgshell:";
+
+function isBackgroundShellCall(callId: string): boolean {
+  return callId.startsWith(BACKGROUND_SHELL_CALL_PREFIX);
+}
+
+const streamedCallRowByActivity = new WeakMap<ThreadActivityItem, DerivedWorkLogEntry>();
+
+/**
+ * A lifecycle row of a call whose command output streamed, marked so
+ * (`streamedOutput`): the call's whole output is the host's join of its
+ * chunks (`GET …/items/:itemId/output`), which its row's "Load full output"
+ * reads — whether or not its own payload was cut. Read off the derivation
+ * input, never off the row's own group: a long command's early chunks age
+ * out of the window while its later ones stay, and a row that splits the
+ * run (a hoisted error, a message) can leave those in another group than the
+ * call's row, where `joinLifecycleDetails` never meets them. The MCP's
+ * transcript counts a call's chunks the same way, wherever they fall in its
+ * view. A file change is never marked: its chunks are the tool's result
+ * text. Memoised per activity, so a derivation that holds the call's output
+ * returns the same object.
+ */
+function streamedCallRow(activity: ThreadActivityItem): DerivedWorkLogEntry {
+  const base = derivedWorkLogEntry(activity);
+  // A background shell's row says so on its own (`isBackgroundShellCall`).
+  if (base.streamedOutput === true) {
+    return base;
+  }
+  const cached = streamedCallRowByActivity.get(activity);
+  if (cached) {
+    return cached;
+  }
+  const entry: DerivedWorkLogEntry = { ...base, streamedOutput: true };
+  streamedCallRowByActivity.set(activity, entry);
+  return entry;
+}
+
+/** Whether `activity` is a lifecycle row of one of `streamedCalls`, and no file change. */
+function isStreamedCallRow(activity: ThreadActivityItem, streamedCalls: ReadonlySet<string>): boolean {
+  if (!CALL_LIFECYCLE_KINDS.has(activity.activityKind)) {
+    return false;
+  }
+  const payload = asRecord(activity.payload);
+  const callId = asTrimmedString(payload?.toolUseId);
+  return callId !== undefined && streamedCalls.has(callId) && payload?.itemType !== "file_change";
+}
+
 /** Activity kinds that never become a work-log row. */
 const DROPPED_ACTIVITY_KINDS = new Set([
   // Fold input only; a status patch is not narrative.
@@ -693,6 +778,8 @@ export function deriveWorkLogEntries(
   const supersededCalls = new Set<string>();
   // What each call's lifecycle rows name it, for its chunks (`headedChunk`).
   const callHeadings = new Map<string, CallHeading>();
+  // The calls whose command output streamed, for their rows (`streamedCallRow`).
+  const streamedCalls = new Set<string>();
   for (const activity of activities) {
     if (CALL_LIFECYCLE_KINDS.has(activity.activityKind)) {
       const payload = asRecord(activity.payload);
@@ -702,6 +789,14 @@ export function deriveWorkLogEntries(
           supersededCalls.add(toolUseId);
         }
         noteCallHeading(callHeadings, toolUseId, payload);
+      }
+      continue;
+    }
+    if (activity.activityKind === "tool.output") {
+      const payload = asRecord(activity.payload);
+      const toolUseId = asTrimmedString(payload?.toolUseId);
+      if (toolUseId && isCommandOutputChunk(payload)) {
+        streamedCalls.add(toolUseId);
       }
       continue;
     }
@@ -767,7 +862,12 @@ export function deriveWorkLogEntries(
       activity.activityKind === "tool.output"
         ? callHeadings.get(asTrimmedString(asRecord(activity.payload)?.toolUseId) ?? "")
         : undefined;
-    const entry = heading === undefined ? derivedWorkLogEntry(activity) : headedChunk(activity, heading);
+    const entry =
+      heading !== undefined
+        ? headedChunk(activity, heading)
+        : isStreamedCallRow(activity, streamedCalls)
+          ? streamedCallRow(activity)
+          : derivedWorkLogEntry(activity);
     // A native agent launch gets its visible row from `task.started`; defer
     // its own in-progress tool row so a second launch cannot duplicate the batch.
     if (

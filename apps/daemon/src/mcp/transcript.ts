@@ -514,9 +514,10 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
         // Where the whole of what the read cut lives (`truncated`, the slimmer's promise, §5.6): the latest cut row of
         // those the host stores whole — the completion or a denial, the row the GUI's "Load full output" reads. Never
         // the start, where the read cut the call's input and no output, nor an update: ingestion stores a `tool.updated`
-        // already cut, so its item holds nothing its row does not (the GUI's button on a running call reads that same
-        // preview back). The denial half is forward-compatible: a denial carries no `data` today and is never cut on
-        // the wire, so it names no id until one carries more than the read can show.
+        // already cut, so its item holds nothing its row does not (the GUI's item read on a running call that streamed
+        // nothing reads that same preview back; one that streamed reads the call's join, GUI spec §6.3). The denial
+        // half is forward-compatible: a denial carries no `data` today and is never cut on the wire, so it names no id
+        // until one carries more than the read can show.
         if (p.truncated === true && (a.activityKind === "tool.completed" || a.activityKind === "tool.denied")) e.outputItemId = a.id;
         if (str(p.toolUseId) && p.itemType === "command_execution") latestCommandRow.set(key, a.id);
         continue;

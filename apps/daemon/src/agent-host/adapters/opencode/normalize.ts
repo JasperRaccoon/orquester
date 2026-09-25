@@ -62,6 +62,8 @@ import {
 import {
   accumulateStepUsage,
   addRelatedSession,
+  advanceOutputMark,
+  finalOutputRemainder,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
   stepTotalTokens,
@@ -550,6 +552,7 @@ function demux(
     case "message.removed": {
       state.messageRoleById.delete(event.properties.messageID);
       state.textPartsByMessageId.delete(event.properties.messageID);
+      dropMessageOutputMarks(state, event.properties.messageID);
       return;
     }
 
@@ -559,6 +562,7 @@ function demux(
       if (parts?.size === 0) {
         state.textPartsByMessageId.delete(event.properties.messageID);
       }
+      state.outputMarks.delete(event.properties.partID);
       return;
     }
 
@@ -613,6 +617,8 @@ function demux(
         );
       }
 
+      takeBackgroundResult(state, part, raw, out);
+
       if ((part.type === "text" || part.type === "reasoning") && role !== "user") {
         const textPart = part as Extract<OpenCodePart, { type: "text" | "reasoning" }>;
         const stored = retainTextPart(state, textPart);
@@ -630,6 +636,8 @@ function demux(
 
       if (part.type === "tool") {
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
+        // Output first: a completion closes the call's output buffer.
+        emitCommandOutput(state, tool, turnId, raw, out);
         emitToolItem(tool, turnId, raw, out);
         if (tool.tool === "task") {
           // The parent's own row stays on the timeline; the child it names
@@ -971,6 +979,36 @@ function emitTaskCompleted(
 }
 
 /**
+ * A result for a run that already ended: one more `task.completed` of that
+ * run, the same linkage and the same `completed` its end had (the child's own
+ * `session.idle` is the only thing that leaves a result pending), carrying the
+ * result. The roster fold keeps a settled row's status and times and takes
+ * the result from a later completion (`roster.ts`, the `task.completed` arm),
+ * so it reopens nothing and every reader still reads `completed`.
+ */
+function emitTaskResult(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  raw: unknown,
+  out: Emitter,
+  result: string | undefined
+): void {
+  if (result === undefined || result.length === 0) {
+    return;
+  }
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.completed",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      status: "completed",
+      summary: result
+    }
+  });
+}
+
+/**
  * §3.1: "a dead child never leaves a running turn" — closing every live task
  * with `task.completed {status: "stopped"}`, which the roster folds to
  * `interrupted` (§7.6). Called by `session.ts` before `session.exited`, and
@@ -1013,6 +1051,12 @@ export function hasLiveChildAgents(state: OpenCodeSessionState): boolean {
  * A `task` call with `task_id` resumes a child: it re-prompts the existing
  * session with no `session.created`, and its `running` frame names that child
  * under a NEW call (fixtures README observation 26).
+ *
+ * Its terminal frame carries the child's answer. The child's own
+ * `session.idle` ends the run just BEFORE it (fixture 12, lines 179-180), so
+ * the part gives that end its result — one more `task.completed` of the run,
+ * once (`emitTaskResult`, fixtures README observation 27); a part that settles
+ * first ends the run itself, with the result.
  */
 function linkChildFromTaskPart(
   state: OpenCodeSessionState,
@@ -1048,6 +1092,9 @@ function linkChildFromTaskPart(
     known.started = false;
     known.completed = false;
     known.lastStatus = undefined;
+    known.resultPending = false;
+    known.pendingResult = undefined;
+    known.answersInBackground = false;
   }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;
@@ -1069,19 +1116,141 @@ function linkChildFromTaskPart(
   });
   rememberCall(agent, part.callID);
 
-  if (part.state.status === "completed") {
+  if (part.state.status === "completed" || part.state.status === "error") {
     // A call run in the BACKGROUND (`metadata.background: true`) completes at
-    // once while the child works on; the child's own `session.idle` settles it.
-    if (metadata?.background !== true) {
-      emitTaskCompleted(state, agent, "completed", raw, out, part.state.output);
+    // once while the child works on; the child's own `session.idle` settles
+    // it, and this answer ("still working") is no run's result.
+    if (part.state.status === "completed" && metadata?.background === true) {
+      // Its answer comes as a prompt to the parent (`takeBackgroundResult`).
+      agent.answersInBackground = true;
+      return;
+    }
+    const text =
+      part.state.status === "completed" ? taskResultText(part.state.output) : part.state.error;
+    if (!agent.completed) {
+      emitTaskCompleted(
+        state,
+        agent,
+        part.state.status === "completed" ? "completed" : "failed",
+        raw,
+        out,
+        text
+      );
+      return;
+    }
+    // The child's own idle ended the run first (fixture 12, lines 179-180):
+    // the part gives that end its result, and ends nothing itself.
+    if (agent.resultPending === true) {
+      agent.resultPending = false;
+      emitTaskResult(state, agent, raw, out, text);
     }
     return;
   }
-  if (part.state.status === "error") {
-    emitTaskCompleted(state, agent, "failed", raw, out, part.state.error);
+  emitTaskProgress(state, agent, raw, out, { status: "running" });
+}
+
+/**
+ * The envelope the `task` tool wraps a child's answer in for the parent's
+ * model: `<task id="<child session>" state="…">`, an optional `<summary>`,
+ * then the text inside `<task_result>` (`<task_error>` for a failure).
+ * Fixture 12 line 180 shows it on 1.18.5; 1.18.32's `TaskTool` builds the
+ * same one (`Ur`, read from the source) for a part's output and for the
+ * answer it prompts a background run's parent with.
+ */
+const TASK_OUTPUT_ENVELOPE = new RegExp(
+  String.raw`^<task id="(?<id>[^"\n]*)" state="[^"\n]*">\n` +
+    String.raw`(?:<summary>(?<summary>[\s\S]*?)</summary>\n)?` +
+    String.raw`<(?<tag>task_result|task_error)>\n(?<text>[\s\S]*)\n</\k<tag>>\n</task>\s*$`
+);
+
+/**
+ * The child an envelope names, its summary line when it has one, and the text
+ * inside it — or nothing for any other shape.
+ */
+function taskEnvelopeOf(
+  output: string
+): { taskId: string; summary?: string; text: string } | undefined {
+  const groups = TASK_OUTPUT_ENVELOPE.exec(output)?.groups;
+  if (groups?.id === undefined || groups.text === undefined) {
+    return undefined;
+  }
+  return {
+    taskId: groups.id,
+    ...(groups.summary !== undefined ? { summary: groups.summary } : {}),
+    text: groups.text
+  };
+}
+
+/**
+ * The call description a background answer's summary names — 1.18.32 writes
+ * `Background task completed: <description>` (or `failed`), the `task` call's
+ * own `description` — or nothing for a summary of any other shape.
+ */
+const BACKGROUND_SUMMARY = /^Background task (?:completed|failed): (?<description>[\s\S]*)$/;
+
+/**
+ * What a child answered, out of its parent `task` part's output: the text
+ * inside {@link TASK_OUTPUT_ENVELOPE}, because the roster shows what the child
+ * said, not how the tool wrapped it. An output of any other shape is the
+ * result as it stands — never dropped.
+ */
+export function taskResultText(output: string | undefined): string | undefined {
+  if (output === undefined) {
+    return undefined;
+  }
+  return taskEnvelopeOf(output)?.text ?? output;
+}
+
+/**
+ * A background run's answer (fixtures README observation 27). 1.18.32's
+ * `TaskTool` answers a call it runs in the BACKGROUND at once, "still
+ * working" (`metadata.background`), and when the child's job settles it
+ * prompts the session that called it with the answer
+ * (`injectBackgroundResult`, read from the source, not captured): a user
+ * message whose one text part is `synthetic` and wraps the answer in
+ * {@link TASK_OUTPUT_ENVELOPE}, naming the child. That part is the run's
+ * result, as a foreground call's own completion is: the run's end gets it
+ * once (`resultPending`), or, the answer coming before the child's own
+ * `session.idle`, that end carries it (`pendingResult`). Only for a run whose
+ * launching part answered in the background (`answersInBackground`), and only
+ * when the summary, where it names the call's description, names this run's:
+ * an answer arriving after a relaunch is the earlier run's. A part that is not
+ * synthetic, or names no child of this thread, is none. The prompt is still
+ * no message of the thread's: this adds the result and nothing else.
+ */
+function takeBackgroundResult(
+  state: OpenCodeSessionState,
+  part: OpenCodePart,
+  raw: unknown,
+  out: Emitter
+): void {
+  if (part.type !== "text") {
     return;
   }
-  emitTaskProgress(state, agent, raw, out, { status: "running" });
+  const text = part as Extract<OpenCodePart, { type: "text" | "reasoning" }>;
+  if (text.synthetic !== true || typeof text.text !== "string") {
+    return;
+  }
+  const envelope = taskEnvelopeOf(text.text);
+  const agent = envelope === undefined ? undefined : state.childAgents.get(envelope.taskId);
+  // Only a run whose launching part answered in the background takes one: an
+  // answer that reaches a foreground run is an earlier run's, late. And one
+  // whose summary names another call's description is another run's.
+  if (envelope === undefined || agent === undefined || agent.answersInBackground !== true) {
+    return;
+  }
+  const described = BACKGROUND_SUMMARY.exec(envelope.summary ?? "")?.groups?.description;
+  if (described !== undefined && described !== agent.description) {
+    return;
+  }
+  if (!agent.completed) {
+    agent.pendingResult = envelope.text;
+    return;
+  }
+  if (agent.resultPending === true) {
+    agent.resultPending = false;
+    emitTaskResult(state, agent, raw, out, envelope.text);
+  }
 }
 
 /** Record a `task` call that named `agent` (`OpenCodeChildAgent.seenCallIds`). */
@@ -1170,10 +1339,18 @@ function demuxChild(
     }
 
     case "session.idle": {
-      // The child's terminal signal. Its parent `task` tool part settles at
-      // the same moment and carries the result text.
+      // The child's terminal signal. Its parent `task` tool part settles
+      // right AFTER it (fixture 12, lines 179-180) and carries the result
+      // text, which that part gives this run's end (`linkChildFromTaskPart`);
+      // a background run's answer comes as a prompt to the parent instead
+      // (`takeBackgroundResult`), and one that came first rides this end.
       const agent = ensureChildAgent(state, childSessionId);
-      emitTaskCompleted(state, agent, "completed", raw, out);
+      if (!agent.completed) {
+        const result = agent.pendingResult;
+        agent.pendingResult = undefined;
+        emitTaskCompleted(state, agent, "completed", raw, out, result);
+        agent.resultPending = result === undefined;
+      }
       return;
     }
 
@@ -1207,12 +1384,14 @@ function demuxChild(
     case "message.removed": {
       state.messageRoleById.delete(event.properties.messageID);
       state.textPartsByMessageId.delete(event.properties.messageID);
+      dropMessageOutputMarks(state, event.properties.messageID);
       return;
     }
 
     case "message.part.removed": {
       const parts = state.textPartsByMessageId.get(event.properties.messageID);
       parts?.delete(event.properties.partID);
+      state.outputMarks.delete(event.properties.partID);
       return;
     }
 
@@ -1248,6 +1427,9 @@ function demuxChild(
       const role =
         messageRoleForPart(state, part) ?? (part.type === "tool" ? "assistant" : undefined);
 
+      // A grandchild's background answer is prompted into this child.
+      takeBackgroundResult(state, part, raw, out);
+
       // A child's `step-finish` tokens belong to the child, never to the
       // parent turn's accumulator — they are a different session's spend.
       if ((part.type === "text" || part.type === "reasoning") && role !== "user") {
@@ -1265,6 +1447,8 @@ function demuxChild(
       if (part.type === "tool") {
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
         const agent = ensureChildAgent(state, childSessionId);
+        // Output first: a completion closes the call's output buffer.
+        emitCommandOutput(state, tool, turnId, raw, out, childSessionId);
         emitToolItem(tool, turnId, raw, out, childSessionId);
         if (tool.state.status === "running" || tool.state.status === "pending") {
           emitTaskProgress(state, agent, raw, out, {
@@ -1554,6 +1738,99 @@ function emitToolItem(
       }
     }
   });
+}
+
+/**
+ * How many running command parts keep an output mark at once. Settled parts
+ * drop theirs, so only a part whose settle never reached the demux (an
+ * interrupted turn's suppressed tail, a stream gap) can pile up here.
+ */
+const OUTPUT_MARKS_CAP = 64;
+
+/**
+ * A command's output, as it grows (fixtures README observation 28). Each
+ * `running` frame of a command-like part restates everything printed so far
+ * in `state.metadata.output`, which reached nobody: the item row carries it
+ * only inside `data.state`, and the wire slimmer drops it there, so only the
+ * completion ever showed output. Each frame now becomes a `command_output`
+ * delta of just what it adds ({@link advanceOutputMark}), on the call's own
+ * item and under the call's owner — the chunks ingestion joins onto the
+ * call's row, whose output they then are, settled too.
+ *
+ * So the part's completion appends what its final `output` holds past them
+ * ({@link finalOutputRemainder}: a timeout's or an abort's note, output the
+ * running frames never carried) — called BEFORE the completion's own item
+ * event, which closes the call's output buffer. A stream that showed nothing
+ * gets nothing: the completion's own output is what its row shows. An errored
+ * part has no final output, and its error stays the completion's. Either way
+ * the part's mark goes.
+ */
+function emitCommandOutput(
+  state: OpenCodeSessionState,
+  part: Extract<OpenCodePart, { type: "tool" }>,
+  turnId: string | undefined,
+  raw: unknown,
+  out: Emitter,
+  agentId?: string
+): void {
+  const marks = state.outputMarks;
+  const status = part.state.status;
+  if (status === "completed" || status === "error") {
+    const shown = marks.get(part.id)?.value;
+    marks.delete(part.id);
+    const final = status === "completed" ? part.state.output : undefined;
+    if (shown !== undefined && shown.length > 0 && typeof final === "string") {
+      pushCommandOutput(part, finalOutputRemainder(shown, final), turnId, raw, out, agentId);
+    }
+    return;
+  }
+  if (status !== "running") {
+    return;
+  }
+  const output = isRecord(part.state.metadata) ? part.state.metadata.output : undefined;
+  if (typeof output !== "string" || toToolLifecycleItemType(part.tool) !== "command_execution") {
+    return;
+  }
+  const { mark, chunk } = advanceOutputMark(marks.get(part.id)?.value ?? "", output);
+  // Written last, so the cap drops the mark written longest ago — a settle
+  // that never came, not a command still printing.
+  marks.delete(part.id);
+  marks.set(part.id, { messageId: part.messageID, value: mark });
+  while (marks.size > OUTPUT_MARKS_CAP) {
+    const oldest = marks.keys().next();
+    if (oldest.done === true) {
+      break;
+    }
+    marks.delete(oldest.value);
+  }
+  pushCommandOutput(part, chunk, turnId, raw, out, agentId);
+}
+
+function pushCommandOutput(
+  part: Extract<OpenCodePart, { type: "tool" }>,
+  delta: string,
+  turnId: string | undefined,
+  raw: unknown,
+  out: Emitter,
+  agentId: string | undefined
+): void {
+  if (delta.length === 0) {
+    return;
+  }
+  out.push({
+    ...out.base({ turnId, itemId: part.callID, agentId, raw }),
+    type: "content.delta",
+    payload: { streamKind: "command_output", delta }
+  });
+}
+
+/** A removed message's parts keep no output mark. */
+function dropMessageOutputMarks(state: OpenCodeSessionState, messageId: string): void {
+  for (const [partId, mark] of state.outputMarks) {
+    if (mark.messageId === messageId) {
+      state.outputMarks.delete(partId);
+    }
+  }
 }
 
 function openPermission(

@@ -283,6 +283,21 @@ function isContextRecord(value: unknown): value is ComposerContextRecord {
 }
 
 /**
+ * A persisted list of attachment refs, field-wise: every entry that is a ref
+ * (its `path` normalised), anything else dropped — never the whole list. The
+ * one reading of a stored ref, for the drafts and the tab's outbox
+ * (`composer-outbox.ts`) alike.
+ */
+export function parsePersistedAttachmentRefs(value: unknown): AttachmentRef[] {
+  return Array.isArray(value) ? value.filter(isAttachmentRef).map(normalisePersistedAttachment) : [];
+}
+
+/** A persisted list of composer context records, field-wise, as {@link parsePersistedAttachmentRefs}. */
+export function parsePersistedContextRecords(value: unknown): ComposerContextRecord[] {
+  return Array.isArray(value) ? value.filter(isContextRecord) : [];
+}
+
+/**
  * Field-wise validation with a fallback, per AGENTS.md: **raw `JSON.parse`
  * output must never reach typed code** — an old bundle's payload outlives a
  * deploy, and one malformed blob must degrade to "no draft", never crash the
@@ -312,10 +327,8 @@ export function parsePersistedDrafts(raw: string | null): Record<string, Compose
     }
     result[sessionId] = {
       text: record.text,
-      attachments: Array.isArray(record.attachments)
-        ? record.attachments.filter(isAttachmentRef).map(normalisePersistedAttachment)
-        : [],
-      context: Array.isArray(record.context) ? record.context.filter(isContextRecord) : []
+      attachments: parsePersistedAttachmentRefs(record.attachments),
+      context: parsePersistedContextRecords(record.context)
     };
   }
   return result;

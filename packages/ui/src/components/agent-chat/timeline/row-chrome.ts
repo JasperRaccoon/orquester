@@ -101,10 +101,19 @@ function nonEmpty(value: string | undefined): string | null {
  *    the first of them, carrying all their text in order, never one row per
  *    flush of the output. The returned entry is the same reference when
  *    nothing was filled, so a settled group's row memos are untouched.
+ *
+ * The row a command's output lands on says so (`streamedOutput`), as each of
+ * those chunks does: the chunks this group holds may be only the latest of a
+ * long command's output, and the row offers the whole of it, the host's join
+ * ("Load full output"). The derivation marks a call's lifecycle rows itself;
+ * this covers rows built one activity at a time — a background shell's
+ * drill-in — and never marks a file change's row.
  */
 export function joinLifecycleDetails<T extends WorkLogEntry>(entries: readonly T[]): T[] {
   const owners = new Set<string>();
   const outputs = new Map<string, string[]>();
+  // The calls whose joined chunks are a command's output (`streamedOutput`).
+  const streamed = new Set<string>();
   const borrowed = new Map<
     string,
     { command?: string; detail?: string; changedFiles?: readonly string[] }
@@ -121,6 +130,7 @@ export function joinLifecycleDetails<T extends WorkLogEntry>(entries: readonly T
         const chunks = outputs.get(callId);
         if (chunks) chunks.push(chunk);
         else outputs.set(callId, [chunk]);
+        if (entry.streamedOutput === true) streamed.add(callId);
       }
       continue;
     }
@@ -176,6 +186,12 @@ export function joinLifecycleDetails<T extends WorkLogEntry>(entries: readonly T
     }
     if (outputRow.get(callId) === index) {
       patch.detail = (outputs.get(callId) ?? []).join("");
+      // What the row shows may be only the latest of a long command's output:
+      // the whole of it is the host's join, a "Load full output" away. Never a
+      // file change's row, whatever its chunks say.
+      if (streamed.has(callId) && entry.streamedOutput !== true && entry.itemType !== "file_change") {
+        patch.streamedOutput = true;
+      }
     }
     result.push(Object.keys(patch).length === 0 ? entry : { ...entry, ...patch });
   }

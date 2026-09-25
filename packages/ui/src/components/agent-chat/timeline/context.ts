@@ -3,6 +3,7 @@ import React from "react";
 import type { RuntimeSubagent } from "@orquester/api";
 
 import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
+import type { FullOutputSource } from "../../../lib/agent-chat/full-output";
 
 /**
  * Shared row state, carried on a context rather than threaded through props.
@@ -60,7 +61,12 @@ export interface TimelineRowContextValue {
   onRevert: (input: { messageId: string; targetTurnCount: number }) => void;
   onOpenTurnDiff: (turnCount: number) => void;
   onOpenFile: (path: string) => void;
-  onLoadFullOutput: (itemId: string) => void;
+  /**
+   * A row's "Load full output": its item, or — for a command whose output
+   * streamed — first its call's output as the host joins it
+   * (`FullOutputSource`, `lib/agent-chat/full-output.ts`). Absent means the item.
+   */
+  onLoadFullOutput: (itemId: string, source?: FullOutputSource) => void;
   /**
    * The whole markdown of a plan proposal — the store's `readFullPlanMarkdown`,
    * the read Implement makes: as is when intact, read back when the wire cut it

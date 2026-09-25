@@ -422,6 +422,22 @@ continue."` — the user is told the thread could not be picked up, not that it
 was never eligible. Both clear the marker and leave the cursor alone, so the
 thread is still resumable by hand.*
 
+*Built: **the turn is settled at the time its process last wrote, not at the restart.** The fold
+settles a turn at its settling `thread.session-set`'s `occurredAt` (§5.1), and a settle stamped
+with the restart counted the whole downtime in the turn's duration — a turn that worked for a
+minute read as hours. The process that ran the turn wrote nothing after its log's last line, so
+the turn was over by then; the host only notices at its next start. So the reconcile's settle is
+its FIRST row, stamped with the `occurredAt` of the log's last line (`lastWriteAt` — the head's
+`updatedAt`, which the fold stamps from every event, so nothing is read for it) — or with the start
+of a turn it settles when that is later (`crashSettleAt`): ingestion stamps a flushed message with
+its first delta's time, so the last line can read seconds before its own turn's start, and a settle
+there ended the turn before it began. Everything it appends after — the `runtime.error` notice, the
+closings below — keeps the clock's time, which is when it was noticed; the log's times never go
+back. A continuation that is attempted and fails settles at its own time: it ran in this host's
+lifetime; so does a prepare that cannot reach disk, which comes after repairs already stamped with
+the clock (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `reconcileThread`,
+`settleAsError`).*
+
 **The resume cursor is not event-sourced.** It lives in a per-thread
 `binding.json` beside `meta.json` that is only ever written field-wise through
 one `upsertSessionBinding`, whose `undefined` means "unchanged" and whose `null`
@@ -522,17 +538,19 @@ kept that process's requests, calls and tasks open for good: a card no process c
 the composer and `send_message` until the user stops the session (§7.4), the fold keeps a running
 call's opening row (retention's open-work rule, §5.1), and a roster row with no terminal row reads
 running again once a session is live (§7.6). So a thread's first load in a host lifetime — the
-`bootSettlePending` settle above, and an orphan's reconcile after the stale-`pending` settle and
-before its turn is settled or continued — appends the rows that close them, for the rows in the
-folded window: first, for every request still pending but a message-mode question,
+`bootSettlePending` settle above, and an orphan's reconcile after its turn is settled (step 4's
+settle comes first) and before it is continued — appends the rows that close them, for the rows in
+the folded window: first, for every request still pending but a message-mode question,
 the host's own cancellation — the rows a Stop writes ("Request cancelled", "Question cancelled", on
-the head's running turn), never a provider's "resolved"/"submitted", which would say someone
-answered (a message-mode question stays pending, where a Stop would cancel it too: it parked no
-request and accepts a later message, §6.2); a `tool.completed {status:
+the turn the head said was running), never a provider's "resolved"/"submitted", which would say
+someone answered (a message-mode question stays pending, where a Stop would cancel it too: it parked
+no request and accepts a later message, §6.2); a `tool.completed {status:
 "failed"}` reading "Stopped when the agent host restarted." for every open call, on its latest
 lifecycle row's item type, title, turn, owner and data (an output an update stored cut never passes
 for whole: the opening row's whole data rides instead, else the cut copy marked `truncated`; an
-identity-only cut rides unmarked); a `task.completed {status: "stopped"}` for
+identity-only cut rides unmarked) and the files that row names at its top level (`changedFiles`, the
+slimmer's promotion out of the data — a Codex patch update is stored as `data: {}` beside them, and
+a closer that copied the data alone listed no files); a `task.completed {status: "stopped"}` for
 every roster task still `pending`, `running` or `waiting`, on its start's owner and turn — `idle`
 is left alone, as the session-death rule leaves it. A shell's item closes before its task, every
 closer rides its opener's owner so it cannot leave a window before the row it closes, and nothing
@@ -543,7 +561,10 @@ to the end of the log, and "Load older" then lost every row between its first ch
 (`apps/daemon/src/agent-host/orchestration/orchestrator.ts` `closeLeftoverWork`,
 `apps/daemon/src/agent-host/orchestration/leftover-work.ts`). Its readers decide instead: it
 reads as streaming only while a live session runs its turn or its agent is still at work (§7.3,
-`isMessageStreaming`), so a stream no process can continue reads as settled.*
+`isMessageStreaming`), so a stream no process can continue reads as settled. After the closings the
+same load names the launches an older host never wrote: an OpenCode or Codex agent launched before
+the relaunch fix gets one `task.started` naming `legacy-launch:<taskId>` once it is settled, so its
+next relaunch reopens it (§7.6).*
 
 ### 3.4 Session restart policy
 
@@ -572,6 +593,16 @@ or a pre-adoption row cannot pin a thread as busy forever. That state is what th
 (§7.6) shows during a restart and what keeps the thread out of any "settled" treatment.
 
 *T3: `apps/server/src/orchestration/ThreadSettlementPolicy.ts:28-45` — `threadHasQueuedTurnStart` and its absolute age bound; `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:1777-1792` — `pendingTurnStart` consulted on every session/turn lifecycle event; `:1849-1856` — a `ready` session with a pending turn start is reported as `starting`*
+
+*Built: a `pending` turn the host never sent — it died between the commit and the effect — is
+settled past that grace window on the thread's first load (or in an orphan's reconcile), by a
+`stopped` session state, and the settle is stamped with the time the log was last written (or the
+turn's request, when a line flushed out of order reads earlier), as §3.3 settles an orphaned turn:
+nothing sent the turn after that line, and an orphan's running turn, which the same settle ends,
+ended there too. The settle is written even when the session already reads `stopped` — a message
+sent to a stopped session, the host dead before the send: skipped as an unchanged session, it left
+the turn `pending` for good, and every later first load wrote the notice again. The "Queued message
+was not sent" notice follows at the clock's time (`settleStalePendingTurns`).*
 
 **Compaction is the one operation that both refuses and queues.** `/compact` is rejected outright
 while a turn is running or another compaction is in flight — it rewrites the conversation the turn
@@ -1287,6 +1318,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `turn.completed {state:"interrupted"}`. A Codex `cancel` ends the turn as `status:"interrupted"`
   with `items: []`, so a fold that trusts `turn.items` erases the turn — the fold must not
   (`apps/daemon/src/agent-host/adapters/codex/normalise.ts`, `…/session.ts`).*
+  *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a command's
+  completion keeps its output. It arrives whole in `aggregatedOutput` and a short command never
+  streams it (fixtures README observation 18), while `detail` is cut to a 180-character preview at
+  ingestion — so the completion carries it in `data.item.aggregatedOutput`, where
+  `commandOutputText` and the slimmer already read Codex's output, up to 64 KiB of UTF-8; past that
+  the head, cut on a character boundary, and `truncated` on the item (`ItemLifecyclePayload`),
+  which ingestion carries onto the row, so the MCP's `read_tool_output` reads the call's streamed
+  join instead of answering a head as the whole (`adapters/codex/items.ts`,
+  `COMMAND_OUTPUT_MAX_BYTES`).*
 - **Two question paths.** The RPC path (`item/tool/requestUserInput`) filters **hard**: a question
   is dropped unless it has id, header, prompt **and** at least one option whose label *and*
   description are both non-empty, and `multiSelect` is hard-coded `false`; if every question is
@@ -1367,6 +1407,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   calls itself. And `developer_instructions: null` is sent explicitly (§4.4). Unverified because no
   capture produced them: `item/permissions/requestApproval`, `item/tool/call`,
   `account/chatgptAuthTokens/refresh` and `attestation/generate` — all answered, none exercised.*
+  *Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a child's calls
+  are not chatter. T3 routes a child's `item/*` as lifecycle, drops both output deltas and the patch
+  updates, and passes an MCP call's progress to the parent; here all six are the child's
+  (`child-routing.ts`) and become its own rows — the child's thread id as `agentId` on envelope and
+  payload, the item id namespaced by that thread (`codex-child:<thread>:<item>`), every row of a
+  call on the parent turn live when it started, its MCP progress the child's heartbeat — while the
+  child's text streams stay chatter, so its messages stay roster ticks. A child's approval is still
+  the parent's card, on the parent turn live as it arrives, joined to the child's namespaced call in
+  the child's own request bookkeeping, which the parent's settle never clears. A child's question is
+  the parent's card on NO turn: a turn's end dismisses the native-callback questions on it (§6.2), so
+  on the parent's turn a parent whose `wait` returned swept the card while the child still waited
+  for its answer (fixtures README observation 20).*
 
 #### OpenCode
 
@@ -1473,6 +1525,28 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   its own work with `agentId` — §7.6's roster shows what the provider actually reports while
   §7.2's re-homing keeps it out of the parent timeline. The ancestry-resolution retry loop above is
   kept (`apps/daemon/src/agent-host/adapters/opencode/normalize.ts`).*
+  *Built (2026-09-24): the child's own `session.idle` ends its run just BEFORE the parent's `task`
+  part completes with the answer, so the part gives that run's end its result — one more
+  `task.completed` of the same run, `completed`, carrying the text inside the tool's
+  `<task_result>` envelope — once per run, never for a stale part of an earlier call; §7.6's fold
+  takes a settled row's result from a later completion and reopens nothing. Before it, every
+  OpenCode roster row read `result: null`. A run in the background answers "still working" at
+  once, and its answer comes as a `synthetic` prompt to the calling session wrapping the same
+  envelope, which gives the run its result the same way — only a run launched in the background
+  takes one, so a late answer never lands on a relaunched run (the prompt is no row, live or
+  replayed). And a running command's output, which each `running` frame restates whole in
+  `state.metadata.output` and which reached nobody (it rode the item row's `data.state`, slimmed
+  off the wire), streams as §5.6's `command_output` chunks of what each frame adds, cut against a
+  per-part high-water mark and owned like the call's rows. Past the tool's 30 000 characters the
+  value is `"...\n\n"` and a sliding tail window; what follows the window's longest overlap with
+  the last value is new, and a value without that head that does not extend the last adds nothing
+  — never text already shown. The joined chunks are the settled row's output too, so the
+  completion first appends what its final `output` holds past them — a timeout's or an abort's
+  note, what a missed frame carried — from where it extends the stream or, when the final output
+  was cut, after the last place it holds the stream's last 512 characters, closing with the cut
+  note's `Full output saved to: <file>` pointer, which the full-output viewer's join would
+  otherwise never hold (`adapters/opencode/normalize.ts`, `state.ts`; fixtures README
+  observations 27-28).*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.
@@ -2954,6 +3028,38 @@ The daemon forwards `offset`/`maxBytes` verbatim — an empty or a repeated valu
 host's rules are the only ones: an empty or repeated `offset` is its 400, a repeated `maxBytes`
 takes its first value.*
 
+*Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, task 4): the timeline reads
+it too. A row showed only the chunks the window still held, and its "Load full output" — offered
+only where §5.6 stamped `truncated`, so never on a running command's start — read the row's own item
+back as JSON: a command's streamed output is in no item, so the viewer showed a completion's payload
+(a Codex command's 180-character preview, a background shell's command and exit code), never what
+the command printed, and the chunks the window had evicted were unreadable in the GUI. Now a row
+whose command streamed its output offers it whether or not its payload was cut
+(`fullOutputSourceOf`, `lib/agent-chat/full-output.ts`) — a running command's start, its call's only
+row, included, since what it reads is the join, never the start's item. `streamedOutput` marks such
+a row: a `tool.output` chunk of `command_output`, every lifecycle row of a call whose chunks the
+derivation input holds — wherever they fall, as the MCP's transcript counts them — the row
+`joinLifecycleDetails` puts them on (`entries.logic.ts`, `timeline/row-chrome.ts`), and every
+lifecycle row of a Claude background shell's call (`bgshell:<taskId>`) with none of its chunks in
+view: its output only ever streams, and in a busy fleet the cross-agent ceiling can evict every
+chunk of a quiet shell while retention keeps its start. The viewer reads the join through the chat
+transport's `readItemOutput`: one window at a time, `THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide, from
+0 to the end, every window starting where the last ended and naming its end as the next — else the
+read fails rather than stitch a text the call never printed. Above the text it says that a running
+call's output is its output so far, and that past the host's 8 MiB cap only the first 8 MiB can be
+shown (the log keeps the rest). A host from before windows answers the whole join, taken as it
+comes; a 404 (`ITEM_NOT_FOUND`, a host from before the route, a thread deleted between two windows)
+or an empty join falls back to the item read, never an error. The item read shows a command's output
+as the command printed it where the item's own data carries it (`commandOutputText`, as the MCP's
+`read_tool_output` reads a command item first: a Codex completion's aggregated output, a Claude Bash
+result's text) — never out of an item stored cut (`payload.truncated`), whose data holds a head —
+and anything else as before: a message's text, a string payload, the payload as JSON
+(`fullOutputText`). A file change is never read through the join: its chunks are its result text, no
+command's output (the MCP's rule). The subagent drill-in, whose window keeps an agent's 200 rows,
+opens the same viewer — a read, not a command. Still out of reach: a call none of whose chunks the
+window or the loaded history holds — a background shell's aside — offers the button only where its
+own payload was cut, since nothing else in the snapshot says it streamed.*
+
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
 *over this thread's rows alone*, is ≤ 1 000 events **and** ≤ 8 MiB of payload; past either it sends
@@ -3238,12 +3344,12 @@ cold-start path. The in-flight command flags (`reverting`, `stopping`), the requ
 decision in flight (`respondingRequestIds`) and the thread-level error banner are dropped with the
 generation that owned them — a command still in flight settles into that generation, never into the
 next (§7.4 names the two that must not be lost with it: a turn and an answer retry past the teardown,
-and a queued send failing there is held by the live generation); the queue, drafts, disclosures and
-scroll position survive. Every write is guarded by an **owner token** minted per live generation, so a
-teardown that lands after a newer store has claimed the same thread cannot clobber the newer
-cache. The alternative first shipped here — holding the live stream open for fifteen minutes per
-recently-viewed tab — bought the same instant repaint at the cost of one live connection and one
-live fold per tab, and is gone.
+and a queued send failing there is held by the live generation, which sends nothing queued behind it
+until it settles); the queue, drafts, disclosures and scroll position survive. Every write is guarded
+by an **owner token** minted per live generation, so a teardown that lands after a newer store has
+claimed the same thread cannot clobber the newer cache. The alternative first shipped here —
+holding the live stream open for fifteen minutes per recently-viewed tab — bought the same instant
+repaint at the cost of one live connection and one live fold per tab, and is gone.
 *T3: `packages/client-runtime/src/state/threadRetention.ts:1-3` — `THREAD_SNAPSHOT_IDLE_TTL_MS = 5 * 60_000`, "keep recent thread snapshots for back navigation; live subscriptions end when the last detail consumer leaves"; `packages/client-runtime/src/state/threads.ts:917-950` — the resume family at that idle TTL beside the state family at `setIdleTTL(0)`, and `Stream.concat(Stream.succeed(cachedThreadState(resume.snapshot.state)), live)`; `:161-176` — `cachedThreadState` keeping a retained "live" status; `:186-228` — the cached sequence seeding `afterSequence`; `:188-189, 228, 255, 274, 293, 418` — the owner guard.*
 
 ### 7.3 Timeline
@@ -3313,7 +3419,11 @@ Row kinds and behaviour:
   their work started in; timed by its rows, a turn of seconds read "Worked for 50h". A turn still
   running, or one no turn row describes, is still timed by its rows, and so is every fold of a
   drill-in: a background agent works long past the parent turn its rows ride, so its fold keeps
-  the span of the agent's own rows, never that turn's seconds.*
+  the span of the agent's own rows, never that turn's seconds. A thinking block never holds a fold
+  open, so a drill-in's fold can end on a thought still being written: its "Worked for …" follows
+  the tokens — the streamed-text fast path re-reads it off the fold's clock (`TurnFoldClock`), and
+  the drill-in's tokens take that fast path as the window's do — and closes on the thought's last
+  write.*
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
   self-ticking elapsed timer, so the turn is never represented by an empty timeline.
@@ -3396,7 +3506,8 @@ of a call that echoes an empty input, a no-argument tool's completion above all,
 gains ": {}" as it completes (`callRowDetail`). Only an echo of the row's own tool, its
 `data.toolName`: OpenCode's completion detail is the tool's own output, and an output that reads
 "config: {}" stays whole. The `ExitPlanMode` boundary covers the start too; and a start never offers
-"Load full output": what the read cut there is the call's input. (2) The
+its ITEM as "Load full output": what the read cut there is the call's input — a streamed command's
+start offers the call's join instead (§6.3's task-4 note on `GET …/items/:itemId/output`). (2) The
 rows a list renders are the ones counted, named and judged (`isStreamedOutputEntry`,
 `withoutJoinedOutput`, `lib/agent-chat/presentation.logic.ts`): a streamed chunk whose call has a
 row of its own in the list is that row's output, and an orphan call's chunks — no row of the call in
@@ -3609,11 +3720,77 @@ and a `turn` or an `answer` keeps retrying with the same `commandId` after its s
 gone — giving up there turned a response the host may already have accepted into a failed send the
 user resent. What that generation still had in flight never strands the next one: a queued send that
 fails after the teardown is held at the front of the thread's live generation with the failure's
-banner, or with none merged into its persisted draft (`holdQueuedMessageInThread`); a message it
-hands back to the draft after the teardown — a rewind whose `/revert` was still out — merges through
-the thread's live slice or storage, never over its own stale copy (`updateThreadDraft`); and the
-request ids with an answer in flight do not ride the retained snapshot (`cachedThreadState`), so a
-settled answer never leaves its card locked.*
+banner, or with none at the front of the queue its page keeps (`holdQueuedMessageInThread`, below);
+a message it hands back to the draft after the teardown — a rewind whose `/revert` was still out —
+merges through the thread's live slice or storage, never over its own stale copy
+(`updateThreadDraft`); and the request ids with an answer in flight do not ride the retained snapshot
+(`cachedThreadState`), so a settled answer never leaves its card locked.*
+
+*Built: **a reload never loses or duplicates a message, and queued sends keep their order.** A
+reload used to take everything in flight with it: `submit` had already cleared the draft, the send
+registry and the queue lived in memory, and a message came back only if its post had reached the
+host. Now the thread store keeps every composer send (a turn or a steer), from before its first post
+until it settles, and its queue as it stands, in the tab's **outbox** (`composer-outbox.ts`, in
+`sessionStorage`: a reload of the tab resumes it, and another tab never replays it — except a tab
+the browser **duplicates**, which starts with a copy: its page adopts every send still in flight
+and the whole queue, the posts of both carry the same ids so the receipts dedupe them, but a message
+taken back in one tab (✗, or a Stop) is still sent by the other, and a re-post failing in both comes
+back into the shared draft twice; nothing coordinates two tabs), each message with its `commandId` —
+a queued message's is minted when it is queued and carried by every post of it. Every entry names
+the page that holds it, and the thread's first store after a reload adopts what the previous page
+left for its thread (`adoptOutboxLeftovers`): a send posted less than `OUTBOX_REPLAY_MAX_AGE_MS`
+(ten minutes) ago is re-posted under the SAME `commandId` — the host's receipt answers one that had
+landed with the seq it recorded, and one that had not goes out now — composer sends and queued ones
+**one at a time, in the order they were first posted** (`replayInOrder`), each composer send
+reading "Sending" from the start and the queue holding until the last one settles — one step going
+wrong never strands the rest, and every "Sending" the run opened is settled when it ends. The bound is
+the receipts': they are a ring of the host's last 500 commands, every thread's together, and a
+re-post the host no longer recognises would be a second turn; ten minutes is far past a reload of a
+post (which gives up within about 1¾ minutes) and far short of 500 commands on a single user's
+host. An older send is not re-posted, and one the host refuses comes back the same way, saying it
+dates from before the reload: a composer send to the draft through the failed-send restore (the
+composer that shows the thread, else the thread's draft), with a notice and a banner; a queued send
+held at the front of its queue — right behind the last message the run held before it that is still
+queued (`holdAtFront`'s `behind`, by message id: never a count, which the user sending one of them, or
+a later message held for another reason, would turn into a place behind a message queued after it),
+in post order — with a banner, under a new `commandId`, the user's next send of it being a new command
+as for any failed queued send. An
+Implement's prompt never comes back: the plan is still there to implement (`generatedPrompt`, told
+by `sendComposerTurn`). The queue comes back in order, behind any queued send still on its way — as
+it was after an ordinary reload, but **held** (`holdUntilUserAction`, "Waits for Send now", its
+`commandId` kept, a banner saying why) once nobody has seen it for `OUTBOX_QUEUE_ABSENCE_MAX_MS`
+(ten minutes): a queued message is due as soon as its thread is idle and would otherwise go out on
+the thread's first frame — hours or days later, after a discarded tab or a restored session, a
+"push and deploy" nobody still wants. The absence is measured from when the queue was last on
+screen **or last driven by a live page** — the thread's store stamps it as the page is hidden, on
+`pagehide`, and at the generation's teardown (not while hidden); a page hidden for hours still sends
+its queue as each message falls due, so its `pagehide` stamps it, and a reload of it is no absence —
+or from when the message was queued, whichever is later, never from the queueing alone: a message
+queued twenty minutes ago behind a turn still running is live after a quick reload. (Not covered: a
+LIVE generation's queue after a long freeze with no reload — a sleeping laptop, a frozen background
+tab — still goes out as it falls due, as it always did.) A message held before the reload comes back held, with its reason (`holdReason`) on
+the banner. A generation that starts from the queue its page kept — the snapshot it would have
+painted expired — holds it by the same rule. After a reload the web client lands on Recent Projects,
+so a thread's leftovers are picked up only when its project is opened again: a posted send whose
+project is not reopened within the ten minutes comes back to the draft with the "check the thread"
+notice rather than being re-posted (a pass at boot could not know which daemon a thread belongs to —
+an entry names only its session). Loads validate field-wise with a fallback, the stamps included, and
+the 100-entry bound only ever drops a message still waiting, oldest first — never a send in flight.
+**Queued sends are serialised across store generations** by a per-thread marker beside the send
+registry (`beginQueuedSend` in `composer-sends.ts`, the drive loop's in-flight latch): the
+generation a project switch tore down may still be posting the head of the queue when the thread's
+next generation reaches a boundary, and that one used to send the next message at once — landing it
+first, or overtaking the head when that failed and was held at the front. It now waits; when the
+head settles the queue proceeds in order — a delivered one lets the next go, a failed one is held at
+the front before its settle is heard. One that fails while no generation of the thread is live is
+held at the front of the queue the page keeps for the thread, with its reason — failures landing
+one after the other keep their order — which the next generation starts from, the retained snapshot
+(taken at the teardown) not having it, so the messages queued behind it do not drain ahead of it;
+only a tab with no storage puts it back in the draft instead. The kept queue is trusted only while
+its last write reached the storage (`keptQueueCurrent`): after a failed write (a full storage) a
+generation with a retained snapshot starts from the snapshot, taking in front of it any held
+message only the kept queue has (`seedQueueFrom`), and the first thing a generation stores is its
+queue as it stands when its first microtask runs, never the seed it was created with.*
 
 *Built: **a draft keeps every file that comes back to it, and holds the send over the eight.** A
 failed send's chips come back ahead of the ones staged while it was in flight, a Stop returns every
@@ -3646,6 +3823,13 @@ up, or Stop is followed by a queued message starting a new turn; a failed send i
 front with `holdUntilUserAction` so nothing overtakes it; and nothing flushes while an approval or a
 question is pending.
 *T3: `apps/web/src/queuedMessageStore.ts:15-36` — `QueuedComposerMessage` and `queuedAfterToolActivityId`; `:70-71` — "a queued message is a live intent, not a draft worth persisting"; `:84-107` — `take` re-anchors the remainder; `:40-45, 141-152` — `drainGeneration`; `:128-140` — `holdAtFront`; `:188-197` — `isQueuedMessageDue` (hold → never; connecting → never; not running → immediately; running → when a later tool activity has landed); `apps/web/src/components/ChatView.tsx:8604-8642` — the drive loop and its pending-request gates; `docs/user/composer.md:31-48` — the user-facing contract ("It goes out on its own when the agent finishes its next tool call, or when the turn ends. … Stop returns every queued message to the composer.")*
+
+*Built: "held in memory only" stops at the page. The queue is still never persisted as a draft, but
+the tab's outbox keeps it (the reload paragraph above), so a reload brings it back as queued, in
+order — held for Send now once it has gone unseen for ten minutes — and a store generation created
+after the retained snapshot expired no longer starts with an empty queue. Guard 2 holds across
+generations too: the drive loop's latch is the thread's (`beginQueuedSend`), not the generation's,
+and a send failing while no generation is live is held at the front of the kept queue.*
 
 **Steer versus queue is one setting with a per-message inversion.** A plain send follows the
 preference; holding the mod key with Enter does the opposite for that one message. A separate
@@ -3798,9 +3982,16 @@ with `task_id` resumes the child under a new call; Codex's is `codex-launch:<ite
 launch record, then `codex-run:<turn id>` at a settled child's own next turn. The start is the one
 row of a run retention never drops: a status row would reopen the agent only until its window
 dropped that row, and the old end would read again mid-run. An agent first launched by a host
-older than this change carries no launch id, and a relaunch from a terminal state does not reopen it
-(`packages/api/src/agent-chat/roster.ts`, `adapters/opencode/normalize.ts`,
-`adapters/codex/normalise.ts`).*
+older than this change carries no launch id, and no relaunch from a terminal state could reopen
+it — so a thread's first load names one for it rather than weaken the guard: every settled
+OpenCode or Codex agent with no launch id on any start gets one appended `task.started` naming
+`legacy-launch:<taskId>`, on its first start's turn and owner, with its newest row's linkage and
+the roster's own `updatedAt` for it as the row's `createdAt`/`updatedAt` (the event itself is
+stamped with the load's time), so the roster reads exactly as before and the agent's spawn row
+takes it in; the next relaunch names a different id, and reopens it. An `idle`
+agent needs none, since any start reopens it (`packages/api/src/agent-chat/roster.ts`,
+`adapters/opencode/normalize.ts`, `adapters/codex/normalise.ts`,
+`apps/daemon/src/agent-host/orchestration/leftover-work.ts` `legacyLaunchStarts`).*
 
 Background tasks (`agentKind: "background"`) list in the same roster with a distinct icon, and a
 **live background row is never collapsed behind "N more" and never fades**: it outlives the turn
@@ -3872,6 +4063,15 @@ the owner of its call's lifecycle rows in the same derivation input — `callOwn
 `lib/agent-chat/entries.logic.ts`, through which `itemsForAgent` includes it in its owner's drill-in
 and `deriveWorkLogEntries` leaves it out of every other view. A chunk whose call has no owned row in
 the input stays the parent's, as before.*
+
+*Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, Task 3): a Codex drill-in
+held the child's progress ticks and never a call — the adapter wrote a child's `item/*` only as the
+roster's `task.progress` and dropped its output deltas as chatter. A collab child's call is now its
+own rows by the same rule: its start, its output chunks and its end carry the child's thread id as
+`agentId` and one turn, the parent's turn live when the call started, under an item id namespaced by
+the child's thread, so it renders in the child's drill-in as one call with its output joined and
+never in the parent's timeline (`adapters/codex/normalise.ts` `childItemEvents`; codex fixtures
+README observation 20).*
 
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind

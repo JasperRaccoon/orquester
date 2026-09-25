@@ -78,8 +78,9 @@ async function streamedOutput(api: DaemonApi, sessionId: string, itemId: string,
 }
 
 /**
- * An item's whole text, as the GUI's "Load full output" viewer reads it (`fullOutputText`, AgentChatView.tsx) — except a
- * command's output, which an agent reads as text rather than as escaped JSON. In this order:
+ * An item's whole text, as the GUI's "Load full output" viewer reads an item (`fullOutputText`,
+ * packages/ui/src/lib/agent-chat/full-output.ts: steps 1 and 3) and a command's streamed output (step 2, which the
+ * viewer reads first, for a row whose command streamed). In this order:
  *
  * 1. a `command_execution` activity whose own data carries output answers it whole (`commandOutputText`: the first place,
  *    in the preview's reading order, that holds output in the unslimmed item) — unless the item is stored slimmed
