@@ -3623,15 +3623,19 @@ left for its thread (`adoptOutboxLeftovers`): a send posted less than `OUTBOX_RE
 (ten minutes) ago is re-posted under the SAME `commandId` — the host's receipt answers one that had
 landed with the seq it recorded, and one that had not goes out now — composer sends and queued ones
 **one at a time, in the order they were first posted** (`replayInOrder`), each composer send
-reading "Sending" from the start and the queue holding until the last one settles. The bound is
+reading "Sending" from the start and the queue holding until the last one settles — one step going
+wrong never strands the rest, and every "Sending" the run opened is settled when it ends. The bound is
 the receipts': they are a ring of the host's last 500 commands, every thread's together, and a
 re-post the host no longer recognises would be a second turn; ten minutes is far past a reload of a
 post (which gives up within about 1¾ minutes) and far short of 500 commands on a single user's
 host. An older send is not re-posted, and one the host refuses comes back the same way, saying it
 dates from before the reload: a composer send to the draft through the failed-send restore (the
 composer that shows the thread, else the thread's draft), with a notice and a banner; a queued send
-held at the front of its queue — behind any held before it, in post order — with a banner, under a
-new `commandId`, the user's next send of it being a new command as for any failed queued send. An
+held at the front of its queue — right behind the last message the run held before it that is still
+queued (`holdAtFront`'s `behind`, by message id: never a count, which the user sending one of them, or
+a later message held for another reason, would turn into a place behind a message queued after it),
+in post order — with a banner, under a new `commandId`, the user's next send of it being a new command
+as for any failed queued send. An
 Implement's prompt never comes back: the plan is still there to implement (`generatedPrompt`, told
 by `sendComposerTurn`). The queue comes back in order, behind any queued send still on its way — as
 it was after an ordinary reload, but **held** (`holdUntilUserAction`, "Waits for Send now", its
@@ -3639,10 +3643,13 @@ it was after an ordinary reload, but **held** (`holdUntilUserAction`, "Waits for
 (ten minutes): a queued message is due as soon as its thread is idle and would otherwise go out on
 the thread's first frame — hours or days later, after a discarded tab or a restored session, a
 "push and deploy" nobody still wants. The absence is measured from when the queue was last on
-screen — the thread's store stamps it as the page is hidden, on `pagehide`, and at the generation's
-teardown (not while hidden) — or when the message was queued, whichever is later, never from the
-queueing alone: a message queued twenty minutes ago behind a turn still running is live after a
-quick reload. A message held before the reload comes back held, with its reason (`holdReason`) on
+screen **or last driven by a live page** — the thread's store stamps it as the page is hidden, on
+`pagehide`, and at the generation's teardown (not while hidden); a page hidden for hours still sends
+its queue as each message falls due, so its `pagehide` stamps it, and a reload of it is no absence —
+or from when the message was queued, whichever is later, never from the queueing alone: a message
+queued twenty minutes ago behind a turn still running is live after a quick reload. (Not covered: a
+LIVE generation's queue after a long freeze with no reload — a sleeping laptop, a frozen background
+tab — still goes out as it falls due, as it always did.) A message held before the reload comes back held, with its reason (`holdReason`) on
 the banner. A generation that starts from the queue its page kept — the snapshot it would have
 painted expired — holds it by the same rule. After a reload the web client lands on Recent Projects,
 so a thread's leftovers are picked up only when its project is opened again: a posted send whose
@@ -3657,10 +3664,14 @@ next generation reaches a boundary, and that one used to send the next message a
 first, or overtaking the head when that failed and was held at the front. It now waits; when the
 head settles the queue proceeds in order — a delivered one lets the next go, a failed one is held at
 the front before its settle is heard. One that fails while no generation of the thread is live is
-held at the front of the queue the page keeps for the thread, with its reason, which the next
-generation starts from — the retained snapshot, taken at the teardown, does not have it — so the
-messages queued behind it do not drain ahead of it; only a tab with no storage puts it back in the
-draft instead.*
+held at the front of the queue the page keeps for the thread, with its reason — failures landing
+one after the other keep their order — which the next generation starts from, the retained snapshot
+(taken at the teardown) not having it, so the messages queued behind it do not drain ahead of it;
+only a tab with no storage puts it back in the draft instead. The kept queue is trusted only while
+its last write reached the storage (`keptQueueCurrent`): after a failed write (a full storage) a
+generation with a retained snapshot starts from the snapshot, taking in front of it any held
+message only the kept queue has (`seedQueueFrom`), and the first thing a generation stores is its
+queue as it stands when its first microtask runs, never the seed it was created with.*
 
 *Built: **a draft keeps every file that comes back to it, and holds the send over the eight.** A
 failed send's chips come back ahead of the ones staged while it was in flight, a Stop returns every
