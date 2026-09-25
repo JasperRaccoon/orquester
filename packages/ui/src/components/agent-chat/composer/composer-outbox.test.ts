@@ -13,13 +13,18 @@ import type { QueuedComposerMessage } from "../../../lib/agent-chat/contracts";
 import {
   adoptOutboxLeftovers,
   COMPOSER_OUTBOX_KEY,
+  holdOutboxQueuedAtFront,
   MAX_OUTBOX_ENTRIES,
+  OUTBOX_QUEUE_ABSENCE_MAX_MS,
   outboxQueue,
+  outboxQueueFresh,
+  outboxQueueShownAt,
   parseComposerOutbox,
   recordOutboxQueuedPost,
   recordOutboxSend,
   removeOutboxEntry,
   resetComposerOutbox,
+  stampOutboxQueueShown,
   writeOutboxQueue,
   type OutboxQueuedMessage
 } from "./composer-outbox";
@@ -155,14 +160,79 @@ describe("the composer outbox", () => {
     assert.deepEqual(outboxQueue("A").map((message) => message.text), ["one", "two"]);
   });
 
-  it("keeps at most the newest MAX_OUTBOX_ENTRIES entries", () => {
+  it("never drops a send in flight to stay under the cap — only messages still waiting, oldest first", () => {
+    recordOutboxSend({ sessionId: "A", commandId: "on-its-way", sentAt: 1_000, turn: { input: "sent" } });
+    writeOutboxQueue("B", [queued("posted", "queued, on its way")]);
+    recordOutboxQueuedPost("B", queued("posted", "queued, on its way"), 2_000);
+    const waiting = Array.from({ length: MAX_OUTBOX_ENTRIES }, (_, index) => queued(`w${index + 1}`, `w${index + 1}`));
+    writeOutboxQueue("C", waiting);
+
+    assert.deepEqual(
+      outboxQueue("C").map((message) => message.text).slice(0, 2),
+      ["w3", "w4"],
+      "the two oldest waiting messages made room"
+    );
+    assert.equal(outboxQueue("C").length, MAX_OUTBOX_ENTRIES - 2);
+    reload();
+    assert.deepEqual(adoptOutboxLeftovers("A").map(summary), ['send on-its-way "sent"']);
+    assert.deepEqual(adoptOutboxLeftovers("B").map(summary), ['queued c-posted "queued, on its way" posted']);
+  });
+
+  it("holds a message at the front of a thread's kept queue, reason and all, and says whether it could", () => {
+    writeOutboxQueue("A", [queued("q2", "two"), queued("q3", "three")]);
+    const held = { ...queued("q1", "one"), holdUntilUserAction: true, holdReason: "The agent host is restarting." };
+    assert.equal(holdOutboxQueuedAtFront("A", held), true);
+    assert.deepEqual(
+      outboxQueue("A").map((message) => [message.text, message.holdUntilUserAction, message.holdReason]),
+      [
+        ["one", true, "The agent host is restarting."],
+        ["two", false, undefined],
+        ["three", false, undefined]
+      ]
+    );
+
+    delete (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage;
+    assert.equal(holdOutboxQueuedAtFront("A", held), false, "no tab storage: the caller keeps it elsewhere");
+  });
+
+  it("keeps a thread's last-shown stamp while it has queued messages, and forgets it with them", () => {
+    stampOutboxQueueShown("A", 5_000);
+    assert.equal(outboxQueueShownAt("A"), null, "no queue, nothing to stamp");
+
+    writeOutboxQueue("A", [queued("q1", "one")]);
+    stampOutboxQueueShown("A", 6_000);
+    assert.equal(outboxQueueShownAt("A"), 6_000);
+    reload();
+    assert.equal(outboxQueueShownAt("A"), 6_000, "the next page reads what this one stamped");
+
+    adoptOutboxLeftovers("A");
+    writeOutboxQueue("A", []);
+    assert.equal(outboxQueueShownAt("A"), null, "the queue is gone, and its stamp with it");
+  });
+
+  it("is fresh while the later of the queue's last showing and the message's queueing is within the bound", () => {
+    const queuedAt = new Date(10_000).toISOString();
+    const bound = OUTBOX_QUEUE_ABSENCE_MAX_MS;
+    assert.equal(outboxQueueFresh({ shownAt: 20_000, queuedAt, now: 20_000 + bound }), true, "at the bound");
+    assert.equal(outboxQueueFresh({ shownAt: 20_000, queuedAt, now: 20_000 + bound + 1 }), false);
+    assert.equal(
+      outboxQueueFresh({ shownAt: null, queuedAt, now: 10_000 + bound }),
+      true,
+      "never stamped: queued in plain sight, so its queueing counts"
+    );
+    assert.equal(outboxQueueFresh({ shownAt: 5_000, queuedAt, now: 10_000 + bound }), true, "the later of the two");
+    assert.equal(outboxQueueFresh({ shownAt: null, queuedAt: "", now: 10_000 }), false, "nothing to measure from");
+    assert.equal(outboxQueueFresh({ shownAt: 20_000, queuedAt, now: 19_000 }), false, "a clock that ran backwards");
+  });
+
+  it("keeps every send in flight even past the cap: the bound only ever drops a waiting message", () => {
     for (let index = 0; index <= MAX_OUTBOX_ENTRIES; index += 1) {
       recordOutboxSend({ sessionId: "A", commandId: `c${index}`, sentAt: 1_000, turn: { input: `m${index}` } });
     }
     reload();
     const kept = adoptOutboxLeftovers("A");
-    assert.equal(kept.length, MAX_OUTBOX_ENTRIES);
-    assert.equal(summary(kept[0]!), 'send c1 "m1"', "the oldest went first");
+    assert.equal(kept.length, MAX_OUTBOX_ENTRIES + 1);
+    assert.equal(summary(kept[0]!), 'send c0 "m0"');
   });
 
   describe("loads field-wise, with a fallback (AGENTS.md: an old bundle's payload outlives a deploy)", () => {
@@ -290,6 +360,32 @@ describe("the composer outbox", () => {
         modelSelection: { model: "sonnet", instanceId: "claude", options: [{ id: "effort", value: "high" }] }
       });
       assert.equal(entry.generatedPrompt, true);
+    });
+
+    it("reads a held message's reason, and the last-shown stamps, field-wise", () => {
+      const raw = JSON.stringify({
+        v: 1,
+        entries: [
+          { ...queuedEntry, message: { ...queued("q1", "held"), holdUntilUserAction: true, holdReason: "no" } },
+          { ...queuedEntry, sessionId: "B", message: { ...queued("q2", "x"), holdReason: 42 } },
+          { ...queuedEntry, sessionId: "C", message: queued("q3", "y") },
+          { ...queuedEntry, sessionId: "D", message: queued("q4", "z") }
+        ],
+        shown: { A: 7_000, B: "yesterday", C: null, "": 5 }
+      });
+      const entries = parseComposerOutbox(raw);
+      assert.deepEqual(
+        entries.map((entry) => (entry.kind === "queued" ? entry.message.holdReason : "?")),
+        ["no", undefined, undefined, undefined]
+      );
+      backing.set(COMPOSER_OUTBOX_KEY, raw);
+      assert.deepEqual(
+        ["A", "B", "C", "D"].map((sessionId) => outboxQueueShownAt(sessionId)),
+        [7_000, null, null, null]
+      );
+      backing.set(COMPOSER_OUTBOX_KEY, JSON.stringify({ v: 1, entries: [queuedEntry], shown: [1, 2] }));
+      assert.equal(outboxQueueShownAt("A"), null, "a stamp map that is not one reads as none");
+      assert.equal(parseComposerOutbox(backing.get(COMPOSER_OUTBOX_KEY)!).length, 1, "and costs no entry");
     });
 
     it("keeps the first of two entries under one commandId", () => {

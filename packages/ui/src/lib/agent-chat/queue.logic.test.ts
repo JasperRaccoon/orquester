@@ -95,6 +95,22 @@ describe("the three guards", () => {
     assert.equal(held.messages.length, 2);
   });
 
+  it("guard 2, in order: a later failure is held behind the ones held before it, still ahead of the rest", () => {
+    const { state, ids } = queueOf("one", "two", "three");
+    const first = takeQueued(state, ids[0]!, "boundary-1");
+    const second = takeQueued(first.state, ids[1]!, "boundary-1");
+    const heldFirst = holdAtFront(second.state, first.message!);
+    const heldBoth = holdAtFront(heldFirst, second.message!, 1);
+    assert.deepEqual(
+      heldBoth.messages.map((message) => [message.id, message.holdUntilUserAction]),
+      [
+        [ids[0], true],
+        [ids[1], true],
+        [ids[2], false]
+      ]
+    );
+  });
+
   it("guard 3: nothing flushes while a request is pending", () => {
     assert.equal(
       isQueuedMessageDue({

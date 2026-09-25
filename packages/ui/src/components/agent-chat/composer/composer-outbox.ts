@@ -13,13 +13,18 @@
  * its thread (`adoptOutboxLeftovers`): a send is re-posted under the SAME
  * `commandId` — the host's receipt makes a delivered one a no-op (§6.2) — or,
  * past {@link OUTBOX_REPLAY_MAX_AGE_MS}, comes back to the draft; the queue
- * comes back as it was.
+ * comes back as it was — held for the user's Send now when nobody has seen it
+ * for {@link OUTBOX_QUEUE_ABSENCE_MAX_MS}.
  *
  * `sessionStorage`, not `localStorage`: per tab. A reload of this tab resumes
  * it; another tab — a second window on the same thread — never replays it,
- * because that tab's own page may still be posting it. A tab the browser
- * duplicates starts with a copy, and replays it under the same ids, which the
- * receipts dedupe.
+ * because that tab's own page may still be posting it. One exception: a tab
+ * the browser DUPLICATES starts with a copy of this one's storage, and its
+ * page adopts every send this tab still has in flight and every message in
+ * its queue. Their posts carry the same ids, so the host's receipts dedupe
+ * them — but a message taken back in one tab (its ✗, or a Stop) is still sent
+ * by the other, and a re-post that fails in both comes back into the shared
+ * draft twice. Nothing coordinates the two tabs.
  *
  * **Owned by the page that wrote it.** Each entry names the page (one id per
  * page load) that holds it. This page's entries are its own sends and queues,
@@ -28,10 +33,16 @@
  * their thread, which rewrites them as its own. An entry stays stored until it
  * settles, so a second reload mid-re-post finds it again.
  *
+ * Beside the entries, the moment each thread's queue was last on screen
+ * (`shown`, {@link stampOutboxQueueShown}) — stamped by the thread's store
+ * when the page is hidden, on `pagehide`, and when the store generation is
+ * torn down — which is what the absence bound measures.
+ *
  * Loaded field-wise with a fallback (AGENTS.md: an old bundle's payload
  * outlives a deploy): a value that is not a v1 outbox reads as empty, an entry
- * missing what identifies it is dropped, and a malformed optional field is
- * dropped from its entry, never the entry.
+ * missing what identifies it is dropped, a malformed optional field is
+ * dropped from its entry, never the entry, and a stamp that is not a time is
+ * no stamp.
  *
  * Component-free and React-free: the thread store is its one writer.
  */
@@ -73,9 +84,28 @@ export const COMPOSER_OUTBOX_KEY = "orquester:agent-chat-outbox";
 export const OUTBOX_REPLAY_MAX_AGE_MS = 10 * 60_000;
 
 /**
- * The most entries the outbox keeps, newest last; past it the oldest go. A
- * tab's own sends and queues are a handful at a time — the bound only stops a
- * tab that never reopens a thread from carrying its leftovers forever.
+ * How long a thread's queue may go unseen and still go out by itself when it
+ * comes back — after a reload, or in a store generation that starts from the
+ * queue this page kept because the snapshot it would have painted expired.
+ *
+ * A queued message is due as soon as its thread is idle, so a queue that
+ * comes back is sent on the thread's first frame, before anyone sees it. That
+ * is right after an ordinary reload; it is not for a queue nobody has looked
+ * at for an hour or a day (a tab the browser discarded and reloaded, a
+ * restored session), whose "push and deploy" may no longer be what the user
+ * wants. Past this bound, measured from when the queue was last on screen —
+ * never from when a message was queued: one queued twenty minutes ago behind a
+ * turn still running is live after a quick reload — every message comes back
+ * held, in order, under its own `commandId`, waiting for its Send now.
+ */
+export const OUTBOX_QUEUE_ABSENCE_MAX_MS = 10 * 60_000;
+
+/**
+ * The most entries the outbox keeps. Past it the oldest messages still
+ * WAITING in a queue go first — never a send in flight, whose entry is the one
+ * copy of a message that may be on its way. A tab's own sends and queues are a
+ * handful at a time; the bound only stops a tab that never reopens a thread
+ * from carrying its queue forever.
  */
 export const MAX_OUTBOX_ENTRIES = 100;
 
@@ -116,6 +146,12 @@ export interface OutboxQueued {
 
 export type OutboxEntry = OutboxSend | OutboxQueued;
 
+/** The stored document: the entries, and when each thread's queue was last on screen. */
+interface OutboxDocument {
+  entries: OutboxEntry[];
+  shown: Record<string, number>;
+}
+
 function mintPageId(): string {
   const cryptoRef = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
   if (cryptoRef?.randomUUID) return cryptoRef.randomUUID();
@@ -134,11 +170,39 @@ function commandIdOf(entry: OutboxEntry): string {
   return entry.kind === "send" ? entry.commandId : entry.message.commandId;
 }
 
+/** A send whose post may be on its way: never dropped to stay under the cap. */
+function inFlight(entry: OutboxEntry): boolean {
+  return entry.kind === "send" || entry.sentAt !== undefined;
+}
+
 /** Whether a send posted at `sentAt` may still be re-posted under its id at `now` (epoch ms). */
 export function outboxReplayable(sentAt: number, now: number): boolean {
   const age = now - sentAt;
   // A clock that ran backwards proves nothing about the receipt: not replayed.
   return age >= 0 && age <= OUTBOX_REPLAY_MAX_AGE_MS;
+}
+
+/**
+ * Whether a queued message coming back may still go out by itself at `now`:
+ * its queue was on screen within {@link OUTBOX_QUEUE_ABSENCE_MAX_MS} — at the
+ * thread's last stamp (`shownAt`), or when the message was queued, whichever
+ * is later (queued in plain sight after the last stamp, it was seen then).
+ * Nothing to measure from, or a clock that ran backwards, is not fresh: such
+ * a message waits for the user rather than going out on a guess.
+ */
+export function outboxQueueFresh(input: {
+  shownAt: number | null;
+  queuedAt: string;
+  now: number;
+}): boolean {
+  const queuedAt = Date.parse(input.queuedAt);
+  const seen = Math.max(
+    input.shownAt ?? Number.NEGATIVE_INFINITY,
+    Number.isFinite(queuedAt) ? queuedAt : Number.NEGATIVE_INFINITY
+  );
+  if (!Number.isFinite(seen)) return false;
+  const absence = input.now - seen;
+  return absence >= 0 && absence <= OUTBOX_QUEUE_ABSENCE_MAX_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +276,7 @@ function parseQueuedMessage(value: unknown): OutboxQueuedMessage | null {
     queuedAfterToolActivityId:
       typeof value.queuedAfterToolActivityId === "string" ? value.queuedAfterToolActivityId : null,
     holdUntilUserAction: value.holdUntilUserAction === true,
+    ...(typeof value.holdReason === "string" ? { holdReason: value.holdReason } : {}),
     queuedAt: typeof value.queuedAt === "string" ? value.queuedAt : ""
   };
 }
@@ -247,21 +312,26 @@ function parseEntry(value: unknown): OutboxEntry | null {
   return null;
 }
 
-/**
- * The outbox as stored. Raw `JSON.parse` output never reaches typed code: a
- * value that is not a v1 outbox is empty, and each entry is read on its own
- * — one it cannot read is dropped, and so is a second entry under an id an
- * earlier one already holds.
- */
-export function parseComposerOutbox(raw: string | null): OutboxEntry[] {
-  if (!raw) return [];
+/** The stamps, field-wise: a thread id and a time, or nothing. */
+function parseShown(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+  const shown: Record<string, number> = {};
+  for (const [sessionId, at] of Object.entries(value)) {
+    if (sessionId.length > 0 && isTime(at)) shown[sessionId] = at;
+  }
+  return shown;
+}
+
+function decodeDocument(raw: string | null): OutboxDocument {
+  const empty: OutboxDocument = { entries: [], shown: {} };
+  if (!raw) return empty;
   let decoded: unknown;
   try {
     decoded = JSON.parse(raw);
   } catch {
-    return [];
+    return empty;
   }
-  if (!isRecord(decoded) || decoded.v !== 1 || !Array.isArray(decoded.entries)) return [];
+  if (!isRecord(decoded) || decoded.v !== 1 || !Array.isArray(decoded.entries)) return empty;
   const seen = new Set<string>();
   const entries: OutboxEntry[] = [];
   for (const value of decoded.entries) {
@@ -270,38 +340,73 @@ export function parseComposerOutbox(raw: string | null): OutboxEntry[] {
     seen.add(commandIdOf(entry));
     entries.push(entry);
   }
-  return entries;
+  return { entries, shown: parseShown(decoded.shown) };
+}
+
+/**
+ * The outbox's entries as stored. Raw `JSON.parse` output never reaches typed
+ * code: a value that is not a v1 outbox is empty, and each entry is read on
+ * its own — one it cannot read is dropped, and so is a second entry under an
+ * id an earlier one already holds.
+ */
+export function parseComposerOutbox(raw: string | null): OutboxEntry[] {
+  return decodeDocument(raw).entries;
 }
 
 // ---------------------------------------------------------------------------
 // Storage
 // ---------------------------------------------------------------------------
 
-function readEntries(): OutboxEntry[] {
+function readDocument(): OutboxDocument {
   try {
-    if (typeof sessionStorage === "undefined") return [];
-    return parseComposerOutbox(sessionStorage.getItem(COMPOSER_OUTBOX_KEY));
+    if (typeof sessionStorage === "undefined") return { entries: [], shown: {} };
+    return decodeDocument(sessionStorage.getItem(COMPOSER_OUTBOX_KEY));
   } catch {
-    return [];
+    return { entries: [], shown: {} };
   }
 }
 
-function writeEntries(entries: readonly OutboxEntry[]): void {
-  try {
-    if (typeof sessionStorage === "undefined") return;
-    const bounded = entries.slice(Math.max(0, entries.length - MAX_OUTBOX_ENTRIES));
-    if (bounded.length === 0) {
-      sessionStorage.removeItem(COMPOSER_OUTBOX_KEY);
-      return;
+/** Under the cap, dropping the oldest WAITING messages only — never a send in flight. */
+function bounded(entries: readonly OutboxEntry[]): OutboxEntry[] {
+  let excess = entries.length - MAX_OUTBOX_ENTRIES;
+  if (excess <= 0) return [...entries];
+  return entries.filter((entry) => {
+    if (excess > 0 && !inFlight(entry)) {
+      excess -= 1;
+      return false;
     }
-    sessionStorage.setItem(COMPOSER_OUTBOX_KEY, JSON.stringify({ v: 1, entries: bounded }));
+    return true;
+  });
+}
+
+/** Write the document; `false` when the tab has no storage to keep it in. */
+function writeDocument(document: OutboxDocument): boolean {
+  try {
+    if (typeof sessionStorage === "undefined") return false;
+    const entries = bounded(document.entries);
+    // A stamp is kept only for a thread that still has a queue to measure.
+    const queued = new Set(entries.filter((entry) => entry.kind === "queued").map((entry) => entry.sessionId));
+    const shown = Object.fromEntries(
+      Object.entries(document.shown).filter(([sessionId]) => queued.has(sessionId))
+    );
+    if (entries.length === 0) {
+      sessionStorage.removeItem(COMPOSER_OUTBOX_KEY);
+      return true;
+    }
+    sessionStorage.setItem(
+      COMPOSER_OUTBOX_KEY,
+      JSON.stringify({ v: 1, entries, ...(Object.keys(shown).length > 0 ? { shown } : {}) })
+    );
+    return true;
   } catch {
     /* blocked storage, the quota — the outbox is a safety net, never a failure */
+    return false;
   }
 }
 
-function rewrite(change: (entries: OutboxEntry[]) => OutboxEntry[]): void {
-  writeEntries(change(readEntries()));
+function rewrite(change: (entries: OutboxEntry[]) => OutboxEntry[]): boolean {
+  const document = readDocument();
+  return writeDocument({ ...document, entries: change(document.entries) });
 }
 
 const ownQueueOf = (entry: OutboxEntry, sessionId: string): entry is OutboxQueued =>
@@ -375,6 +480,27 @@ export function writeOutboxQueue(sessionId: string, messages: readonly QueuedCom
 }
 
 /**
+ * A held message put at the FRONT of this page's queue of a thread — a queued
+ * send that failed while no store generation of the thread was live, whose
+ * queue is then only here (§7.4): the next generation starts from it, the
+ * message first, so nothing queued behind it drains ahead of it. `false` when
+ * the tab has no storage to keep it in, for the caller to keep it elsewhere.
+ */
+export function holdOutboxQueuedAtFront(sessionId: string, message: OutboxQueuedMessage): boolean {
+  const held: OutboxQueued = {
+    kind: "queued",
+    pageId,
+    sessionId,
+    message: { ...message, holdUntilUserAction: true }
+  };
+  return rewrite((entries) => {
+    const rest = entries.filter((entry) => commandIdOf(entry) !== message.commandId);
+    const first = rest.findIndex((entry) => ownQueueOf(entry, sessionId));
+    return first === -1 ? [...rest, held] : [...rest.slice(0, first), held, ...rest.slice(first)];
+  });
+}
+
+/**
  * A send, or a queued message, that settled — delivered, given back, or held
  * anew under a new id. Forgotten whichever page it is stored under: a page
  * settles only what it wrote or adopted, and one whose adoption never reached
@@ -384,19 +510,38 @@ export function removeOutboxEntry(commandId: string): void {
   rewrite((entries) => entries.filter((entry) => commandIdOf(entry) !== commandId));
 }
 
+/**
+ * A thread's queue was on screen until `at` (epoch ms): the page is being
+ * hidden or unloaded, or the thread's store generation is being torn down.
+ * Kept only while the thread has a queue to measure.
+ */
+export function stampOutboxQueueShown(sessionId: string, at: number): void {
+  const document = readDocument();
+  if (!document.entries.some((entry) => entry.kind === "queued" && entry.sessionId === sessionId)) {
+    return;
+  }
+  writeDocument({ ...document, shown: { ...document.shown, [sessionId]: at } });
+}
+
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
 
 /**
  * The messages this page has queued on a thread and not yet posted, in order —
- * what a generation of the thread's store created with nothing retained (the
- * snapshot it would have painted expired) starts its queue from.
+ * what a generation of the thread's store starts its queue from: this page's
+ * own queue as it last stood, a message held while no generation was live
+ * included.
  */
 export function outboxQueue(sessionId: string): OutboxQueuedMessage[] {
-  return readEntries()
-    .filter((entry): entry is OutboxQueued => ownQueueOf(entry, sessionId))
+  return readDocument()
+    .entries.filter((entry): entry is OutboxQueued => ownQueueOf(entry, sessionId))
     .map((entry) => entry.message);
+}
+
+/** When a thread's queue was last on screen, by {@link stampOutboxQueueShown}; `null` if never. */
+export function outboxQueueShownAt(sessionId: string): number | null {
+  return readDocument().shown[sessionId] ?? null;
 }
 
 /**
@@ -405,11 +550,11 @@ export function outboxQueue(sessionId: string): OutboxQueuedMessage[] {
  * each settles.
  */
 export function adoptOutboxLeftovers(sessionId: string): OutboxEntry[] {
-  const entries = readEntries();
+  const document = readDocument();
   const isLeftover = (entry: OutboxEntry): boolean =>
     entry.sessionId === sessionId && entry.pageId !== pageId;
-  if (!entries.some(isLeftover)) return [];
-  const adopted = entries.map((entry) => (isLeftover(entry) ? { ...entry, pageId } : entry));
-  writeEntries(adopted);
-  return adopted.filter((entry, index) => isLeftover(entries[index]!));
+  if (!document.entries.some(isLeftover)) return [];
+  const adopted = document.entries.map((entry) => (isLeftover(entry) ? { ...entry, pageId } : entry));
+  writeDocument({ ...document, entries: adopted });
+  return adopted.filter((entry, index) => isLeftover(document.entries[index]!));
 }

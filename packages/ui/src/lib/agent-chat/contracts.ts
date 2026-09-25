@@ -83,7 +83,8 @@ export type AgentChatConnectionState =
  * running compaction (§3.4). A live intent, not a draft: it is never merged
  * into the persisted draft while it waits, but the tab keeps it — with its
  * `commandId` — in its outbox (`composer-outbox.ts`, `sessionStorage`), so a
- * reload of the tab brings the queue back as it was (§7.4).
+ * reload of the tab brings the queue back as it was, held for Send now once
+ * nobody has seen it for ten minutes (§7.4).
  */
 export interface QueuedComposerMessage {
   id: string;
@@ -105,6 +106,15 @@ export interface QueuedComposerMessage {
   queuedAfterToolActivityId: string | null;
   /** A failed send is re-inserted at the front with this, so nothing overtakes it. */
   holdUntilUserAction: boolean;
+  /**
+   * Why a held message waits — the failure that held it, or that nobody had
+   * seen its queue for a while — shown as the thread's banner wherever the
+   * queue comes back with it: the thread's next store generation, or the
+   * next page after a reload. A held row with no banner never says why.
+   *
+   * *Added with the reload-safe queue; `contracts.ts` stays additive-only.*
+   */
+  holdReason?: string;
   queuedAt: string;
 }
 

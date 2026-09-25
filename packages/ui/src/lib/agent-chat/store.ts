@@ -146,12 +146,17 @@ import {
 } from "../../components/agent-chat/composer/composer-draft";
 import {
   adoptOutboxLeftovers,
+  holdOutboxQueuedAtFront,
   outboxQueue,
+  outboxQueueFresh,
+  outboxQueueShownAt,
   outboxReplayable,
   recordOutboxQueuedPost,
   recordOutboxSend,
   removeOutboxEntry,
+  stampOutboxQueueShown,
   writeOutboxQueue,
+  type OutboxQueued,
   type OutboxQueuedMessage,
   type OutboxSend,
   type OutboxTurn
@@ -871,6 +876,41 @@ const STALE_SEND_NOTICE =
   "This message was on its way when the page reloaded, too long ago to send it again safely — check the thread before sending it.";
 
 /**
+ * Why a queued message that came back waits for its Send now: nobody had seen
+ * its queue for longer than `OUTBOX_QUEUE_ABSENCE_MAX_MS`, so it does not go
+ * out by itself on the thread's first frame (§7.4).
+ */
+const QUEUE_AWAY_NOTICE =
+  "These queued messages were last on screen more than ten minutes ago, so they wait for Send now instead of going out by themselves.";
+
+/** A send a reload left behind that did not go through on its re-post: said as such, then why. */
+const repostFailedNotice = (reason: string): string =>
+  `This message was on its way when the page reloaded, and it did not go through: ${reason}`;
+
+/**
+ * A queued message coming back — after a reload, or into a generation that
+ * starts from the queue its page kept — as it may be shown: held, with the
+ * reason it waits, once its queue has been off screen longer than
+ * `OUTBOX_QUEUE_ABSENCE_MAX_MS` (`outboxQueueFresh`); as it was otherwise. A
+ * message already held keeps its own reason.
+ */
+function heldIfUnseen(
+  message: QueuedComposerMessage,
+  shownAt: number | null,
+  now: number
+): QueuedComposerMessage {
+  if (message.holdUntilUserAction || outboxQueueFresh({ shownAt, queuedAt: message.queuedAt, now })) {
+    return message;
+  }
+  return { ...message, holdUntilUserAction: true, holdReason: QUEUE_AWAY_NOTICE };
+}
+
+/** Why the first held message of a queue waits, for the thread's banner. */
+function firstHoldReason(messages: readonly QueuedComposerMessage[]): string | null {
+  return messages.find((message) => message.holdUntilUserAction && message.holdReason)?.holdReason ?? null;
+}
+
+/**
  * One attempt of a command, bounded by {@link COMMAND_ATTEMPT_TIMEOUT_MS}:
  * past it the request is aborted and the attempt fails as a lost response
  * (status 0, retryable). Raced rather than left to the signal alone, so a
@@ -910,7 +950,7 @@ function attemptCommand(run: (signal: AbortSignal) => Promise<unknown>): Promise
 
 /** A generation's hook for the thread's other generations (§7.4) — see `holdQueuedMessageInThread`. */
 type HoldingThreadStore = ThreadStore & {
-  holdQueuedAtFront?: (message: QueuedComposerMessage, reason?: string) => void;
+  holdQueuedAtFront?: (message: QueuedComposerMessage, reason?: string, index?: number) => void;
 };
 
 export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): ThreadStore {
@@ -1157,14 +1197,20 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
     /**
      * Guard 2's hold (§7.4): the failed message goes back to the FRONT, held
-     * for the user. `reason` is the failure's banner, for a message another
-     * generation sent: its own banner went to that generation, and a held row
-     * with no banner never says why it waits. A banner the user closed for
-     * this thread stays closed, as `withCommandRetries` has it.
+     * for the user — behind `index` messages already held there, so failures
+     * that land one after the other keep the order they were posted in.
+     * `reason` is the failure's banner, for a message another generation sent:
+     * its own banner went to that generation, and a held row with no banner
+     * never says why it waits. A banner the user closed for this thread stays
+     * closed, as `withCommandRetries` has it.
      */
-    const holdQueuedAtFront = (message: QueuedComposerMessage, reason?: string): void => {
+    const holdQueuedAtFront = (
+      message: QueuedComposerMessage,
+      reason?: string,
+      index = 0
+    ): void => {
       update((state) => {
-        const queue = holdAtFront(state.queue, message);
+        const queue = holdAtFront(state.queue, message, index);
         const banner =
           reason === undefined || dismissedErrorBanners.has(`${sessionId}\u0000${reason}`)
             ? {}
@@ -1203,23 +1249,33 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       if (next !== null) setDraft(next);
     };
 
+    /** The thread's banner, unless the user already closed this one (§7.3). */
+    const showBanner = (message: string): void => {
+      if (!closed && !dismissedErrorBanners.has(`${sessionId}\u0000${message}`)) {
+        setSlice({ errorBanner: message });
+      }
+    };
+
     /**
      * A composer send a reload left behind, re-posted under its own
      * `commandId` (§7.4): the host's receipt answers one that had landed with
      * the seq it recorded, and one that had not goes out now — once, either
-     * way. The thread reads "Sending" meanwhile, whichever composer shows it,
-     * so none offers the message to send again; one the host refuses comes back
-     * as any failed send does, before the thread stops reading "Sending".
+     * way. The thread reads "Sending" meanwhile (`settleSending`, opened when
+     * the thread took it over), whichever composer shows it, so none offers
+     * the message to send again; one the host refuses comes back as any failed
+     * send does — saying it dates from before the reload — before the thread
+     * stops reading "Sending".
      */
-    const replaySend = async (entry: OutboxSend): Promise<void> => {
-      const settle = beginComposerSend(sessionId);
+    const replaySend = async (entry: OutboxSend, settleSending: () => void): Promise<void> => {
       try {
         await command("turn", entry.turn, entry.commandId);
       } catch (error) {
-        if (entry.generatedPrompt !== true) restoreSend(entry.turn, errorMessage(error));
+        const notice = repostFailedNotice(errorMessage(error));
+        if (entry.generatedPrompt !== true) restoreSend(entry.turn, notice);
+        showBanner(notice);
       } finally {
         removeOutboxEntry(entry.commandId);
-        settle();
+        settleSending();
       }
     };
 
@@ -1232,12 +1288,12 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * it always was — the old one may be recorded as refused, and a receipt
      * only replays a refusal.
      */
-    const holdFailedQueued = (message: QueuedComposerMessage, reason: string): void => {
-      const held = { ...message, commandId: newId() };
+    const holdFailedQueued = (message: QueuedComposerMessage, reason: string, index = 0): void => {
+      const held = { ...message, commandId: newId(), holdReason: reason };
       if (closed) {
         holdQueuedMessageInThread(sessionId, held, reason);
       } else {
-        holdQueuedAtFront(held);
+        holdQueuedAtFront(held, reason, index);
       }
     };
 
@@ -1247,10 +1303,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * a re-post after a reload shares, so the host's receipt dedupes the two —
      * and holding the thread's queue meanwhile (`beginQueuedSend`), in every
      * generation of it. Delivered, its outbox entry goes and the queue moves
-     * on; failed, it is held at the front FIRST and only then is the queue let
-     * go, so the next message never slips ahead of it.
+     * on; failed, it is held at the front FIRST (behind `holdIndex` messages
+     * held there before it) and only then is the queue let go, so the next
+     * message never slips ahead of it. `describe` words the failure — a
+     * re-post after a reload says so.
      */
-    const postQueued = async (message: OutboxQueuedMessage): Promise<void> => {
+    const postQueued = async (
+      message: OutboxQueuedMessage,
+      holdIndex = 0,
+      describe: (reason: string) => string = (reason) => reason
+    ): Promise<void> => {
       const settleQueued = beginQueuedSend(sessionId);
       try {
         await command(
@@ -1265,7 +1327,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         );
         removeOutboxEntry(message.commandId);
       } catch (error) {
-        holdFailedQueued(message, errorMessage(error));
+        holdFailedQueued(message, describe(errorMessage(error)), holdIndex);
         removeOutboxEntry(message.commandId);
         throw error;
       } finally {
@@ -1274,16 +1336,54 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     };
 
     /**
+     * What a reload left on its way, re-posted ONE AT A TIME in the order it
+     * was first posted — a composer send among the queued ones — so none can
+     * land ahead of one posted before it (§7.4). The queue holds for the whole
+     * run: what waits in it goes only once every one of these has settled.
+     * Each composer send reads "Sending" from the start, not only on its turn.
+     * A queued one the host refuses is held behind the ones held before it
+     * (`heldBefore` of them already are), in order, ahead of the rest.
+     */
+    const replayInOrder = async (
+      ordered: ReadonlyArray<OutboxSend | OutboxQueued>,
+      heldBefore: number
+    ): Promise<void> => {
+      const settleQueue = beginQueuedSend(sessionId);
+      const sending = new Map<OutboxSend, () => void>();
+      for (const entry of ordered) {
+        if (entry.kind === "send") sending.set(entry, beginComposerSend(sessionId));
+      }
+      let held = heldBefore;
+      try {
+        for (const entry of ordered) {
+          if (entry.kind === "send") {
+            await replaySend(entry, sending.get(entry)!);
+            continue;
+          }
+          const failed = await postQueued(entry.message, held, repostFailedNotice).then(
+            () => false,
+            () => true
+          );
+          if (failed) held += 1;
+        }
+      } finally {
+        settleQueue();
+      }
+    };
+
+    /**
      * What a previous page of this tab left for this thread (§7.4) — the sends
      * and the queue a reload interrupted, handed to the thread's first store
      * after it (`adoptOutboxLeftovers`). A send posted less than
      * `OUTBOX_REPLAY_MAX_AGE_MS` ago is re-posted under its own `commandId`,
-     * the host's receipt deduping one that had landed: a composer send with
-     * the thread reading "Sending", a queued one holding the queue. An older
-     * one is not — the host may no longer know its id, and it may have landed:
-     * a composer send comes back to the draft, a queued one is held at the
-     * front of the queue, both saying why. The queue comes back as it was, in
-     * order, behind them.
+     * the host's receipt deduping one that had landed — all of them one at a
+     * time, in the order they were posted (`replayInOrder`). An older one is
+     * not — the host may no longer know its id, and it may have landed: a
+     * composer send comes back to the draft, a queued one is held at the front
+     * of the queue, both saying why. The queue comes back behind them, in
+     * order — held, if nobody has seen it for `OUTBOX_QUEUE_ABSENCE_MAX_MS`
+     * (`heldIfUnseen`); a message held before the reload comes back held, with
+     * its reason on the banner.
      */
     const resumeFromOutbox = (): void => {
       const leftovers = adoptOutboxLeftovers(sessionId);
@@ -1291,31 +1391,36 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         return;
       }
       const at = clock();
+      const shownAt = outboxQueueShownAt(sessionId);
       const stale: OutboxSend[] = [];
+      const replays: Array<OutboxSend | OutboxQueued> = [];
       const held: QueuedComposerMessage[] = [];
       const waiting: QueuedComposerMessage[] = [];
       for (const entry of leftovers) {
         if (entry.kind === "send") {
           if (outboxReplayable(entry.sentAt, at)) {
-            void replaySend(entry);
+            replays.push(entry);
           } else {
             stale.push(entry);
           }
         } else if (entry.sentAt === undefined) {
-          waiting.push(entry.message);
+          waiting.push(heldIfUnseen(entry.message, shownAt, at));
         } else if (outboxReplayable(entry.sentAt, at)) {
-          void postQueued(entry.message).catch(() => {
-            /* `postQueued` held it at the front, and the failure is banner'd. */
-          });
+          replays.push(entry);
         } else {
-          held.push({ ...entry.message, commandId: newId(), holdUntilUserAction: true });
+          held.push({
+            ...entry.message,
+            commandId: newId(),
+            holdUntilUserAction: true,
+            holdReason: STALE_SEND_NOTICE
+          });
           removeOutboxEntry(entry.message.commandId);
         }
       }
       // Newest first: each goes ahead of what the draft holds, so the oldest
       // ends up first, as they were sent. An Implement's prompt gives nothing
       // back — the plan is still there to implement.
-      let givenBack = held.length > 0;
+      let givenBack = false;
       for (const entry of [...stale].reverse()) {
         if (entry.generatedPrompt !== true) {
           restoreSend(entry.turn, STALE_SEND_NOTICE);
@@ -1324,23 +1429,32 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         removeOutboxEntry(entry.commandId);
       }
       // Said on the thread too, not only by a composer that happens to be
-      // mounted: whoever opens it next sees why the message is back, unsent.
+      // mounted: whoever opens it next sees why a message is back, unsent, or
+      // why one waits.
+      const reason = firstHoldReason([...held, ...waiting]) ?? (givenBack ? STALE_SEND_NOTICE : null);
       const banner =
-        givenBack && !dismissedErrorBanners.has(`${sessionId}\u0000${STALE_SEND_NOTICE}`)
-          ? { errorBanner: STALE_SEND_NOTICE }
+        reason !== null && !dismissedErrorBanners.has(`${sessionId}\u0000${reason}`)
+          ? { errorBanner: reason }
           : {};
-      if (held.length === 0 && waiting.length === 0) {
-        if (givenBack) setSlice(banner);
-        return;
+      if (held.length > 0 || waiting.length > 0) {
+        update((state) => {
+          const queue: QueueState = {
+            ...state.queue,
+            messages: [...held, ...waiting, ...state.queue.messages]
+          };
+          const reducer = patchSlice(state.reducer, { queue: [...queue.messages], ...banner });
+          return { ...state, queue, reducer, slice: reducer.slice };
+        });
+      } else if (reason !== null) {
+        setSlice(banner);
       }
-      update((state) => {
-        const queue: QueueState = {
-          ...state.queue,
-          messages: [...held, ...waiting, ...state.queue.messages]
-        };
-        const reducer = patchSlice(state.reducer, { queue: [...queue.messages], ...banner });
-        return { ...state, queue, reducer, slice: reducer.slice };
-      });
+      if (replays.length > 0) {
+        const bySentAt = (entry: OutboxSend | OutboxQueued): number => entry.sentAt ?? 0;
+        void replayInOrder(
+          [...replays].sort((left, right) => bySentAt(left) - bySentAt(right)),
+          held.length
+        );
+      }
     };
 
     /**
@@ -2165,33 +2279,53 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     });
 
     const warm = retained ? cachedThreadState(retained.state) : null;
-    // With nothing retained, the queue starts from the one this page keeps in
-    // the tab's outbox (§7.4): the snapshot that held it expired, and dropping
-    // it lost every message still waiting.
+    // The queue starts from the one this page keeps in the tab's outbox
+    // (§7.4) — the thread's queue as it last stood, a message held while no
+    // generation was live included (`holdQueuedMessageInThread`), which the
+    // retained snapshot, taken at the teardown, does not have — else from that
+    // snapshot. Dropping it when the snapshot expired lost every message still
+    // waiting; a queue nobody has seen for a while comes back held.
+    const keptQueue = outboxQueue(sessionId);
+    const seedFrom = keptQueue.length > 0 ? keptQueue : (warm?.queue.messages ?? []);
+    const seedShownAt = outboxQueueShownAt(sessionId);
+    const seedAt = clock();
+    const seedMessages = seedFrom.map((message) => heldIfUnseen(message, seedShownAt, seedAt));
+    // Unchanged when it is exactly the retained queue: that one's rows are
+    // already painted, and nothing needs projecting again.
+    const retainedMessages = warm?.queue.messages;
+    const seedChanged =
+      retainedMessages === undefined ||
+      seedMessages.length !== retainedMessages.length ||
+      seedMessages.some((message, index) => message !== retainedMessages[index]);
     const seededQueue: QueueState =
-      warm?.queue ??
-      (() => {
-        const messages = outboxQueue(sessionId);
-        return messages.length === 0 ? EMPTY_QUEUE : { messages, drainGeneration: 0 };
-      })();
-    const initialReducer = warm
+      warm !== null && !seedChanged
+        ? warm.queue
+        : seedMessages.length === 0
+          ? EMPTY_QUEUE
+          : { messages: seedMessages, drainGeneration: warm?.queue.drainGeneration ?? 0 };
+    const seedReason = firstHoldReason(seedMessages);
+    const seedBanner =
+      seedReason !== null && !dismissedErrorBanners.has(`${sessionId}\u0000${seedReason}`)
+        ? { errorBanner: seedReason }
+        : {};
+    const baseReducer = warm
       ? warm.reducer
       : (() => {
           const reducer = createReducerState(sessionId);
           const remembered = positions.read(sessionId);
-          const withQueue =
-            seededQueue.messages.length === 0
-              ? reducer
-              : patchSlice(reducer, { queue: [...seededQueue.messages] });
           return remembered
-            ? patchSlice(withQueue, {
+            ? patchSlice(reducer, {
                 scroll: remembered,
                 disclosures: remembered.disclosures,
                 interactionMode: remembered.interactionMode,
                 follow: remembered.atEnd
               })
-            : withQueue;
+            : reducer;
         })();
+    const initialReducer =
+      seedChanged || seedReason !== null
+        ? patchSlice(baseReducer, { queue: [...seededQueue.messages], ...seedBanner })
+        : baseReducer;
 
     /**
      * **Resume by cursor, never re-download.** A warm remount asks the host for
@@ -2214,6 +2348,12 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       if (closed) {
         return;
       }
+      // The queue this generation starts from, held flags and all, is the
+      // page's copy from here on: a message held because nobody had seen it
+      // stays held across the next reload, whose stamp will be fresh.
+      if (seededQueue.messages.length > 0) {
+        writeOutboxQueue(sessionId, seededQueue.messages);
+      }
       // Before the stream: what a reload interrupted is on its way again, and
       // the queue back, before the thread's first frame can make anything due.
       resumeFromOutbox();
@@ -2233,7 +2373,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       );
     });
 
-    return {
+    const initialState: InternalState = {
       reducer: initialReducer,
       slice: initialReducer.slice,
       queue: seededQueue,
@@ -2260,6 +2400,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       reveal: null,
       actions
     };
+    // A queue that is not the retained one gets its rows now — its ghost
+    // bubbles, held or not — rather than at the thread's first frame.
+    return seedChanged ? project(initialState) : initialState;
   });
 
   // The tab's outbox holds this thread's queue as it stands (§7.4): a reload
@@ -2271,6 +2414,26 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       writeOutboxQueue(sessionId, state.queue.messages);
     }
   });
+
+  // When this thread's queue was last on screen (§7.4), for the absence bound
+  // a queue coming back is measured against: stamped as the page is hidden, on
+  // `pagehide`, and when this generation is torn down — unless the page is
+  // hidden then, when the stamp it took on hiding stands.
+  const stampQueueShown = (): void => stampOutboxQueueShown(sessionId, clock());
+  const pageHidden = (): boolean =>
+    typeof document !== "undefined" && document.visibilityState === "hidden";
+  const onVisibilityChange = (): void => {
+    if (pageHidden()) stampQueueShown();
+  };
+  const lifecycle =
+    typeof window !== "undefined" &&
+    typeof document !== "undefined" &&
+    typeof window.addEventListener === "function" &&
+    typeof document.addEventListener === "function";
+  if (lifecycle) {
+    window.addEventListener("pagehide", stampQueueShown);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+  }
 
   // Expose the teardown on the store object so the registry can call it.
   // `retain: false` is the "drop it for good" path (`resetThreadStores`).
@@ -2285,6 +2448,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     unsubscribeQueuedSends?.();
     unsubscribeQueuedSends = null;
     unsubscribeQueueMirror();
+    if (lifecycle) {
+      window.removeEventListener("pagehide", stampQueueShown);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    }
+    if (!pageHidden()) stampQueueShown();
     // The live subscription is gone; the VALUE survives for the idle TTL so a
     // remount paints it instantly and resumes by cursor (§6.5, §7.2). Refused
     // outright when a newer generation already claimed this key.
@@ -2349,7 +2517,8 @@ const registry = new Map<string, RegistryEntry>();
  * composer's own "Sending" lives in `composer-sends.ts`, a queued send holds
  * the thread's queue in every generation until it settles
  * (`beginQueuedSend`), and one that fails there is held by the thread's live
- * generation (`holdQueuedMessageInThread`).
+ * generation, or with none at the front of the queue the page keeps for the
+ * thread (`holdQueuedMessageInThread`).
  */
 // A short grace, because the LIVE subscription is the expensive half and T3
 // gives it TTL 0 — released as soon as its last consumer leaves. What makes a
@@ -2473,10 +2642,14 @@ export function updateThreadDraft(
  * will see it: at the front of the thread's live generation's queue, held for
  * the user's action like any failed queued send — nothing queued behind it
  * went meanwhile: the queue waited for it (`beginQueuedSend`) — and with the
- * failure's banner (`reason`) beside it, or, with no slice of the thread open,
- * merged into the persisted draft the next one seeds from. Never in the
- * destroyed queue: the next generation was seeded from a snapshot taken after
- * the message had already left it, so nobody would show it again.
+ * failure's banner (`reason`) beside it. With no slice of the thread open, at
+ * the FRONT of the queue this page keeps for the thread in the tab's outbox,
+ * held and with its reason, where the thread's next generation starts from —
+ * the messages queued behind it are there too, and a message put back in the
+ * draft instead would watch them drain ahead of it. Only a tab with no storage
+ * to keep it in merges it into the persisted draft. Never in the destroyed
+ * queue: the next generation was seeded from a snapshot taken after the
+ * message had already left it, so nobody would show it again.
  */
 function holdQueuedMessageInThread(
   sessionId: string,
@@ -2486,6 +2659,13 @@ function holdQueuedMessageInThread(
   const live = registry.get(sessionId)?.store as HoldingThreadStore | undefined;
   if (live?.holdQueuedAtFront) {
     live.holdQueuedAtFront(message, reason);
+    return;
+  }
+  const { commandId } = message;
+  if (
+    commandId !== undefined &&
+    holdOutboxQueuedAtFront(sessionId, { ...message, commandId, holdReason: reason })
+  ) {
     return;
   }
   updateThreadDraft(sessionId, (draft) => persistedDraftAfterReturn({ persisted: draft, message }));

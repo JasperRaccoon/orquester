@@ -148,13 +148,43 @@ const ids = (prefix: string): (() => string) => {
   return () => `${prefix}${++n}`;
 };
 
-function open(sessionId: string, host: ReturnType<typeof fakeHost>, idPrefix = "id"): ThreadStore {
+function open(
+  sessionId: string,
+  host: ReturnType<typeof fakeHost>,
+  idPrefix = "id",
+  clock: () => string = now
+): ThreadStore {
   return createThreadStore(sessionId, {
     transport: host.transport,
     newId: ids(idPrefix),
-    now,
+    now: clock,
     delay: async () => {}
   });
+}
+
+/** A clock stopped at `ms`. */
+const at = (ms: number) => (): string => new Date(ms).toISOString();
+const MINUTE = 60_000;
+
+/**
+ * The page's lifecycle, as a browser drives it: the document hides and shows,
+ * the window gets `pagehide`. Installed per test, removed after.
+ */
+function fakePage(): { hide(): void; hiddenWithoutEvent(): void; pagehide(): void } {
+  const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  const win = new EventTarget();
+  (globalThis as unknown as { document: unknown }).document = doc;
+  (globalThis as unknown as { window: unknown }).window = win;
+  return {
+    hide: () => {
+      doc.visibilityState = "hidden";
+      doc.dispatchEvent(new Event("visibilitychange"));
+    },
+    hiddenWithoutEvent: () => {
+      doc.visibilityState = "hidden";
+    },
+    pagehide: () => void win.dispatchEvent(new Event("pagehide"))
+  };
 }
 
 /**
@@ -162,11 +192,15 @@ function open(sessionId: string, host: ReturnType<typeof fakeHost>, idPrefix = "
  * below tears it down — nothing of it may act after, as nothing of a page
  * a browser reloaded does.
  */
-function previousPage(sessionId: string, host: ReturnType<typeof fakeHost>): ThreadStore {
+function previousPage(
+  sessionId: string,
+  host: ReturnType<typeof fakeHost>,
+  clock: () => string = now
+): ThreadStore {
   return retainThreadStore(sessionId, {
     transport: host.transport,
     newId: ids("first-page-"),
-    now,
+    now: clock,
     delay: async () => {}
   });
 }
@@ -247,6 +281,8 @@ describe("a reload never loses or duplicates a message", () => {
     reload();
     delete (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage;
     delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+    delete (globalThis as unknown as { document?: unknown }).document;
+    delete (globalThis as unknown as { window?: unknown }).window;
   });
 
   it("re-posts a send the page was still posting under the SAME commandId, once, the thread reading Sending meanwhile", async () => {
@@ -402,10 +438,40 @@ describe("a reload never loses or duplicates a message", () => {
     await settle();
 
     assert.equal(thread.getState().draft.text, "deploy the fix");
-    assert.equal(thread.getState().slice.errorBanner, "The thread is being rewound.");
+    const banner = thread.getState().slice.errorBanner ?? "";
+    assert.match(banner, /reload/i, "it says the message dates from before the reload");
+    assert.match(banner, /The thread is being rewound\./, "and why the host refused it");
     assert.equal(isComposerSending("A"), false);
     assert.equal(stored(), null);
     assert.deepEqual(host.turns, []);
+  });
+
+  it("tells the composer that shows the thread why a refused re-post is back — a message from before the reload", async () => {
+    const restored: FailedSendRestore<StagedAttachment>[] = [];
+    const unregister = registerComposerHandle("A", {
+      insertText: () => {},
+      stageAttachment: () => false,
+      returnMessage: () => [],
+      focusAtEnd: () => {},
+      openControl: () => {},
+      restoreFailedSend: (restore) => {
+        restored.push(restore);
+        return true;
+      }
+    });
+    try {
+      left([sendLeft({ turn: { input: "deploy the fix" } })]);
+      const host = fakeHost();
+      open("A", host);
+      await flush();
+      host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "The thread is being rewound."));
+      await settle();
+      assert.equal(restored.length, 1);
+      assert.match(restored[0]!.outcome.notice, /reload/i);
+      assert.match(restored[0]!.outcome.notice, /The thread is being rewound\./);
+    } finally {
+      unregister();
+    }
   });
 
   it("brings queued messages back as queued, in order, under the commandIds they were queued with", async () => {
@@ -601,6 +667,291 @@ describe("a reload never loses or duplicates a message", () => {
       ]
     );
     assert.match(thread.getState().slice.errorBanner ?? "", /reload/i, "the banner says why it waits");
+  });
+
+  /** A page that queued "one" and "two" behind a running turn, at `NOW` on its clock. */
+  async function pageWithQueue(clock: () => string = now) {
+    const before = fakeHost();
+    const page = previousPage("A", before, clock);
+    await flush();
+    before.push(running("A"));
+    page.getState().actions.queueMessage(queuedInput("one"));
+    page.getState().actions.queueMessage(queuedInput("two"));
+    return page.getState().slice.queue.map((message) => message.commandId);
+  }
+
+  const queueOf = (thread: ThreadStore) =>
+    thread.getState().slice.queue.map((message) => [message.text, message.commandId, message.holdUntilUserAction]);
+
+  it("brings back a queue its page showed less than ten minutes ago as it was, to go out by itself", async () => {
+    const [one, two] = await pageWithQueue();
+    reload();
+    const host = fakeHost();
+    const thread = open("A", host, "second-page-", at(NOW + 9 * MINUTE));
+    await flush();
+    assert.deepEqual(queueOf(thread), [
+      ["one", one, false],
+      ["two", two, false]
+    ]);
+    host.push(ready("A"));
+    await settle();
+    assert.deepEqual(host.posted(), [["one", one]], "an ordinary reload: the queue goes on as it would have");
+  });
+
+  it("holds a queue its page last showed more than ten minutes ago, in order, under its commandIds — nothing goes out by itself", async () => {
+    const [one, two] = await pageWithQueue();
+    reload();
+    const host = fakeHost();
+    const thread = open("A", host, "second-page-", at(NOW + 11 * MINUTE));
+    await flush();
+    assert.deepEqual(queueOf(thread), [
+      ["one", one, true],
+      ["two", two, true]
+    ]);
+    assert.match(thread.getState().slice.errorBanner ?? "", /Send now/, "the banner says why they wait");
+    host.push(ready("A"));
+    await settle();
+    assert.equal(host.attempts.length, 0, "a stale message never posts on the thread's first frame");
+
+    const sending = thread.getState().actions.sendQueuedNow(thread.getState().slice.queue[0]!.id);
+    await settle();
+    host.attempts[0]!.answer();
+    await sending;
+    assert.deepEqual(host.posted(), [["one", one]], "the user sends it, under the id it was queued with");
+    await settle();
+    assert.equal(host.attempts.length, 1, "and the next still waits for its own Send now");
+  });
+
+  it("measures that absence from when the page last showed the queue, never from when a message was queued", async () => {
+    let pageNow = NOW;
+    await pageWithQueue(() => new Date(pageNow).toISOString());
+    // The page kept showing the queue behind a long turn for twenty minutes.
+    pageNow = NOW + 20 * MINUTE;
+    reload();
+    const thread = open("A", fakeHost(), "second-page-", at(NOW + 21 * MINUTE));
+    await flush();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
+      [false, false],
+      "queued twenty-one minutes ago, but on screen a minute ago: still live"
+    );
+  });
+
+  it("stamps the queue as last shown when the page is hidden", async () => {
+    const page = fakePage();
+    let pageNow = NOW;
+    await pageWithQueue(() => new Date(pageNow).toISOString());
+    pageNow = NOW + 20 * MINUTE;
+    page.hide();
+    pageNow = NOW + 40 * MINUTE;
+    reload();
+    const thread = open("A", fakeHost(), "second-page-", at(NOW + 25 * MINUTE));
+    await flush();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
+      [false, false],
+      "on screen until the page was hidden five minutes ago"
+    );
+  });
+
+  it("does not move that stamp at a teardown while the page is hidden", async () => {
+    const page = fakePage();
+    let pageNow = NOW;
+    await pageWithQueue(() => new Date(pageNow).toISOString());
+    pageNow = NOW + MINUTE;
+    page.hide();
+    pageNow = NOW + 30 * MINUTE;
+    reload();
+    const thread = open("A", fakeHost(), "second-page-", at(NOW + 31 * MINUTE));
+    await flush();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
+      [true, true],
+      "hidden thirty minutes before the tab came back"
+    );
+  });
+
+  it("stamps the queue as last shown on pagehide", async () => {
+    const page = fakePage();
+    let pageNow = NOW;
+    await pageWithQueue(() => new Date(pageNow).toISOString());
+    pageNow = NOW + 20 * MINUTE;
+    page.pagehide();
+    page.hiddenWithoutEvent();
+    pageNow = NOW + 40 * MINUTE;
+    reload();
+    const thread = open("A", fakeHost(), "second-page-", at(NOW + 25 * MINUTE));
+    await flush();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
+      [false, false],
+      "on screen until the page went away five minutes ago"
+    );
+  });
+
+  it("lets a queue kept in the page go on by itself when its thread comes back within ten minutes", async () => {
+    const [one] = await pageWithQueue();
+    // The thread's generation is gone and nothing is retained; the page is the same.
+    resetThreadStores();
+    const host = fakeHost();
+    const thread = open("A", host, "next-", at(NOW + 9 * MINUTE));
+    await flush();
+    assert.deepEqual(thread.getState().slice.queue.map((message) => message.holdUntilUserAction), [false, false]);
+    host.push(ready("A"));
+    await settle();
+    assert.deepEqual(host.posted(), [["one", one]]);
+  });
+
+  it("holds a queue kept in the page when its thread comes back more than ten minutes later", async () => {
+    const [one, two] = await pageWithQueue();
+    resetThreadStores();
+    const host = fakeHost();
+    const thread = open("A", host, "next-", at(NOW + 11 * MINUTE));
+    await flush();
+    assert.deepEqual(queueOf(thread), [
+      ["one", one, true],
+      ["two", two, true]
+    ]);
+    assert.match(thread.getState().slice.errorBanner ?? "", /Send now/);
+    host.push(ready("A"));
+    await settle();
+    assert.equal(host.attempts.length, 0);
+  });
+
+  /** "first queued" on its way from a generation that is then torn down — retained or not. */
+  async function queuedSendOutWhenTornDown(retain: boolean) {
+    const host = fakeHost();
+    const first = open("A", host, "first-");
+    await flush();
+    host.push(running("A"));
+    first.getState().actions.queueMessage(queuedInput("first queued"));
+    first.getState().actions.queueMessage(queuedInput("second queued"));
+    host.push(ready("A"));
+    await settle();
+    assert.deepEqual(host.posted().map(([input]) => input), ["first queued"]);
+    (first as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({ retain });
+    return host;
+  }
+
+  it("holds a queued send that fails with no live generation at the front of the kept queue, reason and all — the next generation shows it there", async () => {
+    const host = await queuedSendOutWhenTornDown(true);
+    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+
+    const next = open("A", host, "next-");
+    await flush();
+    assert.deepEqual(
+      next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["first queued", true],
+        ["second queued", false]
+      ],
+      "held ahead of the rest even though a snapshot was retained without it"
+    );
+    assert.equal(next.getState().slice.errorBanner, "no", "with the reason it waits");
+    host.push(ready("A", 5));
+    await settle();
+    assert.equal(host.attempts.length, 1, "nothing overtakes it");
+    assert.equal(persistedDraft("A"), undefined, "and it is not in the draft as well");
+  });
+
+  it("does the same when nothing was retained", async () => {
+    const host = await queuedSendOutWhenTornDown(false);
+    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+    const next = open("A", host, "next-");
+    await flush();
+    assert.deepEqual(
+      next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["first queued", true],
+        ["second queued", false]
+      ]
+    );
+  });
+
+  it("brings a message held before the reload back held, with the reason it waits", async () => {
+    const before = fakeHost();
+    const page = previousPage("A", before);
+    await flush();
+    before.push(running("A"));
+    page.getState().actions.queueMessage(queuedInput("one"));
+    page.getState().actions.queueMessage(queuedInput("two"));
+    before.push(ready("A"));
+    await settle();
+    before.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+    assert.deepEqual(page.getState().slice.queue.map((message) => message.holdUntilUserAction), [true, false]);
+
+    reload();
+    const thread = open("A", fakeHost(), "second-page-");
+    await flush();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["one", true],
+        ["two", false]
+      ]
+    );
+    assert.equal(thread.getState().slice.errorBanner, "no");
+  });
+
+  it("re-posts a thread's in-flight leftovers one at a time, in the order they were posted — a composer send among them", async () => {
+    left([
+      queuedLeft("q2", "two", { sentAt: NOW - 2_000 }),
+      sendLeft({ commandId: "c1", sentAt: NOW - 3_000, turn: { input: "one" } }),
+      queuedLeft("q3", "three", { sentAt: NOW - 1_000 }),
+      queuedLeft("q4", "four")
+    ]);
+    const host = fakeHost();
+    const thread = open("A", host);
+    await flush();
+    host.push(ready("A"));
+    await settle();
+    assert.deepEqual(host.posted(), [["one", "c1"]], "the oldest post first, and nothing else yet");
+    assert.equal(isComposerSending("A"), true);
+    assert.deepEqual(thread.getState().slice.queue.map((message) => message.text), ["four"]);
+
+    host.attempts[0]!.answer();
+    await settle();
+    assert.equal(isComposerSending("A"), false);
+    assert.deepEqual(host.posted().map(([input]) => input), ["one", "two"]);
+    host.attempts[1]!.answer();
+    await settle();
+    assert.deepEqual(host.posted().map(([input]) => input), ["one", "two", "three"]);
+    host.attempts[2]!.answer();
+    await settle();
+    assert.deepEqual(
+      host.posted().map(([input]) => input),
+      ["one", "two", "three", "four"],
+      "the waiting queue goes only once every one on its way has settled"
+    );
+  });
+
+  it("holds the in-flight leftovers whose re-posts fail in the order they were posted, ahead of the rest", async () => {
+    left([
+      queuedLeft("q1", "one", { sentAt: NOW - 2_000 }),
+      queuedLeft("q2", "two", { sentAt: NOW - 1_000 }),
+      queuedLeft("q3", "three")
+    ]);
+    const host = fakeHost();
+    const thread = open("A", host);
+    await flush();
+    host.push(ready("A"));
+    await settle();
+    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+    host.attempts[1]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
+    await settle();
+    assert.deepEqual(
+      thread.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
+      [
+        ["one", true],
+        ["two", true],
+        ["three", false]
+      ]
+    );
+    assert.equal(host.attempts.length, 2);
   });
 
   it("ignores a stored value it cannot read, and still resumes every entry it can", async () => {
