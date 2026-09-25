@@ -144,18 +144,19 @@ export class CodexRequestRefusal extends Error {
 }
 
 /**
- * Thrown by a handler to leave a server request UNANSWERED, because the server
- * no longer waits for it: the app-server resolves every pending request of a
- * thread itself when that thread's turn ends, and says so with
- * `serverRequest/resolved`; a closed thread takes no answer at all. An answer
- * after that lands on a request the server no longer holds (fixtures README
- * observation 20). The peer writes nothing for it, and the request still
- * leaves the in-flight set, so neither the cap nor
- * {@link CodexPeer.whenServerRequestsSettled} counts it again.
+ * Thrown by a handler to leave a server request UNANSWERED, once the wait on
+ * it has ended: the server named it in `serverRequest/resolved`, or the turn
+ * or thread that asked is over. Whether the server still holds such a request
+ * is read from its binary, not captured (fixtures README observation 20);
+ * holding it, it has no turn left to hand the answer to, and not holding it,
+ * an answer lands on nothing — so writing none is safe either way. The peer
+ * writes nothing for it, and the request still leaves the in-flight set, so
+ * neither the cap nor {@link CodexPeer.whenServerRequestsSettled} counts it
+ * again.
  */
 export class CodexRequestWithdrawn extends Error {
   constructor(reason: string) {
-    super(`the server no longer waits for this request: ${reason}`);
+    super(`the wait on this request has ended: ${reason}`);
     this.name = "CodexRequestWithdrawn";
   }
 }
@@ -171,7 +172,7 @@ export interface CodexPeerHandlers {
   /**
    * Answer one server→client request. Resolving sends `{id, result}`; throwing
    * a {@link CodexRequestRefusal} sends that error, throwing a
-   * {@link CodexRequestWithdrawn} sends nothing (the server stopped waiting),
+   * {@link CodexRequestWithdrawn} sends nothing (the wait on it has ended),
    * and any other throw is reported as `-32603`.
    *
    * An unhandled method must be refused with `-32601`, which the server treats
@@ -438,7 +439,7 @@ export class CodexPeer {
         this.respondResult(id, result);
       } catch (error) {
         if (error instanceof CodexRequestWithdrawn) {
-          // The server resolved it itself: an answer would land nowhere.
+          // The wait on it has ended: nothing is written (see the class).
           return;
         }
         if (error instanceof CodexRequestRefusal) {

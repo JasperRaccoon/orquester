@@ -254,29 +254,31 @@ The spec's §4.5 ordering is "(1) settle pending approvals as `cancel` … (4) `
 Three things follow:
 
 - The interrupt succeeds immediately (`result: {}`); there is no precondition.
-- **No `serverRequest/resolved` is emitted for the orphaned approval**, and the
-  `commandExecution` item that was `inProgress` **never gets an `item/completed`**. Both dangle
-  forever from the client's point of view. This is the concrete reason the host must settle
-  pending requests itself — not because the server rejects the interrupt, but because the server
-  silently abandons them.
-- Answering afterwards is still accepted and *does* produce the resolution notification:
+- **No `serverRequest/resolved` comes for the orphaned approval before the turn ends**, and the
+  `commandExecution` item that was `inProgress` **never gets an `item/completed`** — that item
+  dangles forever from the client's point of view. This is the concrete reason the host must
+  settle pending requests itself — not because the server rejects the interrupt, but because the
+  interrupt leaves them unanswered.
+- One `serverRequest/resolved` does come, 1 ms after the `turn/completed` — in the millisecond the
+  harness wrote its late answer:
 
   ```json
   {"id":0,"result":{"decision":"cancel"}}
   {"method":"serverRequest/resolved","params":{"threadId":"…","requestId":0}}
   ```
 
-  So "settle, then interrupt" and "interrupt, then settle" both work; only "interrupt and never
-  settle" leaks. Keep the spec's ordering — it is the one that also cleans up the UI.
+  So "settle, then interrupt" and "interrupt, then settle" both close the card; only "interrupt
+  and never settle" leaks. Keep the spec's ordering — it is the one that also cleans up the UI.
 
-  *Re-read 2026-09-25, from the 0.155.1 binary (observation 20):* this capture cannot tell the
-  server's own resolution from an ack of the late answer. The `serverRequest/resolved` is stamped
-  1 ms after the `turn/completed` (`emittedAtMs` …508 → …509), in the millisecond the harness wrote
-  its answer, and the installed app-server resolves a thread's pending requests itself when that
-  thread's turn ends ("client request resolved because the turn state was changed"). The likelier
-  reading is that the server resolved the approval at the interrupt's turn end and the late answer
-  landed on nothing. Settling before the interrupt stays right either way: the answer then reaches
-  a request the server still holds.
+  *Re-read 2026-09-25 (observation 20):* this capture cannot tell the server's own resolution of
+  the request from an ack of the late answer — the two frames are stamped …508 (`turn/completed`)
+  and …509 (`serverRequest/resolved`), and stderr was captured at error level only, where a
+  server's warning about an answer to a request it no longer holds would not show. The 0.155.1
+  binary (read, never run) carries "client request resolved because the turn state was changed",
+  which reads as the app-server resolving a thread's pending server→client requests itself when
+  that thread's turn ends — though "client request" could also name a client→server request.
+  Settling before the interrupt is right in either reading: the answer reaches a request the
+  server still holds.
 
 `turn/interrupt` requires both `threadId` **and** `turnId` (`missing field \`turnId\`` otherwise),
 and a stale turn id is a hard error, not a no-op: `{"code":-32600,"message":"no active turn to
@@ -746,28 +748,43 @@ a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`
   swept the child's open card away and the child stayed blocked until a Stop; on the child's own
   turn, a turn the thread never had, every rewind dropped it. Turnless, it is answered or cancelled
   like any card, and a Stop, the exit or the end of the child's own wait (below) settles it.
-- **A child's open card ends with the child's own wait — read from the 0.155.1 binary, not
-  captured.** The installed app-server carries a turn-transition cancellation of pending server
-  requests — the error it resolves them with reads "client request resolved because the turn state
-  was changed" — so when a thread's turn ends, whatever its status, the server resolves every
-  request that thread still has pending itself and emits `serverRequest/resolved {threadId,
-  requestId}` for each, after the `turn/completed`. That is also the likelier reading of `06-…`
-  (observation 5, note at its end). A child's own `turn/completed` (any status) and its
-  `thread/closed` (with or without a turn end: a closed thread takes no answer) settle every card of
-  that child still open, and a `serverRequest/resolved` the one it names (`withdrawChildRequests`,
-  `session.ts`): each gets one `request.resolved {decision: "cancel", withdrawn: true}` /
-  `user-input.resolved {answers: {}, withdrawn: true}` on the stamp the card was opened with — the
-  parent turn an approval rode, none for a question — which ingestion writes as the host's own Stop
-  row, "Request cancelled" / "Question cancelled" (`cancelledRequestActivity`), before the call
-  closures and the task row that end writes; and nothing is answered on the wire
-  (`CodexRequestWithdrawn`, `protocol.ts`), where an answer would land on a request the server no
-  longer holds. Left open, the card blocked the composer and the MCP's `send_message` until the user
-  answered a request nothing waited on, or pressed Stop. A card the user answered first is settled
-  once, by the answer. The parent's own cards are untouched: their `serverRequest/resolved` is our
-  answer's ack, and a Stop still answers them before it interrupts. Unverified: whether a child's
-  requests are resolved at its turn's end exactly as a root thread's are, and what a child's
-  `thread/closed` does to one still pending; a capture of a child asking, then `turn/interrupt` on
-  the child's thread, would settle both.
+- **A card nobody answered ends with the wait on it — the server's side read, not captured.** What
+  the server does with a pending server→client request when the turn that asked ends is not
+  captured for a collab child, and for a root thread only ambiguously (`06-…`, observation 5 and
+  its note). The 0.155.1 binary (read with `strings`, never run) carries "client request resolved
+  because the turn state was changed", which reads as a turn-transition cancellation: at a turn's
+  end, whatever its status, the app-server resolves every request that thread still has pending
+  and emits `serverRequest/resolved {threadId, requestId}` for each — after the `turn/completed`,
+  if `06-…`'s one frame 1 ms after the turn's end is that resolution. "client request" could also
+  name a client→server request, so this is the likelier reading, not a fact. The adapter
+  (`withdrawRequests`, `session.ts`) is built to be right either way:
+  - a collab child's own `turn/completed` (any status) and its `thread/closed` (with or without a
+    turn end) settle every card of that child still open; a `serverRequest/resolved` settles the
+    card it names — the parent's own included, since a card still parked cannot be the ack of our
+    own answer (every path that answers takes the card out before it writes), and a parent card
+    left parked paused the session's watchdog for every later turn, held one of the 32 in-flight
+    slots, and was answered by a later Stop long after the server had dropped it;
+  - each such card gets one `request.resolved {decision: "cancel", withdrawn: true}` /
+    `user-input.resolved {answers: {}, withdrawn: true}` on the stamp it was opened with (an
+    approval: its own turn, or for a child's the parent turn it rode; a question: its own turn, or
+    none for a child's), which ingestion writes as the host's own Stop row, "Request cancelled" /
+    "Question cancelled" (`cancelledRequestActivity`), before the call closures and the task row a
+    child's end writes — unless the host closed the card itself first: a question on a turn that
+    ended was dismissed then ("User input dismissed", §6.2), and the host writes no second row for
+    it (`repeatsHostClosure`, the orchestrator);
+  - nothing is answered on the wire (`CodexRequestWithdrawn`, `protocol.ts`). If the server
+    resolved the request itself, an answer lands on nothing; if it still holds it, the turn or
+    thread that asked is over and nothing consumes the answer; answering is wrong in the first
+    reading and useless in the second.
+
+  Left open, the card blocked the composer and the MCP's `send_message` until the user answered a
+  request nothing waited on, or pressed Stop. A card the user answered first is settled once, by
+  the answer. A parent card whose turn ends with no `serverRequest/resolved` keeps its old
+  behaviour: the user's to answer, or a Stop's to settle — and a Stop answers every card it
+  cancels on the wire and writes one row for it (the host's; the adapter's report of that cancel
+  is not written, `repeatsHostClosure`). A capture of a child asking, then `turn/interrupt` on the
+  child's thread — and of a parent's turn ending with a card open — would settle the server's
+  side.
 - `commandExecution.aggregatedOutput` is "The command's output, aggregated from stdout and stderr";
   the bindings document no bound. The completion keeps it in `data.item.aggregatedOutput` — where
   `commandOutputText` and the wire slimmer's `projectCommandData` already read Codex's output — up

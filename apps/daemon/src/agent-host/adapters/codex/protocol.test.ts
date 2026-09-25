@@ -248,10 +248,11 @@ describe("codex transport — inbound requests", () => {
   });
 
   it("writes nothing for a request its handler withdrew, and still frees its slot", async () => {
-    // The server stopped waiting (a collab child's turn ended or its thread
-    // closed, or `serverRequest/resolved` named it): an answer would land on a
-    // request it no longer holds. The handler must not dangle either, or the
-    // cap and a Stop's `whenServerRequestsSettled` count it for ever.
+    // The wait on it has ended (`serverRequest/resolved` named it, or a collab
+    // child's turn ended or its thread closed): nothing consumes an answer, and
+    // the server may no longer hold the request at all. The handler must not
+    // dangle either, or the cap and a Stop's `whenServerRequestsSettled` count
+    // it for ever.
     const h = harness({ maxInFlightServerRequests: 1 });
     h.deliver({ id: 0, method: "item/commandExecution/requestApproval", params: {} });
     await tick();

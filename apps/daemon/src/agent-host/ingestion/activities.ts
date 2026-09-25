@@ -12,8 +12,8 @@
  *   `approval.resolved`, **except** `tool_user_input`, which is dropped
  *   because it is a question, not an approval; the native request type is
  *   rewritten to the canonical kind and **both** are persisted;
- * - a resolution marked `withdrawn` — nobody answered, the provider stopped
- *   waiting — becomes the host's own cancelled row, the one a Stop writes
+ * - a resolution marked `withdrawn` — nobody answered, and the wait on it
+ *   has ended — becomes the host's own cancelled row, the one a Stop writes
  *   (`cancelledRequestActivity`), never "Approval resolved" / "User input
  *   submitted";
  * - item lifecycle rows exist only for the tool-shaped item types
@@ -170,11 +170,11 @@ function makeActivity(event: RuntimeEvent, init: ActivityInit): ThreadActivityIt
 }
 
 /**
- * The row for a request the provider withdrew: nobody answered it, so it
- * closes with the host's own cancelled row — the one a Stop writes, "Request
- * cancelled" / "Question cancelled" — on the turn stamp the card was opened
- * with. The row is keyed by the request (`settle-cancel:<requestId>`), so if a
- * Stop's own row for the same card ever lands too, the two are one row.
+ * The row for a withdrawn request: nobody answered it, so it closes with the
+ * host's own cancelled row — the one a Stop writes, "Request cancelled" /
+ * "Question cancelled" — on the turn stamp the card was opened with. The row
+ * is keyed by the request (`settle-cancel:<requestId>`), so if a Stop's own
+ * row for the same card lands after it, the two are one row.
  */
 function withdrawnRequestActivity(
   event: RuntimeEvent,

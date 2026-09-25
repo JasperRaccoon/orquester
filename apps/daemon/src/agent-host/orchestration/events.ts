@@ -94,8 +94,8 @@ export function makeActivity(input: {
  * (`settlePendingRequests` in `orchestrator.ts`), on a thread's first load
  * for what a dead process left parked (`leftover-work.ts`), and — through
  * ingestion — for a request an adapter reports withdrawn: nobody answered it
- * and the provider stopped waiting (a Codex collab child's card whose own turn
- * ended, whose thread closed, or which the server resolved itself). "Request
+ * and the wait on it has ended (a Codex card the server resolved itself, or a
+ * collab child's card whose own turn ended or whose thread closed). "Request
  * cancelled" / "Question cancelled" — never the provider's "resolved" or
  * "submitted", which would say someone answered. Its id is the request's own,
  * prefixed, and the resolution kind closes the request in the fold for good
