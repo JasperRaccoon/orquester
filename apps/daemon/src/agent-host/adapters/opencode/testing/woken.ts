@@ -264,6 +264,76 @@ export function compactionContinues(input: { sessionId: string; promptId: string
   ];
 }
 
+/**
+ * A `task` call launching child `childId`, as 1.18.32 sends it: the child's
+ * own `session.created`, then the parent's `task` part `running`, naming the
+ * child (fixture 12, lines 141-142). In the `background`, the part then
+ * completes at once with the tool's "still working" envelope,
+ * `metadata.background` and a `jobId` (`TaskTool.execute`, read from the
+ * source); in the foreground it stays running while the child works.
+ */
+export function childLaunch(input: {
+  sessionId: string;
+  childId: string;
+  callId: string;
+  description: string;
+  background: boolean;
+}): OpenCodeRawEvent[] {
+  const { sessionId, childId, callId, description } = input;
+  const metadata = {
+    parentSessionId: sessionId,
+    sessionId: childId,
+    model: { providerID: "openrouter", modelID: "google/gemini-3.1-flash-lite" }
+  };
+  const taskInput = { subagent_type: "explore", description, prompt: description };
+  const part = (state: Record<string, unknown>): OpenCodeRawEvent => ({
+    type: "message.part.updated",
+    properties: {
+      sessionID: sessionId,
+      part: {
+        id: `prt_${callId}`,
+        messageID: `msg_launch_${callId}`,
+        sessionID: sessionId,
+        type: "tool",
+        tool: "task",
+        callID: callId,
+        state
+      },
+      time: CREATED
+    }
+  });
+  const frames: OpenCodeRawEvent[] = [
+    {
+      type: "session.created",
+      properties: {
+        sessionID: childId,
+        info: { id: childId, parentID: sessionId, title: `${description} (@explore subagent)`, agent: "explore" }
+      }
+    },
+    part({ status: "running", title: description, input: taskInput, metadata, time: { start: CREATED } })
+  ];
+  if (input.background) {
+    frames.push(
+      part({
+        status: "completed",
+        title: description,
+        input: taskInput,
+        metadata: { ...metadata, background: true, jobId: childId },
+        output: [
+          `<task id="${childId}" state="running">`,
+          "<summary>Background task started</summary>",
+          "<task_result>",
+          "The task is working in the background. You will be notified automatically when it finishes.",
+          "</task_result>",
+          "</task>"
+        ].join("\n"),
+        time: { start: CREATED, end: CREATED + 40 }
+      })
+    );
+  }
+  return frames;
+}
+
 /** The run's end: its last `busy`, then `idle` and `session.idle` (fixture 12, lines 177-179). */
 export function runSettles(sessionId: string): OpenCodeRawEvent[] {
   return [

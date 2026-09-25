@@ -528,8 +528,9 @@ export interface OpenCodeChildAgent {
    * The current run's launching part answered in the BACKGROUND
    * (`metadata.background`): only such a run takes an answer the tool injects
    * into its parent (`takeBackgroundResult`) — a foreground run's answer is its
-   * part's, and an injected one is an earlier run's, late. Cleared by a
-   * relaunch.
+   * part's, and an injected one is an earlier run's, late — and only such a
+   * run, with every run inside it, outlives a turn that fails on its own
+   * (`closeLiveChildAgents`). Cleared by a relaunch.
    */
   answersInBackground?: boolean;
 }

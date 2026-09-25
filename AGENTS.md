@@ -1128,7 +1128,17 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   precedes the answer's prompt (the runner publishes its idle before resolving its run), so neither
   it nor the answer's result ever rides the woken turn (README observation 27). The replay harness
   claims the host's prompt ids up front, and models `hostCompacting`, for the same reason
-  `sendTurn` claims first: a blocking `/command` or `summarize` is recorded after its frames.
+  `sendTurn` claims first: a blocking `/command` or `summarize` is recorded after its frames. (4)
+  A background run OUTLIVES a turn that fails on its own (a `session.error`, a rate limit), as a
+  Claude background agent outlives its parent's turn: 1.18.32 cancels a background job only
+  through `SessionRunState.cancel` — the `abort` route, which a Stop, the session's stop and a
+  failed admission send — so `failActiveTurn` closes only the runs that fail with it
+  (`closeLiveChildAgents` `scope: "foreground"`: a child whose launch answered in the background,
+  or one inside it, lives on) and returns the session to `ready`, as Claude and Grok do after
+  every settled turn — an `error` session is a dead one to the roster (every running row
+  `interrupted`) and refuses commands until a Stop, which would cancel that job. The turn stays
+  `failed` (the activity ladder still ranks it `error`). Closed, the child read "interrupted"
+  while it worked, left the drain's liveness, and lost its answer as its result.
 - **Grok: shells are live work, a subagent is its `spawn_subagent` call plus the poll answers naming
   it, and a run nobody asks about stops counting after an hour.** (1) Grok stamps every task row of
   a background shell with the shell itself (`agentId` = `taskId`), and the liveness registry read

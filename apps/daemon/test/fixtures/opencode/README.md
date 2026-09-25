@@ -805,6 +805,23 @@ the thread reads working through the compaction. The reply to the prompt the com
 go on with — one `synthetic` text part marked `metadata.compaction_continue` — then joins it like
 any mid-run prompt, and counts.
 
+**A background run outlives a turn that fails.** Read from 1.18.32's source: a background job
+ends by itself or by `SessionRunState.cancel` — which the `abort` route (`SessionHttpApi.abort` →
+`SessionPrompt.cancel`) runs, cancelling every job the session launched (`cancelBackgroundJobs`,
+children's children included) — and by nothing else: a turn that fails on its own (a
+`session.error`, a rate limit) leaves it running, and its answer comes later as ever. The adapter
+closed every live child `stopped` on any failed turn, so such a child read "interrupted" while it
+worked, left the liveness a deploy's drain waits on, and found no run to take its answer as the
+result. A turn that fails on its own now closes only the runs that fail with it — a child whose
+launching part answered in the background (`answersInBackground`), or one running inside such a
+child, lives on (`closeLiveChildAgents` with `scope: "foreground"`) and ends as any background run
+does: its own idle and answer, a Stop, the session's stop or the exit. A failed admission still
+closes every child: its abort IS `SessionRunState.cancel`. And the failed turn returns the session
+to `ready`, as Claude's and Grok's do after every settled turn: an `error` session reads, to the
+roster, as a dead one (every running row `interrupted`), and refuses the thread's commands until a
+Stop, which would cancel the very job that lives on. The turn itself stays `failed`, and the
+`runtime.error` the frame raised keeps the reason on the timeline.
+
 **The child's end always precedes the answer's prompt.** Read from 1.18.32's source: a run
 fiber's exit handler (the session runner's `onExit`) runs `onIdle` — which publishes the child's
 `session.status {idle}` and `session.idle` — BEFORE it resolves the run's `done`; only then does

@@ -489,8 +489,8 @@ export class OpenCodeThreadSession {
    * which the roster folds to `interrupted` (§7.6) — before the turn or the
    * session settles. A subagent row must never outlive the process that ran it.
    */
-  private closeChildAgents(reason?: string): void {
-    for (const event of closeLiveChildAgents(this.state, this.normalizeContext(), reason)) {
+  private closeChildAgents(reason?: string, scope: "all" | "foreground" = "all"): void {
+    for (const event of closeLiveChildAgents(this.state, this.normalizeContext(), reason, scope)) {
       this.emit(event);
     }
   }
@@ -1000,6 +1000,9 @@ export class OpenCodeThreadSession {
     this.state.activeVariant = undefined;
     this.endInterruptionBefore(admission.turnId);
     this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
+    // Every child, a background one too: the abort above is 1.18.32's
+    // `SessionRunState.cancel`, which cancels the session's background jobs
+    // (read from the source) — unlike a turn that fails on its own.
     this.closeChildAgents(detail);
     this.emit({
       ...this.base({ turnId: admission.turnId }),
@@ -1060,14 +1063,31 @@ export class OpenCodeThreadSession {
     if (turnId !== undefined) {
       this.endInterruptionBefore(turnId);
     }
-    this.updateRecord({ status: "error", lastError: message }, { activeTurnId: true });
-    this.closeChildAgents(message);
+    this.updateRecord(
+      { status: turnId !== undefined ? "ready" : "error", lastError: message },
+      { activeTurnId: true }
+    );
+    // A run in the background outlives the failure: 1.18.32 cancels its job
+    // only through `SessionRunState.cancel` — a Stop, a session stop, a failed
+    // admission's abort — and this sends none (`closeLiveChildAgents`).
+    this.closeChildAgents(message, "foreground");
     void this.recoverPendingRequests();
     if (turnId !== undefined) {
       this.emit({
         ...this.base({ turnId }),
         type: "turn.completed",
         payload: { state: "failed", errorMessage: message, ...(tokenUsage ? { tokenUsage } : {}) }
+      });
+      // The failure was the turn's, not the session's: OpenCode's session
+      // lives on, and so does any run in the background — which the roster
+      // reads as interrupted, and the thread's commands refuse, while the
+      // session reads `error`. So it goes back to `ready`, as Claude's and
+      // Grok's do after every settled turn; the turn stays `failed`, and the
+      // `runtime.error` the frame raised keeps the reason on the timeline.
+      this.emit({
+        ...this.base({ turnId }),
+        type: "session.state.changed",
+        payload: { state: "ready", reason: "turn:failed" }
       });
     }
   }

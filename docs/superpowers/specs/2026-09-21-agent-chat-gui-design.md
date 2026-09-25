@@ -1574,6 +1574,13 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   after it. And the child's end always precedes the answer's prompt (1.18.32's runner publishes
   its idle before it resolves the run), so neither the child's end nor its result rides the woken
   turn, and a rewind of that turn can never take an agent's end while its start stays.*
+  *Built (addendum): a run in the background outlives a turn that fails on its own (a
+  `session.error`, a rate limit) — 1.18.32 cancels a background job only through
+  `SessionRunState.cancel`, the `abort` a Stop, a session stop or a failed admission sends — so
+  that turn closes only the runs that fail with it, and returns the session to `ready`, as Claude
+  and Grok do after every settled turn: an `error` session reads, to §7.6's roster, as a dead one,
+  and refuses commands until a Stop, which would cancel that job. The child keeps working in the
+  roster and in liveness, and ends by its own idle and answer.*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

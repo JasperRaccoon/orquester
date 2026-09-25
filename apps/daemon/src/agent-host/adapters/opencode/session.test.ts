@@ -20,6 +20,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
+import { createLivenessRegistry } from "../../orchestration/liveness.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import {
   OpenCodeThreadSession,
@@ -31,6 +32,7 @@ import type { OpenCodeServerHandle } from "./server.ts";
 import { OpenCodeClient } from "./http.ts";
 import { createHostIngestion } from "./testing/host.ts";
 import {
+  childLaunch,
   compactionContinues,
   compactionPrompt,
   compactionSummary,
@@ -1822,6 +1824,123 @@ test("a Stop's leftovers end once a later turn fails: a background answer after 
     eventsOfType(harness.events, "content.delta").some((event) => event.turnId === FIRST.promptId),
     "the woken reply is written, on its own turn"
   );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+/**
+ * A turn that launched children, then failed on a rate limit: its user
+ * message, its run, the launches, the provider's error.
+ */
+async function turnFailsAfterLaunching(
+  harness: Harness,
+  session: OpenCodeThreadSession,
+  launches: readonly { childId: string; callId: string; description: string; background: boolean }[]
+): Promise<string> {
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+  const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
+    messageID: string;
+  }).messageID;
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: promptId, role: "user", sessionID: sessionId } } },
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: "msg_delegating", role: "assistant", parentID: promptId, sessionID: sessionId } } },
+    ...launches.flatMap((launch) => childLaunch({ sessionId, ...launch }))
+  ]);
+  await waitFor(harness, "task.started", (event) => event.agentId === launches.at(-1)?.childId);
+  harness.fake.push({
+    type: "session.error",
+    properties: {
+      sessionID: sessionId,
+      error: { name: "APIError", data: { message: "Rate limit exceeded", statusCode: 429, isRetryable: true } }
+    }
+  });
+  await waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId);
+  return turn.turnId;
+}
+
+/** Each task's terminal rows, as `taskId:status[:summary]`. */
+function taskEnds(events: readonly RuntimeEvent[]): string[] {
+  return eventsOfType(events, "task.completed").map((event) =>
+    [event.payload.taskId, event.payload.status, ...(event.payload.summary !== undefined ? [event.payload.summary] : [])].join(":")
+  );
+}
+
+test("a background child outlives its launching turn's failure — running in the roster and in liveness — and ends by its own idle and answer", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  await turnFailsAfterLaunching(harness, session, [
+    { childId: "ses_bg", callId: "call_bg", description: "list files", background: true }
+  ]);
+
+  // 1.18.32 keeps the job running: nothing but a cancel ends it.
+  assert.deepEqual(taskEnds(harness.events), [], "the failed turn closes no background run");
+  assert.equal(session.hasLiveSubagents(), true);
+  const liveness = createLivenessRegistry({ clock: harness.ctx.clock });
+  for (const event of harness.events) liveness.observe(event);
+  assert.equal(liveness.liveness("thread-1"), "working", "it holds a deploy's drain");
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  const afterFailure = host.fold();
+  assert.equal(afterFailure.turns.at(-1)?.state, "failed");
+  assert.equal(afterFailure.head?.session.status, "ready", "the session lives on: the failure was the turn's");
+  assert.deepEqual(
+    afterFailure.roster.map((row) => [row.id, row.status]),
+    [["ses_bg", "running"]],
+    "the roster reads it working, never interrupted"
+  );
+
+  // Its run ends, its answer wakes the parent, and the reply runs as a turn.
+  const fed = harness.events.length;
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...runSettles("ses_bg"),
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_bg", answer: "Found README.md.", description: "list files" }),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends,
+    ...runSettles(sessionId)
+  ]);
+  const woken = await waitFor(harness, "turn.completed", (event) => event.turnId === FIRST.promptId);
+  assert.equal(woken.payload.state, "completed");
+  assert.deepEqual(taskEnds(harness.events), ["ses_bg:completed", "ses_bg:completed:Found README.md."]);
+  for (const event of harness.events.slice(fed)) liveness.observe(event);
+  assert.equal(liveness.liveness("thread-1"), null);
+  await host.ingest(harness.events.slice(fed));
+  const end = host.fold();
+  const child = end.roster.find((row) => row.id === "ses_bg");
+  assert.deepEqual([child?.status, child?.result], ["completed", "Found README.md."]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a foreground child of a failed turn is still closed stopped", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  await turnFailsAfterLaunching(harness, session, [
+    { childId: "ses_fg", callId: "call_fg", description: "read the code", background: false }
+  ]);
+  assert.deepEqual(taskEnds(harness.events), ["ses_fg:stopped:Rate limit exceeded"]);
+  assert.equal(session.hasLiveSubagents(), false);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a Stop closes every child — a background one too: the abort cancels its job", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+  pushAll(harness.fake, [
+    ...childLaunch({ sessionId, childId: "ses_bg", callId: "call_bg", description: "list files", background: true }),
+    ...childLaunch({ sessionId, childId: "ses_fg", callId: "call_fg", description: "read the code", background: false })
+  ]);
+  await waitFor(harness, "task.started", (event) => event.agentId === "ses_fg");
+  await session.interruptTurn(turn.turnId);
+  assert.deepEqual(taskEnds(harness.events).sort(), ["ses_bg:stopped:interrupted", "ses_fg:stopped:interrupted"]);
+  assert.equal(session.hasLiveSubagents(), false);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

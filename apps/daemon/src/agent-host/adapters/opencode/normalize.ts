@@ -1036,19 +1036,52 @@ function emitTaskResult(
  * with `task.completed {status: "stopped"}`, which the roster folds to
  * `interrupted` (§7.6). Called by `session.ts` before `session.exited`, and
  * when a turn is interrupted or fails.
+ *
+ * `scope: "foreground"` is a turn that FAILED on its own (a `session.error`,
+ * a rate limit): only the runs that fail with it close. A run in the
+ * background outlives it ({@link outlivesFailedTurn}) — 1.18.32 cancels a
+ * background job only through `SessionRunState.cancel` (the abort a Stop, a
+ * session stop or a failed admission sends), never because the turn that
+ * launched it failed — as a Claude background agent outlives its parent's
+ * turn. Closed, it read "interrupted" while it worked, left the liveness a
+ * deploy's drain waits on, and its answer, when the job settled, found no run
+ * to be the result of. It ends as any background run does: its own idle and
+ * answer, a Stop, the session's stop or the exit.
  */
 export function closeLiveChildAgents(
   state: OpenCodeSessionState,
   ctx: NormalizeContext,
-  reason?: string
+  reason?: string,
+  scope: "all" | "foreground" = "all"
 ): RuntimeEvent[] {
   const out = new Emitter(state, ctx);
   for (const agent of state.childAgents.values()) {
-    if (!agent.completed) {
+    if (!agent.completed && (scope === "all" || !outlivesFailedTurn(state, agent))) {
       emitTaskCompleted(state, agent, "stopped", undefined, out, reason);
     }
   }
   return out.events;
+}
+
+/** How far up its launchers {@link outlivesFailedTurn} looks: grandchildren and theirs. */
+const MAX_LAUNCHER_DEPTH = 8;
+
+/**
+ * Whether `agent` runs in the background: its run's launching part answered
+ * in the background (`answersInBackground`), or it runs inside an agent that
+ * does — a grandchild's launch sits in its parent's session, where this
+ * adapter reads no `task` part, so it is known only by its `parentAgentId`.
+ */
+function outlivesFailedTurn(state: OpenCodeSessionState, agent: OpenCodeChildAgent): boolean {
+  let current: OpenCodeChildAgent | undefined = agent;
+  for (let depth = 0; current !== undefined && depth < MAX_LAUNCHER_DEPTH; depth += 1) {
+    if (current.answersInBackground === true) {
+      return true;
+    }
+    current =
+      current.parentAgentId === undefined ? undefined : state.childAgents.get(current.parentAgentId);
+  }
+  return false;
 }
 
 /** Are any subagents still live? Feeds §6.4's `backgroundLiveness`. */
