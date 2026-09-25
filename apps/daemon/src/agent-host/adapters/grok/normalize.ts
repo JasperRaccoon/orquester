@@ -195,6 +195,14 @@ const TOOL_STATUS_TO_ITEM_STATUS: Record<ToolCallStatus, RuntimeItemStatus> = {
  */
 export const FINISHED_CALLS_REMEMBERED = 1_024;
 
+/**
+ * How many ended background task ids the normaliser remembers, oldest
+ * forgotten first — {@link FINISHED_CALLS_REMEMBERED}'s rule for tasks. A
+ * task's track is dropped at its end, so this is what tells a snapshot that
+ * still lists a finished task from a new task's first sighting.
+ */
+export const ENDED_TASKS_REMEMBERED = 1_024;
+
 function isTerminalToolStatus(status: ToolCallStatus | null | undefined): boolean {
   return status === "completed" || status === "failed";
 }
@@ -351,6 +359,16 @@ export class GrokNormalizer {
    */
   private readonly finishedCalls = new Map<string, FinishedCall>();
   private readonly tasks = new Map<string, BackgroundTrack>();
+  /**
+   * Background task ids (lower-cased) whose end this adapter already wrote — a
+   * shell's, and every id that named an ended subagent run — bounded by
+   * {@link ENDED_TASKS_REMEMBERED}. Nothing starts under one again: a snapshot
+   * entry's status may be terminal, so a finished shell can still be listed,
+   * and that listing started it again under its id, put it back in the
+   * liveness registry as a watch loop, and ended it a second time when it
+   * dropped out.
+   */
+  private readonly endedTasks = new Map<string, true>();
   /** Roster agents, by task id; see {@link subagentFromToolCall}. */
   private readonly subagents = new Map<string, SubagentTrack>();
   /** `spawn_subagent` calls, by call id. */
@@ -1115,6 +1133,38 @@ export class GrokNormalizer {
     evictOldest(this.subagentIds, SUBAGENTS_REMEMBERED);
   }
 
+  /** A shell's end was written: its track goes, and its id is remembered. */
+  private endShell(taskId: string): void {
+    this.tasks.delete(taskId);
+    this.rememberEndedTask(taskId);
+  }
+
+  /**
+   * A subagent run's end was written: the ids that named it are remembered, so
+   * no frame naming one — once its launch is forgotten — becomes a shell. A
+   * resumed run is found through its launch first, so this never hides it.
+   */
+  private rememberEndedSubagent(track: SubagentTrack): void {
+    this.rememberEndedTask(track.taskId);
+    for (const [id, taskId] of this.subagentIds) {
+      if (taskId === track.taskId) {
+        this.rememberEndedTask(id);
+      }
+    }
+  }
+
+  /** Oldest first out, so the memory stays within {@link ENDED_TASKS_REMEMBERED}. */
+  private rememberEndedTask(id: string): void {
+    const key = id.toLowerCase();
+    this.endedTasks.delete(key);
+    this.endedTasks.set(key, true);
+    evictOldest(this.endedTasks, ENDED_TASKS_REMEMBERED);
+  }
+
+  private hasEnded(taskId: string): boolean {
+    return this.endedTasks.has(taskId.toLowerCase());
+  }
+
   /** The task a background-task frame's ids name, when they are a subagent's. */
   private subagentOfBackgroundTask(
     taskId: string,
@@ -1158,6 +1208,7 @@ export class GrokNormalizer {
     raw?: RuntimeEventRaw
   ): RuntimeEvent {
     track.live = false;
+    this.rememberEndedSubagent(track);
     // The rows that close a run after its turn name the turn it ran in, as a
     // shell's closers do; a foreground end within its own turn is that turn.
     return this.event(
@@ -1394,6 +1445,9 @@ export class GrokNormalizer {
         events.push(...this.subagentFromSnapshot(subagentTask, status, raw));
         continue;
       }
+      if (existing === undefined && this.hasEnded(task.task_id)) {
+        continue;
+      }
       const turnId = existing?.turnId ?? this.deps.activeTurnId();
       const linkage = {
         taskId: task.task_id,
@@ -1423,7 +1477,7 @@ export class GrokNormalizer {
       }
       existing.status = status;
       if (status === "completed" || status === "failed") {
-        this.tasks.delete(task.task_id);
+        this.endShell(task.task_id);
         events.push(this.event("task.completed", { ...linkage, status }, turnId, raw));
       } else {
         events.push(this.event("task.updated", { ...linkage, status }, turnId, raw));
@@ -1434,7 +1488,7 @@ export class GrokNormalizer {
       if (seen.has(taskId) || track.status === "pending") {
         continue;
       }
-      this.tasks.delete(taskId);
+      this.endShell(taskId);
       events.push(
         this.event(
           "task.completed",
@@ -1510,6 +1564,9 @@ export class GrokNormalizer {
     if (this.tasks.has(taskId)) {
       const existing = this.tasks.get(taskId)!;
       existing.toolUseId ??= toolUseId;
+      return [];
+    }
+    if (this.hasEnded(taskId)) {
       return [];
     }
     this.tasks.set(taskId, {
@@ -1684,7 +1741,7 @@ export class GrokNormalizer {
   ): RuntimeEvent[] {
     const shell = this.tasks.get(id);
     if (shell !== undefined) {
-      this.tasks.delete(id);
+      this.endShell(id);
       const firstLine = output
         ?.split("\n")
         .find((line) => line.trim().length > 0)
@@ -1761,7 +1818,7 @@ export class GrokNormalizer {
       events.push(this.closeSubagent(track, "stopped"));
     }
     for (const [taskId, track] of [...this.tasks.entries()]) {
-      this.tasks.delete(taskId);
+      this.endShell(taskId);
       events.push(
         this.event(
           "task.completed",

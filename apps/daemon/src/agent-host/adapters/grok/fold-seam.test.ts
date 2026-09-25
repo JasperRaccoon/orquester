@@ -357,6 +357,37 @@ test("a foreground Grok subagent its turn cut keeps running in the background", 
   assert.equal(s.liveness.liveness(THREAD), null);
 });
 
+test("a Grok shell a poll ended stays ended while a snapshot lists it: one start, one end", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  const shell = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
+  const command = "npm run dev";
+  const update = { sessionUpdate: "task_backgrounded", tool_call_id: "call-sh", task_id: shell, command };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
+  assert.equal(s.liveness.liveness(THREAD), "monitoring");
+  await poll(s, { task_id: shell, command, status: "completed", output: "bye" });
+  assert.equal(s.liveness.liveness(THREAD), null);
+
+  const listing = (tasks: unknown[]) =>
+    s.grok.handleXaiNotification("_x.ai/session_notification", {
+      sessionId: SESSION,
+      update: { sessionUpdate: "background_tasks", tasks }
+    });
+  await s.feed(listing([{ task_id: shell, command, kind: "bash", status: "completed" }]));
+  assert.equal(s.liveness.liveness(THREAD), null, "a finished shell the CLI still lists holds no drain");
+  await s.feed(listing([]));
+  const rows = s
+    .state()
+    .activities.filter(
+      (row) => row.activityKind.startsWith("task.") && (row.payload as { taskId?: string }).taskId === shell
+    );
+  assert.deepEqual(
+    rows.map((row) => row.activityKind),
+    ["task.started", "task.completed"]
+  );
+  assert.equal(agent(s, shell).status, "completed");
+});
+
 test("a Grok agent nobody polls holds working for an hour, re-armed by a running poll", async () => {
   const clock = createTestClock(0);
   const s = seam(clock);

@@ -24,7 +24,13 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { agentFrames, readCapture } from "./fixtures.ts";
-import { FINISHED_CALLS_REMEMBERED, GROK_AGENT_LIVENESS_TTL_MS, GrokNormalizer } from "./normalize.ts";
+import {
+  ENDED_TASKS_REMEMBERED,
+  FINISHED_CALLS_REMEMBERED,
+  GROK_AGENT_LIVENESS_TTL_MS,
+  GrokNormalizer,
+  SUBAGENTS_REMEMBERED
+} from "./normalize.ts";
 
 const SESSION = "01a0c1a7-1185-7171-9447-3aa38569088c";
 
@@ -195,6 +201,8 @@ const SPAWN_META = {
 /** Subagent ids are UUIDv7 ("Subagent id must be a UUIDv7", the CLI's own message). */
 const SUB_A = "01a0c1a9-7b2e-7c3d-8e4f-0123456789ab";
 const SUB_B = "01a0c1aa-1111-7222-8333-444455556666";
+/** A background shell's id: the CLI's task ids are UUIDv7 too (fixture 11's starts `01a0c1a7`). */
+const SHELL = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
 
 function spawnStart(callId: string, input: Record<string, unknown>): SessionNotification {
   return frame({
@@ -676,6 +684,95 @@ test("a poll ends a known shell with its first output line; an id nobody reporte
     [[SUB_A, "failed", "Error: port in use"]]
   );
   assert.deepEqual(grok.stopBackgroundTasks(), [], "the shell is gone");
+});
+
+// ---------------------------------------------------------------------------
+// An ended task never starts again
+// ---------------------------------------------------------------------------
+
+const SNAPSHOTS = "_x.ai/session_notification";
+const EMPTY_SNAPSHOT = { sessionId: SESSION, update: { sessionUpdate: "background_tasks", tasks: [] } };
+
+test("a snapshot still listing a shell a poll ended starts nothing, and ends nothing twice", () => {
+  const grok = normalizer();
+  grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-sh", SHELL));
+  const bye = { task_id: SHELL, command: "npm run dev", status: "completed", output: "bye" };
+  assert.deepEqual(statuses(taskRows(poll(grok, [bye]))), [["task.completed", SHELL, "completed"]]);
+  const listed = grok.handleXaiNotification(SNAPSHOTS, snapshot(SHELL, "bash", "completed"));
+  assert.deepEqual(agentRows(listed), [], "the CLI still lists the finished shell: no new start");
+  const dropped = grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT);
+  assert.deepEqual(agentRows(dropped), [], "…and no second end when it drops out");
+  assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing is live");
+});
+
+test("a shell ended any other way never starts again either — by a snapshot or a late frame", () => {
+  const list = (grok: GrokNormalizer, status: string) =>
+    grok.handleXaiNotification(SNAPSHOTS, snapshot(SHELL, "bash", status));
+  const ends: Array<[string, string, (grok: GrokNormalizer) => RuntimeEvent[]]> = [
+    ["its snapshot status", "completed", (grok) => list(grok, "completed")],
+    ["dropping out", "completed", (grok) => grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT)],
+    ["Stop", "stopped", (grok) => grok.stopBackgroundTasks()]
+  ];
+  for (const [how, status, end] of ends) {
+    const grok = normalizer();
+    list(grok, "running");
+    assert.deepEqual(statuses(taskRows(end(grok))), [["task.completed", SHELL, status]], how);
+    for (const listed of ["running", "completed"]) {
+      assert.deepEqual(agentRows(list(grok, listed)), [], `${how}, then listed ${listed}`);
+    }
+    const late = grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-late", SHELL));
+    assert.deepEqual(agentRows(late), [], `${how}, then a late task_backgrounded`);
+    const restated = grok.handleSessionUpdate(
+      frame({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-late-2",
+        status: "completed",
+        rawOutput: { type: "BackgroundTaskStarted", task_id: SHELL, command: "c" }
+      })
+    );
+    assert.deepEqual(agentRows(restated), [], `${how}, then a late BackgroundTaskStarted`);
+    assert.deepEqual(agentRows(grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT)), [], how);
+    assert.deepEqual(grok.stopBackgroundTasks(), [], `${how}: nothing is live`);
+  }
+});
+
+test("the ended-task memory is bounded: the oldest id is forgotten first", () => {
+  const grok = normalizer();
+  const ids = Array.from(
+    { length: ENDED_TASKS_REMEMBERED + 1 },
+    (_, index) => `01a0c1ac-0000-7000-8000-${String(index).padStart(12, "0")}`
+  );
+  const tasks = ids.map((task_id) => ({ task_id, command: "c", kind: "bash", status: "running" }));
+  grok.handleXaiNotification(SNAPSHOTS, {
+    sessionId: SESSION,
+    update: { sessionUpdate: "background_tasks", tasks }
+  });
+  const ended = grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT);
+  assert.equal(only(ended, "task.completed").length, ids.length, "every one dropped out");
+  const newest = grok.handleXaiNotification(SNAPSHOTS, snapshot(ids.at(-1)!, "bash", "completed"));
+  assert.deepEqual(agentRows(newest), [], "the newest end is remembered");
+  const oldest = grok.handleXaiNotification(SNAPSHOTS, snapshot(ids[0]!, "bash", "completed"));
+  assert.deepEqual(
+    agentRows(oldest).map((event) => event.type),
+    ["task.started"],
+    "the oldest was forgotten: memory only, as the finished-call bound is"
+  );
+});
+
+test("an ended subagent's ids outlive its launch's memory: a snapshot listing one is no new shell", () => {
+  const grok = normalizer();
+  backgroundLaunched(grok);
+  const done = poll(grok, [{ task_id: SUB_B, command: RUN_TESTS, status: "completed", output: "ok" }]);
+  assert.equal(only(done, "task.completed").length, 1);
+  // As many later launches push SUB_B's id out of the launch memory.
+  for (let index = 0; index < SUBAGENTS_REMEMBERED; index += 1) {
+    const callId = `call-many-${index}`;
+    const id = `01a0c1ab-0000-7000-8000-${String(index).padStart(12, "0")}`;
+    grok.handleSessionUpdate(spawnStart(callId, { prompt: "p", background: true }));
+    grok.handleSessionUpdate(spawnEnd(callId, "completed", "Subagent started.", textAnswer(id)));
+  }
+  const listed = grok.handleXaiNotification(SNAPSHOTS, snapshot(SUB_B, "subagent", "completed"));
+  assert.deepEqual(agentRows(listed), []);
 });
 
 test("a resume clears `listed`: a snapshot without the resumed agent does not end it mid-resume", () => {
