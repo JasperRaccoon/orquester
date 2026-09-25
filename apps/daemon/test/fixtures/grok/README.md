@@ -722,23 +722,28 @@ the field is `task_id` (snake_case) — T3 reads `output.task_id ?? output.taskI
 and the tool call that starts the task reports `status: "completed"` immediately, with the
 **title rewritten** to `"[bg] sleep 25 (01a0c1a7)"`.
 
-**Nothing was emitted after the turn settled.** Twenty seconds of watching produced no `TaskOutput`,
-no completion event, nothing. Grok surfaces background progress only when the model *polls* with
-`get_command_or_subagent_output`. So §3.1's "background liveness outlives the turn" registry will
-see a task go `running` and never hear it end. It needs its own expiry, or the thread stays
-"monitoring" forever.
+**Nothing was emitted after the turn settled** in the 20 s watched: no `TaskOutput`, no completion
+event, nothing.
 
 *Correction (2026-09-24, read off the capture and the binary — not captured):* the `sleep 25` did
 **not** finish silently. The task started at `t=8794` and the harness sent SIGTERM at `t=30931`,
 22.1 s later, so the capture ended before the command could have ended; it shows only that nothing
-is emitted while a task runs. The 1.0.34 binary names a notification of its own for the end,
-`x.ai/task_completed` — the CLI's own TUI parses it ("Background task completed", "Failed to parse
-x.ai/task_completed") and so does its headless runner (an internally tagged `{sessionUpdate:
-"task_completed", …}`; the `SessionUpdate` variant holds `task_snapshot` and `will_wake`), and its
-`--background-wait-timeout` help reads "Applies to bash/monitor `task_completed`, background
-subagents (`SubagentFinished`)". Its shape was never on the wire here, so the adapter does not map
-it: it reaches the peer as an unregistered notification — a `runtime.warning` — and the registry's
-expiry stays the bound.
+is emitted while a task runs. The CLI's own docs (`20-background-tasks.md`) say what follows an
+end: "When the command completes, a notification appears in the conversation", and "Completion
+wakes the parent automatically" — the agent starts a turn of its own, which an ACP client sees as
+frames outside any prompt it sent; the model reads a command's or a subagent's output with
+`get_command_or_subagent_output` (answered `rawOutput.type: "TaskOutput"`) and stops one with
+`kill_command_or_subagent` (`KillTask`). The adapter reads those two answers the way T3's reader
+does (`XAiBackgroundTasks.ts`; observation 36). The binary also names a notification of its own for
+the end, `x.ai/task_completed` — the CLI's TUI parses it ("Background task completed", "Failed to
+parse x.ai/task_completed") and so does its headless runner, and its `--background-wait-timeout`
+help reads "Applies to bash/monitor `task_completed`, background subagents (`SubagentFinished`)".
+Decoded as far as the binary goes: `{sessionId, update: {sessionUpdate: "task_completed",
+task_snapshot, will_wake}}`, where `task_snapshot` is a twenty-field `TaskSnapshot`. Those twenty
+field names are not recoverable (the headless reader takes ONE of them, into a one-field
+`TaskSnapshotLite`, whose name is not recoverable either), so which field is the task id and
+which the outcome would be a guess. It stays unmapped — an unregistered notification, a
+`runtime.warning` — and the registry's expiry stays the bound for a shell nobody polls.
 
 **Every task row of a shell names the shell itself as its `agentId`**
 (`adapters/grok/normalize.ts`). The liveness registry read a stamped non-agent task as a subagent's
@@ -835,11 +840,13 @@ Also confirmed live against 1.0.34 through the adapter: `initialize._meta.availa
 commands, while `available_commands_update` after `session/new` is **69** and the machine-level
 skill list from `grok inspect --json` is 57 — observation 20's ratio, reproduced end to end.
 
-### 36. Subagents — read from the CLI, **not captured**
+### 36. Subagents — read from the CLI and T3's reader, **not captured**
 
 No run here started a subagent, and none has been captured since. Everything below was read from
-the installed 1.0.34 binary — its embedded docs (`16-subagents.md`, the hooks and CLI references)
-and its strings — on 2026-09-24, and none of it has been seen on the wire.
+the installed 1.0.34 binary — its embedded docs (`16-subagents.md`, `20-background-tasks.md`, the
+hooks and CLI references) and its strings — and from T3 Code's Grok background-task reader
+(`apps/server/src/provider/acp/XAiBackgroundTasks.ts` and its test), on 2026-09-24; none of it has
+been seen on the wire.
 
 What the CLI says a client gets:
 
@@ -854,7 +861,20 @@ What the CLI says a client gets:
   binary serialises — `SearchReplace`, `Bash`, `ReadFile`, `ListDir`, `GrepSearch`,
   `AskUserQuestion`, `EnterPlanMode`, `BackgroundTaskStarted`, all eight seen here — also holds
   `SubagentCompleted` (`SubagentCompletedOutput`, ten fields, among them `subagent_id`,
-  `subagent_type`, `tool_calls`, `turns`, `duration_ms`, `worktree_path`).
+  `subagent_type`, `tool_calls`, `turns`, `duration_ms`, `worktree_path`) — a foreground run that
+  ended — and `TaskOutput` / `KillTask` (`TaskOutputResult`, `MultiTaskOutputResult`,
+  `KillTaskResult`). T3's reader and tests give their shape: `{type: "TaskOutput", Result}` or
+  `{…, MultiResult: {results}}`, each `{task_id, command, status, exit_code, output}`, a subagent's
+  `command` reading `"[subagent:<type>] <description>"`; `{type: "KillTask", Result: {task_id,
+  outcome: "killed"}}`. A spawn that answers without running to the end answers in text: T3's tests
+  name `{type: "Text", text: "subagent_id: …\ntype: …\ndescription: …"}`, and the binary holds the
+  same three labels after "Subagent took longer than the foreground budget and was moved to the
+  background to keep the conversation responsive. It is still running".
+- **A foreground run is not bound to its call.** "foreground subagent exceeded await budget;
+  auto-backgrounding (child keeps running)" (`GROK_SUBAGENT_AWAIT_BUDGET_MS` sets the budget) and
+  "foreground subagent caller gone; auto-backgrounding (child keeps running)" — the binary's own
+  log lines: a foreground spawn whose call answers early, or whose turn is cut (a Stop, a steer's
+  cancel, the watchdog), leaves its child running in the background.
 - **Subagent ids are UUIDv7** ("Subagent id must be a UUIDv7").
 - **`_x.ai/session_notification` variants** `subagent_spawned`, `subagent_progress` and
   `subagent_finished` (observation 28). The CLI's own TUI — itself an ACP client — logs "Subagent
@@ -866,25 +886,38 @@ What the CLI says a client gets:
 - **`send_subagent_message`** (off by default: `GROK_ACTIVE_AGENT_MESSAGES` / `[features]
   active_agent_messages`) resumes an eligible completed subagent "with the same identity";
   `get_command_or_subagent_output`, `wait_commands_or_subagents` and `kill_command_or_subagent`
-  read, wait on and kill background subagents; a finished background subagent (or command) can
-  wake the agent for a new turn.
+  read, wait on and kill background subagents ("reports success if the task was killed or had
+  already exited"); a finished background subagent (or command) wakes the agent for a new turn.
 
 What the adapter builds from it (`adapters/grok/normalize.ts`, `subagentFromToolCall`):
 
-- **The call is the agent.** Its first frame starts a `taskType: "subagent"` task under the call's
-  id, stamped with itself (`agentId` = `taskId`, like every Grok task), launched by the call
-  (`toolUseId`), titled with `description` and with `subagent_type` as its role; the call's rows
-  are `collab_agent_tool_call`, hidden behind the agent's row as a Claude `Agent` call is. A
-  foreground call's end is the agent's end, with the call's `content` text — what the parent model
-  reads, "usually a summary" — as its result; a failed call fails it; a foreground call still open
-  when its turn settles was cut with the turn (observation 11 and fixture 05: a cancelled call gets
-  no terminal frame) and closes `stopped`.
-- **A background agent's end is not observable.** The call answers at once; the agent stays live —
-  "working", holding a deploy's drain like any agent — until a Stop, the session's stop or the
-  process's exit closes it `stopped`. If a `background_tasks` entry or a `_x.ai/task_backgrounded`
-  frame ever joins it (by the spawn call's `tool_call_id`, or by an id its launch reported), its
-  status there ends the agent, and it never becomes a shell row; whether the CLI sends either for a
-  subagent is not captured.
+- **The call is the agent.** The first frame of `grok_build`'s `spawn_subagent` (its vendor block
+  names the namespace) starts a `taskType: "subagent"` task under the call's id, stamped with itself
+  (`agentId` = `taskId`, like every Grok task), launched by the call (`toolUseId`), titled with
+  `description` and with `subagent_type` as its role; `background: true` — the tool's own argument
+  — marks it backgrounded. The call's rows are `collab_agent_tool_call`, hidden behind the agent's
+  row as a Claude `Agent` call is.
+- **Only the completion tag ends a run through its call.** A call answered `SubagentCompleted` ends
+  the agent, with the call's `content` text — what the parent model reads, "usually a summary" —
+  as its result; a call that fails before its run went on fails it. Any other answer — a
+  background launch's, or a foreground one the CLI moved to the background — and a foreground call
+  its turn settles without (fixture 05: a cancelled call gets no terminal frame) send the run on in
+  the background: `task.updated {isBackgrounded: true}`, once, and no end.
+- **A background run ends by what the model asks for.** A `TaskOutput` answer naming the id its
+  launch reported ends it with `output` as its result (`completed`/`failed` by T3's status and
+  exit-code rules, `stopped` for killed/cancelled), or — still `running` — re-arms it with a
+  progress row; a completed `KillTask` answer with `outcome: "killed"` ends it `stopped`; an answer
+  arriving between turns (the CLI woke the parent) counts the same, on the turn the run started
+  in; a run already ended gets no second end. T3 skips a subagent's entries; the adapter reads
+  them, and — unlike T3 — starts no row for an id no launch reported. Shells ride the same reader.
+  A `background_tasks` entry or `_x.ai/task_backgrounded` frame joined to the spawn (by the call's
+  `tool_call_id`, or an id its launch reported) is the agent too, never a shell row — whether the
+  CLI sends either for a subagent is not captured. Stop, the session's stop and the process's
+  exit close whatever is left `stopped`.
+- **A run nobody asks about stops counting after an hour.** Every row naming a Grok agent carries
+  `livenessTtlMs` = one hour (`GROK_AGENT_LIVENESS_TTL_MS`): the host's liveness registry counts it
+  "working" — holding a deploy's drain — for at most an hour after the latest such row, a running
+  poll re-arming it. Only liveness lapses; the roster keeps the row, and a later end is recorded.
 - **`resume_from` reopens the same row.** The relaunch contract (AGENTS.md, "Agent rows must survive
   resumes and retention", rule 1): the source's task starts again under the NEW call. The task is
   found by the subagent id the source's result reported — the UUIDs in it, read without assuming a
@@ -893,11 +926,11 @@ What the adapter builds from it (`adapters/grok/normalize.ts`, `subagentFromTool
   starts a row of its own, under that id. A resume the CLI refuses (its source still running)
   fails the call and never the agent it named.
 - **Unmapped:** the three `subagent_*` updates and `x.ai/task_completed` stay `runtime.warning`s —
-  guessing their fields would be worse than the warning. `send_subagent_message` is a plain tool
-  row: its run's end would be as unobservable as a background launch's.
+  their fields cannot be read off the binary (observation 29), and guessing them would be worse
+  than the warning. `send_subagent_message` is a plain tool row: a run it wakes is not reopened.
 
-A capture of a foreground, a background and a `resume_from` launch — and of a long `sleep` watched
-past its end — would settle every "not captured" above.
+A capture of a foreground, a background and a `resume_from` launch, of a poll and a kill of each —
+and of a long `sleep` watched past its end — would settle every "not captured" above.
 
 ---
 
