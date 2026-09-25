@@ -659,12 +659,16 @@ export interface AgentChatActions {
    * oldest page's cursor; with nothing loaded, by the snapshot's — unless the
    * window has evicted rows since that snapshot, when it asks with none (the
    * block just below the window as it stands). Asks nothing when there is
-   * nothing older.
+   * nothing older. One call pages on past a page that shows no row the
+   * timeline did not already show — right after a rewind the first pages
+   * repeat what the window holds — up to `HISTORY_PAGES_PER_LOAD` pages, with
+   * `slice.history.loading` set throughout.
    *
    * Never rejects: a failure lands in `slice.history.error` in words, never
-   * in the thread's error banner. Overlapping calls share the one request in
-   * flight, and a page that lands after a snapshot (or a rewind) replaced
-   * the history it was asked against is dropped.
+   * in the thread's error banner, and the pages that landed before it stay.
+   * Overlapping calls share the one chain in flight, and a page that lands
+   * after a snapshot (or a rewind) replaced the history it was asked against
+   * is dropped, and ends the chain.
    *
    * *Added with the thread index; `contracts.ts` stays additive-only.*
    */

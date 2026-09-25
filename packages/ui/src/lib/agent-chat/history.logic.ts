@@ -98,6 +98,33 @@ import { AgentChatCommandError } from "./transport";
 export const HISTORY_REVEAL_PAGE_CAP = 25;
 
 /**
+ * How many older pages one "Load older" may pull in while the pages that land
+ * show nothing the timeline did not already show — the bound the Orquester
+ * MCP's `read_transcript` reads at (`HISTORY_PAGES_PER_READ`). Right after a
+ * rewind the host bounds the window past the revert, so the first pages repeat
+ * rows the window holds; on a subagent fleet's thread that can take several.
+ */
+export const HISTORY_PAGES_PER_LOAD = 5;
+
+/**
+ * Whether `after` shows a row `before` did not — what one "Load older" pages
+ * on until ({@link HISTORY_PAGES_PER_LOAD}). A row, not an item: an item only
+ * a folded turn, a folded group or an agent's drill-in holds shows nothing
+ * more on the timeline, and an older row that joins a group shows the group
+ * under its new first row's id.
+ */
+export function showsNewRow(
+  before: readonly AgentChatTimelineRow[],
+  after: readonly AgentChatTimelineRow[]
+): boolean {
+  if (after === before) {
+    return false;
+  }
+  const shown = new Set(before.map((row) => row.id));
+  return after.some((row) => !shown.has(row.id));
+}
+
+/**
  * The most rows the pages and the bridge may hold together
  * ({@link historyWithinCap}).
  *

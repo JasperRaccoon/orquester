@@ -1471,6 +1471,7 @@ describe("the history bridge", () => {
     const expanded = renderedItemIds(state().rows);
 
     const loading = state().actions.loadOlderHistory();
+    // The page reaches the thread's start, so this one click asks for nothing more.
     fake.answer(historyPage({ items: repeated, page: { beforeCursor: null, endItemId: null }, seq }));
     await loading;
 
@@ -1484,6 +1485,101 @@ describe("the history bridge", () => {
     assert.deepEqual(state().rows.map((row) => row.id), folded, "and folded, the same rows");
   });
 
+  describe("one \"Load older\" click pages on past pages that show nothing new", () => {
+    /** Right after a rewind: the window holds turn 1's prompt and rows, and the first pages repeat them. */
+    async function rewoundThread() {
+      const prompt = message("user", "go", { id: "u1", createdAt: stamp(100) });
+      const windowRows = Array.from({ length: 60 }, (_, index) => toolRow(`w${index}`, 200 + index, "t1"));
+      seq = WINDOW_SEQ;
+      const opened = await open();
+      synchronize(
+        opened.fake,
+        snapshot({
+          items: [prompt, ...windowRows],
+          turns: [foldTurn("t0", "u0"), foldTurn("t1", "u1")],
+          seq,
+          history: bounds({ beforeCursor: null })
+        })
+      );
+      opened.state().actions.setDisclosure({ expandedTurnIds: ["t0", "t1"] });
+      return { ...opened, prompt, windowRows };
+    }
+
+    /** Turn 0, older than anything the window holds. */
+    const turnZero = (): ThreadItem[] => [
+      message("user", "earlier", { id: "u0", createdAt: stamp(1) }),
+      toolRow("e0", 2, "t0")
+    ];
+
+    it("asks for the next page while a page shows nothing the timeline did not, and stops at the first that shows an older row — busy throughout", async () => {
+      const { fake, state, prompt, windowRows } = await rewoundThread();
+      const shownBefore = renderedItemIds(state().rows);
+
+      const loading = state().actions.loadOlderHistory();
+      assert.equal(state().slice.history.loading, true);
+      // The block that ends at the index's end: the window's newest rows again.
+      fake.answer(historyPage({ items: windowRows.slice(30), page: { beforeCursor: "c1", endItemId: null }, seq }));
+      await until(() => fake.historyCalls.length === 2, "the second page is asked for");
+      assert.equal(state().slice.history.loading, true, "still busy between the pages");
+      assert.deepEqual(renderedItemIds(state().rows), shownBefore, "nothing new on screen yet");
+      assert.deepEqual(fake.historyCalls[1]?.query, { before: "c1", turns: 20 }, "below the page that landed");
+      // The window's older rows again.
+      fake.answer(historyPage({ items: [prompt, ...windowRows.slice(0, 30)], page: { beforeCursor: "c2" }, seq }));
+      await until(() => fake.historyCalls.length === 3, "the third page is asked for");
+      assert.equal(state().slice.history.loading, true);
+      fake.answer(historyPage({ items: turnZero(), page: { beforeCursor: "c3" }, seq }));
+      await loading;
+
+      assert.equal(fake.historyCalls.length, 3, "no page after the one that showed something older");
+      assert.equal(fake.waiting, 0);
+      assert.equal(state().slice.history.loading, false);
+      assert.deepEqual(renderedItemIds(state().rows), ["u0", "e0", ...shownBefore]);
+      assert.equal(state().slice.history.pages.length, 3, "every page kept: the cursor chain runs through them");
+    });
+
+    it("loads at most five pages in one click, and the next click goes on below the oldest", async () => {
+      const { fake, state, windowRows } = await rewoundThread();
+
+      const loading = state().actions.loadOlderHistory();
+      for (let page = 1; page <= 5; page += 1) {
+        await until(() => fake.waiting === 1, `page ${page} is asked for`);
+        fake.answer(historyPage({ items: [windowRows[60 - page]!], page: { beforeCursor: `c${page}` }, seq }));
+      }
+      await loading;
+
+      assert.equal(fake.historyCalls.length, 5);
+      assert.equal(fake.waiting, 0, "nothing more asked for in this click");
+      assert.equal(state().slice.history.loading, false);
+
+      const next = state().actions.loadOlderHistory();
+      assert.deepEqual(fake.historyCalls.at(-1)?.query, { before: "c5", turns: 20 });
+      fake.answer(historyPage({ items: turnZero(), page: { beforeCursor: null }, seq }));
+      await next;
+      assert.deepEqual(renderedItemIds(state().rows).slice(0, 2), ["u0", "e0"]);
+    });
+
+    it("stops at a page that reaches the thread's start, and at a failed one — keeping what landed", async () => {
+      const { fake, state, windowRows } = await rewoundThread();
+
+      const loading = state().actions.loadOlderHistory();
+      fake.answer(historyPage({ items: windowRows.slice(30), page: { beforeCursor: "c1", endItemId: null }, seq }));
+      await until(() => fake.historyCalls.length === 2, "the second page is asked for");
+      fake.fail(new Error("the host went away"));
+      await loading;
+
+      assert.equal(fake.historyCalls.length, 2);
+      assert.equal(state().slice.history.loading, false);
+      assert.equal(state().slice.history.pages.length, 1, "the page that landed stays");
+      assert.notEqual(state().slice.history.error, null);
+
+      const retry = state().actions.loadOlderHistory();
+      assert.deepEqual(fake.historyCalls.at(-1)?.query, { before: "c1", turns: 20 });
+      fake.answer(historyPage({ items: windowRows.slice(0, 30), page: { beforeCursor: null }, seq }));
+      await retry;
+      assert.equal(fake.historyCalls.length, 3, "nothing older left: the chain stops though the page showed nothing new");
+      assert.equal(state().slice.history.error, null);
+    });
+  });
 
   it("renders a running turn whose early rows went to the history live — exactly as one window holding everything would", async () => {
     const clock = { at: 0 };

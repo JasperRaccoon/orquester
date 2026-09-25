@@ -34,6 +34,7 @@ import {
   EMPTY_HISTORY_ITEMS,
   EMPTY_HISTORY_ROWS,
   EMPTY_LIVE_SPLIT,
+  HISTORY_PAGES_PER_LOAD,
   HISTORY_REVEAL_PAGE_CAP,
   HISTORY_ROW_CAP,
   historyAfterEvent,
@@ -55,6 +56,7 @@ import {
   projectHistoryRows,
   resetHistory,
   rowIdForTurn,
+  showsNewRow,
   spawnGroupKeyOf,
   splitLiveItems,
   withoutOrphanBridge,
@@ -599,6 +601,16 @@ describe("the load-older cursor", () => {
       false,
       "never without an index"
     );
+  });
+
+  it("pages on only past a page that shows no row the timeline did not show (showsNewRow)", () => {
+    const row = (id: string): AgentChatTimelineRow => ({ kind: "working", id, createdAt: null });
+    const before = [row("a"), row("b")];
+    assert.equal(showsNewRow(before, before), false);
+    assert.equal(showsNewRow(before, [row("a"), row("b")]), false, "the same rows, re-derived");
+    assert.equal(showsNewRow(before, [row("b")]), false, "a row folded away shows nothing new");
+    assert.equal(showsNewRow(before, [row("z"), row("a"), row("b")]), true);
+    assert.equal(HISTORY_PAGES_PER_LOAD, 5, "the MCP's read_transcript bound");
   });
 });
 

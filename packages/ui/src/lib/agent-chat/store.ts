@@ -42,6 +42,7 @@ import {
   type RuntimeMode,
   type RuntimeSubagent,
   type ThreadActivityItem,
+  type ThreadHistoryPage,
   type ThreadItem,
   type ThreadMessageItem,
   type ThreadTokenUsage
@@ -77,6 +78,7 @@ import {
   EMPTY_HISTORY_ROWS,
   EMPTY_LIVE_SPLIT,
   hasSettledCompaction,
+  HISTORY_PAGES_PER_LOAD,
   HISTORY_REVEAL_PAGE_CAP,
   HISTORY_ROW_CAP,
   historyErrorMessage,
@@ -89,6 +91,7 @@ import {
   planReveal,
   projectHistoryRows,
   rowIdForTurn,
+  showsNewRow,
   splitLiveItems,
   userMessageIdForTurn,
   withoutOrphanBridge,
@@ -1563,6 +1566,95 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     };
 
     /**
+     * `GET …/history`, up to `pages` older pages one after the other: past a
+     * page only while it showed no row the timeline did not already show
+     * (`showsNewRow`) and something older is left. "Load older" asks for
+     * {@link HISTORY_PAGES_PER_LOAD}, so a click shows something older
+     * whenever something older exists — right after a rewind the first pages
+     * repeat what the window holds; a reveal asks for one per look, and judges
+     * each by its own rule. `loading` holds from the first request to the end
+     * of the chain; overlapping calls share it.
+     */
+    const loadHistoryPages = (pages: number): Promise<void> => {
+      if (historyInFlight !== null) {
+        return historyInFlight;
+      }
+      if (closed || !canLoadOlderHistory(get().slice.history)) {
+        return Promise.resolve();
+      }
+      // From here until the chain ends, what the window evicts goes onto the
+      // bridge (`historyAfterEvent` reads `loading`): the first page ends
+      // where the window stood when it was asked for.
+      patchHistory((history) => (history.loading ? history : { ...history, loading: true }));
+      const run = (async (): Promise<void> => {
+        for (let loaded = 0; loaded < pages; loaded += 1) {
+          const asked = get().slice.history;
+          if (loaded > 0 && !canLoadOlderHistory(asked)) {
+            break;
+          }
+          // Without a cursor once the window has evicted since its snapshot
+          // (`windowEvicted`): that snapshot's cursor no longer meets it.
+          const before = nextHistoryCursor(asked);
+          // What the page is asked against. A snapshot (or a rewind into a
+          // page or the bridge, or the cap) replaces `pages` with a fresh
+          // array and a snapshot mints new bounds, so a page that lands after
+          // either belongs to a log this thread no longer shows as it did: it
+          // is dropped, never merged — and a bridge begun for it, with nothing
+          // loaded to join, goes too (`withoutOrphanBridge`).
+          const superseded = (history: AgentChatHistoryState): boolean =>
+            history.pages !== asked.pages || history.bounds !== asked.bounds;
+          let page: ThreadHistoryPage;
+          try {
+            page = await deps.transport.readHistory(sessionId, {
+              ...(before === undefined ? {} : { before }),
+              turns: THREAD_HISTORY_DEFAULT_TURNS
+            });
+          } catch (error) {
+            if (closed) {
+              return;
+            }
+            // Recorded in words on the history row — never the thread's error
+            // banner: the live thread is fine, only the index is not. What
+            // landed before it stays.
+            patchHistory((history) =>
+              withoutOrphanBridge(
+                superseded(history)
+                  ? { ...history, loading: false }
+                  : { ...history, loading: false, error: historyErrorMessage(error) }
+              )
+            );
+            return;
+          }
+          if (closed) {
+            return;
+          }
+          if (superseded(get().slice.history)) {
+            patchHistory((history) => withoutOrphanBridge({ ...history, loading: false }));
+            return;
+          }
+          // The page's end cuts the window where it lies, so the window's rows
+          // below it render with the history, in their place.
+          const shown = get().rows;
+          const windowItems = get().slice.entries;
+          patchHistory((history) => ({ ...historyWithPage(history, page, windowItems), error: null }));
+          if (showsNewRow(shown, get().rows)) {
+            break;
+          }
+        }
+        patchHistory((history) => (history.loading ? { ...history, loading: false } : history));
+      })().finally(() => {
+        // Released in a `.finally` on the returned promise — always a later
+        // microtask — never inside the body: a transport that throws before
+        // its first `await` would otherwise clear the latch BEFORE the
+        // assignment below, which would then pin a settled promise and
+        // silently refuse every later load.
+        historyInFlight = null;
+      });
+      historyInFlight = run;
+      return run;
+    };
+
+    /**
      * Resolve once the stream is live, so a reveal plans against the thread as
      * it is — a warm remount paints a retained fold that may predate the very
      * turn it was asked to show. Past {@link REVEAL_SYNC_TIMEOUT_MS} it goes
@@ -1985,69 +2077,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       loadOlderHistory() {
-        if (historyInFlight !== null) {
-          return historyInFlight;
-        }
-        const asked = get().slice.history;
-        if (closed || !canLoadOlderHistory(asked)) {
-          return Promise.resolve();
-        }
-        // Without a cursor once the window has evicted since its snapshot
-        // (`windowEvicted`): that snapshot's cursor no longer meets it.
-        const before = nextHistoryCursor(asked);
-        // From here until the page lands, what the window evicts goes onto
-        // the bridge (`historyAfterEvent` reads `loading`): the page ends
-        // where the window stood when it was asked for.
-        patchHistory((history) => (history.loading ? history : { ...history, loading: true }));
-        // What the page is asked against. A snapshot (or a rewind into a page
-        // or the bridge, or the cap) replaces `pages` with a fresh array and a
-        // snapshot mints new bounds, so a page that lands after either
-        // belongs to a log this thread no longer shows as it did: it is
-        // dropped, never merged — and a bridge begun for it, with nothing
-        // loaded to join, goes too (`withoutOrphanBridge`).
-        const superseded = (history: AgentChatHistoryState): boolean =>
-          history.pages !== asked.pages || history.bounds !== asked.bounds;
-        const run = (async (): Promise<void> => {
-          try {
-            const page = await deps.transport.readHistory(sessionId, {
-              ...(before === undefined ? {} : { before }),
-              turns: THREAD_HISTORY_DEFAULT_TURNS
-            });
-            if (closed) {
-              return;
-            }
-            // The page's end cuts the window where it lies, so the window's
-            // rows below it render with the history, in their place.
-            const windowItems = get().slice.entries;
-            patchHistory((history) =>
-              superseded(history)
-                ? withoutOrphanBridge({ ...history, loading: false })
-                : { ...historyWithPage(history, page, windowItems), loading: false, error: null }
-            );
-          } catch (error) {
-            if (closed) {
-              return;
-            }
-            // Recorded in words on the history row — never the thread's error
-            // banner: the live thread is fine, only the index is not.
-            patchHistory((history) =>
-              withoutOrphanBridge(
-                superseded(history)
-                  ? { ...history, loading: false }
-                  : { ...history, loading: false, error: historyErrorMessage(error) }
-              )
-            );
-          }
-        })().finally(() => {
-          // Released in a `.finally` on the returned promise — always a later
-          // microtask — never inside the body: a transport that throws before
-          // its first `await` would otherwise clear the latch BEFORE the
-          // assignment below, which would then pin a settled promise and
-          // silently refuse every later load.
-          historyInFlight = null;
-        });
-        historyInFlight = run;
-        return run;
+        return loadHistoryPages(HISTORY_PAGES_PER_LOAD);
       },
 
       async revealTurn(turnId) {
@@ -2095,7 +2125,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             update((current) => ({ ...current, reveal }));
             return true;
           }
-          await actions.loadOlderHistory();
+          await loadHistoryPages(1);
           if (get().slice.history.error !== null) {
             return false;
           }
