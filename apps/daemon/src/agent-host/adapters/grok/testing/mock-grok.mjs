@@ -15,9 +15,76 @@
  * under a bare `node`, not through tsx.
  */
 
+import { readFileSync } from "node:fs";
+
 const scenario = process.env.GROK_MOCK_SCENARIO ?? "happy";
 const agentVersion = process.env.GROK_MOCK_VERSION ?? "1.0.34";
 const sessionId = "01a0c19e-de22-78c0-a72a-7e230ccfbec0";
+
+/**
+ * `GROK_MOCK_SCENARIO=replay` plays a recorded capture back
+ * (`GROK_MOCK_REPLAY`, an absolute fixture path): the capture's own frames, in
+ * its own order, with no frame invented. Every client frame the harness sent
+ * is a sync point: when the adapter sends a frame of the same method, the
+ * frames the agent sent after it — up to the harness's next frame — are
+ * played, a recorded reply's id rewritten to the adapter's. A client frame the
+ * capture has no match for is answered `{}` (a request) or ignored. Frames are
+ * paced by their recorded gaps, clamped to 1–25 ms, so each reaches the
+ * adapter in its own read, as it did live.
+ */
+const replay =
+  scenario === "replay"
+    ? readFileSync(process.env.GROK_MOCK_REPLAY ?? "", "utf8")
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line))
+    : [];
+let replayCursor = 0;
+/** The capture's own request ids → the adapter's, for the replies. */
+const replayIds = new Map();
+let replayQueue = Promise.resolve();
+
+function handleReplay(frame) {
+  if (typeof frame.method !== "string") {
+    return; // the adapter answering a request of the agent's: nothing recorded to match
+  }
+  let at = -1;
+  for (let index = replayCursor; index < replay.length; index += 1) {
+    const entry = replay[index];
+    if (entry.dir === "send" && entry.frame?.method === frame.method) {
+      at = index;
+      break;
+    }
+  }
+  if (at === -1) {
+    if (frame.id !== undefined) {
+      result(frame.id, {});
+    }
+    return;
+  }
+  if (frame.id !== undefined && replay[at].frame.id !== undefined) {
+    replayIds.set(replay[at].frame.id, frame.id);
+  }
+  let end = at + 1;
+  while (end < replay.length && replay[end].dir !== "send") {
+    end += 1;
+  }
+  const window = replay.slice(at + 1, end).filter((entry) => entry.dir === "recv");
+  replayCursor = end;
+  replayQueue = replayQueue.then(async () => {
+    let previous = replay[at].t;
+    for (const entry of window) {
+      const gap = Math.min(25, Math.max(1, entry.t - previous));
+      previous = entry.t;
+      await new Promise((resolve) => setTimeout(resolve, gap));
+      const out = { ...entry.frame };
+      if (out.method === undefined && replayIds.has(out.id)) {
+        out.id = replayIds.get(out.id);
+      }
+      send(out);
+    }
+  });
+}
 
 let buffer = "";
 process.stdin.setEncoding("utf8");
@@ -40,6 +107,11 @@ process.stdin.on("data", (chunk) => {
 
 function send(frame) {
   process.stdout.write(`${JSON.stringify(frame)}\n`);
+}
+
+/** Several frames in ONE write, so the adapter reads them in one chunk. */
+function sendTogether(frames) {
+  process.stdout.write(frames.map((frame) => `${JSON.stringify(frame)}\n`).join(""));
 }
 
 function result(id, value) {
@@ -95,6 +167,10 @@ const initializeResult = {
 let promptSeq = 0;
 
 function handle(frame) {
+  if (scenario === "replay") {
+    handleReplay(frame);
+    return;
+  }
   const { id, method, params } = frame;
 
   // The adapter's reply to `session/request_permission` is an ordinary
@@ -346,6 +422,58 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "open-work" || scenario === "open-work-exit") {
+    // A turn that settles with a call still open (a cut call gets no terminal
+    // frame, fixture 05) and a background shell running: what Stop, the
+    // session's stop and the exit must close — the call before the task.
+    notify("session/update", {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "call-open-1",
+        title: "run_terminal_command",
+        rawInput: { command: "sleep 600" },
+        _meta: { "x.ai/tool": { version: 1, name: "run_terminal_command", kind: "execute", namespace: "grok_build", label: "Run", read_only: false } }
+      },
+      _meta: { totalTokens: 1700, promptId }
+    });
+    notify("_x.ai/task_backgrounded", {
+      sessionId,
+      update: {
+        sessionUpdate: "task_backgrounded",
+        tool_call_id: "call-bg-1",
+        task_id: "task-bg-1",
+        command: "npm run dev",
+        description: "dev server"
+      }
+    });
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    if (scenario === "open-work-exit") {
+      setTimeout(() => process.exit(143), 20);
+    }
+    return;
+  }
+
+  if (scenario === "wake-steer" && promptSeq === 2) {
+    // The adapter's steer of the woken turn: an ordinary prompt of ours.
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "steered" } },
+      _meta: { totalTokens: 2100, promptId }
+    });
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: { sessionUpdate: "turn_completed", prompt_id: promptId, stop_reason: "end_turn" }
+    });
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, {
+      stopReason: "end_turn",
+      _meta: { sessionId, promptId, usage: { inputTokens: 40, outputTokens: 4, totalTokens: 44 } }
+    });
+    return;
+  }
+
   if (scenario === "slow") {
     // Answers only after a cancel arrives; otherwise it runs forever, which
     // is what the liveness watchdog is for.
@@ -354,6 +482,19 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "self-resolve") {
+    // What the CLI does for a tool under `--always-approve`, `--permission-mode
+    // auto` — or with `support_permission` off: it opens and resolves its own
+    // interaction 6 ms apart and never asks the client (observation 5).
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: { sessionUpdate: "pending_interaction", tool_call_id: `call-${promptSeq}`, kind: "permission" }
+    });
+    notify("_x.ai/session_notification", {
+      sessionId,
+      update: { sessionUpdate: "interaction_resolved", tool_call_id: `call-${promptSeq}` }
+    });
+  }
   notify("session/update", {
     sessionId,
     update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking" } },
@@ -395,6 +536,43 @@ async function runPrompt(id, params) {
         costUsdTicks: 121_754_000
       }
     }
+  });
+  if (scenario === "wake-steer") {
+    await wakeUntilCancelled();
+  }
+}
+
+/**
+ * The CLI's own prompt, as fixtures 16/19 record it: `runningPromptId` never
+ * listed in `entries`, the parent's reply under it — and, here, no end until
+ * a `session/cancel` arrives, when it settles `cancelled`.
+ */
+async function wakeUntilCancelled() {
+  const wake = "subagent-completed-01a0d90e-56c2-78d2-9a27-2d007429d073";
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  // One write: the wake's announcement and its first words reach the adapter
+  // in the same read, the tightest order the CLI could produce.
+  sendTogether([
+    { jsonrpc: "2.0", method: "_x.ai/queue/changed", params: { sessionId, entries: [] } },
+    {
+      jsonrpc: "2.0",
+      method: "_x.ai/queue/changed",
+      params: { sessionId, entries: [], runningPromptId: wake, runningText: "<system-reminder>…</system-reminder>", runningKind: "prompt" }
+    },
+    {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The subagent finished" } },
+        _meta: { totalTokens: 1800, promptId: wake }
+      }
+    }
+  ]);
+  await waitFor(() => cancelled);
+  notify("_x.ai/session_notification", {
+    sessionId,
+    update: { sessionUpdate: "turn_completed", prompt_id: wake, stop_reason: "cancelled" }
   });
 }
 

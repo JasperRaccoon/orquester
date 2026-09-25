@@ -68,6 +68,18 @@ export function autoApprovesEverything(mode: RuntimeMode): boolean {
 }
 
 /**
+ * True where the user was promised approval cards the CLI must raise: the
+ * modes whose argv lets it ask. Under `auto` and `full-access` the CLI
+ * resolves its own interactions by design (`--permission-mode auto`, `agent
+ * --always-approve`: observation 6, and every 2026-09-25 capture), so a
+ * self-resolved interaction there is what was asked for — not the missing
+ * `support_permission` it signals under a supervised mode (observation 5).
+ */
+export function expectsApprovalCards(mode: RuntimeMode): boolean {
+  return mode === "approval-required" || mode === "auto-accept-edits";
+}
+
+/**
  * Extra environment for the child, on top of `support/env.ts`'s base.
  *
  * - `GROK_OAUTH2_REFERRER` is T3's marker (`GrokAcpSupport.ts:48-63`).

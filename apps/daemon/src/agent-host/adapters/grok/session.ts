@@ -51,6 +51,7 @@ import {
   GROK_EXTRA_ENV,
   autoApprovesEdits,
   autoApprovesEverything,
+  expectsApprovalCards,
   GROK_CONFIG_PATH_ENV,
   grokConfigAdvisory,
   grokSpawnArgs,
@@ -70,7 +71,7 @@ import {
 } from "./permissions.ts";
 import { XAI_EMPTY_PLAN_MARKDOWN, XAI_EXIT_PLAN_FEEDBACK, type PlanPathHost } from "./plan.ts";
 import { answersToXaiResponse } from "./questions.ts";
-import { parsePromptResultUsage } from "./usage.ts";
+import { parsePromptResultUsage, parseXaiUsage } from "./usage.ts";
 import { agentVersionOf, contextWindowFromModelState, modelStateOf, promptIdOf } from "./xai-meta.ts";
 
 /**
@@ -88,6 +89,8 @@ export const GROK_REGISTERED_METHODS: readonly string[] = [
   XAI_EXTENSION_NOTIFICATIONS.session_notification,
   XAI_EXTENSION_NOTIFICATIONS.session_update,
   XAI_EXTENSION_NOTIFICATIONS.task_backgrounded,
+  XAI_EXTENSION_NOTIFICATIONS.task_completed,
+  XAI_EXTENSION_NOTIFICATIONS.monitor_event,
   XAI_EXTENSION_NOTIFICATIONS.prompt_complete,
   XAI_EXTENSION_NOTIFICATIONS.queue_changed,
   XAI_EXTENSION_NOTIFICATIONS.settings_update,
@@ -104,6 +107,24 @@ export const GROK_REGISTERED_METHODS: readonly string[] = [
 
 /** How many settled turns `readThread` remembers. */
 const MAX_RECORDED_TURNS = 200;
+
+/**
+ * How many prompt ids the session remembers seeing QUEUED — listed in
+ * `_x.ai/queue/changed` `entries` — to tell its own prompts from the CLI's
+ * (see {@link GrokSession.onQueueChanged}), and how many CLI prompts it keeps
+ * waiting for a turn. Oldest forgotten first; memory only.
+ */
+const PROMPT_IDS_REMEMBERED = 256;
+
+/**
+ * Replies the CLI writes to requests it sent ITSELF, never ours: a subagent's
+ * child session reloading its skills and workflows answers
+ * `{"id": "skills-reload", …}` four times and `"workflows-reload"` once, per
+ * spawn (fixtures 15–23). The peer mints numeric ids only, so these can reply
+ * to nothing of ours; warning on each put five rows in the timeline per
+ * subagent. Any other stray reply still warns.
+ */
+const CLI_INTERNAL_REPLY_IDS: ReadonlySet<string> = new Set(["skills-reload", "workflows-reload"]);
 
 /** `{schemaVersion: 1, sessionId}` — the only thing persisted for resume (§4.1). */
 export const GROK_RESUME_SCHEMA_VERSION = 1;
@@ -189,6 +210,12 @@ interface ActiveTurn {
   interrupted: boolean;
   outcome?: GrokTurnOutcome;
   errorMessage?: string;
+  /**
+   * The CLI's own prompt this turn stands for — a wake ({@link
+   * GrokSession.onQueueChanged}) — settled by that prompt's `turn_completed`,
+   * since no RPC of ours answers it. Cleared when a steer takes the turn over.
+   */
+  wakePromptId?: string;
 }
 
 /** One live `grok agent stdio` child. */
@@ -207,6 +234,10 @@ export class GrokSession {
   private lastError: string | undefined;
   private stopped = false;
   private hostInitiatedStop = false;
+  /** The self-resolved-approvals advisory is said once per session. */
+  private selfResolveAdvised = false;
+  /** `<server>\u0000<status>` of every MCP failure already reported, until the server is ready again. */
+  private readonly mcpWarned = new Set<string>();
 
   private currentModelId: string | undefined;
   private currentReasoningEffort: string | undefined;
@@ -218,6 +249,13 @@ export class GrokSession {
   private activeTurn: ActiveTurn | null = null;
   private readonly recordedTurns: RecordedTurn[] = [];
   private epoch = 0;
+
+  /** Prompt ids the parent's queue listed — ours (see {@link onQueueChanged}). */
+  private readonly listedPromptIds = new Set<string>();
+  /** Prompt ids the CLI started on its own, never listed. */
+  private readonly cliPromptIds = new Set<string>();
+  /** CLI prompts running while a turn was still open: each gets a turn when it settles. */
+  private readonly pendingWakes: string[] = [];
 
 
   /** A serial queue: one mutating command at a time per thread (§3.1). */
@@ -340,8 +378,13 @@ export class GrokSession {
       homeDirs: this.options.homeDirs,
       onRawFrame: (direction, frame) => this.options.logRaw(direction, frame),
       onStderrLine: (line) => this.onStderr(line),
-      onWarning: (message, detail) =>
-        this.emitEvent(this.normalizer.event("runtime.warning", { message, detail })),
+      onWarning: (message, detail) => {
+        if (isCliInternalReply(message, detail)) {
+          this.options.logger.debug("grok: the CLI's reply to its own request", detail);
+          return;
+        }
+        this.emitEvent(this.normalizer.event("runtime.warning", { message, detail }));
+      },
       onExit: (reason, tail) => this.onExit(reason, tail)
     });
     this.connection = connection;
@@ -411,6 +454,7 @@ export class GrokSession {
       { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
     );
     this.acpSessionId = response.sessionId;
+    this.normalizer.bindSession(response.sessionId);
     return response;
   }
 
@@ -427,6 +471,7 @@ export class GrokSession {
    */
   private async loadSession(sessionId: string): Promise<LoadSessionResponse> {
     this.acpSessionId = sessionId;
+    this.normalizer.bindSession(sessionId);
     return await this.peer().request<LoadSessionResponse>(
       "session/load",
       { sessionId, cwd: this.options.cwd, mcpServers: [] },
@@ -448,8 +493,13 @@ export class GrokSession {
     const peer = connection.peer;
 
     peer.onNotification("session/update", (params) => {
-      this.notePromptId(promptIdOf((params as { _meta?: unknown })._meta));
-      this.emitAll(this.normalizer.handleSessionUpdate(params as SessionNotification));
+      const notification = params as SessionNotification;
+      // A subagent's child session streams under its own id (fixture 15):
+      // its prompt ids are its own, never a turn of ours.
+      if (this.isParentSession(notification.sessionId)) {
+        this.notePromptId(promptIdOf(notification._meta));
+      }
+      this.emitAll(this.normalizer.handleSessionUpdate(notification));
     });
 
     // BOTH private channels. An adapter that registers only the live one
@@ -460,12 +510,23 @@ export class GrokSession {
     ]) {
       peer.registerExtensionNotification(method, (params) => {
         this.emitAll(this.normalizer.handleXaiNotification(method, params));
+        if (method === XAI_EXTENSION_NOTIFICATIONS.session_notification) {
+          this.onPrivateUpdate(params);
+        }
       });
     }
 
-    peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.task_backgrounded, (params) => {
-      this.emitAll(this.normalizer.handleXaiNotification(XAI_EXTENSION_NOTIFICATIONS.task_backgrounded, params));
-    });
+    // Background work reported by methods of their own: a task started, a
+    // shell's or monitor's end (fixtures 16, 18, 20), a monitor's line.
+    for (const method of [
+      XAI_EXTENSION_NOTIFICATIONS.task_backgrounded,
+      XAI_EXTENSION_NOTIFICATIONS.task_completed,
+      XAI_EXTENSION_NOTIFICATIONS.monitor_event
+    ]) {
+      peer.registerExtensionNotification(method, (params) => {
+        this.emitAll(this.normalizer.handleXaiNotification(method, params));
+      });
+    }
 
     peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.prompt_complete, (params) => {
       this.onPromptComplete(params as XaiPromptCompleteParams);
@@ -498,7 +559,30 @@ export class GrokSession {
     });
 
     peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.mcp_server_status, (params) => {
-      const status = (params as { status?: unknown; name?: unknown }).status;
+      const record = params as { status?: unknown; name?: unknown; sessionId?: unknown };
+      const status = record.status;
+      // One warning per server and failure until it reports ready again: the
+      // CLI re-handshakes the thread's servers whenever a subagent's child
+      // session boots, and reports the same failure again under the parent's
+      // id (fixtures 15–23: `stripe` unavailable at the session's start and
+      // again at each spawn). A report under a child session's own id — none
+      // captured — would be the same servers: the parent's stands.
+      if (!this.isParentSession(record.sessionId)) {
+        return;
+      }
+      const key = `${String(record.name)}\u0000${String(status)}`;
+      if (status === "ready") {
+        for (const warned of [...this.mcpWarned]) {
+          if (warned.startsWith(`${String(record.name)}\u0000`)) {
+            this.mcpWarned.delete(warned);
+          }
+        }
+        return;
+      }
+      if (this.mcpWarned.has(key)) {
+        return;
+      }
+      this.mcpWarned.add(key);
       if (typeof status === "string" && status !== "ready") {
         this.emitEvent(
           this.normalizer.event("runtime.warning", {
@@ -682,9 +766,14 @@ export class GrokSession {
         // superseded prompt will answer `stopReason:"cancelled"` within
         // milliseconds; without this it still matches `turn.epoch` and ends
         // the turn, and the steered prompt's real result is then dropped
-        // because `activeTurn` is already null.
+        // because `activeTurn` is already null. A turn the CLI started on its
+        // own (a wake) is steered the same way — the CLI's own advice is that
+        // "sending a message interrupts the wait and runs your message right
+        // away" — and becomes this prompt's: the woken prompt's cancelled
+        // `turn_completed` must not settle it.
         this.activeTurn!.epoch = epoch;
         this.activeTurn!.providerPromptId = undefined;
+        this.activeTurn!.wakePromptId = undefined;
         await this.settlePendingAsCancelled();
         try {
           this.peer().notify("session/cancel", { sessionId: this.acpSessionId });
@@ -812,7 +901,7 @@ export class GrokSession {
    * the prompt that actually produced the answer.
    */
   private notePromptId(promptId: string | undefined): void {
-    if (promptId === undefined || promptId.length === 0) {
+    if (promptId === undefined || promptId.length === 0 || this.cliPromptIds.has(promptId)) {
       return;
     }
     const turn = this.activeTurn;
@@ -822,18 +911,139 @@ export class GrokSession {
     turn.providerPromptId = promptId;
   }
 
+  /** A frame of the thread's own ACP session — not a subagent's child session. */
+  private isParentSession(sessionId: unknown): boolean {
+    return typeof sessionId !== "string" || this.acpSessionId.length === 0 || sessionId === this.acpSessionId;
+  }
+
+  /**
+   * `_x.ai/queue/changed`, the parent session's prompt queue — which also
+   * tells a prompt of ours from one the CLI starts ON ITS OWN. Every prompt a
+   * client sends is first LISTED in `entries`, then named `runningPromptId`;
+   * a prompt the CLI starts itself is never listed: `subagent-completed-<id>`
+   * when a background subagent's end wakes the parent, `task-completed-<id>`
+   * when a monitor ends, `notifications-<uuid>` for a monitor's line (fixtures
+   * 16, 19, 20, 22; README observation 40). Such a prompt streams the
+   * parent's reply like any turn — and no RPC of ours answers it — so it gets
+   * a turn of its own ({@link openWakeTurn}), as Claude's woken parent gets a
+   * synthetic one. A child session's queue is its own and never read here.
+   */
   private onQueueChanged(params: unknown): void {
     const record = params as
-      | { entries?: ReadonlyArray<{ id?: unknown }>; runningPromptId?: unknown }
+      | { sessionId?: unknown; entries?: ReadonlyArray<{ id?: unknown }>; runningPromptId?: unknown }
       | null;
-    if (typeof record?.runningPromptId === "string") {
-      this.notePromptId(record.runningPromptId);
+    if (!this.isParentSession(record?.sessionId)) {
+      return;
+    }
+    for (const entry of record?.entries ?? []) {
+      if (typeof entry.id === "string") {
+        rememberBounded(this.listedPromptIds, entry.id);
+      }
+    }
+    const running = record?.runningPromptId;
+    if (typeof running === "string") {
+      if (this.listedPromptIds.has(running)) {
+        this.notePromptId(running);
+      } else {
+        this.onCliPrompt(running);
+      }
       return;
     }
     const first = record?.entries?.[0]?.id;
     if (typeof first === "string") {
       this.notePromptId(first);
     }
+  }
+
+  /**
+   * A prompt the CLI started itself. It gets a turn once no other is open:
+   * the CLI runs its queue in order, so one arriving while our turn is still
+   * unsettled — fixture 20's first monitor line is announced 15 ms BEFORE
+   * the user's prompt's RPC result — waits for that turn to settle
+   * ({@link settleTurn} opens it). Otherwise it opens AT ONCE, before the
+   * next frame is read: its reply may follow in the same read, and a chunk
+   * with no open turn is dropped. That is safe against a `sendTurn` in
+   * flight, which decides steer-or-new inside the per-thread lock by reading
+   * the open turn — and opens its own before its first await.
+   */
+  private onCliPrompt(promptId: string): void {
+    if (this.stopped || this.cliPromptIds.has(promptId) || this.activeTurn?.wakePromptId === promptId) {
+      return;
+    }
+    rememberBounded(this.cliPromptIds, promptId);
+    const turn = this.activeTurn;
+    if (turn !== null && !turn.settled) {
+      this.pendingWakes.push(promptId);
+      this.pendingWakes.splice(0, Math.max(0, this.pendingWakes.length - PROMPT_IDS_REMEMBERED));
+      return;
+    }
+    this.openWakeTurn(promptId);
+  }
+
+  /** A turn for the CLI's own prompt: `turn.started`, the thread running, no RPC. */
+  private openWakeTurn(promptId: string): void {
+    const turnId = `grok-turn-${this.options.uuid()}`;
+    this.epoch += 1;
+    this.activeTurn = {
+      turnId,
+      epoch: this.epoch,
+      settled: false,
+      interrupted: false,
+      providerPromptId: promptId,
+      wakePromptId: promptId
+    };
+    this.normalizer.clearPlanFallback();
+    this.normalizer.beginTurn();
+    this.status = "running";
+    this.touch();
+    this.emitEvent(this.normalizer.event("session.state.changed", { state: "running" }, turnId));
+    this.emitEvent(
+      this.normalizer.event(
+        "turn.started",
+        {
+          ...(this.currentModelId === undefined ? {} : { model: this.currentModelId }),
+          ...(this.currentReasoningEffort === undefined ? {} : { effort: this.currentReasoningEffort })
+        },
+        turnId
+      )
+    );
+  }
+
+  /**
+   * The parent's private channel, after the normaliser: the `turn_completed`
+   * of a prompt the CLI started itself settles its turn with that frame's
+   * stop reason and usage — the only report such a prompt gets (no
+   * `prompt_complete`, no RPC result). One that ended before its turn could
+   * open no longer needs one.
+   */
+  private onPrivateUpdate(params: unknown): void {
+    const record = params as { sessionId?: unknown; update?: Record<string, unknown> } | null;
+    const update = record?.update;
+    if (update?.["sessionUpdate"] !== "turn_completed" || !this.isParentSession(record?.sessionId)) {
+      return;
+    }
+    const promptId = update["prompt_id"];
+    if (typeof promptId !== "string" || !this.cliPromptIds.has(promptId)) {
+      return;
+    }
+    const stopReason = typeof update["stop_reason"] === "string" ? update["stop_reason"] : null;
+    const usage = parseXaiUsage(update["usage"]);
+    void this.serialize(async () => {
+      await Promise.resolve();
+      const pending = this.pendingWakes.indexOf(promptId);
+      if (pending !== -1) {
+        this.pendingWakes.splice(pending, 1);
+        return;
+      }
+      const turn = this.activeTurn;
+      if (turn === null || turn.settled || turn.wakePromptId !== promptId) {
+        return;
+      }
+      this.settleTurn(turn.turnId, turn.epoch, {
+        stopReason,
+        ...(usage === undefined ? {} : { usage })
+      });
+    });
   }
 
   /**
@@ -912,7 +1122,16 @@ export class GrokSession {
     }
     this.emitEvent(this.normalizer.turnCompleted(turnId, merged, errorMessage));
 
-    if (this.normalizer.approvalsWereSelfResolved) {
+    // Once per session, and only where approval cards were promised: under
+    // `auto` / `full-access` the CLI resolving its own interactions is the
+    // mode working. Said at every turn end, it filled a full-access thread's
+    // timeline — and a woken turn ends too.
+    if (
+      !this.selfResolveAdvised &&
+      expectsApprovalCards(this.options.runtimeMode) &&
+      this.normalizer.approvalsWereSelfResolved
+    ) {
+      this.selfResolveAdvised = true;
       this.emitEvent(this.normalizer.event("runtime.warning", { message: grokConfigAdvisory() }));
     }
 
@@ -921,6 +1140,11 @@ export class GrokSession {
       this.status = "ready";
       this.touch();
       this.emitEvent(this.normalizer.event("session.state.changed", { state: "ready" }));
+      // The CLI moved on to a prompt of its own while this turn was settling.
+      const wake = this.pendingWakes.shift();
+      if (wake !== undefined) {
+        this.openWakeTurn(wake);
+      }
     }
   }
 
@@ -999,13 +1223,18 @@ export class GrokSession {
   /**
    * The §6.2 session-scoped stop, with no turn to settle: release anything the
    * user could still be waiting on, tell the agent to stop whatever it is
-   * running, and close every live background task so the roster empties and
-   * `backgroundLiveness` clears.
+   * running, and close every open call and live background task so the
+   * roster empties and `backgroundLiveness` clears — the calls FIRST, then
+   * the tasks, as every adapter's teardown orders them (a background shell's
+   * call closes before its task).
    *
    * `session/cancel` is the only lever that reaches Grok's background work —
    * the tasks are children of the CLI process and it exposes no per-task kill
-   * to the client (the model kills its own through `KillTask`). The session
-   * itself stays up: the user pressed Stop, not Close.
+   * to the client (the model kills its own through `KillTask`). Captured
+   * (fixture 21): it cancels a background subagent (`subagent_finished
+   * {status: "cancelled"}`) and leaves a background shell running, which a
+   * later CLI report then counts live again. The session itself stays up: the
+   * user pressed Stop, not Close.
    */
   private async stopSessionScopedWork(): Promise<void> {
     if (this.stopped) {
@@ -1018,8 +1247,8 @@ export class GrokSession {
       } catch {
         // Nothing to cancel on a dead transport.
       }
-      this.emitAll(this.normalizer.stopBackgroundTasks());
       this.emitAll(this.normalizer.failOpenTools("Stopped."));
+      this.emitAll(this.normalizer.stopBackgroundTasks());
     });
   }
 
@@ -1152,12 +1381,13 @@ export class GrokSession {
 
   /**
    * §3.1: a dead child never leaves a running turn. The in-flight turn is
-   * settled, every live task is closed `stopped` and every parked request is
-   * failed — all BEFORE `session.exited`.
+   * settled, every open call and then every live task is closed and every
+   * parked request is failed — all BEFORE `session.exited`.
    */
   private settleEverythingForExit(reason: ChildExitReason, stderrTail: string): void {
     const turn = this.activeTurn;
     const detail = stderrTail.trim().length > 0 ? `\n${stderrTail.trim()}` : "";
+    this.pendingWakes.length = 0;
 
     for (const [requestId, pending] of [...this.pendingApprovals.entries()]) {
       this.pendingApprovals.delete(requestId);
@@ -1172,8 +1402,8 @@ export class GrokSession {
       this.emitEvent(this.normalizer.userInputResolved(requestId, {}));
     }
 
-    this.emitAll(this.normalizer.stopBackgroundTasks());
     this.emitAll(this.normalizer.failOpenTools("The agent process exited."));
+    this.emitAll(this.normalizer.stopBackgroundTasks());
 
     if (turn !== null && !turn.settled) {
       const outcome = exitOutcome(reason, this.hostInitiatedStop);
@@ -1221,9 +1451,10 @@ export class GrokSession {
     }
     this.stopped = true;
     this.hostInitiatedStop = true;
+    this.pendingWakes.length = 0;
     await this.settlePendingAsCancelled();
-    this.emitAll(this.normalizer.stopBackgroundTasks());
     this.emitAll(this.normalizer.failOpenTools("The session was stopped."));
+    this.emitAll(this.normalizer.stopBackgroundTasks());
     const turn = this.activeTurn;
     if (turn !== null && !turn.settled) {
       turn.settled = true;
@@ -1254,6 +1485,27 @@ export class GrokSession {
   private touch(): void {
     this.updatedAt = this.options.stamp().createdAt;
   }
+}
+
+/** Add to a set, forgetting the oldest entry past {@link PROMPT_IDS_REMEMBERED}. */
+function rememberBounded(set: Set<string>, value: string): void {
+  set.delete(value);
+  set.add(value);
+  if (set.size > PROMPT_IDS_REMEMBERED) {
+    const oldest = set.values().next().value;
+    if (oldest !== undefined) {
+      set.delete(oldest);
+    }
+  }
+}
+
+/** The peer's warning about a reply to nothing, when the reply is the CLI's own ({@link CLI_INTERNAL_REPLY_IDS}). */
+function isCliInternalReply(message: string, detail: unknown): boolean {
+  if (message !== "acp: response for an unknown request id") {
+    return false;
+  }
+  const id = (detail as { id?: unknown } | null | undefined)?.id;
+  return typeof id === "string" && CLI_INTERNAL_REPLY_IDS.has(id);
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {

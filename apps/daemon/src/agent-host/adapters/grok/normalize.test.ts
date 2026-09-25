@@ -1320,7 +1320,7 @@ test("subagent_spawned joins a resume to its source's task, and a spawn no launc
   );
   const end = grok.handleXaiNotification("_x.ai/session_notification", finished(NEW_ID, "completed", "tests:4"));
   assert.deepEqual(
-    taskRows(end).map((event) => [event.payload.taskId, event.payload.toolUseId, event.payload.summary]),
+    only(end, "task.completed").map((event) => [event.payload.taskId, event.payload.toolUseId, event.payload.summary]),
     [["call-s1", "call-s2", "tests:4"]]
   );
   // The CLI's own spawn (a /loop fire; not captured): an agent under its id.

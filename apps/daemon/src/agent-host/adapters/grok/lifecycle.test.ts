@@ -793,6 +793,123 @@ test("Stop with NO active turn is session-scoped: live background work is closed
   await r.dispose();
 });
 
+/** `[type, id]` of the item and task ends, in emission order. */
+function ends(events: readonly RuntimeEvent[]): Array<[string, string | undefined]> {
+  return events
+    .filter((event) => event.type === "item.completed" || event.type === "task.completed")
+    .map((event) => [event.type, event.itemId ?? (event.payload as { taskId?: string }).taskId]);
+}
+
+const OPEN_WORK_ENDS: Array<[string, string]> = [
+  ["item.completed", "call-open-1"],
+  ["task.completed", "task-bg-1"]
+];
+
+test("Stop with no turn closes the open call BEFORE the background task", async () => {
+  // Every adapter's teardown closes calls before tasks (AGENTS.md, "A running
+  // state never outlives its process"): a background shell's call closes
+  // before its task.
+  const r = await rig({ scenario: "open-work" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "work", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const before = r.events.length;
+  await r.adapter.interruptTurn("t1");
+  await r.waitFor((event) => event.type === "task.completed", "task.completed");
+  await r.drain();
+  assert.deepEqual(ends(r.events.slice(before)), OPEN_WORK_ENDS);
+  await r.dispose();
+});
+
+test("stopSession closes the open call BEFORE the background task", async () => {
+  const r = await rig({ scenario: "open-work" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "work", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const before = r.events.length;
+  await r.adapter.stopSession("t1");
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  assert.deepEqual(ends(r.events.slice(before)), OPEN_WORK_ENDS);
+  await r.dispose();
+});
+
+test("an exit closes the open call BEFORE the background task, both before session.exited", async () => {
+  const r = await rig({ scenario: "open-work-exit" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "work", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const before = r.events.length;
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const after = r.events.slice(before);
+  assert.deepEqual(ends(after), OPEN_WORK_ENDS);
+  assert.equal(after.at(-1)?.type, "session.exited");
+  await r.dispose();
+});
+
+test("the CLI's own prompt after a turn is a turn of its own; a message during it steers it", async () => {
+  const r = await rig({ scenario: "wake-steer" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "hello", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn 1");
+  const wake = await r.waitFor(
+    (event) => event.type === "turn.started" && r.events.filter((e) => e.type === "turn.started").indexOf(event) === 1,
+    "the woken turn"
+  );
+  await r.waitFor(
+    (event) => event.type === "content.delta" && event.turnId === wake.turnId,
+    "the woken reply"
+  );
+  const steered = await r.adapter.sendTurn({ threadId: "t1", input: "go on", attachments: [], interactionMode: "default" });
+  assert.equal(steered.turnId, wake.turnId, "a steer of the woken turn, not a turn of its own");
+  const done = (await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId === wake.turnId,
+    "the steered turn's end"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(done.payload.state, "completed", "settled by the steered prompt, never by the cancelled wake");
+  assert.equal(done.payload.tokenUsage?.inputTokens, 40);
+  await r.drain();
+  const text = r.events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.turnId === wake.turnId && event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+  assert.equal(text, "The subagent finishedsteered");
+  assert.equal(r.events.filter((event) => event.type === "turn.completed").length, 2, "one end per turn");
+  await r.dispose();
+});
+
+function advisories(events: readonly RuntimeEvent[]): number {
+  return events.filter(
+    (event) => event.type === "runtime.warning" && /support_permission/.test(event.payload.message)
+  ).length;
+}
+
+test("full-access: a CLI resolving its own interactions is what was asked for — no advisory", async () => {
+  const r = await rig({ scenario: "self-resolve" });
+  await start(r, { runtimeMode: "full-access" });
+  await r.adapter.sendTurn({ threadId: "t1", input: "one", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn 1");
+  await r.adapter.sendTurn({ threadId: "t1", input: "two", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2, "turn 2");
+  await r.drain();
+  assert.equal(advisories(r.events), 0);
+  await r.dispose();
+});
+
+test("supervised: a CLI resolving its own interactions is told ONCE, not at every turn end", async () => {
+  const r = await rig({ scenario: "self-resolve" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "one", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn 1");
+  await r.adapter.sendTurn({ threadId: "t1", input: "two", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2, "turn 2");
+  await r.drain();
+  assert.equal(advisories(r.events), 1);
+  await r.dispose();
+});
+
 test("a session that dies on its own is removed from the adapter's map", async () => {
   // Q1 #30: a stale entry keeps winning `hasSession` and is reported to the
   // §3.3 reconcile as live.
