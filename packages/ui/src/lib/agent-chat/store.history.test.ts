@@ -1447,6 +1447,44 @@ describe("the history bridge", () => {
     );
   });
 
+  it("keeps the window's older rows in the window's order when a first page past a rewind takes the whole window into the history", async () => {
+    // Right after a rewind the host bounds the window past the revert, so the first page is the block that ends at
+    // the index's end (`endItemId: null`): it repeats the window's newest rows, and its end takes the whole window
+    // into the history — the older rows no page holds with it. One of them was replaced in place: first written
+    // right after the prompt, it carries the stamp of its latest write, later than the rows after it. The history
+    // takes those rows in the window's order, the log's; the timeline places every entry by its stamp, in the window
+    // as in the history, so nothing on screen moves.
+    const prompt = message("user", "go", { id: "u1", createdAt: stamp(1) });
+    const rewritten = toolRow("kp", 151, "t1", "the latest write");
+    const older = Array.from({ length: 200 }, (_, index) => toolRow(`o${index}`, 10 + 2 * index, "t1"));
+    const repeated = Array.from({ length: 100 }, (_, index) => toolRow(`r${index}`, 500 + index, "t1"));
+    const windowItems = [prompt, rewritten, ...older, ...repeated];
+    seq = WINDOW_SEQ;
+    const { fake, state } = await open();
+    synchronize(
+      fake,
+      snapshot({ items: windowItems, turns: [foldTurn("t1", "u1")], seq, history: bounds({ beforeCursor: null }) })
+    );
+    state().actions.setDisclosure({ expandedTurnIds: [] });
+    const folded = state().rows.map((row) => row.id);
+    state().actions.setDisclosure({ expandedTurnIds: ["t1"] });
+    const expanded = renderedItemIds(state().rows);
+
+    const loading = state().actions.loadOlderHistory();
+    fake.answer(historyPage({ items: repeated, page: { beforeCursor: null, endItemId: null }, seq }));
+    await loading;
+
+    assert.equal(state().slice.history.windowCut, windowItems.length, "the page's end takes the whole window");
+    // The items the history's rows are projected from — the store's own layer, read as `store.fixwave.test.ts` reads
+    // `rowsProjection`: the timeline's last step orders by stamp, so the order shows only in what comes before it.
+    const historyItems = (state() as unknown as { historyRows: { items: readonly ThreadItem[] } }).historyRows.items;
+    assert.deepEqual(ids(historyItems), ids(windowItems), "the window's order, the rewritten row where it was");
+    assert.deepEqual(renderedItemIds(state().rows), expanded, "every row where it was on screen");
+    state().actions.setDisclosure({ expandedTurnIds: [] });
+    assert.deepEqual(state().rows.map((row) => row.id), folded, "and folded, the same rows");
+  });
+
+
   it("renders a running turn whose early rows went to the history live — exactly as one window holding everything would", async () => {
     const clock = { at: 0 };
     const pageItems = [...turnItems(1, clock), ...turnItems(2, clock)];

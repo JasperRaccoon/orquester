@@ -1557,6 +1557,66 @@ describe("bridge rows above the live window", () => {
   });
 });
 
+describe("the window's rows no page holds join the history in the window's order", () => {
+  const input = (collected: HistoryRowsInput["history"], sharedLive: readonly ThreadItem[]): HistoryRowsInput => ({
+    history: collected,
+    sharedLive,
+    expandedTurnIds: new Set(["t9"]),
+    expandedWorkGroupIds: new Set(),
+    turns: [foldTurn("t9", "u9")],
+    supportsConversationRollback: true,
+    liveCompacted: false
+  });
+
+  it("keeps a row replaced in place where it was first written when a page that ends at the log's end takes the whole window", () => {
+    // Right after a rewind the first page ends at the index's end: it repeats the window's newest rows, and its end
+    // takes the whole window into the history — the older rows no page holds with it. One of them was replaced in
+    // place: first written right after the prompt, it carries the stamp of its latest write.
+    const windowItems = [
+      message("user", "go", { id: "u9", createdAt: stamp(1) }),
+      toolRow("kp", 151),
+      ...Array.from({ length: 100 }, (_, index) => toolRow(`o${index}`, 10 + 2 * index)),
+      ...Array.from({ length: 50 }, (_, index) => toolRow(`r${index}`, 500 + index))
+    ];
+    const page = historyPage({
+      items: windowItems.slice(-50).map((row) => ({ ...(row as ThreadActivityItem), summary: "as the page saw it" })),
+      page: { beforeCursor: "below", endItemId: null }
+    });
+    const cut = pageEndCut(windowItems, page);
+    assert.equal(cut, windowItems.length, "the page's end takes the whole window");
+    const collected = collectHistoryItems(EMPTY_HISTORY_ITEMS, [page]);
+    const split = splitLiveItems(EMPTY_LIVE_SPLIT, windowItems, collected, cut);
+
+    const projected = projectHistoryRows(EMPTY_HISTORY_ROWS, input(collected, split.shared));
+
+    assert.deepEqual(ids(projected.items), ids(windowItems), "the window's order: the rewritten row where it was");
+    assert.ok(
+      projected.items.every((item, index) => item === windowItems[index]),
+      "every row as the window holds it"
+    );
+  });
+
+  it("puts a row no page holds ahead of the rows a page shares with the window that follow it there; its stamp decides among the rest", () => {
+    // The window holds `J` — replaced in place since, its stamp now past the page's end — and after it `A`, a row the
+    // page holds as well. `h1` and `h2` are only on the page. By its stamp alone J would land below the whole page.
+    const onPage = [toolRow("h1", 10), toolRow("A", 20), toolRow("h2", 30)];
+    const collected = collectHistoryItems(EMPTY_HISTORY_ITEMS, [historyPage({ items: onPage })]);
+
+    const projected = projectHistoryRows(EMPTY_HISTORY_ROWS, input(collected, [toolRow("J", 40), onPage[1]!]));
+
+    assert.deepEqual(ids(projected.items), ["h1", "J", "A", "h2"]);
+  });
+
+  it("never re-sorts the rows no page holds by their stamps: a later one keeps its place below an earlier one", () => {
+    const collected = collectHistoryItems(EMPTY_HISTORY_ITEMS, [historyPage({ items: [toolRow("h1", 500)] })]);
+    const joining = [toolRow("first", 90), toolRow("second", 20), toolRow("third", 30)];
+
+    const projected = projectHistoryRows(EMPTY_HISTORY_ROWS, input(collected, joining));
+
+    assert.deepEqual(ids(projected.items), ["first", "second", "third", "h1"]);
+  });
+});
+
 describe("hasSettledCompaction", () => {
   it("is what the store feeds `liveCompacted` from", async () => {
     const { hasSettledCompaction } = await import("./history.logic");

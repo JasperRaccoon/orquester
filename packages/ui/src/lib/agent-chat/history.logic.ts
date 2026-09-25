@@ -1267,14 +1267,33 @@ function gateHistoryRewind(
 /**
  * The history's items with the window's (newer) copy of every shared one, in
  * the history's place; and the window's other shared rows — those before the
- * cut, and the continuations of what the history began — merged in by
- * `createdAt`, each ahead of the first history row newer than it. A
- * continuation is newer than everything a page or the bridge holds, so it
- * lands after them, where the fold's lifecycle and spawn collapses merge it
- * into the history's own row; a row the window outlived the bridge with — an
- * old prompt, an agent's launch row — lands in its place, ahead of the
- * bridge rows that came after it, so it anchors its turn and its spawn batch
- * as it did in the window.
+ * cut, and the continuations of what the history began — joined in the
+ * WINDOW's order, which is the log's. Never re-sorted by their stamps: a row
+ * the fold replaced in place keeps its first position but carries the stamp of
+ * its latest write, and the entries' order-sensitive steps (a spawn batch's
+ * anchor, a call's lifecycle) must meet the window's rows in the order the
+ * window's own projection meets them — the last step, the timeline's, places
+ * every entry by its stamp in either projection.
+ *
+ * Where a joining row lands among the rows only the history holds:
+ *
+ * - **ahead of every anchor that follows it in the window** — a row the
+ *   history and the window hold at one line, the same stamp on both copies. A
+ *   row the window rewrote since the history's copy (dropped by retention and
+ *   appended again, or replaced in place) may sit at another line in each, so
+ *   it anchors nothing;
+ * - **among the rest, by its stamp, as ever** — ahead of the first history row
+ *   stamped later — but never below a joining row that follows it in the
+ *   window.
+ *
+ * So a continuation, newer than everything a page or the bridge holds, lands
+ * after them, where the fold's lifecycle and spawn collapses merge it into the
+ * history's own row; a row the window outlived the bridge with — an old
+ * prompt, an agent's launch row — lands in its place, ahead of the bridge rows
+ * that came after it, so it anchors its turn and its spawn batch as it did in
+ * the window; and when a first page after a rewind ends at the index's end and
+ * takes the whole window into the history, the window's older rows keep their
+ * order above it.
  */
 function withWindowContent(
   items: readonly ThreadItem[],
@@ -1287,35 +1306,69 @@ function withWindowContent(
   for (const item of sharedLive) {
     windowCopy.set(item.id, item);
   }
-  const replaced = new Set<string>();
-  const merged = items.map((item) => {
+  const held = new Set<string>();
+  const anchorAt = new Map<string, number>();
+  const merged = items.map((item, position) => {
     const copy = windowCopy.get(item.id);
     if (copy === undefined) {
       return item;
     }
-    replaced.add(item.id);
+    held.add(item.id);
+    if (copy.createdAt === item.createdAt) {
+      anchorAt.set(item.id, position);
+    }
     return copy;
   });
-  const joining = sharedLive.filter((item) => !replaced.has(item.id));
-  if (joining.length === 0) {
+  if (held.size === sharedLive.length) {
     return merged;
   }
-  // Stable: rows with the same stamp keep the window's order.
-  const byTime = [...joining].sort((left, right) =>
-    left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0
-  );
+  // The latest stamp up to each position: a row stamped `at` goes ahead of the
+  // first position whose latest stamp is past it — the first history row
+  // stamped later — found by a binary search, since these never decrease.
+  const latestStamp: string[] = [];
+  for (const item of merged) {
+    const before = latestStamp.at(-1);
+    latestStamp.push(before !== undefined && before > item.createdAt ? before : item.createdAt);
+  }
+  const byStamp = (at: string): number => {
+    let low = 0;
+    let high = latestStamp.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (latestStamp[middle]! > at) {
+        high = middle;
+      } else {
+        low = middle + 1;
+      }
+    }
+    return low;
+  };
+  // Walked from the window's end: each joining row lands no further down than
+  // any anchor or joining row after it, so the places never decrease in the
+  // window's order.
+  const places = new Map<ThreadItem, number>();
+  let bound = merged.length;
+  for (let index = sharedLive.length - 1; index >= 0; index -= 1) {
+    const item = sharedLive[index]!;
+    const anchor = anchorAt.get(item.id);
+    if (anchor !== undefined) {
+      bound = Math.min(bound, anchor);
+    } else if (!held.has(item.id)) {
+      bound = Math.min(bound, byStamp(item.createdAt));
+      places.set(item, bound);
+    }
+  }
+  const joining = sharedLive.filter((item) => places.has(item));
   const result: ThreadItem[] = [];
   let next = 0;
-  for (const item of merged) {
-    while (next < byTime.length && byTime[next]!.createdAt < item.createdAt) {
-      result.push(byTime[next]!);
+  for (let position = 0; position <= merged.length; position += 1) {
+    while (next < joining.length && places.get(joining[next]!)! <= position) {
+      result.push(joining[next]!);
       next += 1;
     }
-    result.push(item);
-  }
-  while (next < byTime.length) {
-    result.push(byTime[next]!);
-    next += 1;
+    if (position < merged.length) {
+      result.push(merged[position]!);
+    }
   }
   return result;
 }
