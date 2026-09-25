@@ -12,6 +12,10 @@
  *   `approval.resolved`, **except** `tool_user_input`, which is dropped
  *   because it is a question, not an approval; the native request type is
  *   rewritten to the canonical kind and **both** are persisted;
+ * - a resolution marked `withdrawn` — nobody answered, and the wait on it
+ *   has ended — becomes the host's own cancelled row, the one a Stop writes
+ *   (`cancelledRequestActivity`), never "Approval resolved" / "User input
+ *   submitted";
  * - item lifecycle rows exist only for the tool-shaped item types
  *   ({@link isToolLifecycleItemType}), so `review_entered` / `review_exited`,
  *   `assistant_message`, `reasoning`, `plan`, `context_compaction`, `error`
@@ -33,6 +37,7 @@ import {
   type ThreadActivityTone
 } from "@orquester/api/agent-chat";
 
+import { cancelledRequestActivity } from "../orchestration/events.ts";
 import {
   taskProgressActivityId,
   taskUsageActivityId,
@@ -165,6 +170,26 @@ function makeActivity(event: RuntimeEvent, init: ActivityInit): ThreadActivityIt
 }
 
 /**
+ * The row for a withdrawn request: nobody answered it, so it closes with the
+ * host's own cancelled row — the one a Stop writes, "Request cancelled" /
+ * "Question cancelled" — on the turn stamp the card was opened with. The row
+ * is keyed by the request (`settle-cancel:<requestId>`), so if a Stop's own
+ * row for the same card lands after it, the two are one row.
+ */
+function withdrawnRequestActivity(
+  event: RuntimeEvent,
+  requestId: string,
+  kind: "approval" | "question"
+): ThreadActivityItem {
+  return cancelledRequestActivity({
+    requestId,
+    kind,
+    turnId: event.turnId !== undefined ? String(event.turnId) : null,
+    createdAt: event.createdAt
+  });
+}
+
+/**
  * Item-lifecycle rows share one payload shape. `toolUseId` is the runtime item
  * id and is **stable across a call's whole lifecycle** — it is what the §7.3
  * resolver groups on and what the §5.6 coalescer keys on.
@@ -231,6 +256,9 @@ export function runtimeEventToActivities(
       if (event.payload.requestType === "tool_user_input") {
         return [];
       }
+      if (event.payload.withdrawn === true && event.requestId !== undefined) {
+        return [withdrawnRequestActivity(event, event.requestId, "approval")];
+      }
       const requestKind = requestKindFromCanonicalRequestType(event.payload.requestType);
       return [
         makeActivity(event, {
@@ -275,6 +303,9 @@ export function runtimeEventToActivities(
     }
 
     case "user-input.resolved": {
+      if (event.payload.withdrawn === true && event.requestId !== undefined) {
+        return [withdrawnRequestActivity(event, event.requestId, "question")];
+      }
       return [
         makeActivity(event, {
           id: event.eventId,

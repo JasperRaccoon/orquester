@@ -774,7 +774,7 @@ export class CodexNormaliser {
       case "project/changed":
       case "skills/changed": // a probe-refresh signal, not a timeline row
       case "fs/changed":
-      case "serverRequest/resolved": // our own answer's ack; request.resolved is emitted by the handler
+      case "serverRequest/resolved": // our answer's ack, or a card the server resolved itself; the session writes the row
       case "item/reasoning/summaryPartAdded":
       case "item/commandExecution/terminalInteraction":
       case "item/autoApprovalReview/started":

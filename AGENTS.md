@@ -726,6 +726,17 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   card must not be able to close without the message, or the reverse — and its text echoes each
   question before its answer so the agent, which sees an ordinary user turn, can tell what was
   answered.
+- **One request, one closing row — the host's, when the host closed it.** A Stop writes its own
+  "Request cancelled" / "Question cancelled" row (`settlePendingRequests`) and hands the adapter
+  the cancel, which the adapter answers on the wire and reports; a turn's end dismisses a stranded
+  native question in the log only (`settleStrandedQuestions`), and the adapter may settle it later.
+  Every adapter's report of such a closure used to be a second row — "Approval resolved {decision:
+  cancel}" / "User input submitted", saying someone answered. The host remembers the requests it
+  closed itself (`ThreadRuntime.hostClosedRequests`) and drops, at the sink, an adapter row that
+  repeats the closure as a cancellation (`repeatsHostClosure`: an approval's `decision: "cancel"`,
+  a question with no answer — the adapters' echo and ingestion's `withdrawn` row). A real answer
+  racing the Stop keeps its row; a new request reusing the id is not the host's closure (ids may be
+  recycled, `pending.ts`); the adapter's answer on the wire is never touched.
 - **A non-image attachment reaches the agent as a PATH, guarded twice.** The upload reply
   carries `AttachmentRef.path` — the absolute host path; `validate.ts` rebuilds every ref from
   `{type, id, name, mimeType, sizeBytes}`, so the host's validation strips it from every command
@@ -972,9 +983,29 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   native-callback questions on it (`settleStrandedQuestions`, in the log only — the adapter is
   never answered), which on the parent's turn swept the child's open card while the child stayed
   blocked, and a turn the thread never had (the child's own) is dropped by every rewind; nothing
-  settles an approval by its turn, so approvals stay on the parent's. A child's MCP progress is
-  its heartbeat (`tool.progress` on its task); its message and reasoning items stay ticks (codex
-  fixtures README observation 20).
+  settles an approval by its turn, so approvals stay on the parent's. **The end of the wait on a
+  card nobody answered settles it** (`withdrawRequests`), the parent's own as a child's: the end
+  of the turn that raised it (`turn/completed`, whatever the status; a child's own turn for a
+  child's card — never the turn a card is merely stamped with), its thread's close
+  (`thread/closed`, with or without a turn end), or a `serverRequest/resolved` naming it (a card
+  still parked is never the ack of our own answer: every path that answers takes it out first). A
+  card asked outside any turn (an MCP elicitation with `turnId: null`) is not ended by a turn's
+  end. Left parked, a card paused the session's watchdog for every later turn, held one of the 32
+  in-flight slots, kept an approval blocking the composer, and was answered by a later Stop. Each
+  gets one row, the host's own Stop row ("Request cancelled" / "Question cancelled",
+  `cancelledRequestActivity`, through ingestion's `withdrawn` rule), on the stamp the card was
+  opened with — a child's before the rows its end writes, the parent's own after its turn's end, so
+  a question the host dismissed at that end keeps the dismissal as its one row
+  (`repeatsHostClosure`) — and nothing is answered on the wire (`CodexRequestWithdrawn`). Whether the server still holds such a request is read, not captured:
+  the 0.155.1 binary's "client request resolved because the turn state was changed" reads as the
+  server resolving a thread's pending requests itself at its turn's end, but "client request"
+  could also name a client→server request (codex fixtures README observations 5 and 20). Writing
+  no answer is safe either way — the server resolved the request, or the turn that asked is over.
+  Left open, the card blocked the composer ("Answer the request above first.") and the MCP's
+  `send_message` until the user answered a request nothing waited on, or pressed Stop. A card
+  answered first is settled once, by its answer. A child's MCP progress is its heartbeat
+  (`tool.progress` on its task); its message and reasoning items stay ticks (codex fixtures README
+  observation 20).
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no

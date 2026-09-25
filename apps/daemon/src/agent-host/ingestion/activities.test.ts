@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 
 import { TOOL_LIFECYCLE_ITEM_TYPES, type CanonicalItemType } from "@orquester/api/agent-chat";
 
+import { cancelledRequestActivity } from "../orchestration/events.ts";
 import {
   requestKindFromCanonicalRequestType,
   runtimeEventToActivities,
@@ -101,6 +102,71 @@ describe("approvals (§5.1)", () => {
     assert.equal(payloadOf(row).requestKind, undefined);
     assert.equal(payloadOf(row).requestType, "dynamic_tool_call");
     assert.equal(row.summary, "Approval requested");
+  });
+});
+
+describe("a request the provider withdrew is the host's own cancelled row", () => {
+  // Nobody answered it: the work that asked went away (a Codex collab child's
+  // turn ended or its thread closed) or the provider resolved it itself. The
+  // row a Stop writes says exactly that, "Request cancelled" / "Question
+  // cancelled"; "Approval resolved" / "User input submitted" would say
+  // someone answered.
+  it("an approval: one 'Request cancelled' row, on the turn its card rode", () => {
+    const event = runtimeEvent(
+      "request.resolved",
+      { requestType: "command_execution_approval", decision: "cancel", withdrawn: true },
+      { requestId: "req-7", turnId: "turn-3" }
+    );
+    assert.deepEqual(runtimeEventToActivities(event), [
+      cancelledRequestActivity({
+        requestId: "req-7",
+        kind: "approval",
+        turnId: "turn-3",
+        createdAt: event.createdAt
+      })
+    ]);
+  });
+
+  it("a question: one 'Question cancelled' row, turnless when its card was", () => {
+    const event = runtimeEvent(
+      "user-input.resolved",
+      { answers: {}, withdrawn: true },
+      { requestId: "q-7" }
+    );
+    const rows = runtimeEventToActivities(event);
+    assert.deepEqual(rows, [
+      cancelledRequestActivity({
+        requestId: "q-7",
+        kind: "question",
+        turnId: null,
+        createdAt: event.createdAt
+      })
+    ]);
+    assert.equal(rows[0]!.summary, "Question cancelled");
+  });
+
+  it("a withdrawn tool_user_input resolution is still no row: a question closes by its own event", () => {
+    assert.deepEqual(
+      runtimeEventToActivities(
+        runtimeEvent(
+          "request.resolved",
+          { requestType: "tool_user_input", decision: "cancel", withdrawn: true },
+          { requestId: "q-8" }
+        )
+      ),
+      []
+    );
+  });
+
+  it("an answered resolution keeps its own row", () => {
+    const [row] = runtimeEventToActivities(
+      runtimeEvent(
+        "request.resolved",
+        { requestType: "command_execution_approval", decision: "cancel" },
+        { requestId: "req-9" }
+      )
+    );
+    assert.equal(row!.summary, "Approval resolved", "a user's Cancel is an answer");
   });
 });
 

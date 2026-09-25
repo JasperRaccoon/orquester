@@ -143,6 +143,24 @@ export class CodexRequestRefusal extends Error {
   }
 }
 
+/**
+ * Thrown by a handler to leave a server request UNANSWERED, once the wait on
+ * it has ended: the server named it in `serverRequest/resolved`, or the turn
+ * or thread that asked is over. Whether the server still holds such a request
+ * is read from its binary, not captured (fixtures README observation 20);
+ * holding it, it has no turn left to hand the answer to, and not holding it,
+ * an answer lands on nothing — so writing none is safe either way. The peer
+ * writes nothing for it, and the request still leaves the in-flight set, so
+ * neither the cap nor {@link CodexPeer.whenServerRequestsSettled} counts it
+ * again.
+ */
+export class CodexRequestWithdrawn extends Error {
+  constructor(reason: string) {
+    super(`the wait on this request has ended: ${reason}`);
+    this.name = "CodexRequestWithdrawn";
+  }
+}
+
 /** One decoded server→client request, before a handler has answered it. */
 export interface CodexServerRequest<TMethod extends ServerRequestMethod = ServerRequestMethod> {
   id: number | string;
@@ -153,8 +171,9 @@ export interface CodexServerRequest<TMethod extends ServerRequestMethod = Server
 export interface CodexPeerHandlers {
   /**
    * Answer one server→client request. Resolving sends `{id, result}`; throwing
-   * a {@link CodexRequestRefusal} sends that error, and any other throw is
-   * reported as `-32603`.
+   * a {@link CodexRequestRefusal} sends that error, throwing a
+   * {@link CodexRequestWithdrawn} sends nothing (the wait on it has ended),
+   * and any other throw is reported as `-32603`.
    *
    * An unhandled method must be refused with `-32601`, which the server treats
    * as "the model was refused", never as a protocol violation (fixtures README
@@ -419,6 +438,10 @@ export class CodexPeer {
         const result = await this.options.handlers.onRequest(request);
         this.respondResult(id, result);
       } catch (error) {
+        if (error instanceof CodexRequestWithdrawn) {
+          // The wait on it has ended: nothing is written (see the class).
+          return;
+        }
         if (error instanceof CodexRequestRefusal) {
           this.respondError(id, error.code, error.message);
           return;
