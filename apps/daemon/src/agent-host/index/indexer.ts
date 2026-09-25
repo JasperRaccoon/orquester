@@ -873,10 +873,11 @@ export function createThreadIndexer(input: {
    * Cut back to the line before the cut, as the removed turn's start once cut
    * it (`openTurn`). What goes with it lies past the cut like the rest this
    * revert drops from the index — its items, text and markers — and its late
-   * rows lose their positions with them; history planning folds each one out
-   * of the cut by the turn it names (`referencedTurnId`), as the fold keeps it
-   * (`reduceReverted`). The range is sealed from here on (`revertSeq`), so
-   * nothing grows it back.
+   * rows lose their positions with them; history planning folds out of the
+   * cut what the fold keeps of it (`keptOutOfGap` in `orchestrator.ts`: a
+   * late row by the turn it names, `referencedTurnId`; a turnless row by
+   * `reduceReverted`'s own arms). The range is sealed from here on
+   * (`revertSeq`), so nothing grows it back.
    */
   function clipAtCut(memory: ThreadMemory, cut: Position): void {
     memory.turns.forEach((turn, index) => {

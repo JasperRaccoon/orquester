@@ -1630,7 +1630,7 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
    * "Load older" after the rewinds that removed `removedTurnIds`: none of
    * their rows is on a page or in the window, and every other row the log
    * wrote is on one of them — no activity on two pages. `unserved` names the
-   * kept rows a test expects neither to show.
+   * other rows a test expects neither to show.
    */
   function assertRewoundHistory(
     store: FakeThreadStore,
@@ -1888,10 +1888,15 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     await next.settle();
     await index.drain();
     const appended = first.store.logs.get(threadId)!.slice(logLength);
-    assert.deepEqual(closingsIn(appended), [["tool.completed", "toolu_parent:r-1"]]);
-    const closer = appended[0]!;
-    const closerId = closer.type === "thread.activity-appended" ? closer.payload.activity.id : "";
-    assert.ok(closerId.length > 0);
+    // Found by its call, not by its place: a first load may append more than the closings.
+    const closer = appended.find(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.activityKind === "tool.completed" &&
+        (event.payload.activity.payload as Record<string, unknown>).toolUseId === "toolu_parent:r-1"
+    );
+    const closerId = closer?.type === "thread.activity-appended" ? closer.payload.activity.id : "";
+    assert.ok(closerId.length > 0, "the first load closed the parent's call");
 
     await rewind(next, threadId, 1);
     await plainTurn(next, threadId, "r-3", 600);
@@ -2010,7 +2015,7 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     assert.ok(unserved.size > 0, "the window evicted some of them");
     assertRewoundHistory(host.store, threadId, window, pages, ["r-2"], unserved);
     assert.ok(
-      host.logger.entries.some((entry) => entry.level === "warn" && entry.message.includes("late rows")),
+      host.logger.entries.some((entry) => entry.level === "warn" && entry.message.includes("gap rows")),
       "the host says a page went without them"
     );
     await host.stop();
@@ -2108,6 +2113,178 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
       end = start;
     }
     assertNothingLost(host.store, threadId, window, pages);
+    await host.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // Right after a rewind: nothing a revert hid from the per-class windows is out of reach
+  // -------------------------------------------------------------------------
+
+  /**
+   * The snapshot a client reads once the index has taken every append, and every page "Load older"
+   * then reads — as the client asks: first by the snapshot's cursor, or without one when the snapshot
+   * has none (`nextHistoryCursor`), then by each page's own.
+   */
+  async function walkAsTheClient(host: TestHost, index: ThreadIndex, threadId: string) {
+    await host.settle();
+    await index.drain();
+    const read = await host.orchestrator.readThread(threadId);
+    if (read.kind !== "snapshot") throw new Error("a whole-thread read is a snapshot");
+    assert.equal(read.thread.history?.hasOlder, true, "the window has evicted: there is history to page");
+    const pages: ThreadHistoryPage[] = [];
+    const first = read.thread.history?.beforeCursor;
+    let query: { before?: string } | null = first ? { before: first } : {};
+    while (query !== null) {
+      assert.ok(pages.length < 50, "paging terminates");
+      const page = await host.orchestrator.readHistory(threadId, query);
+      pages.push(page);
+      query = page.page.beforeCursor === null ? null : { before: page.page.beforeCursor };
+    }
+    return { window: read.thread.items, pages };
+  }
+
+  /** `count` rows the agent `agentId` writes between parent turns: no turn, however long it runs. */
+  const turnlessAgentRows = (
+    host: TestHost,
+    threadId: string,
+    agentId: string,
+    label: string,
+    count: number
+  ): Promise<void> =>
+    host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: count }, (_, i) =>
+        sunkRow(threadId, `${agentId}:${label}-${i}`, "runtime.warning", {}, { turnId: null, agentId })
+      )
+    );
+
+  it("after a rewind that left the parent below its limit, every evicted row is reachable (setup A)", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await startShell(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 560);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 30);
+    await shellOutput(host, threadId, "r-1", 300);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    // No new turn: the shell's window lies wholly in the cut, and the parent's is below its limit.
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    for (const id of ["r-1-row-0", "shell-line:r-1:0"]) {
+      assert.ok(!window.some((item) => item.id === id), `the window evicted ${id}`);
+    }
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("after a rewind whose only full window lies in its cut, every evicted row is reachable (setup B)", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await startShell(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 400);
+    await settleTurn(host, threadId);
+    await startTurn(host, threadId, "r-2");
+    await parentRows(host, threadId, "r-2", 200);
+    await shellOutput(host, threadId, "r-1", 300);
+    await settleTurn(host, threadId);
+    await rewind(host, threadId, 1);
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    for (const id of ["r-1-row-0", "shell-line:r-1:0"]) {
+      assert.ok(!window.some((item) => item.id === id), `the window evicted ${id}`);
+    }
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("after a rewind with no full window left, an old launch row does not strand r-1's evicted rows", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 600);
+    await settleTurn(host, threadId);
+    await plainTurn(host, threadId, "r-2", 100);
+    await rewind(host, threadId, 1);
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    assert.ok(window.some((item) => item.id === "launch:r-1"), "the launch row outlives the rows after it");
+    assert.ok(!window.some((item) => item.id === "r-1-row-0"), "the window evicted r-1's first rows");
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    await host.stop();
+  });
+
+  it("an agent's turnless rows reach a page once evicted: in the cut, and before the next prompt", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await startTurn(host, threadId, "r-1");
+    await launchAgent(host, threadId, "r-1");
+    await parentRows(host, threadId, "r-1", 40);
+    // r-1 answers, so a revert's message fallback restores nothing (`retainMessagesAfterRevert`).
+    await host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: "assistant:r-1",
+        role: "assistant",
+        text: "Started the agent.",
+        streaming: false,
+        turnId: "r-1"
+      })
+    ]);
+    await settleTurn(host, threadId);
+    await plainTurn(host, threadId, "r-2", 60);
+    // Between r-2 and the rewind — in the cut — the agent works on with no turn, says something, and a legacy
+    // turnless capture lands twice: counted 1, which a rewind to one turn keeps, and 2, which it drops.
+    await turnlessAgentRows(host, threadId, "agent-r-1", "cut", 150);
+    await host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: "agent-r-1:cut-words",
+        role: "assistant",
+        text: "Still exploring.",
+        streaming: false,
+        turnId: null,
+        agentId: "agent-r-1"
+      }),
+      ...[1, 2].map((turnCount) =>
+        sunk(threadId, "thread.turn-diff-completed", {
+          turnCount,
+          turnId: null,
+          ref: `legacy/${turnCount}`,
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: "2026-09-24T10:00:00.000Z"
+        })
+      )
+    ]);
+    await rewind(host, threadId, 1);
+    // After the rewind, before any prompt: more of the agent's turnless rows and words.
+    await turnlessAgentRows(host, threadId, "agent-r-1", "after", 400);
+    await host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: "agent-r-1:after-words",
+        role: "assistant",
+        text: "Found it.",
+        streaming: false,
+        turnId: null,
+        agentId: "agent-r-1"
+      })
+    ]);
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    for (const id of ["agent-r-1:cut-0", "agent-r-1:after-0"]) {
+      assert.ok(!window.some((item) => item.id === id), `the agent's window evicted ${id}`);
+    }
+    // The revert dropped the words spoken in its cut; the fold keeps what came after it.
+    assert.ok(!window.some((item) => item.id === "agent-r-1:cut-words"));
+    assert.ok(window.some((item) => item.id === "agent-r-1:after-words"));
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"], new Set(["agent-r-1:cut-words"]));
+    const turnless = (page: ThreadHistoryPage): number[] =>
+      page.checkpoints.flatMap((checkpoint) => (checkpoint.turnId === null ? [checkpoint.checkpointTurnCount] : []));
+    assert.deepEqual(pages.flatMap(turnless), [1], "the capture the rewind kept, alone");
     await host.stop();
   });
 });

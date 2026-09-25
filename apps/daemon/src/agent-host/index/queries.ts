@@ -33,7 +33,10 @@ export interface ThreadIndexQueries {
   eventPositionBySeq(threadId: string, seq: number): IndexedItemPosition | null;
   messageSpan(threadId: string, messageId: string): IndexedMessageSpan | null;
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
+  firstBoundaryAfter(threadId: string, seq: number): IndexedItemPosition | null;
+  latestRevertSeq(threadId: string): number;
   turnById(threadId: string, turnId: string): IndexedTurn | null;
+  turnByPrompt(threadId: string, messageId: string): IndexedTurn | null;
   totalTurns(threadId: string): number;
   turnsBefore(
     threadId: string,
@@ -52,6 +55,11 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
       `SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? AND ordinal = ? LIMIT 1`
     ),
     turnById: db.prepare(`SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? AND turn_id = ?`),
+    turnByPrompt: db.prepare(
+      `SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? AND user_message_id = ?
+       ORDER BY ordinal LIMIT 1`
+    ),
+    revertSeq: db.prepare("SELECT revert_seq FROM threads WHERE thread_id = ?"),
     totalTurns: db.prepare("SELECT COUNT(*) AS total FROM turns WHERE thread_id = ?"),
     newestTurns: db.prepare(
       `SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? ORDER BY ordinal DESC LIMIT ?`
@@ -104,6 +112,14 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
       `SELECT message_id, first_seq, first_byte, seq FROM message_docs
        WHERE thread_id = ? AND first_seq < ? AND seq >= ?
        ORDER BY first_seq, message_id`
+    ),
+    itemAfter: db.prepare(
+      `SELECT seq, byte_offset, byte_length FROM items
+       WHERE thread_id = ? AND seq > ? ORDER BY seq LIMIT 1`
+    ),
+    messageAfter: db.prepare(
+      `SELECT first_seq AS seq, first_byte AS byte_offset, first_length AS byte_length
+       FROM message_docs WHERE thread_id = ? AND first_seq > ? ORDER BY first_seq LIMIT 1`
     ),
     compactedAfter: db.prepare(
       "SELECT 1 AS hit FROM markers WHERE thread_id = ? AND kind = 'compacted' AND seq > ? LIMIT 1"
@@ -285,6 +301,30 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
         .filter((span): span is SpanningMessage => span !== null);
     },
 
+    /**
+     * The first line past `seq` a page boundary may sit on — the lowest
+     * activity line (an activity's latest) or message first line above it —
+     * or null when the index positions none.
+     */
+    firstBoundaryAfter(threadId, seq) {
+      if (typeof seq !== "number" || Number.isNaN(seq)) {
+        return null;
+      }
+      const bound = boundOf(seq);
+      const item = toItemPosition(sql.itemAfter.get(threadId, bound));
+      const message = toItemPosition(sql.messageAfter.get(threadId, bound));
+      if (item === null || message === null) {
+        return item ?? message;
+      }
+      return message.seq < item.seq ? message : item;
+    },
+
+    /** The seq of the thread's latest `thread.reverted`; 0 for one never rewound (or not indexed). */
+    latestRevertSeq(threadId) {
+      const seq = asRecord(sql.revertSeq.get(threadId))?.revert_seq;
+      return isCount(seq) ? seq : 0;
+    },
+
     turnByOrdinal(threadId, ordinal) {
       if (!Number.isSafeInteger(ordinal) || ordinal < 1) {
         return null;
@@ -293,6 +333,14 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
     },
 
     turnById,
+
+    /** The turn that names `messageId` as its opening prompt (its `userMessageId`), or null. */
+    turnByPrompt(threadId, messageId) {
+      if (typeof messageId !== "string" || messageId.length === 0) {
+        return null;
+      }
+      return toIndexedTurn(sql.turnByPrompt.get(threadId, messageId));
+    },
 
     totalTurns(threadId) {
       const total = asRecord(sql.totalTurns.get(threadId))?.total;

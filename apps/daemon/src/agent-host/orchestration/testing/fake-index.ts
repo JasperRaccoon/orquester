@@ -45,6 +45,8 @@ interface ThreadRows {
   prompts: Map<string, EventPosition>;
   /** The turn whose range grows with the log; none after a revert. */
   openTurnId: string | null;
+  /** The seq of the latest `thread.reverted`; 0 before any. */
+  revertSeq: number;
   /** The conversation's own compaction markers (the shared rule); only a settled one blocks a rewind. */
   markers: Array<{ seq: number; compacted: boolean }>;
   /** Every activity's latest line, by id. */
@@ -83,6 +85,7 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
       turns: [],
       prompts: new Map(),
       openTurnId: null,
+      revertSeq: 0,
       markers: [],
       items: new Map(),
       messages: new Map(),
@@ -152,6 +155,7 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
       rows.turns = rows.turns.filter((turn) => turn.ordinal <= keep);
       // A revert closes every range: nothing grows until the next turn starts.
       rows.openTurnId = null;
+      rows.revertSeq = event.seq;
       rows.state = applyDomainEvent(rows.state, event);
       return;
     }
@@ -397,6 +401,27 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
           lastSeq: message.lastSeq
         }))
         .sort((left, right) => left.firstSeq - right.firstSeq);
+    },
+
+    firstBoundaryAfter(threadId: string, seq: number): IndexedItemPosition | null {
+      const rows = threads.get(threadId);
+      if (rows === undefined) return null;
+      let found: IndexedItemPosition | null = null;
+      const consider = (line: IndexedItemPosition): void => {
+        if (line.seq > seq && (found === null || line.seq < found.seq)) found = { ...line };
+      };
+      for (const item of rows.items.values()) consider(item);
+      for (const message of rows.messages.values()) consider(message.first);
+      return found;
+    },
+
+    latestRevertSeq(threadId: string): number {
+      return threads.get(threadId)?.revertSeq ?? 0;
+    },
+
+    turnByPrompt(threadId: string, messageId: string): IndexedTurn | null {
+      const turn = threads.get(threadId)?.turns.find((row) => row.userMessageId === messageId);
+      return turn === undefined ? null : { ...turn };
     },
 
     rewindable(threadId: string, turn: IndexedTurn): boolean {
