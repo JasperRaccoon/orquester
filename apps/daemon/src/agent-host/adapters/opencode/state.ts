@@ -564,6 +564,17 @@ export interface OpenCodeSessionState {
    * call's answer — and opens a turn of its own. Bounded ({@link claimPrompt}).
    */
   claimedPromptIds: Set<string>;
+  /**
+   * The thread's own session is running: a `busy` (or `retry`) status since
+   * its last `idle` — 1.18.32's `SessionPrompt.run` sets it at the top of
+   * every loop iteration, before it writes a reply. A reply the host never
+   * started opens a turn only on that evidence (`claimReply`): with no run
+   * behind it no `idle` would ever settle the turn, and `turn.started` alone
+   * never arms the watchdog, so it would hold a deploy's drain until the user
+   * acted. Cleared by `idle` and `session.idle`, and by a reconnect, after
+   * which nothing seen before is evidence.
+   */
+  parentBusy: boolean;
   activeAgent?: string;
   activeVariant?: string;
   interruptedTurnId?: string;
@@ -640,6 +651,7 @@ export function createSessionState(input: {
     relatedSessionIds: new Set([input.openCodeSessionId]),
     childAgents: new Map(),
     claimedPromptIds: new Set(),
+    parentBusy: false,
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
     promptGeneration: 0,
@@ -668,8 +680,10 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.turnTokenUsage = undefined;
   state.activeTurnId = undefined;
   // A fork re-mints every message id (fixtures README observation 17): no
-  // prompt the source session held is named in this one.
+  // prompt the source session held is named in this one, and no run of the
+  // source is the fork's.
   state.claimedPromptIds.clear();
+  state.parentBusy = false;
   state.interruptedTurnId = undefined;
   state.reconcileIdleStatus = false;
   state.awaitingBusyAfterInterruption = false;

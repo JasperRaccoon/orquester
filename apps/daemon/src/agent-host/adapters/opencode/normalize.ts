@@ -743,6 +743,9 @@ function demux(
     case "session.status": {
       const status = event.properties.status;
       if (status.type === "busy" || status.type === "retry") {
+        // A run is going, whoever started it: the evidence a reply the host
+        // never started needs before it opens a turn (`claimReply`).
+        state.parentBusy = true;
         if (turnId !== undefined) {
           out.signal({ kind: "status-busy" });
         }
@@ -758,13 +761,17 @@ function demux(
         }
         return;
       }
-      if (status.type === "idle" && turnId !== undefined) {
-        out.signal({ kind: "status-idle", raw });
+      if (status.type === "idle") {
+        state.parentBusy = false;
+        if (turnId !== undefined) {
+          out.signal({ kind: "status-idle", raw });
+        }
       }
       return;
     }
 
     case "session.idle": {
+      state.parentBusy = false;
       // After an abort this is the ONLY idle signal — no `session.status`
       // follows (fixtures README observation 6).
       if (state.activeTurnId !== undefined) {
@@ -1643,11 +1650,17 @@ function claimReply(
   ) {
     return;
   }
-  claimPrompt(state, promptId);
   if (state.activeTurnId !== undefined) {
+    claimPrompt(state, promptId);
     state.turnTokenUsage?.promptMessageIds.add(promptId);
     return;
   }
+  // No run behind it, no turn: a reply beginning comes after its run's `busy`
+  // (`parentBusy`). Unclaimed, a later reply of a live run can still open it.
+  if (!state.parentBusy) {
+    return;
+  }
+  claimPrompt(state, promptId);
   openTurn(state, promptId);
   state.turnTokenUsage?.promptMessageIds.add(promptId);
   out.push({

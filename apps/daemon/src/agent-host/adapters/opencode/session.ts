@@ -598,6 +598,10 @@ export class OpenCodeThreadSession {
     if (this.state.turnTokenUsage !== undefined) {
       this.state.turnTokenUsage.complete = false;
     }
+    // Frames were missed: a run's `busy` seen before the gap may have ended
+    // in it, so it is no evidence for a reply after it (`claimReply`). A live
+    // run says `busy` again at its next loop iteration.
+    this.state.parentBusy = false;
     const turnId = this.state.activeTurnId;
     if (turnId === undefined) {
       return;

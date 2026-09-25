@@ -1646,7 +1646,12 @@ function wokenReplyFrames(
   };
 }
 
-/** Fixture 12's parent at rest after a background launch, its child settled: what a wake finds. */
+/**
+ * Fixture 12's parent at rest after a background launch, its child settled:
+ * what a wake finds. The capture ends mid-run (line 202), so the parent's own
+ * run is settled here too — `busy` → `idle` → `session.idle`, lines 177-179 as
+ * the parent's.
+ */
 function parentAtRest(): Replay {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-background";
@@ -1654,6 +1659,7 @@ function parentAtRest(): Replay {
   run.state.activeTurnId = undefined;
   run.state.turnTokenUsage = undefined;
   feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  feed(run, childFixtureFrames([177, 178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID }));
   return run;
 }
 
@@ -1713,6 +1719,35 @@ test("a reply the host asked for, a compaction's summary, or a message that alre
   };
   Object.assign(summary.properties.info, { mode: "compaction", agent: "compaction", summary: true });
   assert.deepEqual(eventsOfType(feed(compacting, [summary]).flat(), "turn.started"), []);
+});
+
+test("a reply with no `busy` since the parent's last idle — no run behind it — opens no turn", () => {
+  const run = parentAtRest();
+  feed(run, injectedResult("ses_background_child", "Found README.md and a.ts."));
+  const reply = wokenReplyFrames("msg_injected", "msg_woken");
+  const [busy, begins] = reply.begins;
+  assert.ok(busy && begins);
+  // The assistant frame alone: every loop iteration of 1.18.32's
+  // `SessionPrompt.run` sets `busy` before it writes the reply, so a reply
+  // with none before it has no run to end it — a turn opened on it would
+  // never settle, and hold a deploy's drain until the user acted.
+  const lone = feed(run, [begins, ...reply.streams]).flat();
+  assert.deepEqual(eventsOfType(lone, "turn.started"), []);
+  assert.equal(run.state.activeTurnId, undefined);
+
+  // The run's own `busy`, then its next reply: that one opens the turn.
+  const next = wokenReplyFrames("msg_injected", "msg_woken_2");
+  const opened = feed(run, next.begins).flat();
+  assert.deepEqual(eventsOfType(opened, "turn.started").map((event) => event.turnId), ["msg_injected"]);
+
+  // A run that ended (`idle`) is no evidence for the next reply.
+  const ended = parentAtRest();
+  feed(ended, [
+    ...injectedResult("ses_background_child", "Found it."),
+    busy,
+    ...childFixtureFrames([178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID })
+  ]);
+  assert.deepEqual(eventsOfType(feed(ended, [begins]).flat(), "turn.started"), []);
 });
 
 test("no capture opens a turn of its own: every reply in them answers a prompt the host sent, or is a compaction", () => {
