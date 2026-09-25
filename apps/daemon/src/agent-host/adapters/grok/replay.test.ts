@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
+import { BACKGROUND_LIVENESS_TTL_MS, createLivenessRegistry } from "../../orchestration/liveness.ts";
+import { createTestClock } from "../../orchestration/testing/fakes.ts";
 import { captureFiles, readCapture, agentFrames, promptResults, type JsonRpcFrame } from "./fixtures.ts";
 import { GrokNormalizer } from "./normalize.ts";
 import { XAI_EXTENSION_NOTIFICATIONS, xaiMethodSpellings } from "./acp/_generated/xai.ts";
@@ -309,9 +311,26 @@ test("11 background task: the roster and the tool-call join produce one task.sta
   assert.equal(started[0].payload.taskId, "01a0c1a7-3335-7fc3-894b-56f0bb60a6db");
   assert.equal(started[0].payload.agentKind, "background");
   assert.equal(started[0].payload.toolUseId, "call-3bd55661-e57d-41e1-a207-08f14c96b78c-0");
-  // Nothing was emitted after the turn settled: the task never completes on
-  // its own, which is exactly why the adapter must close it on session exit.
+  // Nothing ended it in the 22 s the capture watched (the `sleep 25` outlived
+  // it, observation 29), and nobody polled it — which is exactly why the
+  // adapter must close it on session exit.
   assert.equal(only(events, "task.completed").length, 0);
+});
+
+test("11 background task: the shell is live work — monitoring — in the real registry, bounded by its TTL", () => {
+  // Every task row of a Grok shell names the shell itself as its `agentId`;
+  // the registry once read that as "a subagent's own shell" and dropped it, so
+  // a dev server left running neither read "monitoring" nor held a deploy.
+  const { events } = replay("11-background-task.ndjson");
+  const clock = createTestClock(0);
+  const registry = createLivenessRegistry({ clock });
+  for (const event of events) {
+    registry.observe(event);
+  }
+  assert.equal(registry.liveness("thread-1"), "monitoring");
+  assert.equal(registry.liveAgentCount("thread-1"), 0);
+  clock.set(BACKGROUND_LIVENESS_TTL_MS);
+  assert.equal(registry.liveness("thread-1"), null, "the TTL still bounds a silent shell");
 });
 
 test("11 background task: stopping the session closes every live task", () => {

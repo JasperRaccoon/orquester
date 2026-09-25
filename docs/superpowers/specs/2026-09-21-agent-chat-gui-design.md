@@ -1696,6 +1696,26 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `tool_call_update` — `Monitor`, `BackgroundTaskStarted`, `TaskOutput`, `KillTask` — and are
   emitted **even after the turn ends**.
   *T3: `apps/server/src/provider/acp/XAiBackgroundTasks.ts:61-155`; `apps/server/src/provider/Layers/GrokAdapter.ts:1343-1366`*
+  *Built: a shell's start comes from `_x.ai/task_backgrounded`, the `background_tasks` snapshot and
+  the `BackgroundTaskStarted` discriminant, joined on the task id; its end from the snapshot or from
+  the `TaskOutput`/`KillTask` answers T3 reads — no end was ever captured, so the §3.1 liveness
+  registry's TTL bounds it; a task whose end the CLI reported is remembered, so a snapshot still
+  listing it never starts it again, while one the adapter closed itself (Stop, exit) — shell or
+  subagent — counts live again on any CLI report that it still runs (a listing, a start frame, a
+  poll) — and it counts as live at all only because a row whose `agentId` is its own `taskId` is its
+  own, not an agent's internal work (Grok stamps every shell with itself;
+  `orchestration/liveness.ts`). A subagent is its `spawn_subagent` call plus the poll answers naming
+  it: the call's first frame starts the agent under the call's id; only an answer tagged
+  `SubagentCompleted` ends it through the call, with the call's result; any other answer — a
+  `background: true` launch's, or a foreground run the CLI moved to the background — and a
+  foreground call its turn cut leave it running in the background, where a `TaskOutput` answer ends
+  it with its `output` (a `KillTask` answer ends it too — T3's `outcome: "killed"`, or the binary's
+  `explicitly_killed`/`already_exited` fields) — T3's reader, which skips a subagent's entries, read
+  for them too — and Stop or exit closes what is left. Its rows carry `livenessTtlMs`, so an agent
+  nobody polls stops holding "working" an hour after its latest row. `resume_from` starts the same
+  task again under the new call (`adapters/grok/normalize.ts`, `subagentFromToolCall`,
+  `taskAnswers`; the Grok fixtures README, observations 29 and 36 — read from the CLI's binary and
+  T3's reader, not captured).*
 - **Interrupt** marks the turn id as interrupted **synchronously, before taking the thread lock**,
   so late notifications and a late prompt result are dropped; then settles pending approvals and
   user-inputs as cancelled (the ACP spec requires a cancel to answer every pending permission
@@ -4034,6 +4054,10 @@ filtered by `agentId`, streaming live, rendered with the same row components, re
 breadcrumb and Escape back to main. The drill-in must not remount the parent: the composer and roster
 stay mounted so the parent can be steered while watching a child, and the child view dispatches no
 commands. On OpenCode and Grok the roster shows whatever their protocols report and nothing more.
+*Built: for Grok that is the `spawn_subagent` call and the poll and kill answers naming the agent —
+its start, a move to the background, its end and result, a `resume_from` relaunch — so a Grok
+agent's drill-in holds no child activity: none of the child's own work was ever observed on the wire
+(the Grok fixtures README, observation 36).*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

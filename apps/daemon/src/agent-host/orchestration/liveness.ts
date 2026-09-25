@@ -14,11 +14,13 @@
  * which is correct, because orphaned background work is not live.
  *
  * **Differs from T3: background rows expire.** T3 drops a task only on a
- * terminal status, which assumes every provider reports one. Grok does not —
- * a backgrounded task (`_x.ai/task_backgrounded`) never reports completion at
- * all, so a thread would read `"monitoring"` for the rest of the host's life
- * and the §6.4 ladder would keep the tab out of "finished" forever. Two bounds
- * fix it, both on the **background** bucket only:
+ * terminal status, which assumes every provider reports one. Grok reports a
+ * backgrounded task's (`_x.ai/task_backgrounded`) end only in a snapshot or
+ * in a poll the model asks for — the `x.ai/task_completed` its binary names
+ * has no captured shape (fixtures README observation 29) — so a thread could
+ * read `"monitoring"` for the rest of the host's life and the §6.4 ladder
+ * would keep the tab out of "finished" forever. Two bounds fix it, both on the
+ * **background** bucket only:
  *
  * - a watch loop with no transition for {@link BACKGROUND_LIVENESS_TTL_MS} is
  *   dropped (evaluated lazily on read, so there is no timer to leak and a test
@@ -26,8 +28,13 @@
  * - a turn ending drops every background row that reported nothing **during
  *   that turn** — it was already not live while the agent worked.
  *
- * Agent rows are never expired: a subagent that runs for hours is real work,
- * and `session.exited` clears the thread anyway.
+ * Agent rows are never expired — a subagent that runs for hours is real work —
+ * unless the row says otherwise: an adapter whose agents' ends can go
+ * unreported stamps `livenessTtlMs` on every row of the agent (Grok's end
+ * arrives only when the model polls or kills it, and a chat session lives
+ * until Stop or the tab closes, so `session.exited` may never come). Such an
+ * agent counts for at most that long after the latest row naming it; the
+ * roster keeps its row, and a later end is recorded as any end is.
  */
 
 import {
@@ -48,7 +55,11 @@ import { systemClock, type Clock } from "./runtime-seams.ts";
 export const BACKGROUND_LIVENESS_TTL_MS = 10 * 60_000;
 
 interface ThreadLivenessState {
-  readonly agents: Set<string>;
+  /**
+   * taskId → when the agent stops counting (epoch ms: its latest row plus the
+   * row's `livenessTtlMs`), or `null` for an agent that counts until its end.
+   */
+  readonly agents: Map<string, number | null>;
   /** taskId → the epoch ms of its last transition, for the TTL. */
   readonly monitors: Map<string, number>;
   /** When the thread's current turn started, for the turn-boundary sweep. */
@@ -79,6 +90,8 @@ interface TaskTransition {
   status: string | undefined;
   kind: TaskTransitionKind;
   agentId: string | undefined;
+  /** The row's `livenessTtlMs`, when it is a positive finite number. */
+  livenessTtlMs: number | undefined;
 }
 
 /**
@@ -112,7 +125,13 @@ function transitionFor(event: RuntimeEvent): TaskTransition | null {
         kind,
         // The task's own `agentId` marks work launched from inside a subagent;
         // it is on the payload linkage, and the envelope carries it too.
-        agentId: payload.agentId ?? event.agentId
+        agentId: payload.agentId ?? event.agentId,
+        livenessTtlMs:
+          typeof payload.livenessTtlMs === "number" &&
+          Number.isFinite(payload.livenessTtlMs) &&
+          payload.livenessTtlMs > 0
+            ? payload.livenessTtlMs
+            : undefined
       };
     }
     default:
@@ -133,7 +152,7 @@ export function createLivenessRegistry(
       return existing;
     }
     const created: ThreadLivenessState = {
-      agents: new Set(),
+      agents: new Map(),
       monitors: new Map(),
       turnStartedAt: null
     };
@@ -161,12 +180,22 @@ export function createLivenessRegistry(
     }
   };
 
-  /** Lazy TTL: evaluated on every read and write, so no timer can leak. */
-  const expireBackground = (threadId: string, state: ThreadLivenessState): void => {
-    const cutoff = clock.now().getTime() - backgroundTtlMs;
+  /**
+   * Lazy TTLs: evaluated on every read and write, so no timer can leak. A
+   * watch loop expires after the registry's own window; an agent only when its
+   * latest row set an expiry (`livenessTtlMs`).
+   */
+  const expire = (state: ThreadLivenessState): void => {
+    const now = clock.now().getTime();
+    const cutoff = now - backgroundTtlMs;
     for (const [taskId, lastSeenAt] of [...state.monitors]) {
       if (lastSeenAt <= cutoff) {
         state.monitors.delete(taskId);
+      }
+    }
+    for (const [taskId, expiresAt] of [...state.agents]) {
+      if (expiresAt !== null && expiresAt <= now) {
+        state.agents.delete(taskId);
       }
     }
   };
@@ -174,11 +203,13 @@ export function createLivenessRegistry(
   const readState = (threadId: string): ThreadLivenessState | undefined => {
     const state = stateByThreadId.get(threadId);
     if (!state) return undefined;
-    expireBackground(threadId, state);
+    expire(state);
     return state;
   };
 
   const record = (input: TaskTransition): void => {
+    // An expired entry must read as gone to the status-free check below.
+    readState(input.threadId);
     const taskType = input.taskType;
     if (taskType !== undefined && INERT_TASK_TYPES.has(taskType)) {
       drop(input.threadId, input.taskId);
@@ -187,9 +218,20 @@ export function createLivenessRegistry(
     // A subagent's internal non-agent work (its own shells and monitors) is
     // covered by the owning agent's entry. Nested agents fall through: they can
     // outlive their parent and must keep the thread working.
+    //
+    // An `agentId` equal to the task's OWN id names no owner: Grok stamps every
+    // row of a background shell with the shell itself (`adapters/grok/
+    // normalize.ts`), and reading that as "some agent's shell" dropped every
+    // Grok shell — a dev server left running neither read "monitoring" nor
+    // held a deploy's drain. Such a row is the task's own, classified below
+    // like any other: a shell is a watch loop, bounded by the TTL. Claude
+    // stamps only a real owner, and Codex and OpenCode type every live row
+    // `subagent` (Codex's Stop/exit closer carries no type, but it is terminal
+    // either way), so none of them reads differently.
     if (
       input.agentId !== undefined &&
       input.agentId.trim().length > 0 &&
+      input.agentId !== input.taskId &&
       (taskType === undefined || MONITOR_TASK_TYPES.has(taskType))
     ) {
       drop(input.threadId, input.taskId);
@@ -225,7 +267,10 @@ export function createLivenessRegistry(
       state.monitors.set(input.taskId, clock.now().getTime());
       return;
     }
-    state.agents.add(input.taskId);
+    state.agents.set(
+      input.taskId,
+      input.livenessTtlMs === undefined ? null : clock.now().getTime() + input.livenessTtlMs
+    );
   };
 
   return {
@@ -253,7 +298,7 @@ export function createLivenessRegistry(
             }
           }
         }
-        expireBackground(event.threadId, state);
+        expire(state);
         dropIfEmpty(event.threadId, state);
         return;
       }
