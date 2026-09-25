@@ -805,3 +805,57 @@ test("a subagent's own shell counts on its own once the subagent's run ends, unt
   assert.equal(s.liveness.liveness(THREAD), null, "its own end ends it");
   assert.equal(agent(s, SHELL).status, "completed");
 });
+
+test("19 through the fold: an unpolled background agent works past its turn, ends by subagent_finished, and its wake is a turn", async () => {
+  const AGENT = "call-b929f166-b896-45fa-bdb5-4b7129d05044-0";
+  const s = captureSeam("19-subagent-background-unpolled.ndjson");
+  await s.feedThrough(indexOf(s.events, (event) => event.type === "turn.completed"));
+  assert.equal(s.liveness.liveness(THREAD), "working", "live past its parent's turn, with no poll");
+  await s.feedThrough(indexOf(s.events, taskEnd(AGENT)) - 1);
+  assert.equal(s.liveness.liveness(THREAD), "working", "its heartbeat kept it live to its end");
+  await s.feedThrough(s.events.length);
+  const state = s.state();
+  const row = state.roster.find((entry) => entry.id === AGENT);
+  assert.equal(row?.status, "completed");
+  assert.equal(row?.result, "e-done");
+  assert.equal(s.liveness.liveness(THREAD), null);
+  assert.deepEqual(
+    agentMessages(state, AGENT, "assistant").map((item) => item.text),
+    ["e-done"],
+    "the child's words are its agent's"
+  );
+  const woken = state.items.filter(
+    (item) => item.kind === "message" && item.role === "assistant" && item.agentId === undefined && /e-done/.test(item.text)
+  );
+  assert.equal(woken.length, 1, "the parent's woken reply is a message of the parent's");
+  assert.equal(state.turns.length, 2, "the prompt's turn and the wake's");
+});
+
+test("22 through the fold: a foreground run past its await budget reads backgrounded, then completes", async () => {
+  const AGENT = "call-058f81b9-857c-4320-84f2-eefa4e2b3d6c-0";
+  const s = captureSeam("22-subagent-await-budget.ndjson");
+  await s.feedThrough(indexOf(s.events, (event) => event.type === "turn.completed"));
+  const moved = s.state().roster.find((entry) => entry.id === AGENT);
+  assert.equal(moved?.status, "running");
+  assert.equal(moved?.isBackgrounded, true, "the CLI moved it to the background");
+  assert.equal(s.liveness.liveness(THREAD), "working");
+  await s.feedThrough(s.events.length);
+  const done = s.state().roster.find((entry) => entry.id === AGENT);
+  assert.equal(done?.status, "completed");
+  assert.equal(done?.result, "late-ok");
+  assert.equal(s.liveness.liveness(THREAD), null);
+});
+
+test("23 through the fold: a Stop that cuts a foreground agent ends it interrupted, never backgrounded", async () => {
+  const AGENT = "call-051e75a0-fd17-4ac0-b9cd-a9d831db32a0-0";
+  const s = captureSeam("23-stop-cuts-foreground-subagent.ndjson", {
+    atNote: (note, control) => (/sending session\/cancel mid-turn/.test(note) ? control.interrupt() : [])
+  });
+  await s.feedThrough(s.events.length);
+  const row = s.state().roster.find((entry) => entry.id === AGENT);
+  assert.equal(row?.status, "interrupted");
+  assert.notEqual(row?.isBackgrounded, true);
+  assert.equal(s.liveness.liveness(THREAD), null);
+  const turn = s.state().turns.at(-1);
+  assert.equal(turn?.state, "interrupted");
+});
