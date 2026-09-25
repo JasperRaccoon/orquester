@@ -35,7 +35,7 @@ import type {
   StartSessionInput
 } from "../../adapter.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
-import { spawnProviderChild } from "../../support/spawn.ts";
+import { describeExit, spawnProviderChild } from "../../support/spawn.ts";
 import { CODEX_ADAPTER_CAPABILITIES } from "./capabilities.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
 import { projectCodexHistory } from "./history.ts";
@@ -158,6 +158,13 @@ export const createCodexAdapter: AdapterFactory = async (
       child.stderr.resume();
 
       const activePeer = peer;
+      // A child that dies before it answers fails the probe NOW. Nothing else
+      // closes a probe's transport, so `initialize` waited out the whole
+      // handshake window — a ref'd timer (`support/deadline.ts`) that held the
+      // process for 30 s after the child was gone.
+      void child.exited.then((reason) => {
+        activePeer.close(`probe child ${describeExit(reason)}`);
+      });
       const initialize = await withDeadline(
         () =>
           activePeer.request("initialize", {
