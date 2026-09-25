@@ -711,6 +711,16 @@ export interface RequestResolvedPayload {
   requestType: CanonicalRequestType;
   decision?: ApprovalDecision;
   resolution?: unknown;
+  /**
+   * Nobody answered it: the provider stopped waiting before anyone did — the
+   * work that asked went away (a Codex collab child's own turn ended or its
+   * thread closed) or the provider resolved the request itself — and the
+   * adapter settled the card as a Stop would, answering nothing on the wire.
+   * Ingestion writes the host's own cancelled row for it
+   * (`cancelledRequestActivity`: "Request cancelled"), never "Approval
+   * resolved", which would say someone answered. `decision` is `"cancel"`.
+   */
+  withdrawn?: true;
 }
 
 export interface UserInputRequestedPayload {
@@ -732,6 +742,12 @@ export interface UserInputRequestedPayload {
 
 export interface UserInputResolvedPayload {
   answers: Record<string, unknown>;
+  /**
+   * Nobody answered it, as {@link RequestResolvedPayload.withdrawn}: ingestion
+   * writes "Question cancelled", never "User input submitted". `answers` is
+   * empty.
+   */
+  withdrawn?: true;
 }
 
 export interface TaskStartedPayload extends TaskAgentLinkage {

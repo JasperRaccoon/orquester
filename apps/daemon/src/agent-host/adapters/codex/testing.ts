@@ -117,12 +117,23 @@ export type MockTurnScript =
    * parent whose `wait` returned does: `"before-asking"` between the child's
    * `item/started` and its request, `"while-asking"` right after the request,
    * with the card still open. Unset, the parent's turn ends after the child's.
+   *
+   * `afterAsking` ends the CHILD's side with the card still open instead of
+   * waiting for the answer, one frame per step, in order: the child's own
+   * `turn/completed` with that status (`turn-interrupted`, `turn-failed`,
+   * `turn-completed`), its `thread/closed`, or the server's own
+   * `serverRequest/resolved` naming the request (`resolved`). The item the
+   * card asked about never completes, and an answer that comes anyway is only
+   * logged. The installed CLI resolves a thread's pending requests itself when
+   * that thread's turn ends, and says so after the turn's end:
+   * `["turn-interrupted", "resolved"]` (fixtures README observation 20).
    */
   | {
       kind: "child-approval";
       childThreadId: string;
       item: "command" | "file-change" | "question";
       parentSettles?: "before-asking" | "while-asking";
+      afterAsking?: ("turn-interrupted" | "turn-failed" | "turn-completed" | "thread-closed" | "resolved")[];
     }
   | { kind: "silent" }
   | { kind: "exit-mid-turn"; exitCode: number };
@@ -442,10 +453,28 @@ async function runTurn(turnId, script) {
         activeTurnId = null;
         parentSettled = true;
       };
+      // The child's side ends with the card still open: its turn's end, its
+      // thread's close, or the server's own resolution of the request.
+      const endChild = (requestId) => {
+        for (const step of script.afterAsking) {
+          if (step === "thread-closed") {
+            send({ method: "thread/closed", params: { threadId: child } });
+          } else if (step === "resolved") {
+            send({ method: "serverRequest/resolved", params: { threadId: child, requestId } });
+          } else {
+            send({ method: "turn/completed", params: { threadId: child, turn: turnObject(childTurn, step.slice("turn-".length)) } });
+          }
+        }
+      };
       const ask = async (method, params) => {
         if (script.parentSettles === "before-asking") settleParent();
+        const requestId = serverRequestId;
         const reply = askServerRequest(method, params);
         if (script.parentSettles === "while-asking") settleParent();
+        if (script.afterAsking) {
+          endChild(requestId);
+          return null;
+        }
         return await reply;
       };
       send({ method: "item/started", params: { item: { type: "subAgentActivity", id: "sub-" + child, kind: "started", agentThreadId: child, agentPath: "/root/" + child }, threadId, turnId, startedAtMs: 0 } });
@@ -464,7 +493,9 @@ async function runTurn(turnId, script) {
         send({ method: "item/started", params: { item: { type: "fileChange", id: itemId, changes, status: "inProgress" }, threadId: child, turnId: childTurn, startedAtMs: 0 } });
         const reply = await ask("item/fileChange/requestApproval", { threadId: child, turnId: childTurn, itemId, startedAtMs: 0, reason: null, grantRoot: null });
         const accepted = reply && reply.result && reply.result.decision !== "decline" && reply.result.decision !== "cancel";
-        send({ method: "item/completed", params: { item: { type: "fileChange", id: itemId, changes, status: accepted ? "completed" : "declined" }, threadId: child, turnId: childTurn, completedAtMs: 1 } });
+        if (!script.afterAsking) {
+          send({ method: "item/completed", params: { item: { type: "fileChange", id: itemId, changes, status: accepted ? "completed" : "declined" }, threadId: child, turnId: childTurn, completedAtMs: 1 } });
+        }
       } else {
         const item = (status, output) => ({ type: "commandExecution", id: itemId, pluginId: null, scriptPath: null, command: "ls -1", cwd: process.cwd(), processId: null, source: "agent", status, commandActions: [], aggregatedOutput: output, exitCode: output === null ? null : 0, durationMs: null });
         send({ method: "item/started", params: { item: item("inProgress", null), threadId: child, turnId: childTurn, startedAtMs: 0 } });
@@ -474,9 +505,13 @@ async function runTurn(turnId, script) {
           availableDecisions: ["accept", "decline", "cancel"]
         });
         const accepted = reply && reply.result && reply.result.decision === "accept";
-        send({ method: "item/completed", params: { item: item(accepted ? "completed" : "declined", accepted ? "a.ts\\n" : null), threadId: child, turnId: childTurn, completedAtMs: 1 } });
+        if (!script.afterAsking) {
+          send({ method: "item/completed", params: { item: item(accepted ? "completed" : "declined", accepted ? "a.ts\\n" : null), threadId: child, turnId: childTurn, completedAtMs: 1 } });
+        }
       }
-      send({ method: "turn/completed", params: { threadId: child, turn: turnObject(childTurn, "completed") } });
+      if (!script.afterAsking) {
+        send({ method: "turn/completed", params: { threadId: child, turn: turnObject(childTurn, "completed") } });
+      }
       if (parentSettled) return;
       break;
     }

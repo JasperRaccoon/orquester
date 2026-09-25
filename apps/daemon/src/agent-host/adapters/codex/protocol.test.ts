@@ -12,6 +12,7 @@ import { describe, it } from "node:test";
 import {
   CodexPeer,
   CodexRequestRefusal,
+  CodexRequestWithdrawn,
   CodexRpcError,
   CodexTransportClosedError,
   isNoActiveTurnError,
@@ -244,6 +245,33 @@ describe("codex transport — inbound requests", () => {
     await tick();
     await tick();
     assert.deepEqual(h.sent.at(-1), { id: 0, error: { code: -32603, message: "boom" } });
+  });
+
+  it("writes nothing for a request its handler withdrew, and still frees its slot", async () => {
+    // The server stopped waiting (a collab child's turn ended or its thread
+    // closed, or `serverRequest/resolved` named it): an answer would land on a
+    // request it no longer holds. The handler must not dangle either, or the
+    // cap and a Stop's `whenServerRequestsSettled` count it for ever.
+    const h = harness({ maxInFlightServerRequests: 1 });
+    h.deliver({ id: 0, method: "item/commandExecution/requestApproval", params: {} });
+    await tick();
+    assert.equal(h.peer.openServerRequestCount, 1);
+    const settled = h.peer.whenServerRequestsSettled();
+
+    h.requests[0]!.reject(new CodexRequestWithdrawn("the child's turn ended"));
+    await settled;
+    assert.equal(h.peer.openServerRequestCount, 0);
+    assert.deepEqual(
+      h.sent.filter((frame) => frame.id === 0),
+      [],
+      "no result and no error: the server resolved it itself"
+    );
+
+    // The slot is free: the next request reaches its handler instead of -32001.
+    h.deliver({ id: 1, method: "item/commandExecution/requestApproval", params: {} });
+    await tick();
+    assert.equal(h.requests.length, 2);
+    assert.equal(h.sent.length, 0);
   });
 
   it("answers -32001 past the 32 in-flight cap", async () => {

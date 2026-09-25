@@ -143,6 +143,23 @@ export class CodexRequestRefusal extends Error {
   }
 }
 
+/**
+ * Thrown by a handler to leave a server request UNANSWERED, because the server
+ * no longer waits for it: the app-server resolves every pending request of a
+ * thread itself when that thread's turn ends, and says so with
+ * `serverRequest/resolved`; a closed thread takes no answer at all. An answer
+ * after that lands on a request the server no longer holds (fixtures README
+ * observation 20). The peer writes nothing for it, and the request still
+ * leaves the in-flight set, so neither the cap nor
+ * {@link CodexPeer.whenServerRequestsSettled} counts it again.
+ */
+export class CodexRequestWithdrawn extends Error {
+  constructor(reason: string) {
+    super(`the server no longer waits for this request: ${reason}`);
+    this.name = "CodexRequestWithdrawn";
+  }
+}
+
 /** One decoded server→client request, before a handler has answered it. */
 export interface CodexServerRequest<TMethod extends ServerRequestMethod = ServerRequestMethod> {
   id: number | string;
@@ -153,8 +170,9 @@ export interface CodexServerRequest<TMethod extends ServerRequestMethod = Server
 export interface CodexPeerHandlers {
   /**
    * Answer one server→client request. Resolving sends `{id, result}`; throwing
-   * a {@link CodexRequestRefusal} sends that error, and any other throw is
-   * reported as `-32603`.
+   * a {@link CodexRequestRefusal} sends that error, throwing a
+   * {@link CodexRequestWithdrawn} sends nothing (the server stopped waiting),
+   * and any other throw is reported as `-32603`.
    *
    * An unhandled method must be refused with `-32601`, which the server treats
    * as "the model was refused", never as a protocol violation (fixtures README
@@ -419,6 +437,10 @@ export class CodexPeer {
         const result = await this.options.handlers.onRequest(request);
         this.respondResult(id, result);
       } catch (error) {
+        if (error instanceof CodexRequestWithdrawn) {
+          // The server resolved it itself: an answer would land nowhere.
+          return;
+        }
         if (error instanceof CodexRequestRefusal) {
           this.respondError(id, error.code, error.message);
           return;

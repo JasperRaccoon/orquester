@@ -21,6 +21,10 @@
  *   they dangle forever (fixtures README observation 5).
  * - **Interrupt is turn-scoped**, enforced client-side: a stale turn id is a
  *   hard `-32600 "no active turn to interrupt"` on the wire, not a no-op.
+ * - **A collab child's card ends with the child's wait.** Its own turn's end,
+ *   its thread's close or the server's `serverRequest/resolved` settles it as
+ *   a Stop would — once, on the stamps it was opened with — and answers
+ *   nothing: the server stopped waiting (`withdrawChildRequests`).
  * - **Plan mode is sticky**, so `collaborationMode` is sent on every turn
  *   including `{mode:"default"}` (fixtures README observation 9).
  */
@@ -82,6 +86,7 @@ import {
 import {
   CodexPeer,
   CodexRequestRefusal,
+  CodexRequestWithdrawn,
   describeError,
   isNoActiveTurnError,
   type CodexServerRequest
@@ -146,17 +151,29 @@ export interface CodexSessionOptions {
   onClosed: () => void;
 }
 
-interface PendingApproval {
+/** What every parked server→client request carries, approval or question. */
+interface ParkedRequest {
   requestId: string;
-  method: string;
-  settle: (decision: ApprovalDecision) => void;
+  /** The server's own JSON-RPC id — what `serverRequest/resolved` names. */
+  providerRequestId: string;
+  /** The collab child whose card this is; absent for this thread's own. */
+  childThreadId?: string;
+  /**
+   * Settle it with nobody's answer — the provider stopped waiting: its
+   * cancelled row, and the handler ends writing nothing
+   * ({@link CodexRequestWithdrawn}).
+   */
+  withdraw: (reason: string) => void;
   fail: (error: Error) => void;
 }
 
-interface PendingUserInput {
-  requestId: string;
+interface PendingApproval extends ParkedRequest {
+  method: string;
+  settle: (decision: ApprovalDecision) => void;
+}
+
+interface PendingUserInput extends ParkedRequest {
   settle: (answers: Record<string, unknown>) => void;
-  fail: (error: Error) => void;
 }
 
 /** Live tasks, so a dead child can close every one with `status:"stopped"` (§3.1). */
@@ -221,7 +238,8 @@ export class CodexSession {
    * card can stay open while the parent's `wait` returns and the parent's turn
    * settles, and clearing its entries there read the user's decline as "you
    * were not asked" and lost its diff. They end with the child's own
-   * `turn/completed` or `thread/closed`, a Stop, or the exit.
+   * `turn/completed` or `thread/closed` — as its still-open cards do
+   * ({@link withdrawChildRequests}) — a Stop, or the exit.
    */
   private readonly childRequests = new Map<string, RequestBookkeeping>();
 
@@ -330,6 +348,15 @@ export class CodexSession {
    */
   get liveChildTurnsForTest(): [string, string][] {
     return this.normaliser.liveChildTurns();
+  }
+
+  /**
+   * Server→client requests whose handler has not finished on the transport:
+   * parked, or answered and not yet written. A withdrawn card must not stay
+   * here — a Stop waits on this set before it interrupts.
+   */
+  get openServerRequestsForTest(): number {
+    return this.peer?.openServerRequestCount ?? 0;
   }
 
   /** How many entries the collab children's request bookkeeping holds ({@link childRequests}). */
@@ -1012,6 +1039,25 @@ export class CodexSession {
     const isOurs =
       this.providerThreadId === null || about === null || about === this.providerThreadId;
 
+    // What ends a collab child's wait on its cards, settled before anything
+    // else that end writes — its abandoned calls, its task row — as a Stop
+    // settles cards first: its own turn's end (any status), its thread's
+    // close, or the server naming one of them resolved.
+    if ((method === "turn/completed" || method === "thread/closed") && !isOurs && about !== null) {
+      this.withdrawChildRequests(
+        method === "turn/completed" ? "the child's turn ended" : "the child's thread closed",
+        (request) => request.childThreadId === about
+      );
+    } else if (method === "serverRequest/resolved") {
+      const resolvedId = (params as { requestId?: unknown } | null | undefined)?.requestId;
+      if (typeof resolvedId === "number" || typeof resolvedId === "string") {
+        this.withdrawChildRequests(
+          "the server resolved it",
+          (request) => request.providerRequestId === String(resolvedId)
+        );
+      }
+    }
+
     for (const draft of this.normaliser.notification(method, params)) {
       if (draft.type === "thread.started") {
         this.announceThread(draft.payload.providerThreadId);
@@ -1245,21 +1291,31 @@ export class CodexSession {
         // child's question rides NO turn (`questionTurnId`); the provider's
         // turn stays its ref either way.
         const turnId = this.questionTurnId(params.threadId, params.turnId);
+        const childThreadId = this.isChildThread(params.threadId) ? params.threadId : undefined;
+        // The ONE emitter of the card's resolution row, exactly as
+        // `parkApproval` has it — `settlePendingRequests` must not emit a
+        // second row for the same requestId (Q1 finding 17).
+        const resolved = (answers: Record<string, unknown>, withdrawn: boolean): void => {
+          this.emit({
+            type: "user-input.resolved",
+            payload: { answers, ...(withdrawn ? { withdrawn: true as const } : {}) },
+            ...(turnId !== undefined ? { turnId } : {}),
+            requestId,
+            raw
+          });
+        };
         const answers = await new Promise<Record<string, unknown>>((resolve, reject) => {
           this.pendingUserInputs.set(requestId, {
             requestId,
-            // `settle` is the SINGLE emitter, exactly as `parkApproval` does it
-            // — `settlePendingRequests` must not emit a second row for the
-            // same requestId (Q1 finding 17).
-            settle: (resolved) => {
-              this.emit({
-                type: "user-input.resolved",
-                payload: { answers: resolved },
-                ...(turnId !== undefined ? { turnId } : {}),
-                requestId,
-                raw
-              });
-              resolve(resolved);
+            providerRequestId: String(request.id),
+            ...(childThreadId !== undefined ? { childThreadId } : {}),
+            settle: (answered) => {
+              resolved(answered, false);
+              resolve(answered);
+            },
+            withdraw: (reason) => {
+              resolved({}, true);
+              reject(new CodexRequestWithdrawn(reason));
             },
             fail: reject
           });
@@ -1311,20 +1367,33 @@ export class CodexSession {
     // The turn the card's rows ride: the request's own, or — a collab child's
     // — the parent turn live as it arrives (`requestTurnId`).
     const turnId = this.requestTurnId(input.threadId, input.turnId);
+    // A collab child's card ends with the child's wait (`withdrawChildRequests`).
+    const childThreadId = this.isChildThread(input.threadId) ? input.threadId : undefined;
+    // The card's one resolution row, answered or withdrawn, with the stamps it
+    // was opened with.
+    const resolved = (decision: ApprovalDecision, withdrawn: boolean): void => {
+      this.emit({
+        type: "request.resolved",
+        payload: { requestType, decision, ...(withdrawn ? { withdrawn: true as const } : {}) },
+        ...(turnId !== undefined ? { turnId } : {}),
+        ...(input.itemId !== undefined ? { itemId: input.itemId } : {}),
+        requestId,
+        raw: input.raw
+      });
+    };
     return new Promise<ApprovalDecision>((resolve, reject) => {
       this.pendingApprovals.set(requestId, {
         requestId,
         method: input.method,
+        providerRequestId: input.providerRequestId,
+        ...(childThreadId !== undefined ? { childThreadId } : {}),
         settle: (decision) => {
-          this.emit({
-            type: "request.resolved",
-            payload: { requestType, decision },
-            ...(turnId !== undefined ? { turnId } : {}),
-            ...(input.itemId !== undefined ? { itemId: input.itemId } : {}),
-            requestId,
-            raw: input.raw
-          });
+          resolved(decision, false);
           resolve(decision);
+        },
+        withdraw: (reason) => {
+          resolved("cancel", true);
+          reject(new CodexRequestWithdrawn(reason));
         },
         fail: reject
       });
@@ -1390,6 +1459,52 @@ export class CodexSession {
     // The watchdog was paused while these were open; resume the clock from now
     // rather than from when the cards opened (Q1 finding 16).
     this.noteActivity();
+  }
+
+  /**
+   * Settle every card a collab child still has parked that `match` names, as
+   * a Stop settles one — once, on the stamps it was opened with ("Request
+   * cancelled" / "Question cancelled": `withdrawn`, ingestion's rule) — but
+   * answering nothing on the wire, because the server stopped waiting.
+   *
+   * Three things end a child's wait, and each reaches only the child's own
+   * cards. Its own `turn/completed`, whatever the status: the app-server
+   * resolves every pending request of a thread itself when that thread's turn
+   * ends, and says so with `serverRequest/resolved` after the turn's end
+   * (fixtures README observation 20). Its `thread/closed`, which may come with
+   * no turn end: a closed thread takes no answer. And `serverRequest/resolved`
+   * naming one of them. Left open, the card blocked the composer and the MCP's
+   * `send_message` until the user answered a request nothing waited on any
+   * more, or pressed Stop.
+   *
+   * The parent's own cards keep today's behaviour: their
+   * `serverRequest/resolved` is the ack of our own answer, and a parent card
+   * is the user's to answer or a Stop's to settle. A card the user answered
+   * first is no longer parked, so nothing is settled twice. A message-mode
+   * question is never parked here — Codex's async questions are the
+   * normaliser's, and a child's message items stay ticks — so §6.2's rule that
+   * one may outlive its turn holds by construction.
+   */
+  private withdrawChildRequests(reason: string, match: (request: ParkedRequest) => boolean): void {
+    let withdrew = false;
+    // Approvals, then questions, as `settlePendingRequests` settles them.
+    const parked: readonly Map<string, ParkedRequest>[] = [this.pendingApprovals, this.pendingUserInputs];
+    for (const requests of parked) {
+      for (const [requestId, request] of requests) {
+        if (request.childThreadId === undefined || !match(request)) {
+          continue;
+        }
+        requests.delete(requestId);
+        request.withdraw(reason);
+        withdrew = true;
+      }
+    }
+    if (withdrew) {
+      // The watchdog was paused while the cards were open (§3.1); resume it
+      // from now, not from when they opened (Q1 finding 16).
+      this.noteActivity();
+      this.disarmIfIdle();
+    }
   }
 
   /** Fail every parked request outright — used when the transport is gone. */
@@ -1774,9 +1889,11 @@ export class CodexSession {
    * and any rewind dropped it (`reduceReverted` keeps a row only on a kept turn
    * or on none). Safe on the parent's turn because nothing settles an approval
    * by its turn: the fold derives pending approvals without one (`pending.ts`),
-   * and only a Stop, the exit or a host's first load closes them. The card
-   * stays the parent's (no owner); the provider's turn stays in its refs. A
-   * QUESTION is different — {@link questionTurnId}.
+   * and only a Stop, the exit or a host's first load closes them — and a
+   * child's, the end of the child's own wait ({@link withdrawChildRequests}),
+   * with this same stamp. The card stays the parent's (no owner); the
+   * provider's turn stays in its refs. A QUESTION is different —
+   * {@link questionTurnId}.
    */
   private requestTurnId(threadId: string | undefined, providerTurnId: string | undefined): string | undefined {
     return this.isChildThread(threadId) ? (this.activeTurnId ?? undefined) : providerTurnId;
@@ -1795,7 +1912,8 @@ export class CodexSession {
    * on `item/tool/requestUserInput` until a Stop. The child's own turn is no
    * answer either — a turn this thread never had, which every rewind drops.
    * Turnless, the card is answered or cancelled like any other, and a Stop,
-   * the exit or a host's first load settles it; the provider's turn stays in
+   * the exit, a host's first load or the end of the child's own wait
+   * ({@link withdrawChildRequests}) settles it; the provider's turn stays in
    * its refs.
    */
   private questionTurnId(threadId: string | undefined, providerTurnId: string): string | undefined {
