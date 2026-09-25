@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { commandDisplayDetail, commandOutputText } from "./command-output.ts";
+import { commandDisplayDetail, commandOutputText, storedCommandOutput } from "./command-output.ts";
 import { slimActivityPayload } from "./slim.ts";
 
 const command = (fields: Record<string, unknown>) => ({ itemType: "command_execution", ...fields });
@@ -230,4 +230,35 @@ test("commandOutputText holds the whole output the wire's one-line preview is cu
   const wire = slimActivityPayload(command({ title: "Bash", data })) as { data: unknown; truncated?: unknown };
   assert.equal(wire.truncated, true);
   assert.equal(commandOutputText(wire.data), "line 0");
+});
+
+test("storedCommandOutput: an item stored whole holds its output whole, whatever row of the call it is", () => {
+  const output = "PASS a.test.ts\n  ✓ adds\n";
+  const data = { command: "pnpm test", cwd: "/w/p", item: { aggregatedOutput: output } };
+  for (const kind of ["tool.completed", "tool.updated", "tool.started"]) {
+    assert.deepEqual(storedCommandOutput(kind, command({ status: "completed", data })), { text: output, whole: true }, kind);
+  }
+});
+
+test("storedCommandOutput: a completion stored cut holds its output's head — Codex past 64 KiB — never the whole", () => {
+  // As the Codex adapter stores a command whose output passed its bound (`boundCommandOutput`): the head, marked cut.
+  const head = `${"ok\n".repeat(20)}`;
+  const cut = command({ status: "completed", truncated: true, data: { command: "cat big.log", item: { aggregatedOutput: head } } });
+  assert.deepEqual(storedCommandOutput("tool.completed", cut), { text: head, whole: false });
+});
+
+test("storedCommandOutput: an update stored cut holds no part of the output — its data is the wire's one-line preview", () => {
+  // Ingestion persists every tool.updated already slimmed (§5.6): what `GET …/items/:itemId` serves back.
+  const lines = `${Array.from({ length: 50 }, (_, i) => `test ${i} passed`).join("\n")}\n`;
+  const stored = slimActivityPayload(command({ status: "inProgress", data: { item: { command: "pnpm test", aggregatedOutput: lines } } }));
+  assert.equal((stored as { truncated?: unknown }).truncated, true);
+  assert.equal(storedCommandOutput("tool.updated", stored), undefined);
+});
+
+test("storedCommandOutput: no command, or no output, is nothing", () => {
+  assert.equal(storedCommandOutput("tool.completed", { itemType: "file_change", data: { item: { aggregatedOutput: "x" } } }), undefined);
+  assert.equal(storedCommandOutput("tool.completed", command({ data: { command: "true", exitCode: 0 } })), undefined);
+  assert.equal(storedCommandOutput("tool.completed", command({ truncated: true, data: {} })), undefined);
+  assert.equal(storedCommandOutput("tool.completed", "a string payload"), undefined);
+  assert.equal(storedCommandOutput("tool.completed", null), undefined);
 });

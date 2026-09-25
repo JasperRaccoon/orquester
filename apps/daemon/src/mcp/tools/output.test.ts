@@ -308,6 +308,28 @@ for (const [host, answering] of HOSTS) {
     assert.deepEqual([none.kind, none.text], ["payload", JSON.stringify(stored.kind === "activity" ? stored.payload : null, null, 2)]);
   });
 
+  test(`${host}: a completion that kept only its output's head reads the call's join — never the head as the whole output`, async () => {
+    // As the Codex adapter stores a command whose output passed 64 KiB: the head in `data.item.aggregatedOutput`, the
+    // payload marked `truncated`.
+    const whole = `${Array.from({ length: 400 }, (_, i) => `ok ${i}`).join("\n")}\n`;
+    const head = whole.slice(0, 600);
+    const cut = commandRow({ command: "pnpm test", cwd: "/w/p", item: { aggregatedOutput: head } }, { truncated: true });
+    const { text, pages } = await readAll(answering(cut, joinedOutput({ toolUseId: "call-1", output: whole })), cut.id);
+    assert.equal(text, whole);
+    for (const page of pages) assert.deepEqual([page.kind, "truncated" in page], ["command-output", false]);
+  });
+
+  test(`${host}: with no join to give — nothing streamed, or no route — a completion's kept head answers as command-output, truncated`, async () => {
+    const head = `${Array.from({ length: 60 }, (_, i) => `ok ${i}`).join("\n")}\n`;
+    const cut = commandRow({ command: "pnpm test", cwd: "/w/p", item: { aggregatedOutput: head } }, { truncated: true });
+    const expected = { itemId: cut.id, kind: "command-output", text: head, offset: 0, totalBytes: Buffer.byteLength(head), truncated: true };
+    // Nothing streamed: an empty join, or an empty window of one (totalBytes 0).
+    assert.deepEqual(await read(answering(cut, joinedOutput({ toolUseId: "call-1", output: "" })), { itemId: cut.id }), expected);
+    // A host from before the route answers its route miss; the host's own 404 says the item names no call it joined.
+    const miss = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: `No route for GET /threads/c1/items/${cut.id}/output.` } } };
+    assert.deepEqual(await read(answering(cut, miss), { itemId: cut.id }), expected);
+  });
+
   test(`${host}: a host without the join — an older one's route miss, or its own 404 — falls back to the item's text, never an error`, async () => {
     const row = shellDone();
     const payloadText = JSON.stringify(row.payload, null, 2);

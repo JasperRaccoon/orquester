@@ -683,7 +683,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             kind: "output",
             title: "Full output",
             loading: false,
-            text: output.kind === "streamed" ? output.text : fullOutputText(output.item),
+            text: output.kind === "item" ? fullOutputText(output.item) : output.text,
             notes: fullOutputNotes(output)
           });
         })

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import type { ThreadItemOutputResponse, ThreadItemResponse } from "@orquester/api/agent-chat";
+import {
+  slimActivityPayload,
+  type ThreadActivityItem,
+  type ThreadItemOutputResponse,
+  type ThreadItemResponse
+} from "@orquester/api/agent-chat";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { WorkLogEntry } from "./contracts";
@@ -165,6 +170,113 @@ describe("the full-output viewer's read", () => {
     const viewer = reads({ streamedOutput: async () => Promise.reject(new Error("The agent host is restarting.")) });
     await assert.rejects(() => readFullOutput(viewer, "a1", "streamed"), /restarting/);
     assert.deepEqual(viewer.asked, ["output a1"]);
+  });
+});
+
+describe("a Codex completion that kept only its output's head (stored cut past 64 KiB)", () => {
+  // As the Codex adapter stores a command whose output passed its bound (`boundCommandOutput`): the whole output up to
+  // 64 KiB in `data.item.aggregatedOutput`, only its head past that, and the payload marked `truncated`.
+  const whole = Array.from({ length: 3_000 }, (_, index) => `ok ${index} - parses case ${index}\n`).join("");
+  const head = whole.slice(0, 1_000);
+  const codex = (payload: Record<string, unknown>): ThreadActivityItem =>
+    activity(
+      "tool.completed",
+      {
+        itemType: "command_execution",
+        toolUseId: "item_7",
+        title: "pnpm test",
+        detail: `${whole.slice(0, 177)}...`,
+        status: "completed",
+        data: {
+          command: "pnpm test",
+          cwd: "/w/p",
+          source: "unifiedExecStartup",
+          commandActions: [],
+          exitCode: 0,
+          durationMs: 812,
+          item: { aggregatedOutput: head }
+        },
+        ...payload
+      },
+      { id: "done-7", turnId: "t1" }
+    );
+  const stored = codex({ truncated: true });
+  // The row as the timeline derives it from what a snapshot sends: slimmed on the wire (§5.6), and none of the call's
+  // chunks in view — the retention boundary between its last chunk and its completion, or a page between them.
+  const rowOf = (item: ThreadActivityItem): WorkLogEntry => {
+    const wire = { ...item, payload: slimActivityPayload(item.payload) } as ThreadActivityItem;
+    const [row] = joinLifecycleDetails(deriveWorkLogEntries([wire]));
+    assert.ok(row !== undefined);
+    return row;
+  };
+
+  it("reads the call's join before its item's head: the host holds the whole output", async () => {
+    const row = rowOf(stored);
+    assert.equal(row.streamedOutput, undefined, "no chunk of the call in view");
+    assert.equal(fullOutputSourceOf(row), "item");
+    const viewer = reads({
+      item: async () => ({ item: stored }),
+      streamedOutput: async () => join(whole, { toolUseId: "item_7" })
+    });
+
+    assert.deepEqual(await readFullOutput(viewer, row.id, "item"), {
+      kind: "streamed",
+      text: whole,
+      running: false,
+      cut: false
+    });
+    assert.deepEqual(viewer.asked, ["item done-7", "output done-7"], "the item first, then (stored cut) the join");
+  });
+
+  it("shows the head as the command printed it, saying only the start was kept, where no join answers", async () => {
+    for (const answer of [join("", { toolUseId: "item_7" }), null]) {
+      const viewer = reads({ item: async () => ({ item: stored }), streamedOutput: async () => answer });
+      const output = await readFullOutput(viewer, stored.id, "item");
+      assert.deepEqual(output, { kind: "head", text: head });
+      assert.deepEqual(fullOutputNotes(output), ["Only the start of this output was kept."]);
+    }
+  });
+
+  it("asks the join once: a row that streamed read it first, and its item's head answers after", async () => {
+    const viewer = reads({
+      item: async () => ({ item: stored }),
+      streamedOutput: async () => join("", { toolUseId: "item_7" })
+    });
+    assert.deepEqual(await readFullOutput(viewer, stored.id, "streamed"), { kind: "head", text: head });
+    assert.deepEqual(viewer.asked, ["output done-7", "item done-7"]);
+  });
+
+  it("a completion that kept its whole output still reads it, and never asks the join", async () => {
+    const intact = codex({ data: { command: "pnpm test", item: { aggregatedOutput: head } } });
+    const viewer = reads({ item: async () => ({ item: intact }) });
+    const output = await readFullOutput(viewer, intact.id, "item");
+    assert.deepEqual(output, { kind: "item", item: intact });
+    assert.equal(fullOutputText(intact), head);
+    assert.deepEqual(fullOutputNotes(output), []);
+    assert.deepEqual(viewer.asked, ["item done-7"]);
+  });
+
+  it("an update stored cut reads the join too, then (nothing streamed) its payload, never its preview", async () => {
+    // Ingestion persists every tool.updated already slimmed (§5.6): its data is a one-line preview, no part of it.
+    const live = activity(
+      "tool.updated",
+      {
+        itemType: "command_execution",
+        toolUseId: "item_7",
+        status: "inProgress",
+        data: { item: { command: "pnpm test", aggregatedOutput: whole } }
+      },
+      { id: "live-7", turnId: "t1" }
+    );
+    const update = { ...live, payload: slimActivityPayload(live.payload) } as ThreadActivityItem;
+    const viewer = reads({
+      item: async () => ({ item: update }),
+      streamedOutput: async () => join("", { toolUseId: "item_7" })
+    });
+    const output = await readFullOutput(viewer, update.id, "item");
+    assert.deepEqual(output, { kind: "item", item: update });
+    assert.equal(fullOutputText(update), JSON.stringify(update.payload, null, 2));
+    assert.deepEqual(viewer.asked, ["item live-7", "output live-7"]);
   });
 });
 
