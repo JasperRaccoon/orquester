@@ -1419,6 +1419,15 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   the parent's card on NO turn: a turn's end dismisses the native-callback questions on it (§6.2), so
   on the parent's turn a parent whose `wait` returned swept the card while the child still waited
   for its answer (fixtures README observation 20).*
+  *Built (follow-ups 2026-09-25): a child's card still open when the child's own wait ends — its
+  own turn's end whatever the status, its thread's close, or a `serverRequest/resolved` naming it
+  (the installed CLI resolves a thread's pending requests itself when that thread's turn ends) — is
+  settled as a Stop settles one: one "Request cancelled" / "Question cancelled" row
+  (`cancelledRequestActivity`, through ingestion's `withdrawn` rule) on the stamp the card was
+  opened with, and no answer on the wire, where the server no longer holds the request
+  (`withdrawChildRequests`, `CodexRequestWithdrawn`). Left open, it blocked the composer and the
+  MCP's `send_message` until the user answered a request nothing waited on, or pressed Stop. The
+  parent's own cards are untouched (fixtures README observation 20).*
 
 #### OpenCode
 

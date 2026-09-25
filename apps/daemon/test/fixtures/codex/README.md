@@ -269,6 +269,15 @@ Three things follow:
   So "settle, then interrupt" and "interrupt, then settle" both work; only "interrupt and never
   settle" leaks. Keep the spec's ordering — it is the one that also cleans up the UI.
 
+  *Re-read 2026-09-25, from the 0.155.1 binary (observation 20):* this capture cannot tell the
+  server's own resolution from an ack of the late answer. The `serverRequest/resolved` is stamped
+  1 ms after the `turn/completed` (`emittedAtMs` …508 → …509), in the millisecond the harness wrote
+  its answer, and the installed app-server resolves a thread's pending requests itself when that
+  thread's turn ends ("client request resolved because the turn state was changed"). The likelier
+  reading is that the server resolved the approval at the interrupt's turn end and the late answer
+  landed on nothing. Settling before the interrupt stays right either way: the answer then reaches
+  a request the server still holds.
+
 `turn/interrupt` requires both `threadId` **and** `turnId` (`missing field \`turnId\`` otherwise),
 and a stale turn id is a hard error, not a no-op: `{"code":-32600,"message":"no active turn to
 interrupt"}` (`13-…`). §4.1's "interrupt is turn-scoped and a no-op when that turn is no longer
@@ -736,7 +745,29 @@ a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`
   log only, never an answer to the adapter). On the parent's turn, a parent whose `wait` returned
   swept the child's open card away and the child stayed blocked until a Stop; on the child's own
   turn, a turn the thread never had, every rewind dropped it. Turnless, it is answered or cancelled
-  like any card, and a Stop or the exit settles it.
+  like any card, and a Stop, the exit or the end of the child's own wait (below) settles it.
+- **A child's open card ends with the child's own wait — read from the 0.155.1 binary, not
+  captured.** The installed app-server carries a turn-transition cancellation of pending server
+  requests — the error it resolves them with reads "client request resolved because the turn state
+  was changed" — so when a thread's turn ends, whatever its status, the server resolves every
+  request that thread still has pending itself and emits `serverRequest/resolved {threadId,
+  requestId}` for each, after the `turn/completed`. That is also the likelier reading of `06-…`
+  (observation 5, note at its end). A child's own `turn/completed` (any status) and its
+  `thread/closed` (with or without a turn end: a closed thread takes no answer) settle every card of
+  that child still open, and a `serverRequest/resolved` the one it names (`withdrawChildRequests`,
+  `session.ts`): each gets one `request.resolved {decision: "cancel", withdrawn: true}` /
+  `user-input.resolved {answers: {}, withdrawn: true}` on the stamp the card was opened with — the
+  parent turn an approval rode, none for a question — which ingestion writes as the host's own Stop
+  row, "Request cancelled" / "Question cancelled" (`cancelledRequestActivity`), before the call
+  closures and the task row that end writes; and nothing is answered on the wire
+  (`CodexRequestWithdrawn`, `protocol.ts`), where an answer would land on a request the server no
+  longer holds. Left open, the card blocked the composer and the MCP's `send_message` until the user
+  answered a request nothing waited on, or pressed Stop. A card the user answered first is settled
+  once, by the answer. The parent's own cards are untouched: their `serverRequest/resolved` is our
+  answer's ack, and a Stop still answers them before it interrupts. Unverified: whether a child's
+  requests are resolved at its turn's end exactly as a root thread's are, and what a child's
+  `thread/closed` does to one still pending; a capture of a child asking, then `turn/interrupt` on
+  the child's thread, would settle both.
 - `commandExecution.aggregatedOutput` is "The command's output, aggregated from stdout and stderr";
   the bindings document no bound. The completion keeps it in `data.item.aggregatedOutput` — where
   `commandOutputText` and the wire slimmer's `projectCommandData` already read Codex's output — up

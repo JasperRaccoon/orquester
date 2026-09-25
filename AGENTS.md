@@ -972,9 +972,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   native-callback questions on it (`settleStrandedQuestions`, in the log only — the adapter is
   never answered), which on the parent's turn swept the child's open card while the child stayed
   blocked, and a turn the thread never had (the child's own) is dropped by every rewind; nothing
-  settles an approval by its turn, so approvals stay on the parent's. A child's MCP progress is
-  its heartbeat (`tool.progress` on its task); its message and reasoning items stay ticks (codex
-  fixtures README observation 20).
+  settles an approval by its turn, so approvals stay on the parent's. **The end of the child's own
+  wait settles its cards** (`withdrawChildRequests`): its own `turn/completed` whatever the status
+  and its `thread/closed` with or without a turn end settle every card of the child still open, a
+  `serverRequest/resolved` the one it names — the installed CLI resolves a thread's pending
+  requests itself when that thread's turn ends ("client request resolved because the turn state
+  was changed", 0.155.1) and says so after the turn's end. Each gets one row, the host's own Stop
+  row ("Request cancelled" / "Question cancelled", `cancelledRequestActivity`, through ingestion's
+  `withdrawn` rule), on the stamp the card was opened with, and nothing is answered on the wire
+  (`CodexRequestWithdrawn`: the answer would land on a request the server no longer holds). Left
+  open, the card blocked the composer ("Answer the request above first.") and the MCP's
+  `send_message` until the user answered a request nothing waited on, or pressed Stop. A card
+  answered first is settled once, by its answer; the parent's own cards are untouched (their
+  `serverRequest/resolved` is our answer's ack). A child's MCP progress is its heartbeat
+  (`tool.progress` on its task); its message and reasoning items stay ticks (codex fixtures README
+  observation 20).
 - **Background shells (Claude): only detached ones are surfaced, and their output is TAILED from a
   file.** Every ordinary Bash call raises a `local_bash` task, so `is_backgrounded` — not the task
   type — is the discriminator: a `false` one is the blocking tool call's own row and gets no
