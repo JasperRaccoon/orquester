@@ -827,6 +827,17 @@ the command's output, and the error is the call's status and detail, which the r
 status carries and the MCP transcript shows as text; it is never written into the stream. A
 part's mark goes when it settles, when it is removed and when its message is.
 
+A completion whose final output the tool cut — it opens with that note — holds only what the tool
+kept, and that is the output's END: `es` in `ShellTool.run` walks the lines from the last one
+(read from the source, not captured). The completion row keeps it in `data.result`, so the row is
+marked `truncated` (`isCutFinalOutput`, the same note `finalOutputRemainder` reads): unmarked, the
+MCP's `read_tool_output` answered that end as the whole output. Both readers now take the call's
+join — every line the command printed — first, and show the kept end, as only part of the output,
+only where no join answers (`storedCommandOutput`). Only `bash` writes this note; the generic
+`Truncate.output` other tools go through writes another (`...N lines truncated...` and "The tool
+call succeeded but the output was truncated", keeping the head by default), which no command row
+of a captured tool carries and which is not read here.
+
 ---
 
 ## Reproducing

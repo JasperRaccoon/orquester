@@ -1031,7 +1031,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   A row holds only the chunks its window kept (a parent's 500 rows, an agent's 200), and a command's
   item holds its output only as far as its adapter kept it: a Codex completion keeps
   `aggregatedOutput` whole up to 64 KiB and past that only the head, its payload marked `truncated`
-  at rest (`COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`); a background shell's completion
+  at rest (`COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`); an OpenCode completion whose
+  final output its `bash` tool cut keeps what the tool kept — the END of the output, behind the
+  tool's `...output truncated...` / `Full output saved to: <file>` note — marked the same way
+  (`isCutFinalOutput`, `adapters/opencode/state.ts`; unmarked, the MCP answered that end as the
+  whole output); a background shell's completion
   keeps its command and exit code, no output; an update is stored already slimmed, its data the
   row's preview. So a row whose command streamed (`streamedOutput`, `WorkLogEntry`: a
   `command_output` chunk, every lifecycle row of a call whose chunks the derivation input holds —
@@ -1046,10 +1050,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   next, even with none of the call's chunks in view — the MCP's order: `read_tool_output`'s step 1
   skips an item stored cut, its step 2 is the join. Where no join answers (an empty one, or a 404)
   the item answers by one rule both readers follow, `storedCommandOutput`
-  (`packages/api/src/agent-chat/command-output.ts`): an output stored whole as text; a completion's
-  kept head as text under "Only the start of this output was kept." (the MCP: `command-output`,
-  `truncated: true`) — never as JSON, never as the whole output, and naming no size, since a first
-  load's closer can carry an update's cut copy marked the same way, a one-line preview; an update's
+  (`packages/api/src/agent-chat/command-output.ts`): an output stored whole as text; the part a
+  completion kept as text under "Only part of this output was kept." (the MCP: `command-output`,
+  `truncated: true`) — never as JSON, never as the whole output, and naming neither the part (a
+  Codex head, an OpenCode end) nor its size, since a first load's closer can carry an update's cut
+  copy marked the same way, a one-line preview; an update's
   preview never as the output (its payload, as JSON); anything else as before (`fullOutputText`).
   The other notes above the text: "still running", and "only the first 8 MiB can be shown here" (the
   log keeps every chunk; only the join stops at its cap). A host from before windows answers the
@@ -1089,7 +1094,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   last 512 characters — no anchor under 64 — else nothing), BEFORE its own item event closes the
   call's output buffer; a final output the tool cut ends that with its note's pointer,
   `Full output saved to: <file>`, which the join otherwise never holds. A stream that showed
-  nothing adds nothing, and an errored part has no final output.
+  nothing adds nothing, and an errored part has no final output. Such a completion's
+  `data.result` holds only what the tool kept — the END of the output, behind that note (`es` in
+  `ShellTool.run` walks the lines from the last) — so it is marked `truncated` (`isCutFinalOutput`,
+  the note `finalOutputRemainder` reads): unmarked, the MCP's `read_tool_output` answered that end
+  as the whole output while the GUI's viewer read the join; now both read the join first and show
+  the kept end only when none answers, as "only part of" the output (`storedCommandOutput`).
 - **Grok: shells are live work, a subagent is its `spawn_subagent` call plus the poll answers naming
   it, and a run nobody asks about stops counting after an hour.** (1) Grok stamps every task row of
   a background shell with the shell itself (`agentId` = `taskId`), and the liveness registry read
@@ -1309,11 +1319,13 @@ it cannot read whole is named in `unavailableTurns` with a hint, and a failed pa
 error. Like the GUI's "Load full output", `read_tool_output` reads the unslimmed item behind a tool
 row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command answers its whole
 output from the places the row's preview reads (`commandOutputText`, one list with
-`commandDisplayDetail`), unless the item is stored already cut (`truncated`: an update, or a Codex
+`commandDisplayDetail`), unless the item is stored already cut (`truncated`: an update; a Codex
 command's completion, which keeps its `aggregatedOutput` in `data.item` up to 64 KiB and past that
-only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts` — a head that answers after
-the join, when that is empty, as `command-output` with `truncated: true`, the text the GUI's viewer
-shows: `storedCommandOutput`, the one rule both follow). A command's output
+only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`; or an OpenCode command's
+completion whose output its `bash` tool cut, which keeps the end the tool kept behind its note —
+`isCutFinalOutput`, `adapters/opencode/state.ts` — a kept part that answers after the join, when
+that is empty, as `command-output` with `truncated: true`, the text the GUI's viewer shows:
+`storedCommandOutput`, the one rule both follow). A command's output
 that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
 command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
 and answered with `running`/`truncated`; never a file change's (Claude streams its result text as

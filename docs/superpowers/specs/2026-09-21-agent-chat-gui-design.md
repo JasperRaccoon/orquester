@@ -3099,6 +3099,16 @@ update's cut copy, marked the same way, whose head is a one-line preview. So wha
 is a completion stored whole that holds no output — a Codex command's from a host before task 3 —
 none of whose chunks the window or the loaded history holds: its payload shows.*
 
+*Built (follow-ups 2026-09-25, OpenCode): an OpenCode `bash` completion whose final output the tool
+cut past its own limits is stored cut too. 1.18.32's `ShellTool.run` keeps the END of such an output
+behind `...output truncated...` / `Full output saved to: <file>` (read from the source), and the
+completion carried it in `data.result` unmarked, so the MCP's `read_tool_output` answered that end as
+the whole output while this viewer read the call's join. The adapter now marks it `truncated`
+(`isCutFinalOutput`, the note `finalOutputRemainder` already reads; `adapters/opencode/state.ts`), and
+both readers take the join first and the kept end only where none answers. The note above a kept part
+is now "Only part of this output was kept." (the `kept` arm of `FullOutput`): "Only the start" was
+untrue of OpenCode's end, and which part a completion kept is its adapter's to know, not the viewer's.*
+
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
 *over this thread's rows alone*, is ≤ 1 000 events **and** ≤ 8 MiB of payload; past either it sends
