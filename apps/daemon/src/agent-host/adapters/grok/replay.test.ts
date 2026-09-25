@@ -15,14 +15,8 @@ import { BACKGROUND_LIVENESS_TTL_MS, createLivenessRegistry } from "../../orches
 import { createTestClock } from "../../orchestration/testing/fakes.ts";
 import { captureFiles, readCapture, agentFrames, promptResults, type JsonRpcFrame } from "./fixtures.ts";
 import { GrokNormalizer } from "./normalize.ts";
-import { XAI_EXTENSION_NOTIFICATIONS, xaiMethodSpellings } from "./acp/_generated/xai.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
-
-const XAI_CHANNEL_METHODS = new Set<string>([
-  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.session_notification),
-  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.session_update),
-  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.task_backgrounded)
-]);
+import { XAI_ROUTED_METHODS as XAI_CHANNEL_METHODS } from "./testing/capture-driver.ts";
 
 interface ReplayRun {
   events: RuntimeEvent[];
@@ -393,7 +387,10 @@ test("the emitted types stay inside the documented union", () => {
     "item.completed",
     "item.started",
     "item.updated",
+    "task.completed",
+    "task.progress",
     "task.started",
+    "task.updated",
     "thread.metadata.updated",
     "thread.state.changed",
     "thread.token-usage.updated",

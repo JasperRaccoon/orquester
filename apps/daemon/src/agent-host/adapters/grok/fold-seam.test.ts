@@ -337,22 +337,38 @@ test("a background Grok subagent still running when Stop comes is closed by it",
   assert.equal(s.liveness.liveness(THREAD), null);
 });
 
-test("a foreground Grok subagent its turn cut keeps running in the background", async () => {
+test("a foreground Grok subagent its turn cut is cancelled with it: live until the CLI says so", async () => {
   const s = seam();
   await s.startTurn("turn-1");
   await s.update(spawnStart("call-s1", { prompt: "p", description: "find callers" }));
-  // `session/cancel`: the call gets no terminal frame (fixture 05), the turn
-  // settles, and the child keeps running ("caller gone; auto-backgrounding").
+  const spawned = {
+    sessionUpdate: "subagent_spawned",
+    subagent_id: SUB_A,
+    child_session_id: SUB_A,
+    description: "find callers",
+    subagent_type: "general-purpose"
+  };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: SESSION, update: spawned }));
+  // `session/cancel`: the call gets no terminal frame (fixture 05) and the
+  // CLI cancels the child with the turn (fixture 23).
   await s.feed(s.grok.endTurn());
   const cancelled = { stopReason: "cancelled", cancellationCategory: "MidTurnAbort" };
   await s.feed([s.grok.turnCompleted("turn-1", cancelled)]);
   // The session settles `ready` after the interrupted turn (`settleTurn`).
   await s.feed([s.grok.event("session.state.changed", { state: "ready" })]);
   const cut = agent(s, "call-s1");
-  assert.equal(cut.status, "running");
-  assert.equal(cut.isBackgrounded, true);
-  assert.equal(s.liveness.liveness(THREAD), "working", "it still holds a deploy's drain");
-  await s.feed(s.grok.stopBackgroundTasks());
+  assert.equal(cut.status, "running", "live until the CLI's end arrives");
+  assert.notEqual(cut.isBackgrounded, true, "never sent to the background: nothing kept it running");
+  assert.equal(s.liveness.liveness(THREAD), "working");
+  const finished = {
+    sessionUpdate: "subagent_finished",
+    subagent_id: SUB_A,
+    child_session_id: SUB_A,
+    status: "cancelled",
+    error: "Subagent was cancelled",
+    will_wake: false
+  };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: SESSION, update: finished }));
   assert.equal(agent(s, "call-s1").status, "interrupted");
   assert.equal(s.liveness.liveness(THREAD), null);
 });

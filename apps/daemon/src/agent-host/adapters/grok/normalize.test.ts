@@ -1,21 +1,19 @@
 /**
- * Normaliser tests on frames no capture holds: a late update of a finished
- * call, and the `spawn_subagent` tool.
+ * Normaliser tests on synthetic frames: a late update of a finished call, and
+ * the `spawn_subagent` tool's edge cases the captures do not reach.
  *
  * Every synthetic frame follows the shape EVERY captured tool call has
- * (`apps/daemon/test/fixtures/grok/`, all fourteen files): a `tool_call` whose
- * `title` and `_meta["x.ai/tool"].name` are the tool's name and whose
- * `rawInput` is the model's own arguments, a status-less `tool_call_update`
- * that rewrites the title and the input (`{variant, …}`), and a terminal
- * `tool_call_update` carrying `content` (what the model reads) and a
- * `rawOutput` tagged by `type`. What is specific to `spawn_subagent` — its
- * parameters, its `background` launch returning a subagent id at once,
- * `resume_from` — comes from the CLI's embedded docs, not a capture (fixtures
- * README observation 36). The poll and kill answers (`TaskOutput`,
- * `KillTask`) and a spawn's text answer (`Text`) take the shapes T3's own
- * reader and tests use (`XAiBackgroundTasks.ts`); the binary names the same
- * tags, and a kill's `explicitly_killed` / `already_exited` /
- * `kill_result_delivered` are the binary's field names; none is captured here.
+ * (`apps/daemon/test/fixtures/grok/`): a `tool_call` whose `title` and
+ * `_meta["x.ai/tool"].name` are the tool's name and whose `rawInput` is the
+ * model's own arguments, a status-less `tool_call_update` that rewrites the
+ * title and the input (`{variant, …}`), and a terminal `tool_call_update`
+ * carrying `content` (what the model reads) and a `rawOutput` tagged by
+ * `type`. The subagent frames themselves — `spawn_subagent`'s launches and
+ * answers (`SubagentCompleted`, `Text`), the poll and kill answers
+ * (`TaskOutput`, `KillTask {outcome: "killed"}`), `subagent_*` and
+ * `_x.ai/task_completed` — are the shapes fixtures 15–23 captured on
+ * 2026-09-25 (`subagent-replay.test.ts` replays those files whole); only the
+ * kill's `already_exited` outcome is still read off the binary's strings.
  */
 
 import test from "node:test";
@@ -359,6 +357,87 @@ function backgrounded(toolCallId: string, taskId: string): unknown {
   };
 }
 
+/** `subagent_spawned`, the captured shape (fixture 15): the child's session id IS its subagent id. */
+function spawned(subagentId: string, description: string, extra: Record<string, unknown> = {}): unknown {
+  return {
+    sessionId: SESSION,
+    update: {
+      sessionUpdate: "subagent_spawned",
+      subagent_id: subagentId,
+      parent_session_id: SESSION,
+      child_session_id: subagentId,
+      subagent_type: "general-purpose",
+      description,
+      effective_context_source: "new",
+      model: "grok-4.7",
+      ...extra
+    }
+  };
+}
+
+/** `subagent_progress`, the captured shape (fixture 15). */
+function progressed(subagentId: string): unknown {
+  return {
+    sessionId: SESSION,
+    update: {
+      sessionUpdate: "subagent_progress",
+      subagent_id: subagentId,
+      child_session_id: subagentId,
+      duration_ms: 2102,
+      turn_count: 1,
+      tool_call_count: 1,
+      tokens_used: 11_925,
+      tools_used: ["run_terminal_command"],
+      error_count: 0
+    }
+  };
+}
+
+/** `subagent_finished`, the captured shape: `output` when completed, `error` when cancelled (fixtures 15, 18). */
+function finished(subagentId: string, status: "completed" | "cancelled", output = "sub-ok"): unknown {
+  return {
+    sessionId: SESSION,
+    update: {
+      sessionUpdate: "subagent_finished",
+      subagent_id: subagentId,
+      child_session_id: subagentId,
+      status,
+      ...(status === "completed" ? { output } : { error: "Subagent was cancelled" }),
+      tool_calls: 1,
+      turns: 1,
+      duration_ms: 3731,
+      tokens_used: 12_011,
+      will_wake: false
+    }
+  };
+}
+
+const TASK_COMPLETED = "_x.ai/task_completed";
+
+/** `_x.ai/task_completed` for a killed shell, the captured shape (fixture 18). */
+function killedSnapshot(taskId: string): unknown {
+  return {
+    sessionId: SESSION,
+    update: {
+      sessionUpdate: "task_completed",
+      task_snapshot: {
+        task_id: taskId,
+        command: "c",
+        output: "",
+        exit_code: null,
+        signal: "killed",
+        completed: true,
+        kind: "bash",
+        explicitly_killed: true,
+        kill_result_delivered: true,
+        owner_session_id: SESSION,
+        is_backgrounded: true
+      },
+      will_wake: false
+    }
+  };
+}
+
 const FIND_CALLERS = {
   prompt: "Find every caller of add() and report file:line.",
   description: "find callers",
@@ -460,20 +539,33 @@ test("a foreground spawn answered without the completion tag went to the backgro
   assert.equal(startedBy(grok, "call-s2", { prompt: "p", resume_from: SUB_A }).payload.taskId, "call-s1");
 });
 
-test("a foreground spawn its turn ended under was cut, not ended: its child runs on, backgrounded", () => {
-  // `session/cancel` leaves an in-flight call with no terminal frame (fixture
-  // 05's write), and "foreground subagent caller gone; auto-backgrounding
-  // (child keeps running)". A steer re-opens the turn and changes nothing.
+test("a foreground spawn its turn cut is not sent to the background: the CLI's cancel ends it", () => {
+  // `session/cancel` leaves the call with no terminal frame and CANCELS the
+  // child (fixture 23: `subagent_finished {status: "cancelled"}` 42 ms
+  // later). The run stays live, unbackgrounded, until the CLI says so.
   const grok = normalizer();
   startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
   grok.beginTurn();
-  const cut = grok.endTurn();
-  assert.deepEqual(backgroundings(cut), [["task.updated", "call-s1", true]]);
-  assert.deepEqual(agentRows(grok.endTurn()), [], "said once");
+  assert.deepEqual(agentRows(grok.endTurn()), [], "no task.updated {isBackgrounded}: nothing moved");
+  const cancelled = grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled"));
+  assert.deepEqual(statuses(taskRows(cancelled)), [["task.completed", "call-s1", "stopped"]]);
+  assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing left live");
+});
+
+test("a foreground spawn its turn cut with no CLI end stays live until Stop", () => {
+  // An older CLI without `subagent_finished`, or one that never sends it:
+  // Stop, the session's stop or the exit ends the run.
+  const grok = normalizer();
+  startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  grok.endTurn();
   const late = grok.handleSessionUpdate(spawnEnd("call-s1", "failed", "cancelled"));
-  assert.deepEqual(agentRows(late), [], "a cut call's failure is not the child's end");
-  const stopped = taskRows(grok.stopBackgroundTasks());
-  assert.deepEqual(statuses(stopped), [["task.completed", "call-s1", "stopped"]]);
+  assert.deepEqual(
+    statuses(taskRows(late)),
+    [["task.completed", "call-s1", "failed"]],
+    "a call that fails with its run still open fails the run it opened"
+  );
+  assert.deepEqual(grok.stopBackgroundTasks(), [], "…once");
 });
 
 test("resume_from reopens the settled agent: the same task, launched again by the new call", () => {
@@ -650,18 +742,20 @@ test("T3's kill answer ends the agent stopped — only a completed call whose ou
   assert.deepEqual(statuses(taskRows(killed)), [["task.completed", "call-bg", "stopped"]]);
 });
 
-test("the binary's kill fields end a run too — explicitly_killed or already_exited, once", () => {
+test("the captured kill answer ends a run — outcome killed; snapshot fields on it end nothing", () => {
+  // Fixture 18: `{task_id, outcome: "killed", message}` for a subagent and a
+  // shell alike. `explicitly_killed` / `kill_result_delivered` are
+  // `TaskSnapshot` fields of `_x.ai/task_completed`, never a kill answer's.
   const grok = normalizer();
   backgroundLaunched(grok);
   grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-sh", SHELL));
-  const idle = { explicitly_killed: false, already_exited: false, kill_result_delivered: true };
-  const noop = poll(grok, [{ task_id: SUB_B, ...idle }], "KillTask");
-  assert.deepEqual(agentRows(noop), [], "a kill that neither killed it nor found it exited");
-  const refused = poll(grok, [{ task_id: SUB_B, explicitly_killed: true }], "KillTask", "failed");
+  const snapshotFields = { explicitly_killed: true, kill_result_delivered: true };
+  assert.deepEqual(agentRows(poll(grok, [{ task_id: SUB_B, ...snapshotFields }], "KillTask")), []);
+  const refused = poll(grok, [{ task_id: SUB_B, outcome: "killed" }], "KillTask", "failed");
   assert.deepEqual(agentRows(refused), [], "a failed kill call ends nothing");
   const kills = [
-    { task_id: SUB_B, explicitly_killed: true, kill_result_delivered: true },
-    { task_id: SHELL, already_exited: true }
+    { task_id: SUB_B, outcome: "killed", message: "Subagent cancellation initiated" },
+    { task_id: SHELL, outcome: "already_exited" }
   ];
   assert.deepEqual(statuses(taskRows(poll(grok, kills, "KillTask"))), [
     ["task.completed", "call-bg", "stopped"],
@@ -670,15 +764,16 @@ test("the binary's kill fields end a run too — explicitly_killed or already_ex
   assert.deepEqual(agentRows(poll(grok, kills, "KillTask")), [], "never a second end");
 });
 
-test("already_exited ends a run with the answer's own terminal status, else stopped", () => {
+test("an already_exited kill outcome ends a run with the answer's own terminal status, else stopped", () => {
+  // The binary's other kill word, read as the `outcome` value (not captured).
   const cases: Array<[Record<string, unknown>, string]> = [
-    [{ already_exited: true }, "stopped"],
-    [{ already_exited: true, status: "running" }, "stopped"],
-    [{ already_exited: true, status: "completed" }, "completed"],
-    [{ already_exited: true, status: "failed" }, "failed"],
-    [{ already_exited: true, exit_code: 0 }, "completed"],
-    [{ already_exited: true, exit_code: 1 }, "failed"],
-    [{ explicitly_killed: true, status: "completed" }, "stopped"]
+    [{ outcome: "already_exited" }, "stopped"],
+    [{ outcome: "already_exited", status: "running" }, "stopped"],
+    [{ outcome: "already_exited", status: "completed" }, "completed"],
+    [{ outcome: "already_exited", status: "failed" }, "failed"],
+    [{ outcome: "already_exited", exit_code: 0 }, "completed"],
+    [{ outcome: "already_exited", exit_code: 1 }, "failed"],
+    [{ outcome: "killed", status: "completed" }, "stopped"]
   ];
   for (const [fields, expected] of cases) {
     const grok = normalizer();
@@ -774,7 +869,8 @@ test("a shell whose end the CLI reported never starts again — by a snapshot or
   const ends: Array<[string, string, (grok: GrokNormalizer) => RuntimeEvent[]]> = [
     ["its snapshot status", "completed", (grok) => listShell(grok, "completed")],
     ["a poll", "failed", (grok) => poll(grok, [{ task_id: SHELL, command: "c", exit_code: 1 }])],
-    ["a kill", "stopped", (grok) => poll(grok, [{ task_id: SHELL, explicitly_killed: true }], "KillTask")]
+    ["a kill", "stopped", (grok) => poll(grok, [{ task_id: SHELL, outcome: "killed" }], "KillTask")],
+    ["task_completed", "stopped", (grok) => grok.handleXaiNotification(TASK_COMPLETED, killedSnapshot(SHELL))]
   ];
   for (const [how, status, end] of ends) {
     const grok = normalizer();
@@ -1012,7 +1108,9 @@ test("every row naming a subagent carries the hour-long liveness TTL", () => {
   const grok = normalizer();
   const rows: RuntimeEvent[] = [];
   rows.push(...grok.handleSessionUpdate(spawnStart("call-s1", FIND_CALLERS)));
+  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers")));
   rows.push(...grok.endTurn());
+  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", progressed(SUB_A)));
   rows.push(...poll(grok, [{ task_id: SUB_A, command: "[subagent:explore] x", status: "running" }]));
   grok.beginTurn();
   rows.push(...grok.handleSessionUpdate(spawnStart("call-s2", FIND_CALLERS)));
@@ -1021,7 +1119,7 @@ test("every row naming a subagent carries the hour-long liveness TTL", () => {
   const tasks = agentRows(rows);
   assert.deepEqual(
     tasks.map((event) => event.type),
-    ["task.started", "task.updated", "task.started", "task.completed", "task.completed"]
+    ["task.started", "task.progress", "task.progress", "task.started", "task.completed", "task.completed"]
   );
   for (const row of tasks) {
     assert.equal(row.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS, row.type);
