@@ -172,7 +172,13 @@ interface BackgroundTrack {
  */
 interface ChildSession {
   readonly sessionId: string;
-  /** The roster task (agent) the session is: every row it produces is owned by it. */
+  /**
+   * The roster task (agent) the session is: every row it produces is owned by
+   * it. A resume is a NEW child session of the SAME task (fixture 17), so a
+   * segment's item id names the session as well — ingestion derives a
+   * message's id from its item's, and one keyed by the task alone appended the
+   * resumed run's words to the first run's settled message, in the log.
+   */
   readonly taskId: string;
   /** The open assistant text segment, and the turn it rides. */
   text?: { readonly itemId: string; readonly turnId: string | undefined };
@@ -960,7 +966,7 @@ export class GrokNormalizer {
       if (content.text.trim().length === 0) {
         return events;
       }
-      const itemId = `assistant:${this.runtimeId}:agent:${child.taskId}:segment:${child.nextSegment}`;
+      const itemId = `assistant:${this.runtimeId}:agent:${child.taskId}:${child.sessionId}:segment:${child.nextSegment}`;
       child.nextSegment += 1;
       child.text = { itemId, turnId };
       events.push(
@@ -1002,7 +1008,7 @@ export class GrokNormalizer {
     }
     if (child.reasoning === undefined) {
       child.reasoning = {
-        itemId: `reasoning:${this.runtimeId}:agent:${child.taskId}:${child.nextSegment}`,
+        itemId: `reasoning:${this.runtimeId}:agent:${child.taskId}:${child.sessionId}:${child.nextSegment}`,
         turnId
       };
       child.nextSegment += 1;

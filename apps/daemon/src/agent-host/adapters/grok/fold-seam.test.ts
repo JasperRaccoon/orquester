@@ -635,3 +635,91 @@ test("21 through the fold: after a Stop, the shell the CLI kept running holds mo
   assert.equal(roster.find((entry) => entry.id === SHELL_21)?.status, "interrupted");
   assert.equal(roster.find((entry) => entry.id === "call-7b249d13-32d3-4f24-a3ad-b582665c9c5a-1")?.status, "interrupted");
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 1: a resumed run's words are its own; more captures through the fold
+// ---------------------------------------------------------------------------
+
+function agentMessages(state: ReturnType<typeof fold>, agentId: string, role: "assistant" | "reasoning") {
+  return state.items.filter(
+    (item): item is Extract<(typeof state.items)[number], { kind: "message" }> =>
+      item.kind === "message" && item.agentId === agentId && item.role === role
+  );
+}
+
+test("17 through the fold: a resumed run's words are a message of its own, never the first run's", async () => {
+  const FIRST = "call-22f4fca9-389a-4943-a3bc-f130066bc4ce-0";
+  const s = captureSeam("17-subagent-resume-from.ndjson");
+  await s.feedThrough(s.events.length);
+  const state = s.state();
+  assert.deepEqual(
+    agentMessages(state, FIRST, "assistant").map((item) => item.text),
+    ["first-run", "resumed-ok"],
+    "the resume shares its task id with the run it continues, never its message"
+  );
+  const agent = state.roster.find((entry) => entry.id === FIRST);
+  assert.equal(agent?.status, "completed");
+  assert.equal(agent?.result, "resumed-ok");
+  assert.equal(agent?.activationCount, 2);
+});
+
+test("a resume in a later turn keeps each run's words and thinking apart, each on its own turn", async () => {
+  const s = seam();
+  const RUN_1 = "01a0d910-6f3a-7c33-b417-671c083d422c";
+  const RUN_2 = "01a0d910-856d-77c2-8e1f-8f1ebe0ce5a9";
+  const child = async (sessionId: string, update: Record<string, unknown>) =>
+    await s.feed(s.grok.handleSessionUpdate({ sessionId, update, _meta: { promptId: "child" } } as never));
+  const notify = async (update: Record<string, unknown>) =>
+    await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: SESSION, update }));
+  const spawned = (subagentId: string, extra: Record<string, unknown> = {}) => ({
+    sessionUpdate: "subagent_spawned",
+    subagent_id: subagentId,
+    child_session_id: subagentId,
+    description: "first run",
+    subagent_type: "general-purpose",
+    ...extra
+  });
+  const finished = (subagentId: string, output: string) => ({
+    sessionUpdate: "subagent_finished",
+    subagent_id: subagentId,
+    child_session_id: subagentId,
+    status: "completed",
+    output
+  });
+  const turnEnd = { sessionUpdate: "turn_completed", prompt_id: "child", stop_reason: "end_turn" };
+
+  await s.startTurn("turn-1");
+  await s.update(spawnStart("call-s1", { prompt: "p", description: "first run" }));
+  await notify(spawned(RUN_1));
+  await child(RUN_1, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "think-1" } });
+  await child(RUN_1, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "first-run" } });
+  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: RUN_1, update: turnEnd }));
+  await notify(finished(RUN_1, "first-run"));
+  await s.update(spawnEnd("call-s1", "completed", "first-run", completion(RUN_1)));
+  await s.feed(s.grok.endTurn());
+  await s.feed([s.grok.turnCompleted("turn-1", { stopReason: "end_turn" })]);
+
+  await s.startTurn("turn-2");
+  await s.update(spawnStart("call-s2", { prompt: "again", resume_from: RUN_1 }));
+  await notify(spawned(RUN_2, { resumed_from: RUN_1, effective_context_source: "resumed" }));
+  await child(RUN_2, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "think-2" } });
+  await child(RUN_2, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "second-run" } });
+  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: RUN_2, update: turnEnd }));
+  await notify(finished(RUN_2, "second-run"));
+
+  const state = s.state();
+  assert.deepEqual(
+    agentMessages(state, "call-s1", "assistant").map((item) => [item.text, item.turnId]),
+    [
+      ["first-run", "turn-1"],
+      ["second-run", "turn-2"]
+    ]
+  );
+  assert.deepEqual(
+    agentMessages(state, "call-s1", "reasoning").map((item) => [item.text, item.turnId]),
+    [
+      ["think-1", "turn-1"],
+      ["think-2", "turn-2"]
+    ]
+  );
+});
