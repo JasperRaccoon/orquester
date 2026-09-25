@@ -917,13 +917,16 @@ What the adapter builds from it (`adapters/grok/normalize.ts`, `subagentFromTool
   never starts again: a snapshot still listing it (an entry's status may be terminal, so a finished
   task can be listed) or a late frame naming it starts nothing (`endedTasks`). An end the adapter
   wrote itself (Stop, the exit, a task dropping out unannounced) is not the CLI's word — whether
-  `session/cancel` kills a background shell is not captured — so a later listing that says the task
-  still runs counts it live again, and a terminal one is the CLI's end, with no row. T3 skips a
-  subagent's entries; the adapter reads them, and — unlike T3 — starts no row for an id no launch
-  reported. Shells ride the same reader. A `background_tasks` entry or `_x.ai/task_backgrounded`
-  frame joined to the spawn (by the call's `tool_call_id`, or an id its launch reported) is the
-  agent too, never a shell row — whether the CLI sends either for a subagent is not captured. Stop,
-  the session's stop and the process's exit close whatever is left `stopped`.
+  `session/cancel` kills background work is not captured, and the CLI auto-backgrounds a child whose
+  caller is gone — so any CLI report that the task still runs (a snapshot listing, a start frame, a
+  poll answering `running`), shell or subagent, counts it live again under its own bound: its own
+  start row re-emitted, which the roster reads as a late delivery, then status-less re-arms. A
+  report of its end is the CLI's end, with no row. T3 skips a subagent's entries; the adapter reads
+  them, and — unlike T3 — starts no row for an id no launch reported. Shells ride the same reader. A
+  `background_tasks` entry or `_x.ai/task_backgrounded` frame joined to the spawn (by the call's
+  `tool_call_id`, or an id its launch reported) is the agent too, never a shell row — whether the
+  CLI sends either for a subagent is not captured. Stop, the session's stop and the process's exit
+  close whatever is left `stopped`.
 - **A run nobody asks about stops counting after an hour.** Every row naming a Grok agent carries
   `livenessTtlMs` = one hour (`GROK_AGENT_LIVENESS_TTL_MS`): the host's liveness registry counts it
   "working" — holding a deploy's drain — for at most an hour after the latest such row, a running

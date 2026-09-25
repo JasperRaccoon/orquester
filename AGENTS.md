@@ -995,13 +995,18 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `_x.ai/task_backgrounded` / `BackgroundTaskStarted` naming it starts nothing — a snapshot entry's
   status may be terminal, so a finished task can still be listed, and that listing started the shell
   again under its id, put it back in the liveness registry as a watch loop (holding a deploy's drain
-  up to its 10-minute TTL) and ended it a second time when it dropped out. An end the adapter wrote
-  itself (Stop, the session's stop, the exit, a task dropping out of a snapshot unannounced) is not
-  the CLI's word: whether `session/cancel` kills Grok's background shells is not captured, and never
-  letting a deploy kill running work outranks a duplicate row — so a later listing that says it
-  still runs, or a start frame, counts it live again (its start row re-emitted; the roster reads it
-  as a late delivery and keeps the end; liveness reads "monitoring" under its TTL), while a terminal
-  listing is the CLI's end, remembered, no row (`startsAgain`).
+  up to its 10-minute TTL) and ended it a second time when it dropped out. One rule, for shells and
+  subagents alike: an end the adapter wrote itself (Stop, the session's stop, the exit, a task
+  dropping out of a snapshot unannounced) is not the CLI's word — whether `session/cancel` kills
+  Grok's background work is not captured (the binary auto-backgrounds a child whose caller is gone),
+  and never letting a deploy kill running work outranks a duplicate row — so ANY report from the CLI
+  that the task still runs (a snapshot listing, a start frame, a poll answering `running`) counts it
+  live again: its own start row is re-emitted, naming its own launch, which the roster reads as a
+  late delivery (it keeps the adapter's end), while liveness counts it under its own bound (a
+  shell's watch-loop TTL, a subagent's 60-minute agent TTL), re-armed by further reports —
+  status-less rows, because a status would reopen the roster's row. A report of its end (a terminal
+  listing, a finished poll, a kill) is the CLI's end: remembered, no second row, final. A resting
+  (`idle`) listing says neither. (`shellReport`, `subagentReport`, `reviveShell`, `reviveSubagent`.)
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
