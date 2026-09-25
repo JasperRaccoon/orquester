@@ -1117,9 +1117,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   for a reply that already ended (a fork copies completed messages — fixture 10; a rewind also
   claims every prompt its fork copied, so a copy its dead run never completed opens nothing
   either), a compaction's summary (`summary: true`: the host's own `/compact` runs with no turn
-  open) or output after an interruption (the demux drops it first). The replay harness claims the
-  host's prompt ids up front for the same reason `sendTurn` does: a blocking `/command` is
-  recorded after its frames.
+  open — so a woken run that compacts first, its context already full, streams that summary before
+  the turn opens; README observation 27) or output after an interruption (the demux drops it
+  first). The replay harness claims the host's prompt ids up front for the same reason `sendTurn`
+  does: a blocking `/command` is recorded after its frames.
 - **Grok: shells are live work, a subagent is its `spawn_subagent` call plus the poll answers naming
   it, and a run nobody asks about stops counting after an hour.** (1) Grok stamps every task row of
   a background shell with the shell itself (`agentId` = `taskId`), and the liveness registry read

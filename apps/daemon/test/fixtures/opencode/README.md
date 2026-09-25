@@ -785,8 +785,16 @@ opened: a reply that has already ended — a fork copies a session's messages wh
 included (fixture 10), and a rewind claims every prompt its fork copied, so a copy its dead run
 never completed opens nothing either — a compaction's summary (`summary: true`, fixture 09: the
 host's own `/compact` runs one while no turn is open), and anything that follows an
-interruption, which the demux drops first. No capture holds a woken parent: the replay tests clone fixture 12's frames
-under new ids, and assert that no capture opens a turn of its own.
+interruption, which the demux drops first. No capture holds a woken parent: the replay tests
+clone fixture 12's frames under new ids, and assert that no capture opens a turn of its own.
+
+One edge stays open, read from the same source: a run whose last answer already overflows the
+model's context compacts FIRST (`SessionPrompt.run` → `SessionCompaction.create {auto: true}`),
+before any reply. Woken into such a run, the parent's compaction summary streams while no turn is
+open — as the host's own `/compact` does — and the turn opens at the reply that follows it, named
+by the `continue` prompt the compaction writes. Telling that compaction from the host's
+(`auto: false` on its `compaction` part, fixture 09) would take tracking the prompt's parts; no
+capture shows it.
 
 ### 28. A running `bash` part restates its whole output on every frame
 
