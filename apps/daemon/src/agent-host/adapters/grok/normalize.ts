@@ -257,6 +257,30 @@ function pollLifecycle(
 }
 
 /**
+ * How a COMPLETED kill answer's entry ends the task it names, or `undefined`
+ * when it ends nothing. T3's shape: `outcome: "killed"` (its reader and
+ * tests). The binary's own field names, not captured: `KillTaskResult` has
+ * three fields, and beside `TaskNotFound`/`MultiResult` the 1.0.34 strings
+ * list `already_exited`, `explicitly_killed` and `kill_result_delivered` — so
+ * `explicitly_killed: true` is a kill, and `already_exited: true` ends the
+ * task too (the tool "reports success if the task was killed or had already
+ * exited"), with the answer's own terminal status when it carries one.
+ * `kill_result_delivered` says nothing about the task.
+ */
+function killEnd(
+  result: Record<string, unknown>
+): "completed" | "failed" | "stopped" | undefined {
+  if (result["outcome"] === "killed" || result["explicitly_killed"] === true) {
+    return "stopped";
+  }
+  if (result["already_exited"] !== true) {
+    return undefined;
+  }
+  const lifecycle = pollLifecycle(result["status"], result["exit_code"]);
+  return lifecycle === undefined || lifecycle === "running" ? "stopped" : lifecycle;
+}
+
+/**
  * How many launches, agents and subagent ids the normaliser remembers for
  * `resume_from`, oldest forgotten first (a live agent never is). A resume of a
  * forgotten id starts a row of its own — the same as after a host restart.
@@ -1655,13 +1679,14 @@ export class GrokNormalizer {
    * exit_code, output}`; `{type: "KillTask", Result | MultiResult}` with
    * `outcome: "killed"` (T3's reader and tests; the binary names the same
    * tags — `TaskOutputResult`, `MultiTaskOutputResult`, `KillTaskResult`; not
-   * captured here). Answers arrive between turns too: the CLI wakes the parent
-   * when a background task finishes.
+   * captured here) or the binary's own kill fields ({@link killEnd}). Answers
+   * arrive between turns too: the CLI wakes the parent when a background task
+   * finishes.
    *
    * - `running` re-arms the task's liveness with a progress row, and ends
    *   nothing; a finished status ends a live run once, with `output` as a
-   *   subagent's result (a shell's summary is its first line, as T3's);
-   *   `killed` (a completed kill call only) ends it `stopped`.
+   *   subagent's result (a shell's summary is its first line, as T3's); a
+   *   completed kill call ends it as {@link killEnd} says.
    * - An id this session never named — an older process's task, a subagent
    *   whose id no launch reported — starts nothing: T3 starts a row for it,
    *   but after a host restart that would name work the first load already
@@ -1682,8 +1707,9 @@ export class GrokNormalizer {
         continue;
       }
       if (output["type"] === "KillTask") {
-        if (callCompleted && result["outcome"] === "killed") {
-          events.push(...this.endBackgroundTask(id, "stopped", undefined, raw));
+        const end = callCompleted ? killEnd(result) : undefined;
+        if (end !== undefined) {
+          events.push(...this.endBackgroundTask(id, end, undefined, raw));
         }
         continue;
       }

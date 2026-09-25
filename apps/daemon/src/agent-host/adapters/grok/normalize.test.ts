@@ -14,7 +14,8 @@
  * README observation 36). The poll and kill answers (`TaskOutput`,
  * `KillTask`) and a spawn's text answer (`Text`) take the shapes T3's own
  * reader and tests use (`XAiBackgroundTasks.ts`); the binary names the same
- * tags; none is captured here.
+ * tags, and a kill's `explicitly_killed` / `already_exited` /
+ * `kill_result_delivered` are the binary's field names; none is captured here.
  */
 
 import test from "node:test";
@@ -640,13 +641,55 @@ test("every status spelling and exit code T3's reader maps, in a MultiResult", (
   }
 });
 
-test("a kill ends the agent stopped — only when the call completed and the outcome is killed", () => {
+test("T3's kill answer ends the agent stopped — only a completed call whose outcome is killed", () => {
   const grok = normalizer();
   backgroundLaunched(grok);
   assert.deepEqual(agentRows(poll(grok, [{ task_id: SUB_B, outcome: "killed" }], "KillTask", "failed")), []);
-  assert.deepEqual(agentRows(poll(grok, [{ task_id: SUB_B, outcome: "already_exited" }], "KillTask")), []);
+  assert.deepEqual(agentRows(poll(grok, [{ task_id: SUB_B, outcome: "error" }], "KillTask")), []);
   const killed = poll(grok, [{ task_id: SUB_B, outcome: "killed" }], "KillTask");
   assert.deepEqual(statuses(taskRows(killed)), [["task.completed", "call-bg", "stopped"]]);
+});
+
+test("the binary's kill fields end a run too — explicitly_killed or already_exited, once", () => {
+  const grok = normalizer();
+  backgroundLaunched(grok);
+  grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-sh", SHELL));
+  const idle = { explicitly_killed: false, already_exited: false, kill_result_delivered: true };
+  const noop = poll(grok, [{ task_id: SUB_B, ...idle }], "KillTask");
+  assert.deepEqual(agentRows(noop), [], "a kill that neither killed it nor found it exited");
+  const refused = poll(grok, [{ task_id: SUB_B, explicitly_killed: true }], "KillTask", "failed");
+  assert.deepEqual(agentRows(refused), [], "a failed kill call ends nothing");
+  const kills = [
+    { task_id: SUB_B, explicitly_killed: true, kill_result_delivered: true },
+    { task_id: SHELL, already_exited: true }
+  ];
+  assert.deepEqual(statuses(taskRows(poll(grok, kills, "KillTask"))), [
+    ["task.completed", "call-bg", "stopped"],
+    ["task.completed", SHELL, "stopped"]
+  ]);
+  assert.deepEqual(agentRows(poll(grok, kills, "KillTask")), [], "never a second end");
+});
+
+test("already_exited ends a run with the answer's own terminal status, else stopped", () => {
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ already_exited: true }, "stopped"],
+    [{ already_exited: true, status: "running" }, "stopped"],
+    [{ already_exited: true, status: "completed" }, "completed"],
+    [{ already_exited: true, status: "failed" }, "failed"],
+    [{ already_exited: true, exit_code: 0 }, "completed"],
+    [{ already_exited: true, exit_code: 1 }, "failed"],
+    [{ explicitly_killed: true, status: "completed" }, "stopped"]
+  ];
+  for (const [fields, expected] of cases) {
+    const grok = normalizer();
+    backgroundLaunched(grok);
+    const ended = only(poll(grok, [{ task_id: SUB_B, ...fields }], "KillTask"), "task.completed");
+    assert.deepEqual(
+      ended.map((event) => event.payload.status),
+      [expected],
+      JSON.stringify(fields)
+    );
+  }
 });
 
 test("an answer arriving between turns ends the agent on the turn it ran in", () => {
