@@ -410,7 +410,7 @@ test("update_session: a summary still saying continuing after the goal was pause
 });
 
 test("update_session: a goal an Orquester update holds refuses the switch with its own advice before anything is written; mid-turn, a mode change is told to wait", async (t) => {
-  const HELD_SWITCH_REFUSAL = "The goal is held for an Orquester update and resumes by itself once the agent host has restarted. Switch accounts after that, or take the goal back first: send_message \"/goal pause\" keeps it paused.";
+  const HELD_SWITCH_REFUSAL = "The goal is held for an Orquester update and resumes by itself once the agent host has restarted, when it continues again. Take it back first — send_message \"/goal pause\" keeps it paused — then switch accounts.";
   // Goals §5.7: the host reports a held goal `paused` and continuing, and refuses the switch itself.
   const held = await harness([chatSummary(summaryGoal("paused", true))], snapshot(threadGoal("paused"))); t.after(held.close);
   held.api.on("PUT", "/api/sessions/c1", { status: 200, body: chatSummary({ title: "Renamed" }) }).on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
@@ -432,6 +432,8 @@ test("the goal cases are in the descriptions: Stop pauses a continuing goal firs
   assert.match(tool("interrupt_session").description, /\(Codex\), Stop pauses the goal first/);
   assert.match(tool("interrupt_session").description, /send_message "\/goal resume"/);
   assert.match(tool("compact_session").description, /"Pause the goal before compacting\.": interrupt_session pauses it and stops the turn\./);
+  // Goals §5.7: the host gives a held goal the plain running-turn refusal, which the tool passes through.
+  assert.match(tool("compact_session").description, /Orquester update holds \(heldForUpdate\) starts no next turn, so it gets the plain refusal: wait for the turn\./);
   assert.match(tool("update_session").description, /refused while a goal continues/);
 });
 

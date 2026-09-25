@@ -115,6 +115,16 @@ export interface ChatAccountSwitchState {
    */
   goalContinuing?: boolean;
   /**
+   * The thread's goal is HELD for an Orquester update — `isGoalHeldForUpdate`
+   * (`goal.logic.ts`, goals §5.7), the goal chip's "paused for update". It
+   * closes the chip like a continuing goal, but its pause is the deploy's,
+   * so the reason names the hold instead of asking for a pause. Absent reads
+   * as no.
+   *
+   * *Added with the held goal's own refusal; additive.*
+   */
+  goalHeldForUpdate?: boolean;
+  /**
    * The provider is compacting the conversation (the store's
    * `isCompacting`). The host refuses a switch for it first, ahead of a
    * continuing goal. Absent reads as no.
@@ -202,6 +212,14 @@ export function isGoalContinuing(input: {
 /** The host's own words for goals §5.5's refusal (`identitySwitchRefusal`). */
 export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching accounts.";
 
+/**
+ * The host's own words for a goal held for an Orquester update (goals §5.7,
+ * `identitySwitchRefusal`): paused already, set going again by the next agent
+ * host, and taken back — paused for good — by the user's own `/goal pause`.
+ */
+export const GOAL_HELD_SWITCH_REFUSAL =
+  "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts.";
+
 /** The host's own words for a switch refused during a compaction (`identitySwitchRefusal`). */
 export const COMPACTION_SWITCH_REFUSAL =
   "Wait for the context compaction to finish before switching accounts.";
@@ -214,7 +232,9 @@ export const COMPACTION_SWITCH_REFUSAL =
  * A continuing goal closes it too (goals §5.5): a turn the provider starts
  * under the old account would be killed by the next message's account
  * restart. Pausing the goal opens it again, and the host re-creates the goal
- * on the new account (`carryGoal`).
+ * on the new account (`carryGoal`). So does a goal a deploy holds (§5.7) —
+ * continuing as well, and checked on its own as the host checks it, so a
+ * reason the chip names is always a closed chip's.
  */
 export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
   return (
@@ -225,6 +245,7 @@ export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
     state.connection === "synchronized" &&
     !state.backgroundLive &&
     state.goalContinuing !== true &&
+    state.goalHeldForUpdate !== true &&
     state.compacting !== true
   );
 }
@@ -232,13 +253,16 @@ export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
 /**
  * The reason the chip names, in the host's own order and words
  * (`identitySwitchRefusal`), so the chip and a refused switch never disagree:
- * a running compaction first, then a continuing goal — which only a pause
- * ends (goals §5.5); between its turns idle never comes, so it outranks a
- * running turn. `null` otherwise, where the chip's own "available when the
- * agent is idle" is the truth.
+ * a running compaction first, then a goal held for an Orquester update —
+ * paused already, so it names the hold and the `/goal pause` that takes it
+ * back (goals §5.7) — then a continuing goal, which only a pause ends
+ * (§5.5); between its turns idle never comes, so both outrank a running
+ * turn. `null` otherwise, where the chip's own "available when the agent is
+ * idle" is the truth.
  */
 export function chatAccountSwitchRefusal(state: ChatAccountSwitchState): string | null {
   if (state.compacting === true) return COMPACTION_SWITCH_REFUSAL;
+  if (state.goalHeldForUpdate === true) return GOAL_HELD_SWITCH_REFUSAL;
   return state.goalContinuing === true ? GOAL_CONTINUING_SWITCH_REFUSAL : null;
 }
 

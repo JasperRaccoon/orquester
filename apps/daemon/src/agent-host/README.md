@@ -103,7 +103,9 @@ keeps reporting it as continuing. The request is a lease (`GOAL_HOLD_LEASE_MS`) 
 while it waits; when it runs out with this host still up — or a held goal has sat idle behind
 other work for `GOAL_HOLD_IDLE_MS` — the host resumes what it held itself. Every such resume, and
 the next host's, is conditional (`onlyIfPaused`): the provider, not the fold, says whether the
-goal is still paused.
+goal is still paused. A host from before the hold cannot pause a goal, so the daemon stops such a
+goal's session at a turn boundary instead, and this host resumes it without a turn when the daemon
+hands it over (`POST /goals/resume-sessions` → `resumeGoalSessionsAfterHandover`).
 
 ## Rules that apply to everything under this directory
 

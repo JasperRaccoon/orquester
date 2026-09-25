@@ -50,9 +50,10 @@ function goalHeldForUpdate(s: SessionSummary, snap: ThreadSnapshotPayload): bool
 
 /** The GUI's `canSwitchChatAccount` / the host's `identitySwitchRefusal`; the host stays authoritative. */
 function switchRefusal(s: SessionSummary, snap: ThreadSnapshotPayload): string | null {
-  // Goals §5.7: the host refuses the switch while it holds the goal, which it will set going again by itself. Any
-  // `/goal` but `status` takes the goal back from the hold and leaves it paused, and a paused goal may switch.
-  if (goalHeldForUpdate(s, snap)) return "The goal is held for an Orquester update and resumes by itself once the agent host has restarted. Switch accounts after that, or take the goal back first: send_message \"/goal pause\" keeps it paused.";
+  // Goals §5.7: the host refuses the switch while it holds the goal, which it will set going again by itself — and
+  // then it continues, and is refused anyway: waiting never opens the switch. Any `/goal` but `status` takes the goal
+  // back from the hold and leaves it paused, and a paused goal may switch (the host's `GOAL_HELD_SWITCH_REFUSAL`).
+  if (goalHeldForUpdate(s, snap)) return "The goal is held for an Orquester update and resumes by itself once the agent host has restarted, when it continues again. Take it back first — send_message \"/goal pause\" keeps it paused — then switch accounts.";
   // Goals §5.5, ahead of the turn check as on the host: between a continuing goal's turns idle never comes, so "wait for
   // the turn" is advice that never comes true — and a switch let through between two of them would be the host's 409
   // only after the other fields were written. A `/goal pause` only stops the NEXT turn; interrupt_session stops both.
@@ -564,7 +565,7 @@ const revertSession = defineTool({
 const compactSession = defineTool({
   name: "compact_session",
   title: "Compact context",
-  description: "Ask the agent to compact its context window (the GUI's 'Compact context'). Refused on an empty conversation and while a turn runs — while a Codex goal continues, with \"Pause the goal before compacting.\": interrupt_session pauses it and stops the turn.",
+  description: "Ask the agent to compact its context window (the GUI's 'Compact context'). Refused on an empty conversation and while a turn runs — while a Codex goal continues, with \"Pause the goal before compacting.\": interrupt_session pauses it and stops the turn. A goal an Orquester update holds (heldForUpdate) starts no next turn, so it gets the plain refusal: wait for the turn.",
   input: { sessionId: sessionIdField },
   // Not idempotent: a retry compacts again.
   annotations: MUTATING,

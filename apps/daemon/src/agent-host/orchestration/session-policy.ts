@@ -147,10 +147,29 @@ export interface IdentitySwitchState {
    * read `stopped` or `error`), which reads as continuing.
    */
   goalContinuing: boolean;
+  /**
+   * The thread's goal is HELD for an Orquester update (goals §5.7): a
+   * deploy's drain paused it between two of its turns, and the next host —
+   * or this one, once the lease runs out — sets it going again by itself. It
+   * reads as continuing, but it is paused already, so "pause the goal" is the
+   * wrong advice: the user's own `/goal pause` takes it back instead, and the
+   * goal then stays paused, continues no more and may switch. A held goal the
+   * host has just set going again is not held any more — it continues.
+   */
+  goalHeldForUpdate: boolean;
 }
 
 /** The refusal for a continuing goal — the composer mirror shows these very words. */
 export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching accounts.";
+
+/**
+ * The refusal for a goal held for an Orquester update (goals §5.7) — the
+ * composer mirror shows these very words. It says what waiting would bring
+ * (the goal going again, which refuses the switch too) and what takes the
+ * goal back.
+ */
+export const GOAL_HELD_SWITCH_REFUSAL =
+  "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts.";
 
 /**
  * The refusal message for an account switch, or `null` when the thread is idle
@@ -163,7 +182,12 @@ export function identitySwitchRefusal(state: IdentitySwitchState): string | null
   }
   // Ahead of the turn check: between a continuing goal's turns idle never
   // comes, so waiting is the wrong advice — pausing the goal is the one that
-  // works. Behind the compaction, which a goal command waits for too.
+  // works. Behind the compaction, which a goal command waits for too. A held
+  // goal continues as well, but its pause is the deploy's: its own words say
+  // how to take it back (goals §5.7).
+  if (state.goalHeldForUpdate) {
+    return GOAL_HELD_SWITCH_REFUSAL;
+  }
   if (state.goalContinuing) {
     return GOAL_CONTINUING_SWITCH_REFUSAL;
   }

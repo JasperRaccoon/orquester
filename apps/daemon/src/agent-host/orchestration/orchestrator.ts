@@ -605,6 +605,18 @@ export interface Orchestrator {
    */
   holdContinuingGoals(): Promise<string[]>;
 
+  /**
+   * Goals §5.7, `POST /goals/resume-sessions`: the other half of a legacy
+   * handover. The daemon stopped these Codex threads' sessions at a turn
+   * boundary on a host from before the goal hold — which cannot pause a goal —
+   * so a deploy could go ahead, their goals still active in Codex's own
+   * store. Each is marked as a §5.5 handover marks a continuing goal
+   * (`resumeGoalAfterRestart`) and its session resumed after the gate
+   * WITHOUT a turn: Codex continues the goal by itself. Answers the threads
+   * it took — a thread this host does not know, or one deleted, is skipped.
+   */
+  resumeGoalSessionsAfterHandover(threadIds: readonly string[]): Promise<string[]>;
+
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
   clearContinuationMarkers(threadIds: readonly string[]): Promise<void>;
@@ -2568,10 +2580,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     if (session.status === "starting" || session.status === "running" || turnIsActive(runtime)) {
       // Goals §5.5: under a continuing goal, waiting for the turn to finish is
-      // useless advice — the provider starts the next one by itself.
+      // useless advice — the provider starts the next one by itself. Except a
+      // goal held for an Orquester update (§5.7): it is paused already and
+      // starts no next turn, so this turn ending is exactly what to wait for.
       const head = headOf(runtime);
+      const adapter = head === null ? undefined : options.adapters.get(head.adapter);
       throw compactionUnavailable(
-        head !== null && goalContinuingNow(runtime, head, options.adapters.get(head.adapter))
+        head !== null && goalContinuingNow(runtime, head, adapter) && !goalHeld(runtime, adapter)
           ? "Pause the goal before compacting."
           : "Context compaction is unavailable while a provider turn is running."
       );
@@ -3544,6 +3559,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
     const session = currentSession(runtime);
     const pending = runtime.state.pending ?? { approvals: [], userInputs: [] };
+    const adapter = options.adapters.get(head.adapter);
     const refusal = identitySwitchRefusal({
       status: session.status,
       activeTurnId: session.activeTurnId,
@@ -3558,7 +3574,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // and `carryGoal` re-creates the goal on the new account; except one
       // whose resume mark is still pending (after a handover it may read
       // `stopped` or `error`), which reads as continuing and is refused.
-      goalContinuing: goalContinuingNow(runtime, head, options.adapters.get(head.adapter))
+      goalContinuing: goalContinuingNow(runtime, head, adapter),
+      // Goals §5.7: a held goal continues too, but it is paused already —
+      // the refusal names the hold, and the user's own `/goal pause` that
+      // takes it back. One the host has just set going again
+      // ({@link goalJustResumed}) is not held: it gets the pause advice.
+      goalHeldForUpdate: goalHeld(runtime, adapter)
     });
     if (refusal !== null) {
       throw commandRejected(refusal);
@@ -5705,6 +5726,48 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     await resumeHeldGoal(runtime, adapter);
   };
 
+  /** See {@link Orchestrator.resumeGoalSessionsAfterHandover}. */
+  const resumeGoalSessionsAfterHandover = async (
+    threadIds: readonly string[]
+  ): Promise<string[]> => {
+    const taken: string[] = [];
+    for (const threadId of new Set(threadIds)) {
+      if (hostStopping()) break;
+      // Off `meta.json` first, as the reconcile decides: an unknown or unsafe
+      // id is never folded, let alone given a runtime.
+      const persisted = await store.loadHead(threadId, { seedRuntime: false }).catch(() => null);
+      if (persisted === null) continue;
+      let runtime: ThreadRuntime;
+      try {
+        runtime = await loadRuntime(threadId);
+      } catch (error) {
+        logger.warn(`agent-host: could not load ${threadId} to resume its goal session`, error);
+        continue;
+      }
+      if (runtime.deleted) continue;
+      // On the effect queue, so the mark lands between the thread's own
+      // effects; `resumeGoalSession` clears it — on success, on failure, for
+      // a closed tab — exactly as it clears a handover's.
+      await runEffect(runtime, async () => {
+        if (runtime.deleted) return;
+        runtime.resumeGoalAfterRestart = true;
+        await saveHeadNow(runtime);
+      });
+      if (runtime.deleted) continue;
+      goalResumePending.add(threadId);
+      taken.push(threadId);
+    }
+    if (taken.length > 0) {
+      logger.info("agent-host: resuming Codex goal sessions a legacy handover stopped", {
+        threads: taken.length
+      });
+    }
+    // After the gate, a macrotask later — and a no-op before it, the gate
+    // starting them then.
+    startGoalResumes();
+    return taken;
+  };
+
   /**
    * Goals §5.7, the user wins: the user's own action on a thread's goal — a
    * host `/goal` command, a Stop, a session stop, deleting the thread — takes
@@ -5829,6 +5892,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     activeTurnThreadIds,
     backgroundWorkThreadIds,
     holdContinuingGoals,
+    resumeGoalSessionsAfterHandover,
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,

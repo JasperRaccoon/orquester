@@ -87,6 +87,13 @@ interface Fixture {
   holdRequests: Array<{ body: string; headers: IncomingMessage["headers"] }>;
   /** What the fake host answers `POST /goals/hold`. */
   holdAnswer: { status: number; body: unknown };
+  /** Agent goals §5.7 legacy handover: the snapshot the fake host answers per thread (`GET /threads/:id/thread`). */
+  snapshots: Record<string, { status: number; body: unknown }>;
+  /** Every `POST /threads/:id/session/stop` the fake host received. */
+  sessionStops: Array<{ threadId: string; body: string }>;
+  /** Every `POST /goals/resume-sessions` the fake host received, and its answer. */
+  resumeRequests: string[];
+  resumeAnswer: { status: number; body: unknown };
   /** Every line the service and its supervisor logged. */
   logs: Array<{ level: "log" | "warn" | "error"; text: string }>;
   cleanup(): Promise<void>;
@@ -156,6 +163,10 @@ async function makeFixture(
     health: options.health ?? {},
     holdRequests: [],
     holdAnswer: { status: 200, body: { heldThreadIds: [] } },
+    snapshots: {},
+    sessionStops: [],
+    resumeRequests: [],
+    resumeAnswer: { status: 200, body: { threadIds: [] } },
     logs: [],
     service: null as unknown as AgentChatService,
     cleanup: async () => {
@@ -204,6 +215,27 @@ async function makeFixture(
         res
           .writeHead(state.holdAnswer.status, { "content-type": "application/json" })
           .end(JSON.stringify(state.holdAnswer.body));
+        return;
+      }
+      const snapshot = /^\/threads\/([^/]+)\/thread$/.exec(req.url ?? "");
+      if (snapshot && req.method === "GET" && state.snapshots[decodeURIComponent(snapshot[1]!)]) {
+        const answer = state.snapshots[decodeURIComponent(snapshot[1]!)]!;
+        res
+          .writeHead(answer.status, { "content-type": "application/json" })
+          .end(JSON.stringify(answer.body));
+        return;
+      }
+      const sessionStop = /^\/threads\/([^/]+)\/session\/stop$/.exec(req.url ?? "");
+      if (sessionStop && req.method === "POST") {
+        state.sessionStops.push({ threadId: decodeURIComponent(sessionStop[1]!), body });
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ seq: 7 }));
+        return;
+      }
+      if (req.url === "/goals/resume-sessions" && req.method === "POST") {
+        state.resumeRequests.push(body);
+        res
+          .writeHead(state.resumeAnswer.status, { "content-type": "application/json" })
+          .end(JSON.stringify(state.resumeAnswer.body));
         return;
       }
       const refresh = /^\/providers\/([^/]+)\/refresh$/.exec(req.url ?? "");
@@ -801,6 +833,8 @@ const STALE_BUSY_HOST = {
 test("agent goals §5.7: a blocked deploy drain posts the goal hold, and reads the answer field-wise", async () => {
   const f = await makeFixture(CLAUDEX, null, { health: STALE_BUSY_HOST });
   try {
+    // Boot adoption never waits for the answer; the request itself went out.
+    await f.service.supervisor.goalHoldSettled();
     assert.equal(f.holdRequests.length, 1, "boot adoption found the drain blocked and asked at once");
     assert.equal(f.holdRequests[0]!.body, "{}");
     assert.equal(f.holdRequests[0]!.headers["content-type"], "application/json");
@@ -810,6 +844,7 @@ test("agent goals §5.7: a blocked deploy drain posts the goal hold, and reads t
     // Entries that are not thread ids are dropped, never trusted.
     f.holdAnswer = { status: 200, body: { heldThreadIds: ["thread-G", 7, null, "thread-H"] } };
     await f.service.supervisor.checkHealth();
+    await f.service.supervisor.goalHoldSettled();
     assert.equal(f.holdRequests.length, 2, "the health tick renews the lease");
     const said = (): string[] =>
       f.logs.filter((line) => line.level === "log" && /goal/.test(line.text)).map((line) => line.text);
@@ -818,6 +853,7 @@ test("agent goals §5.7: a blocked deploy drain posts the goal hold, and reads t
     // Anything but an array reads as nothing held.
     f.holdAnswer = { status: 200, body: { heldThreadIds: "thread-G" } };
     await f.service.supervisor.checkHealth();
+    await f.service.supervisor.goalHoldSettled();
     assert.deepEqual(said().slice(1), ["agent host no longer holding goals for the restart"]);
   } finally {
     await f.cleanup();
@@ -831,8 +867,11 @@ test("agent goals §5.7: a host without the route is asked once; any other refus
       status: 503,
       body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is stopping." } }
     };
-    await f.service.supervisor.checkHealth();
-    await f.service.supervisor.checkHealth();
+    await f.service.supervisor.goalHoldSettled();
+    for (let tick = 0; tick < 2; tick += 1) {
+      await f.service.supervisor.checkHealth();
+      await f.service.supervisor.goalHoldSettled();
+    }
     assert.equal(f.holdRequests.length, 3, "a failed renewal is simply asked again");
     const failures = f.logs.filter(
       (line) => line.level === "warn" && /goal hold request failed/.test(line.text)
@@ -845,10 +884,61 @@ test("agent goals §5.7: a host without the route is asked once; any other refus
       status: 404,
       body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /goals/hold." } }
     };
-    await f.service.supervisor.checkHealth();
-    await f.service.supervisor.checkHealth();
+    for (let tick = 0; tick < 2; tick += 1) {
+      await f.service.supervisor.checkHealth();
+      await f.service.supervisor.goalHoldSettled();
+    }
     assert.equal(f.holdRequests.length, 4, "an older host is asked once, then remembered");
     assert.equal(f.service.supervisor.status().pendingVersionRestart, true, "and the deploy waits as before");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent goals §5.7, a host from before the hold: the snapshot read, the session stop and the hand-over reach the host as sent", async () => {
+  const f = await makeFixture(CLAUDEX, null, { health: STALE_BUSY_HOST });
+  try {
+    f.holdAnswer = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /goals/hold." } } };
+    await f.service.supervisor.goalHoldSettled();
+    await f.service.supervisor.checkHealth();
+    await f.service.supervisor.goalHoldSettled();
+    // A Codex goal loop whose next turn has just begun, as the host answers
+    // `GET /threads/:id/thread` — another version's snapshot, read field-wise.
+    const at = (ms: number): string => new Date(Date.now() - ms).toISOString();
+    f.snapshots["thread-G"] = {
+      status: 200,
+      body: {
+        kind: "snapshot",
+        thread: {
+          head: { adapter: "codex", session: { status: "running", activeTurnId: "t2" } },
+          turns: [
+            { turnId: "t1", state: "completed", startedAt: at(60_000), completedAt: at(1_050) },
+            { turnId: "t2", state: "running", startedAt: at(1_000) }
+          ],
+          pending: { approvals: [], userInputs: [] }
+        }
+      }
+    };
+    await f.service.supervisor.checkHealth();
+    assert.equal(f.sessionStops.length, 1, "the goal's session was stopped");
+    assert.equal(f.sessionStops[0]!.threadId, "thread-G");
+    assert.match(
+      (JSON.parse(f.sessionStops[0]!.body) as { commandId: string }).commandId,
+      /^goal-handover:/,
+      "a command like any other, with its own id"
+    );
+    // The replacement answers on the socket (the same fake, now current):
+    // adopted, it is handed the stopped session.
+    f.health = { protocolVersion: AGENT_HOST_PROTOCOL_VERSION, hostInstanceId: "host-2", activeTurnThreadIds: [], backgroundWorkThreadIds: [] };
+    f.resumeAnswer = { status: 200, body: { threadIds: ["thread-G", 7] } };
+    await f.service.supervisor.checkHealth();
+    assert.deepEqual(f.resumeRequests.map((body) => JSON.parse(body) as unknown), [{ threadIds: ["thread-G"] }]);
+    assert.ok(
+      f.logs.some((line) => /resuming 1 Codex goal session\(s\) the restart stopped/.test(line.text)),
+      "said once taken"
+    );
+    await f.service.supervisor.checkHealth();
+    assert.equal(f.resumeRequests.length, 1, "taken: never asked again");
   } finally {
     await f.cleanup();
   }

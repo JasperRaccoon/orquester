@@ -45,7 +45,9 @@ import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush } fr
 import {
   AgentHostSupervisor,
   buildAgentHostEnv,
+  legacyGoalTurnOf,
   type DirectHostHandle,
+  type LegacyGoalTurn,
   type ProbeOutcome,
   type SupervisorTmux
 } from "./supervisor.ts";
@@ -79,12 +81,22 @@ const PROVIDER_REFRESH_DEADLINE_MS = 30_000;
 /**
  * Deadline on the agent goals §5.7 `POST /goals/hold`. Short: the host only
  * pauses goals (each bounded by its own `goalPauseMs`) and writes a few head
- * files, while the supervisor awaits the answer inside its transition queue —
- * on boot adoption's evaluation too — so a slow host must never hold
- * supervision up for long. A missed renewal costs nothing: the next
- * evaluation asks again, well inside the host's lease.
+ * files. The supervisor never awaits it — one request in flight at a time —
+ * so it bounds only how long a request can occupy that slot. A missed
+ * renewal costs nothing: the next evaluation asks again, well inside the
+ * host's lease.
  */
 const GOAL_HOLD_DEADLINE_MS = 5_000;
+
+/**
+ * Deadlines on the agent goals §5.7 legacy handover's host calls (a host from
+ * before the goal hold): a thread snapshot, a session stop, and — on the
+ * replacement — the resume of the sessions stopped. The supervisor awaits the
+ * first two inside its transition queue, never on boot adoption (the fallback
+ * runs only once that host has answered its hold with a 404), so each stays
+ * short; a missed one is simply tried on the next evaluation.
+ */
+const LEGACY_GOAL_CALL_DEADLINE_MS = 5_000;
 
 /** One launch-env contribution, mirroring `index.ts`'s `LaunchEnv`. */
 export interface ChatLaunchEnv {
@@ -225,6 +237,14 @@ export class AgentChatService {
         // Agent goals §5.7: asked on every blocked drain evaluation while a
         // deploy waits, which is what keeps the host's hold lease alive.
         requestHoldGoals: () => this.requestHostHoldGoals(),
+        // …and, on a host from before that route, the legacy handover's calls.
+        inspectLegacyGoalTurn: (threadId) => this.inspectLegacyGoalTurn(threadId),
+        threadAdapter: (threadId) => {
+          const summary = this.chat.get(threadId);
+          return summary ? (this.opts.registryEntry(summary.refId)?.chat?.adapter ?? null) : null;
+        },
+        stopThreadSession: (threadId) => this.requestHostSessionStop(threadId),
+        resumeGoalSessions: (threadIds) => this.requestHostResumeGoalSessions(threadIds),
         tmux: opts.tmux,
         spawnDirect: (bin, args, env) => {
           if (opts.spawnDirect) {
@@ -1008,6 +1028,57 @@ export class AgentChatService {
     }
     const held = response.value?.heldThreadIds;
     return Array.isArray(held) ? held.filter((id): id is string => typeof id === "string") : [];
+  }
+
+  /** Agent goals §5.7 legacy handover: one blocking thread's running turn, off the host's own snapshot. */
+  private async inspectLegacyGoalTurn(threadId: string): Promise<LegacyGoalTurn | null> {
+    try {
+      const response = await this.client.json<unknown>("GET", agentHostRoutes.read(threadId), undefined, {
+        timeoutMs: LEGACY_GOAL_CALL_DEADLINE_MS
+      });
+      return response.status === 200 ? legacyGoalTurnOf(response.value) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Agent goals §5.7 legacy handover: stop one Codex goal thread's provider session. */
+  private async requestHostSessionStop(threadId: string): Promise<void> {
+    const response = await this.client.json<{ error?: { message?: unknown } }>(
+      "POST",
+      agentHostRoutes.sessionStop(threadId),
+      { commandId: `goal-handover:${randomUUID()}` },
+      { timeoutMs: LEGACY_GOAL_CALL_DEADLINE_MS }
+    );
+    if (response.status < 200 || response.status >= 300) {
+      const message = response.value?.error?.message;
+      throw new Error(
+        `agent host answered ${response.status} to the session stop` +
+          (typeof message === "string" && message ? `: ${message}` : "")
+      );
+    }
+  }
+
+  /** Agent goals §5.7 legacy handover: the replacement resumes the sessions stopped, without a turn. */
+  private async requestHostResumeGoalSessions(
+    threadIds: readonly string[]
+  ): Promise<readonly string[] | null> {
+    const response = await this.client.json<{ threadIds?: unknown; error?: { message?: unknown } }>(
+      "POST",
+      agentHostRoutes.resumeGoalSessions,
+      { threadIds },
+      { timeoutMs: LEGACY_GOAL_CALL_DEADLINE_MS }
+    );
+    if (response.status === 404) return null;
+    if (response.status !== 200) {
+      const message = response.value?.error?.message;
+      throw new Error(
+        `agent host answered ${response.status} to the goal session resume` +
+          (typeof message === "string" && message ? `: ${message}` : "")
+      );
+    }
+    const taken = response.value?.threadIds;
+    return Array.isArray(taken) ? taken.filter((id): id is string => typeof id === "string") : [];
   }
 }
 

@@ -595,6 +595,18 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           shortLabel: shortAccountLabel
         })
       : null;
+  // The goal the status-line chip renders (goals §8.2).
+  const threadGoal = paintOnly ? null : slice.goal;
+  // Goals §5.7: a deploy's drain paused the goal between two of its turns and
+  // the next host resumes it — the fold reads `paused`, the tab reads working.
+  // The goal chip says so rather than showing the user's pause (its actions
+  // stay a paused goal's, Resume and Clear, since the user wins), and the
+  // account chip names the hold rather than asking for a pause it has had.
+  const goalHeldForUpdate = isGoalHeldForUpdate({
+    goal: threadGoal,
+    summaryGoal: session.goal,
+    goalHeldForHandover: slice.head?.goalHeldForHandover === true
+  });
   // Goals §5.5: a goal the provider keeps working on by itself (Codex) holds
   // the switch — its next turn would start under the old account and die on
   // the restart — and the chip says to pause it rather than to wait. Only
@@ -619,6 +631,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       resumeGoalAfterRestart: slice.head?.resumeGoalAfterRestart === true,
       goalHeldForHandover: slice.head?.goalHeldForHandover === true
     }),
+    // A held goal is paused already: the chip names the hold, in the host's
+    // words, as the goal chip reads it.
+    goalHeldForUpdate,
     // The host refuses a switch for a running compaction first (and the chip
     // then names it, as the host would).
     compacting: status.isCompacting
@@ -633,16 +648,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // both copies — the roster this tab derives and the summary the daemon
   // sends — so a nudge is withheld while either says work is still running.
   const goalSupport = provider?.capabilities?.goals ?? null;
-  const threadGoal = paintOnly ? null : slice.goal;
-  // Goals §5.7: a deploy's drain paused the goal between two of its turns and
-  // the next host resumes it — the fold reads `paused`, the tab reads working.
-  // The chip says so rather than showing the user's pause; the actions stay a
-  // paused goal's (Resume, Clear), since the user wins.
-  const goalHeldForUpdate = isGoalHeldForUpdate({
-    goal: threadGoal,
-    summaryGoal: session.goal,
-    goalHeldForHandover: slice.head?.goalHeldForHandover === true
-  });
+  // `threadGoal` and `goalHeldForUpdate` are read above, beside the account
+  // chip, which names a held goal too.
   const goalBackgroundLive = roster.backgroundLiveness !== null || session.backgroundLiveness != null;
   const { goalActionList, goalNote } = React.useMemo(() => {
     const input = {

@@ -516,10 +516,11 @@ and its default model (the flagged one, else the first) are never shed.
   pause alone stops only the NEXT goal turn, never the one running. A mid-turn model or permission
   change under a continuing goal gets the same advice. A goal an Orquester update holds
   (`chat.goal.heldForUpdate`) refuses the switch too, with `The goal is held for an Orquester update
-  and resumes by itself once the agent host has restarted. Switch accounts after that, or take the
-  goal back first: send_message "/goal pause" keeps it paused.`; it starts no next turn, so a
-  mid-turn model or permission change under it gets the plain turn advice. If a write fails after others landed, the
-  error's `detail` carries `applied`.
+  and resumes by itself once the agent host has restarted, when it continues again. Take it back
+  first — send_message "/goal pause" keeps it paused — then switch accounts.` (waiting never opens
+  the switch: the resumed goal continues). It starts no next turn, so a mid-turn model or
+  permission change under it gets the plain turn advice. If a write fails after others landed,
+  the error's `detail` carries `applied`.
 - **`interrupt_session`** — interrupts the running turn (its pending requests are cancelled); with
   no turn running, stops every live subagent, background shell and watch loop. On an agent that
   continues a goal by itself (Codex), Stop pauses the goal first — an interrupt alone would let the
@@ -559,7 +560,10 @@ and its default model (the flagged one, else the first) are never shed.
   turn runs (`COMPACTION_UNAVAILABLE`) and on an empty conversation (`COMMAND_REJECTED`). Under a
   continuing Codex goal a turn is nearly always running, and the refusal says `Pause the goal before
   compacting.` instead: `interrupt_session` (it pauses the goal and stops the turn), compact, then
-  `send_message "/goal resume"`. A `/goal pause` alone lets the running turn finish first.
+  `send_message "/goal resume"`. A `/goal pause` alone lets the running turn finish first. A goal
+  an Orquester update holds (`chat.goal.heldForUpdate`) is paused already and starts no next turn,
+  so while its final turn runs the refusal is the plain one (`Context compaction is unavailable
+  while a provider turn is running.`): wait for that turn, then compact.
 
 ### Search
 

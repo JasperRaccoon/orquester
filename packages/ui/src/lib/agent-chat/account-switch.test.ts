@@ -18,12 +18,14 @@ import {
   chatAccountSwitchSupported,
   COMPACTION_SWITCH_REFUSAL,
   GOAL_CONTINUING_SWITCH_REFUSAL,
+  GOAL_HELD_SWITCH_REFUSAL,
   identityChangeSummary,
   isGoalContinuing,
   isProxyLauncher,
   PROXY_ACCOUNT_FAMILY,
   type ChatAccountSwitchState
 } from "./account-switch.ts";
+import { isGoalHeldForUpdate } from "./goal.logic.ts";
 
 const shortLabel = (label: string | undefined): string | undefined =>
   label === undefined ? undefined : label.split("@")[0];
@@ -145,7 +147,9 @@ describe("the idle gate", () => {
       { connection: "connecting" },
       { connection: "reconnecting" },
       { backgroundLive: true },
-      { compacting: true }
+      { compacting: true },
+      { goalContinuing: true },
+      { goalHeldForUpdate: true }
     ];
     for (const patch of closed) {
       assert.equal(
@@ -274,6 +278,7 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
         );
       }
     }
+    // What the view builds: continuing, and held as the goal chip reads it.
     const held = {
       ...idle,
       goalContinuing: isGoalContinuing({
@@ -281,10 +286,57 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
         support: CODEX,
         sessionStatus: "ready",
         goalHeldForHandover: true
-      })
+      }),
+      goalHeldForUpdate: isGoalHeldForUpdate({ goal: goal("paused"), goalHeldForHandover: true })
     };
     assert.equal(canSwitchChatAccount(held), false, "the switch stays refused while the goal is held");
-    assert.equal(chatAccountSwitchRefusal(held), GOAL_CONTINUING_SWITCH_REFUSAL, "in the host's own words");
+    assert.equal(
+      chatAccountSwitchRefusal(held),
+      GOAL_HELD_SWITCH_REFUSAL,
+      "in the host's own words — the hold's, not a pause the goal has had"
+    );
+  });
+
+  it("goals §5.7: the held goal's words are the host's, and name the /goal pause that takes it back", () => {
+    assert.equal(
+      GOAL_HELD_SWITCH_REFUSAL,
+      "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts."
+    );
+  });
+
+  it("goals §5.7: the summary's verdict decides held as it decides continuing", () => {
+    const summary = (status: string, continuing: boolean) => ({ objective: "Make CI green", status, continuing });
+    const view = (summaryGoal: unknown, fold: AgentGoal["status"]): ChatAccountSwitchState => ({
+      ...idle,
+      goalContinuing: isGoalContinuing({ summaryGoal, goal: goal(fold), support: CODEX, sessionStatus: "ready" }),
+      goalHeldForUpdate: isGoalHeldForUpdate({ goal: goal(fold), summaryGoal })
+    });
+    // Held: the host reports the goal paused AND continuing.
+    assert.equal(chatAccountSwitchRefusal(view(summary("paused", true), "paused")), GOAL_HELD_SWITCH_REFUSAL);
+    // Just paused by the user, the summary a poll behind: still the pause advice, never "held".
+    assert.equal(chatAccountSwitchRefusal(view(summary("active", true), "paused")), GOAL_CONTINUING_SWITCH_REFUSAL);
+    // Taken back by the user's `/goal pause`: a paused goal of their own may switch.
+    const takenBack = view(summary("paused", false), "paused");
+    assert.equal(canSwitchChatAccount(takenBack), true, "the user's own pause opens the chip");
+    assert.equal(chatAccountSwitchRefusal(takenBack), null);
+  });
+
+  it("goals §5.7: held without a continuing verdict still closes the chip, as the host refuses it", () => {
+    // The head's mark read before the provider's goal block has landed: the
+    // chip reads the hold, and the host (which knows its adapter) refuses it.
+    const held = {
+      ...idle,
+      goalContinuing: isGoalContinuing({
+        goal: goal("paused"),
+        support: null,
+        sessionStatus: "ready",
+        goalHeldForHandover: true
+      }),
+      goalHeldForUpdate: isGoalHeldForUpdate({ goal: goal("paused"), goalHeldForHandover: true })
+    };
+    assert.equal(held.goalContinuing, false);
+    assert.equal(canSwitchChatAccount(held), false);
+    assert.equal(chatAccountSwitchRefusal(held), GOAL_HELD_SWITCH_REFUSAL);
   });
 
   it("goals §5.7: the head's hold mark continues nothing the provider would not set going again", () => {
@@ -415,7 +467,19 @@ describe("fix round 2 (4): the refusal names what the host names, in the host's 
     assert.equal(chatAccountSwitchRefusal({ ...idle, compacting: true }), COMPACTION_SWITCH_REFUSAL);
     assert.equal(chatAccountSwitchRefusal({ ...idle, compacting: true, isTurnActive: true }), COMPACTION_SWITCH_REFUSAL);
     assert.equal(chatAccountSwitchRefusal({ ...idle, goalContinuing: true }), GOAL_CONTINUING_SWITCH_REFUSAL);
+    assert.equal(chatAccountSwitchRefusal({ ...idle, goalHeldForUpdate: true }), GOAL_HELD_SWITCH_REFUSAL);
     assert.equal(chatAccountSwitchRefusal(idle), null);
-    assert.equal(canSwitchChatAccount({ ...idle, compacting: false, goalContinuing: false }), true);
+    assert.equal(
+      canSwitchChatAccount({ ...idle, compacting: false, goalContinuing: false, goalHeldForUpdate: false }),
+      true
+    );
+  });
+
+  it("goals §5.7: a held goal comes after the compaction and before the continuing goal, as on the host", () => {
+    const held = { ...idle, goalContinuing: true, goalHeldForUpdate: true };
+    assert.equal(chatAccountSwitchRefusal({ ...held, compacting: true }), COMPACTION_SWITCH_REFUSAL);
+    assert.equal(chatAccountSwitchRefusal(held), GOAL_HELD_SWITCH_REFUSAL);
+    // Its final turn may still run: the hold's words still come first.
+    assert.equal(chatAccountSwitchRefusal({ ...held, isTurnActive: true }), GOAL_HELD_SWITCH_REFUSAL);
   });
 });

@@ -465,14 +465,16 @@ The first implementation showed two ways a continuing goal silently stopped; bot
   while the thread's goal is continuing — `goalContinuingNow`, the summary's own predicate, grace
   included — with `Pause the goal before switching accounts.`, after the compaction refusal and
   before the running-turn one (between a continuing goal's turns idle never comes, so waiting is
-  the wrong advice). Otherwise a provider-started turn under the old account is killed by the
-  next message's account restart. A stopped or errored session may switch (amended 2026-09-24:
-  pausing a stopped Codex session would itself resume it and start a goal turn) — except one
-  whose resume mark is still pending (after a handover it may read `stopped` or `error`), which
-  reads as continuing (§4.7) — and so may a paused, blocked or limited goal; `carryGoal` (§5.3,
-  §6.2.2) re-creates it on the new account. The same predicate turns `/compact`'s running-turn
-  refusal into `Pause the goal before compacting.` — a compaction in flight, or turns queued
-  behind one, still get the plain compaction refusal first. The client mirror
+  the wrong advice); a goal a deploy holds is continuing too, but paused already, and gets words
+  of its own in that slot (§5.7, amended 2026-09-24). Otherwise a provider-started turn under the
+  old account is killed by the next message's account restart. A stopped or errored session may
+  switch (amended 2026-09-24: pausing a stopped Codex session would itself resume it and start a
+  goal turn) — except one whose resume mark is still pending (after a handover it may read
+  `stopped` or `error`), which reads as continuing (§4.7) — and so may a paused, blocked or
+  limited goal; `carryGoal` (§5.3, §6.2.2) re-creates it on the new account. The same predicate
+  turns `/compact`'s running-turn refusal into `Pause the goal before compacting.` — a compaction
+  in flight, or turns queued behind one, still get the plain compaction refusal first, and a held
+  goal, which starts no next turn, keeps the plain running-turn refusal (§5.7). The client mirror
   `canSwitchChatAccount` (`packages/ui/src/lib/agent-chat/account-switch.ts`) gates the chip on
   `goalContinuing`, which `isGoalContinuing` (same file) decides: the summary's verdict whenever
   the view has one — `SessionSummary.goal.continuing`, and a `null` summary goal is itself a
@@ -481,7 +483,8 @@ The first implementation showed two ways a continuing goal silently stopped; bot
   host's predicate: an `active` goal on a `continuesAcrossTurns` adapter with a live session
   (`starting`, `ready` or `running`) or a resume mark — no running-turn or grace check — or a
   `paused` or `active` goal whose head carries a deploy's hold mark, `goalHeldForHandover` (§5.7),
-  whatever the session says; the summary's verdict still wins.
+  whatever the session says; the summary's verdict still wins. A goal the chip reads as held
+  (`goalHeldForUpdate`, §5.7) closes it on its own too, with the host's held-goal words.
 - **Deploy handover.** `markThreadsForContinuation` also marks a thread whose goal continues on a
   live session and has a usable resume cursor (the binding's, else the head's) — **without** the
   per-project continuation opt-in: setting a goal is the user's opt-in to autonomous work. It
@@ -552,8 +555,8 @@ up again. Nothing running is cut, as the drain rule wants.
   every re-evaluation — a settled turn, background work ending, the 15 s health tick — also sends
   `POST /goals/hold` (`agentHostRoutes.holdGoals`), answered `{heldThreadIds}`. It is a lease:
   each request extends it to `GOAL_HOLD_LEASE_MS` (120 s, `support/deadline.ts`) from now. A host
-  that predates the route answers its route-miss 404, which the daemon ignores: the deploy that
-  ships this waits as before; the next one has the route.
+  that predates the route — the one the deploy shipping this replaces — answers its route-miss
+  404, and the daemon falls back to a legacy handover (below).
 - **Only when goals are the last thing in the way.** The host holds nothing while anything else
   blocks the drain: its own `activeTurnThreadIds` ∪ `backgroundWorkThreadIds` must all be threads
   whose goal it can hold (below) or already holds. Otherwise a subagent fleet running in another
@@ -578,8 +581,9 @@ up again. Nothing running is cut, as the drain rule wants.
 - **Continuing.** A held goal reads as continuing: `goalContinuingNow` answers true while the
   thread is held, whatever the fold's status says (it reads `paused` once Codex has answered). So
   the turn settling raises no "finished" stamp and no push, the tab reads working
-  (`goal-continuing`), and the account switch stays refused (§5.5). The GUI names the hold rather
-  than showing it as the user's own pause (§8.2, §8.3).
+  (`goal-continuing`), and the account switch stays refused (§5.5), in words of its own ("As
+  built", below). The GUI names the hold rather than showing it as the user's own pause (§8.2,
+  §8.3).
 - **The handover.** The head field is the resume mark: `markThreadsForContinuation` leaves it as
   it is. The next host's reconcile treats `goalHeldForHandover` like `resumeGoalAfterRestart`
   (`goalResumePending`, off the same `meta.json` read). After the gate, `resumeGoalSession`
@@ -656,14 +660,59 @@ up again. Nothing running is cut, as the drain rule wants.
     churn, and long work — a fleet — does not leave the goal idle. Past that, the host releases
     it as the lease's end does (a host release, not the user's): the goal goes on, and is held
     again once goals are the last thing in the way.
-  - The daemon awaits the hold inside its serialized transition queue (5 s client timeout), so a
-    restart never overtakes a hold still being applied; it asks whatever the blocker is (only the
-    host can tell which are goals), including from its first check at boot, and remembers a host
-    instance that answered 404.
-  - Known limit: while a goal is held, `/compact` (with its last turn running) and the account
-    switch still advise pausing a goal that is already paused — the refusal text is the host's,
-    mirrored word for word by the GUI; the MCP names the hold in its own account-switch refusal
-    (§8.6).
+  - The daemon never awaits the hold (amended 2026-09-25): one request in flight at a time (5 s
+    client timeout), so boot adoption — before the daemon listens — and every other supervision
+    step go on without the host's answer, and an answer that arrives after the host was replaced
+    is dropped without a word. A restart that overtakes a hold still being applied is safe: the
+    host skips a pause queued behind its stop and keeps the mark of one the stop cut short. The
+    daemon asks whatever the blocker is (only the host can tell which are goals), including from
+    its first check at boot, and remembers a host instance that answered 404.
+  - A held goal's refusals never ask for the pause it has had. The account switch is refused, in
+    the continuing goal's slot (after a running compaction, before a running turn), with `The goal
+    is paused for an Orquester update and resumes by itself once the agent host has restarted.
+    Send /goal pause to keep it paused, then switch accounts.` (`GOAL_HELD_SWITCH_REFUSAL`;
+    `identitySwitchRefusal` reads `goalHeldForUpdate`, which is `goalHeld`). The user's `/goal
+    pause` releases the hold and the goal stays paused, so it continues no more and may switch;
+    waiting is not offered, since the goal the update sets going again refuses the switch too. A
+    goal the host has just set going again (`goalJustResumed`) is not held, and gets `Pause the
+    goal before switching accounts.` like any continuing goal. The GUI mirrors the text word for
+    word (`chatAccountSwitchRefusal`, fed by the goal chip's own `isGoalHeldForUpdate`); the MCP
+    keeps its own held-goal refusal (§8.6). `/compact` with the held goal's final turn still
+    running gets the plain `Context compaction is unavailable while a provider turn is running.`:
+    the goal starts no next turn, so waiting for this one is the advice that works.
+- **A host from before the hold** (amended 2026-09-25). The deploy that ships §5.7 replaces a host
+  that knows nothing of goals and cannot pause one, so its goals cannot be held; they are stopped
+  at a turn boundary instead, and resumed on the replacement.
+  - When. Only while that host's drain is blocked by Codex goal loops and nothing else: every
+    running turn one Codex started by itself, right after another it started, within
+    `LEGACY_GOAL_CONTINUATION_GAP_MS` (3 s) of that one's end — read off the host's own snapshot
+    (`GET …/thread`, `{kind: "snapshot", thread}`; `legacyGoalTurnOf` in
+    `agent-chat/supervisor.ts`): turn rows with no `userMessageId`, the host filling it only
+    when a user message opened the turn. The gap tells Codex continuing (within milliseconds)
+    from a `/compact` typed after a goal turn, which such a host records the same way. No
+    approval or question open, no background work anywhere. Anything else in the way — a turn a
+    user started, a thread the daemon's tab records name as another agent (no snapshot is read
+    then), a thread whose snapshot cannot be read — stops nothing, and the deploy waits as it
+    always did.
+  - How. The supervisor stops each goal thread's provider session (`POST …/session/stop`) while
+    its turn is young, within `LEGACY_GOAL_TURN_BOUNDARY_MS` (45 s): in a goal loop the next turn
+    is already running when the summary poll looks, so the 15 s health tick is what re-evaluates,
+    and the window covers one tick plus its probe and snapshot reads. At most that much of the
+    turn is lost; an older turn is left to finish, and its own boundary comes. A turn is never
+    stopped twice; a stop that fails is tried again while the turn is young. The goal stays
+    `active` in Codex's own store.
+  - Then. The stop settles the goal's turn, the drain goes ahead, and once the replacement is
+    adopted the daemon hands it those threads (`POST /goals/resume-sessions`,
+    `resumeGoalSessionsAfterHandover`) — asked again on every health tick until a host takes them,
+    and handed over even when the stop's own answer failed (a stop that timed out may have
+    landed; resuming a session that was not stopped only leaves an idle one). The host marks each
+    like a §5.5 handover (`resumeGoalAfterRestart`) and resumes its session WITHOUT a turn after
+    its gate, and Codex continues the goal by itself; the adapter's resume snapshot mirrors the
+    goal into the fold (`restored`).
+  - Known limits. The list lives in the daemon's memory: a daemon restarted before the handover
+    forgets it, and those goals wait for the user's next message. A goal stopped while a sibling
+    goal is still mid-turn, or before other work starts, waits idle for the restart — such a host
+    cannot resume a session without a turn, so there is no idle release as a hold has.
 - **Compatibility.** `goalHeldForHandover?: true` is one more optional head field (`ThreadHead`,
   the `meta.json` schema in `packages/config`, the head check in `fold-snapshot.ts`), ignored by an
   older build — whose host then resumes neither the session nor the goal (a held goal reads
@@ -1003,9 +1052,10 @@ sessions the way the GUI does, so goals reach it as the GUI shows them:
 - **`update_session`** refuses an account switch while the goal continues (§5.5) — judged on the
   summary and on the snapshot just read, so a stale "continuing" after a pause does not refuse —
   before writing anything, and advises `interrupt_session` (a pause alone lets the running turn
-  finish); a goal a deploy holds (§5.7) refuses it the same way, with its own advice — wait for the
-  update, or take the goal back with `/goal pause` — and a mid-turn model or permission change under
-  a held goal gets the plain turn advice, since it starts no next turn. `interrupt_session` and
+  finish); a goal a deploy holds (§5.7) refuses it the same way, with its own advice — take the
+  goal back with `/goal pause` first: waiting never opens the switch, since the resumed goal
+  continues — and a mid-turn model or permission change under a held goal gets the plain turn
+  advice, since it starts no next turn. `interrupt_session` and
   `compact_session` pass the host's goal rules through (§5.6).
 
 ## 9. Compatibility

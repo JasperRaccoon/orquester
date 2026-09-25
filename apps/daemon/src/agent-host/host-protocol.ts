@@ -152,13 +152,36 @@ export const agentHostRoutes = {
    * that predates the route answers its generic route-miss 404, which the
    * daemon ignores.
    */
-  holdGoals: "/goals/hold"
+  holdGoals: "/goals/hold",
+
+  /**
+   * Agent goals §5.7, a legacy handover's other half: `POST`
+   * {@link AgentHostResumeGoalSessionsRequest} →
+   * {@link AgentHostResumeGoalSessionsResponse}. A host from before the goal
+   * hold cannot pause a goal, so the daemon stopped these Codex threads'
+   * sessions at a turn boundary to let the deploy go ahead; their goals are
+   * still active in Codex's own store. This host resumes each session WITHOUT
+   * a turn, as for a §5.5 handover mark, and Codex continues the goal by
+   * itself.
+   */
+  resumeGoalSessions: "/goals/resume-sessions"
 } as const;
 
 /** `POST /goals/hold` (agent goals §5.7). */
 export interface AgentHostHoldGoalsResponse {
   /** Every thread the host holds after this request, the ones held before it included. */
   heldThreadIds: string[];
+}
+
+/** `POST /goals/resume-sessions` (agent goals §5.7). */
+export interface AgentHostResumeGoalSessionsRequest {
+  threadIds: string[];
+}
+
+/** `POST /goals/resume-sessions` (agent goals §5.7). */
+export interface AgentHostResumeGoalSessionsResponse {
+  /** The threads this host took: known, not deleted. Their resume runs after the answer. */
+  threadIds: string[];
 }
 
 /** `GET /health` on the host socket. */

@@ -628,7 +628,9 @@ next `/turn`'s ensure step, carrying the cursor. Three things make it safe:*
    switching accounts.`: between a Codex goal's turns idle never comes. A session whose goal resume
    mark is still pending reads as continuing whatever it says — after a handover it may read
    `stopped` or `error` — so the `error` carve-out does not hold while that mark stands (goals
-   §5.5).*
+   §5.5). A goal a deploy holds is continuing too, but paused already, so it gets words of its own
+   in the same slot, naming the `/goal pause` that takes it back (`GOAL_HELD_SWITCH_REFUSAL`,
+   goals §5.7).*
 3. ***The home KIND may never cross the cliproxy boundary, and OpenCode is excluded outright.*** *A
    thread's home kind is a function of its registry entry, which never changes; and OpenCode runs
    one server per project under the daemon's own identity (§3.2), so there is no per-thread account
@@ -3602,8 +3604,10 @@ produced a visible chip is noise (`packages/ui/src/components/agent-chat/compose
 *Built (2026-09-24, `2026-09-24-agent-goals-design.md`): a disabled account chip names the host's
 own reason when there is one, in `identitySwitchRefusal`'s order (`chatAccountSwitchRefusal`,
 `lib/agent-chat/account-switch.ts`): `Wait for the context compaction to finish before switching
-accounts.` during a compaction, `Pause the goal before switching accounts.` under a continuing goal
-(goals §5.5) — and "Available when the agent is idle" otherwise.*
+accounts.` during a compaction, the held goal's own words (`GOAL_HELD_SWITCH_REFUSAL`, which name
+the `/goal pause` that takes it back) under a goal an Orquester update holds (goals §5.7),
+`Pause the goal before switching accounts.` under a continuing goal (goals §5.5) — and "Available
+when the agent is idle" otherwise.*
 
 *Built: **attachments name themselves in the text.** An image inserts `[Image #N]` at the caret
 when it is staged — the CLI's own placeholder for a pasted image — numbered by its position among

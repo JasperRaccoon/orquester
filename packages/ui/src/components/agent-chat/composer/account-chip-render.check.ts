@@ -15,7 +15,11 @@ import assert from "node:assert/strict";
 import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { ChatAccountOption } from "../../../lib/agent-chat/account-switch";
+import {
+  GOAL_CONTINUING_SWITCH_REFUSAL,
+  GOAL_HELD_SWITCH_REFUSAL,
+  type ChatAccountOption
+} from "../../../lib/agent-chat/account-switch";
 import { AccountChip } from "./ComposerChips";
 
 /**
@@ -89,22 +93,42 @@ assert.ok(
 
 // Goals §5.5: a continuing goal holds the chip for something the user must
 // DO — pause the goal — and the chip says that instead of "wait".
+const goalContinuing = render(
+  createElement(AccountChip, {
+    label: "one",
+    options: OPTIONS,
+    selectedId: "acc-1",
+    canSwitch: false,
+    disabledReason: GOAL_CONTINUING_SWITCH_REFUSAL,
+    onChange: () => undefined
+  })
+);
+assert.ok(DISABLED_ATTR.test(goalContinuing), "a continuing goal closes the picker");
+assert.ok(
+  goalContinuing.includes("Pause the goal before switching accounts."),
+  "and the chip says what would open it"
+);
+assert.ok(!goalContinuing.includes("Available when the agent is idle"), "not a wait that never ends");
+
+// Goals §5.7: a goal HELD for an Orquester update is paused already — the
+// chip names the hold and what takes it back, never a pause it has had.
 const goalHeld = render(
   createElement(AccountChip, {
     label: "one",
     options: OPTIONS,
     selectedId: "acc-1",
     canSwitch: false,
-    disabledReason: "Pause the goal before switching accounts.",
+    disabledReason: GOAL_HELD_SWITCH_REFUSAL,
     onChange: () => undefined
   })
 );
-assert.ok(DISABLED_ATTR.test(goalHeld), "a continuing goal closes the picker");
+assert.ok(DISABLED_ATTR.test(goalHeld), "a held goal closes the picker too");
+assert.ok(goalHeld.includes(GOAL_HELD_SWITCH_REFUSAL), "and the chip says the hold's own words");
+assert.ok(goalHeld.includes("Send /goal pause"), "including what opens it");
 assert.ok(
-  goalHeld.includes("Pause the goal before switching accounts."),
-  "and the chip says what would open it"
+  !goalHeld.includes("Pause the goal before switching accounts."),
+  "not a pause the goal has had already"
 );
-assert.ok(!goalHeld.includes("Available when the agent is idle"), "not a wait that never ends");
 
 // ---------------------------------------------------------------------------
 // The label-only fallback

@@ -27,7 +27,8 @@ import {
   AGENT_HOST_PROTOCOL_VERSION,
   agentHostRoutes,
   type AgentHostHealthResponse,
-  type AgentHostHoldGoalsResponse
+  type AgentHostHoldGoalsResponse,
+  type AgentHostResumeGoalSessionsResponse
 } from "../host-protocol.ts";
 import type { ThreadIndex } from "../index/index.ts";
 import { runtimeEventToActivities } from "../ingestion/activities.ts";
@@ -894,5 +895,31 @@ describe("agent host server — goals §5.7, the deploy's goal hold", () => {
     // Only POST is the route.
     assert.equal((await h.call("GET", agentHostRoutes.holdGoals)).status, 404);
     await h.stop();
+  });
+
+  it("POST /goals/resume-sessions takes the threads it knows and refuses a malformed body whole", async () => {
+    const h = await harness();
+    try {
+      const threadId = await h.host.createThread({ refId: "claude" });
+      // The resume itself is the orchestrator's (goal-legacy-handover.test.ts):
+      // here, what the route takes and what it refuses.
+      const taken = await h.call("POST", agentHostRoutes.resumeGoalSessions, {
+        threadIds: [threadId, "thread-missing", "../escape"]
+      });
+      assert.equal(taken.status, 200);
+      assert.deepEqual(taken.body, { threadIds: [threadId] } satisfies AgentHostResumeGoalSessionsResponse);
+
+      for (const body of [{}, { threadIds: "x" }, { threadIds: [7] }, { threadIds: Array(1_001).fill("t") }]) {
+        const refused = await h.call("POST", agentHostRoutes.resumeGoalSessions, body);
+        assert.equal(refused.status, 400, JSON.stringify(body).slice(0, 60));
+      }
+      assert.equal(
+        (await h.call("GET", agentHostRoutes.resumeGoalSessions)).status,
+        404,
+        "only POST is the route"
+      );
+    } finally {
+      await h.stop();
+    }
   });
 });

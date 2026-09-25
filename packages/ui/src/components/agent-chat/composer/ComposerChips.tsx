@@ -394,8 +394,8 @@ export interface AccountChipProps {
   canSwitch?: boolean;
   /**
    * Why a closed chip is closed, in the host's words when it names one: a
-   * running compaction, or a continuing goal (goals §5.5). Absent ⇒ the
-   * chip's own "available when idle".
+   * running compaction, a goal held for an Orquester update (goals §5.7), or
+   * a continuing goal (§5.5). Absent ⇒ the chip's own "available when idle".
    */
   disabledReason?: string | null;
   onChange?: (accountId: string) => void;

@@ -44,6 +44,7 @@ import {
   agentHostRoutes,
   type AgentHostHealthResponse,
   type AgentHostHoldGoalsResponse,
+  type AgentHostResumeGoalSessionsResponse,
   type CreateHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../host-protocol.ts";
@@ -216,6 +217,9 @@ const COMMAND_NAMES: ReadonlySet<string> = new Set(AGENT_CHAT_COMMAND_NAMES);
  * every future caller.
  */
 const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** `POST /goals/resume-sessions`: more threads than any host serves at once. */
+const MAX_RESUME_GOAL_SESSIONS = 1_000;
 
 export function isSafeThreadId(value: string): boolean {
   return THREAD_ID_PATTERN.test(value) && !value.split(/[/\\]/).includes("..");
@@ -437,6 +441,32 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     if (path === agentHostRoutes.holdGoals && method === "POST") {
       const body: AgentHostHoldGoalsResponse = {
         heldThreadIds: await orchestrator.holdContinuingGoals()
+      };
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // Agent goals §5.7: the sessions a legacy handover stopped — on a host from
+    // before the goal hold, at a turn boundary — resumed without a turn, so
+    // Codex continues each goal by itself. A malformed body is refused whole;
+    // an id that is not a safe thread id, or not this host's, is skipped.
+    if (path === agentHostRoutes.resumeGoalSessions && method === "POST") {
+      const requestBody = (await readJsonBody(request)) as { threadIds?: unknown };
+      const raw = requestBody?.threadIds;
+      if (
+        !Array.isArray(raw) ||
+        raw.length > MAX_RESUME_GOAL_SESSIONS ||
+        raw.some((id) => typeof id !== "string")
+      ) {
+        throw new AgentChatCommandError(
+          "INVALID_COMMAND",
+          `threadIds must be an array of at most ${MAX_RESUME_GOAL_SESSIONS} thread ids.`
+        );
+      }
+      const body: AgentHostResumeGoalSessionsResponse = {
+        threadIds: await orchestrator.resumeGoalSessionsAfterHandover(
+          (raw as string[]).filter(isSafeThreadId)
+        )
       };
       sendJson(response, 200, body);
       return;

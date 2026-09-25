@@ -338,7 +338,13 @@ timeline. An unmapped provider message is a `satisfies never` typecheck error an
 --test $(find src -name '*.test.ts')` per package. The daemon and UI scripts also preload
 `./test/quiet-mock-timers.mjs`, which drops node:test's "The MockTimers API is an experimental
 feature" `ExperimentalWarning` — only that one, every other warning still prints — so a run's output
-stays pristine (`node --test` hands `--import` on to each file's child process). Replay tests live
+stays pristine (`node --test` hands `--import` on to each file's child process). Every test script
+(the UI's `.check.ts` loop too) also preloads the shared `scripts/test/assert-ok.mjs`: without it, a
+failing `assert.ok(x)` or `assert(x)` with no message either quotes the wrong code in its message or
+hangs its whole file, because Node 20 looks the call up in the `.ts` file at a position in tsx's one-line output, and its
+`findColumn` can then re-parse the file until the stack overflows. The preload writes that one message
+itself, through the source map and the TypeScript parser, and changes nothing else — keep it on any
+new test invocation (`apps/daemon/src/assert-ok.test.ts` pins it). Replay tests live
 **under `src/`** (the daemon's test glob only walks `src`) and read recorded real-CLI captures from
 `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/`, each with a `capturedWith` provenance
 block and a `README.md` of protocol observations that is required reading before touching its
@@ -825,9 +831,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   The route is daemon-owned rather than a §6.2 command precisely because the body is **not**
   forwarded verbatim — only the daemon can apply the family gate, the seeded-account gate and the
   launch-env recompose. `binding.json` gains no new writer.
-  A continuing Codex goal refuses the switch too (`Pause the goal before switching accounts.`),
-  and a switch that applies carries the goal to the new home (`carryGoal`) — the Codex goal
-  gotcha below.
+  A continuing Codex goal refuses the switch too (`Pause the goal before switching accounts.`; a
+  goal a deploy holds, in words of its own), and a switch that applies carries the goal to the new
+  home (`carryGoal`) — the Codex goal gotcha below.
 - **Rewind counts turns by ORDER, never by checkpoints.** `targetTurnCount` on `/revert` and on
   `thread.reverted` means "keep the first N started turns" — `startedTurns(turns)` in
   `packages/api/src/agent-chat/turns.ts`, the fold's turn rows with a provider turn id, in order —
@@ -989,7 +995,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   own `/goal` (but `status`), Stop or session stop releases the thread for the rest of the lease
   and resumes nothing. The GUI names a held goal (`isGoalHeldForUpdate`: `Goal · paused for
   update`, info tone) rather than showing it as the user's own pause, and the MCP flags it
-  `heldForUpdate`. An older host answers the route with a 404, and that deploy waits as before. A stop that comes anyway (a manual `POST /api/agent-host/stop`)
+  `heldForUpdate`. The daemon never awaits a hold request (one in flight at a time), so boot
+  adoption does not wait on the host's answer. A host from before the hold answers the route with
+  a 404 and cannot pause a goal: once Codex goal loops are all that block its drain (turns with
+  no `userMessageId`, each starting within 3 s of the last one's end, read off the host's own
+  `{kind: "snapshot", thread}`), the supervisor stops each goal thread's session while its turn is
+  young (`LEGACY_GOAL_TURN_BOUNDARY_MS`, 45 s — the 15 s health tick is what re-evaluates in a goal
+  loop), and the replacement resumes those sessions without a turn (`POST /goals/resume-sessions`)
+  — Codex continues each goal. A stop that
+  comes anyway (a manual `POST /api/agent-host/stop`)
   marks every goal that continues on a live
   session with a resume cursor — no project opt-in, the goal is the opt-in — as the head field
   `resumeGoalAfterRestart`, and the next host resumes that session after the gate WITHOUT sending a
@@ -1024,9 +1038,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   switching accounts.` — a provider-started turn under the old account would be killed by the next
   message's restart), and a `/compact` refused for a running turn advises `Pause the goal before
   compacting.` (a compaction in flight, or turns queued behind one, get the plain compaction refusal
-  first). A stopped or errored session may switch, because pausing it would itself resume it and
-  start a goal turn — except one whose resume mark is still pending (after a handover it may read
-  `stopped` or `error`), which reads as continuing.
+  first). A goal a deploy holds is continuing too but paused already, so neither asks for a pause:
+  the switch is refused with `GOAL_HELD_SWITCH_REFUSAL` (`… Send /goal pause to keep it paused,
+  then switch accounts.`; the user's `/goal pause` releases the hold, and a paused goal may
+  switch), which the GUI mirrors word for word, and `/compact` gets the plain running-turn refusal
+  (a held goal starts no next turn). A stopped or errored session may switch, because pausing it
+  would itself resume it and start a goal turn — except one whose resume mark is still pending
+  (after a handover it may read `stopped` or `error`), which reads as continuing.
 
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
 
@@ -1657,7 +1675,7 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Agent chat: client state, transport, timeline, composer, roster | `packages/ui/src/lib/agent-chat/`, `packages/ui/src/components/agent-chat/` |
 | Agent chat: fold performance (batch retention, fold caches, the per-task roster, the history bridge) | `docs/superpowers/specs/2026-09-23-fold-performance-design.md`, `packages/api/src/agent-chat/{fold.ts,roster.ts}`, `packages/ui/src/lib/agent-chat/history.logic.ts` |
 | Agent chat: lazy boot, fold snapshot, thread index, history pages, search | `docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md`, `apps/daemon/src/agent-host/index/`, `reconcileThread`/`foldFromDisk`/`readHistory`/`windowBoundary` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, `packages/api/src/agent-chat/{fold-snapshot.ts,history-cursor.ts}`, `packages/ui/src/lib/agent-chat/history.logic.ts`, `packages/ui/src/components/command-palette/conversation-search.ts` |
-| Agent chat: goals (the provider-owned goal mirror, per-provider goal handling, Codex's host `/goal`, the goal watchdog window, the goal chip) | `docs/superpowers/specs/2026-09-24-agent-goals-design.md`, `packages/api/src/agent-chat/goal.ts`, `apps/daemon/src/agent-host/adapters/{claude,codex,grok}/`, `parseHostGoalCommand` in `apps/daemon/src/agent-host/orchestration/slash.ts`, `decideGoalCommand`/`goalContinuingNow`/`stopContinuingGoal`/`holdContinuingGoals` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, the deploy hold's daemon half in `apps/daemon/src/agent-chat/supervisor.ts` (`requestHoldGoals`), the goal window in `apps/daemon/src/agent-host/{support/deadline.ts,orchestration/turn-watchdog.ts}`, the `goal-continuing` rung in `apps/daemon/src/agent-chat/activity-ladder.ts`, `packages/ui/src/components/agent-chat/status/` (the goal chip) |
+| Agent chat: goals (the provider-owned goal mirror, per-provider goal handling, Codex's host `/goal`, the goal watchdog window, the goal chip) | `docs/superpowers/specs/2026-09-24-agent-goals-design.md`, `packages/api/src/agent-chat/goal.ts`, `apps/daemon/src/agent-host/adapters/{claude,codex,grok}/`, `parseHostGoalCommand` in `apps/daemon/src/agent-host/orchestration/slash.ts`, `decideGoalCommand`/`goalContinuingNow`/`stopContinuingGoal`/`holdContinuingGoals`/`resumeGoalSessionsAfterHandover` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, the deploy hold's daemon half in `apps/daemon/src/agent-chat/supervisor.ts` (`requestHoldGoals`, and for a host from before the hold `stopLegacyGoalsAtTheirBoundary`/`legacyGoalTurnOf`), the goal window in `apps/daemon/src/agent-host/{support/deadline.ts,orchestration/turn-watchdog.ts}`, the `goal-continuing` rung in `apps/daemon/src/agent-chat/activity-ladder.ts`, `packages/ui/src/components/agent-chat/status/` (the goal chip) |
 | Agent chat: protocol fixtures (read the per-provider `README.md`) | `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/` |
 | Orquester MCP (tools, in-process client, waits) | `apps/daemon/src/mcp/server.ts`, `…/daemon-api.ts`, `…/wait.ts`, `…/tools/` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |

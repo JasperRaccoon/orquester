@@ -42,6 +42,7 @@ import {
   GOAL_HELD_FOR_UPDATE_SUMMARY,
   GOAL_RESUME_FAILED_SUMMARY
 } from "./orchestrator.ts";
+import { GOAL_CONTINUING_SWITCH_REFUSAL, GOAL_HELD_SWITCH_REFUSAL } from "./session-policy.ts";
 import {
   createScriptedAdapter,
   createTestHost,
@@ -373,8 +374,7 @@ describe("goals §5.7 — holding a continuing goal for a deploy", () => {
     assert.equal(continuing(host, threadId), true);
     await assert.rejects(
       () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }),
-      (error: unknown) =>
-        isAgentChatCommandError(error) && error.message === "Pause the goal before switching accounts."
+      (error: unknown) => isAgentChatCommandError(error) && error.message === GOAL_HELD_SWITCH_REFUSAL
     );
     await host.stop();
   });
@@ -986,6 +986,124 @@ describe("goals §5.7 — the user's own action takes a hold back", () => {
     assert.deepEqual(await host.orchestrator.holdContinuingGoals(), [threadId]);
     await clockFrom(host)(GOAL_HOLD_LEASE_MS * 2);
     assert.deepEqual(goalCalls(host.adapter), ["pause", "status", "resume"]);
+    await host.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What a held goal's refusals advise
+// ---------------------------------------------------------------------------
+
+describe("goals §5.7 — a held goal's refusals never ask for the pause it has had", () => {
+  const refusedAsHeld = (error: unknown): boolean =>
+    isAgentChatCommandError(error) &&
+    error.code === "COMMAND_REJECTED" &&
+    error.message === GOAL_HELD_SWITCH_REFUSAL;
+
+  const compactionRefused =
+    (message: string) =>
+    (error: unknown): boolean =>
+      isAgentChatCommandError(error) && error.code === "COMPACTION_UNAVAILABLE" && error.message === message;
+
+  it("the account switch is refused in the hold's own words, its final turn running or not", async () => {
+    const { host } = codexHost();
+    const threadId = await continuingGoal(host);
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === GOAL_CONTINUING_SWITCH_REFUSAL,
+      "before the hold, only a pause stops the goal"
+    );
+    assert.deepEqual(await host.orchestrator.holdContinuingGoals(), [threadId]);
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }),
+      refusedAsHeld,
+      "held, its final turn still running"
+    );
+    await completeTurn(host, threadId);
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }),
+      refusedAsHeld,
+      "held, its final turn over"
+    );
+    assert.equal(host.store.heads.get(threadId)?.accountId, "acc1", "nothing moved");
+    assert.equal(heldMark(host), true, "and a refusal takes nothing back");
+    await host.stop();
+  });
+
+  it("/compact while its final turn runs gets the plain refusal: a held goal starts no next turn", async () => {
+    const { host } = codexHost();
+    const threadId = await continuingGoal(host);
+    await assert.rejects(
+      () => host.orchestrator.command(threadId, "compact", { commandId: cmd() }),
+      compactionRefused("Pause the goal before compacting."),
+      "before the hold, Codex starts the next turn by itself"
+    );
+    assert.deepEqual(await host.orchestrator.holdContinuingGoals(), [threadId]);
+    assert.equal(continuing(host, threadId), true);
+    for (const attempt of [
+      () => host.orchestrator.command(threadId, "compact", { commandId: cmd() }),
+      () => host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "/compact" })
+    ]) {
+      await assert.rejects(
+        attempt,
+        compactionRefused("Context compaction is unavailable while a provider turn is running.")
+      );
+    }
+
+    // Waiting was the right advice: the turn ends, none follows it, and the
+    // compaction goes ahead — the goal still held for the next host.
+    await completeTurn(host, threadId);
+    await host.orchestrator.command(threadId, "compact", { commandId: cmd() });
+    await host.settle();
+    assert.equal(callsOf(host, "compact").length, 1);
+    assert.equal(heldMark(host), true);
+    await host.stop();
+  });
+
+  it("taken back with /goal pause, as the refusal advises, the goal stays paused and the switch applies", async () => {
+    const { host } = codexHost();
+    const threadId = await continuingGoal(host, { running: false });
+    assert.deepEqual(await host.orchestrator.holdContinuingGoals(), [threadId]);
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }),
+      refusedAsHeld
+    );
+
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "/goal pause" });
+    await host.settle();
+    assert.equal(heldMark(host), undefined, "the pause is the user's own now: nothing resumes it");
+    assert.deepEqual(host.orchestrator.summary(threadId)?.goal, {
+      objective: "ship it",
+      status: "paused",
+      continuing: false
+    });
+    await host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 });
+    await host.settle();
+    assert.equal(host.store.heads.get(threadId)?.accountId, "acc2");
+
+    // The next message restarts the session under the new account and takes
+    // the goal along, still paused, for the user to resume there.
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "carry on" });
+    await host.settle();
+    assert.equal(host.adapter.lastStart?.carryGoal, true);
+    assert.deepEqual(host.adapter.lastStart?.knownGoal, { objective: "ship it", status: "paused" });
+    await host.stop();
+  });
+
+  it("a held goal the host has set going again is no longer held: the pause advice is back", async () => {
+    const { host, codex } = codexHost();
+    const threadId = await continuingGoal(host, { running: false });
+    await host.orchestrator.holdContinuingGoals();
+    // The lease runs out and the goal is resumed, Codex's own update still on
+    // its way: the fold reads `paused`, yet the goal is going again.
+    codex.trailing.add("resume");
+    await clockFrom(host)(GOAL_HOLD_LEASE_MS);
+    assert.equal(heldMark(host), undefined);
+    assert.equal(continuing(host, threadId), true);
+    await assert.rejects(
+      () => host.orchestrator.setIdentity(threadId, { commandId: cmd(), ...toAcc2 }),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === GOAL_CONTINUING_SWITCH_REFUSAL
+    );
     await host.stop();
   });
 });

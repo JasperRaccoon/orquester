@@ -226,9 +226,10 @@ export interface ChatComposerProps {
   accountSwitchEnabled?: boolean | undefined;
   /**
    * The reason the picker is closed, in the host's own order and words
-   * (`chatAccountSwitchRefusal`): a running compaction, else a continuing
-   * goal, which only a pause ends (goals §5.5). Absent ⇒ the chip's own
-   * "available when idle".
+   * (`chatAccountSwitchRefusal`): a running compaction, else a goal held for
+   * an Orquester update, which the user's `/goal pause` takes back (goals
+   * §5.7), else a continuing goal, which only a pause ends (§5.5). Absent ⇒
+   * the chip's own "available when idle".
    *
    * *Added with agent goals; additive to the contract.*
    */

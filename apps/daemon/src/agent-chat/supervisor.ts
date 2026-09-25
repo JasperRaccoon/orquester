@@ -73,6 +73,28 @@ export const UNREACHABLE_PROBES_BEFORE_RESTART_BUSY = 4;
 export const HOST_EXIT_GRACE_MS = 30_000;
 export const HOST_EXIT_POLL_MS = 100;
 
+/**
+ * Agent goals §5.7, a host from before the goal hold: how young a Codex goal's
+ * running turn must be for the daemon to stop that thread's session at the
+ * turn's boundary (`stopLegacyGoalsAtTheirBoundary`) — at most this much of
+ * its work is lost; an older one is left to finish, and its own boundary
+ * comes. In a goal loop the next turn is already running when the summary
+ * poll looks, so no settled turn re-evaluates the drain: the 15 s health tick
+ * does, and the age is read after its probe and the snapshot reads (≤ 5 s
+ * each). The window covers one tick and those reads with room to spare.
+ */
+export const LEGACY_GOAL_TURN_BOUNDARY_MS = 45_000;
+
+/**
+ * Agent goals §5.7, a host from before the goal hold: how soon after the
+ * previous turn settled a turn must have started to be Codex continuing a
+ * goal. Codex starts the next goal turn within milliseconds of the last one's
+ * end; a turn with no user message that starts later — a `/compact` typed
+ * after a goal turn, which such a host records the same way — is not
+ * stopped.
+ */
+export const LEGACY_GOAL_CONTINUATION_GAP_MS = 3_000;
+
 export type AgentHostState =
   /** Never started, or intentionally stopped. */
   | "stopped"
@@ -128,10 +150,33 @@ export interface SupervisorAdapters {
    * renews a lease the host drops `GOAL_HOLD_LEASE_MS` after the last one.
    * Resolves to every thread the host holds after the request, or `null` when
    * the host predates the route (its route-miss 404); throws on anything else.
-   * Must be bounded: the supervisor awaits it inside its transition queue.
-   * Optional — without it the drain waits exactly as it did before §5.7.
+   * Must be bounded. Never awaited by a transition — one request at a time,
+   * the next evaluation asks again. Optional — without it the drain waits
+   * exactly as it did before §5.7.
    */
   requestHoldGoals?(): Promise<readonly string[] | null>;
+  /**
+   * Agent goals §5.7, a host that predates `POST /goals/hold` — the one the
+   * deploy shipping §5.7 replaces: one blocking thread's running turn, read
+   * off the host's own snapshot (`GET /threads/:id/thread`). `null` when it
+   * cannot be read. Bounded; never throws.
+   */
+  inspectLegacyGoalTurn?(threadId: string): Promise<LegacyGoalTurn | null>;
+  /**
+   * The chat adapter the daemon's own tab record names for a thread, or null
+   * when it cannot tell. A cheap pre-filter for the legacy handover: a thread
+   * it names as anything but Codex cannot be a Codex goal loop, so no
+   * snapshot — a whole thread window — is read while one blocks the drain.
+   */
+  threadAdapter?(threadId: string): string | null;
+  /** `POST /threads/:id/session/stop` on the host. Bounded; throws on a failure. */
+  stopThreadSession?(threadId: string): Promise<void>;
+  /**
+   * `POST /goals/resume-sessions` (agent goals §5.7): resume these threads'
+   * provider sessions WITHOUT a turn. Resolves to the threads the host took,
+   * or `null` when it predates the route; throws on anything else. Bounded.
+   */
+  resumeGoalSessions?(threadIds: readonly string[]): Promise<readonly string[] | null>;
   /** Null on a host without a usable tmux — the host then dies with the daemon. */
   tmux: SupervisorTmux | null;
   /** No-tmux fallback: a direct, non-detached child. */
@@ -158,6 +203,23 @@ export interface SupervisorAdapters {
    */
   backgroundWorkThreadIds?(): readonly string[] | null;
   logger?: { log?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
+}
+
+/**
+ * Agent goals §5.7 on a host from before the goal hold: one blocking thread's
+ * running turn, as that host's own snapshot records it.
+ */
+export interface LegacyGoalTurn {
+  /**
+   * A Codex goal's continuation: a Codex thread whose running turn AND the
+   * turn before it had no user message behind them — turns Codex started by
+   * itself — with no approval or question open.
+   */
+  goalLoop: boolean;
+  /** The running turn's id, or null when unknown. */
+  turnId: string | null;
+  /** When the running turn started (epoch ms), or null when unknown. */
+  startedAt: number | null;
 }
 
 export interface SupervisorOptions {
@@ -231,6 +293,19 @@ export class AgentHostSupervisor {
   private lastDrainDeferral: string | null = null;
   /** What the host a deploy waits on answered to its §5.7 goal hold ({@link GoalHoldState}). */
   private goalHold: GoalHoldState | null = null;
+  /** The §5.7 hold request still waiting for its answer, if any: one at a time. */
+  private goalHoldInFlight: Promise<void> | null = null;
+  /**
+   * Agent goals §5.7, a host from before the goal hold: the Codex threads whose
+   * session this daemon stopped at a turn boundary so the deploy could go
+   * ahead, their goals still active in Codex's own store — each owed a session
+   * resume on the next host, which lets Codex continue the goal by itself.
+   * In memory: a daemon restarted before the handover forgets them, and those
+   * goals then wait for the user's next message.
+   */
+  private readonly legacyGoalResumes = new Set<string>();
+  /** The running turn each legacy goal session was stopped in: never stopped twice for one turn. */
+  private readonly legacyGoalStoppedTurns = new Map<string, string | null>();
   /**
    * True once `init()` has run. Distinguishes "never started" from "a spawn
    * failed and the state is `stopped`" — without it the health interval would
@@ -263,6 +338,15 @@ export class AgentHostSupervisor {
   /** True only when the host can take work right now. */
   isHealthy(): boolean {
     return this.state === "healthy";
+  }
+
+  /**
+   * Resolves once no agent goals §5.7 hold request is in flight. Supervision
+   * itself never waits on one; this is for a caller that must see a request's
+   * answer applied — a test.
+   */
+  goalHoldSettled(): Promise<void> {
+    return this.goalHoldInFlight ?? Promise.resolve();
   }
 
   /**
@@ -386,6 +470,9 @@ export class AgentHostSupervisor {
         }
         if (this.pendingVersionRestart) {
           await this.restartIfDrained();
+        } else {
+          // A hand-over the replacement could not take yet is asked again.
+          await this.resumeLegacyGoalSessions();
         }
         return;
       }
@@ -547,10 +634,15 @@ export class AgentHostSupervisor {
       // the host resumes what it held. Whatever the blocker: only the host can
       // tell whether goals are all that is in the way, and it holds nothing
       // while a fleet in another tab would leave a goal idle for as long as it
-      // ran. Awaited here, inside the transition and bounded by the client's
-      // deadline, so a `/stop` never overtakes a hold the host is still
-      // applying.
-      await this.requestGoalHold(probed.health.hostInstanceId);
+      // ran. NOT awaited: supervision — boot adoption, before the daemon
+      // listens, above all — never waits on the host's answer. A `/stop` that
+      // overtakes a hold still being applied is safe: the host skips a pause
+      // queued behind it and keeps the mark of one it cut short.
+      this.renewGoalHold(probed.health.hostInstanceId);
+      const hold = this.goalHold;
+      if (hold?.unsupported === true && hold.hostInstanceId === probed.health.hostInstanceId) {
+        await this.stopLegacyGoalsAtTheirBoundary(probed.health);
+      }
       return;
     }
     this.lastDrainDeferral = null;
@@ -563,10 +655,19 @@ export class AgentHostSupervisor {
    * is logged once per change of reason and simply asked again on the next
    * evaluation — the lease outlives several missed renewals. A host that
    * predates the route (`null`) is remembered and not asked again until a
-   * different instance is adopted: the deploy that ships §5.7 waits as it
-   * always did, the next one holds. The held set is logged when it changes,
-   * never per tick — the host answers the whole set on every renewal.
+   * different instance is adopted: the deploy that ships §5.7 falls back to
+   * stopping Codex goal loops at their turn boundaries
+   * ({@link stopLegacyGoalsAtTheirBoundary}), the next one holds. The held
+   * set is logged when it changes, never per tick — the host answers the
+   * whole set on every renewal.
    */
+  private renewGoalHold(hostInstanceId: string): void {
+    if (this.goalHoldInFlight !== null) return;
+    this.goalHoldInFlight = this.requestGoalHold(hostInstanceId).finally(() => {
+      this.goalHoldInFlight = null;
+    });
+  }
+
   private async requestGoalHold(hostInstanceId: string): Promise<void> {
     const request = this.opts.adapters.requestHoldGoals;
     if (!request) return;
@@ -580,12 +681,15 @@ export class AgentHostSupervisor {
     if (hold.unsupported) return;
     try {
       const held = await request();
+      // Answered after the supervisor moved on — the host replaced, or its
+      // restart no longer pending: nothing to learn, and nothing to log.
+      if (this.goalHold !== hold || !this.pendingVersionRestart) return;
       hold.failure = null;
       if (held === null) {
         hold.unsupported = true;
         this.log(
           "log",
-          "agent host predates the goal hold; a continuing goal keeps the restart waiting until it pauses or ends"
+          "agent host predates the goal hold; once Codex goal loops are all that keep the restart waiting, their sessions are stopped at a turn boundary and resumed on the next host"
         );
         return;
       }
@@ -600,13 +704,118 @@ export class AgentHostSupervisor {
           : "agent host no longer holding goals for the restart"
       );
     } catch (error) {
-      // A throw — synchronous or not — is logged, never passed on: this runs
-      // inside `init()` and behind the fire-and-forget `handleTurnSettled`.
+      // A throw — synchronous or not — is logged, never passed on: nothing
+      // awaits this. A failure after the supervisor moved on is no news.
+      if (this.goalHold !== hold || !this.pendingVersionRestart) return;
       const reason = error instanceof Error ? error.message : String(error);
       if (reason !== hold.failure) {
         hold.failure = reason;
         this.log("warn", "agent host goal hold request failed; the restart keeps waiting", error);
       }
+    }
+  }
+
+  /**
+   * Agent goals §5.7 for a host from before the goal hold (its route-miss
+   * 404). Such a host knows nothing of goals and cannot pause one, and a
+   * continuing Codex goal starts its next turn within milliseconds of the
+   * last, so its drain would wait out the whole goal. So once the drain's ONLY
+   * blockers are Codex goal loops — every running turn one Codex started by
+   * itself, right after another it started — each goal thread's provider
+   * session is stopped the moment its next turn has just begun (within
+   * {@link LEGACY_GOAL_TURN_BOUNDARY_MS}), which loses seconds of that turn at
+   * most, and remembered: the next host resumes the session without a turn,
+   * and Codex continues the goal by itself — its own store kept it active
+   * ({@link resumeLegacyGoalSessions}). A goal thread mid-turn is left for its
+   * own boundary. Anything else in the way — a turn a user started,
+   * background work anywhere or not known yet, a thread whose snapshot cannot
+   * be read, an open approval or question — stops nothing, and the deploy
+   * waits as it always did. A goal stopped while a sibling goal is still
+   * mid-turn, or before other work starts, waits idle for the restart: such a
+   * host cannot resume a session without a turn.
+   */
+  private async stopLegacyGoalsAtTheirBoundary(health: AgentHostHealthResponse): Promise<void> {
+    const { inspectLegacyGoalTurn, stopThreadSession, resumeGoalSessions } = this.opts.adapters;
+    if (!inspectLegacyGoalTurn || !stopThreadSession || !resumeGoalSessions) return;
+    // Background work anywhere keeps the drain waiting whatever the goals do —
+    // as does not knowing yet (`drainBlockers`' own rule).
+    const daemonView = this.daemonBackgroundWork();
+    if (health.backgroundWorkThreadIds === undefined && daemonView === null) return;
+    if (backgroundWorkThreadIds(health, daemonView).length > 0) return;
+    const active = [...new Set(health.activeTurnThreadIds)];
+    if (active.length === 0) return;
+    const adapterOf = this.opts.adapters.threadAdapter;
+    if (
+      adapterOf !== undefined &&
+      active.some((threadId) => {
+        const adapter = adapterOf(threadId);
+        return adapter !== null && adapter !== "codex";
+      })
+    ) {
+      return;
+    }
+    const turns = await Promise.all(
+      active.map(async (threadId) => ({
+        threadId,
+        turn: await inspectLegacyGoalTurn(threadId).catch(() => null)
+      }))
+    );
+    if (turns.some(({ turn }) => turn === null || !turn.goalLoop)) return;
+    const now = this.opts.adapters.now();
+    for (const { threadId, turn } of turns) {
+      if (turn?.startedAt == null || now - turn.startedAt > LEGACY_GOAL_TURN_BOUNDARY_MS) continue;
+      if (turn.turnId !== null && this.legacyGoalStoppedTurns.get(threadId) === turn.turnId) {
+        continue;
+      }
+      // Handed over whatever the stop answers: a stop that timed out or lost
+      // its reply may still have landed, and a session resumed that was never
+      // stopped is only an idle one — while one stopped and never resumed
+      // leaves its goal waiting for the user.
+      this.legacyGoalResumes.add(threadId);
+      try {
+        await stopThreadSession(threadId);
+      } catch (error) {
+        this.log("warn", `could not stop Codex goal ${threadId}'s session for the restart; it keeps it waiting`, error);
+        continue;
+      }
+      this.legacyGoalStoppedTurns.set(threadId, turn.turnId);
+      this.log(
+        "log",
+        `agent host predates the goal hold: stopped Codex goal ${threadId}'s session at a turn boundary for the restart; the next host resumes it`
+      );
+    }
+  }
+
+  /**
+   * Hand the host the goal sessions {@link stopLegacyGoalsAtTheirBoundary}
+   * stopped: it resumes each without a turn, and Codex continues its goal. On
+   * a healthy host with no restart pending — right after the replacement is
+   * adopted, and again on every health tick until a host takes them. Never
+   * throws.
+   */
+  private async resumeLegacyGoalSessions(): Promise<void> {
+    const resume = this.opts.adapters.resumeGoalSessions;
+    if (
+      !resume ||
+      this.legacyGoalResumes.size === 0 ||
+      this.state !== "healthy" ||
+      this.pendingVersionRestart
+    ) {
+      return;
+    }
+    const threadIds = [...this.legacyGoalResumes].sort();
+    try {
+      const taken = await resume(threadIds);
+      // A host without the route cannot take them; a later one will.
+      if (taken === null) return;
+      for (const threadId of threadIds) this.legacyGoalResumes.delete(threadId);
+      this.log(
+        "log",
+        `agent host resuming ${taken.length} Codex goal session(s) the restart stopped` +
+          (taken.length < threadIds.length ? ` (${threadIds.length - taken.length} no longer there)` : "")
+      );
+    } catch (error) {
+      this.log("warn", "could not hand the stopped Codex goal sessions to the agent host; asking again on the next check", error);
     }
   }
 
@@ -648,7 +857,9 @@ export class AgentHostSupervisor {
     if (!ready) {
       this.setState("error", "replacement agent host never reached readiness");
       this.log("error", "agent host restart did not switch: the replacement never became ready");
+      return;
     }
+    await this.resumeLegacyGoalSessions();
   }
 
   /**
@@ -931,6 +1142,57 @@ export function drainBlockers(
   if (turns > 0) parts.push(`${turns} thread(s) with an active turn`);
   if (background > 0) parts.push(`${background} thread(s) with live background work`);
   return parts.join(", ");
+}
+
+/**
+ * Agent goals §5.7: {@link LegacyGoalTurn} off what a host from before the
+ * goal hold answered `GET /threads/:id/thread` — `{kind: "snapshot", thread}`,
+ * another version's wire data, read field-wise. `null` when it names no
+ * running turn to judge (the turn settled since `/health` was read, or the
+ * body is not a snapshot). A turn "Codex started by itself" is a turn row
+ * without a `userMessageId` — the host fills it only when a user message
+ * opened the turn — and a goal CONTINUES only when it started within
+ * {@link LEGACY_GOAL_CONTINUATION_GAP_MS} of the previous turn's end.
+ */
+export function legacyGoalTurnOf(body: unknown): LegacyGoalTurn | null {
+  if (!isRecord(body) || body.kind !== "snapshot") return null;
+  const snapshot = body.thread;
+  if (!isRecord(snapshot) || !isRecord(snapshot.head)) return null;
+  const head = snapshot.head;
+  const session = isRecord(head.session) ? head.session : null;
+  const activeTurnId = typeof session?.activeTurnId === "string" ? session.activeTurnId : null;
+  if (activeTurnId === null) return null;
+  const turns = Array.isArray(snapshot.turns) ? snapshot.turns.filter(isRecord) : [];
+  const at = turns.findIndex((turn) => turn.turnId === activeTurnId);
+  const running = at >= 0 ? turns[at] : undefined;
+  const previous = at > 0 ? turns[at - 1] : undefined;
+  const pending = isRecord(snapshot.pending) ? snapshot.pending : {};
+  const open =
+    (Array.isArray(pending.approvals) ? pending.approvals.length : 0) +
+    (Array.isArray(pending.userInputs) ? pending.userInputs.length : 0);
+  const startedAt = typeof running?.startedAt === "string" ? Date.parse(running.startedAt) : Number.NaN;
+  const previousEnded =
+    typeof previous?.completedAt === "string" ? Date.parse(previous.completedAt) : Number.NaN;
+  const providerStarted = (turn: Record<string, unknown> | undefined): boolean =>
+    turn !== undefined && typeof turn.userMessageId !== "string";
+  const continued =
+    Number.isFinite(startedAt) &&
+    Number.isFinite(previousEnded) &&
+    startedAt - previousEnded <= LEGACY_GOAL_CONTINUATION_GAP_MS;
+  return {
+    goalLoop:
+      head.adapter === "codex" &&
+      providerStarted(running) &&
+      providerStarted(previous) &&
+      continued &&
+      open === 0,
+    turnId: activeTurnId,
+    startedAt: Number.isFinite(startedAt) ? startedAt : null
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
