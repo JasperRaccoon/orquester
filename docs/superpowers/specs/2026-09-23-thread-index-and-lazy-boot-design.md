@@ -214,25 +214,36 @@ file, whose ranges may still reach past a cut, is rebuilt from the logs at the d
 *Built (follow-ups 2026-09-24):* a kept turn's late rows past a revert's cut stay in "Load older",
 at query time, with no index change. The gaps between the clipped ranges are a revert's cut and
 what follows it until the next turn begins. Besides every line inside a turn's range or before the
-first turn, a block folds each gap line that names a turn (`referencedTurnId`, the rule the indexer
-grows a range by: an activity's, a message's or a checkpoint's `turnId`) which the index still has
-and which began before the line — a kept turn's late row, which the fold keeps by its turn
-(`reduceReverted`) — never a removed turn's line (it is no longer indexed, and an id minted again
-after the revert began after the line), a turnless line or the revert (`historyBlockEvents` in
-`orchestrator.ts`). When the page lists no turn after them, it lists the newest turn its late rows
-belong to (`withLateTurns`): a later rewind that removes it removes every later turn too, and the
-client drops the pages such a rewind reaches; listed beside a later turn, it would read as on
-screen to a search reveal, which would stop at a page that holds only its late row. Blocks are
-contiguous reads that meet, so every line lies in exactly one block and a late row is on one page;
-the window may still hold it, and the reader renders one row per id. The index counts none of the
-rows of the cut, so the page does, against its 400: the block is planned again from the same end
-with that many fewer indexed activities (`indexedActivityBudget`: the largest count whose
-activities and late rows fit together; a late row written after the revert is an activity the index
-counts already), which keeps every page lossless; a cut holding more late rows than a page folds
-beside a single activity is served without them, as before, with a warning, whenever folding them
-would evict. A turnless line of a cut stays out: the fold keeps a turnless activity through every
-revert, but a turnless message only by rules a block cannot replay (a removed turn's own prompt is
-one).
+first turn, a block folds out of a gap exactly the rows the fold keeps, by the arms of
+`reduceReverted` as every later revert applies them (`historyBlockEvents` / `keptOutOfGap` in
+`orchestrator.ts`): a row written after the latest revert (`threads.revert_seq`), which no revert
+has judged; a row naming a turn (`referencedTurnId`, the rule the indexer grows a range by: an
+activity's, a message's or a checkpoint's `turnId`) which the index still has and which began
+before the line — a kept turn's late row; a turnless activity, which every revert keeps; a turnless
+message only as a kept turn's opening prompt (`turnByPrompt`) — the fallback pass of
+`retainMessagesAfterRevert`, counted over the whole thread, is not replayed; and a turnless
+checkpoint only when every later revert's `turnCount` holds its count, which the block knows when
+it holds the latest revert. Never a removed turn's row, a session change or the revert itself.
+Blocks are contiguous reads that meet, so every line lies in exactly one block and a gap row is on
+one page; the window may still hold it, and the reader renders one row per id. A page lists the
+newest kept turn its gap rows name when it lists no later one (`withGapTurns`): the client drops
+its pages when a rewind removes a turn one of them lists, and a rewind that removes that turn
+removes every later one. A search reveal judges a page by the rows it shows (`planReveal`,
+`liveTurnIdsOf` over its items), never by its `turns`. The index counts none of the rows of a cut,
+so the page does, against its 400: the block is planned again from the same end with that many
+fewer indexed activities (`indexedActivityBudget`: the largest count whose activities and gap rows
+fit together; a row written after the revert is an activity the index counts already), which keeps
+every page lossless; a cut holding more gap rows than a page folds beside a single activity is
+served without them, as before, with a warning, whenever folding them would evict. And once the
+thread has been rewound and retention has dropped an activity, the window boundary never lies
+before the first line the index positions past the latest revert — else the index's end,
+`cursor.lastByte` (`pastLatestRevert`, `firstBoundaryAfter`): a revert shrinks a class below its
+limit while the rows that class evicted before it stay gone, so the per-class windows no longer
+find them (the oldest activity left can be a launch row kept out of age order), and a class whose
+window lies wholly in a cut cannot be positioned at all. Every row either hides was written before
+the latest revert. Such a boundary names no line a cursor could keep, so the snapshot's
+`beforeCursor` is null with `hasOlder` true, and the client asks for the page below the window
+without one (`nextHistoryCursor`).
 
 Maintenance. The orchestrator's `commit` hands every appended event, with the byte position the
 store returns for it, to `index.observe(...)`. The indexer keeps, per thread, a tiny **turn fold**

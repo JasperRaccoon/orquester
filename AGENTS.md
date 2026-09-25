@@ -575,26 +575,35 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   finished later — the Claude normaliser stamps a call's rows with the turn it started in), so a
   rewind that kept such a turn left it reaching into the turns it removed, and "Load older" served
   their rows again. A revert now clips every surviving range at its cut, the first removed turn's
-  first line (`clipAtCut` in `index/indexer.ts`, `INDEX_SCHEMA_VERSION` 4). The late rows past the
-  cut lose their item positions and search rows with the removed turns', never their page: a block
-  that holds a cut folds out of it every line naming a turn the index still has that began before
-  the line (`historyBlockEvents` in `orchestrator.ts`, by `referencedTurnId` — the index's own rule
-  for a line that belongs to a turn), which is a kept turn's late row the fold keeps by its turn
-  (`reduceReverted`) — never a removed turn's line, a turnless one or the revert — and lists the
-  newest such turn when it lists no later one (a rewind that removes it removes every later turn,
-  so the client still drops the page; beside a later turn it would cut a search reveal short). The
-  index counts none of those rows, so the page does: its late rows count against its 400
-  (`indexedActivityBudget` plans the block again from the same end with that many fewer indexed
-  activities), and a cut holding more of them than a page folds beside one activity is served
-  without them, with a warning, whenever folding them would evict. Query time only: nothing the
-  index derives changed. A deploy of the bump deletes a version-3 `index.sqlite` and rebuilds it
-  once, in the background, by the boot catch-up (one thread at a time, never on the readiness path):
-  until a thread's catch-up reaches it, it offers nothing older and search misses it — and a tab
-  snapshotted before then, until its next snapshot. The window boundary behind `hasOlder` is the
-  newest first row of any FULL retention class (the parent's 500, an agent's 200, the 2 000 across
-  agents — `windowBoundary`), never simply the oldest activity the fold holds: anchors, open
-  questions and the opening rows of running work survive out of age order, and a fleet
-  whose agents lost their early rows would read as having nothing older. The client
+  first line (`clipAtCut` in `index/indexer.ts`, `INDEX_SCHEMA_VERSION` 4). The rows past the cut
+  lose their item positions and search rows with the removed turns', never their page: a block that
+  holds a revert's gap — the cut and what follows it until the next turn begins — folds out of it
+  exactly the rows the fold keeps (`historyBlockEvents` / `keptOutOfGap` in `orchestrator.ts`, the
+  arms of `reduceReverted`): a row written after the latest revert, which no revert has judged; a
+  row naming a turn the index still has that began before it (by `referencedTurnId`, the index's own
+  rule — a kept turn's late row); a turnless activity; a turnless message only as a kept turn's
+  prompt (the message fallback pass, counted over the whole thread, is not replayed); a turnless
+  checkpoint only within every later revert's count — never a removed turn's row, a session change
+  or the revert. The page lists the newest kept turn its gap rows name when it lists no later one: a
+  rewind that removes it removes every later turn, so the client still drops the page
+  (`historyAfterRevert`), and a search reveal judges a page by the rows it shows, never by its turns
+  (`planReveal`). The index counts none of the rows of a cut, so the page does: its gap rows count
+  against its 400 (`indexedActivityBudget` plans the block again from the same end with that many
+  fewer indexed activities; a row written after the revert is indexed, counted already), and a cut
+  holding more of them than a page folds beside one activity is served without them, with a warning,
+  whenever folding them would evict. Query time only: nothing the index derives changed. A deploy of
+  the bump deletes a version-3 `index.sqlite` and rebuilds it once, in the background, by the boot
+  catch-up (one thread at a time, never on the readiness path): until a thread's catch-up reaches
+  it, it offers nothing older and search misses it — and a tab snapshotted before then, until its
+  next snapshot. The window boundary behind `hasOlder` is the newest first row of any FULL retention
+  class (the parent's 500, an agent's 200, the 2 000 across agents — `windowBoundary`), never simply
+  the oldest activity the fold holds: anchors, open questions and the opening rows of running work
+  survive out of age order, and a fleet whose agents lost their early rows would read as having
+  nothing older. Once the thread has been rewound and retention has dropped an activity, it never
+  lies before the first line the index positions past the latest revert, else the index's end
+  (`pastLatestRevert`): a revert shrinks a class below its limit while the rows it evicted before
+  stay gone, and a class whose window lies wholly in a cut cannot be positioned at all. Such a
+  boundary gets no cursor, and the client asks for the page below the window without one. The client
   projects rows over the CONCATENATION of every loaded page (memoised by the pages array —
   per page, a turn a boundary splits would open its group twice), dedupes by item id, and
   renders an item the live window also holds once, at the page's older position with the
