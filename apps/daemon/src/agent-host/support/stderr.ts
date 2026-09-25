@@ -92,8 +92,27 @@ export interface RedactOptions {
 }
 
 /**
- * Mask credential-shaped text and collapse home paths. Applied to every line
- * before it becomes an event, and to the tail before it becomes an excerpt.
+ * A home path in its percent-encoded spelling, either hex case, or nothing when
+ * it encodes to itself. Grok keys its session dirs by the URL-encoded cwd
+ * (`~/.grok/sessions/%2Fvar%2Flib%2F…/`) and its task snapshots name files
+ * there, so collapsing the plain spelling alone let the home through (the
+ * Grok fixtures README, redaction).
+ */
+function encodedHomePattern(dir: string): RegExp | undefined {
+  const encoded = encodeURIComponent(dir);
+  if (encoded === dir) {
+    return undefined;
+  }
+  const source = encoded
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/%([0-9A-F]{2})/g, (_match, hex: string) => `%(?:${hex}|${hex.toLowerCase()})`);
+  return new RegExp(source, "g");
+}
+
+/**
+ * Mask credential-shaped text and collapse home paths — each in its plain and
+ * its percent-encoded spelling. Applied to every line before it becomes an
+ * event, and to the tail before it becomes an excerpt.
  */
 export function redactStderr(value: string, options: RedactOptions = {}): string {
   // NUL bytes first: they can split a pattern in two and they have no business
@@ -105,6 +124,10 @@ export function redactStderr(value: string, options: RedactOptions = {}): string
     .sort((a, b) => b.length - a.length);
   for (const dir of homes) {
     out = out.split(dir).join("~");
+    const encoded = encodedHomePattern(dir);
+    if (encoded !== undefined) {
+      out = out.replace(encoded, "~");
+    }
   }
 
   out = out.replace(PAIRING_URL_RE, "[pairing-url]");
