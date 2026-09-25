@@ -577,18 +577,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   rewind that kept such a turn left it reaching into the turns it removed, and "Load older" served
   their rows again. A revert now clips every surviving range at its cut, the first removed turn's
   first line (`clipAtCut` in `index/indexer.ts`, `INDEX_SCHEMA_VERSION` 4). The rows past the cut
-  lose their item positions and search rows with the removed turns', never their page: a block that
-  holds a revert's gap — the cut and what follows it until the next turn begins — folds out of it
-  exactly the rows the fold keeps (`historyBlockEvents` / `keptOutOfGap` in `orchestrator.ts`, the
-  arms of `reduceReverted`): a row written after the latest revert, which no revert has judged; a
-  row naming a turn the index still has that began before it (by `referencedTurnId`, the index's own
-  rule — a kept turn's late row); a turnless activity; a turnless message only as a kept turn's
-  prompt (the message fallback pass, counted over the whole thread, is not replayed); a turnless
-  checkpoint only within every later revert's count — never a removed turn's row, a session change
-  or the revert. The page lists the newest kept turn its gap rows name when it lists no later one: a
-  rewind that removes it removes every later turn, so the client still drops the page
-  (`historyAfterRevert`), and a search reveal judges a page by the rows it shows, never by its turns
-  (`planReveal`). The index counts none of the rows of a cut, so the page does: its gap rows count
+  lose their item positions and search rows with the removed turns', but keep their page (save the
+  one case below): a block that holds a revert's gap — the cut and what follows it until the next
+  turn begins — folds out of it the rows the fold keeps (`historyBlockEvents` / `keptOutOfGap` in
+  `orchestrator.ts`, the arms of `reduceReverted`): a row written after the latest revert, which no
+  revert has judged; a row naming a turn the index still has that began before it (by
+  `referencedTurnId`, the index's own rule — a kept turn's late row); a turnless activity; a
+  turnless message only as a kept turn's prompt (the message fallback pass, counted over the whole
+  thread, is not replayed); a turnless checkpoint only from a block that holds the latest revert,
+  and there only within every later revert's count — a block that does not hold it serves none,
+  which is conservative, and harmless while the window's 500 checkpoints hold them — and never a
+  removed turn's row, a session change or the revert. The page lists the newest kept turn its gap
+  rows name when it lists no later one: a rewind that removes it removes every later turn, so the
+  client still drops the page (`historyAfterRevert`), and a search reveal judges a page by the rows
+  it shows, never by its turns (`planReveal`).
+  The index counts none of the rows of a cut, so the page does: its gap rows count
   against its 400 (`indexedActivityBudget` plans the block again from the same end with that many
   fewer indexed activities; a row written after the revert is indexed, counted already), and a cut
   holding more of them than a page folds beside one activity is served without them, with a warning,
@@ -604,7 +607,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   lies before the first line the index positions past the latest revert, else the index's end
   (`pastLatestRevert`): a revert shrinks a class below its limit while the rows it evicted before
   stay gone, and a class whose window lies wholly in a cut cannot be positioned at all. Such a
-  boundary gets no cursor, and the client asks for the page below the window without one. The client
+  boundary gets no cursor, and the client asks for the page below the window without one. So right
+  after such a rewind the first page ends there and repeats rows the window still holds — often most
+  of the window — and on a fleet's thread (~2 500 activities retained) so can the next few: the
+  client renders each row once, and one "Load older" pages on past a page that shows no row the
+  timeline did not already show, up to five pages (`HISTORY_PAGES_PER_LOAD`, the MCP's bound;
+  `showsNewRow`, `loadHistoryPages` in `store.ts`), `history.loading` set throughout. The client
   projects rows over the CONCATENATION of every loaded page (memoised by the pages array —
   per page, a turn a boundary splits would open its group twice), dedupes by item id, and
   renders an item the live window also holds once, at the page's older position with the
@@ -618,8 +626,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   loaded history — the newest page's `page.endItemId` (the first row it does not hold, named by the
   host), else the last row a page shares with the window, or the newest bridge row — to the history
   section. Never decide that order by timestamp: rows replaced in place carry a fresh `createdAt` at
-  their first position. A running turn's rows in the history section render live, as the window
-  renders them. Pages + bridge are capped at `HISTORY_ROW_CAP` (20 000 rows): past it the oldest
+  their first position. The window rows the history section takes that no page holds keep the
+  window's order among the history's own rows too, each ahead of the rows both hold at one line that
+  follow it in the window, by stamp only among the rest (`withWindowContent`) — the entries'
+  order-sensitive steps (a spawn batch's anchor, a call's lifecycle) meet them as the window's own
+  projection does; the timeline's last step orders the entries by stamp in both. A running turn's
+  rows in the history section render live, as the window renders them.
+  Pages + bridge are capped at `HISTORY_ROW_CAP` (20 000 rows): past it the oldest
   pages go first (the cursor chain keeps "Load older" exact), and when the bridge plus the newest
   page alone pass it, everything is dropped and a fresh snapshot is re-read through a guarded path
   that never rewinds the stream. `windowEvicted` offers "Load older" the moment the window evicts a

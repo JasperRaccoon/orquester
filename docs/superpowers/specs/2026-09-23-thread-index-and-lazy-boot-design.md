@@ -214,7 +214,7 @@ file, whose ranges may still reach past a cut, is rebuilt from the logs at the d
 *Built (follow-ups 2026-09-24):* a kept turn's late rows past a revert's cut stay in "Load older",
 at query time, with no index change. The gaps between the clipped ranges are a revert's cut and
 what follows it until the next turn begins. Besides every line inside a turn's range or before the
-first turn, a block folds out of a gap exactly the rows the fold keeps, by the arms of
+first turn, a block folds out of a gap the rows the fold keeps, by the arms of
 `reduceReverted` as every later revert applies them (`historyBlockEvents` / `keptOutOfGap` in
 `orchestrator.ts`): a row written after the latest revert (`threads.revert_seq`), which no revert
 has judged; a row naming a turn (`referencedTurnId`, the rule the indexer grows a range by: an
@@ -222,8 +222,10 @@ activity's, a message's or a checkpoint's `turnId`) which the index still has an
 before the line — a kept turn's late row; a turnless activity, which every revert keeps; a turnless
 message only as a kept turn's opening prompt (`turnByPrompt`) — the fallback pass of
 `retainMessagesAfterRevert`, counted over the whole thread, is not replayed; and a turnless
-checkpoint only when every later revert's `turnCount` holds its count, which the block knows when
-it holds the latest revert. Never a removed turn's row, a session change or the revert itself.
+checkpoint only from a block that holds the latest revert, and there only when every later
+revert's `turnCount` holds its count — a block that does not hold it serves none, which is
+conservative, and harmless while the window's 500 checkpoints hold them. Never a removed turn's
+row, a session change or the revert itself.
 Blocks are contiguous reads that meet, so every line lies in exactly one block and a gap row is on
 one page; the window may still hold it, and the reader renders one row per id. A page lists the
 newest kept turn its gap rows name when it lists no later one (`withGapTurns`): the client drops
@@ -243,7 +245,13 @@ find them (the oldest activity left can be a launch row kept out of age order), 
 window lies wholly in a cut cannot be positioned at all. Every row either hides was written before
 the latest revert. Such a boundary names no line a cursor could keep, so the snapshot's
 `beforeCursor` is null with `hasOlder` true, and the client asks for the page below the window
-without one (`nextHistoryCursor`).
+without one (`nextHistoryCursor`). Right after such a rewind the first page therefore repeats rows
+the window still holds — often most of the window — and on a fleet's thread (~2 500 activities
+retained) so can the next few. The client renders each row once; one "Load older" pages on past a
+page that shows no row the timeline did not already show, up to five pages
+(`HISTORY_PAGES_PER_LOAD`, the MCP's `read_transcript` bound), `history.loading` set throughout; and
+the window's rows the history takes that no page holds keep the window's order there
+(`withWindowContent`), ahead of the rows both hold that follow them — never re-sorted by stamp.
 
 Maintenance. The orchestrator's `commit` hands every appended event, with the byte position the
 store returns for it, to `index.observe(...)`. The indexer keeps, per thread, a tiny **turn fold**

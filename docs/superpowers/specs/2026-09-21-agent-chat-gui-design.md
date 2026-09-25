@@ -3442,7 +3442,9 @@ the composer's, carry the file-type icon of §7.4 (`icons/files`). The plan prop
 into `fsRoot` from a render path. An older-history row ("Load older", `LoadOlderRow`) appears
 once the retained window has evicted a visible row, and pages the turns below it from the host's
 thread index (`GET …/history`; design `2026-09-23-thread-index-and-lazy-boot-design.md`)
-(`packages/ui/src/components/agent-chat/timeline/`). Codex's `commentary` phase is a visible
+(`packages/ui/src/components/agent-chat/timeline/`); one click pages on past a page that shows no
+row the timeline did not already show — right after a rewind the first pages repeat what the
+window holds — up to five pages, busy throughout. Codex's `commentary` phase is a visible
 assistant message between tool calls, in both live and replayed turns. The phase remains metadata
 so commentary cannot become the turn's terminal answer.*
 
