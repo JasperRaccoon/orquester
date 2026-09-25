@@ -1125,3 +1125,335 @@ test("every row naming a subagent carries the hour-long liveness TTL", () => {
     assert.equal(row.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS, row.type);
   }
 });
+
+// ---------------------------------------------------------------------------
+// A subagent's child session (fixture 15: its frames arrive under its own id)
+// ---------------------------------------------------------------------------
+
+/** A frame of the child session `childId`, in the captured `session/update` shape. */
+function childFrame(childId: string, update: Record<string, unknown>, meta: Record<string, unknown> = {}) {
+  return { sessionId: childId, update, _meta: { promptId: "child-prompt", ...meta } } as unknown as SessionNotification;
+}
+
+function childXai(childId: string, update: Record<string, unknown>): unknown {
+  return { sessionId: childId, update };
+}
+
+/** A foreground launch whose `subagent_spawned` has named its child session SUB_A. */
+function withChild(turn: TurnCursor = { current: "turn-1" }): GrokNormalizer {
+  const grok = normalizer(turn);
+  startedBy(grok, "call-s1", FIND_CALLERS);
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
+  return grok;
+}
+
+test("a child's turn_completed is never the parent turn's usage", () => {
+  const grok = withChild();
+  const usage = { inputTokens: 23_451, outputTokens: 95, totalTokens: 23_546, costUsdTicks: 146_390_400 };
+  grok.handleXaiNotification(
+    "_x.ai/session_notification",
+    childXai(SUB_A, { sessionUpdate: "turn_completed", prompt_id: "child-prompt", stop_reason: "end_turn", usage })
+  );
+  grok.handleXaiNotification(
+    "_x.ai/session_notification",
+    childXai(SUB_A, { sessionUpdate: "response_completed", usage: { input_tokens: 10_078, output_tokens: 58 } })
+  );
+  assert.equal(grok.turnUsage(), undefined, "the parent's turn has reported no usage of its own");
+});
+
+test("a child's catalog, title, mode, model and context size never become the parent's", () => {
+  const grok = withChild();
+  grok.handleSessionUpdate(
+    frame({ sessionUpdate: "available_commands_update", availableCommands: [{ name: "compact", description: "c" }] })
+  );
+  grok.handleXaiNotification("_x.ai/session_notification", {
+    sessionId: SESSION,
+    update: { sessionUpdate: "model_changed", model_id: "grok-4.7" }
+  });
+  const events = [
+    ...grok.handleSessionUpdate(
+      childFrame(SUB_A, {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [{ name: "only-the-childs", description: "x" }]
+      })
+    ),
+    ...grok.handleSessionUpdate(childFrame(SUB_A, { sessionUpdate: "session_info_update", title: "Child's title" })),
+    ...grok.handleSessionUpdate(childFrame(SUB_A, { sessionUpdate: "current_mode_update", currentModeId: "plan" })),
+    ...grok.handleXaiNotification(
+      "_x.ai/session_notification",
+      childXai(SUB_A, { sessionUpdate: "model_changed", model_id: "grok-4.5" })
+    ),
+    ...grok.handleSessionUpdate(
+      childFrame(SUB_A, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hm" } }, { totalTokens: 11_549 })
+    )
+  ];
+  assert.deepEqual(grok.slashCommands.map((command) => command.name), ["compact"]);
+  assert.deepEqual(only(events, "thread.metadata.updated"), [], "the child's title is not the thread's");
+  assert.equal(grok.isPlanModeActive, false);
+  assert.equal(grok.modelId, "grok-4.7");
+  assert.equal(grok.contextSize, undefined, "the child's context size is not the thread's");
+  assert.deepEqual(only(events, "thread.token-usage.updated"), []);
+});
+
+test("a child's hooks, permission_denied and self-resolved interactions are not the parent's", () => {
+  const grok = withChild();
+  const events = [
+    ...grok.handleXaiNotification(
+      "_x.ai/session_notification",
+      childXai(SUB_A, { sessionUpdate: "hook_run_started", event_name: "permission_denied", tool_name: "write", count: 1 })
+    ),
+    ...grok.handleXaiNotification(
+      "_x.ai/session_notification",
+      childXai(SUB_A, { sessionUpdate: "pending_interaction", tool_call_id: "call-c", kind: "permission" })
+    ),
+    ...grok.handleXaiNotification(
+      "_x.ai/session_notification",
+      childXai(SUB_A, { sessionUpdate: "interaction_resolved", tool_call_id: "call-c" })
+    )
+  ];
+  assert.deepEqual(events, [], "a hook row names no owner: a child's would land in the parent timeline");
+  assert.equal(grok.sawPermissionDenied, false);
+  assert.equal(grok.approvalsWereSelfResolved, false);
+});
+
+test("a child's words open its agent's own segment; its turn end closes it and leaves the parent's open", () => {
+  const grok = withChild();
+  const parent = grok.handleSessionUpdate(
+    frame({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Waiting." } })
+  );
+  const childWords = grok.handleSessionUpdate(
+    childFrame(SUB_A, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "sub-ok" } })
+  );
+  const [opened, delta] = childWords;
+  assert.equal(opened?.type, "item.started");
+  assert.equal(opened?.agentId, "call-s1");
+  assert.equal(delta?.type, "content.delta");
+  assert.equal(delta?.agentId, "call-s1");
+  assert.equal(delta?.turnId, "turn-1");
+  assert.notEqual(delta?.itemId, only(parent, "content.delta")[0]?.itemId, "never the parent's bubble");
+  const ended = grok.handleXaiNotification(
+    "_x.ai/session_notification",
+    childXai(SUB_A, { sessionUpdate: "turn_completed", prompt_id: "child-prompt", stop_reason: "end_turn" })
+  );
+  assert.deepEqual(
+    ended.map((event) => [event.type, event.itemId, event.agentId]),
+    [["item.completed", delta?.itemId, "call-s1"]]
+  );
+  const more = grok.handleSessionUpdate(
+    frame({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: " Done." } })
+  );
+  assert.equal(only(more, "item.started").length, 0, "the parent's bubble is still the open one");
+});
+
+test("a background agent's words after the parent's turn ended are turnless, closed by their own completion", () => {
+  const turn: TurnCursor = { current: "turn-1" };
+  const grok = normalizer(turn);
+  startedBy(grok, "call-bg", { prompt: "p", description: "run tests", background: true });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_B, "run tests"));
+  grok.endTurn();
+  turn.current = undefined;
+  const words = grok.handleSessionUpdate(
+    childFrame(SUB_B, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "bg-done" } })
+  );
+  const thought = grok.handleSessionUpdate(
+    childFrame(SUB_B, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "ok" } })
+  );
+  for (const event of [...words, ...thought]) {
+    assert.equal(event.turnId, undefined, `${event.type} rides no turn`);
+    assert.equal(event.agentId, "call-bg");
+    assert.ok(event.itemId !== undefined, `${event.type} names its item`);
+  }
+  const finishedRows = grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_B, "completed", "bg-done"));
+  assert.deepEqual(
+    finishedRows.map((event) => [event.type, event.itemId ?? (event.payload as { taskId?: string }).taskId]),
+    [
+      ["item.completed", only(thought, "content.delta")[0]?.itemId],
+      ["item.completed", only(words, "content.delta")[0]?.itemId],
+      ["task.completed", "call-bg"]
+    ],
+    "the run's end closes its open thinking and words before its task row"
+  );
+});
+
+test("a run's end closes its child's open calls BEFORE its task row", () => {
+  const grok = withChild();
+  const opened = grok.handleSessionUpdate(
+    childFrame(SUB_A, { sessionUpdate: "tool_call", toolCallId: "call-child-1", title: "run_terminal_command", rawInput: { command: "sleep 302" } })
+  );
+  assert.equal(only(opened, "item.started")[0]?.agentId, "call-s1");
+  const ended = grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled"));
+  assert.deepEqual(
+    ended.map((event) => [event.type, event.itemId ?? (event.payload as { taskId?: string }).taskId]),
+    [
+      ["item.completed", "call-child-1"],
+      ["task.completed", "call-s1"]
+    ]
+  );
+  const failed = only(ended, "item.completed")[0]!;
+  assert.equal(failed.payload.status, "failed");
+  assert.equal(failed.agentId, "call-s1");
+  assert.equal(failed.turnId, "turn-1", "on the turn the call started in");
+});
+
+test("a frame of a session no subagent_spawned named is the parent's, as before", () => {
+  const grok = normalizer();
+  const events = grok.handleSessionUpdate(
+    childFrame("01a0ffff-0000-7000-8000-000000000000", {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "hi" }
+    })
+  );
+  assert.equal(only(events, "content.delta")[0]?.agentId, undefined);
+});
+
+test("subagent_spawned joins a resume to its source's task, and a spawn no launch explains starts its own", () => {
+  const grok = normalizer();
+  startedBy(grok, "call-s1", FIND_CALLERS);
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
+  grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "completed", "main.js:3"));
+  const resumed = startedBy(grok, "call-s2", { prompt: "More.", resume_from: SUB_A });
+  assert.equal(resumed.payload.taskId, "call-s1");
+  const NEW_ID = "01a0c1ab-2222-7333-8444-555566667777";
+  grok.handleXaiNotification(
+    "_x.ai/session_notification",
+    spawned(NEW_ID, "find callers", { resumed_from: SUB_A, effective_context_source: "resumed" })
+  );
+  const end = grok.handleXaiNotification("_x.ai/session_notification", finished(NEW_ID, "completed", "tests:4"));
+  assert.deepEqual(
+    taskRows(end).map((event) => [event.payload.taskId, event.payload.toolUseId, event.payload.summary]),
+    [["call-s1", "call-s2", "tests:4"]]
+  );
+  // The CLI's own spawn (a /loop fire; not captured): an agent under its id.
+  const LOOP = "01a0c1ac-3333-7444-8555-666677778888";
+  const loop = grok.handleXaiNotification("_x.ai/session_notification", spawned(LOOP, "hourly check"));
+  assert.deepEqual(
+    taskRows(loop).map((event) => [event.type, event.payload.taskId, event.payload.toolUseId]),
+    [["task.started", LOOP, LOOP]]
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Monitors (fixture 20; T3's reader)
+// ---------------------------------------------------------------------------
+
+test("a Monitor answer with no task_backgrounded before it starts the monitor itself — T3's reader order", () => {
+  const grok = normalizer();
+  const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
+  grok.handleSessionUpdate(
+    frame({ sessionUpdate: "tool_call", toolCallId: "call-m", title: "monitor", rawInput: { command: "tail -f x", description: "watch x" } })
+  );
+  const started = grok.handleSessionUpdate(
+    frame({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-m",
+      status: "completed",
+      rawOutput: { type: "Monitor", taskId: MONITOR, timeoutMs: 36_000_000, persistent: false }
+    })
+  );
+  assert.deepEqual(
+    taskRows(started).map((event) => [event.payload.taskId, event.payload.taskType, event.payload.title, event.payload.toolUseId]),
+    [[MONITOR, "monitor", "watch x", "call-m"]]
+  );
+  const event = grok.handleXaiNotification("_x.ai/monitor_event", {
+    sessionId: SESSION,
+    update: { sessionUpdate: "monitor_event", task_id: MONITOR, description: "watch x", event_text: "ERROR boom" }
+  });
+  assert.deepEqual(
+    agentRows(event).map((row) => [row.type, (row.payload as { summary?: string }).summary]),
+    [["task.progress", "ERROR boom"]]
+  );
+  const unknown = grok.handleXaiNotification("_x.ai/monitor_event", {
+    sessionId: SESSION,
+    update: { sessionUpdate: "monitor_event", task_id: "01a0d913-0000-7000-8000-000000000000", event_text: "x" }
+  });
+  assert.deepEqual(unknown, [], "a monitor nobody started starts nothing");
+});
+
+// ---------------------------------------------------------------------------
+// background_tasks: a row only when something the roster reads changed
+// ---------------------------------------------------------------------------
+
+function listing(tasks: Array<Record<string, unknown>>, sessionId = SESSION): unknown {
+  return { sessionId, update: { sessionUpdate: "background_tasks", tasks } };
+}
+
+const DEV = { task_id: SHELL, command: "npm run dev", description: "dev server", kind: "bash", output_file: "~/out.log" };
+
+test("an unchanged background_tasks listing emits nothing, however often it is restated", () => {
+  const grok = normalizer();
+  const OTHER = "01a0c1a7-4444-7fc3-894b-56f0bb60a6db";
+  const first = grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }]));
+  assert.deepEqual(agentRows(first).map((row) => row.type), ["task.started"]);
+  for (let index = 0; index < 3; index += 1) {
+    assert.deepEqual(grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }])), []);
+  }
+  // Another task starting restates this one: still nothing for it.
+  const second = grok.handleXaiNotification(
+    SNAPSHOTS,
+    listing([
+      { ...DEV, status: "running" },
+      { task_id: OTHER, command: "sleep 9", kind: "bash", status: "running" }
+    ])
+  );
+  assert.deepEqual(agentRows(second).map((row) => [row.type, row.payload.taskId]), [["task.started", OTHER]]);
+});
+
+test("a changed listing emits exactly one row, carrying every change", () => {
+  const grok = normalizer();
+  grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }]));
+  const renamed = agentRows(grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, description: "vite", status: "running" }])));
+  assert.deepEqual(
+    renamed.map((row) => [row.type, row.payload.title, (row.payload as { status?: string }).status]),
+    [["task.updated", "vite", undefined]],
+    "a new title is one status-less update"
+  );
+  const both = agentRows(
+    grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, description: "vite 2", status: "waiting", output_file: "~/b.log" }]))
+  );
+  assert.equal(both.length, 1, "status, title and output file: one row");
+  assert.deepEqual(
+    [both[0]!.type, both[0]!.payload.title, (both[0]!.payload as { status?: string }).status, both[0]!.payload.outputFile],
+    ["task.updated", "vite 2", "waiting", "~/b.log"]
+  );
+  assert.deepEqual(grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, description: "vite 2", status: "waiting", output_file: "~/b.log" }])), []);
+});
+
+test("a listing's cancelled status ends the task once — Stop then writes no second end", () => {
+  const grok = normalizer();
+  grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }]));
+  const ended = agentRows(grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "cancelled" }])));
+  assert.deepEqual(statuses(ended), [["task.completed", SHELL, "stopped"]]);
+  assert.deepEqual(grok.stopBackgroundTasks(), []);
+});
+
+test("a revived shell's changes ride a status-less row; an unchanged listing still says nothing", () => {
+  const grok = normalizer();
+  grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }]));
+  grok.stopBackgroundTasks();
+  const revived = agentRows(grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }])));
+  assert.deepEqual(revived.map((row) => row.type), ["task.started"]);
+  assert.deepEqual(grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }])), []);
+  const waiting = agentRows(grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "waiting" }])));
+  assert.deepEqual(
+    waiting.map((row) => [row.type, (row.payload as { status?: string }).status]),
+    [["task.progress", undefined]],
+    "never a status that would reopen the roster's row"
+  );
+});
+
+test("a child session's listing never ends the parent's tasks", () => {
+  const grok = withChild();
+  grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }]));
+  const CHILD_SHELL = "call-88e87ad3-152e-4eab-b522-89fc544e8db5-0";
+  const childListing = grok.handleXaiNotification(
+    SNAPSHOTS,
+    listing([{ task_id: CHILD_SHELL, command: "sleep 20", kind: "bash", status: "running" }], SUB_A)
+  );
+  assert.deepEqual(
+    agentRows(childListing).map((row) => [row.type, row.payload.taskId, row.payload.agentId]),
+    [["task.started", CHILD_SHELL, "call-s1"]],
+    "the child's shell is its agent's; the parent's dev server did not drop out"
+  );
+  const parentAgain = grok.handleXaiNotification(SNAPSHOTS, listing([{ ...DEV, status: "running" }]));
+  assert.deepEqual(parentAgain, [], "…and the parent's listing never ends the child's shell");
+});

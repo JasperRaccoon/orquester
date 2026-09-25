@@ -26,6 +26,7 @@ import type { AppendableDomainEvent } from "../../services.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { agentFrames, readCapture } from "./fixtures.ts";
 import { GROK_AGENT_LIVENESS_TTL_MS, GrokNormalizer } from "./normalize.ts";
+import { driveCapture } from "./testing/capture-driver.ts";
 
 const THREAD = "thread-1";
 const SESSION = "01a0c1a7-1185-7171-9447-3aa38569088c";
@@ -498,4 +499,139 @@ test("a Grok agent nobody polls holds working for an hour, re-armed by a running
   assert.equal(agent(s, "call-bg").status, "completed", "a later end is recorded as any end is");
   assert.equal(agent(s, "call-bg").result, "done at last");
   assert.equal(s.liveness.liveness(THREAD), null);
+});
+
+// ---------------------------------------------------------------------------
+// The 2026-09-25 captures through ingestion, the fold and the registry
+// ---------------------------------------------------------------------------
+
+interface CaptureSeam {
+  readonly events: readonly RuntimeEvent[];
+  readonly liveness: ReturnType<typeof createLivenessRegistry>;
+  /** Ingest every event up to and including `index` not ingested yet. */
+  feedThrough(index: number): Promise<void>;
+  state(): ReturnType<typeof fold>;
+}
+
+/** Drive a capture (`testing/capture-driver.ts`) and hand its events to the real seam, on demand. */
+function captureSeam(file: string, options: Parameters<typeof driveCapture>[1] = {}): CaptureSeam {
+  const run = driveCapture(file, options);
+  const clock = new FakeClock();
+  const timers = new FakeTimers(clock);
+  const sink = new RecordingSink();
+  const liveness = createLivenessRegistry({ clock: createTestClock(0) });
+  const ingestion = createIngestion({
+    sink: sink.sink,
+    liveness,
+    clock,
+    idGen: counterIdGen(),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer
+  });
+  let next = 0;
+  return {
+    events: run.events,
+    liveness,
+    feedThrough: async (index) => {
+      for (; next <= index && next < run.events.length; next += 1) {
+        await ingestion.ingest(run.events[next]!);
+      }
+      await ingestion.drain();
+    },
+    state: () => fold(sink.events())
+  };
+}
+
+function indexOf(events: readonly RuntimeEvent[], predicate: (event: RuntimeEvent) => boolean): number {
+  const index = events.findIndex(predicate);
+  assert.ok(index >= 0, "the capture holds the moment the test names");
+  return index;
+}
+
+const taskEnd = (taskId: string) => (event: RuntimeEvent) =>
+  event.type === "task.completed" && event.payload.taskId === taskId;
+
+test("15 through the fold: the agent completes with its answer; its child's rows and words are its own", async () => {
+  const FG = "call-178a2a0c-2c5e-49a6-8fb8-e0fee73d6c1e-0";
+  const CHILD_CALL = "call-bc7ab91e-2c90-4a0b-b578-8ba7dc84ce7e-0";
+  const s = captureSeam("15-subagent-foreground.ndjson");
+  await s.feedThrough(indexOf(s.events, taskEnd(FG)) - 1);
+  assert.equal(s.liveness.liveness(THREAD), "working", "a running foreground agent is live work");
+  await s.feedThrough(s.events.length);
+  const state = s.state();
+  const roster = state.roster.find((entry) => entry.id === FG);
+  assert.equal(roster?.status, "completed");
+  assert.equal(roster?.result, "sub-ok");
+  assert.equal(roster?.title, "echo check");
+  assert.equal(s.liveness.liveness(THREAD), null);
+
+  const childRows = state.activities.filter((row) => (row.payload as { toolUseId?: string }).toolUseId === CHILD_CALL);
+  assert.ok(childRows.length > 0);
+  assert.ok(childRows.every((row) => row.agentId === FG), "the child's call renders in its agent's drill-in only");
+  const messages = state.items.filter((item) => item.kind === "message");
+  const childWords = messages.filter((item) => item.agentId === FG && item.role === "assistant");
+  assert.deepEqual(childWords.map((item) => item.text), ["sub-ok"]);
+  const parentWords = messages.filter((item) => item.agentId === undefined && item.role === "assistant");
+  assert.ok(parentWords.some((item) => item.text.endsWith("DONE")));
+  assert.equal(parentWords.some((item) => item.text.includes("sub-ok")), false);
+  assert.deepEqual(
+    messages.filter((item) => item.streaming).map((item) => item.id),
+    [],
+    "every segment, the agent's included, is closed"
+  );
+});
+
+test("16 through the fold: live while the background agent runs, idle after subagent_finished; its shell is its own", async () => {
+  const BG = "call-a00d2553-adc5-48f4-9181-4a66616fc94f-0";
+  const CHILD_SHELL = "call-88e87ad3-152e-4eab-b522-89fc544e8db5-0";
+  const s = captureSeam("16-subagent-background-poll.ndjson");
+  const firstTurnEnd = indexOf(s.events, (event) => event.type === "turn.completed");
+  await s.feedThrough(firstTurnEnd);
+  assert.equal(s.liveness.liveness(THREAD), "working", "the agent outlives its parent's turn");
+  await s.feedThrough(s.events.length);
+  const state = s.state();
+  assert.equal(state.roster.find((entry) => entry.id === BG)?.status, "completed");
+  assert.equal(state.roster.find((entry) => entry.id === BG)?.result, "bg-done");
+  const shell = state.roster.find((entry) => entry.id === CHILD_SHELL);
+  assert.equal(shell?.status, "completed");
+  assert.equal(shell?.agentKind, "background");
+  const shellRows = state.activities.filter((row) => (row.payload as { taskId?: string }).taskId === CHILD_SHELL);
+  assert.ok(shellRows.every((row) => row.agentId === BG), "the child's shell is its agent's, never the parent's");
+  assert.equal(s.liveness.liveness(THREAD), null);
+});
+
+test("20 through the fold: a monitor reads monitoring while it runs and nothing after task_completed", async () => {
+  const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
+  const s = captureSeam("20-monitor.ndjson");
+  await s.feedThrough(indexOf(s.events, taskEnd(MONITOR)) - 1);
+  assert.equal(s.liveness.liveness(THREAD), "monitoring");
+  await s.feedThrough(s.events.length);
+  const monitor = s.state().roster.find((entry) => entry.id === MONITOR);
+  assert.equal(monitor?.status, "completed");
+  assert.equal(monitor?.title, "tick watch");
+  assert.equal(s.liveness.liveness(THREAD), null);
+});
+
+test("18 through the fold: a killed agent and a killed shell both read interrupted", async () => {
+  const s = captureSeam("18-subagent-kill.ndjson");
+  await s.feedThrough(s.events.length);
+  const roster = s.state().roster;
+  assert.equal(roster.find((entry) => entry.id === "call-e64257f2-037e-4f00-95c4-f512daeb136b-1")?.status, "interrupted");
+  assert.equal(roster.find((entry) => entry.id === "01a0d911-4089-7b73-a6b2-4490a4cfe87a")?.status, "interrupted");
+  assert.equal(s.liveness.liveness(THREAD), null);
+});
+
+test("21 through the fold: after a Stop, the shell the CLI kept running holds monitoring; the roster keeps the end", async () => {
+  const SHELL_21 = "01a0d915-61b7-7132-b432-a6c95b3f7778";
+  const s = captureSeam("21-stop-with-background-work.ndjson", {
+    atNote: (note, { grok }) =>
+      /sending session\/cancel with no prompt in flight/.test(note)
+        ? [...grok.failOpenTools("Stopped."), ...grok.stopBackgroundTasks()]
+        : []
+  });
+  await s.feedThrough(s.events.length);
+  assert.equal(s.liveness.liveness(THREAD), "monitoring", "the poll said the shell still runs: a deploy must wait");
+  const roster = s.state().roster;
+  assert.equal(roster.find((entry) => entry.id === SHELL_21)?.status, "interrupted");
+  assert.equal(roster.find((entry) => entry.id === "call-7b249d13-32d3-4f24-a3ad-b582665c9c5a-1")?.status, "interrupted");
 });
