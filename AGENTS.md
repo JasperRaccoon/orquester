@@ -890,12 +890,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `interacted` carries no status — neither is evidence about the run in progress. Grok starts an
   agent at its `spawn_subagent` call's first frame under the call's id, and a `resume_from` launch
   starts the SAME task again under the new call (`launchSubagent`; see "Grok: shells are live
-  work"). An agent first
-  launched by a host older than this change has no launch id on its first start, so a relaunch from
-  a terminal state could not reopen it; rather than weaken the late-delivery guard in the fold, a
-  thread's first load in a host lifetime gives each settled one — OpenCode and Codex threads only
-  (the head's adapter): Claude always launched with an id, and Grok surfaced no agents before it did
-  so with ids — one appended `task.started` naming `legacy-launch:<taskId>` (`legacyLaunchStarts`
+  work"). An agent first launched by a host older than the relaunch fix (2026-09-24) has no launch
+  id on its first start, so a relaunch from a terminal state could not reopen it; rather than weaken
+  the late-delivery guard in the fold, a thread's first load in a host lifetime gives each settled
+  one — OpenCode and Codex threads only (the head's adapter): Claude always launched with an id, and
+  Grok surfaced no agents before it did so with ids — one appended `task.started` naming
+  `legacy-launch:<taskId>` (`legacyLaunchStarts`
   in `leftover-work.ts`, `recordLegacyLaunches`, after the leftover closings so an agent they stop
   counts as settled). It rides the agent's first start's turn (a rewind keeps or drops the two
   together) and owner, carries its newest row's linkage like a closer, and its row's
@@ -1027,28 +1027,35 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   heartbeat belongs to its call (`toolProgressEvent`): no nested frame on 2.1.280 carries
   `task_id`, so owning it by `task_id` dropped every subagent heartbeat; `task_id` counts only for
   a surfaced subagent.
-- **"Load full output" on a command whose output streamed reads the host's join, never the row.**
-  A row holds only the chunks its window kept (a parent's 500 rows, an agent's 200), and a streamed
-  command's item holds at most a preview of what it printed (a Codex completion's 180-character
-  detail; a background shell's completion, its command and exit code) — reading the item back showed
-  that payload as JSON. So a row whose command streamed (`streamedOutput`, `WorkLogEntry`: a
+- **"Load full output" reads all a command printed: the host's join, else what its item kept.**
+  A row holds only the chunks its window kept (a parent's 500 rows, an agent's 200), and a command's
+  item holds its output only as far as its adapter kept it: a Codex completion keeps
+  `aggregatedOutput` whole up to 64 KiB and past that only the head, its payload marked `truncated`
+  at rest (`COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`); a background shell's completion
+  keeps its command and exit code, no output; an update is stored already slimmed, its data the
+  row's preview. So a row whose command streamed (`streamedOutput`, `WorkLogEntry`: a
   `command_output` chunk, every lifecycle row of a call whose chunks the derivation input holds —
   wherever they fall — the row `joinLifecycleDetails` puts them on, and every lifecycle row of a
   Claude background shell's `bgshell:` call, whose chunks the cross-agent ceiling can evict while
   retention keeps its start) offers the button whether or not its payload was cut — a running
-  command's start included (`fullOutputSourceOf`) — and the viewer reads the call's join
+  command's start included (`fullOutputSourceOf`) — and the viewer reads the call's join first
   (`readFullOutput`, `packages/ui/src/lib/agent-chat/full-output.ts`) through the chat transport's
   `readItemOutput`: `GET …/items/:itemId/output` one window at a time,
   `THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES` wide, each starting where the last ended — else the read
-  fails rather than stitch a text the call never printed — with "still running" / "only the first 8
-  MiB can be shown here" notes above the text (the log keeps every chunk; only the join stops at its
-  cap). A host from before windows answers the whole join, taken as it comes; a 404 or an empty join
-  falls back to the item read, never an error — which shows a command's own output as text
-  (`commandOutputText`, the MCP's first step; never out of an item stored cut, `payload.truncated`)
-  and anything else as before (`fullOutputText`). Never a file change's join: its chunks are its
-  result text (the MCP's rule). The subagent drill-in opens the same viewer: a read, not a command.
-  The read is not routed through the thread store: an output the user asked to see once is not
-  thread state.
+  fails rather than stitch a text the call never printed. A command item stored cut asks the join
+  next, even with none of the call's chunks in view — the MCP's order: `read_tool_output`'s step 1
+  skips an item stored cut, its step 2 is the join. Where no join answers (an empty one, or a 404)
+  the item answers by one rule both readers follow, `storedCommandOutput`
+  (`packages/api/src/agent-chat/command-output.ts`): an output stored whole as text; a completion's
+  kept head as text under "Only the start of this output was kept." (the MCP: `command-output`,
+  `truncated: true`) — never as JSON, never as the whole output, and naming no size, since a first
+  load's closer can carry an update's cut copy marked the same way, a one-line preview; an update's
+  preview never as the output (its payload, as JSON); anything else as before (`fullOutputText`).
+  The other notes above the text: "still running", and "only the first 8 MiB can be shown here" (the
+  log keeps every chunk; only the join stops at its cap). A host from before windows answers the
+  whole join, taken as it comes. Never a file change's join: its chunks are its result text (the
+  MCP's rule). The subagent drill-in opens the same viewer: a read, not a command. The read is not
+  routed through the thread store: an output the user asked to see once is not thread state.
 - **OpenCode: a subagent's answer arrives after its run ended, and a running command restates its
   output.** (fixtures README observations 27-28, `adapters/opencode/normalize.ts`.) (1) The
   child's own `session.idle` ends a run just BEFORE the parent's `task` part completes with the
@@ -1304,7 +1311,9 @@ row's `outputItemId` (`GET …/items/:itemId`) in UTF-8 byte windows; a command 
 output from the places the row's preview reads (`commandOutputText`, one list with
 `commandDisplayDetail`), unless the item is stored already cut (`truncated`: an update, or a Codex
 command's completion, which keeps its `aggregatedOutput` in `data.item` up to 64 KiB and past that
-only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`). A command's output
+only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts` — a head that answers after
+the join, when that is empty, as `command-output` with `truncated: true`, the text the GUI's viewer
+shows: `storedCommandOutput`, the one rule both follow). A command's output
 that exists only as streamed `tool.output` chunks — a Claude background shell's, a running
 command's so far — is joined by the host (`GET …/items/:itemId/output`, `store/tool-output.ts`)
 and answered with `running`/`truncated`; never a file change's (Claude streams its result text as

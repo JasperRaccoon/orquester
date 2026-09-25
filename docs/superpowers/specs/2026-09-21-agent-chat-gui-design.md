@@ -3080,6 +3080,25 @@ opens the same viewer — a read, not a command. Still out of reach: a call none
 window or the loaded history holds — a background shell's aside — offers the button only where its
 own payload was cut, since nothing else in the snapshot says it streamed.*
 
+*Built (plan `2026-09-24-follow-ups-adapters-output-composer-history`, final fix): a command item
+stored cut reads the join too. Since task 3 a Codex completion keeps its output in
+`data.item.aggregatedOutput`, whole up to 64 KiB and past that only the head, its payload marked
+`truncated` at rest; with none of the call's chunks in view — the retention boundary between its
+last chunk and its completion, or a page boundary between them — its row read the item, and the
+viewer printed the kept head as one escaped JSON string while the host held the whole join. Now the
+item read of a command row naming its call whose item is stored cut asks the call's join next
+(`readFullOutput`: the MCP's order — its step 1 skips an item stored cut, its step 2 is the join),
+and where no join answers — an empty one, a 404 — a completion stored cut shows the head it kept as
+the command printed it, with "Only the start of this output was kept." above it, never as JSON and
+never as the whole output; the MCP answers the same head as `command-output` with `truncated: true`.
+One rule decides both readers, `storedCommandOutput`
+(`packages/api/src/agent-chat/command-output.ts`): an output stored whole answers first, a
+completion's kept head only after the join, an update's preview never. The note names no size: a
+host's first load closes a call a dead process left open with a completion that can carry an
+update's cut copy, marked the same way, whose head is a one-line preview. So what stays out of reach
+is a completion stored whole that holds no output — a Codex command's from a host before task 3 —
+none of whose chunks the window or the loaded history holds: its payload shows.*
+
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured
 *over this thread's rows alone*, is ≤ 1 000 events **and** ≤ 8 MiB of payload; past either it sends
