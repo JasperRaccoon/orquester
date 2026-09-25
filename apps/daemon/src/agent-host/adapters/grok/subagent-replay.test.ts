@@ -5,7 +5,7 @@
  * (`testing/capture-driver.ts`).
  *
  * What each capture pins is the fixtures README's observation of the same
- * number range (37–45); the shapes are the CLI's own, not T3's or the
+ * number range (37–47); the shapes are the CLI's own, not T3's or the
  * binary's strings.
  */
 

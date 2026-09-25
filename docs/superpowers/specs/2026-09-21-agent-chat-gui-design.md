@@ -1696,7 +1696,7 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `tool_call_update` — `Monitor`, `BackgroundTaskStarted`, `TaskOutput`, `KillTask` — and are
   emitted **even after the turn ends**.
   *T3: `apps/server/src/provider/acp/XAiBackgroundTasks.ts:61-155`; `apps/server/src/provider/Layers/GrokAdapter.ts:1343-1366`*
-  *Built: captured on 2026-09-25 (the Grok fixtures README, observations 37–45, fixtures 15–23),
+  *Built: captured on 2026-09-25 (the Grok fixtures README, observations 37–47, fixtures 15–23),
   and more than T3 reads. A shell's start comes from `_x.ai/task_backgrounded`, the
   `background_tasks` snapshot and the `BackgroundTaskStarted` discriminant, joined on the task id; a
   monitor's from the same frame (it carries `monitor_description`) and the `Monitor` answer T3 reads

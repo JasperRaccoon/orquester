@@ -1097,7 +1097,7 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   nothing adds nothing, and an errored part has no final output.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its
   child session's own frames; the CLI's own prompts get turns; a run nobody hears from stops
-  counting after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–45 of the Grok
+  counting after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok
   fixtures README — read them before touching any of this). (1) Grok stamps every task row of a
   background shell with the shell itself (`agentId` = `taskId`), and the liveness registry read any
   stamped non-agent task as "a subagent's own work, covered by its owner" and dropped it: a dev

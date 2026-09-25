@@ -75,6 +75,12 @@ Frames are verbatim apart from the redaction and elision below.
 Applied at record time and again on export:
 
 - absolute home paths → `~`
+- the same home **percent-encoded** (`%2Fvar%2Flib%2F…`, either hex case) → `~`: the CLI keys its
+  per-cwd session dirs by the URL-encoded cwd, and task snapshots, `output_file`s and some tool
+  outputs name files there. Missed by the plain-path rule until 2026-09-25; that export applied it
+  to every file that held one (03b, 07, 11, 15–22), and nothing else in them changed. The
+  adapter's own redactor (`support/stderr.ts`, which `raw.ndjson` and every stderr line go
+  through) collapses both spellings as well
 - e-mail addresses → `<redacted-email>`
 - API tokens (Atlassian `ATATT3…`, `ghp_`/`gho_`, `xox?-`, `sk-`, `xai-`, JWTs) → `<redacted-token>`
 - the hostname → `<host>`
@@ -98,7 +104,9 @@ removed. Nothing else is altered.
    already present in an earlier file is replaced by a note pointing at the file and `t` that
    holds it verbatim. This is almost entirely `available_commands_update`, which is ~33 KiB and
    repeats 2–4 times per run; every *distinct* payload survives verbatim exactly once across the
-   set. Without it the fixtures were 3.3 MiB; with it they are 1.4 MiB.
+   set. Without it files 01–14 were 3.3 MiB; with it they are 1.4 MiB. The 2026-09-25 files
+   (15–23) add 1.9 MiB with it applied, so the set is 3.3 MiB of NDJSON (3.4 MiB on disk with
+   `12-cli-text/` and this README).
 
 ## The files
 
