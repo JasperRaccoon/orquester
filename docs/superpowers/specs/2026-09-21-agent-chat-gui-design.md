@@ -3601,43 +3601,66 @@ and a `turn` or an `answer` keeps retrying with the same `commandId` after its s
 gone — giving up there turned a response the host may already have accepted into a failed send the
 user resent. What that generation still had in flight never strands the next one: a queued send that
 fails after the teardown is held at the front of the thread's live generation with the failure's
-banner, or with none merged into its persisted draft (`holdQueuedMessageInThread`); a message it
-hands back to the draft after the teardown — a rewind whose `/revert` was still out — merges through
-the thread's live slice or storage, never over its own stale copy (`updateThreadDraft`); and the
-request ids with an answer in flight do not ride the retained snapshot (`cachedThreadState`), so a
-settled answer never leaves its card locked.*
+banner, or with none at the front of the queue its page keeps (`holdQueuedMessageInThread`, below);
+a message it hands back to the draft after the teardown — a rewind whose `/revert` was still out —
+merges through the thread's live slice or storage, never over its own stale copy
+(`updateThreadDraft`); and the request ids with an answer in flight do not ride the retained snapshot
+(`cachedThreadState`), so a settled answer never leaves its card locked.*
 
 *Built: **a reload never loses or duplicates a message, and queued sends keep their order.** A
 reload used to take everything in flight with it: `submit` had already cleared the draft, the send
 registry and the queue lived in memory, and a message came back only if its post had reached the
 host. Now the thread store keeps every composer send (a turn or a steer), from before its first post
 until it settles, and its queue as it stands, in the tab's **outbox** (`composer-outbox.ts`, in
-`sessionStorage`: a reload of the tab resumes it, another tab never replays it), each message with
-its `commandId` — a queued message's is minted when it is queued and carried by every post of it.
-Every entry names the page that holds it, and the thread's first store after a reload adopts what
-the previous page left for its thread (`adoptOutboxLeftovers`): a send posted less than
-`OUTBOX_REPLAY_MAX_AGE_MS` (ten minutes) ago is re-posted under the SAME `commandId` — the host's
-receipt answers one that had landed with the seq it recorded, and one that had not goes out now —
-with the thread reading "Sending" meanwhile, a queued one holding the queue. The bound is the
-receipts': they are a ring of the host's last 500 commands, every thread's together, and a re-post
-the host no longer recognises would be a second turn; ten minutes is far past a reload of a post
-(which gives up within about 1¾ minutes) and far short of 500 commands on a single user's host. An
-older send is not re-posted, and one the host refuses comes back the same way: a composer send to the
-draft through the failed-send restore (the composer that shows the thread, else the thread's draft),
-with a notice saying why; a queued send held at the front of its queue, with a banner, under a new
-`commandId` — the user's next send of it is a new command, as for any failed queued send. An
+`sessionStorage`: a reload of the tab resumes it, and another tab never replays it — except a tab
+the browser **duplicates**, which starts with a copy: its page adopts every send still in flight
+and the whole queue, the posts of both carry the same ids so the receipts dedupe them, but a message
+taken back in one tab (✗, or a Stop) is still sent by the other, and a re-post failing in both comes
+back into the shared draft twice; nothing coordinates two tabs), each message with its `commandId` —
+a queued message's is minted when it is queued and carried by every post of it. Every entry names
+the page that holds it, and the thread's first store after a reload adopts what the previous page
+left for its thread (`adoptOutboxLeftovers`): a send posted less than `OUTBOX_REPLAY_MAX_AGE_MS`
+(ten minutes) ago is re-posted under the SAME `commandId` — the host's receipt answers one that had
+landed with the seq it recorded, and one that had not goes out now — composer sends and queued ones
+**one at a time, in the order they were first posted** (`replayInOrder`), each composer send
+reading "Sending" from the start and the queue holding until the last one settles. The bound is
+the receipts': they are a ring of the host's last 500 commands, every thread's together, and a
+re-post the host no longer recognises would be a second turn; ten minutes is far past a reload of a
+post (which gives up within about 1¾ minutes) and far short of 500 commands on a single user's
+host. An older send is not re-posted, and one the host refuses comes back the same way, saying it
+dates from before the reload: a composer send to the draft through the failed-send restore (the
+composer that shows the thread, else the thread's draft), with a notice and a banner; a queued send
+held at the front of its queue — behind any held before it, in post order — with a banner, under a
+new `commandId`, the user's next send of it being a new command as for any failed queued send. An
 Implement's prompt never comes back: the plan is still there to implement (`generatedPrompt`, told
-by `sendComposerTurn`). The queue comes back as it was, in order, behind any queued send still on its
-way, and a generation that starts with nothing retained (its snapshot expired) starts its queue from
-the outbox too. Loads validate field-wise with a fallback. After a reload the web client lands on
-Recent Projects, so a thread's leftovers are picked up when it is opened again: within the ten
-minutes they go out, later they are back in the draft. **Queued sends are serialised across store
-generations** by a per-thread marker beside the send registry (`beginQueuedSend` in
-`composer-sends.ts`, the drive loop's in-flight latch): the generation a project switch tore down may
-still be posting the head of the queue when the thread's next generation reaches a boundary, and
-that one used to send the next message at once — landing it first, or overtaking the head when that
-failed and was held at the front. It now waits; when the head settles the queue proceeds in order — a
-delivered one lets the next go, a failed one is held at the front before its settle is heard.*
+by `sendComposerTurn`). The queue comes back in order, behind any queued send still on its way — as
+it was after an ordinary reload, but **held** (`holdUntilUserAction`, "Waits for Send now", its
+`commandId` kept, a banner saying why) once nobody has seen it for `OUTBOX_QUEUE_ABSENCE_MAX_MS`
+(ten minutes): a queued message is due as soon as its thread is idle and would otherwise go out on
+the thread's first frame — hours or days later, after a discarded tab or a restored session, a
+"push and deploy" nobody still wants. The absence is measured from when the queue was last on
+screen — the thread's store stamps it as the page is hidden, on `pagehide`, and at the generation's
+teardown (not while hidden) — or when the message was queued, whichever is later, never from the
+queueing alone: a message queued twenty minutes ago behind a turn still running is live after a
+quick reload. A message held before the reload comes back held, with its reason (`holdReason`) on
+the banner. A generation that starts from the queue its page kept — the snapshot it would have
+painted expired — holds it by the same rule. After a reload the web client lands on Recent Projects,
+so a thread's leftovers are picked up only when its project is opened again: a posted send whose
+project is not reopened within the ten minutes comes back to the draft with the "check the thread"
+notice rather than being re-posted (a pass at boot could not know which daemon a thread belongs to —
+an entry names only its session). Loads validate field-wise with a fallback, the stamps included, and
+the 100-entry bound only ever drops a message still waiting, oldest first — never a send in flight.
+**Queued sends are serialised across store generations** by a per-thread marker beside the send
+registry (`beginQueuedSend` in `composer-sends.ts`, the drive loop's in-flight latch): the
+generation a project switch tore down may still be posting the head of the queue when the thread's
+next generation reaches a boundary, and that one used to send the next message at once — landing it
+first, or overtaking the head when that failed and was held at the front. It now waits; when the
+head settles the queue proceeds in order — a delivered one lets the next go, a failed one is held at
+the front before its settle is heard. One that fails while no generation of the thread is live is
+held at the front of the queue the page keeps for the thread, with its reason, which the next
+generation starts from — the retained snapshot, taken at the teardown, does not have it — so the
+messages queued behind it do not drain ahead of it; only a tab with no storage puts it back in the
+draft instead.*
 
 *Built: **a draft keeps every file that comes back to it, and holds the send over the eight.** A
 failed send's chips come back ahead of the ones staged while it was in flight, a Stop returns every
@@ -3673,9 +3696,10 @@ question is pending.
 
 *Built: "held in memory only" stops at the page. The queue is still never persisted as a draft, but
 the tab's outbox keeps it (the reload paragraph above), so a reload brings it back as queued, in
-order, and a store generation created after the retained snapshot expired no longer starts with an
-empty queue. Guard 2 holds across generations too: the drive loop's latch is the thread's
-(`beginQueuedSend`), not the generation's.*
+order — held for Send now once it has gone unseen for ten minutes — and a store generation created
+after the retained snapshot expired no longer starts with an empty queue. Guard 2 holds across
+generations too: the drive loop's latch is the thread's (`beginQueuedSend`), not the generation's,
+and a send failing while no generation is live is held at the front of the kept queue.*
 
 **Steer versus queue is one setting with a per-message inversion.** A plain send follows the
 preference; holding the mod key with Enter does the opposite for that one message. A separate
