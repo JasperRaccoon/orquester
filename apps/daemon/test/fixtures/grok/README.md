@@ -913,14 +913,17 @@ What the adapter builds from it (`adapters/grok/normalize.ts`, `subagentFromTool
   `explicitly_killed: true` (the binary's field names, not captured), and on `already_exited: true`
   with the answer's own terminal status when it carries one, else `stopped`; an answer arriving
   between turns (the CLI woke the parent) counts the same, on the turn the run started in; a run
-  already ended gets no second end, and an ended task — shell or subagent — never starts again: a
-  snapshot still listing it (an entry's status may be terminal, so a finished task can be listed) or
-  a late frame naming it starts nothing (`endedTasks`). T3 skips a subagent's entries; the adapter
-  reads them, and — unlike T3 — starts no row for an id no launch reported. Shells ride the same
-  reader. A `background_tasks` entry or `_x.ai/task_backgrounded` frame joined to the spawn (by the
-  call's `tool_call_id`, or an id its launch reported) is the agent too, never a shell row — whether
-  the CLI sends either for a subagent is not captured. Stop, the session's stop and the process's
-  exit close whatever is left `stopped`.
+  already ended gets no second end, and a task whose end the CLI reported — shell or subagent —
+  never starts again: a snapshot still listing it (an entry's status may be terminal, so a finished
+  task can be listed) or a late frame naming it starts nothing (`endedTasks`). An end the adapter
+  wrote itself (Stop, the exit, a task dropping out unannounced) is not the CLI's word — whether
+  `session/cancel` kills a background shell is not captured — so a later listing that says the task
+  still runs counts it live again, and a terminal one is the CLI's end, with no row. T3 skips a
+  subagent's entries; the adapter reads them, and — unlike T3 — starts no row for an id no launch
+  reported. Shells ride the same reader. A `background_tasks` entry or `_x.ai/task_backgrounded`
+  frame joined to the spawn (by the call's `tool_call_id`, or an id its launch reported) is the
+  agent too, never a shell row — whether the CLI sends either for a subagent is not captured. Stop,
+  the session's stop and the process's exit close whatever is left `stopped`.
 - **A run nobody asks about stops counting after an hour.** Every row naming a Grok agent carries
   `livenessTtlMs` = one hour (`GROK_AGENT_LIVENESS_TTL_MS`): the host's liveness registry counts it
   "working" — holding a deploy's drain — for at most an hour after the latest such row, a running
@@ -929,9 +932,9 @@ What the adapter builds from it (`adapters/grok/normalize.ts`, `subagentFromTool
   resumes and retention", rule 1): the source's task starts again under the NEW call. The task is
   found by the subagent id the source's result reported — the UUIDs in it, read without assuming a
   shape: the CLI's `rawOutput` first, the text only when that names none, never an id the launch's
-  own input, the session or a live shell names. An id no launch reported (a host restart since)
-  starts a row of its own, under that id. A resume the CLI refuses (its source still running)
-  fails the call and never the agent it named.
+  own input, the session, a live shell or an ended task names. An id no launch reported (a host
+  restart since) starts a row of its own, under that id. A resume the CLI refuses (its source still
+  running) fails the call and never the agent it named.
 - **Unmapped:** the three `subagent_*` updates and `x.ai/task_completed` stay `runtime.warning`s —
   their fields cannot be read off the binary (observation 29), and guessing them would be worse
   than the warning. `send_subagent_message` is a plain tool row: a run it wakes is not reopened.
