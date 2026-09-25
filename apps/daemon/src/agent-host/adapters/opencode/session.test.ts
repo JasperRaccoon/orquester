@@ -30,7 +30,14 @@ import {
 import type { OpenCodeServerHandle } from "./server.ts";
 import { OpenCodeClient } from "./http.ts";
 import { createHostIngestion } from "./testing/host.ts";
-import { injectedAnswer, runSettles, wokenReply } from "./testing/woken.ts";
+import {
+  compactionContinues,
+  compactionPrompt,
+  compactionSummary,
+  injectedAnswer,
+  runSettles,
+  wokenReply
+} from "./testing/woken.ts";
 import { deferred } from "./util.ts";
 
 // ---------------------------------------------------------------------------
@@ -63,8 +70,8 @@ class FakeOpenCode {
   commands: { name: string; description?: string; hints?: string[] }[] = [];
   permissionsOpen: unknown[] = [];
   questionsOpen: unknown[] = [];
-  /** Overrides keyed by `METHOD path-suffix`. */
-  readonly overrides = new Map<string, () => Response>();
+  /** Overrides keyed by `METHOD path-suffix`; one may hold its answer back. */
+  readonly overrides = new Map<string, () => Response | Promise<Response>>();
   private controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   private nextSession = 0;
 
@@ -1830,30 +1837,80 @@ test("the session stopping during the woken reply settles its turn before sessio
   harness.dispose();
 });
 
-test("the host's own /compact runs no turn: a compaction's summary is no reply", async () => {
+test("the host's own /compact runs no turn: its summary streams while summarize runs, and opens nothing", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
   const sessionId = session.sessionId;
-  await session.compact();
-  // As fixture 09 shows it: the compaction's prompt, then its summary — an
-  // assistant message with `summary: true` — streaming, then the run's end.
-  const summary = wokenReply({ sessionId, promptId: "msg_compaction", replyId: "msg_summary", text: "## Objective" });
-  const asSummary = (frame: unknown): unknown => {
-    const copy = JSON.parse(JSON.stringify(frame)) as { type: string; properties: { info?: Record<string, unknown> } };
-    if (copy.type === "message.updated" && copy.properties.info !== undefined) {
-      Object.assign(copy.properties.info, { mode: "compaction", agent: "compaction", summary: true });
-    }
-    return copy;
-  };
+  // `summarize` answers only once its run has ended (fixture 09): hold it
+  // open while the compaction's frames arrive, as the server does.
+  const requested = deferred<void>();
+  const answer = deferred<void>();
+  harness.fake.overrides.set(`POST /session/${sessionId}/summarize`, async () => {
+    requested.resolve();
+    await answer.promise;
+    return json(true);
+  });
+  const compacting = session.compact();
+  await requested.promise;
+  const summary = compactionSummary({ sessionId, promptId: "msg_compaction", replyId: "msg_summary", text: "## Objective" });
   pushAll(harness.fake, [
-    { type: "message.updated", properties: { sessionID: sessionId, info: { id: "msg_compaction", role: "user", sessionID: sessionId } } },
-    ...[...summary.begins, ...summary.streams, ...summary.ends].map(asSummary),
-    { type: "session.compacted", properties: { sessionID: sessionId } },
-    ...runSettles(sessionId)
+    ...compactionPrompt({ sessionId, promptId: "msg_compaction", auto: false }),
+    ...summary.begins,
+    ...summary.streams,
+    ...summary.ends,
+    { type: "session.compacted", properties: { sessionID: sessionId } }
   ]);
+  await drainedWith(harness, sessionId, "during the compaction");
+  answer.resolve();
+  await compacting;
+  pushAll(harness.fake, runSettles(sessionId));
   await drainedWith(harness, sessionId, "after the compaction");
   assert.deepEqual(eventsOfType(harness.events, "turn.started"), []);
   assert.equal(session.session.activeTurnId, undefined);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a woken run that compacts first runs as one turn from its summary on, which the run's idle settles", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const busy = { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } };
+  const summary = compactionSummary({ sessionId, promptId: "msg_compaction", replyId: "msg_summary", text: "## Goal" });
+  const reply = wokenReply({ sessionId, promptId: "msg_continue", replyId: "msg_reply", text: "Done." });
+  // The answer, then a run that compacts before it replies (1.18.32's
+  // `SessionPrompt.run`: the context was already full).
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    busy,
+    ...compactionPrompt({ sessionId, promptId: "msg_compaction", auto: true }),
+    ...summary.begins,
+    ...summary.streams
+  ]);
+  await waitFor(harness, "content.delta");
+  assert.deepEqual(
+    eventsOfType(harness.events, "turn.started").map((event) => event.turnId),
+    ["msg_compaction"],
+    "the thread reads working through the compaction"
+  );
+  assert.deepEqual([session.session.status, session.session.activeTurnId], ["running", "msg_compaction"]);
+
+  pushAll(harness.fake, [
+    ...summary.ends,
+    ...compactionContinues({ sessionId, promptId: "msg_continue" }),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends,
+    ...runSettles(sessionId)
+  ]);
+  const completed = await waitFor(harness, "turn.completed");
+  assert.deepEqual([completed.turnId, completed.payload.state], ["msg_compaction", "completed"]);
+  assert.equal(
+    completed.payload.tokenUsage?.inputTokens,
+    1_346 + 42_514,
+    "the reply's step alone: the summary call stays off the turn's usage"
+  );
+  assert.deepEqual(eventsOfType(harness.events, "turn.started").length, 1);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

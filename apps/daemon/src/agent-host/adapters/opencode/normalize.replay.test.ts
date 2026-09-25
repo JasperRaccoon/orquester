@@ -61,6 +61,7 @@ import {
   suffixPrefixOverlap,
   type OpenCodeSessionState
 } from "./state.ts";
+import { compactionContinues, compactionPrompt, compactionSummary, wokenReply } from "./testing/woken.ts";
 
 const FIXTURE_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -175,9 +176,27 @@ function replay(
     }
   }
 
+  // And `compact()` holds `hostCompacting` up while its `summarize` runs. That
+  // request too is recorded only when it returns (fixture 09), so the flag
+  // goes up at its own first frame — its prompt's manual `compaction` part —
+  // and down at its record.
+  let summarizing = records.filter((record) => {
+    const http = record.data as HttpRecord;
+    return (
+      record.kind === "http" &&
+      http.method === "POST" &&
+      http.path.includes("/summarize") &&
+      http.path.includes(parent)
+    );
+  }).length;
+
   for (const record of records) {
     if (record.kind === "http") {
       const http = record.data as HttpRecord;
+      if (http.method === "POST" && http.path.includes("/summarize") && http.path.includes(parent)) {
+        state.hostCompacting = false;
+        summarizing -= 1;
+      }
       // The runtime's half: a submitted prompt opens a turn.
       if (
         http.method === "POST" &&
@@ -201,6 +220,11 @@ function replay(
     const raw = asRawEvent(record.data);
     if (raw === null) {
       continue;
+    }
+    const part = (raw.properties as { part?: { type?: unknown; auto?: unknown; sessionID?: unknown } } | undefined)
+      ?.part;
+    if (summarizing > 0 && part?.type === "compaction" && part.auto === false && part.sessionID === parent) {
+      state.hostCompacting = true;
     }
     const result = normalizeOpenCodeEvent(state, raw, ctx);
     events.push(...result.events);
@@ -1710,15 +1734,67 @@ test("a reply the host asked for, a compaction's summary, or a message that alre
   assert.ok(done !== undefined);
   assert.deepEqual(eventsOfType(feed(copied, [done]).flat(), "turn.started"), []);
 
-  // A compaction's summary (`summary: true`) answers no prompt of the
-  // conversation — the host's own `/compact` among them (fixture 09).
+  // The host's own `/compact` (fixture 09): `compact()` holds `hostCompacting`
+  // up while its `summarize` runs, and the summary opens nothing — its run
+  // `busy` and all.
   const compacting = parentAtRest();
-  const summary = JSON.parse(JSON.stringify(wokenReplyFrames("msg_compaction", "msg_summary").begins[1])) as {
-    type: string;
-    properties: { info: Record<string, unknown> };
-  };
-  Object.assign(summary.properties.info, { mode: "compaction", agent: "compaction", summary: true });
-  assert.deepEqual(eventsOfType(feed(compacting, [summary]).flat(), "turn.started"), []);
+  compacting.state.hostCompacting = true;
+  const summary = compactionSummary({
+    sessionId: CHILD_PARENT_ID,
+    promptId: "msg_compaction",
+    replyId: "msg_summary",
+    text: "## Objective"
+  });
+  const own = feed(compacting, [
+    ...compactionPrompt({ sessionId: CHILD_PARENT_ID, promptId: "msg_compaction", auto: false }),
+    ...summary.begins,
+    ...summary.streams,
+    ...summary.ends
+  ]).flat();
+  assert.deepEqual(eventsOfType(own, "turn.started"), []);
+  assert.equal(compacting.state.activeTurnId, undefined);
+});
+
+test("a woken run that compacts first runs as one turn from its summary on, the summary off the meter", () => {
+  const run = parentAtRest();
+  const sessionId = CHILD_PARENT_ID;
+  feed(run, injectedResult("ses_background_child", "Found README.md and a.ts."));
+  // 1.18.32's `SessionPrompt.run` (read from the source): the run's first
+  // iteration finds the last answer's context over the model's limit and
+  // writes an automatic compaction's prompt; the next summarises; the one
+  // after answers the prompt the compaction writes to go on with.
+  const busy: OpenCodeRawEvent = { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } };
+  const summary = compactionSummary({ sessionId, promptId: "msg_compaction", replyId: "msg_summary", text: "## Goal" });
+  const reply = wokenReply({ sessionId, promptId: "msg_continue", replyId: "msg_reply", text: "Done." });
+  const before = feed(run, [busy, ...compactionPrompt({ sessionId, promptId: "msg_compaction", auto: true })]).flat();
+  assert.deepEqual(before, [], "a compaction's prompt is no reply: nothing opens yet");
+
+  const perFrame = feed(run, [
+    ...summary.begins,
+    ...summary.streams,
+    ...summary.ends,
+    ...compactionContinues({ sessionId, promptId: "msg_continue" }),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends
+  ]);
+  const events = perFrame.flat();
+  assert.deepEqual(
+    eventsOfType(events, "turn.started").map((event) => event.turnId),
+    ["msg_compaction"],
+    "the summary opens the turn — the thread reads working through the compaction — named by the prompt it answers"
+  );
+  assert.equal(perFrame[1]?.[0]?.type, "turn.started", "on the summary's first frame, before any row of it");
+  for (const event of events) {
+    assert.equal(event.turnId, "msg_compaction", `${event.type} rides the woken turn`);
+  }
+  assert.ok(events.some((event) => event.type === "thread.state.changed"), "the compaction lands on it too");
+  // The summary call answers no prompt of the conversation, so its step stays
+  // off the meter, as inside a turn the host started; the reply's counts.
+  assert.equal(eventsOfType(events, "thread.token-usage.updated").length, 1, "only the reply's step moves the meter");
+  assert.equal(run.state.turnTokenUsage?.promptMessageIds.has("msg_compaction"), false);
+  assert.equal(run.state.turnTokenUsage?.promptMessageIds.has("msg_continue"), true);
+  assert.equal(run.state.claimedPromptIds.has("msg_compaction"), true);
 });
 
 test("a reply with no `busy` since the parent's last idle — no run behind it — opens no turn", () => {

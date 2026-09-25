@@ -156,6 +156,114 @@ export function wokenReply(input: {
   };
 }
 
+/**
+ * A compaction's prompt, as 1.18.32's `SessionCompaction.create` writes it: a
+ * user message whose one part is `{type: "compaction", auto}` — `auto: false`
+ * for a `/compact` (`summarize`, fixture 09 line 89), `auto: true` for the one
+ * a run starts itself when its context overflowed (read from the source).
+ */
+export function compactionPrompt(input: {
+  sessionId: string;
+  promptId: string;
+  auto: boolean;
+}): OpenCodeRawEvent[] {
+  return [
+    {
+      type: "message.updated",
+      properties: {
+        sessionID: input.sessionId,
+        info: {
+          id: input.promptId,
+          role: "user",
+          sessionID: input.sessionId,
+          agent: "build",
+          model: { providerID: "openrouter", modelID: "google/gemini-3.1-flash-lite" },
+          time: { created: CREATED }
+        }
+      }
+    },
+    {
+      type: "message.part.updated",
+      properties: {
+        sessionID: input.sessionId,
+        part: {
+          id: `prt_${input.promptId}`,
+          messageID: input.promptId,
+          sessionID: input.sessionId,
+          type: "compaction",
+          auto: input.auto
+        },
+        time: CREATED
+      }
+    }
+  ];
+}
+
+/**
+ * The summary a compaction writes: an assistant message answering its prompt
+ * with `mode` and `agent` `"compaction"` and `summary: true` (fixture 09 line
+ * 91; `SessionCompaction.process`), streaming like any reply.
+ */
+export function compactionSummary(input: {
+  sessionId: string;
+  promptId: string;
+  replyId: string;
+  text: string;
+}): WokenReply {
+  const reply = wokenReply(input);
+  const asSummary = (frame: OpenCodeRawEvent): OpenCodeRawEvent => {
+    const copy = JSON.parse(JSON.stringify(frame)) as {
+      type: string;
+      properties: { info?: Record<string, unknown> };
+    };
+    if (copy.type === "message.updated" && copy.properties.info !== undefined) {
+      Object.assign(copy.properties.info, { mode: "compaction", agent: "compaction", summary: true });
+    }
+    return copy;
+  };
+  return {
+    begins: reply.begins.map(asSummary),
+    streams: reply.streams.map(asSummary),
+    ends: reply.ends.map(asSummary)
+  };
+}
+
+/**
+ * What an automatic compaction writes once its summary is done (read from
+ * 1.18.32's `SessionCompaction.process`): the prompt the run goes on with — a
+ * user message whose one text part is `synthetic`, marked
+ * `metadata.compaction_continue` — then `session.compacted`.
+ */
+export function compactionContinues(input: { sessionId: string; promptId: string }): OpenCodeRawEvent[] {
+  return [
+    {
+      type: "message.updated",
+      properties: {
+        sessionID: input.sessionId,
+        info: { id: input.promptId, role: "user", sessionID: input.sessionId, agent: "build", time: { created: CREATED } }
+      }
+    },
+    {
+      type: "message.part.updated",
+      properties: {
+        sessionID: input.sessionId,
+        part: {
+          id: `prt_${input.promptId}`,
+          messageID: input.promptId,
+          sessionID: input.sessionId,
+          type: "text",
+          metadata: { compaction_continue: true },
+          synthetic: true,
+          text: "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+          time: { start: CREATED, end: CREATED }
+        },
+        time: CREATED
+      }
+    },
+    { type: "session.compacted", properties: { sessionID: input.sessionId } }
+  ];
+}
+
 /** The run's end: its last `busy`, then `idle` and `session.idle` (fixture 12, lines 177-179). */
 export function runSettles(sessionId: string): OpenCodeRawEvent[] {
   return [

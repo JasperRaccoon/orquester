@@ -575,6 +575,15 @@ export interface OpenCodeSessionState {
    * which nothing seen before is evidence.
    */
   parentBusy: boolean;
+  /**
+   * The host's own `/compact` is running: `compact()` in `session.ts` holds it
+   * up across its `summarize` request, which answers only once the
+   * compaction's run has ended. Its summary is no reply, and opens no turn
+   * (`claimReply`). A summary written while it is down and no turn runs is a
+   * run's own compaction — one a background answer woke that found its
+   * context full — and opens the woken turn.
+   */
+  hostCompacting: boolean;
   activeAgent?: string;
   activeVariant?: string;
   interruptedTurnId?: string;
@@ -652,6 +661,7 @@ export function createSessionState(input: {
     childAgents: new Map(),
     claimedPromptIds: new Set(),
     parentBusy: false,
+    hostCompacting: false,
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
     promptGeneration: 0,

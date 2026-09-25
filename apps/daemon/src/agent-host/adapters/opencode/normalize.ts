@@ -1618,19 +1618,28 @@ function emitTextDelta(
  *   turn's own (`promptMessageIds`).
  * - While none runs, it opens one — the woken turn — named by the prompt, as
  *   a live turn is named by the prompt that opened it (a rewind finds it again
- *   in `GET /session/:id/message`): a fresh generation and usage accumulator,
- *   `turn.started` before any row of the reply, and a `turn-woken` signal for
- *   the session's record. From there it is any turn: the session's idle (or
- *   error) settles it, a Stop aborts it, the session's stop closes it, and a
- *   message the user sends meanwhile steers it — the server queues it into
- *   the same run.
+ *   in `GET /session/:id/message`): `openTurn`, `turn.started` before any row
+ *   of the reply, and a `turn-woken` signal for the session's record. From
+ *   there it is any turn: the session's idle (or error) settles it, a Stop
+ *   aborts it, the session's stop closes it, and a message the user sends
+ *   meanwhile steers it — the server queues it into the same run. Only with a
+ *   run behind it (`parentBusy`): with none, no idle would ever settle it.
+ *
+ * A compaction's summary (`summary: true`) answers no prompt of the
+ * conversation, so its prompt is claimed but never joins `promptMessageIds`:
+ * the summary call stays off the meter and the turn's usage, as it always has
+ * inside a turn the host started. While no turn runs it is either the host's
+ * own `/compact` (`hostCompacting`), which stays turnless, or a run's own —
+ * one a background answer woke that found its context full and compacts
+ * before it replies (1.18.32's `SessionPrompt.run`) — which opens the woken
+ * turn there, named by the compaction's prompt, so the thread reads working
+ * through the compaction; the reply to the prompt it goes on with then joins
+ * it as any mid-run prompt does.
  *
  * Only a reply BEGINNING: a message that already ended (a fork copies a
  * session's messages whole — fixture 10) answers no running prompt, and a
  * rewind claims every prompt its fork copied (`rollbackThread`), so neither
- * does a copy its dead run never completed. And never a compaction's summary
- * (`summary: true`), which answers no prompt of the conversation — the host's
- * own `/compact` runs one while no turn is open. Output that follows an
+ * does a copy its dead run never completed. Output that follows an
  * interruption never reaches here (the demux drops it first), so it opens
  * nothing either.
  */
@@ -1645,14 +1654,20 @@ function claimReply(
   if (
     promptId === undefined ||
     state.claimedPromptIds.has(promptId) ||
-    info.time?.completed !== undefined ||
-    info.summary === true
+    info.time?.completed !== undefined
   ) {
     return;
   }
+  const summary = info.summary === true;
   if (state.activeTurnId !== undefined) {
     claimPrompt(state, promptId);
-    state.turnTokenUsage?.promptMessageIds.add(promptId);
+    if (!summary) {
+      state.turnTokenUsage?.promptMessageIds.add(promptId);
+    }
+    return;
+  }
+  if (summary && state.hostCompacting) {
+    claimPrompt(state, promptId);
     return;
   }
   // No run behind it, no turn: a reply beginning comes after its run's `busy`
@@ -1662,7 +1677,9 @@ function claimReply(
   }
   claimPrompt(state, promptId);
   openTurn(state, promptId);
-  state.turnTokenUsage?.promptMessageIds.add(promptId);
+  if (!summary) {
+    state.turnTokenUsage?.promptMessageIds.add(promptId);
+  }
   out.push({
     ...out.base({ turnId: promptId, raw }),
     type: "turn.started",

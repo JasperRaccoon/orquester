@@ -1942,14 +1942,22 @@ export class OpenCodeThreadSession {
       if (this.state.activeTurnId !== undefined) {
         throw new Error("OpenCode cannot compact while a turn is running.");
       }
-      await this.client.post<unknown>(openCodeRoutes.summarize(this.state.openCodeSessionId), {
-        timeoutMs: COMPACTION_TIMEOUT_MS,
-        body: {
-          providerID: parsedModel.providerID,
-          modelID: parsedModel.modelID,
-          auto: false
-        } satisfies SummarizeBody
-      });
+      // The summary this writes is the host's own, no reply: it opens no turn
+      // (`claimReply`). `summarize` answers once the compaction's run ended,
+      // so the flag covers every frame of it that can open one.
+      this.state.hostCompacting = true;
+      try {
+        await this.client.post<unknown>(openCodeRoutes.summarize(this.state.openCodeSessionId), {
+          timeoutMs: COMPACTION_TIMEOUT_MS,
+          body: {
+            providerID: parsedModel.providerID,
+            modelID: parsedModel.modelID,
+            auto: false
+          } satisfies SummarizeBody
+        });
+      } finally {
+        this.state.hostCompacting = false;
+      }
     });
   }
 
