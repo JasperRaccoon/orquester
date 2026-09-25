@@ -66,9 +66,9 @@ import {
   claimPrompt,
   finalOutputRemainder,
   isCutFinalOutput,
-  makeTurnTokenUsageAccumulator,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
+  openTurn,
   stepTotalTokens,
   type OpenCodeChildAgent,
   type OpenCodeSessionState,
@@ -1648,12 +1648,8 @@ function claimReply(
     state.turnTokenUsage?.promptMessageIds.add(promptId);
     return;
   }
-  const usage = makeTurnTokenUsageAccumulator();
-  usage.promptMessageIds.add(promptId);
-  state.promptGeneration += 1;
-  state.activeTurnId = promptId;
-  state.turnTokenUsage = usage;
-  state.lastSessionErrorMessage = undefined;
+  openTurn(state, promptId);
+  state.turnTokenUsage?.promptMessageIds.add(promptId);
   out.push({
     ...out.base({ turnId: promptId, raw }),
     type: "turn.started",

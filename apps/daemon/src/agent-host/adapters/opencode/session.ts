@@ -75,7 +75,7 @@ import { readSseFrames } from "./sse.ts";
 import {
   claimPrompt,
   createSessionState,
-  makeTurnTokenUsageAccumulator,
+  openTurn,
   repointSession,
   takeTurnTokenUsage,
   type OpenCodeCancellation,
@@ -1448,7 +1448,19 @@ export class OpenCodeThreadSession {
           : undefined;
       this.cancelIdleReconciliation();
 
-      const generation = this.state.promptGeneration + 1;
+      // Read before the turn opens, which may start a wait for a new busy: a
+      // steer the server refuses restores it (`rollbackAdmission`).
+      const priorAwaitingBusy = this.state.awaitingBusyAfterInterruption;
+      let generation: number;
+      if (steeringTurnId === undefined) {
+        generation = openTurn(this.state, turnId);
+      } else {
+        // A steer joins the running turn: a new admission generation, the
+        // turn's usage and its wait kept.
+        generation = this.state.promptGeneration + 1;
+        this.state.promptGeneration = generation;
+        this.state.lastSessionErrorMessage = undefined;
+      }
       const admission: OpenCodePromptAdmission = {
         generation,
         turnId,
@@ -1460,19 +1472,12 @@ export class OpenCodeThreadSession {
         cancelled: false,
         idleStatusConfirmations: 0,
         ...(priorIdle !== undefined ? { priorIdle } : {}),
-        priorAwaitingBusy: this.state.awaitingBusyAfterInterruption,
+        priorAwaitingBusy,
         recovering: false
       };
-      this.state.promptGeneration = generation;
       this.state.promptAdmission = admission;
-      this.state.activeTurnId = turnId;
       this.state.activeAgent = agent;
       this.state.activeVariant = variant;
-      this.state.lastSessionErrorMessage = undefined;
-      if (steeringTurnId === undefined) {
-        this.state.turnTokenUsage = makeTurnTokenUsageAccumulator();
-        this.state.awaitingBusyAfterInterruption = this.state.interruptedTurnId !== undefined;
-      }
       this.state.turnTokenUsage?.promptMessageIds.add(messageId);
 
       this.updateRecord(

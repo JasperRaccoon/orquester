@@ -290,7 +290,14 @@ export interface OpenCodeStepUsage {
 
 export interface OpenCodeTurnTokenUsageAccumulator {
   partIds: Set<string>;
-  /** Client-minted user message ids this turn submitted. */
+  /**
+   * The prompts whose replies' steps count as this turn's own: the ids the
+   * host minted for it (its prompt, each steer's) and every prompt the server
+   * wrote itself that the turn claimed (`claimReply` in `normalize.ts` — a
+   * background answer that woke the parent, the `continue` prompt an automatic
+   * compaction writes). Never a compaction's own prompt: its summary is no
+   * reply of the conversation, and stays off the meter.
+   */
   promptMessageIds: Set<string>;
   assistantOwnershipByMessageId: Map<string, "owned" | "other" | "unknown">;
   unresolvedStepsByMessageId: Map<string, Map<string, OpenCodeStepUsage>>;
@@ -669,6 +676,24 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.pendingIdleReconciliation = undefined;
   state.lastSessionErrorMessage = undefined;
   state.lastEmittedTitle = undefined;
+}
+
+/**
+ * Open turn `turnId`: a new prompt generation — so no completion machine
+ * armed for an earlier turn can settle this one — a fresh usage accumulator,
+ * no `session.error` carried over, and, after a Stop, the wait for the new
+ * run's first `busy` (`awaitingBusyAfterInterruption`). The one setup both
+ * ways a turn opens share, so they cannot drift: the host's own prompt
+ * (`sendTurn` in `session.ts`) and a reply the server started on its own
+ * (`claimReply` in `normalize.ts`). Returns the generation.
+ */
+export function openTurn(state: OpenCodeSessionState, turnId: string): number {
+  state.promptGeneration += 1;
+  state.activeTurnId = turnId;
+  state.turnTokenUsage = makeTurnTokenUsageAccumulator();
+  state.lastSessionErrorMessage = undefined;
+  state.awaitingBusyAfterInterruption = state.interruptedTurnId !== undefined;
+  return state.promptGeneration;
 }
 
 /**
