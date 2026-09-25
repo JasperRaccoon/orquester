@@ -410,7 +410,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   reported each as "didn't finish before the previous session ended" on the next message with no
   notice in between. `/health` now also carries `backgroundWorkThreadIds` (the host's liveness
   registry, `working` and `monitoring` both — the registry's TTL bounds a silent watch loop, so a
-  dev server cannot defer a deploy for longer than that window; an agent holds the drain until its
+  dev server cannot defer a deploy for longer than that window, and every turn end drops a watch
+  loop that reported nothing during that turn, which on Grok also runs at the end of every turn
+  the CLI starts itself — a subagent's end, a monitor's line — so a silent Grok shell stops holding
+  the drain sooner, while a monitor is re-armed inside the wake its own line caused (see the Grok
+  gotcha); an agent holds the drain until its
   end, except one whose rows carry `livenessTtlMs` — Grok's, whose runs report their end and a
   heartbeat but whose chat lives until Stop or the tab closes — which holds it for at most 60
   minutes after the latest row naming it, see the Grok gotcha); the supervisor unions it with the
@@ -1157,10 +1161,18 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `prompt_complete` to settle it. Its turn opens AT ONCE (the reply may follow in the same read, and
   a chunk with no open turn is dropped — safe, because `sendTurn` decides steer-or-new under the lock
   by reading the open turn), or, when announced while a turn is still settling (fixture 20: 15 ms
-  before the RPC result), right after it; its `turn_completed` settles it with that frame's usage; a
-  user message during it steers it (cancel, then our prompt under the same turn id — the cancelled
-  wake's `turn_completed` then settles nothing). Before, the woken reply was dropped and the thread
-  read idle. (6) **An hour, not forever**: every row naming a Grok agent carries `livenessTtlMs`
+  before the RPC result), right after it, the frames that name it in between (its prompt hook) held
+  for it by the prompt id they carry; its `turn_completed` settles it with that frame's usage; a user
+  message during it steers it (cancel, then our prompt under the same turn id — the cancelled wake's
+  `turn_completed` then settles nothing), and a cancel while it still waits ends IT (the CLI runs one
+  prompt at a time), so it opens no turn. One module holds the rule, `prompt-queue.ts`, which the
+  session and the capture-replay driver both use. **A monitor's wake re-arms it**: its line arrives
+  just BEFORE the wake it causes, so the liveness registry's turn-boundary sweep read it as silent
+  through that turn and dropped it at the wake's end — a code-only deploy stopped waiting for a
+  running monitor between its lines. The wake's turn opens with a status-less `task.progress` for
+  each live monitor its `runningText` names (`<monitor-event task_id="…">`, `rearmMonitors`),
+  replaced in place; only those, since re-arming every monitor at every wake would let unrelated
+  wakes hold a silent one forever. Before, the woken reply was dropped and the thread read idle. (6) **An hour, not forever**: every row naming a Grok agent carries `livenessTtlMs`
   (`GROK_AGENT_LIVENESS_TTL_MS`, 60 min), and the registry counts it "working" — holding a deploy's
   drain — for at most that long after the latest such row; its heartbeat and a poll answering
   running re-arm it. Only liveness lapses: the roster keeps the row and a later end is recorded as
