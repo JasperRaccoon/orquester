@@ -994,8 +994,7 @@ export class OpenCodeThreadSession {
     this.state.activeTurnId = undefined;
     this.state.activeAgent = undefined;
     this.state.activeVariant = undefined;
-    this.state.awaitingBusyAfterInterruption = false;
-    this.state.reconcileIdleStatus = false;
+    this.endInterruptionBefore(admission.turnId);
     this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
     this.closeChildAgents(detail);
     this.emit({
@@ -1020,9 +1019,7 @@ export class OpenCodeThreadSession {
     this.state.activeTurnId = undefined;
     this.state.activeAgent = undefined;
     this.state.activeVariant = undefined;
-    this.state.interruptedTurnId = undefined;
-    this.state.awaitingBusyAfterInterruption = false;
-    this.state.reconcileIdleStatus = false;
+    this.endInterruptionBefore(turnId);
     this.state.lastSessionErrorMessage = undefined;
     for (const requestId of this.state.autoRepliedRequestIds) {
       this.state.emittedTerminalRequestIds.add(requestId);
@@ -1056,6 +1053,9 @@ export class OpenCodeThreadSession {
     this.state.activeAgent = undefined;
     this.state.activeVariant = undefined;
     this.state.reconcileIdleStatus = false;
+    if (turnId !== undefined) {
+      this.endInterruptionBefore(turnId);
+    }
     this.updateRecord({ status: "error", lastError: message }, { activeTurnId: true });
     this.closeChildAgents(message);
     void this.recoverPendingRequests();
@@ -1066,6 +1066,26 @@ export class OpenCodeThreadSession {
         payload: { state: "failed", errorMessage: message, ...(tokenUsage ? { tokenUsage } : {}) }
       });
     }
+  }
+
+  /**
+   * `turnId` has settled, and it is not the turn a Stop interrupted: that
+   * turn's run ended before this one's began, so the Stop's leftovers are
+   * over and nothing of it may keep dropping the parent's output
+   * (`suppressInterruptedOutput` in `normalize.ts`) — a background answer that
+   * wakes the parent later included, whose reply would otherwise never be
+   * written. Every path a turn settles by calls it: only `completeTurn` used
+   * to clear these, so a later turn that failed (a rate limit, say) left the
+   * Stop's id behind for good. The interrupted turn's own settle keeps them,
+   * as does a submit the server refused (`rollbackAdmission`): no run began.
+   */
+  private endInterruptionBefore(turnId: string): void {
+    if (this.state.interruptedTurnId === turnId) {
+      return;
+    }
+    this.state.interruptedTurnId = undefined;
+    this.state.awaitingBusyAfterInterruption = false;
+    this.state.reconcileIdleStatus = false;
   }
 
   // -- requests -----------------------------------------------------------

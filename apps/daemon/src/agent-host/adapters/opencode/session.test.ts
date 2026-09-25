@@ -1767,6 +1767,58 @@ test("a Stop during the woken reply aborts its turn, and what the aborted run st
   harness.dispose();
 });
 
+test("a Stop's leftovers end once a later turn fails: a background answer after it still wakes the parent into a turn", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  // A turn the user stops…
+  const stopped = await session.sendTurn({ threadId: "thread-1", input: "one", attachments: [], interactionMode: "default" });
+  await session.interruptTurn(stopped.turnId);
+  // …then a later one that launches a background task and fails: a rate limit.
+  const failing = await session.sendTurn({ threadId: "thread-1", input: "two", attachments: [], interactionMode: "default" });
+  const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
+    messageID: string;
+  }).messageID;
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: promptId, role: "user", sessionID: sessionId } } },
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: "msg_two", role: "assistant", parentID: promptId, sessionID: sessionId } } },
+    {
+      type: "session.error",
+      properties: {
+        sessionID: sessionId,
+        error: { name: "APIError", data: { message: "Rate limit exceeded", statusCode: 429, isRetryable: true } }
+      }
+    }
+  ]);
+  const failed = await waitFor(harness, "turn.completed", (event) => event.turnId === failing.turnId);
+  assert.equal((failed as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "failed");
+
+  // The job outlives the failed turn, and its answer wakes the parent.
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends,
+    ...runSettles(sessionId)
+  ]);
+  await drainedWith(harness, sessionId, "after the wake");
+  assert.deepEqual(
+    eventsOfType(harness.events, "turn.completed")
+      .filter((event) => event.turnId === FIRST.promptId)
+      .map((event) => event.payload.state),
+    ["completed"],
+    "the woken reply ran as a turn, and settled"
+  );
+  assert.ok(
+    eventsOfType(harness.events, "content.delta").some((event) => event.turnId === FIRST.promptId),
+    "the woken reply is written, on its own turn"
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("the session stopping during the woken reply settles its turn before session.exited", async () => {
   const harness = makeHarness();
   const { session } = await wokenMidReply(harness);
