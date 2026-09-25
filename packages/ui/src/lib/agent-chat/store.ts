@@ -1722,6 +1722,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             liveTurnIds: liveTurnIdsOf(slice.entries, slice.turns),
             // A turn the window evicted into the bridge is on screen too.
             bridgeTurnIds: liveTurnIdsOf(slice.history.bridge, slice.turns),
+            // And one a page shows — by its rows, never by the turns it lists.
+            pageTurnIds: liveTurnIdsOf(
+              slice.history.pages.flatMap((page) => page.items),
+              slice.turns
+            ),
             pages: slice.history.pages,
             hasOlder: canLoadOlderHistory(slice.history)
           });

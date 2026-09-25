@@ -632,9 +632,9 @@ export function historyErrorMessage(error: unknown): string {
 export type RevealPlan = "present" | "load-more" | "absent";
 
 /**
- * Where a turn is: on screen (the window, the bridge or a loaded page holds
- * it), one more older page away, or out of reach — nothing older exists, or
- * {@link HISTORY_REVEAL_PAGE_CAP} pages have already been pulled in.
+ * Where a turn is: on screen (the window, the bridge or a loaded page shows
+ * something of it), one more older page away, or out of reach — nothing older
+ * exists, or {@link HISTORY_REVEAL_PAGE_CAP} pages have already been pulled in.
  */
 export function planReveal(
   turnId: string,
@@ -642,14 +642,23 @@ export function planReveal(
     liveTurnIds: ReadonlySet<string>;
     /** What the bridge shows something of: {@link liveTurnIdsOf} over it. */
     bridgeTurnIds?: ReadonlySet<string>;
+    /**
+     * What the loaded pages show something of: {@link liveTurnIdsOf} over
+     * their items. Never their `turns`: a host lists there the turn of a late
+     * row it serves out of a rewind's cut, for {@link historyAfterRevert} —
+     * a subagent's row, which the parent timeline never renders, would read
+     * as the turn on screen, and the reveal would stop short of it.
+     */
+    pageTurnIds: ReadonlySet<string>;
     pages: readonly ThreadHistoryPage[];
     hasOlder: boolean;
   }
 ): RevealPlan {
-  if (input.liveTurnIds.has(turnId) || input.bridgeTurnIds?.has(turnId) === true) {
-    return "present";
-  }
-  if (historyTurns(input.pages).some((turn) => turn.turnId === turnId)) {
+  if (
+    input.liveTurnIds.has(turnId) ||
+    input.bridgeTurnIds?.has(turnId) === true ||
+    input.pageTurnIds.has(turnId)
+  ) {
     return "present";
   }
   return input.hasOlder && input.pages.length < HISTORY_REVEAL_PAGE_CAP ? "load-more" : "absent";

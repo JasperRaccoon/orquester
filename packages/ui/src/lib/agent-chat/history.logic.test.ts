@@ -988,36 +988,74 @@ describe("planReveal", () => {
 
   it("is present when the live window holds the turn", () => {
     assert.equal(
-      planReveal("t9", { liveTurnIds: new Set(["t9"]), pages: [], hasOlder: true }),
+      planReveal("t9", { liveTurnIds: new Set(["t9"]), pageTurnIds: new Set(), pages: [], hasOlder: true }),
       "present"
     );
   });
 
-  it("is present when a loaded page holds the turn", () => {
-    assert.equal(planReveal("t5", { liveTurnIds: new Set(), pages: withTurn, hasOlder: true }), "present");
+  it("is present when a loaded page shows the turn", () => {
+    const pages = [historyPage({ items: [toolRow("x5", 1, { turnId: "t5" })] })];
+    const pageTurnIds = liveTurnIdsOf(pages.flatMap((page) => page.items), []);
+    assert.equal(
+      planReveal("t5", { liveTurnIds: new Set(), pageTurnIds, pages, hasOlder: true }),
+      "present"
+    );
+  });
+
+  it("loads more while the pages only list the turn — a subagent's late row of it shows nowhere", () => {
+    // What a host lists beside a page's rows (a late row's turn, for the rewind reach check) is not
+    // what the page shows: its row for the turn is an agent's, which the parent timeline never renders.
+    const pages = [
+      historyPage({
+        turns: [historyTurn("t5", 5)],
+        items: [toolRow("late", 1, { turnId: "t5", agentId: "agent-1" })]
+      })
+    ];
+    const pageTurnIds = liveTurnIdsOf(pages.flatMap((page) => page.items), []);
+    assert.equal(
+      planReveal("t5", { liveTurnIds: new Set(), pageTurnIds, pages, hasOlder: true }),
+      "load-more"
+    );
   });
 
   it("is present when only the bridge holds the turn — no page load for it", () => {
     const bridgeTurnIds = liveTurnIdsOf([toolRow("x7", 1, { turnId: "t7" })], []);
     assert.equal(
-      planReveal("t7", { liveTurnIds: new Set(), bridgeTurnIds, pages: withTurn, hasOlder: true }),
+      planReveal("t7", {
+        liveTurnIds: new Set(),
+        bridgeTurnIds,
+        pageTurnIds: new Set(),
+        pages: withTurn,
+        hasOlder: true
+      }),
       "present"
     );
   });
 
   it("loads more while older history exists", () => {
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: withTurn, hasOlder: true }), "load-more");
+    const nothing = new Set<string>();
+    assert.equal(
+      planReveal("t1", { liveTurnIds: nothing, pageTurnIds: nothing, pages: withTurn, hasOlder: true }),
+      "load-more"
+    );
   });
 
   it("is absent once nothing older exists", () => {
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: withTurn, hasOlder: false }), "absent");
+    const nothing = new Set<string>();
+    assert.equal(
+      planReveal("t1", { liveTurnIds: nothing, pageTurnIds: nothing, pages: withTurn, hasOlder: false }),
+      "absent"
+    );
   });
 
   it(`gives up after ${HISTORY_REVEAL_PAGE_CAP} pages`, () => {
     const loaded = (count: number): ThreadHistoryPage[] =>
       Array.from({ length: count }, () => historyPage());
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: loaded(24), hasOlder: true }), "load-more");
-    assert.equal(planReveal("t1", { liveTurnIds: new Set(), pages: loaded(25), hasOlder: true }), "absent");
+    const nothing = new Set<string>();
+    const plan = (pages: ThreadHistoryPage[]) =>
+      planReveal("t1", { liveTurnIds: nothing, pageTurnIds: nothing, pages, hasOlder: true });
+    assert.equal(plan(loaded(24)), "load-more");
+    assert.equal(plan(loaded(25)), "absent");
   });
 });
 

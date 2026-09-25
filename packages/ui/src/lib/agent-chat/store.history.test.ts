@@ -739,6 +739,43 @@ describe("revealTurn", () => {
     assert.equal(state().reveal?.rowId, "u1");
   });
 
+  it("pages on past a page that lists the turn but shows none of it — a subagent's late row alone", async () => {
+    const { fake, state } = await open();
+    synchronize(fake);
+    // The host lists t1 beside a late row of it (the rewind reach check), but that row is a
+    // subagent's, which the parent timeline never renders: nothing of t1 is on screen yet.
+    const lateRowOnly = historyPage({
+      items: [
+        activity("tool.completed", { toolUseId: "bg", status: "completed" }, {
+          id: "late",
+          turnId: "t1",
+          agentId: "agent-1",
+          createdAt: stamp(20)
+        })
+      ],
+      turns: [historyTurn("t1", 1, { userMessageId: "u1" })],
+      page: { beforeCursor: "cursor-late" }
+    });
+    const pageWithTurn = historyPage({
+      items: [
+        message("user", "first", { id: "u1", createdAt: stamp(10) }),
+        message("assistant", "one", { id: "a1", turnId: "t1", createdAt: stamp(11) })
+      ],
+      turns: [historyTurn("t1", 1, { userMessageId: "u1" })],
+      page: { beforeCursor: null }
+    });
+
+    const revealing = state().actions.revealTurn("t1");
+    await until(() => fake.waiting === 1, "the first page request");
+    fake.answer(lateRowOnly);
+    await until(() => fake.waiting === 1 && fake.historyCalls.length === 2, "the second request");
+    assert.equal(fake.historyCalls[1]?.query.before, "cursor-late");
+    fake.answer(pageWithTurn);
+
+    assert.equal(await revealing, true);
+    assert.equal(state().reveal?.rowId, "u1");
+  });
+
   it("gives up at once on a turn the thread no longer has", async () => {
     const { fake, state } = await open();
     synchronize(fake);
