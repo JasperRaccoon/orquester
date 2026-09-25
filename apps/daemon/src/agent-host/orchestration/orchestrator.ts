@@ -398,6 +398,32 @@ interface ThreadRuntime {
    */
   checkpointsUnavailable: boolean;
   deleted: boolean;
+  /**
+   * The requests the HOST closed itself while the adapter may still hold them
+   * — a Stop's cancel (`settlePendingRequests`), a turn end's dismissal of a
+   * stranded question (`settleStrandedQuestions`) — so the adapter's own
+   * report of that closure is not written as a second row
+   * (`repeatsHostClosure`). Insertion-ordered, capped at
+   * {@link HOST_CLOSED_REQUESTS_LIMIT}.
+   */
+  hostClosedRequests: Set<string>;
+}
+
+/**
+ * How many host-closed request ids a thread remembers. An id leaves with the
+ * adapter's report of it, or when a new request reuses it; one whose report
+ * never comes (an adapter that had already let go) is dropped oldest-first
+ * past this, and the worst that costs is the old second row.
+ */
+const HOST_CLOSED_REQUESTS_LIMIT = 256;
+
+/** A question's answers that answer nothing: none at all, or an empty record. */
+function isUnanswered(answers: unknown): boolean {
+  return (
+    answers === undefined ||
+    answers === null ||
+    (typeof answers === "object" && !Array.isArray(answers) && Object.keys(answers).length === 0)
+  );
 }
 
 const HEAD_SAVE_EVENT_INTERVAL = 50;
@@ -910,7 +936,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       revertedTo: loaded.derived.revertedTo,
       titleManual: loaded.derived.titleManual,
       checkpointsUnavailable: false,
-      deleted: state.deleted
+      deleted: state.deleted,
+      hostClosedRequests: new Set()
     };
     // A long fold is paid once: the next load of this thread starts from here,
     // even if it is never written to again — an idle open tab would otherwise
@@ -1438,6 +1465,54 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
+   * **One request, one closing row.** When the HOST closes a request itself —
+   * a Stop's cancel, a turn end's dismissal of a stranded question — it
+   * writes the row, in its own words, and remembers the id: the adapter may
+   * still hold the request and report its end later — the echo of the cancel
+   * the host handed it, or the provider's own resolution — which ingestion
+   * wrote as a second row, "Approval resolved" / "User input submitted",
+   * saying someone answered. Such a report is dropped at the sink.
+   *
+   * Only a CANCELLATION repeats the host's closure — an approval's `decision:
+   * "cancel"`, a question with no answer (the adapters' echo, and ingestion's
+   * `withdrawn` row): a real answer racing the Stop keeps its row. A new
+   * request under the same id is not the host's closure (ids may be recycled,
+   * `pending.ts`), and the adapter's answer on the wire is never touched —
+   * only its row is not written.
+   */
+  const rememberHostClosures = (runtime: ThreadRuntime, requestIds: readonly string[]): void => {
+    for (const requestId of requestIds) {
+      runtime.hostClosedRequests.delete(requestId);
+      runtime.hostClosedRequests.add(requestId);
+    }
+    for (const oldest of runtime.hostClosedRequests) {
+      if (runtime.hostClosedRequests.size <= HOST_CLOSED_REQUESTS_LIMIT) break;
+      runtime.hostClosedRequests.delete(oldest);
+    }
+  };
+
+  /** Whether `event` is an adapter's report of a closure the host already wrote (it forgets the id). */
+  const repeatsHostClosure = (runtime: ThreadRuntime, event: AppendableDomainEvent): boolean => {
+    if (event.type !== "thread.activity-appended") return false;
+    const activity = event.payload.activity;
+    const payload = activity.payload as { requestId?: unknown; decision?: unknown; answers?: unknown } | null;
+    const requestId = payload?.requestId;
+    if (typeof requestId !== "string") return false;
+    switch (activity.activityKind) {
+      case "approval.requested":
+      case "user-input.requested":
+        runtime.hostClosedRequests.delete(requestId);
+        return false;
+      case "approval.resolved":
+        return payload?.decision === "cancel" && runtime.hostClosedRequests.delete(requestId);
+      case "user-input.resolved":
+        return isUnanswered(payload?.answers) && runtime.hostClosedRequests.delete(requestId);
+      default:
+        return false;
+    }
+  };
+
+  /**
    * §4.1: every pending approval and user-input request is resolved with
    * `cancel` and emitted as `request.resolved` / `user-input.resolved`
    * **before** `interruptTurn` or `stopSession` reaches the provider.
@@ -1469,6 +1544,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       ...userInputs.map((question) => cancelled(question.requestId, "question"))
     ];
     await append(runtime, events);
+    // The adapter answers the provider and reports the cancel it is handed:
+    // the host's row above is the one closing row (`repeatsHostClosure`).
+    rememberHostClosures(runtime, [
+      ...approvals.map((approval) => approval.requestId),
+      ...userInputs.map((question) => question.requestId)
+    ]);
     if (!adapter) return;
     for (const approval of approvals) {
       try {
@@ -1538,6 +1619,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         )
       )
     );
+    // The adapter is never answered here, so it may still hold the question
+    // and report its end later — when the provider says so, or at a Stop.
+    rememberHostClosures(runtime, stranded.map((question) => question.requestId));
   };
 
   const stopSessionInternal = async (runtime: ThreadRuntime): Promise<void> => {
@@ -4134,13 +4218,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const runtime = runtimes.get(threadId) ?? (await loadRuntime(threadId));
     // The pending-turn rule is the host's, not any one writer's: an adapter
     // that reports `ready` while a turn start is in flight must not settle the
-    // row the command opened.
-    const guarded = events.map((event) => {
-      if (event.type !== "thread.session-set") return event;
+    // row the command opened. Nor is a closure the host already wrote written
+    // twice (`repeatsHostClosure`).
+    const guarded = events.flatMap((event): AppendableDomainEvent[] => {
+      if (repeatsHostClosure(runtime, event)) return [];
+      if (event.type !== "thread.session-set") return [event];
       const session = coerceSessionForPendingTurn(runtime, event.payload.session);
-      return session === event.payload.session
-        ? event
-        : { ...event, payload: { ...event.payload, session } };
+      return [
+        session === event.payload.session
+          ? event
+          : { ...event, payload: { ...event.payload, session } }
+      ];
     });
     await append(runtime, guarded);
   };

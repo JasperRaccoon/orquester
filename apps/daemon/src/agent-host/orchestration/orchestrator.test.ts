@@ -376,6 +376,190 @@ describe("orchestrator — approvals", () => {
   });
 });
 
+/** The adapter's own resolution of a request, as ingestion appends it. */
+async function adapterResolution(
+  host: TestHost,
+  requestId: string,
+  kind: "approval" | "question",
+  payload: Record<string, unknown>,
+  threadId = "thread-1"
+): Promise<string> {
+  commandSeq += 1;
+  const id = `adapter-resolved-${commandSeq}`;
+  await host.orchestrator.ingestionSink(threadId, [
+    {
+      eventId: `ingest-resolved-${commandSeq}`,
+      threadId,
+      type: "thread.activity-appended",
+      payload: {
+        activity: {
+          kind: "activity",
+          id,
+          tone: kind === "approval" ? "approval" : "info",
+          activityKind: kind === "approval" ? "approval.resolved" : "user-input.resolved",
+          summary: kind === "approval" ? "Approval resolved" : "User input submitted",
+          payload: { requestId, ...payload },
+          turnId: null,
+          createdAt: host.clock.nowIso(),
+          updatedAt: host.clock.nowIso()
+        }
+      },
+      occurredAt: host.clock.nowIso(),
+      commandId: null,
+      causationEventId: null,
+      metadata: { requestId }
+    }
+  ]);
+  return id;
+}
+
+/** The rows that close `requestId`, in log order, as `[id, summary]`. */
+function closingRows(host: TestHost, requestId: string): string[][] {
+  return activityEvents(host)
+    .filter(
+      (row) =>
+        (row.activityKind === "approval.resolved" || row.activityKind === "user-input.resolved") &&
+        (row.payload as { requestId?: string }).requestId === requestId
+    )
+    .map((row) => [row.id, row.summary]);
+}
+
+describe("orchestrator — a request the host closed itself keeps one closing row", () => {
+  // A Stop writes its own "Request cancelled" / "Question cancelled" row and
+  // hands the adapter the cancel; every adapter answers it and reports the
+  // resolution — which ingestion wrote as a second row, "Approval resolved"
+  // or "User input submitted", saying someone answered.
+  it("a Stop's cancel is one row: the adapter's own report of it is not written", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-1");
+    await openQuestion(host, "q-1", { dismissible: false });
+    await host.settle();
+
+    await host.orchestrator.command(threadId, "interrupt", { commandId: cmd() });
+    await host.settle();
+    // The adapter still answers the provider: the host handed it the cancel.
+    assert.deepEqual(
+      host.adapter.calls
+        .filter((call) => call.kind === "respondToApproval" || call.kind === "respondToUserInput")
+        .map((call) => call.detail),
+      [
+        { requestId: "req-1", decision: "cancel" },
+        { requestId: "q-1", answers: {} }
+      ]
+    );
+    await adapterResolution(host, "req-1", "approval", { decision: "cancel", requestKind: "command" });
+    await adapterResolution(host, "q-1", "question", { answers: {} });
+    await host.settle();
+
+    assert.deepEqual(closingRows(host, "req-1"), [["settle-cancel:req-1", "Request cancelled"]]);
+    assert.deepEqual(closingRows(host, "q-1"), [["settle-cancel:q-1", "Question cancelled"]]);
+    assert.equal(host.orchestrator.summary(threadId)?.hasPendingApprovals, false);
+    await host.stop();
+  });
+
+  it("a turn end's dismissal is the question's one row: a cancellation the adapter reports later is not written", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    const consumed = host.orchestrator.consume(host.adapter);
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const turnId = host.orchestrator.summary(threadId)?.latestTurn?.turnId ?? null;
+    assert.ok(turnId);
+    await openQuestion(host, "q-stranded", { dismissible: false, turnId });
+    await host.settle();
+    host.adapter.emit({
+      eventId: "turn-end-sweep",
+      threadId,
+      turnId,
+      createdAt: host.clock.nowIso(),
+      type: "turn.completed",
+      payload: {}
+    } as unknown as RuntimeEvent);
+    await host.settle();
+
+    // The provider's request died with the turn; the adapter settles it later
+    // — when the server says so, or at the next Stop.
+    await adapterResolution(host, "q-stranded", "question", { answers: {} });
+    await host.settle();
+    assert.deepEqual(closingRows(host, "q-stranded"), [
+      [`turn-end-dismiss:${turnId}:q-stranded`, "User input dismissed"]
+    ]);
+    host.adapter.close();
+    await consumed;
+    await host.stop();
+  });
+
+  it("a real answer racing the Stop keeps its row: only a cancellation repeats the host's", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-2");
+    await host.settle();
+    await host.orchestrator.command(threadId, "interrupt", { commandId: cmd() });
+    await host.settle();
+    // The user's accept reached the provider first; its report lands after
+    // the host's cancel.
+    const answered = await adapterResolution(host, "req-2", "approval", {
+      decision: "accept",
+      requestKind: "command"
+    });
+    await host.settle();
+    assert.deepEqual(closingRows(host, "req-2"), [
+      ["settle-cancel:req-2", "Request cancelled"],
+      [answered, "Approval resolved"]
+    ]);
+    await host.stop();
+  });
+
+  it("a new request reusing the id is not the host's closure: its own cancellation is written", async () => {
+    // Request ids may be recycled (`pending.ts`): the host's closure of the
+    // old one must not swallow the new one's end.
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-3");
+    await host.settle();
+    await host.orchestrator.command(threadId, "interrupt", { commandId: cmd() });
+    await host.settle();
+
+    host.clock.advance(1_000);
+    await host.orchestrator.ingestionSink(threadId, [
+      {
+        eventId: "ingest-req-3-again",
+        threadId,
+        type: "thread.activity-appended",
+        payload: {
+          activity: {
+            kind: "activity",
+            id: "approval:req-3:again",
+            tone: "approval",
+            activityKind: "approval.requested",
+            summary: "Run a command?",
+            payload: { requestId: "req-3", requestKind: "command" },
+            turnId: null,
+            createdAt: host.clock.nowIso(),
+            updatedAt: host.clock.nowIso()
+          }
+        },
+        occurredAt: host.clock.nowIso(),
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ]);
+    await host.settle();
+    assert.equal(host.orchestrator.summary(threadId)?.hasPendingApprovals, true, "the new request is open");
+    host.clock.advance(1_000);
+    await adapterResolution(host, "req-3", "approval", { decision: "cancel", requestKind: "command" });
+    await host.settle();
+    assert.equal(closingRows(host, "req-3").length, 2, "the host's closure of the old one, and the new one's own");
+    assert.equal(host.orchestrator.summary(threadId)?.hasPendingApprovals, false);
+    await host.stop();
+  });
+});
+
 describe("orchestrator — interrupt (§4.1, §6.2)", () => {
   it("settles every pending request as cancel BEFORE interrupting", async () => {
     const host = createTestHost();
