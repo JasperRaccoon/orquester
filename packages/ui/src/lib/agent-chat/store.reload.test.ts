@@ -1124,6 +1124,34 @@ describe("a reload never loses or duplicates a message", () => {
     }
   });
 
+  it("opens the thread's stream even when giving a stale send back throws: the outbox is a safety net, never a failure", async () => {
+    const unregister = registerComposerHandle("A", {
+      insertText: () => {},
+      stageAttachment: () => false,
+      returnMessage: () => [],
+      focusAtEnd: () => {},
+      openControl: () => {},
+      restoreFailedSend: () => {
+        throw new Error("the composer could not take it");
+      }
+    });
+    const warned: unknown[][] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => void warned.push(args);
+    try {
+      left([sendLeft({ sentAt: NOW - OUTBOX_REPLAY_MAX_AGE_MS - 1, turn: { input: "check first" } })]);
+      const host = fakeHost();
+      const thread = open("A", host);
+      await flush();
+      host.push(ready("A"));
+      assert.equal(thread.getState().slice.head?.id, "A", "the stream opened, and its first frame landed");
+      assert.equal(warned.length, 1, "the failure is said once, in the console");
+    } finally {
+      console.warn = warn;
+      unregister();
+    }
+  });
+
   it("does not trust a kept queue whose last write failed: the retained snapshot has what came after", async () => {
     const storageFill = fillableSessionStorage();
     const host = fakeHost();

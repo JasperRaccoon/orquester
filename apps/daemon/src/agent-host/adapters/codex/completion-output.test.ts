@@ -241,16 +241,22 @@ describe("a Codex command's completion keeps its output (Task 3)", () => {
     }
   });
 
-  it("past 64 KiB with nothing streamed, the cut head is never answered as the whole output", async () => {
+  it("past 64 KiB with nothing streamed, the cut head answers as the command's output, marked cut, never whole", async () => {
     const output = "x".repeat(CAP + 1);
     const n = make();
     const events = await ingestCodexDrafts([turnStarted(n), started(n), completed(n, output)]);
     const completion = completionOf(events);
     assert.equal((completion.payload as StoredCommandPayload).truncated, true);
 
+    // The join is asked first (step 2) and holds nothing: the head the completion kept answers, as the GUI's viewer
+    // shows it — the command's output as printed, saying it is only its start — never the payload as JSON.
     const { text, pages } = await readAll(daemon(completion, events), completion.id);
-    assert.equal(pages[0]!.kind, "payload", "the item as stored, never 'command-output'");
-    assert.equal(text, JSON.stringify(completion.payload, null, 2));
+    assert.equal(text, "x".repeat(CAP), "the stored head, whole");
+    for (const page of pages) {
+      assert.equal(page.kind, "command-output");
+      assert.equal(page.truncated, true, "only its head was kept");
+      assert.equal("running" in page, false);
+    }
   });
 
   it("the bound is exact: 64 KiB is whole, a byte more is cut, and a character never straddles it", () => {

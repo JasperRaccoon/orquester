@@ -122,6 +122,48 @@ export function commandOutputText(data: unknown): string | undefined {
 }
 
 /**
+ * A command's output as its ITEM stores it (`GET …/items/:itemId`, the
+ * unslimmed read), and whether that is all of it — the one rule both readers
+ * of a row's whole output follow: the GUI's "Load full output"
+ * (`readFullOutput`, `packages/ui/src/lib/agent-chat/full-output.ts`) and the
+ * MCP's `read_tool_output` (`apps/daemon/src/mcp/tools/output.ts`).
+ *
+ * - An item stored whole holds its output whole ({@link commandOutputText} of
+ *   its data): `whole: true`, answered first.
+ * - A COMPLETION stored cut (`payload.truncated`) holds its output's head: its
+ *   adapter kept only the start of a long output and said so — Codex's
+ *   `aggregatedOutput`, its first 64 KiB (`COMMAND_OUTPUT_MAX_BYTES`,
+ *   `apps/daemon/src/agent-host/adapters/codex/items.ts`). `whole: false`: a
+ *   reader asks the call's streamed output first, which the host joins whole,
+ *   and answers the head only when that comes back empty, saying it is only
+ *   the start — never as JSON, and never as the whole output. (A host's first
+ *   load closes a call a dead process left open with a completion that may
+ *   carry an update's cut copy, marked the same way: its preview reads the
+ *   same way, the start of the output.)
+ * - An UPDATE stored cut holds no part of it: ingestion persists every
+ *   `tool.updated` already slimmed (§5.6), its data a one-line preview that is
+ *   never labelled as the output — `undefined`, as for an item that is no
+ *   command's, or whose data carries no output.
+ */
+export function storedCommandOutput(
+  activityKind: string,
+  payload: unknown
+): { text: string; whole: boolean } | undefined {
+  const record = asRecord(payload);
+  if (record?.itemType !== "command_execution") {
+    return undefined;
+  }
+  const text = commandOutputText(record.data);
+  if (text === undefined) {
+    return undefined;
+  }
+  if (record.truncated !== true) {
+    return { text, whole: true };
+  }
+  return activityKind === "tool.completed" ? { text, whole: false } : undefined;
+}
+
+/**
  * A `detail` that only repeats the command: the command itself, or a head of
  * it cut short with "..." (ingestion's cut) or "…".
  */

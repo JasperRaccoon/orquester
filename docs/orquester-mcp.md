@@ -727,7 +727,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   - A tool row carries `outputItemId` where more of the call's output can be read, and
     `read_tool_output` reads it (§6, Tool output):
     - the call's completion (or denial) when its payload was cut on its way to you — the row the
-      GUI offers **Load full output** on; for a command, its whole output. Never the call's start
+      GUI offers **Load full output** on; for a command, its whole output (or, a Codex command
+      past 64 KiB that streamed nothing, the first 64 KiB, `truncated`). Never the call's start
       (what was cut there is the call's input, never its output) nor an update: a running call's
       updates are stored already cut, so one read back holds only its preview;
     - else, for a **command** that streamed its output, the call's latest row — its start, its
@@ -818,8 +819,7 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
        `output_for_prompt`). A running call's update is stored already cut, so its own data is
        never read as its output — nor is a Codex command's completion whose output passed 64 KiB:
        the completion keeps only the first 64 KiB and says it was cut, so the output is read from
-       step 2 when the command streamed it, and otherwise the item answers as its `payload`, the
-       first 64 KiB inside it.
+       step 2 when the command streamed it, and otherwise from step 3.
     2. **The call's streamed output**, when the item is a command's — a `command_execution` row,
        or a chunk of a command's output — and the call streamed any: output that is in no item's
        data at all — a Claude background shell's, a command's output while it runs — joined by the
@@ -833,13 +833,21 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
        grows. `truncated: true` says the join passed the host's cap, 8 MiB, and `text` is its
        head. (A background shell's output is already capped when it is read from the CLI's file:
        1 MiB, then one notice naming the file.)
+    3. **The head a completion kept**, when neither step answered for a completion stored cut —
+       a Codex command past 64 KiB that streamed nothing, or asked of a host with no join to
+       give: those first 64 KiB, as the command printed them, with `truncated: true` — the GUI's
+       viewer shows the same text, saying only the start was kept. Never the payload as JSON, and
+       never as the whole output. (A call a dead agent host left open is closed by the next one
+       with a completion that may carry an update's cut copy, marked the same way: its one-line
+       preview answers here too, as the start of the output.) An update's own preview never
+       answers as `command-output`.
   - `message` — a message's text.
   - `payload` — anything else, as the GUI's viewer shows it: a string payload as it is, else the
-    payload as indented JSON (`JSON.stringify(payload, null, 2)`), else the row's summary. A
-    command comes back this way too when neither step finds output: its data keeps it elsewhere
-    and nothing was streamed. (A live Claude Bash call streams its result's text as a command's
-    output, so even a result given as a list of blocks is read by step 2. A file change always
-    comes back this way.)
+    payload as indented JSON (`JSON.stringify(payload, null, 2)`), else the row's summary. A command
+    comes back this way too when no step finds output: its data keeps it elsewhere and nothing was
+    streamed, or it is an update, whose stored data is the row's preview. (A live Claude Bash call
+    streams its result's text as a command's output, so even a result given as a list of blocks is
+    read by step 2. A file change always comes back this way.)
 
   Right after a deploy, the agent host may still be the one from before it (it is replaced once no
   turn and no background work is running). One from before the join cannot join streamed output:

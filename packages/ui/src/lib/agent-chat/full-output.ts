@@ -2,29 +2,31 @@
  * Agent chat — a row's "Load full output" (spec §5.6, §6.3): what the row
  * offers, what the viewer reads for it, and what the viewer says about it.
  *
- * A call's whole output lives in one of two places. A payload the wire cut
- * (§5.6, `truncated`) is whole in its item, `GET …/items/:itemId`. A
- * command's output that STREAMED — `tool.output` chunks: a Claude background
- * shell's, a Codex command's while it runs, a long one's — is in no item at
- * all: the host joins the chunks from the log (`GET …/items/:itemId/output`),
- * and the retained window may hold only the latest of them (a parent's 500
- * rows, an agent's 200). So a row whose command streamed (`streamedOutput`)
- * reads that join first, whether or not its own payload was cut, and its item
- * where the host has no join to give — a 404: a host from before the route —
- * or the call streamed nothing; never an error. A file change is never read
- * through the join: its chunks are the tool's result text, no command's
- * output, and `streamedOutput` is never set on one.
- *
- * An item is shown by {@link fullOutputText}: a command's output as the
- * command printed it where its own data carries it, anything else as the
- * viewer always showed it — the MCP's `read_tool_output` reads an item the
- * same way.
+ * A call's whole output lives in its item or in its streamed chunks. A
+ * payload the wire cut (§5.6, `truncated` on the row) is whole in its item,
+ * `GET …/items/:itemId` — unless the item is stored cut too
+ * (`payload.truncated` at rest): an update, which ingestion persists already
+ * slimmed, or a completion whose adapter kept only the head of a long output
+ * (Codex's first 64 KiB). A command's output that STREAMED — `tool.output`
+ * chunks: a Claude background shell's, a Codex command's while it runs, a
+ * long one's — is in no item at all: the host joins the chunks from the log
+ * (`GET …/items/:itemId/output`), and the retained window may hold only the
+ * latest of them (a parent's 500 rows, an agent's 200) or none. So a row
+ * whose command streamed (`streamedOutput`) reads that join first, whether or
+ * not its own payload was cut; a command item stored cut reads it next, the
+ * MCP's order; and only where the host has no join to give — an empty one,
+ * or a 404: a host from before the route — does the item answer: a
+ * completion's kept head as text, saying it is only the start
+ * (`storedCommandOutput`, the one rule `read_tool_output` follows too), and
+ * anything else by {@link fullOutputText}. Never an error for either. A file
+ * change is never read through the join: its chunks are the tool's result
+ * text, no command's output, and `streamedOutput` is never set on one.
  *
  * No React import.
  */
 
 import {
-  commandOutputText,
+  storedCommandOutput,
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   type ThreadItem,
   type ThreadItemOutputResponse,
@@ -68,16 +70,54 @@ export interface FullOutputReads {
 /**
  * What the viewer shows: a call's streamed output — `running` while the call
  * has not completed (it is the output so far), `cut` once the join passed the
- * host's cap (it is the head) — or the item, shown by {@link fullOutputText}.
+ * host's cap (it is the head) — or the head a completion's item kept of a
+ * long output, as the command printed it (`head`), or the item, shown by
+ * {@link fullOutputText}.
  */
 export type FullOutput =
   | { kind: "streamed"; text: string; running: boolean; cut: boolean }
+  | { kind: "head"; text: string }
   | { kind: "item"; item: ThreadItem };
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+/** The host's join as the viewer shows it, or `null` when it holds nothing to show. */
+function streamedFrom(join: ThreadItemOutputResponse | null): FullOutput | null {
+  return join !== null && join.output !== ""
+    ? { kind: "streamed", text: join.output, running: !join.complete, cut: join.truncated }
+    : null;
+}
+
+/**
+ * A command row naming its call whose item is stored cut (`payload.truncated`
+ * at rest): an update, persisted already slimmed, or a completion that kept
+ * only its output's head. Its data holds no whole output, so the call's join
+ * is read before it — `read_tool_output`'s order (step 2 before the payload).
+ */
+function isCutCommandCall(item: ThreadItem): boolean {
+  if (item.kind !== "activity" || !item.activityKind.startsWith("tool.")) {
+    return false;
+  }
+  const payload = asRecord(item.payload);
+  return (
+    payload?.itemType === "command_execution" &&
+    payload.truncated === true &&
+    typeof payload.toolUseId === "string" &&
+    payload.toolUseId !== ""
+  );
+}
 
 /**
  * Read a row's whole output for the viewer. A join that answers is shown
  * first: it is everything the command printed, where the item holds at most
- * what its provider kept of it. A failed join read is the viewer's error,
+ * what its provider kept of it. A row whose command streamed asks for it
+ * before its item; a command item stored cut, after (never twice). Where no
+ * join answers, a completion stored cut shows the head it kept, as text —
+ * never its payload as JSON, and never as the whole output — and any other
+ * item shows as it always has. A failed join read is the viewer's error,
  * never a quiet fallback to an item that may hold none of the output.
  */
 export async function readFullOutput(
@@ -85,46 +125,49 @@ export async function readFullOutput(
   itemId: string,
   source: FullOutputSource = "item"
 ): Promise<FullOutput> {
-  if (source === "streamed") {
-    const join = await reads.streamedOutput(itemId);
-    if (join !== null && join.output !== "") {
-      return { kind: "streamed", text: join.output, running: !join.complete, cut: join.truncated };
+  const joinAsked = source === "streamed";
+  if (joinAsked) {
+    const streamed = streamedFrom(await reads.streamedOutput(itemId));
+    if (streamed !== null) {
+      return streamed;
     }
   }
   const { item } = await reads.item(itemId);
+  if (!joinAsked && isCutCommandCall(item)) {
+    const streamed = streamedFrom(await reads.streamedOutput(itemId));
+    if (streamed !== null) {
+      return streamed;
+    }
+  }
+  const stored =
+    item.kind === "activity" ? storedCommandOutput(item.activityKind, item.payload) : undefined;
+  if (stored !== undefined && !stored.whole) {
+    return { kind: "head", text: stored.text };
+  }
   return { kind: "item", item };
 }
 
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-
 /**
  * An item as the viewer shows it: a message's text; a command's output as the
- * command printed it, where the item's own data carries it
- * (`commandOutputText` — Codex's aggregated output, a Claude Bash result's
+ * command printed it, where the item's own data carries it whole
+ * (`storedCommandOutput` — Codex's aggregated output, a Claude Bash result's
  * text), exactly as the MCP's `read_tool_output` reads a command item first;
  * else a string payload as it is, the payload as indented JSON, or — nothing
  * to write — the row's summary. The §5.6 allow-list is what the *row*
  * renders; the item is whatever the adapter wrote, shown whole.
  *
  * Never a command's output out of an item stored cut (`payload.truncated`):
- * an update, which ingestion persists already slimmed, or a completion that
- * kept only a head of a long output (Codex's past 64 KiB). Its data holds
- * that preview or head, and reading it as the output would pass a part for
- * the whole; the payload shows instead, as the MCP answers it.
+ * an update's data is a one-line preview, and a completion's kept head is
+ * {@link readFullOutput}'s to show, saying it is only the start — here it
+ * would pass a part for the whole.
  */
 export function fullOutputText(item: ThreadItem): string {
   if (item.kind === "message") {
     return item.text;
   }
-  const payload = asRecord(item.payload);
-  if (payload?.itemType === "command_execution" && payload.truncated !== true) {
-    const output = commandOutputText(payload.data);
-    if (output !== undefined) {
-      return output;
-    }
+  const stored = storedCommandOutput(item.activityKind, item.payload);
+  if (stored?.whole === true) {
+    return stored.text;
   }
   if (typeof item.payload === "string") {
     return item.payload;
@@ -144,10 +187,17 @@ const CAP_LABEL = `${THREAD_ITEM_OUTPUT_MAX_BYTES / (1024 * 1024)} MiB`;
 /**
  * What the viewer says of the text it shows, above it: a running call's output
  * is what exists now, and a join past the host's cap is its head — the log
- * keeps every chunk, only this read stops there. An item needs no note.
+ * keeps every chunk, only this read stops there. A completion's kept head is
+ * only the start of its output: Codex's first 64 KiB, or the one-line preview
+ * a first load's closer copied from an update — how much the viewer cannot
+ * tell, so the note does not say. An item needs no note.
  */
 export function fullOutputNotes(output: FullOutput): string[] {
   const notes: string[] = [];
+  if (output.kind === "head") {
+    notes.push("Only the start of this output was kept.");
+    return notes;
+  }
   if (output.kind !== "streamed") {
     return notes;
   }
