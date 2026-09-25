@@ -1114,14 +1114,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   and a `turn-woken` signal for the session's record. From there it is any turn: the run's idle
   settles it, a `session.error` fails it, a Stop aborts it, the session's stop closes it, a
   restart's reconcile settles it, and a user message steers it — never Claude's auto-close of a
-  synthetic turn: this run is live, and the prompt joins it. Its steps are its own. Never opened
-  for a reply that already ended (a fork copies completed messages — fixture 10; a rewind also
-  claims every prompt its fork copied, so a copy its dead run never completed opens nothing
-  either), a compaction's summary (`summary: true`: the host's own `/compact` runs with no turn
-  open — so a woken run that compacts first, its context already full, streams that summary before
-  the turn opens; README observation 27) or output after an interruption (the demux drops it
-  first). The replay harness claims the host's prompt ids up front for the same reason `sendTurn`
-  does: a blocking `/command` is recorded after its frames.
+  synthetic turn: this run is live, and the prompt joins it. Its steps are its own. Only with a run
+  behind it — the parent's `busy` since its last `idle` (`parentBusy`; a reconnect clears it): with
+  none no `idle` would settle the turn and `turn.started` never arms the watchdog, so it would hold
+  a deploy's drain. A compaction's summary (`summary: true`) claims its prompt but never joins
+  `promptMessageIds` (off the meter): the host's own `/compact` stays turnless (`compact()` holds
+  `hostCompacting` up across `summarize`), a woken run that compacts FIRST (its context already
+  full) opens the turn at its summary. Never opened for a reply that already ended (a fork copies
+  completed messages — fixture 10; a rewind also claims every prompt its fork copied) or output
+  after an interruption (the demux drops it first) — a guard every path a LATER turn settles by
+  now ends (`endInterruptionBefore`): only `completeTurn` did, so a later turn that failed (a rate
+  limit) left the Stop behind and every woken reply after it was dropped. The child's end always
+  precedes the answer's prompt (the runner publishes its idle before resolving its run), so neither
+  it nor the answer's result ever rides the woken turn (README observation 27). The replay harness
+  claims the host's prompt ids up front, and models `hostCompacting`, for the same reason
+  `sendTurn` claims first: a blocking `/command` or `summarize` is recorded after its frames.
 - **Grok: shells are live work, a subagent is its `spawn_subagent` call plus the poll answers naming
   it, and a run nobody asks about stops counting after an hour.** (1) Grok stamps every task row of
   a background shell with the shell itself (`agentId` = `taskId`), and the liveness registry read

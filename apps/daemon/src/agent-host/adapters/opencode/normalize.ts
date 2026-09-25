@@ -1233,10 +1233,13 @@ export function taskResultText(output: string | undefined): string | undefined {
  * message whose one text part is `synthetic` and wraps the answer in
  * {@link TASK_OUTPUT_ENVELOPE}, naming the child. That part is the run's
  * result, as a foreground call's own completion is: the run's end gets it
- * once (`resultPending`), or, the answer coming before the child's own
- * `session.idle`, that end carries it (`pendingResult`). Only for a run whose
- * launching part answered in the background (`answersInBackground`), and only
- * when the summary, where it names the call's description, names this run's:
+ * once (`resultPending`) — 1.18.32 publishes the child's `session.idle`
+ * before the job completes and the prompt is written, so the end comes first
+ * — or, defensively, the answer coming before it, that end carries it
+ * (`pendingResult`). Both are written before any reply to the prompt opens a
+ * turn (`claimReply` opens at the reply), so neither rides it. Only for a run
+ * whose launching part answered in the background (`answersInBackground`), and
+ * only when the summary, where it names the call's description, names this run's:
  * an answer arriving after a relaunch is the earlier run's. A part that is not
  * synthetic, or names no child of this thread, is none. The prompt is still
  * no message of the thread's: this adds the result and nothing else.

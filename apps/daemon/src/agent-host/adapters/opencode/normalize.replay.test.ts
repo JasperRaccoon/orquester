@@ -1691,6 +1691,13 @@ test("a background answer wakes the parent: its reply opens a turn named by the 
   const run = parentAtRest();
   const prompt = feed(run, injectedResult("ses_background_child", "Found README.md and a.ts.")).flat();
   assert.deepEqual(eventsOfType(prompt, "turn.started"), [], "a prompt alone is no reply: nothing opens yet");
+  // The child's end came first (1.18.32's runner publishes its idle before the
+  // job completes), and the result its answer carries lands before the reply
+  // opens the turn: neither rides it, so a rewind of it takes neither.
+  assert.deepEqual(
+    eventsOfType(prompt, "task.completed").map((event) => [event.payload.summary, event.turnId]),
+    [["Found README.md and a.ts.", undefined]]
+  );
 
   const reply = wokenReplyFrames("msg_injected", "msg_woken");
   const [busy, begins] = reply.begins.map((frame) => normalizeOpenCodeEvent(run.state, frame, run.ctx));

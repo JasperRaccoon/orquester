@@ -1562,9 +1562,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   arriving mid-run joins it, and a message the user sends meanwhile steers it — unlike §4.5
   Claude's stale synthetic turn, which a send auto-closes: this run is live and OpenCode queues the
   prompt into it. A reply that has already ended (a fork's copied history — a rewind also claims
-  every prompt its fork copied), a compaction's summary (`summary: true` — the host's own
-  `/compact` runs while no turn is open) and output after an interruption open nothing
+  every prompt its fork copied) and output after an interruption open nothing
   (`adapters/opencode/normalize.ts`, `session.ts`, `state.ts`; fixtures README observation 27).*
+  *Built (the sweep after it): the turn opens only with a run behind it — the parent's `busy`
+  since its last `idle` — or no `idle` would ever settle it and a deploy's drain would wait on it.
+  A compaction's summary claims its prompt off the meter: the host's own `/compact` stays turnless
+  (`compact()` holds `hostCompacting` up across its `summarize`), and a woken run that compacts
+  first — its context already full — opens the turn at the summary, so the thread reads working
+  through the compaction. An interruption's guard ends when any later turn settles, a failed one
+  included: a Stop followed by a turn that failed on a rate limit used to drop every woken reply
+  after it. And the child's end always precedes the answer's prompt (1.18.32's runner publishes
+  its idle before it resolves the run), so neither the child's end nor its result rides the woken
+  turn, and a rewind of that turn can never take an agent's end while its start stays.*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

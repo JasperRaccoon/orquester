@@ -780,21 +780,45 @@ the reply, and a `turn-woken` signal the session's record follows. From there it
 run's idle settles it, a `session.error` fails it, a Stop aborts it, the session's stop closes it,
 a message the user sends meanwhile steers it (OpenCode queues it into the same run), a second
 answer arriving mid-run joins it, and a host that dies mid-reply leaves it to the next host's
-reconcile, like any running turn. Its steps count as the turn's own (`promptMessageIds`). Never
-opened: a reply that has already ended — a fork copies a session's messages whole, completed ones
-included (fixture 10), and a rewind claims every prompt its fork copied, so a copy its dead run
-never completed opens nothing either — a compaction's summary (`summary: true`, fixture 09: the
-host's own `/compact` runs one while no turn is open), and anything that follows an
-interruption, which the demux drops first. No capture holds a woken parent: the replay tests
-clone fixture 12's frames under new ids, and assert that no capture opens a turn of its own.
+reconcile, like any running turn. Its steps count as the turn's own (`promptMessageIds`).
 
-One edge stays open, read from the same source: a run whose last answer already overflows the
-model's context compacts FIRST (`SessionPrompt.run` → `SessionCompaction.create {auto: true}`),
-before any reply. Woken into such a run, the parent's compaction summary streams while no turn is
-open — as the host's own `/compact` does — and the turn opens at the reply that follows it, named
-by the `continue` prompt the compaction writes. Telling that compaction from the host's
-(`auto: false` on its `compaction` part, fixture 09) would take tracking the prompt's parts; no
-capture shows it.
+It opens only with a run behind it: the parent's `busy` since its last `idle` (`parentBusy` —
+`SessionPrompt.run` sets `busy` at the top of every loop iteration, before it writes a reply).
+With no run, no `idle` would ever settle the turn, and `turn.started` alone never arms the host's
+watchdog, so it would hold a deploy's drain until the user acted. A reconnect clears the evidence;
+a live run says `busy` again at its next iteration. Never opened: a reply that has already
+ended — a fork copies a session's messages whole, completed ones included (fixture 10), and a
+rewind claims every prompt its fork copied, so a copy its dead run never completed opens nothing
+either — and anything that follows an interruption, which the demux drops first. That last guard
+lasts until a later turn settles, by ANY path: a later turn that failed (a rate limit) used to
+leave the Stop's id behind for good (`completeTurn` alone cleared it), and every woken reply after
+it was dropped — never written, the thread idle.
+
+A compaction's summary (`summary: true`, fixture 09) answers no prompt of the conversation: its
+prompt is claimed but never joins `promptMessageIds`, so the summary call stays off the meter and
+the turn's usage. While no turn runs it is either the host's own `/compact` — `compact()` holds
+`hostCompacting` up across its `summarize` request, which answers only once the compaction's run
+ended — and stays turnless, or a woken run's own: a run whose last answer already overflows the
+model's context compacts FIRST (`SessionPrompt.run` → `SessionCompaction.create {auto: true}`;
+read from the source), so the summary opens the woken turn, named by the compaction's prompt, and
+the thread reads working through the compaction. The reply to the prompt the compaction writes to
+go on with — one `synthetic` text part marked `metadata.compaction_continue` — then joins it like
+any mid-run prompt, and counts.
+
+**The child's end always precedes the answer's prompt.** Read from 1.18.32's source: a run
+fiber's exit handler (the session runner's `onExit`) runs `onIdle` — which publishes the child's
+`session.status {idle}` and `session.idle` — BEFORE it resolves the run's `done`; only then does
+the child's `prompt` return, `TaskTool.runTask` end, the job complete, and
+`notifyBackgroundResult` → `injectBackgroundResult` prompt the parent. So on the one ordered
+event stream the child's `task.completed` is written while no turn runs (the launching turn has
+ended, the woken one has not opened), and so is the result the answer carries — the woken turn
+opens at the REPLY, never at the prompt. Were the order reversed, the child's end would ride the
+woken turn, and a rewind of that turn would drop the agent's end while its start stayed on the
+launching turn: the roster would read it running again. The adapter still takes an answer that
+comes first (`pendingResult`) — defensively.
+
+No capture holds a woken parent: the replay tests clone fixture 12's frames under new ids, and
+assert that no capture opens a turn of its own.
 
 ### 28. A running `bash` part restates its whole output on every frame
 
