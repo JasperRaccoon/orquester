@@ -275,12 +275,12 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
 });
 
 /**
- * A Grok agent's end is reported only when the model polls it or kills it, so
- * an agent nobody polls again would hold "working" — and every code-only
- * deploy — for as long as its chat stays open. Every Grok subagent row carries
- * `livenessTtlMs`, and the registry counts the agent live for at most that long
- * after the latest row naming it. Only liveness expires: the roster keeps the
- * row, and a later end is recorded as any end is.
+ * A Grok agent reports its end (`subagent_finished`) and a heartbeat while it
+ * runs, but an agent whose reports stop would hold "working" — and every
+ * code-only deploy — for as long as its chat stays open. Every Grok subagent
+ * row carries `livenessTtlMs`, and the registry counts the agent live for at
+ * most that long after the latest row naming it. Only liveness expires: the
+ * roster keeps the row, and a later end is recorded as any end is.
  */
 describe("an agent row with a liveness TTL (Grok) expires; every row naming it re-arms it", () => {
   const HOUR = 60 * 60_000;

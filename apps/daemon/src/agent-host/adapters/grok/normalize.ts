@@ -304,21 +304,22 @@ function isTerminalToolStatus(status: ToolCallStatus | null | undefined): boolea
 /**
  * The tool that launches a subagent, in the CLI's own tool namespace — the
  * CLI's embedded docs and its Claude-compat tool table (`Agent` →
- * `spawn_subagent`). A tool's namespace is the module it lives in, in the
- * binary: `implementations/opencode/write` is the `write` whose captured calls
- * name `opencode`, `implementations/grok_build/read_file` the `read_file`
- * whose calls name `grok_build`, and the spawn lives at
- * `implementations/grok_build/task/coordinator/spawn`. No capture holds a
- * spawn (fixtures README observation 36).
+ * `spawn_subagent`). Captured (fixtures 15–23): its first frame is titled
+ * `spawn_subagent` with the model's arguments as `rawInput` (`description`,
+ * `prompt`, `subagent_type`, `background`, `resume_from`) and names itself in
+ * `_meta["x.ai/tool"]`; the rewrite that follows is `{variant: "Task", …,
+ * run_in_background, task_id: null}`.
  */
 export const SPAWN_SUBAGENT_TOOL = "spawn_subagent";
 const GROK_TOOL_NAMESPACE = "grok_build";
 
 /**
- * The `rawOutput` tag of a foreground spawn that ran its child to the end —
- * the CLI's `ToolOutput::SubagentCompleted` (`SubagentCompletedOutput`), the
- * same internally tagged enum whose `ReadFile`, `Bash`, `GrepSearch`… answers
- * the fixtures hold. Any other answer means the run goes on.
+ * The `rawOutput` tag of a foreground spawn that ran its child to the end:
+ * `{type: "SubagentCompleted", output, subagent_id, subagent_type,
+ * tool_calls, turns, duration_ms, worktree_path, resume_from_hint}` (fixtures
+ * 15, 17), a millisecond after `subagent_finished`. Any other answer — a
+ * background launch's `Text`, or a foreground run's the CLI moved to the
+ * background (fixture 22) — means the run goes on.
  */
 const SUBAGENT_COMPLETED_OUTPUT = "SubagentCompleted";
 
@@ -461,8 +462,10 @@ export const SUBAGENTS_REMEMBERED = 512;
 
 /**
  * How long a Grok agent counts as live work after the latest row naming it
- * (`livenessTtlMs` on every one of its rows): an hour. Its end arrives only
- * when the model polls or kills it, so an agent nobody asks about again would
+ * (`livenessTtlMs` on every one of its rows): an hour. A run reports its end
+ * (`subagent_finished`) and, while it runs, a heartbeat about every ten
+ * seconds (`subagent_progress`, fixtures 16 and 19) that re-arms the hour — so
+ * the bound is for a run whose reports stop without an end, which would
  * otherwise hold "working" — and every code-only deploy's drain — for as long
  * as its chat stays open. Liveness only: the roster keeps the row.
  */
@@ -1337,39 +1340,40 @@ export class GrokNormalizer {
   // ------------------------------------------------------------- subagents
 
   /**
-   * A `spawn_subagent` call → a roster agent (§7.6). The call, and the poll
-   * and kill answers naming the id it reported, are what a client observably
-   * gets of a subagent. The CLI's `_x.ai` vocabulary also names
-   * `subagent_spawned`, `subagent_progress`, `subagent_finished` and an
-   * `x.ai/task_completed` notification, but no capture holds one and their
-   * fields cannot be read off the binary, so they stay unmapped — a
-   * `runtime.warning` — rather than guessed (fixtures README observation 36).
+   * A `spawn_subagent` call → a roster agent (§7.6). Captured (fixtures
+   * 15–23): the call, then `subagent_spawned` naming the run's id and child
+   * session ({@link subagentSpawned}), the child's own frames under that
+   * session ({@link childSessionUpdate}), `subagent_progress` heartbeats
+   * ({@link subagentProgress}) and `subagent_finished` — the run's end, every
+   * way it ends ({@link subagentFinished}).
    *
    * - The call's first frame STARTS the agent: `task.started`, agent-kind
    *   (`taskType: "subagent"`), stamped with its own id like every Grok task,
    *   launched by the call (`toolUseId`), so the GUI hides the launch row
    *   behind the agent's the way it hides a Claude `Agent` call.
-   * - A foreground call answered with the completion tag (`SubagentCompleted`)
-   *   ends the agent, with the call's result — the text the parent model
-   *   reads — as the agent's. A call that fails before its run goes on fails
-   *   it.
+   * - `subagent_finished` ends it, once. The call's own answer ends it only
+   *   when that end never came: a foreground call answered with the completion
+   *   tag (`SubagentCompleted`) ends the agent with the CLI's `output` as its
+   *   result; a call that fails before its run goes on fails it.
    * - Any other answer means the run goes on without its call: a
-   *   `background: true` launch answers at once with the subagent's id, and
-   *   the CLI moves a foreground run past its await budget to the background
-   *   ("foreground subagent exceeded await budget; auto-backgrounding (child
-   *   keeps running)"). So does a foreground call its turn cut
-   *   ({@link endTurn}: "caller gone; auto-backgrounding"). Such a run ends by
-   *   a poll or kill answer ({@link backgroundFromToolCall}, T3's reader), a
-   *   `background_tasks` frame joined to it ({@link foldBackgroundTasks}),
-   *   Stop, the session's stop or the process's exit
-   *   ({@link stopBackgroundTasks}); its liveness lapses an hour after the
-   *   latest row naming it ({@link GROK_AGENT_LIVENESS_TTL_MS}).
+   *   `background: true` launch answers at once with the subagent's id (a
+   *   `Text` answer, fixture 16), and the CLI moves a foreground run past its
+   *   await budget to the background (fixture 22: "Subagent took longer than
+   *   the foreground budget and was moved to the background…"). A foreground
+   *   call its turn cut is NOT one of these: the CLI cancels the child with
+   *   the turn (fixture 23; {@link endTurn}). Such a run ends by
+   *   `subagent_finished`, a poll or kill answer ({@link
+   *   backgroundFromToolCall}, T3's reader), Stop, the session's stop or the
+   *   process's exit ({@link stopBackgroundTasks}); its liveness lapses an
+   *   hour after the latest row naming it ({@link GROK_AGENT_LIVENESS_TTL_MS}).
    * - `resume_from` re-launches a completed subagent. The relaunch contract
    *   (AGENTS.md, "Agent rows must survive resumes and retention", rule 1):
    *   the SAME task starts again under the NEW call, before any row of the
    *   run, so the roster reopens it; the task is found by the subagent id the
-   *   source launch reported ({@link learnSubagentIds}); an id no launch
-   *   reported (a host restart since) names a task of its own.
+   *   source launch reported ({@link learnSubagentIds}) — the resume spawns a
+   *   NEW subagent id, joined to the same task by `resumed_from` (fixture
+   *   17); an id no launch reported (a host restart since) names a task of its
+   *   own.
    */
   private subagentFromToolCall(
     toolCallId: string,
@@ -1712,11 +1716,12 @@ export class GrokNormalizer {
   /**
    * Remember the subagent id(s) a launch reported, for a later `resume_from`.
    * Read shape-free — the UUIDs in what the call returned: the CLI's subagent
-   * ids are UUIDv7, and the result is the one place the parent model learns
-   * the id it later passes to `resume_from` (a background launch "returns
-   * immediately with a subagent ID", the docs say; a foreground result's
-   * `rawOutput` is the `SubagentCompleted` output, whose fields include
-   * `subagent_id`, per the binary).
+   * ids are UUIDv7, and the result is where the parent model learns the id it
+   * later passes to `resume_from` (captured: a background launch's `Text`
+   * answer names `subagent_id: <id>`, fixture 16; a foreground result's
+   * `SubagentCompleted` output its `subagent_id` and `resume_from_hint`,
+   * fixture 15). `subagent_spawned` names it too ({@link subagentSpawned});
+   * whichever comes first is kept.
    *
    * The CLI's own `rawOutput` is read first, and the text only when it names
    * none: the text of a foreground result is the subagent's summary, model
@@ -1810,11 +1815,12 @@ export class GrokNormalizer {
    * One rule, for shells and subagents alike ({@link subagentReport}):
    * - An end the CLI reported is final: nothing starts again.
    * - An end the adapter wrote itself (Stop, the session's stop, the exit, a
-   *   task dropping out of a snapshot unannounced) is not the CLI's word —
-   *   whether `session/cancel` kills Grok's background work is not captured,
-   *   and a deploy must never kill running work, which outranks a duplicate
-   *   row. So a report that the task still runs counts it live again
-   *   ({@link reviveShell}), and a report of its end is the CLI's end,
+   *   task dropping out of a snapshot unannounced) is not the CLI's word — a
+   *   Stop's `session/cancel` leaves a background shell running (fixture 21:
+   *   a poll 12 s later answered `running`, and the shell outlived the CLI
+   *   itself), and a deploy must never kill running work, which outranks a
+   *   duplicate row. So a report that the task still runs counts it live
+   *   again ({@link reviveShell}), and a report of its end is the CLI's end,
    *   remembered as such, with no row: the adapter already wrote one.
    */
   private shellReport(
@@ -1902,12 +1908,13 @@ export class GrokNormalizer {
 
   /**
    * A subagent run the adapter closed itself that the CLI reports still
-   * running — a session-scoped Stop's `session/cancel` probably leaves a
-   * background child running (the CLI auto-backgrounds a child whose caller
-   * is gone): live again, under its own start row re-emitted, naming its own
-   * launch — which the roster reads as a late delivery (it keeps the
-   * adapter's end) and the liveness registry as live work for the agent's
-   * hour, re-armed by further reports.
+   * running — a heartbeat, a poll, a listing: live again, under its own start
+   * row re-emitted, naming its own launch — which the roster reads as a late
+   * delivery (it keeps the adapter's end) and the liveness registry as live
+   * work for the agent's hour, re-armed by further reports. Captured, a Stop's
+   * `session/cancel` cancels a background child (fixture 21:
+   * `subagent_finished {status: "cancelled"}` 50 ms later), so after a Stop
+   * this is the rule for what the CLI did not cancel.
    */
   private reviveSubagent(track: SubagentTrack, raw: RuntimeEventRaw): RuntimeEvent[] {
     track.live = true;

@@ -173,8 +173,35 @@ test("16 replayed: the CLI's wake after a background agent's end is a turn the a
     assert.deepEqual(
       warnings,
       ['grok: MCP server not ready {"name":"stripe","status":"unavailable"}'],
-      "the host's MCP failure once — not again when the subagent's spawn re-handshakes it, not the " +
-        "child's skills-reload replies, not the full-access self-resolve advisory"
+      "the host's MCP failure once — not again when the subagent's spawn re-handshakes it, and not the " +
+        "full-access self-resolve advisory"
+    );
+  } finally {
+    await r.dispose();
+  }
+});
+
+test("15 replayed: a foreground agent ends once; the CLI's replies to its own reloads are not warnings", async () => {
+  const FG = "call-178a2a0c-2c5e-49a6-8fb8-e0fee73d6c1e-0";
+  const r = await replayRig("15-subagent-foreground.ndjson");
+  try {
+    await start(r);
+    await send(r, "spawn it in the foreground");
+    const done = (await r.waitFor(isTurnCompleted, "the turn")) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+    assert.equal(done.payload.state, "completed");
+    assert.equal(done.payload.tokenUsage?.hasSubagents, true);
+    const ends = r.events.filter((event) => event.type === "task.completed" && event.payload.taskId === FG);
+    assert.deepEqual(
+      ends.map((event) => [(event.payload as { status?: string }).status, (event.payload as { summary?: string }).summary]),
+      [["completed", "sub-ok"]]
+    );
+    const warnings = r.events
+      .filter((event): event is Extract<RuntimeEvent, { type: "runtime.warning" }> => event.type === "runtime.warning")
+      .map((event) => event.payload.message);
+    assert.deepEqual(
+      warnings,
+      ["grok: MCP server not ready"],
+      "the five skills-reload / workflows-reload replies this capture holds are the CLI's own"
     );
   } finally {
     await r.dispose();

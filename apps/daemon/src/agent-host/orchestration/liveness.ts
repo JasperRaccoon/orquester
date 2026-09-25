@@ -14,13 +14,13 @@
  * which is correct, because orphaned background work is not live.
  *
  * **Differs from T3: background rows expire.** T3 drops a task only on a
- * terminal status, which assumes every provider reports one. Grok reports a
- * backgrounded task's (`_x.ai/task_backgrounded`) end only in a snapshot or
- * in a poll the model asks for — the `x.ai/task_completed` its binary names
- * has no captured shape (fixtures README observation 29) — so a thread could
- * read `"monitoring"` for the rest of the host's life and the §6.4 ladder
- * would keep the tab out of "finished" forever. Two bounds fix it, both on the
- * **background** bucket only:
+ * terminal status, which assumes every provider reports one — and every
+ * provider can fail to: a Grok shell's end arrives by `_x.ai/task_completed`,
+ * a snapshot or a poll (fixtures README observation 39), none of which comes
+ * once the CLI stops reporting on it, and a thread could read `"monitoring"`
+ * for the rest of the host's life while the §6.4 ladder kept the tab out of
+ * "finished" forever. Two bounds fix it, both on the **background** bucket
+ * only:
  *
  * - a watch loop with no transition for {@link BACKGROUND_LIVENESS_TTL_MS} is
  *   dropped (evaluated lazily on read, so there is no timer to leak and a test
@@ -30,11 +30,12 @@
  *
  * Agent rows are never expired — a subagent that runs for hours is real work —
  * unless the row says otherwise: an adapter whose agents' ends can go
- * unreported stamps `livenessTtlMs` on every row of the agent (Grok's end
- * arrives only when the model polls or kills it, and a chat session lives
- * until Stop or the tab closes, so `session.exited` may never come). Such an
- * agent counts for at most that long after the latest row naming it; the
- * roster keeps its row, and a later end is recorded as any end is.
+ * unreported stamps `livenessTtlMs` on every row of the agent (Grok's: its
+ * runs report their end and a heartbeat about every ten seconds, but a chat
+ * session lives until Stop or the tab closes, so `session.exited` may never
+ * come for a run whose reports stop). Such an agent counts for at most that
+ * long after the latest row naming it; the roster keeps its row, and a later
+ * end is recorded as any end is.
  */
 
 import {

@@ -118,11 +118,12 @@ const PROMPT_IDS_REMEMBERED = 256;
 
 /**
  * Replies the CLI writes to requests it sent ITSELF, never ours: a subagent's
- * child session reloading its skills and workflows answers
- * `{"id": "skills-reload", …}` four times and `"workflows-reload"` once, per
- * spawn (fixtures 15–23). The peer mints numeric ids only, so these can reply
- * to nothing of ours; warning on each put five rows in the timeline per
- * subagent. Any other stray reply still warns.
+ * child session reloading its skills and workflows answered
+ * `{"id": "skills-reload", …}` four times and `"workflows-reload"` once
+ * (fixture 15's spawn, the first of its day; the later captures' spawns sent
+ * none). The peer mints numeric ids only, so these can reply to nothing of
+ * ours; warning on each put five rows in the timeline. Any other stray reply
+ * still warns.
  */
 const CLI_INTERNAL_REPLY_IDS: ReadonlySet<string> = new Set(["skills-reload", "workflows-reload"]);
 
