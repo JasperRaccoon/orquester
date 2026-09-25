@@ -819,10 +819,14 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
        different place first (Grok's preview is its content blocks' first line, its whole output
        `output_for_prompt`). A running call's update is stored already cut, so its own data is
        never read as its output — nor is a completion that kept only part of its output and says
-       so: a Codex command's past 64 KiB, which keeps the first 64 KiB, and an OpenCode command
+       so: a Codex command's past 64 KiB, which keeps the first 64 KiB; an OpenCode command
        whose output its `bash` tool cut past the tool's own limits, which keeps the end of it
-       behind the tool's note (`...output truncated...` / `Full output saved to: <file>`). Their
-       output is read from step 2 when the command streamed it, and otherwise from step 3.
+       behind the tool's note (`...output truncated...` / `Full output saved to: <file>`); and an
+       OpenCode command-named tool of another kind (an MCP server's) whose output OpenCode's
+       generic cut shortened, which keeps the start of it, its note at the end (`...<n> lines
+       truncated...` / "The tool call succeeded but the output was truncated. Full output saved
+       to: <file>"). Their output is read from step 2 when the command streamed it, and otherwise
+       from step 3.
     2. **The call's streamed output**, when the item is a command's — a `command_execution` row,
        or a chunk of a command's output — and the call streamed any: output that is in no item's
        data at all — a Claude background shell's, a command's output while it runs — joined by the
@@ -839,7 +843,8 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
     3. **The part a completion kept**, when neither step answered for a completion stored cut —
        a command that streamed nothing, or asked of a host with no join to give: what it kept, as
        the command printed it, with `truncated: true` — a Codex command's first 64 KiB, an
-       OpenCode command's last lines behind the tool's note naming the file that holds all of it.
+       OpenCode command's last lines behind the tool's note naming the file that holds all of it,
+       or, cut by OpenCode's generic truncation, its first lines with that note after them.
        The GUI's viewer shows the same text, saying only part of the output was kept. Never the
        payload as JSON, and never as the whole output. (A call a dead agent host left open is
        closed by the next one with a completion that may carry an update's cut copy, marked the

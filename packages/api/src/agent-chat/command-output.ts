@@ -135,7 +135,8 @@ export function commandOutputText(data: unknown): string | undefined {
  *   `aggregatedOutput`, its first 64 KiB (`COMMAND_OUTPUT_MAX_BYTES`,
  *   `apps/daemon/src/agent-host/adapters/codex/items.ts`); OpenCode's `bash`
  *   tool keeps the END of one past its limits, behind a note naming the file
- *   that holds all of it (`isCutFinalOutput`,
+ *   that holds all of it, and its generic cut — any other command-named tool's
+ *   — the start, its note after it (`isCutFinalOutput`,
  *   `apps/daemon/src/agent-host/adapters/opencode/state.ts`). `whole: false`: a
  *   reader asks the call's streamed output first, which the host joins whole,
  *   and answers the kept part only when that comes back empty, saying it is

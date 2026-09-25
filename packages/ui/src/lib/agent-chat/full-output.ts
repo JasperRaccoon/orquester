@@ -7,8 +7,9 @@
  * `GET …/items/:itemId` — unless the item is stored cut too
  * (`payload.truncated` at rest): an update, which ingestion persists already
  * slimmed, or a completion that holds only part of a long output — Codex's
- * first 64 KiB, or the end OpenCode's `bash` tool kept behind its "output
- * truncated" note. A command's output that STREAMED — `tool.output`
+ * first 64 KiB, the end OpenCode's `bash` tool kept behind its "output
+ * truncated" note, or the head OpenCode's generic cut kept of another
+ * command-named tool's. A command's output that STREAMED — `tool.output`
  * chunks: a Claude background shell's, a Codex command's while it runs, a
  * long one's — is in no item at all: the host joins the chunks from the log
  * (`GET …/items/:itemId/output`), and the retained window may hold only the
@@ -191,8 +192,9 @@ const CAP_LABEL = `${THREAD_ITEM_OUTPUT_MAX_BYTES / (1024 * 1024)} MiB`;
  * is what exists now, and a join past the host's cap is its head — the log
  * keeps every chunk, only this read stops there. What a completion kept is
  * only part of its output: Codex's first 64 KiB, the end OpenCode's `bash`
- * tool kept behind its own note (which names the file holding the rest), or
- * the one-line preview a first load's closer copied from an update — which
+ * tool kept behind its own note (which names the file holding the rest), the
+ * head its generic cut kept before its note, or the one-line preview a first
+ * load's closer copied from an update — which
  * part, and how much, the viewer cannot tell, so the note says neither. An
  * item needs no note.
  */

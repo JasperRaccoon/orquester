@@ -223,6 +223,40 @@ describe("an OpenCode command whose final output the tool cut", () => {
     }
   });
 
+  it("a command-named tool the GENERIC truncation cut answers its kept head as command-output, marked cut", async () => {
+    // Every tool but the shell goes through 1.18.32's `Truncate.output` (read
+    // from the source): an MCP server's `run_command`, say, keeps the HEAD of
+    // an output past the limits, its note at the end. Such a tool streams
+    // nothing, so no join answers: the kept head does, only part of it.
+    const head = PRINTED.split("\n").slice(0, 2_000).join("\n");
+    const cutOutput =
+      `${head}\n\n...1100 lines truncated...\n\nThe tool call succeeded but the output was truncated. ` +
+      `Full output saved to: ${SAVED}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`;
+    const completion = bashPart({
+      status: "completed",
+      input: { command: "seq -f 'line %05g' 0 3099" },
+      output: cutOutput,
+      title: "run_command",
+      metadata: { truncated: true, outputPath: SAVED },
+      time: { start: 1, end: 2 }
+    });
+    const renamed = JSON.parse(JSON.stringify(completion)) as { type: string; properties: { part: { tool: string } } };
+    renamed.properties.part.tool = "shell_run_command";
+    const events = await ingested([renamed]);
+    const stored = completionOf(events);
+    assert.deepEqual(
+      [(stored.payload as { itemType?: string }).itemType, (stored.payload as { truncated?: boolean }).truncated],
+      ["command_execution", true]
+    );
+
+    const { text, pages } = await readAll(daemon(stored, events), stored.id);
+    assert.equal(text, cutOutput, "the kept head and the tool's note, as it wrote them");
+    for (const page of pages) {
+      assert.equal(page.kind, "command-output");
+      assert.equal(page.truncated, true, "only part of it was kept");
+    }
+  });
+
   it("a completion the tool did not cut is unchanged: its data answers its output whole, and the join is never asked", async () => {
     const final = lines(0, 20);
     const events = await ingested([pending, running(lines(0, 10)), running(final), completed(final, final, false)]);

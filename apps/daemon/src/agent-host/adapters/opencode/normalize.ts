@@ -1806,12 +1806,14 @@ function emitContextWindow(
 /**
  * A tool part as its lifecycle row. A command's completion carries its final
  * `output` in `data.result`, where both readers of a row's whole output look
- * (`storedCommandOutput`). When the tool cut that output itself — past its
- * limits it keeps only the END, behind a note naming the file that holds all
- * of it ({@link isCutFinalOutput}) — the completion says so (`truncated`, as
- * Codex marks the head it bounded): the MCP's `read_tool_output` then reads the
- * call's streamed join first, as the GUI's viewer does, and answers the kept
- * part as the command's output, only a part of it, when no join answers.
+ * (`storedCommandOutput`). When OpenCode cut that output itself — the shell
+ * keeps only the END past its limits, behind a note naming the file that holds
+ * all of it; the generic cut any other command-named tool goes through (an
+ * MCP server's) keeps the HEAD, its note at the end ({@link isCutFinalOutput})
+ * — the completion says so (`truncated`, as Codex marks the head it bounded):
+ * the MCP's `read_tool_output` then reads the call's streamed join first, as
+ * the GUI's viewer does, and answers the kept part as the command's output,
+ * only a part of it, when no join answers.
  */
 function emitToolItem(
   part: Extract<OpenCodePart, { type: "tool" }>,

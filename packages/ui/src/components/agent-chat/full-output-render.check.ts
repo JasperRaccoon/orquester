@@ -162,7 +162,7 @@ assert.ok(
   "said before the text, where the viewer opens"
 );
 
-// What a completion kept when no join answers: Codex's head, OpenCode's end —
+// What a completion kept when no join answers: Codex's head, the shell's end —
 // neither is the whole output, and which part it is the note does not claim.
 const kept = pane({
   loading: false,

@@ -1035,7 +1035,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   final output its `bash` tool cut keeps what the tool kept — the END of the output, behind the
   tool's `...output truncated...` / `Full output saved to: <file>` note — marked the same way
   (`isCutFinalOutput`, `adapters/opencode/state.ts`; unmarked, the MCP answered that end as the
-  whole output); a background shell's completion
+  whole output), and so does one of any other command-named tool (an MCP server's) that
+  OpenCode's generic `Truncate.output` cut: the HEAD, its note at the END; a background shell's completion
   keeps its command and exit code, no output; an update is stored already slimmed, its data the
   row's preview. So a row whose command streamed (`streamedOutput`, `WorkLogEntry`: a
   `command_output` chunk, every lifecycle row of a call whose chunks the derivation input holds —
@@ -1343,7 +1344,8 @@ output from the places the row's preview reads (`commandOutputText`, one list wi
 `commandDisplayDetail`), unless the item is stored already cut (`truncated`: an update; a Codex
 command's completion, which keeps its `aggregatedOutput` in `data.item` up to 64 KiB and past that
 only the head — `COMMAND_OUTPUT_MAX_BYTES`, `adapters/codex/items.ts`; or an OpenCode command's
-completion whose output its `bash` tool cut, which keeps the end the tool kept behind its note —
+completion whose output OpenCode cut, which keeps the end its `bash` tool kept behind its note, or
+the head the generic `Truncate.output` kept before its own —
 `isCutFinalOutput`, `adapters/opencode/state.ts` — a kept part that answers after the join, when
 that is empty, as `command-output` with `truncated: true`, the text the GUI's viewer shows:
 `storedCommandOutput`, the one rule both follow). A command's output

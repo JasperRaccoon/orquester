@@ -864,10 +864,22 @@ kept, and that is the output's END: `es` in `ShellTool.run` walks the lines from
 marked `truncated` (`isCutFinalOutput`, the same note `finalOutputRemainder` reads): unmarked, the
 MCP's `read_tool_output` answered that end as the whole output. Both readers now take the call's
 join — every line the command printed — first, and show the kept end, as only part of the output,
-only where no join answers (`storedCommandOutput`). Only `bash` writes this note; the generic
-`Truncate.output` other tools go through writes another (`...N lines truncated...` and "The tool
-call succeeded but the output was truncated", keeping the head by default), which no command row
-of a captured tool carries and which is not read here.
+only where no join answers (`storedCommandOutput`).
+
+Only `bash` writes that note. Every other tool goes through the generic `Truncate.output` — read
+from 1.18.32's source, not captured: `Tool.define` wraps each built-in tool whose result does not
+set `metadata.truncated` itself (the shell does), and every MCP tool's result is cut by it too —
+which keeps the HEAD (its default direction, the only one any tool asks for) and closes with its
+own note: `\n\n...<n> lines|bytes truncated...\n\nThe tool call succeeded but the output was
+truncated. Full output saved to: <file>\n` and one hint line — "Use Grep to search the full
+content or Read with offset/limit to view specific sections." or, where the agent may delegate,
+"Use the Task tool to have explore agent process this file with Grep and Read (with
+offset/limit). Do NOT read the full file yourself - delegate to save context." A command-named
+tool that is not the shell (an MCP server's `run_command`, say: the adapter reads any tool whose
+name holds "bash" or "command" as a command) can therefore end its completion with that note, and
+such a completion is marked `truncated` the same way (`isCutFinalOutput`). It streams nothing, so
+no join answers: both readers show the kept head as only part of the output. Only at the very end:
+the note anywhere else is output.
 
 ---
 

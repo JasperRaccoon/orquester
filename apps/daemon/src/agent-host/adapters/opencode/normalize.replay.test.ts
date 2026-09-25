@@ -2542,6 +2542,58 @@ test("a completion whose final output the tool cut is stored marked cut; any oth
   assert.equal("truncated" in (readDone?.payload ?? {}), false);
 });
 
+/**
+ * What 1.18.32's generic `Truncate.output` makes of a tool's output past its
+ * limits (read from the source, not captured): the HEAD — its default
+ * direction, the only one any tool uses — then its note at the END, whose last
+ * line depends on whether the agent may delegate to the Task tool. Every tool
+ * but the shell goes through it (`Tool.define`, and every MCP tool), with
+ * `metadata.truncated` and `outputPath` set beside it.
+ */
+function genericCut(head: string, cut: string, saved: string, taskHint = false): string {
+  const hint = taskHint
+    ? "Use the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context."
+    : "Use Grep to search the full content or Read with offset/limit to view specific sections.";
+  return `${head}\n\n...${cut} truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: ${saved}\n${hint}`;
+}
+
+test("a command's completion the generic truncation cut — the head kept, its note at the end — is stored marked cut too", () => {
+  const bash = bashFrames();
+  const saved = "/home/u/.local/share/opencode/tool-output/tool_1";
+  // A command-named tool that is not the shell: an MCP server's, say.
+  const asTool = (frame: OpenCodeRawEvent, tool: string): OpenCodeRawEvent => {
+    const copy = JSON.parse(JSON.stringify(frame)) as { type: string; properties: { part: { tool: string } } };
+    copy.properties.part.tool = tool;
+    return copy;
+  };
+  const completionFor = (tool: string, output: string) =>
+    eventsOfType(
+      feed(liveSession(BASH_SESSION_ID), [
+        asTool(settledAs(bash.completed, output, "", { truncated: true, outputPath: saved }), tool)
+      ]).flat(),
+      "item.completed"
+    )[0]?.payload;
+
+  const head = numberedLines(0, 2_000);
+  for (const output of [
+    genericCut(head, "1200 lines", saved),
+    genericCut(head, "1200 lines", saved, true),
+    // A first line past the byte limit: nothing of it kept, the note alone.
+    genericCut("", "80000 bytes", saved)
+  ]) {
+    const stored = completionFor("shell_run_command", output);
+    assert.equal(stored?.itemType, "command_execution");
+    assert.equal(stored?.truncated, true, JSON.stringify(output.slice(-120)));
+  }
+  // The note anywhere but at the end is output, not the tool's cut.
+  const quoted = completionFor("shell_run_command", `${genericCut(head, "5 lines", saved)}\nmore output\n`);
+  assert.equal("truncated" in (quoted ?? {}), false);
+  // A tool that is not a command keeps its output as it is.
+  const read = completionFor("read", genericCut(head, "1200 lines", saved));
+  assert.equal(read?.itemType, "dynamic_tool_call");
+  assert.equal("truncated" in (read ?? {}), false);
+});
+
 test("a final output that neither extends the stream nor holds its end adds nothing", () => {
   const session = liveSession(BASH_SESSION_ID);
   const bash = bashFrames();

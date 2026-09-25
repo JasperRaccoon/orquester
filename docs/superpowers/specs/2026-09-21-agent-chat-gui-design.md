@@ -3125,7 +3125,9 @@ the whole output while this viewer read the call's join. The adapter now marks i
 (`isCutFinalOutput`, the note `finalOutputRemainder` already reads; `adapters/opencode/state.ts`), and
 both readers take the join first and the kept end only where none answers. The note above a kept part
 is now "Only part of this output was kept." (the `kept` arm of `FullOutput`): "Only the start" was
-untrue of OpenCode's end, and which part a completion kept is its adapter's to know, not the viewer's.*
+untrue of OpenCode's end, and which part a completion kept is its adapter's to know, not the viewer's.
+A command-named tool of another kind (an MCP server's) that OpenCode's generic `Truncate.output` cut
+— the head, its own note at the end — is marked the same way.*
 
 **Snapshot-or-replay is the server's decision, not the client's.** The client only ever sends its
 last sequence; the host chooses. It replays events after `after` only when the range, measured

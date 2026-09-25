@@ -28,7 +28,8 @@ type ToolOutputKind = "command-output" | "message" | "payload";
  * What an item answers, and — for a call's streamed output — the two things the host's join says about it: the call has
  * not completed (`running`: the text is its output so far), and the join passed the host's cap (`truncated`: the text
  * is its head, `THREAD_ITEM_OUTPUT_MAX_BYTES`). `truncated` also marks the part a completion's item kept of a long
- * output (`storedCommandOutput`: Codex's first 64 KiB, or the end OpenCode's `bash` tool kept behind its note). Either
+ * output (`storedCommandOutput`: Codex's first 64 KiB, the end OpenCode's `bash` tool kept behind its note, the head its
+ * generic cut kept before its own). Either
  * the whole `text`, which this tool windows itself, or — from a host that windows — the one `window` of a streamed
  * output the call asked for.
  */
@@ -88,7 +89,7 @@ async function streamedOutput(api: DaemonApi, sessionId: string, itemId: string,
  *    `commandOutputText`: the first place, in the preview's reading order, that holds output in the unslimmed item) —
  *    unless the item is stored cut (`payload.truncated`): an update, persisted already slimmed (§5.6), whose data holds
  *    only the preview, or a completion that kept only part of its output (Codex's head past 64 KiB, the end OpenCode's
- *    `bash` tool kept behind its "output truncated" note);
+ *    `bash` tool kept behind its "output truncated" note, the head OpenCode's generic cut kept of another command's);
  * 2. else a command's row naming its call (`payload.toolUseId`) — a `command_execution` activity, or a `tool.output`
  *    chunk of `command_output` — answers the call's streamed output, which is in no item's data at all (a Claude
  *    background shell's, a running command's so far), joined by the host, when the call streamed any — one window of
@@ -119,7 +120,7 @@ async function itemOutput(api: DaemonApi, sessionId: string, item: ThreadItem, w
       }
     }
   }
-  // What a completion stored cut kept of a long output — Codex's head, OpenCode's end — as printed: only part of it.
+  // What a completion stored cut kept of a long output — Codex's head, an OpenCode cut's end or head — as printed: only part of it.
   if (stored !== undefined) return { kind: "command-output", text: stored.text, truncated: true };
   if (typeof item.payload === "string") return { kind: "payload", text: item.payload };
   let json: string | undefined;

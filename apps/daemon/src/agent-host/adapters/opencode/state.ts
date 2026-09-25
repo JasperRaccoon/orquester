@@ -153,14 +153,35 @@ const FINAL_ANCHOR_FLOOR = 64;
 const FINAL_OUTPUT_CUT_NOTE = /^\.\.\.output truncated\.\.\.\n\nFull output saved to: ([^\n]+)\n\n/;
 
 /**
- * Whether a command's final `output` is one the tool cut: it opens with
- * {@link FINAL_OUTPUT_CUT_NOTE}. What follows the note is only the part the
- * tool kept — the END of the output (`es` in 1.18.32's `ShellTool.run` walks
- * the lines from the last one, read from the source) — so a completion
- * carrying it holds no whole output, and says so (`emitToolItem`).
+ * The note 1.18.32's generic `Truncate.output` closes an output it cut with
+ * (read from the source, not captured): every tool but the shell goes through
+ * it — `Tool.define` wraps each built-in one whose result does not say
+ * `metadata.truncated` itself, and every MCP tool's result is cut by it — and
+ * it keeps the HEAD, its default direction and the only one any tool asks
+ * for. `\n\n...<n> lines|bytes truncated...\n\nThe tool call succeeded but the
+ * output was truncated. Full output saved to: <file>\n<hint>`, the hint one of
+ * two lines, by whether the agent may hand the file to the Task tool; an
+ * output whose first line alone passes the byte limit keeps nothing before it.
+ */
+const GENERIC_OUTPUT_CUT_NOTE = new RegExp(
+  String.raw`\n\n\.\.\.\d+ (?:lines|bytes) truncated\.\.\.\n\n` +
+    String.raw`The tool call succeeded but the output was truncated\. Full output saved to: [^\n]+\n` +
+    String.raw`(?:Use Grep to search the full content or Read with offset/limit to view specific sections\.` +
+    String.raw`|Use the Task tool to have explore agent process this file with Grep and Read \(with offset/limit\)\. ` +
+    String.raw`Do NOT read the full file yourself - delegate to save context\.)$`
+);
+
+/**
+ * Whether a command's final `output` is one OpenCode cut, and so holds only
+ * part of it: the shell's own cut opens with {@link FINAL_OUTPUT_CUT_NOTE} and
+ * keeps the END of the output (`es` in 1.18.32's `ShellTool.run` walks the
+ * lines from the last one); the generic cut every other tool goes through
+ * keeps the HEAD and closes with {@link GENERIC_OUTPUT_CUT_NOTE} — a
+ * command-named MCP tool's, say. Either way a completion carrying it holds no
+ * whole output, and says so (`emitToolItem`).
  */
 export function isCutFinalOutput(final: string): boolean {
-  return FINAL_OUTPUT_CUT_NOTE.test(final);
+  return FINAL_OUTPUT_CUT_NOTE.test(final) || GENERIC_OUTPUT_CUT_NOTE.test(final);
 }
 
 /**
