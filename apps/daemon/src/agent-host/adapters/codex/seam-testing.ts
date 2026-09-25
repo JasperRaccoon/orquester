@@ -166,7 +166,48 @@ export async function orchestratedCodex(
   };
 }
 
+/** The thread every seam test opens: a supervised Codex chat under a managed account. */
+export const SEAM_THREAD = {
+  threadId: "thread-1",
+  projectPath: process.cwd(),
+  cwd: process.cwd(),
+  title: "Codex",
+  refId: "codex",
+  accountId: "acc1",
+  home: "account" as const,
+  modelSelection: { model: "gpt-5.5" },
+  runtimeMode: "approval-required" as const
+};
+
 /** The activity rows a log appended, in order. */
 export function activitiesOf(log: readonly DomainEvent[]): ThreadActivityItem[] {
   return log.flatMap((event) => (event.type === "thread.activity-appended" ? [event.payload.activity] : []));
+}
+
+/** The card the adapter opened, as it emitted it: its request id and the server's JSON-RPC id. */
+export function openedCard(host: OrchestratedCodex): { requestId: string; providerRequestId: string } | null {
+  const opened = host.handled.find(
+    (event) => event.type === "request.opened" || event.type === "user-input.requested"
+  );
+  const providerRequestId = opened?.providerRefs?.providerRequestId;
+  return opened?.requestId !== undefined && providerRequestId !== undefined
+    ? { requestId: opened.requestId, providerRequestId }
+    : null;
+}
+
+/** The rows that close `requestId`, in log order. */
+export function closingRows(host: OrchestratedCodex, requestId: string): ThreadActivityItem[] {
+  return activitiesOf(host.log()).filter(
+    (row) =>
+      (row.activityKind === "approval.resolved" || row.activityKind === "user-input.resolved") &&
+      (row.payload as { requestId?: string }).requestId === requestId
+  );
+}
+
+/** What the adapter wrote to the wire for one server→client request: a response carries no method. */
+export function answersTo(host: OrchestratedCodex, providerRequestId: string): unknown[] {
+  return host
+    .received()
+    .filter((frame) => frame.method === undefined && String(frame.id) === providerRequestId)
+    .map((frame) => frame.result ?? frame.error);
 }

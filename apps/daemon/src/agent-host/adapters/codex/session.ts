@@ -16,15 +16,20 @@
  * - **Settle before interrupt.** Every pending approval and user-input request
  *   is cancelled and emitted as resolved BEFORE `turn/interrupt` reaches the
  *   provider. On this CLI the interrupt itself needs no settling — but it
- *   **silently abandons** open requests and `inProgress` items, emitting no
- *   `serverRequest/resolved` and no `item/completed` for them, so without this
- *   they dangle forever (fixtures README observation 5).
+ *   abandons open requests and `inProgress` items: no `item/completed` ever
+ *   comes for them, and no `serverRequest/resolved` before the turn's end
+ *   (fixtures README observation 5; whether the one that follows the end is
+ *   the server's own resolution is read, not captured — observation 20).
+ *   Settling first answers each request while the server still holds it, in
+ *   either reading.
  * - **Interrupt is turn-scoped**, enforced client-side: a stale turn id is a
  *   hard `-32600 "no active turn to interrupt"` on the wire, not a no-op.
- * - **A collab child's card ends with the child's wait.** Its own turn's end,
- *   its thread's close or the server's `serverRequest/resolved` settles it as
- *   a Stop would — once, on the stamps it was opened with — and answers
- *   nothing: the server stopped waiting (`withdrawChildRequests`).
+ * - **A card nobody answered ends with the wait on it.** A collab child's own
+ *   turn end or thread close (for its cards) and a `serverRequest/resolved`
+ *   naming a card still parked (the parent's own included) settle it as a Stop
+ *   would — once, on the stamps it was opened with — and answer nothing on the
+ *   wire, which is safe whether or not the server still holds the request
+ *   (`withdrawRequests`; fixtures README observation 20).
  * - **Plan mode is sticky**, so `collaborationMode` is sent on every turn
  *   including `{mode:"default"}` (fixtures README observation 9).
  */
@@ -159,7 +164,7 @@ interface ParkedRequest {
   /** The collab child whose card this is; absent for this thread's own. */
   childThreadId?: string;
   /**
-   * Settle it with nobody's answer — the provider stopped waiting: its
+   * Settle it with nobody's answer, once the wait on it has ended: its
    * cancelled row, and the handler ends writing nothing
    * ({@link CodexRequestWithdrawn}).
    */
@@ -239,7 +244,7 @@ export class CodexSession {
    * settles, and clearing its entries there read the user's decline as "you
    * were not asked" and lost its diff. They end with the child's own
    * `turn/completed` or `thread/closed` — as its still-open cards do
-   * ({@link withdrawChildRequests}) — a Stop, or the exit.
+   * ({@link withdrawRequests}) — a Stop, or the exit.
    */
   private readonly childRequests = new Map<string, RequestBookkeeping>();
 
@@ -357,6 +362,11 @@ export class CodexSession {
    */
   get openServerRequestsForTest(): number {
     return this.peer?.openServerRequestCount ?? 0;
+  }
+
+  /** Whether the liveness watchdog is armed — never while a card is parked (§3.1). */
+  get livenessArmedForTest(): boolean {
+    return this.livenessTimer !== null;
   }
 
   /** How many entries the collab children's request bookkeeping holds ({@link childRequests}). */
@@ -1039,19 +1049,20 @@ export class CodexSession {
     const isOurs =
       this.providerThreadId === null || about === null || about === this.providerThreadId;
 
-    // What ends a collab child's wait on its cards, settled before anything
+    // What ends the wait on a card nobody answered, settled before anything
     // else that end writes — its abandoned calls, its task row — as a Stop
-    // settles cards first: its own turn's end (any status), its thread's
-    // close, or the server naming one of them resolved.
+    // settles cards first: a collab child's own turn end (any status) or its
+    // thread's close, for that child's cards; the server naming a card
+    // resolved, for that card, the parent's own included.
     if ((method === "turn/completed" || method === "thread/closed") && !isOurs && about !== null) {
-      this.withdrawChildRequests(
+      this.withdrawRequests(
         method === "turn/completed" ? "the child's turn ended" : "the child's thread closed",
         (request) => request.childThreadId === about
       );
     } else if (method === "serverRequest/resolved") {
       const resolvedId = (params as { requestId?: unknown } | null | undefined)?.requestId;
       if (typeof resolvedId === "number" || typeof resolvedId === "string") {
-        this.withdrawChildRequests(
+        this.withdrawRequests(
           "the server resolved it",
           (request) => request.providerRequestId === String(resolvedId)
         );
@@ -1367,7 +1378,7 @@ export class CodexSession {
     // The turn the card's rows ride: the request's own, or — a collab child's
     // — the parent turn live as it arrives (`requestTurnId`).
     const turnId = this.requestTurnId(input.threadId, input.turnId);
-    // A collab child's card ends with the child's wait (`withdrawChildRequests`).
+    // A collab child's card ends with the child's wait (`withdrawRequests`).
     const childThreadId = this.isChildThread(input.threadId) ? input.threadId : undefined;
     // The card's one resolution row, answered or withdrawn, with the stamps it
     // was opened with.
@@ -1462,36 +1473,49 @@ export class CodexSession {
   }
 
   /**
-   * Settle every card a collab child still has parked that `match` names, as
-   * a Stop settles one — once, on the stamps it was opened with ("Request
-   * cancelled" / "Question cancelled": `withdrawn`, ingestion's rule) — but
-   * answering nothing on the wire, because the server stopped waiting.
+   * Settle every parked card `match` names that nobody answered, as a Stop
+   * settles one — once, on the stamps it was opened with ("Request cancelled"
+   * / "Question cancelled": `withdrawn`, ingestion's rule) — but answering
+   * nothing on the wire.
    *
-   * Three things end a child's wait, and each reaches only the child's own
-   * cards. Its own `turn/completed`, whatever the status: the app-server
-   * resolves every pending request of a thread itself when that thread's turn
-   * ends, and says so with `serverRequest/resolved` after the turn's end
-   * (fixtures README observation 20). Its `thread/closed`, which may come with
-   * no turn end: a closed thread takes no answer. And `serverRequest/resolved`
-   * naming one of them. Left open, the card blocked the composer and the MCP's
-   * `send_message` until the user answered a request nothing waited on any
-   * more, or pressed Stop.
+   * What ends the wait on a card, and whose cards it reaches:
    *
-   * The parent's own cards keep today's behaviour: their
-   * `serverRequest/resolved` is the ack of our own answer, and a parent card
-   * is the user's to answer or a Stop's to settle. A card the user answered
-   * first is no longer parked, so nothing is settled twice. A message-mode
-   * question is never parked here — Codex's async questions are the
-   * normaliser's, and a child's message items stay ticks — so §6.2's rule that
-   * one may outlive its turn holds by construction.
+   * - A collab child's own `turn/completed`, whatever the status, and its
+   *   `thread/closed`, with or without a turn end — that child's cards. The
+   *   turn or thread that asked is over.
+   * - `serverRequest/resolved` naming a card — that card, the parent's own
+   *   included. A card still parked cannot be the ack of our own answer: every
+   *   path that answers takes the card out before it writes. Left parked, it
+   *   paused the watchdog for every later turn, held one of the 32 in-flight
+   *   slots, and a later Stop answered a request the server had dropped.
+   *
+   * Why nothing is written back (fixtures README observation 20 — read, not
+   * captured for a child): the installed app-server's binary carries "client
+   * request resolved because the turn state was changed", which reads as the
+   * server resolving a thread's pending requests itself when that thread's
+   * turn ends — though "client request" could also name a client→server
+   * request — and fixture 06 shows a `serverRequest/resolved` 1 ms after an
+   * interrupted turn's end. In that reading an answer lands on a request the
+   * server no longer holds; in the other, the server holds it for a turn that
+   * is over and nothing consumes the answer. Dropping it is safe in both;
+   * answering is wrong in the first.
+   *
+   * A parent's card whose turn ends with no resolution keeps today's
+   * behaviour (the user's to answer, or a Stop's to settle), and so does a
+   * card the user answered first: it is no longer parked, so nothing is
+   * settled twice. The host writes no second row for a card it closed itself
+   * (a question it dismissed at its turn's end; `repeatsHostClosure`). A
+   * message-mode question is never parked here — Codex's async questions are
+   * the normaliser's, and a child's message items stay ticks — so §6.2's rule
+   * that one may outlive its turn holds by construction.
    */
-  private withdrawChildRequests(reason: string, match: (request: ParkedRequest) => boolean): void {
+  private withdrawRequests(reason: string, match: (request: ParkedRequest) => boolean): void {
     let withdrew = false;
     // Approvals, then questions, as `settlePendingRequests` settles them.
     const parked: readonly Map<string, ParkedRequest>[] = [this.pendingApprovals, this.pendingUserInputs];
     for (const requests of parked) {
       for (const [requestId, request] of requests) {
-        if (request.childThreadId === undefined || !match(request)) {
+        if (!match(request)) {
           continue;
         }
         requests.delete(requestId);
@@ -1889,9 +1913,9 @@ export class CodexSession {
    * and any rewind dropped it (`reduceReverted` keeps a row only on a kept turn
    * or on none). Safe on the parent's turn because nothing settles an approval
    * by its turn: the fold derives pending approvals without one (`pending.ts`),
-   * and only a Stop, the exit or a host's first load closes them — and a
-   * child's, the end of the child's own wait ({@link withdrawChildRequests}),
-   * with this same stamp. The card stays the parent's (no owner); the
+   * and only a Stop, the exit or a host's first load closes them — and, with
+   * this same stamp, the end of the wait on it: the server's own resolution,
+   * or a child's own turn end or thread close ({@link withdrawRequests}). The card stays the parent's (no owner); the
    * provider's turn stays in its refs. A QUESTION is different —
    * {@link questionTurnId}.
    */
@@ -1913,8 +1937,8 @@ export class CodexSession {
    * answer either — a turn this thread never had, which every rewind drops.
    * Turnless, the card is answered or cancelled like any other, and a Stop,
    * the exit, a host's first load or the end of the child's own wait
-   * ({@link withdrawChildRequests}) settles it; the provider's turn stays in
-   * its refs.
+   * ({@link withdrawRequests}) settles it; the provider's turn stays in its
+   * refs.
    */
   private questionTurnId(threadId: string | undefined, providerTurnId: string): string | undefined {
     return this.isChildThread(threadId) ? undefined : providerTurnId;

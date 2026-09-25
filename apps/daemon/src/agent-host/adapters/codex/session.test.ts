@@ -25,6 +25,7 @@ import {
   waitUntil,
   writeMockCodexServer,
   type MockConfig,
+  type MockParentAskEnd,
   type MockTurnScript
 } from "./testing.ts";
 
@@ -1352,16 +1353,12 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
   });
 });
 
-describe("codex session — a collab child's open cards end with the child (follow-ups 2026-09-25)", () => {
-  // The gap: a child's own turn was interrupted (or failed, or its thread
-  // closed) with one of its cards open, and the card stayed open — blocking
-  // the composer and the MCP's send_message — until the user answered it or
-  // pressed Stop. The provider had stopped waiting: the installed CLI
-  // resolves a thread's pending requests itself when its turn ends (fixtures
-  // README observation 20). Now the card is settled as a Stop settles one —
-  // once, on the turn stamp it was opened with — and nothing is answered on
-  // the wire.
-  const turnOf = (id: string, status: CodexProtocol.v2.TurnStatus): CodexProtocol.v2.Turn => ({
+// ---------------------------------------------------------------------------
+// A card nobody answers: shared by the two blocks below
+// ---------------------------------------------------------------------------
+
+function turnOf(id: string, status: CodexProtocol.v2.TurnStatus): CodexProtocol.v2.Turn {
+  return {
     id,
     items: [],
     itemsView: "notLoaded",
@@ -1370,34 +1367,48 @@ describe("codex session — a collab child's open cards end with the child (foll
     startedAt: 0,
     completedAt: null,
     durationMs: null
-  });
-
-  /** Every resolution the session emitted for one request, answered or not. */
-  const resolutionsOf = (r: Rig, requestId: string | undefined): RuntimeEvent[] =>
-    r.events.events.filter(
-      (event) =>
-        (event.type === "request.resolved" || event.type === "user-input.resolved") &&
-        event.requestId === requestId
-    );
-
-  /** What the adapter wrote to the wire for one server→client request: a response carries no method. */
-  const answersTo = (r: Rig, providerRequestId: string | undefined): unknown[] =>
-    r
-      .received()
-      .filter((frame) => frame.method === undefined && String(frame.id) === providerRequestId)
-      .map((frame) => frame.result ?? frame.error);
-
-  /**
-   * A barrier on the wire: the mock logs every frame in the order it reads
-   * them, so once it has answered a request of ours, everything the adapter
-   * wrote before it is in the log.
-   */
-  const wireBarrier = async (r: Rig): Promise<void> => {
-    await r.session.readThread();
   };
+}
 
-  const indexOf = (r: Rig, event: RuntimeEvent): number => r.events.events.indexOf(event);
+/** Every resolution the session emitted for one request, answered or not. */
+function resolutionsOf(r: Rig, requestId: string | undefined): RuntimeEvent[] {
+  return r.events.events.filter(
+    (event) =>
+      (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+      event.requestId === requestId
+  );
+}
 
+/** What the adapter wrote to the wire for one server→client request: a response carries no method. */
+function answersTo(r: Rig, providerRequestId: string | undefined): unknown[] {
+  return r
+    .received()
+    .filter((frame) => frame.method === undefined && String(frame.id) === providerRequestId)
+    .map((frame) => frame.result ?? frame.error);
+}
+
+/**
+ * A barrier on the wire: the mock logs every frame in the order it reads
+ * them, so once it has answered a request of ours, everything the adapter
+ * wrote before it is in the log.
+ */
+async function wireBarrier(r: Rig): Promise<void> {
+  await r.session.readThread();
+}
+
+function indexOf(r: Rig, event: RuntimeEvent): number {
+  return r.events.events.indexOf(event);
+}
+
+describe("codex session — a collab child's open cards end with the child (follow-ups 2026-09-25)", () => {
+  // The gap: a child's own turn was interrupted (or failed, or its thread
+  // closed) with one of its cards open, and the card stayed open — blocking
+  // the composer and the MCP's send_message — until the user answered it or
+  // pressed Stop. Nothing waits on an answer to it any more (fixtures README
+  // observation 20, which reads the server's side from its binary: not
+  // captured for a child). Now the card is settled as a Stop settles one —
+  // once, on the turn stamp it was opened with — and nothing is answered on
+  // the wire.
   for (const status of ["interrupted", "failed", "completed"] as const) {
     it(`an approval open as the child's turn ends ${status}: cancelled once, on its parent turn, never answered`, async () => {
       const r = rig({
@@ -1559,6 +1570,45 @@ describe("codex session — a collab child's open cards end with the child (foll
     await r.stop();
   });
 
+  for (const item of ["command", "question"] as const) {
+    it(`serverRequest/resolved alone cancels the child's open ${item} card while the child's turn runs on`, async () => {
+      // The resolution with no turn end behind it: whatever settles the card
+      // here is the resolved branch, not the child's turn end.
+      const r = rig({
+        turns: [{ kind: "child-approval", childThreadId: "child-1", item, afterAsking: ["resolved"] }]
+      });
+      await r.session.start();
+      const turn = await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
+      const opened = await r.events.waitFor(
+        (event) => event.type === "request.opened" || event.type === "user-input.requested",
+        "the child's card"
+      );
+      const resolved = await r.events.waitFor(
+        (event) =>
+          (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+          event.requestId === opened.requestId,
+        "the card settled"
+      );
+      assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
+      assert.equal(resolved.turnId, item === "command" ? turn.turnId : undefined);
+
+      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+      await wireBarrier(r);
+      assert.deepEqual(
+        r.session.liveChildTurnsForTest,
+        [["child-1", "child-1-turn"]],
+        "the child's turn never ended: the resolution alone settled the card"
+      );
+      assert.equal(
+        r.events.events.some((event) => event.type === "task.updated" && event.payload.taskId === "child-1"),
+        false
+      );
+      assert.equal(resolutionsOf(r, opened.requestId).length, 1);
+      assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
+      await r.stop();
+    });
+  }
+
   it("an answer that races the child's turn end settles the card once, whichever lands first", async () => {
     // The user's answer first: it is the card's one resolution, and it goes
     // on the wire; the child's turn end after it finds nothing parked.
@@ -1633,11 +1683,10 @@ describe("codex session — a collab child's open cards end with the child (foll
     await r.stop();
   });
 
-  it("the parent's own cards are untouched by a child's turn end, its thread's close, or serverRequest/resolved", async () => {
-    // Today's behaviour, kept: the parent's own `serverRequest/resolved` is
-    // the ack of our own answer, and a parent's card is the user's to answer
-    // or a Stop's to settle. A message-mode question is never a parked
-    // request, so nothing here can reach it either (§6.2).
+  it("the parent's own cards are untouched by a child's turn end, its thread's close, or another request's resolution", async () => {
+    // A child's end reaches the child's cards only, and a resolution only the
+    // card it names. A message-mode question is never a parked request, so
+    // nothing here can reach it either (§6.2).
     const r = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
     await r.session.start();
     const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
@@ -1670,10 +1719,10 @@ describe("codex session — a collab child's open cards end with the child (foll
       turn: turnOf("child-9-turn", "interrupted")
     });
     r.session.injectNotificationForTest("thread/closed", { threadId: "child-9" });
-    // …and a resolution naming the parent's own open card.
+    // …and a resolution naming a request that is not this card.
     r.session.injectNotificationForTest("serverRequest/resolved", {
       threadId: parentThreadId,
-      requestId: Number(opened.providerRefs?.providerRequestId)
+      requestId: Number(opened.providerRefs?.providerRequestId) + 1
     });
     await wireBarrier(r);
     assert.deepEqual(
@@ -1696,7 +1745,7 @@ describe("codex session — a collab child's open cards end with the child (foll
     await r.stop();
   });
 
-  it("the parent's own turn ending under its card keeps today's behaviour: parked until a Stop answers it", async () => {
+  it("the parent's own turn end alone settles nothing in the adapter: its card stays parked until a Stop answers it", async () => {
     const r = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
     await r.session.start();
     const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
@@ -1721,6 +1770,92 @@ describe("codex session — a collab child's open cards end with the child (foll
     assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), [{ decision: "cancel" }]);
     await r.stop();
   });
+});
+
+describe("codex session — the parent's own card the server resolved itself (sweep, follow-ups 2026-09-25)", () => {
+  // A `serverRequest/resolved` naming a card still parked cannot be the ack
+  // of our own answer: every path that answers takes the card out before it
+  // writes. Left parked, the card paused the session's watchdog for every
+  // later turn, held one of the 32 in-flight slots, and a later Stop answered
+  // a request the server had dropped and wrote a second row for it.
+  for (const item of ["command", "question"] as const) {
+    const ask = (afterAsking: MockParentAskEnd): MockTurnScript =>
+      item === "command"
+        ? { kind: "command-approval", command: "ls -1", afterAsking }
+        : {
+            kind: "user-input",
+            questionId: "branch",
+            header: "Branch",
+            question: "Which branch?",
+            options: [{ label: "main", description: "The default branch" }],
+            afterAsking
+          };
+
+    it(`a parent ${item} card resolved mid-turn is cancelled once, frees its slot and wakes the watchdog`, async () => {
+      const r = rig({ turns: [ask(["resolved"])] });
+      await r.session.start();
+      const turn = await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "plan" });
+      const opened = await r.events.waitFor(
+        (event) => event.type === "request.opened" || event.type === "user-input.requested",
+        "the parent's card"
+      );
+      const resolved = await r.events.waitFor(
+        (event) =>
+          (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+          event.requestId === opened.requestId,
+        "the card settled"
+      );
+      assert.deepEqual(
+        resolved.payload,
+        item === "command"
+          ? { requestType: "command_execution_approval", decision: "cancel", withdrawn: true }
+          : { answers: {}, withdrawn: true }
+      );
+      assert.equal(resolved.turnId, turn.turnId, "the card's own turn, as it was opened");
+
+      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+      assert.equal(r.session.currentTurnId, turn.turnId, "the turn runs on");
+      assert.equal(r.session.livenessArmedForTest, true, "no card left to pause the watchdog");
+
+      // A later Stop writes nothing more for it, and never answers it.
+      await r.session.interruptTurn(turn.turnId);
+      await wireBarrier(r);
+      assert.equal(resolutionsOf(r, opened.requestId).length, 1);
+      assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
+      await r.stop();
+    });
+
+    it(`a parent ${item} card resolved after its turn ended is cancelled once, and the next turn's watchdog arms`, async () => {
+      const r = rig({ turns: [ask(["turn-interrupted", "resolved"]), { kind: "silent" }] });
+      await r.session.start();
+      const turn = await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "plan" });
+      const opened = await r.events.waitFor(
+        (event) => event.type === "request.opened" || event.type === "user-input.requested",
+        "the parent's card"
+      );
+      const resolved = await r.events.waitFor(
+        (event) =>
+          (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+          event.requestId === opened.requestId,
+        "the card settled"
+      );
+      assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
+      assert.equal(resolved.turnId, turn.turnId, "the card's own turn, ended as it was");
+      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+      assert.equal(r.session.currentTurnId, null);
+
+      // The next turn is watched again: no stale card pauses it.
+      const next = await r.session.sendTurn({ input: "again", attachments: [], interactionMode: "plan" });
+      assert.equal(r.session.currentTurnId, next.turnId);
+      assert.equal(r.session.livenessArmedForTest, true);
+
+      await r.session.interruptTurn();
+      await wireBarrier(r);
+      assert.equal(resolutionsOf(r, opened.requestId).length, 1, "a later Stop writes nothing more");
+      assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
+      await r.stop();
+    });
+  }
 });
 
 describe("codex session — the liveness watchdog really pauses (Q1 finding 16)", () => {
