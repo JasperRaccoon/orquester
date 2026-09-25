@@ -777,7 +777,7 @@ test("Stop with NO active turn is session-scoped: live background work is closed
   assert.equal(
     r.events.some((event) => event.type === "task.completed"),
     false,
-    "no frame reporting a background task's end is mapped"
+    "nothing reported the background task's end: no snapshot or poll said so"
   );
 
   await r.adapter.interruptTurn("t1");
