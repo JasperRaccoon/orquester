@@ -2924,17 +2924,20 @@ export class GrokNormalizer {
     const shell = this.tasks.get(id);
     if (shell !== undefined) {
       this.endShell(id, "cli");
-      const firstLine = output
-        ?.split("\n")
-        .find((line) => line.trim().length > 0)
-        ?.trim();
+      // A shell's summary is its output's first line (T3's rule); a monitor's
+      // its LAST — its latest event, as its progress row showed while it ran.
+      const lines = (output ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      const summary = shell.taskType === "monitor" ? lines.at(-1) : lines[0];
       return [
         this.event(
           "task.completed",
           {
             ...this.shellLinkage(id, shell),
             status,
-            ...(firstLine === undefined ? {} : { summary: firstLine }),
+            ...(summary === undefined ? {} : { summary }),
             ...(exitCode === undefined ? {} : { exitCode })
           },
           shell.turnId,

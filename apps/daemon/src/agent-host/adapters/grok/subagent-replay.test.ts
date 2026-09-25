@@ -320,9 +320,9 @@ test("20 monitor: one monitor task, its events as progress, its end by task_comp
   );
   const ends = only(rows, "task.completed");
   assert.deepEqual(
-    ends.map((row) => [row.payload.status, row.payload.exitCode]),
-    [["completed", 0]],
-    "the completed listing after task_completed adds nothing"
+    ends.map((row) => [row.payload.status, row.payload.exitCode, row.payload.summary]),
+    [["completed", 0, "tick 2"]],
+    "the completed listing after task_completed adds nothing; a monitor's end shows its LAST line"
   );
   assert.deepEqual(run.turns, ["turn-1", "wake-1", "wake-2", "wake-3"], "two events and the end woke it");
 });
