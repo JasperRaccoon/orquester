@@ -380,3 +380,54 @@ test("29 replayed: the scheduler's reports reach the normaliser — a loop row, 
     await r.dispose();
   }
 });
+
+test("31 replayed: the host's cancel of a question is the CLI's own; a Stop's order ends the turn interrupted", async () => {
+  const r = await replayRig("31-question-cancelled.ndjson");
+  try {
+    await start(r);
+    const isQuestion = (event: RuntimeEvent): boolean => event.type === "user-input.requested";
+
+    // Turn 1: the question answered with the host's cancel alone. The CLI
+    // reads it as the user declining ("User declined to answer the
+    // questions…") and the model goes on.
+    const first = await send(r, "ask me");
+    const asked = await r.waitForNth(1, isQuestion, "the first question");
+    await r.adapter.respondToUserInput("t1", asked.requestId!, {}, { cancel: true });
+    const firstDone = (await r.waitFor(isTurnCompleted, "turn 1")) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+    assert.equal(firstDone.turnId, first);
+    const declined = r.events.findIndex(
+      (event) => event.type === "user-input.resolved" && event.requestId === asked.requestId
+    );
+    assert.equal(textOn(r.events.slice(0, declined), first), "I'll ask that one question now.");
+    assert.equal(textOn(r.events.slice(declined), first), "NONE", "the model heard nobody answered");
+
+    // Turn 2: a Stop — the host cancels the question, then interrupts.
+    const second = await send(r, "ask me again");
+    const again = await r.waitForNth(2, isQuestion, "the second question");
+    await r.adapter.respondToUserInput("t1", again.requestId!, {}, { cancel: true });
+    await r.adapter.interruptTurn("t1");
+    const secondDone = (await r.waitForNth(2, isTurnCompleted, "turn 2")) as Extract<
+      RuntimeEvent,
+      { type: "turn.completed" }
+    >;
+    assert.equal(secondDone.turnId, second);
+    assert.equal(secondDone.payload.state, "interrupted");
+
+    const resolutions = r.events.filter((event) => event.type === "user-input.resolved");
+    assert.deepEqual(
+      resolutions.map((event) => [event.requestId, (event.payload as { withdrawn?: boolean }).withdrawn]),
+      [
+        [asked.requestId, true],
+        [again.requestId, true]
+      ],
+      "one closing row per card, each nobody's answer"
+    );
+    assert.equal(
+      r.events.filter(isTurnCompleted).length,
+      2,
+      "the cancelled prompt's own result, arriving after the interrupt, settles nothing twice"
+    );
+  } finally {
+    await r.dispose();
+  }
+});

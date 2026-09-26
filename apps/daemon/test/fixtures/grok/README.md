@@ -39,7 +39,7 @@ had only read off the binary and T3's reader.
 | Extra env | `22-subagent-await-budget.ndjson` only: `GROK_SUBAGENT_AWAIT_BUDGET_MS=4000` (the binary's foreground await budget, set low so a 12 s child outlives it) |
 | Harness | the same out-of-repo scripts, plus `acp-clean.mjs` (the launch env above), one scenario script per file, `leftovers.sh` (every process carrying the capture's `ORQUESTER_SESSION_ID` marker, killed after each run) and `export-2026-09-25.mjs` |
 
-### The 2026-09-26 captures (24–30)
+### The 2026-09-26 captures (24–31)
 
 What a background shell and the CLI's other children do when it ends, and the cases 2026-09-25
 left uncaptured.
@@ -51,10 +51,10 @@ left uncaptured.
 | Model | `grok-4.7`, the CLI's default; `--reasoning-effort low` |
 | Working directory | a fresh throwaway `git init` sandbox, `~/tmp/agent-chat-fixtures/grok/sandbox-2026-09-26` (`add.js`, `README.md`, one commit, `.grok/config.toml` with `[features] support_permission = true`) |
 | Launch | exactly the adapter's since 2026-09-26: its own process group (`detached`, as `spawnProviderChild` spawns it), a stop signalling the group, and the 2026-09-25 launch env plus `ORQUESTER_AGENT_LAUNCH`, one value per run (observation 48) |
-| argv | `--reasoning-effort low agent --always-approve stdio` (full-access) for 24 and 27–30; `--reasoning-effort low --permission-mode default agent stdio` (the adapter's supervised argv) for 25 and 26, every request answered by the harness |
+| argv | `--reasoning-effort low agent --always-approve stdio` (full-access) for 24 and 27–31; `--reasoning-effort low --permission-mode default agent stdio` (the adapter's supervised argv) for 25 and 26, every request answered by the harness |
 | Sandbox extras | `.grok/agents/one-turn.md` (`maxTurns: 1`), a project agent definition, for 28 |
 | Harness | the same out-of-repo scripts, plus `acp-2026-09-26.mjs` (that launch, and a sweep after every run of every process still carrying the run's marker — SIGTERM, then SIGKILL — listing each one's `ppid`/`pgid`/`sid` first) and `export-2026-09-26.mjs` (the same export rules, its dedupe map seeded from the committed set) |
-| Cost | eight runs — the seven committed and the override attempt of observation 50 — $3.78 by their own `turn_completed` `costUsdTicks` (a few turns report none, so somewhat more) |
+| Cost | nine runs — the eight committed and the override attempt of observation 50 — $4.04 by their own `turn_completed` `costUsdTicks` (a few turns report none, so somewhat more); 31, the last, $0.26 |
 
 ### Sandbox configuration that shaped the captures
 
@@ -124,7 +124,7 @@ Two mechanical reductions, each marked in-band by a `note` frame that states exa
 removed. Nothing else is altered.
 
 1. A run of more than 30 consecutive `agent_thought_chunk` / `agent_message_chunk` frames keeps
-   the first 25 and last 5; the rest are replaced by one note. In 15–30 a run is one session's:
+   the first 25 and last 5; the rest are replaced by one note. In 15–31 a run is one session's:
    a subagent's child session streams under its own `sessionId` (observation 38), interleaved with
    the parent's, and one run never merges the two.
 2. A notification payload ≥ 4 KiB that is identical (ignoring `sessionId` and `_meta`) to one
@@ -132,8 +132,8 @@ removed. Nothing else is altered.
    holds it verbatim. This is almost entirely `available_commands_update`, which is ~33 KiB and
    repeats 2–4 times per run; every *distinct* payload survives verbatim exactly once across the
    set. Without it files 01–14 were 3.3 MiB; with it they are 1.4 MiB. The 2026-09-25 files
-   (15–23) add 1.9 MiB with it applied and the 2026-09-26 files (24–30) 1.7 MiB, so the set is
-   4.9 MiB of NDJSON (5.0 MiB on disk with `12-cli-text/` and this README).
+   (15–23) add 1.9 MiB with it applied and the 2026-09-26 files (24–31) 1.8 MiB, so the set is
+   5.0 MiB of NDJSON (5.1 MiB on disk with `12-cli-text/` and this README).
 
 ## The files
 
@@ -176,6 +176,7 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `28-subagent-max-turns.ndjson` | the same full-access argv; the sandbox holds `.grok/agents/one-turn.md` (`maxTurns: 1`) | a foreground spawn of that type, given a tool call and an answer to do | The runtime's turn cap ends a run `cancelled` with its own `error` (observation 50). |
 | `29-loop-scheduled-task.ndjson` | the same full-access argv | `/loop 60s Reply with exactly: tick`, its first fire watched, then `scheduler_list` and `scheduler_delete` | The scheduler's `_x.ai/scheduled_task_*`, the fire's subagent the CLI spawns itself, its wake (observation 52). |
 | `30-goal.ndjson` | the same full-access argv | `/goal Create a file named goal.txt containing exactly: ok --budget 20000`, watched to its end, then `/goal clear` | `goal_updated`: `active` → `budget_limited` → `cleared`; the goal's planner, a subagent the CLI spawns itself (observation 53). |
+| `31-question-cancelled.ndjson` | the same full-access argv | two turns, each asking one `ask_user_question` ("alpha or beta?"): the first answered `{outcome: "cancelled"}` alone, the second answered so and followed at once by `session/cancel` (a host Stop's order) | What the CLI makes of the host's cancel of a question, with and without the Stop's cancel after it (observation 54); the CLI's direct children, from `/proc`, right after `session/new` returned, at `_x.ai/mcp_initialized` and at the end (the harness's `note` frames). |
 
 ---
 
@@ -913,8 +914,8 @@ Easy to get the wrong way round, and both were observed accepted verbatim:
 | `_x.ai/ask_user_question` | `{"outcome":"accepted","answers":{…}}` — **flat** |
 
 Nobody's answer is a cancel of each shape's own: `{"outcome":{"outcome":"cancelled"}}` for a
-permission (captured, 05) and `{"outcome":"cancelled"}` for a question (T3's shape; not
-captured). A user's empty answer — a skip — is still `{"outcome":"accepted","answers":{}}`, so the
+permission (captured, 05) and `{"outcome":"cancelled"}` for a question (T3's shape;
+captured 2026-09-26, 31 — observation 54). A user's empty answer — a skip — is still `{"outcome":"accepted","answers":{}}`, so the
 host flags its own cancel (a Stop, the session's stop, a closed tab) instead of handing the adapter
 an empty answer (`respondToUserInput`'s `options.cancel`): until 2026-09-26 a Stop told the CLI the
 user had answered, nothing.
@@ -1469,6 +1470,36 @@ result summary. A goal active again after the CLI's own end is a new run of its 
 id); after the adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its
 progress notes itself on the ended row; a new goal ends the old one. Not captured: a goal that
 completes, pauses, resumes or fails.
+
+### 54. The host's cancel of a question: the model hears "declined"; a Stop's cancel ends the turn
+
+Fixture 31, two turns, each asking one `_x.ai/ask_user_question` ("alpha or beta?") and answered
+`{"outcome":"cancelled"}` — the reply the adapter sends for the host's cancel of a card
+(observation 34).
+
+- **Alone** (turn 1). `interaction_resolved` for the call at once, then the question's own call
+  completes with the CLI's reading of the reply:
+
+  ```json
+  {"sessionUpdate":"tool_call_update","toolCallId":"call-721b1099-…-0","status":"completed",
+   "rawOutput":{"type":"AskUserQuestion","UserAnswered":{"message":"User declined to answer the questions. Continue with the task using your best judgment, or ask different questions."}}}
+  ```
+
+  The turn goes on: the model thought for a second and answered "NONE" — what the prompt asked it
+  to say when nobody chose — and the turn ended `end_turn`. A cancel alone stops nothing; to the
+  model it is the user declining, which is why only the host's OWN cancels send it (a Stop, the
+  session's stop, a closed tab), never a user's skip, which stays an empty answer.
+- **Then `session/cancel`**, 1 ms later (turn 2 — the host Stop's order: `settlePendingRequests`
+  answers every open card first, then the interrupt goes out). `interaction_resolved`, then 2 ms
+  later `turn_completed {stop_reason: "cancelled"}`, `prompt_complete {stopReason: "cancelled",
+  cancellationCategory: "MidTurnAbort"}` and the prompt's `{stopReason: "cancelled"}`. No
+  `tool_call_update` ever closes the question's call and no model call follows: as for a cut
+  spawn call (observation 44), a cancelled turn's open calls are the adapter's to close.
+
+Pinned through the real session (`session-replay.test.ts`, "31 replayed"): the host's cancel
+(`respondToUserInput(…, {cancel: true})`) reaches the CLI as exactly that reply and writes one
+`withdrawn` row per card, turn 1 settles with the model's own answer, turn 2 settles `interrupted`
+by the adapter's interrupt, and the prompt's late `cancelled` result settles nothing twice.
 
 ## Reproducing
 
