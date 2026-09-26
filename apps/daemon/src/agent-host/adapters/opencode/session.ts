@@ -43,6 +43,7 @@ import {
   emitTerminalPermission,
   emitTerminalQuestion,
   hasLiveChildAgents,
+  endInterruptionIfNewRun,
   normalizeOpenCodeEvent,
   openHeldRequest,
   openPermissionCard,
@@ -78,6 +79,7 @@ import { readSseFrames } from "./sse.ts";
 import {
   claimPrompt,
   createSessionState,
+  endInterruption,
   openTurn,
   repointSession,
   takeTurnTokenUsage,
@@ -512,11 +514,18 @@ export class OpenCodeThreadSession {
     const flight = deferred<void>();
     this.interruptFlights.add(flight.promise);
     this.state.interrupting = true;
+    // Only an idle from here on says the run this interrupts is over.
+    this.state.idleAfterInterrupt = false;
     try {
       return await work();
     } finally {
       this.interruptFlights.delete(flight.promise);
       this.state.interrupting = this.interruptFlights.size > 0;
+      if (!this.state.interrupting) {
+        // A new run said `busy` while this was under way, after the stopped
+        // run's idle: its leftovers are over now.
+        endInterruptionIfNewRun(this.state);
+      }
       flight.resolve();
     }
   }
@@ -1164,9 +1173,7 @@ export class OpenCodeThreadSession {
     if (this.state.interruptedTurnId === turnId) {
       return;
     }
-    this.state.interruptedTurnId = undefined;
-    this.state.awaitingBusyAfterInterruption = false;
-    this.state.reconcileIdleStatus = false;
+    endInterruption(this.state);
   }
 
   // -- requests -----------------------------------------------------------

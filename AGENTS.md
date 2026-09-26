@@ -1176,7 +1176,16 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   completed messages — fixture 10; a rewind also claims every prompt its fork copied) or output
   after an interruption (the demux drops it first) — a guard every path a LATER turn settles by
   now ends (`endInterruptionBefore`): only `completeTurn` did, so a later turn that failed (a rate
-  limit) left the Stop behind and every woken reply after it was dropped. The child's end always
+  limit) left the Stop behind and every woken reply after it was dropped. A NEW run ends it too: a
+  `busy` once the interrupt is over and the parent has said idle since it began
+  (`endInterruptionAtNewRun`, `idleAfterInterrupt`; checked again as the interrupt ends, for a
+  `busy` the stream delivered before the abort answered) — 1.18.32 publishes a cancelled run's
+  idle only after its fiber ended, so nothing of the stopped run follows it (README observation
+  29), and a background answer injected after the abort starts the parent again: that run's reply
+  used to be dropped with the leftovers, its requests shown to nobody's turn; it now gets its woken
+  turn. A `busy` with no idle since ends nothing (the stopped run wrote one at the top of every
+  step), and a user message's part is never dropped (an injected answer is a run's result). The
+  child's end always
   precedes the answer's prompt (the runner publishes its idle before resolving its run), so neither
   it nor the answer's result ever rides the woken turn (README observation 27). The replay harness
   claims the host's prompt ids up front, and models `hostCompacting`, for the same reason

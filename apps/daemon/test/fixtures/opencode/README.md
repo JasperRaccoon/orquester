@@ -804,7 +804,10 @@ rewind claims every prompt its fork copied, so a copy its dead run never complet
 either — and anything that follows an interruption, which the demux drops first. That last guard
 lasts until a later turn settles, by ANY path: a later turn that failed (a rate limit) used to
 leave the Stop's id behind for good (`completeTurn` alone cleared it), and every woken reply after
-it was dropped — never written, the thread idle.
+it was dropped — never written, the thread idle. Or until a NEW run: a `busy` once the interrupt
+is over and the parent has said idle since it began, which only a run started after the abort can
+send (observation 29) — a background answer injected after the Stop starts the parent again, and
+its reply gets its woken turn.
 
 A compaction's summary (`summary: true`, fixture 09) answers no prompt of the conversation: its
 prompt is claimed but never joins `promptMessageIds`, so the summary call stays off the meter and
@@ -947,6 +950,16 @@ is `SessionPrompt.cancel`, which is `SessionRunState.cancel`, and before it answ
    metadata. Cancelling one closes the job's scope, which interrupts its run, whose `onInterrupt`
    cancels the child session the same way (`promptOps.cancel`);
 2. interrupts the session's own run (its runner's `cancel`) and marks the session idle.
+
+In what order the stream sees it: an interrupted `SessionProcessor` publishes the abort's
+`session.error` and an idle (`halt`, in its `onInterrupt`), then its cleanup — the open text and
+reasoning parts closed, up to 250 ms for its tool calls, each call still open marked `error`
+"Tool execution aborted" with `interrupted: true`, the reply's `time.completed` — and only once
+the run's fiber has ended does the runner publish its own idle (`SessionStatus.set` publishes
+`session.status` and, for idle, `session.idle`, every time). Each cancelled child does the same
+before its parent's cancel goes on. So nothing a stopped run wrote follows its session's idle,
+and a `busy` after that idle is a new run's — the boundary the adapter ends a Stop's leftovers at
+(observation 27).
 
 An asker it interrupts leaves nothing behind: `Permission.ask` and `Question.ask` await their
 answer under `ensuring`, which deletes the request from the pending list, and nothing is

@@ -618,6 +618,15 @@ export interface OpenCodeSessionState {
   interruptedTurnId?: string;
   reconcileIdleStatus: boolean;
   awaitingBusyAfterInterruption: boolean;
+  /**
+   * The parent has said idle since the latest interrupt began: the run it
+   * interrupted is over — 1.18.32 publishes a cancelled run's idle only once
+   * its fiber has ended, after everything that run wrote — so a `busy` from
+   * here on is a new run's, and ends the interruption
+   * (`endInterruptionAtNewRun` in `normalize.ts`). Reset when an interrupt
+   * begins and when one ends.
+   */
+  idleAfterInterrupt: boolean;
   promptGeneration: number;
   promptAdmission?: OpenCodePromptAdmission;
   pendingIdleReconciliation?: OpenCodeIdleReconciliation;
@@ -702,6 +711,7 @@ export function createSessionState(input: {
     interrupting: false,
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
+    idleAfterInterrupt: false,
     promptGeneration: 0,
     textPartsByMessageId: new Map(),
     messageRoleById: new Map(),
@@ -733,12 +743,24 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   // source is the fork's.
   state.claimedPromptIds.clear();
   state.parentBusy = false;
-  state.interruptedTurnId = undefined;
-  state.reconcileIdleStatus = false;
-  state.awaitingBusyAfterInterruption = false;
+  endInterruption(state);
   state.pendingIdleReconciliation = undefined;
   state.lastSessionErrorMessage = undefined;
   state.lastEmittedTitle = undefined;
+}
+
+/**
+ * An interrupt and its leftovers are over — a later turn settled
+ * (`endInterruptionBefore` in `session.ts`), a new run said `busy` after the
+ * stopped run's idle (`endInterruptionAtNewRun` in `normalize.ts`), or the
+ * thread moved to a fork: nothing the stream sends is dropped or held for it
+ * any more.
+ */
+export function endInterruption(state: OpenCodeSessionState): void {
+  state.interruptedTurnId = undefined;
+  state.reconcileIdleStatus = false;
+  state.awaitingBusyAfterInterruption = false;
+  state.idleAfterInterrupt = false;
 }
 
 /**

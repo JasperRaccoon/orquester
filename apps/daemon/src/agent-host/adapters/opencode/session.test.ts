@@ -2218,6 +2218,238 @@ test("end to end: through the host's real ingestion and fold, the woken reply re
 });
 
 // ---------------------------------------------------------------------------
+// After a Stop: the stopped run's leftovers, then a new run's own turn
+// ---------------------------------------------------------------------------
+
+/** A turn whose run is streaming: its prompt, `busy`, the reply and a text part. */
+async function turnStreaming(
+  harness: Harness,
+  session: OpenCodeThreadSession
+): Promise<{ turnId: string; replyId: string; partId: string }> {
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "run it", attachments: [], interactionMode: "default" });
+  const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
+    messageID: string;
+  }).messageID;
+  const replyId = "msg_stopped_reply";
+  const partId = "prt_stopped_text";
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: promptId, role: "user", sessionID: sessionId } } },
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    {
+      type: "message.updated",
+      properties: { sessionID: sessionId, info: { id: replyId, role: "assistant", parentID: promptId, sessionID: sessionId } }
+    },
+    {
+      type: "message.part.updated",
+      properties: { sessionID: sessionId, part: { id: partId, messageID: replyId, sessionID: sessionId, type: "text", text: "", time: { start: 1 } } }
+    },
+    {
+      type: "message.part.delta",
+      properties: { sessionID: sessionId, messageID: replyId, partID: partId, field: "text", delta: "Working" }
+    }
+  ]);
+  await waitFor(harness, "content.delta", (event) => event.itemId === partId);
+  return { turnId: turn.turnId, replyId, partId };
+}
+
+/**
+ * What the stopped run still sends once the abort has answered, in 1.18.32's
+ * order (read from the source): a `busy` it wrote before the interrupt and a
+ * delta; `SessionProcessor.halt`'s abort error and idle; the cleanup — the
+ * text part closed, the reply completed with its error; then the runner's own
+ * idle, published once the run's fiber has ended.
+ */
+function stoppedRunLeftovers(sessionId: string, stopped: { replyId: string; partId: string }): unknown[] {
+  const idle = [
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: sessionId } }
+  ];
+  return [
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    {
+      type: "message.part.delta",
+      properties: { sessionID: sessionId, messageID: stopped.replyId, partID: stopped.partId, field: "text", delta: " on it" }
+    },
+    { type: "session.error", properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
+    ...idle,
+    {
+      type: "message.part.updated",
+      properties: {
+        sessionID: sessionId,
+        part: { id: stopped.partId, messageID: stopped.replyId, sessionID: sessionId, type: "text", text: "Working on it", time: { start: 1, end: 2 } }
+      }
+    },
+    {
+      type: "message.updated",
+      properties: {
+        sessionID: sessionId,
+        info: {
+          id: stopped.replyId,
+          role: "assistant",
+          sessionID: sessionId,
+          error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+          time: { created: 1, completed: 3 }
+        }
+      }
+    },
+    ...idle
+  ];
+}
+
+/** Every event after `from` that writes a row of the thread's own timeline. */
+function timelineRows(events: readonly RuntimeEvent[], from: number): RuntimeEvent[] {
+  return events
+    .slice(from)
+    .filter((event) => event.type.startsWith("content.") || event.type.startsWith("item.") || event.type.startsWith("turn."));
+}
+
+test("after a Stop, a background answer's run is a new run: its reply is written on its own woken turn, the stopped run's late frames still dropped", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const stopped = await turnStreaming(harness, session);
+  await session.interruptTurn(stopped.turnId);
+  const fed = harness.events.length;
+
+  pushAll(harness.fake, stoppedRunLeftovers(sessionId, stopped));
+  await drainedWith(harness, sessionId, "after the stopped run");
+  assert.deepEqual(timelineRows(harness.events, fed), [], "the stopped run's late frames write nothing");
+
+  // A background job's answer, injected once the abort had found the runner
+  // idle, starts the parent again: that run's `busy`, then its reply.
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins,
+    ...reply.streams,
+    ...reply.ends,
+    ...runSettles(sessionId)
+  ]);
+  const woken = await waitFor(harness, "turn.completed", (event) => event.turnId === FIRST.promptId);
+  assert.equal((woken as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "completed");
+  assert.deepEqual(
+    eventsOfType(harness.events, "turn.started").map((event) => event.turnId),
+    [stopped.turnId, FIRST.promptId],
+    "the new run opened its own turn"
+  );
+  const written = eventsOfType(harness.events.slice(fed), "content.delta");
+  assert.deepEqual(
+    written.map((event) => [event.turnId, event.payload.delta]),
+    [[FIRST.promptId, FIRST.text]],
+    "the woken reply is written, on its turn, and nothing of the stopped run"
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("after a Stop, a new run whose busy arrives before the abort answers still gets its woken turn once the abort is over", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const stopped = await turnStreaming(harness, session);
+  const abortSent = deferred<void>();
+  const abortAnswered = deferred<void>();
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, async () => {
+    abortSent.resolve();
+    await abortAnswered.promise;
+    return json(true);
+  });
+  const stopping = session.interruptTurn(stopped.turnId);
+  await abortSent.promise;
+  // The stream wins the race: the stopped run's teardown, the answer's prompt
+  // and the new run's `busy`, all before the abort's own answer.
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...stoppedRunLeftovers(sessionId, stopped).slice(2),
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins.filter((frame) => frame.type === "session.status")
+  ]);
+  await drainedWith(harness, sessionId, "during the abort");
+  abortAnswered.resolve();
+  await stopping;
+
+  pushAll(harness.fake, [
+    ...reply.begins.filter((frame) => frame.type !== "session.status"),
+    ...reply.streams,
+    ...reply.ends,
+    ...runSettles(sessionId)
+  ]);
+  const woken = await waitFor(harness, "turn.completed", (event) => event.turnId === FIRST.promptId);
+  assert.equal((woken as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "completed");
+  assert.equal(firstOfType(harness.events, "turn.aborted")?.turnId, stopped.turnId);
+  assert.ok(
+    eventsOfType(harness.events, "content.delta").some((event) => event.turnId === FIRST.promptId),
+    "the woken reply is written on its own turn"
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("while a Stop is under way, a run the abort then cancels says busy after an idle: its reply opens no turn, before the abort answers or after", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const abortSent = deferred<void>();
+  const abortAnswered = deferred<void>();
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, async () => {
+    abortSent.resolve();
+    await abortAnswered.promise;
+    return json(true);
+  });
+  // A Stop with no turn running: the session-scoped one that stops background work.
+  const stopping = session.interruptTurn();
+  await abortSent.promise;
+  const fed = harness.events.length;
+  const idle = [
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: sessionId } }
+  ];
+  // An idle, then a run an injected answer started — which the abort, still
+  // under way, cancels: its reply begins, then its own teardown's idle.
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...idle,
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins,
+    ...reply.streams,
+    { type: "session.error", properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
+    ...idle
+  ]);
+  await drainedWith(harness, sessionId, "during the abort");
+  assert.deepEqual(timelineRows(harness.events, fed), [], "no turn for a run the abort under way may end");
+  abortAnswered.resolve();
+  await stopping;
+  pushAll(harness.fake, reply.ends);
+  await drainedWith(harness, sessionId, "after the abort");
+  assert.deepEqual(timelineRows(harness.events, fed), [], "its idle came after its busy: nothing to end");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("after a Stop, a busy from before the stopped run's idle ends nothing: a reply to an unclaimed prompt after it still opens no turn", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const stopped = await turnStreaming(harness, session);
+  await session.interruptTurn(stopped.turnId);
+  const fed = harness.events.length;
+
+  // The stopped run's late `busy` (published before the interrupt), then a
+  // reply the server wrote to a prompt nobody claimed — no idle between.
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins,
+    ...reply.streams
+  ]);
+  await drainedWith(harness, sessionId, "after the late busy");
+  assert.deepEqual(timelineRows(harness.events, fed), [], "no idle since the Stop: that busy may be the stopped run's own");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+// ---------------------------------------------------------------------------
 // A reconnect clears the run evidence (`parentBusy`)
 // ---------------------------------------------------------------------------
 

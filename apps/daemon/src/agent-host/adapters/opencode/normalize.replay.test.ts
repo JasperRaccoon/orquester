@@ -1522,6 +1522,23 @@ test("a background run's answer, injected into the parent, becomes its result, o
   assert.equal(child?.result, "Found README.md and a.ts.");
 });
 
+test("a background run's answer injected while a Stop's leftovers are still dropped is its result all the same", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  // A Stop whose leftovers still linger: the parent's own output is dropped,
+  // but a user message's part is none of it.
+  run.state.interruptedTurnId = "turn-stopped";
+  run.state.reconcileIdleStatus = true;
+  const result = feed(run, injectedResult("ses_background_child", "Found it.")).flat();
+  assert.deepEqual(
+    eventsOfType(result, "task.completed").map((event) => [event.payload.taskId, event.payload.summary]),
+    [["ses_background_child", "Found it."]]
+  );
+});
+
 test("a background answer that arrives before the child's idle rides the run's own end", () => {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-background";

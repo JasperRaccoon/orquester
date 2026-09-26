@@ -1617,7 +1617,11 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   first — its context already full — opens the turn at the summary, so the thread reads working
   through the compaction. An interruption's guard ends when any later turn settles, a failed one
   included: a Stop followed by a turn that failed on a rate limit used to drop every woken reply
-  after it. And the child's end always precedes the answer's prompt (1.18.32's runner publishes
+  after it. *Built (2026-09-26): and when a NEW run says `busy` once the interrupt is over and
+  the parent has said idle since it began — 1.18.32 publishes a cancelled run's idle only after
+  its fiber ended, so only a run started after the abort can — a background answer injected after
+  a Stop used to have its reply dropped with the leftovers; it now gets its woken turn.* And the
+  child's end always precedes the answer's prompt (1.18.32's runner publishes
   its idle before it resolves the run), so neither the child's end nor its result rides the woken
   turn, and a rewind of that turn can never take an agent's end while its start stays.*
   *Built (addendum): a run in the background outlives a turn that fails on its own (a

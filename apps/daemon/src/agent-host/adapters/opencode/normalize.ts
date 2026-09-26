@@ -64,6 +64,7 @@ import {
   addRelatedSession,
   advanceOutputMark,
   claimPrompt,
+  endInterruption,
   finalOutputRemainder,
   isCutFinalOutput,
   mergeOpenCodeAssistantText,
@@ -439,11 +440,13 @@ export function normalizeOpenCodeEvent(
   }
 
   // Parent output that arrives after an interruption must not reopen the turn.
+  // A user message's parts are no output: the one an injected answer carries
+  // is a background run's result (`takeBackgroundResult`).
   const suppressInterruptedOutput =
     isParentEvent &&
     interruptionLingers(state) &&
     (raw.type === "message.part.delta" ||
-      raw.type === "message.part.updated" ||
+      (raw.type === "message.part.updated" && !isUserMessagePart(state, raw)) ||
       raw.type === "todo.updated" ||
       (raw.type === "message.updated" &&
         isRecord(raw.properties) &&
@@ -464,9 +467,10 @@ export function normalizeOpenCodeEvent(
 
 /**
  * Whether what reaches the stream may still be an interrupted run's: no turn
- * has run since a Stop, or the one sent after it has not said `busy` yet. The
- * parent's output is dropped then, and a request waits for the server's word
- * on its asker (`holdsRequests`).
+ * has run since a Stop, or the one sent after it has not said `busy` yet — and
+ * no new run has said it after the stopped run's idle
+ * (`endInterruptionAtNewRun`). The parent's output is dropped then, and a
+ * request waits for the server's word on its asker (`holdsRequests`).
  */
 function interruptionLingers(state: OpenCodeSessionState): boolean {
   return (
@@ -474,6 +478,59 @@ function interruptionLingers(state: OpenCodeSessionState): boolean {
       (state.interruptedTurnId !== undefined || state.reconcileIdleStatus)) ||
     state.awaitingBusyAfterInterruption
   );
+}
+
+/** A `message.part.updated` whose message is a known user message: no output. */
+function isUserMessagePart(state: OpenCodeSessionState, raw: OpenCodeRawEvent): boolean {
+  const part = isRecord(raw.properties) ? raw.properties.part : undefined;
+  return (
+    isRecord(part) &&
+    typeof part.messageID === "string" &&
+    state.messageRoleById.get(part.messageID) === "user"
+  );
+}
+
+/**
+ * The parent said idle while an interrupt was under way or lingering: the run
+ * it interrupted is over (`idleAfterInterrupt`). 1.18.32 cancels a run by
+ * interrupting its fiber — `SessionProcessor.halt` publishes the abort's error
+ * and an idle, the cleanup closes its parts and its reply — and publishes the
+ * runner's own idle only once that fiber has ended (read from the source), so
+ * nothing the stopped run wrote follows its idle on the stream.
+ */
+function noteIdleAfterInterrupt(state: OpenCodeSessionState): void {
+  if (state.interrupting || state.cancellation !== undefined || interruptionLingers(state)) {
+    state.idleAfterInterrupt = true;
+  }
+}
+
+/**
+ * A `busy` once no interrupt is under way and the parent has said idle since
+ * the latest began is a NEW run's — a background answer injected after the
+ * abort starts the parent again — and ends the interruption (`endInterruption`):
+ * what the stream sends from here is that run's, whose reply opens its woken
+ * turn as any (`claimReply`), and whose requests are shown as any. A `busy`
+ * with no idle since is no evidence: the stopped run wrote one at the top of
+ * every step, and the stream may deliver it after the abort answered.
+ */
+function endInterruptionAtNewRun(state: OpenCodeSessionState): void {
+  if (state.interrupting || state.cancellation !== undefined) {
+    return;
+  }
+  if (state.idleAfterInterrupt && interruptionLingers(state)) {
+    endInterruption(state);
+  }
+}
+
+/**
+ * An interrupt has just ended (`asInterrupt` in `session.ts`): a new run whose
+ * `busy` the stream delivered while it was under way, after the stopped run's
+ * idle, ends the interruption now — its reply may come next.
+ */
+export function endInterruptionIfNewRun(state: OpenCodeSessionState): void {
+  if (state.parentBusy) {
+    endInterruptionAtNewRun(state);
+  }
 }
 
 /**
@@ -772,8 +829,10 @@ function demux(
       const status = event.properties.status;
       if (status.type === "busy" || status.type === "retry") {
         // A run is going, whoever started it: the evidence a reply the host
-        // never started needs before it opens a turn (`claimReply`).
+        // never started needs before it opens a turn (`claimReply`) — and,
+        // after a Stop's idle, the end of the Stop's leftovers.
         state.parentBusy = true;
+        endInterruptionAtNewRun(state);
         if (turnId !== undefined) {
           out.signal({ kind: "status-busy" });
         }
@@ -791,6 +850,7 @@ function demux(
       }
       if (status.type === "idle") {
         state.parentBusy = false;
+        noteIdleAfterInterrupt(state);
         if (turnId !== undefined) {
           out.signal({ kind: "status-idle", raw });
         }
@@ -800,6 +860,7 @@ function demux(
 
     case "session.idle": {
       state.parentBusy = false;
+      noteIdleAfterInterrupt(state);
       // After an abort this is the ONLY idle signal — no `session.status`
       // follows (fixtures README observation 6).
       if (state.activeTurnId !== undefined) {
