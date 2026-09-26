@@ -403,6 +403,17 @@ export interface AgentDrillInProps {
    * *Added with the drill-in fixes (2026-09-27).*
    */
   onOpenAgent?: ((agentId: string) => void) | undefined;
+  /**
+   * The THREAD's error banner, overlaid on the child's timeline as on the
+   * thread's own. The overlay stays live over a child — approvals, answers,
+   * Stop, compact — and those commands report a failure only here, so a
+   * drill-in that hid it hid the failure until Back. Dismissing it is a UI
+   * action, not a command. Absent means no banner.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  errorBanner?: string | null | undefined;
+  onDismissErrorBanner?: (() => void) | undefined;
 }
 
 export interface ChatStatusLineProps {

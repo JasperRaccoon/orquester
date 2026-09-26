@@ -757,6 +757,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onOpenFile={paintOnly ? noop : openFile}
               // A nested spawn row's member: switch the drill-in to it.
               onOpenAgent={paintOnly ? noop : setDrillInAgentId}
+              // The overlay's commands fail through the thread's banner, and
+              // the overlay stays live over a child.
+              errorBanner={paintOnly ? null : slice.errorBanner}
+              onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
             />
           ) : (
             <ChatTimeline

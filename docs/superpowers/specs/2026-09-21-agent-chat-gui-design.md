@@ -4315,7 +4315,9 @@ each projection, which left the chevron dead.*
 *Built (2026-09-27): "dispatches no commands" withholds rewind, approvals as rows, the queue and
 Ctrl+B; navigation and reads are no commands and pass the thread's own handlers through — a file a
 child's words link to, a changed-file line and a diff heading open it as they do in the thread, and
-"Load full output" reads in the parent's viewer (`roster/drill-in-callbacks.ts`).*
+"Load full output" reads in the parent's viewer (`roster/drill-in-callbacks.ts`). The thread's error
+banner overlays the child's timeline as it does the thread's: the overlay stays live over a child,
+and its commands (approve, answer, dismiss, Stop, compact) report a failure only there.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

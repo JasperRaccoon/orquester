@@ -277,5 +277,24 @@ const nested = render({ sessionId: nestedSession, agentId: AGENT, roster: [outer
 assert.ok(nested.includes("Ran 1 subagent"), `the settled batch is a spawn row: ${nested}`);
 assert.ok(nested.includes("✓ completed"));
 
+// ---------------------------------------------------------------------------
+// The thread's error banner stays on screen over a child (S4)
+// ---------------------------------------------------------------------------
+
+// The overlay stays live over the drill-in, and its commands — approve,
+// answer, Stop, compact — report failure only through this banner.
+const failing = render({
+  sessionId: liveSession,
+  agentId: AGENT,
+  roster: [liveAgent],
+  bottomInset: 0,
+  onBack: NOOP,
+  errorBanner: "boom: the approval could not be sent",
+  onDismissErrorBanner: NOOP
+});
+assert.ok(failing.includes("boom: the approval could not be sent"), `a failed command says so over a child: ${failing}`);
+assert.ok(failing.includes('aria-label="Dismiss"'), "and the banner can be dismissed there");
+assert.ok(!live.includes('aria-label="Dismiss"'), "no banner without an error");
+
 resetThreadStores();
 console.log("agent-chat drill-in render checks passed");

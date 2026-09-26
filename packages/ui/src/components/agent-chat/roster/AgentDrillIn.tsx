@@ -91,7 +91,9 @@ export function AgentDrillIn({
   projectPath,
   onLoadFullOutput,
   onOpenFile,
-  onOpenAgent
+  onOpenAgent,
+  errorBanner = null,
+  onDismissErrorBanner
 }: AgentDrillInProps): React.ReactElement {
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
   // Live-follow for the child's own list (§7.3): armed on entry, disarmed by
@@ -286,8 +288,10 @@ export function AgentDrillIn({
         onDisclosureChange={onDisclosureChange}
         bottomInset={bottomInset}
         {...callbacks}
-        errorBanner={null}
-        onDismissErrorBanner={noop}
+        // The thread's banner: the overlay's commands fail through it, and it
+        // is on screen whichever timeline the main area shows.
+        errorBanner={errorBanner}
+        onDismissErrorBanner={onDismissErrorBanner ?? noop}
       />
     </div>
   );
