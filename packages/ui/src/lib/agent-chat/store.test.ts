@@ -208,6 +208,54 @@ describe("the per-thread slice", () => {
     assert.equal(state().slice.backgroundLiveness, "monitoring");
   });
 
+  it("never counts a live loop or goal as background work — the host treats both as inert", async () => {
+    const row = (id: string, kind: "loop" | "goal" | "subagent") => ({
+      id,
+      kind,
+      agentKind: "background" as const,
+      title: id,
+      role: null,
+      model: null,
+      effort: null,
+      status: "running" as const,
+      activationCount: 1,
+      usage: null,
+      progress: null,
+      lastToolName: null,
+      result: null,
+      error: null,
+      outputFile: null,
+      exitCode: null,
+      isBackgrounded: null,
+      parentAgentId: null,
+      agentIndex: null,
+      phaseIndex: null,
+      phaseTitle: null,
+      attempt: null,
+      workflowName: null,
+      phases: [],
+      runHandles: null,
+      recentActivity: [],
+      firstSeenAt: stamp(1),
+      startedAt: null,
+      completedAt: null,
+      updatedAt: stamp(1)
+    });
+    const { fake, state } = await store();
+    // A loop between its fires and a goal pursued in the thread's turns are
+    // no work of their own: the host's registry (INERT_TASK_TYPES), the tab
+    // strip, the Attention Center, pushes and the account-switch gate all
+    // read the thread as idle, and the open tab must agree.
+    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, roster: [row("loop-1", "loop"), row("goal:g1", "goal")] }) });
+    assert.equal(state().slice.backgroundLiveness, null);
+    // A shell beside them is live work as ever.
+    fake.push({
+      kind: "snapshot",
+      thread: snapshot({ seq: 2, roster: [row("loop-1", "loop"), row("goal:g1", "goal"), row("shell-1", "subagent")] })
+    });
+    assert.equal(state().slice.backgroundLiveness, "monitoring");
+  });
+
   it("reads the context window off the activity fold", async () => {
     const { fake, state } = await store();
     fake.push({

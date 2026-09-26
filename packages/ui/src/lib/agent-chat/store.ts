@@ -122,7 +122,7 @@ import {
   type TimelineRowsProjection
 } from "./rows.logic";
 import { providerForRefId, providersStore } from "./providers";
-import { liveAgentTaskIds } from "./roster.logic";
+import { isLoopOrGoalRow, liveAgentTaskIds } from "./roster.logic";
 import { isCompactingThread, latestContextWindowActivity } from "./status.logic";
 import {
   drainQueue,
@@ -571,7 +571,10 @@ function rewindProgress(
  * the *only* live work, `null` otherwise. The authoritative copy rides
  * `SessionSummary` for the ambient surfaces (§6.4); the open tab derives the
  * same answer from the roster it already has rather than waiting on a bus
- * event, and the two agree because both read the same task classification.
+ * event, and the two agree because both read the same task classification —
+ * which is why a loop and a goal count for nothing here: the host's registry
+ * never counts their task types (`INERT_TASK_TYPES`), their fires, turns and
+ * agents being the work, each live on its own row.
  */
 function deriveBackgroundLiveness(
   roster: readonly RuntimeSubagent[]
@@ -579,7 +582,7 @@ function deriveBackgroundLiveness(
   let liveAgents = 0;
   let liveBackground = 0;
   for (const agent of roster) {
-    if (!ACTIVE_SUBAGENT_STATUSES.has(agent.status)) {
+    if (!ACTIVE_SUBAGENT_STATUSES.has(agent.status) || isLoopOrGoalRow(agent)) {
       continue;
     }
     if (agent.agentKind === "background") {

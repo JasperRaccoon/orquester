@@ -1371,24 +1371,25 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   a live goal `Active` rather than "Working", a settled one's line its end reason ("Token budget
   reached: …"), never a shell's row, and never counted or token-summed as work
   (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) — background, and
-  `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain; its work does,
-  each fire and each planner being a subagent the CLI spawns itself (an agent row under its own id,
-  whose end wakes the parent). A fire notes itself on the loop's row and a goal's change of phase on
-  the goal's, in place (a token tick alone does not); `scheduled_task_deleted` ends a loop
-  (`stopped`, `completed` on expiry) and a goal leaving `active` ends it (`budget_limited`,
-  `paused`, `cleared` → `stopped` with the reason, `completed` with its result); the session's end
-  closes both, as the loop and the goal live in the CLI's process (whether a Stop's `session/cancel`
-  stops either is not captured: a later fire or goal update notes itself on the ended row, and only
-  the CLI re-creating a loop or resuming a goal it ended itself opens a new run). A genuine `failed`
-  status was not triggered: a subagent's model is set only in the account home's `config.toml`,
-  never written.
-  Noise the captures showed, silenced: a child's `skills-reload` /
-  `workflows-reload` replies to requests the CLI sent itself are not warnings (the ACP peer drops a
-  reply to nothing that carries an id the adapter names, `agentOwnReplyIds`); an MCP server's
-  failure is said once until it recovers (the CLI re-handshakes the thread's servers at every
-  spawn); the self-resolved-approvals advisory is said once, and only where approval cards were
-  promised (never under `auto` / `full-access`, where the CLI resolving its own interactions is the
-  mode working).
+  `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain (its work does,
+  each fire and each planner being a subagent the CLI spawns itself: an agent row under its own id,
+  whose end wakes the parent), and the open tab's own liveness skips both
+  (`deriveBackgroundLiveness` in the store), agreeing with the host, the tab strip, the Attention
+  Center, pushes and the account-switch gate that a thread with only a loop or a goal live is idle.
+  A fire notes itself on the loop's row and a goal's change of phase on the goal's, in place (a
+  token tick alone does not); `scheduled_task_deleted` ends a loop (`stopped`, `completed` on
+  expiry) and a goal leaving `active` ends it (`budget_limited`, `paused`, `cleared` → `stopped`
+  with the reason, `completed` with its result); the session's end closes both, as the loop and the
+  goal live in the CLI's process (whether a Stop's `session/cancel` stops either is not captured: a
+  later fire or goal update notes itself on the ended row, and only the CLI re-creating a loop or
+  resuming a goal it ended itself opens a new run). A genuine `failed` status was not triggered: a
+  subagent's model is set only in the account home's `config.toml`, never written. Noise the
+  captures showed, silenced: a child's `skills-reload` / `workflows-reload` replies to requests the
+  CLI sent itself are not warnings (the ACP peer drops a reply to nothing that carries an id the
+  adapter names, `agentOwnReplyIds`); an MCP server's failure is said once until it recovers (the
+  CLI re-handshakes the thread's servers at every spawn); the self-resolved-approvals advisory is
+  said once, and only where approval cards were promised (never under `auto` / `full-access`, where
+  the CLI resolving its own interactions is the mode working).
 - **What a Grok CLI starts outlives it. Its helpers are stopped at every end of its session; the
   work its agent started only when the USER ends the session — a deploy must never kill running
   work.** The CLI starts every child of its own — the MCP servers it boots from the host's
