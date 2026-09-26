@@ -234,5 +234,30 @@ assert.ok(exited.includes('data-shell-output="true"'), "an exited shell's output
 assert.ok(exited.includes("PASS src/a.test.ts"), "without a click: the rendered row is the one seeded open");
 assert.ok(!exited.includes('data-timeline-row-kind="turn-fold"'));
 
+// ---------------------------------------------------------------------------
+// A live agent reads live: its running call, its working row
+// ---------------------------------------------------------------------------
+
+const AGENT = "agent-1";
+const runningCall = wireActivity(
+  "tool.started",
+  { toolUseId: "call-1", itemType: "command_execution", title: "npm test", command: "npm test", status: "inProgress" },
+  { agentId: AGENT, id: "agent-call" }
+);
+
+const liveAgent = rosterRow(AGENT, { title: "Run the suite", startedAt: "2026-09-21T10:00:00.000Z" });
+const liveSession = await seededThread({ items: [runningCall], roster: [liveAgent] });
+const live = render({ sessionId: liveSession, agentId: AGENT, roster: [liveAgent], bottomInset: 0, onBack: NOOP });
+assert.ok(live.includes('data-timeline-row-kind="work-live"'), `the running call is a live row: ${live}`);
+assert.ok(live.includes("Running npm"), "in the present tense, as the thread's running call reads");
+assert.ok(live.includes('data-timeline-row-kind="working"'), "and the run is headed by the working row");
+assert.ok(!live.includes('data-timeline-row-kind="turn-fold"'), "its run never folds while it works");
+
+const settledAgent = rosterRow(AGENT, { title: "Run the suite", status: "completed" });
+const settledSession = await seededThread({ items: [runningCall], roster: [settledAgent] });
+const settled = render({ sessionId: settledSession, agentId: AGENT, roster: [settledAgent], bottomInset: 0, onBack: NOOP });
+assert.ok(!settled.includes('data-timeline-row-kind="working"'), "a settled agent is not working");
+assert.ok(!settled.includes('data-timeline-row-kind="work-live"'));
+
 resetThreadStores();
 console.log("agent-chat drill-in render checks passed");

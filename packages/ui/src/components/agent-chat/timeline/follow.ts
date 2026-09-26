@@ -1,5 +1,7 @@
 // Ported from T3 Code (MIT): apps/web/src/components/chat/MessagesTimeline.logic.ts:149-172
 
+import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+
 /**
  * Live-follow's re-arm rule (spec §7.3).
  *
@@ -70,6 +72,24 @@ export function shouldAnimateFollow(input: {
   settling: boolean;
 }): boolean {
   return input.working && !input.reducedMotion && !input.firstPaint && !input.settling;
+}
+
+/**
+ * Whether the rows show work in progress — the `working` input above.
+ *
+ * Read off the rows alone: a response is live exactly when the projection says
+ * so, with its live rows (§7.2: the UI renders, it does not fold). That holds
+ * in the thread's timeline and in the drill-in alike, where a live agent's
+ * current run projects the same live rows (`agentRunStartIndex`,
+ * `rows.logic.ts`) — so a child's streamed prose glides as the thread's does.
+ */
+export function timelineIsWorking(rows: readonly AgentChatTimelineRow[]): boolean {
+  return rows.some(
+    (row) =>
+      row.kind === "working" ||
+      row.kind === "thinking" ||
+      ((row.kind === "activity-group" || row.kind === "work-live") && row.active)
+  );
 }
 
 // ---------------------------------------------------------------------------

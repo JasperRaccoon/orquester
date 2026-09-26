@@ -286,6 +286,8 @@ export function useAgentChatDrillIn(
       items: entries,
       agentId,
       messageStreaming,
+      // Its current run's start and its kind: a live agent reads live.
+      agent,
       disclosures
     });
     return { rows: projection.current.stable.result, agent, items: entries };

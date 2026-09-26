@@ -3652,10 +3652,12 @@ Row kinds and behaviour:
   their work started in; timed by its rows, a turn of seconds read "Worked for 50h". A turn still
   running, or one no turn row describes, is still timed by its rows, and so is every fold of a
   drill-in: a background agent works long past the parent turn its rows ride, so its fold keeps
-  the span of the agent's own rows, never that turn's seconds. A thinking block never holds a fold
-  open, so a drill-in's fold can end on a thought still being written: its "Worked for …" follows
-  the tokens — the streamed-text fast path re-reads it off the fold's clock (`TurnFoldClock`), and
-  the drill-in's tokens take that fast path as the window's do — and closes on the thought's last
+  the span of the agent's own rows, never that turn's seconds. A live agent's current run is the
+  drill-in's running response and never folds (§7.6), as the thread's running turn does not. A
+  thinking block never holds a fold open, so a drill-in's fold — a settled agent's, or a run before
+  the current one — can end on a thought still being written: its "Worked for …" follows the tokens
+  — the streamed-text fast path re-reads it off the fold's clock (`TurnFoldClock`), and the
+  drill-in's tokens take that fast path as the window's do — and closes on the thought's last
   write.*
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
@@ -4290,6 +4292,18 @@ move to the background, its end and result, a `resume_from` relaunch — and, si
 session's own frames reach the client under its own `sessionId` (captured 2026-09-25), a Grok
 agent's drill-in holds its thinking, its words, its tool calls and its own background shells (the
 Grok fixtures README, observation 38).*
+*Built (2026-09-27): "streaming live" means the drill-in reads as live as the thread does while its
+agent works. While the session is live and the roster shows the agent `pending`, `running` or
+`waiting` — `messageStreamingContext`'s notion, the one `isMessageStreaming` and the roster's
+session-death pass read; never a loop or a goal, which drive work and do none — its current run,
+from the roster's `startedAt` (reset on every relaunch; else its latest launch), is the running
+response: unfolded as the running turn is, its in-progress calls live rows ("Running npm", a call
+waiting on the parent's approval card included, a streaming command's output following it), its
+tail live (an active group's shimmer, a live spawn row, the thinking placeholder when nothing there
+is live), a working row at its head timed from its start, and the smooth follow glides. A run is a
+position, not a turn, because an agent's rows ride whatever parent turn was live when each started,
+or none (`agentRunStartIndex` in `rows.logic.ts`, `drill-in.logic.ts`). A settled agent, and a run
+before the current one, fold as before.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

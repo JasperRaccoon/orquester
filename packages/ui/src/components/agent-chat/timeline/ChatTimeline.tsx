@@ -26,6 +26,7 @@ import {
   nextFollowState,
   shouldAnimateFollow,
   tickSettleLatch,
+  timelineIsWorking,
   timelineListIdentity,
   type TimelineSettleLatch
 } from "./follow";
@@ -192,18 +193,10 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   // The drill-in dispatches no commands, whether or not the caller says so.
   const effectiveReadOnly = readOnly === true || agentId !== undefined;
 
-  // A turn is live exactly when the projection says so; nothing here re-derives
-  // turn state from items (§7.2: the UI renders, it does not fold).
-  const working = React.useMemo(
-    () =>
-      rows.some(
-        (row) =>
-          row.kind === "working" ||
-          row.kind === "thinking" ||
-          ((row.kind === "activity-group" || row.kind === "work-live") && row.active)
-      ),
-    [rows]
-  );
+  // A turn — or a drill-in's live agent — is live exactly when the projection
+  // says so; nothing here re-derives turn state from items (§7.2: the UI
+  // renders, it does not fold).
+  const working = React.useMemo(() => timelineIsWorking(rows), [rows]);
 
   const reducedMotion = usePrefersReducedMotion();
   const enterFlag = useRowEnterFlags(rows, sessionId);

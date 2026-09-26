@@ -882,9 +882,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   closer rides the turn its work started in, so a turn of seconds read "Worked for 50h". Only a turn
   still running, or one no row describes, is timed by its rows. A drill-in's folds are always timed
   by the agent's own rows (`drill-in.logic.ts` passes no `turns`): a background agent works long
-  past the parent turn its rows ride, and that turn's seconds would say nothing of it. A thinking
-  block never holds a fold open, so there — no turn is unfolded as running — a thought still being
-  written can end a folded turn: a fold its rows time keeps a clock (`TurnFoldClock` in
+  past the parent turn its rows ride, and that turn's seconds would say nothing of it. **A live
+  agent's current run is the drill-in's running response** — while the session is live and the
+  roster shows it `pending`/`running`/`waiting` (the `messageStreamingContext` notion, never a
+  second one; a loop or a goal never), its run from its start (the roster's `startedAt`, else its
+  latest launch) is unfolded, its in-progress calls are live rows, its tail is live and a working
+  row heads it: a run is a POSITION, not a turn (`agentRunStartIndex` in `rows.logic.ts`), because
+  an agent's rows ride whatever parent turn was live when each started, or none. A thinking block
+  never holds a fold open, so a fold outside that run — a settled agent's, or an earlier run's — can
+  end on a thought still being written: a fold its rows time keeps a clock (`TurnFoldClock` in
   `rows.logic.ts`: its start and the POSITIONS of its answer and its last row, which a token never
   moves), and the streamed-text fast path relabels it off that clock, so its "Worked for …" follows
   the tokens and closes on the thought's last write. The drill-in holds its disclosure sets across

@@ -340,6 +340,22 @@ function deriveActiveVisualResponseTurnIds(input: {
   return turnIds;
 }
 
+/**
+ * A drill-in run's turns: every turn a row from `start` on rides. The run
+ * unfolds them all, as a running response unfolds the turns after its prompt
+ * — a turn it shares with the rows before it included.
+ */
+function turnIdsFrom(entries: readonly TimelineEntry[], start: number): ReadonlySet<string> {
+  const turnIds = new Set<string>();
+  for (let index = start; index < entries.length; index += 1) {
+    const turnId = timelineEntryTurnId(entries[index]!);
+    if (turnId !== null) {
+      turnIds.add(turnId);
+    }
+  }
+  return turnIds;
+}
+
 /** *T3: `MessagesTimeline.logic.ts:614-620`.* */
 export { workEntryIsActiveTurnActivity };
 
@@ -439,7 +455,9 @@ function foldClockLabel(clock: TurnFoldClock, entries: readonly TimelineEntry[])
  * of the agent's own rows (`drill-in.logic.ts`). Such a fold keeps its
  * {@link TurnFoldClock}: its last row may be a thinking block still being
  * written — a thinking block never holds a fold open — and the streamed-text
- * fast path moves its label with every token.
+ * fast path moves its label with every token. (A live agent's current run is
+ * its running response and never folds, `agentRunStartIndex`; a drill-in's
+ * fold is a settled agent's, or a run before the current one.)
  *
  * *T3: `MessagesTimeline.logic.ts:627-803`; differs: T3 times every turn but
  * the latest by its rows.*
@@ -764,6 +782,23 @@ export interface TimelineRowsInput {
    * *Added with the history bridge.*
    */
   liveActivityAbove?: boolean;
+  /**
+   * A drill-in's live agent (§7.6): where its current run begins in these
+   * entries — the first row after the prompt that heads it, else its first
+   * row at or after its start — which makes that run the running response,
+   * as the running turn is the thread's. An agent's rows ride whatever parent
+   * turn was live when each started, or none between the parent's turns, so a
+   * run is a POSITION, never a turn: every row from here on is the response
+   * whatever turn it rides — its turns unfold, an in-progress call is a live
+   * row, a live tail is live and a provisional answer shows no meta yet — and
+   * the working row goes here, timed from `activeTurnStartedAt`. A run before
+   * it folds as a settled turn does. Read only with `isWorking`; absent — the
+   * thread's own timeline — the running response is the running turn's, after
+   * the last prompt.
+   *
+   * *Added with the drill-in's live rows.*
+   */
+  agentRunStartIndex?: number;
 }
 
 export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineRow[] {
@@ -812,13 +847,22 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     input.latestTurn ?? null,
     input.runningTurnId ?? null
   );
-  const activeVisualResponseTurnIds = deriveActiveVisualResponseTurnIds({
-    entries,
-    unsettledTurnId,
-    // The rows after the timeline's last prompt are the live response; with
-    // that prompt below, no row here is.
-    isWorking: input.isWorking && header !== "below"
-  });
+  // A drill-in's live agent: its current run, by position — whatever turns its
+  // rows ride (`agentRunStartIndex`).
+  const agentRun =
+    input.isWorking && input.agentRunStartIndex !== undefined
+      ? Math.min(Math.max(input.agentRunStartIndex, 0), entries.length)
+      : null;
+  const activeVisualResponseTurnIds =
+    agentRun !== null
+      ? turnIdsFrom(entries, agentRun)
+      : deriveActiveVisualResponseTurnIds({
+          entries,
+          unsettledTurnId,
+          // The rows after the timeline's last prompt are the live response;
+          // with that prompt below, no row here is.
+          isWorking: input.isWorking && header !== "below"
+        });
   const foldsByAnchorEntryId = deriveTurnFolds({
     entries,
     terminalAssistantMessageIds,
@@ -842,20 +886,28 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
 
   // Where the running response starts: after the last prompt here, from the
   // first row when that prompt is above (`lastUserMessageIndex` finds none
-  // here), and nowhere in these rows when it is below.
+  // here), and nowhere in these rows when it is below — or, in a drill-in, at
+  // its live agent's current run.
   let activeTurnHeaderIndex = entries.length;
   if (input.isWorking && header !== "below") {
-    activeTurnHeaderIndex = lastUserMessageIndex(entries) + 1;
+    activeTurnHeaderIndex = agentRun ?? lastUserMessageIndex(entries) + 1;
   }
   const entryBelongsToActiveTurn = (entry: TimelineEntry, index: number): boolean =>
     input.isWorking &&
     index >= activeTurnHeaderIndex &&
-    (unsettledTurnId === null || timelineEntryTurnId(entry) === unsettledTurnId);
+    (agentRun !== null || unsettledTurnId === null || timelineEntryTurnId(entry) === unsettledTurnId);
+  // A drill-in's run is judged by position; its rows are the ones from the
+  // run's start, whatever turn each rides.
+  const agentRunWork =
+    agentRun === null
+      ? null
+      : new Set(entries.slice(agentRun).flatMap((entry) => (entry.kind === "work" ? [entry.entry] : [])));
   const workEntryIsInActiveRun = (entry: WorkLogEntry): boolean =>
     input.isWorking &&
-    unsettledTurnId !== null &&
     entry.toolLifecycleStatus === "inProgress" &&
-    entry.turnId === unsettledTurnId;
+    (agentRunWork !== null
+      ? agentRunWork.has(entry)
+      : unsettledTurnId !== null && entry.turnId === unsettledTurnId);
 
   // The live tool run: the trailing streak of work entries in the active turn
   // — at the timeline's end, so never in a projection the timeline continues
@@ -936,7 +988,10 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
   let hasActivityRow = false;
   const appendWorkingRow = (): void => {
     const latestUserMessage = entries[lastUserMessageIndex(entries)];
+    // A drill-in's run is timed from its own start: the prompt above it, if
+    // any, may head an earlier run.
     const startedAt =
+      agentRun === null &&
       activeVisualResponseTurnIds.size > 1 &&
       latestUserMessage?.kind === "message" &&
       latestUserMessage.message.role === "user"
@@ -1011,11 +1066,12 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       // A run with no reasoning row is a plain tool group, not an activity group.
       if (groupEntries.some((entry) => entry.kind === "message")) {
         // Live only at the timeline's end — this projection's end is not that
-        // when the timeline continues below it.
+        // when the timeline continues below it — and only in the running
+        // response: the running turn's, or a drill-in run's by position.
         const active =
           input.isWorking &&
           tailHere &&
-          activityTurnId === unsettledTurnId &&
+          (agentRun !== null ? cursor > activeTurnHeaderIndex : activityTurnId === unsettledTurnId) &&
           cursor === entries.length &&
           !latestToolFailed &&
           (latestVisibleToolEntry === undefined || latestToolKeepsActivityLive);
@@ -1222,8 +1278,9 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     }
     const stillInProgress =
       message.role === "assistant" &&
-      message.turnId !== null &&
-      activeVisualResponseTurnIds.has(message.turnId);
+      (agentRun !== null
+        ? index >= activeTurnHeaderIndex
+        : message.turnId !== null && activeVisualResponseTurnIds.has(message.turnId));
     // While the turn is still running the latest assistant message is only
     // provisionally terminal: withhold the metadata row so commentary does not
     // flash timestamps mid-work.
@@ -1435,6 +1492,7 @@ function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): b
     left.continuesBelow === right.continuesBelow &&
     left.activeTurnHeader === right.activeTurnHeader &&
     left.liveActivityAbove === right.liveActivityAbove &&
+    left.agentRunStartIndex === right.agentRunStartIndex &&
     left.activeTurnStartedAt === right.activeTurnStartedAt &&
     left.runningTurnId === right.runningTurnId &&
     left.supportsConversationRollback === right.supportsConversationRollback &&
@@ -1504,8 +1562,8 @@ function replaceStreamingMessageRows(
     // A turnless message joins no fold and keeps the fast path, as does one
     // that reads as streaming — a streaming answer holds its turn unfolded; a
     // streaming thinking block does not, and a fold it ends (in a drill-in,
-    // where no turn is unfolded as running) is relabelled below, off its
-    // clock, so its "Worked for …" follows the tokens.
+    // outside a live agent's current run, which never folds) is relabelled
+    // below, off its clock, so its "Worked for …" follows the tokens.
     const turnId = entry.message.turnId;
     if (turnId !== null && !isMessageStreaming(entry.message, input.messageStreaming ?? NOTHING_STREAMS)) {
       return null;
