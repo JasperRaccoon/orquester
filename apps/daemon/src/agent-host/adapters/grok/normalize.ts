@@ -94,7 +94,7 @@ import {
 } from "./subagents.ts";
 import { failTool, toolCall } from "./tool-calls.ts";
 import { parseResponseCompletedUsage, parseXaiUsage, turnTokenUsage } from "./usage.ts";
-import { contextTokensOf, isReplayFrame, promptIdOf } from "./xai-meta.ts";
+import { contextTokensOf, isReplayFrame } from "./xai-meta.ts";
 
 export { ENDED_TASKS_REMEMBERED, normalizeTaskStatus } from "./background-tasks.ts";
 export {
