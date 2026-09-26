@@ -1769,7 +1769,8 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   a chat thread deliberately inherits exactly what a terminal tab under the same home would — see
   §10. Concurrent prompts are **queued** by the CLI, not steered into the running turn, and there
   is an `_x.ai/task_backgrounded` notification
-  (`apps/daemon/src/agent-host/adapters/grok/history.ts`, `…/normalize.ts`).*
+  (`apps/daemon/src/agent-host/adapters/grok/history.ts`, `…/normalize.ts`,
+  `…/background-tasks.ts`).*
 - **Every x.ai extension method, in both spellings.** Each exists bare (`x.ai/…`) and
   underscore-prefixed (`_x.ai/…`), and params may additionally arrive **wrapped** as
   `{method, params}` — register both names and unwrap.
@@ -1865,7 +1866,8 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   counts on its own — and its context size, usage, catalog, title, hooks and plan mode never touch
   the parent's. `resume_from` spawns a new subagent id naming its source (`resumed_from`) and starts
   the same task again under the new call, its new child session's words messages of their own
-  (`adapters/grok/normalize.ts`, `subagentSpawned`, `childSessionUpdate`, `taskCompleted`).*
+  (`adapters/grok/subagents.ts` `subagentSpawned`, `normalize.ts` `childSessionUpdate`,
+  `background-tasks.ts` `taskCompleted`).*
 - **Prompts the CLI starts itself.** Not in T3. A background subagent's end, a monitor's line and
   a monitor's end wake the agent: the CLI runs a prompt of its own (`subagent-completed-<id>`,
   `notifications-<uuid>`, `task-completed-<id>`) and streams the parent's reply under it, with no

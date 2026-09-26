@@ -254,11 +254,11 @@ describe("a turn the provider started sweeps nothing at its end", () => {
 
 /**
  * An `agentId` names the agent a task belongs to. Grok stamps a background
- * shell with ITSELF (`adapters/grok/normalize.ts`, every `task.*` of a shell
- * carries `agentId: taskId`), so the "a subagent's internal work is covered by
- * its owner" rule read every Grok shell as some agent's and dropped it: a dev
- * server left running in the background neither kept the tab "monitoring" nor
- * held a deploy's drain.
+ * shell with ITSELF (`adapters/grok/background-tasks.ts`, every `task.*` of a
+ * shell carries `agentId: taskId`), so the "a subagent's internal work is
+ * covered by its owner" rule read every Grok shell as some agent's and dropped
+ * it: a dev server left running in the background neither kept the tab
+ * "monitoring" nor held a deploy's drain.
  */
 describe("a task stamped with its own id is its own row (Grok)", () => {
   it("a Grok background shell is live monitoring work, bounded by the TTL", () => {

@@ -34,7 +34,7 @@ companion spec, `docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-de
 | `adapters/claude/**` | **W6** | The Claude adapter (§4.5 Claude) + `apps/daemon/test/fixtures/claude/**`. |
 | `adapters/codex/**` | **W7** | The Codex adapter (§4.5 Codex); `_generated/**` comes from **X2**. |
 | `adapters/opencode/**` | **W8** | The OpenCode adapter (§4.5 OpenCode). |
-| `adapters/grok/**` | **W9** | The Grok adapter + the ACP client (§4.5 Grok); `acp/_generated/**` comes from **X4**. |
+| `adapters/grok/**` | **W9** | The Grok adapter + the ACP client (§4.5 Grok); `acp/_generated/**` comes from **X4**. The normaliser (frames → runtime events) is `normalize.ts` — `GrokNormalizer`, the class `session.ts` and the replay tests drive, and the frame routing: the ACP `session/update` switch and the private channel's, a subagent's child session's frames included — over `normalizer-state.ts` (`GrokNormalizerState`, the state its functions share, and the envelope every row is built with), with one module of functions per concern: `segments.ts` (assistant text and reasoning), `tool-calls.ts` (a call's rows, finished calls, the plan card), `subagents.ts` (spawn calls, the `subagent_*` reports, child sessions, `resume_from`), `background-tasks.ts` (shells and monitors: snapshots, the CLI's reports, poll and kill answers, ended-task memory and revival) and `loops-goals.ts` (scheduled prompts and the goal). |
 
 The daemon-side half — proxying `/api/sessions/:id/*` onto the socket, spawning and adopting the
 host, the kill guard, the tab records — is **W10** and lives in `apps/daemon/src/agent-chat/**`,

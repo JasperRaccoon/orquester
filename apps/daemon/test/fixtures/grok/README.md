@@ -834,9 +834,9 @@ It is how a shell's or a monitor's end now reaches the roster, and the registry'
 bound only for a task the CLI stops reporting on.
 
 **Every task row of a shell names the shell itself as its `agentId`**
-(`adapters/grok/normalize.ts`). The liveness registry read a stamped non-agent task as a subagent's
-own work — covered by its owner — and dropped it, so this capture's `sleep 25` never counted as live
-at all. It does now: an `agentId` equal to the row's own `taskId` names no owner
+(`adapters/grok/background-tasks.ts`). The liveness registry read a stamped non-agent task as a
+subagent's own work — covered by its owner — and dropped it, so this capture's `sleep 25` never
+counted as live at all. It does now: an `agentId` equal to the row's own `taskId` names no owner
 (`orchestration/liveness.ts`), and a Grok shell is a watch loop like any other, bounded by that
 expiry.
 
@@ -1276,7 +1276,8 @@ child session, so they never stream into the first run's.
 
 ### 47. What the adapter builds from all of it
 
-`adapters/grok/normalize.ts` and `session.ts`; the replay tests `subagent-replay.test.ts` (the
+`adapters/grok/normalize.ts` and the modules it routes to (`subagents.ts`, `background-tasks.ts`,
+`tool-calls.ts`, `segments.ts`), and `session.ts`; the replay tests `subagent-replay.test.ts` (the
 normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) and
 `session-replay.test.ts` (the real session, the mock peer playing a capture back) run these files.
 

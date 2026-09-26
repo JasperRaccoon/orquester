@@ -16,7 +16,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, watch } from "node:fs";
+import { dirname } from "node:path";
 
 const scenario = process.env.GROK_MOCK_SCENARIO ?? "happy";
 const agentVersion = process.env.GROK_MOCK_VERSION ?? "1.0.34";
@@ -770,7 +771,12 @@ async function runPrompt(id, params) {
     notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
     result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
     if (scenario === "leftover-exit") {
-      setTimeout(() => process.exit(143), 20);
+      // It ends on its own, once the host has recorded its work: the host
+      // reads the shell's session off `/proc` while this CLI lives, and an exit
+      // a fixed 20 ms after the turn raced that read — under load it lost, and
+      // nothing was left recorded for the user's later end.
+      await leftoverWorkRecorded();
+      process.exit(143);
     }
     return;
   }
@@ -1080,6 +1086,40 @@ function startHelper() {
     return;
   }
   spawn("sleep", ["301"], { detached: true, stdio: "ignore" }).unref();
+}
+
+/**
+ * Resolve once the host has recorded this launch's work: the thread's
+ * `leftover-work.json` (`GROK_MOCK_LEFTOVER_WORK`, the rig's path for it) names
+ * a session under this launch's marker. The host writes that file by a rename
+ * into place, an event of its directory — which is what this waits on, never a
+ * clock.
+ */
+function leftoverWorkRecorded() {
+  const path = process.env.GROK_MOCK_LEFTOVER_WORK ?? "";
+  const recorded = () => {
+    try {
+      const { launches } = JSON.parse(readFileSync(path, "utf8"));
+      return launches.some(
+        (launch) => launch.launchId === process.env.ORQUESTER_AGENT_LAUNCH && launch.sessions.length > 0
+      );
+    } catch {
+      return false;
+    }
+  };
+  return new Promise((resolve) => {
+    const watcher = watch(dirname(path), () => {
+      if (recorded()) {
+        watcher.close();
+        resolve();
+      }
+    });
+    // Checked once the watch is armed, so a rename before it is seen too.
+    if (recorded()) {
+      watcher.close();
+      resolve();
+    }
+  });
 }
 
 /** Resolve once every one of `names` has been printed, one per line, on `stream`. */
