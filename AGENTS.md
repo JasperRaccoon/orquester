@@ -1442,8 +1442,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in `system-status.ts`),
   what it started coming with it as its descendants — so the work a session end left running, and
   whatever a crashed host never swept, is in reach. A marked process whose parent still runs outside
-  every root is that parent's, never a root: no marker makes it ours. Every adapter's launches carry
-  the marker (next bullet); only Grok's sweep by it.
+  every root is that parent's, never a root: no marker makes it ours — nor is one a subreaper
+  adopted (`systemd --user`, a container's non-pid-1 init; the kill-guard gotcha). Every adapter's
+  launches carry the marker (next bullet); only Grok's sweep by it.
 - **Every provider launch carries a launch marker; only the Grok adapter sweeps by it.** The host's
   `buildEnv` (`agent-host/main.ts`) stamps `ORQUESTER_AGENT_LAUNCH` on every provider child's
   environment through `buildProviderEnv`'s required `launchId` — one `randomUUID()` per call, and
@@ -1759,17 +1760,22 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   terminal runs fine. Probed per request (not cached) so a tool installed from a tab lights its
   card up on the next modal open.
 - **`/api/system/processes/kill` protects the daemon, the tmux server, and the managed cliproxy
-  process** (the route passes the proxy's live child pid via the service's `protectedPids` hook —
-  on a no-tmux host cliproxy is a daemon child and would otherwise be a legal target).
-  Everything else must descend from a daemon-tree root (its own children plus every `orq-*` tmux
-  pane pid, the agent host, and every orphan of the daemon's uid carrying an agent-host launch
-  marker — what a Grok CLI left behind, see "What a Grok CLI starts outlives it") or it's
-  `PROCESS_NOT_MANAGED`. The guard is two-pass on `/proc` starttime, never on the shared 2 s
-  snapshot cache: once the first SIGTERM lands, children reparent and `ppid` stops being an
-  identity, so pass one records starttimes while the tree is intact and pass two re-checks each one
-  immediately before signalling (a recycled pid must never get the signal). Everything under
-  `/api/system/*` is Linux-only by construction (all `/proc`); off Linux each route answers
-  `supported: false` with zeroed data, the same host-gating shape `/api/fs/capabilities` uses.
+  process** (the route passes the proxy's live child pid via the service's `protectedPids` hook — on
+  a no-tmux host cliproxy is a daemon child and would otherwise be a legal target). Everything else
+  must descend from a daemon-tree root (its own children plus every `orq-*` tmux pane pid, the agent
+  host, and every orphan of the daemon's uid carrying an agent-host launch marker — what a provider
+  CLI left behind, see "What a Grok CLI starts outlives it") or it's `PROCESS_NOT_MANAGED`. An
+  orphan is rooted only when init adopted it or its parent is gone (`launchedOrphans`): **one a
+  SUBREAPER adopted is not** — `systemd --user` when the desktop app runs inside a user session (it
+  is `PR_SET_CHILD_SUBREAPER`, so every orphan of that session goes to it, not to pid 1), or a
+  container's non-pid-1 init — so there Settings → System neither lists nor kills what a provider
+  left running; it is found (and stopped) by hand, or by ending the chat's session, which sweeps a
+  Grok chat's work. The guard is two-pass on `/proc` starttime, never on the shared 2 s snapshot
+  cache: once the first SIGTERM lands, children reparent and `ppid` stops being an identity, so pass
+  one records starttimes while the tree is intact and pass two re-checks each one immediately before
+  signalling (a recycled pid must never get the signal). Everything under `/api/system/*` is
+  Linux-only by construction (all `/proc`); off Linux each route answers `supported: false` with
+  zeroed data, the same host-gating shape `/api/fs/capabilities` uses.
 - **Adapter/localStorage loads must go through a schema (or field-wise validation) with
   fallback — old bundles' payloads outlive deploys.** Raw `JSON.parse` output must never reach
   typed code: a `usage` blob persisted by a pre-migration bundle once crashed the whole web

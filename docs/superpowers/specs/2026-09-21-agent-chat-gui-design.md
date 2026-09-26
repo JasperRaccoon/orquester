@@ -290,14 +290,15 @@ would make a working hook look broken to the user's agent
 **Kill guard.** `apps/daemon/src/system-status.ts` adds the host pid to the protected set via
 the same `protectedPids` hook cliproxy uses. Provider children remain legal kill targets.
 
-*Built: so does what a provider CLI left behind, once no root reaches it. A process of the
-daemon's own uid outside every root, adopted by init (or with its parent gone), that carries an
-agent-host launch marker (`ORQUESTER_AGENT_LAUNCH`, see the supervision note above) is a root of
-its own — listed under the chat its `ORQUESTER_SESSION_ID` names and killable
-(`launchedOrphans`), with what it started as its descendants — so the work a session end left
-running on purpose (every end but the user's), and the orphans of a host that crashed before any
-sweep, are not `PROCESS_NOT_MANAGED`. A marked process whose parent still runs outside every root
-stays that parent's.*
+*Built: so does what a provider CLI left behind, once no root reaches it. A process of the daemon's
+own uid outside every root, adopted by init (or with its parent gone), that carries an agent-host
+launch marker (`ORQUESTER_AGENT_LAUNCH`, see the supervision note above) is a root of its own —
+listed under the chat its `ORQUESTER_SESSION_ID` names and killable (`launchedOrphans`), with what
+it started as its descendants — so the work a session end left running on purpose (every end but the
+user's), and the orphans of a host that crashed before any sweep, are not `PROCESS_NOT_MANAGED`. A
+marked process whose parent still runs outside every root stays that parent's, and so does one a
+subreaper adopted (`systemd --user` around the desktop app, a container's non-pid-1 init): there the
+gap is real, and such an orphan is neither listed nor killable.*
 
 **Observability.** Per thread, `raw.ndjson` (untranslated provider frames, tagged with source)
 and `events.ndjson` (normalised). Rotation: 10 MiB per file, 10 files, 14 days for raw; events

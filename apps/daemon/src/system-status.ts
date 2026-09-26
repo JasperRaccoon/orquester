@@ -911,16 +911,18 @@ export class SystemStatusService {
  * with its chat when the daemon knows it. What an orphan started comes with it
  * as its descendant ({@link collectTree}), never as a root of its own; and a
  * marked process whose parent still runs outside every root is that parent's —
- * no marker makes it ours. The Grok CLI starts its background shells and MCP
- * servers in sessions of their own, so they outlive it reparented to init; the
- * host stops its MCP servers at every session end but the work its agent
- * started only when the user ends the session — a deploy must never kill
- * running work — so a dev server runs on here by design, and a host that
- * crashed swept nothing (Grok fixtures README observation 48). A parent chain
- * is gone once a process is orphaned — its environment is not. Only processes
- * of this daemon's own uid are read (another user's environment is not ours to
- * read, and nothing of theirs is ours to kill), and only those no root already
- * reaches.
+ * no marker makes it ours. A gap by construction: an orphan a SUBREAPER adopted
+ * (`systemd --user` around the desktop app, a container's non-pid-1 init) has a
+ * live parent that is not init, and is not rooted either. The Grok CLI starts
+ * its background shells and MCP servers in sessions of their own, so they
+ * outlive it reparented to init; the host stops its MCP servers at every
+ * session end but the work its agent started only when the user ends the
+ * session — a deploy must never kill running work — so a dev server runs on
+ * here by design, and a host that crashed swept nothing (Grok fixtures README
+ * observation 48). A parent chain is gone once a process is orphaned — its
+ * environment is not. Only processes of this daemon's own uid are read (another
+ * user's environment is not ours to read, and nothing of theirs is ours to
+ * kill), and only those no root already reaches.
  */
 async function launchedOrphans(
   procs: Map<number, ProcSnapshot>,
