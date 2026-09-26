@@ -117,7 +117,13 @@ export type NormalizerSignal =
    * shown or answered, and nothing will be until the server says whether its
    * asker still waits (`judgeHeldRequest` in `session.ts`).
    */
-  | { kind: "request-after-interrupt"; held: OpenCodeHeldRequest; raw: unknown };
+  | { kind: "request-after-interrupt"; held: OpenCodeHeldRequest; raw: unknown }
+  /**
+   * A child whose run the adapter ended itself reports that the run goes on
+   * (`reportChildRun`): the server says whether it still runs, and check
+   * `checkId` settles it (`judgeChildSurvival` in `session.ts`).
+   */
+  | { kind: "child-reports-run"; childId: string; checkId: number };
 
 /**
  * A request held for the server's word on its asker. `cardOnly`: full access
@@ -1035,12 +1041,17 @@ function emitTaskProgress(
       description: agent.description,
       ...(extra.summary !== undefined ? { summary: extra.summary } : {}),
       ...(extra.lastToolName !== undefined ? { lastToolName: extra.lastToolName } : {}),
-      ...(extra.status !== undefined ? { status: extra.status } : {})
+      // A revived run's rows name no status: the roster keeps the adapter's end.
+      ...(extra.status !== undefined && agent.revived !== true ? { status: extra.status } : {})
     }
   });
 }
 
-/** A non-terminal status patch; repeated identical statuses are dropped. */
+/**
+ * A non-terminal status patch; repeated identical statuses are dropped, and a
+ * revived run writes none — `running` would reopen the roster's row, `idle`
+ * flip it off the adapter's end (`roster.ts`, `applyStatus`).
+ */
 function emitTaskStatus(
   state: OpenCodeSessionState,
   agent: OpenCodeChildAgent,
@@ -1048,7 +1059,7 @@ function emitTaskStatus(
   raw: unknown,
   out: Emitter
 ): void {
-  if (agent.completed || agent.lastStatus === status) {
+  if (agent.completed || agent.revived === true || agent.lastStatus === status) {
     return;
   }
   emitTaskStarted(state, agent, raw, out);
@@ -1147,8 +1158,102 @@ export function closeLiveChildAgents(
   for (const agent of state.childAgents.values()) {
     if (!agent.completed && (scope === "all" || !outlivesFailedTurn(state, agent))) {
       emitTaskCompleted(state, agent, "stopped", undefined, out, reason);
+      // The adapter's word, not the provider's: a run the abort never reached
+      // may report it goes on (`reportChildRun`).
+      agent.endedByAdapter = true;
+      agent.survivalCheck = undefined;
     }
   }
+  return out.events;
+}
+
+/**
+ * A child whose run the adapter ended itself reports that the run goes on —
+ * its session says `busy`, or a frame of a live run arrives (`status` and
+ * `activity`). The Grok adapter's rule: an end the adapter wrote is not the
+ * provider's word, and a deploy must never kill running work. But a run the
+ * abort DID cancel sends such frames too, late — its last ones, published
+ * before its cancel — and only the server can tell the two apart once the
+ * abort is over (README observation 29). So the report asks it
+ * (`judgeChildSurvival` in `session.ts`, then {@link settleChildSurvival}),
+ * once per question: while a check is pending nothing more asks, and after the
+ * server said "not running" only a `busy` asks again — the leftovers of a
+ * cancelled run are many frames, a new run's `busy` is one.
+ */
+function reportChildRun(
+  agent: OpenCodeChildAgent,
+  kind: "status" | "activity",
+  out: Emitter
+): void {
+  if (agent.endedByAdapter !== true || agent.survivalCheck === "pending") {
+    return;
+  }
+  if (agent.survivalCheck === "notRunning" && kind === "activity") {
+    return;
+  }
+  agent.survivalCheck = "pending";
+  agent.survivalCheckId = (agent.survivalCheckId ?? 0) + 1;
+  out.signal({ kind: "child-reports-run", childId: agent.sessionId, checkId: agent.survivalCheckId });
+}
+
+/**
+ * The child said idle: whatever ran is over, and a check still in flight is
+ * void — a revival now would outlive the run it answers for
+ * ({@link settleChildSurvival} acts only on a check still `pending`). What
+ * reports after this idle is a new run's, and asks afresh, under a new id.
+ */
+function noteChildIdle(agent: OpenCodeChildAgent): void {
+  if (agent.endedByAdapter === true) {
+    agent.survivalCheck = undefined;
+  }
+}
+
+/**
+ * The server's word on a child whose run the adapter ended ({@link
+ * reportChildRun}): `running` counts it live again — its own start row
+ * re-emitted, naming its own launch, which the roster reads as a late delivery
+ * (it keeps the adapter's end) and the liveness registry as live work; its
+ * rows from here name no status (`revived`), and its own idle and answer end
+ * it, once, as they end any run. Not running: that report was a cancelled
+ * run's last frames. A check the child's own idle made void writes nothing.
+ * `running` is also the answer when the server cannot say: a duplicate row
+ * costs less than a deploy killing running work.
+ */
+export function settleChildSurvival(
+  state: OpenCodeSessionState,
+  childId: string,
+  checkId: number,
+  running: boolean,
+  ctx: NormalizeContext
+): RuntimeEvent[] {
+  const agent = state.childAgents.get(childId);
+  if (
+    agent === undefined ||
+    agent.endedByAdapter !== true ||
+    agent.survivalCheck !== "pending" ||
+    agent.survivalCheckId !== checkId
+  ) {
+    return [];
+  }
+  if (!running) {
+    agent.survivalCheck = "notRunning";
+    return [];
+  }
+  agent.survivalCheck = undefined;
+  agent.endedByAdapter = false;
+  agent.revived = true;
+  agent.completed = false;
+  agent.lastStatus = undefined;
+  const out = new Emitter(state, ctx);
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
+    type: "task.started",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      description: agent.description
+    }
+  });
   return out.events;
 }
 
@@ -1240,6 +1345,10 @@ function linkChildFromTaskPart(
     known.resultPending = false;
     known.pendingResult = undefined;
     known.answersInBackground = false;
+    // A new run, which the roster reopens for: nothing of the last one's end.
+    known.endedByAdapter = false;
+    known.survivalCheck = undefined;
+    known.revived = false;
   }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;
@@ -1476,13 +1585,13 @@ function demuxChild(
     case "session.status": {
       const agent = ensureChildAgent(state, childSessionId);
       const status = event.properties.status;
-      emitTaskStatus(
-        state,
-        agent,
-        status.type === "busy" || status.type === "retry" ? "running" : "idle",
-        raw,
-        out
-      );
+      const running = status.type === "busy" || status.type === "retry";
+      if (running) {
+        reportChildRun(agent, "status", out);
+      } else {
+        noteChildIdle(agent);
+      }
+      emitTaskStatus(state, agent, running ? "running" : "idle", raw, out);
       return;
     }
 
@@ -1493,6 +1602,7 @@ function demuxChild(
       // a background run's answer comes as a prompt to the parent instead
       // (`takeBackgroundResult`), and one that came first rides this end.
       const agent = ensureChildAgent(state, childSessionId);
+      noteChildIdle(agent);
       if (!agent.completed) {
         const result = agent.pendingResult;
         agent.pendingResult = undefined;
@@ -1523,6 +1633,10 @@ function demuxChild(
         return;
       }
       const agent = ensureChildAgent(state, childSessionId);
+      // A reply still being written: a frame of a live run.
+      if (!messageEnded(raw, info)) {
+        reportChildRun(agent, "activity", out);
+      }
       for (const part of state.textPartsByMessageId.get(info.id)?.values() ?? []) {
         emitTextDelta(part, turnId, raw, out, agent.sessionId);
       }
@@ -1556,6 +1670,8 @@ function demuxChild(
       ) {
         return;
       }
+      // Text being written: a frame of a live run.
+      reportChildRun(ensureChildAgent(state, childSessionId), "activity", out);
       const nextText = (existing.emittedText ?? existing.text) + event.properties.delta;
       existing.emittedText = nextText;
       existing.text = nextText;
@@ -1581,7 +1697,12 @@ function demuxChild(
       // A child's `step-finish` tokens belong to the child, never to the
       // parent turn's accumulator — they are a different session's spend.
       if ((part.type === "text" || part.type === "reasoning") && role !== "user") {
-        const stored = retainTextPart(state, part as Extract<OpenCodePart, { type: "text" | "reasoning" }>);
+        const textPart = part as Extract<OpenCodePart, { type: "text" | "reasoning" }>;
+        if (role === "assistant" && textPart.time?.end === undefined) {
+          // A part still being written — a cleanup's closing copy carries its end.
+          reportChildRun(ensureChildAgent(state, childSessionId), "activity", out);
+        }
+        const stored = retainTextPart(state, textPart);
         if (role === "assistant") {
           emitTextDelta(stored, turnId, raw, out, childSessionId);
         }
@@ -1595,6 +1716,10 @@ function demuxChild(
       if (part.type === "tool") {
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
         const agent = ensureChildAgent(state, childSessionId);
+        if (tool.state.status === "running" || tool.state.status === "pending") {
+          // A call under way — an aborted one's closing frame is an `error`.
+          reportChildRun(agent, "activity", out);
+        }
         // Output first: a completion closes the call's output buffer.
         emitCommandOutput(state, tool, turnId, raw, out, childSessionId);
         emitToolItem(tool, turnId, raw, out, childSessionId);
@@ -1649,6 +1774,12 @@ function demuxChild(
 // ---------------------------------------------------------------------------
 // Helpers the demux leans on
 // ---------------------------------------------------------------------------
+
+/** A message frame saying its message is over: completed, or ended by an error (an abort's). */
+function messageEnded(raw: OpenCodeRawEvent, info: { time?: { completed?: number } }): boolean {
+  const record = isRecord(raw.properties) && isRecord(raw.properties.info) ? raw.properties.info : undefined;
+  return info.time?.completed !== undefined || record?.error !== undefined;
+}
 
 function retainTextPart(
   state: OpenCodeSessionState,

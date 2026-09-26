@@ -986,6 +986,20 @@ What still reaches the thread after a Stop:
   The adapter's own walk after the abort (`abortDescendants`: `GET …/children`, then an abort
   for each, bounded) reaches the children it lists in time, and no others.
 
+**A child that runs on.** The Stop closes every child `stopped` on the adapter's own word
+(`closeLiveChildAgents`), so one that survived read "interrupted" and held no drain while it
+worked. The Grok adapter's rule applies — an end the adapter wrote is not the provider's word: a
+frame of a live run from such a child (its `busy`, a delta, a text part with no end, a running
+call, a reply not completed) asks the server once every interrupt is over whether its session runs
+(`GET /session/status`). A cancelled child sends such frames too, late — its last ones, published
+before its cancel — and only the server tells the two apart; each cancelled child's own idle comes
+after them. Busy, it counts live again: its own start row re-emitted, naming its own launch, which
+the roster reads as a late delivery (it keeps the Stop's end, and its first-written result) and the
+liveness registry as live work; its rows from there name no status, which would reopen the
+roster's row or flip it to idle; its own idle and answer end it, once. Not running, the frames were
+leftovers: nothing is written, and only a `busy` asks again. Its idle voids a check in flight. A
+read that fails counts it live: the drain outranks a duplicate row.
+
 The adapter used to mark every request that arrived while no turn ran after an interrupt resolved,
 write nothing and answer nothing: a live asker waited for good, and so did the parent's next turn,
 whose prompt joins the running run (`ensureRunning` awaits it). Now a request that arrives while

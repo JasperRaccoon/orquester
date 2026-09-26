@@ -1631,6 +1631,13 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   and Grok do after every settled turn: an `error` session reads, to §7.6's roster, as a dead one,
   and refuses commands until a Stop, which would cancel that job. The child keeps working in the
   roster and in liveness, and ends by its own idle and answer.*
+  *Built (2026-09-26): and a child a Stop closed that runs on — the abort does not reach every run
+  (fixtures README observation 29) — counts live again on the server's word: a frame of a live run
+  from it asks `GET /session/status` once the interrupts are over, and a busy child gets its own
+  start row re-emitted, naming its own launch — a late delivery to the roster, which keeps the
+  Stop's end; live work to the liveness registry, so a deploy's drain waits for it — with no
+  status on its rows after, and its own idle and answer end it once (Grok's rule for an end the
+  adapter wrote itself).*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

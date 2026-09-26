@@ -1221,7 +1221,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   and its session busy — the card, as any (a child's question on no turn), or full access's
   `once`; unlisted or its session idle (an older server's orphan) — no card, a reject on the wire,
   and no row when it closes. A read that fails shows the card: a reject would answer for the user,
-  and 1.18.32's `Permission.reply` rejects every other ask of that session with it.
+  and 1.18.32's `Permission.reply` rejects every other ask of that session with it. (7) A child the
+  adapter closed itself (a Stop, a failed admission's abort, a failed turn: `closeLiveChildAgents`
+  marks `endedByAdapter`) that runs on — a `task_id` extension's child, a job started after the
+  abort listed the jobs — read "interrupted" and held no drain while it worked. The Grok rule now
+  applies: an end the adapter wrote is not the provider's word. A report of a live run (the child's
+  `busy`, a delta, a text part with no end, a running call, a reply not completed) asks the server
+  once the interrupts are over (`reportChildRun`, `judgeChildSurvival`, `settleChildSurvival`):
+  busy — its own start re-emitted, naming its own launch, which the roster reads as a late
+  delivery (it keeps the Stop's end, result included: first write wins) and liveness as live work;
+  its rows from there name no status (`revived`: `running` would reopen the row, `idle` flip it),
+  and its own idle and answer end it, once. Idle — the report was a cancelled run's last frames:
+  nothing, and only a `busy` asks again. The child's own idle voids a check in flight; a read that
+  fails revives (the drain outranks a duplicate row).
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

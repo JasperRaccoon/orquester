@@ -47,6 +47,7 @@ import {
   normalizeOpenCodeEvent,
   openHeldRequest,
   openPermissionCard,
+  settleChildSurvival,
   type NormalizeContext,
   type NormalizerSignal,
   type OpenCodeHeldRequest
@@ -769,6 +770,10 @@ export class OpenCodeThreadSession {
         void this.judgeHeldRequest(signal.held, signal.raw);
         return;
       }
+      case "child-reports-run": {
+        void this.judgeChildSurvival(signal.childId, signal.checkId);
+        return;
+      }
       default: {
         const exhaustive: never = signal;
         void exhaustive;
@@ -1289,12 +1294,7 @@ export class OpenCodeThreadSession {
           (rows) => (Array.isArray(rows) ? (rows as unknown[]) : undefined),
           () => undefined
         ),
-      this.client
-        .get<SessionStatusMap>(openCodeRoutes.sessionStatus, { timeoutMs: 2_000 })
-        .then(
-          (map) => (isRecord(map) ? map : undefined),
-          () => undefined
-        )
+      this.readSessionStatuses()
     ]);
     if (
       listed !== undefined &&
@@ -1302,14 +1302,40 @@ export class OpenCodeThreadSession {
     ) {
       return false;
     }
-    if (statuses !== undefined) {
-      // A missing entry IS idle (fixtures README observation 7).
-      const status = statuses[held.request.sessionID];
-      if (status === undefined || status.type === "idle") {
-        return false;
-      }
+    return statuses === undefined || runsIn(statuses, held.request.sessionID);
+  }
+
+  /**
+   * A child whose run the adapter ended reported that it goes on
+   * (`reportChildRun` in `normalize.ts`). Once every interrupt is over — the
+   * abort is what ends a child — the server says whether its session still
+   * runs, and check `checkId` settles it (`settleChildSurvival`): a survivor
+   * counts live again. A read that fails counts it live too: never let a
+   * deploy kill running work.
+   */
+  private async judgeChildSurvival(childId: string, checkId: number): Promise<void> {
+    await this.interruptsSettled();
+    if (this.closed) {
+      return;
     }
-    return true;
+    const statuses = await this.readSessionStatuses();
+    if (this.closed) {
+      return;
+    }
+    const running = statuses === undefined || runsIn(statuses, childId);
+    for (const event of settleChildSurvival(this.state, childId, checkId, running, this.normalizeContext())) {
+      this.emit(event);
+    }
+  }
+
+  /** `GET /session/status`, or `undefined` when the server cannot say. */
+  private async readSessionStatuses(): Promise<SessionStatusMap | undefined> {
+    return await this.client
+      .get<SessionStatusMap>(openCodeRoutes.sessionStatus, { timeoutMs: 2_000 })
+      .then(
+        (map) => (isRecord(map) ? map : undefined),
+        () => undefined
+      );
   }
 
   /** Release a request nobody will answer: a permission `reject`, a question's reject route. */
@@ -2314,6 +2340,15 @@ export class OpenCodeThreadSession {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Whether `sessionId` runs, by `GET /session/status`: an idle session is simply
+ * absent from the map (fixtures README observation 7); `busy` and `retry` run.
+ */
+function runsIn(statuses: SessionStatusMap, sessionId: string): boolean {
+  const status = statuses[sessionId];
+  return status !== undefined && status.type !== "idle";
+}
 
 function addRelated(state: OpenCodeSessionState, sessionId: string): void {
   state.relatedSessionIds.add(sessionId);

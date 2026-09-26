@@ -249,6 +249,11 @@ class FakeOpenCode {
     if (sent !== undefined) {
       return Promise.resolve(sent);
     }
+    return this.nextRequest(method, suffix);
+  }
+
+  /** Settles with the next request matching `method` and `suffix` sent from now on. */
+  nextRequest(method: string, suffix: string): Promise<RecordedRequest> {
     return new Promise((resolve) => {
       this.requestWaiters.push({ method, suffix, arrived: resolve });
     });
@@ -1966,6 +1971,15 @@ function taskEnds(events: readonly RuntimeEvent[]): string[] {
   );
 }
 
+/**
+ * One turn of the event loop: whatever the session queued — a promise chain
+ * with nothing left to wait on, the fake server's answers — has run. How a
+ * test that asserts something did NOT happen gets there without a clock.
+ */
+function nextTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 test("a background child outlives its launching turn's failure — running in the roster and in liveness — and ends by its own idle and answer", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
@@ -2040,6 +2054,239 @@ test("a Stop closes every child — a background one too: the abort cancels its 
   await session.interruptTurn(turn.turnId);
   assert.deepEqual(taskEnds(harness.events).sort(), ["ses_bg:stopped:interrupted", "ses_fg:stopped:interrupted"]);
   assert.equal(session.hasLiveSubagents(), false);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// A child the Stop closed that runs on (README observation 29)
+// ---------------------------------------------------------------------------
+
+/** A background child launched in a turn, then the user's Stop, which closes it. */
+async function stoppedWithChild(harness: Harness): Promise<{ session: OpenCodeThreadSession; sessionId: string }> {
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+  const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
+    messageID: string;
+  }).messageID;
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: promptId, role: "user", sessionID: sessionId } } },
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    ...childLaunch({ sessionId, childId: "ses_bg", callId: "call_bg", description: "list files", background: true })
+  ]);
+  await waitFor(harness, "task.started", (event) => event.agentId === "ses_bg");
+  await session.interruptTurn(turn.turnId);
+  assert.deepEqual(taskEnds(harness.events), ["ses_bg:stopped:interrupted"], "the Stop closed it, on the adapter's word");
+  return { session, sessionId };
+}
+
+/** The child's reply streaming: its assistant message, a text part, a delta. */
+function childStreams(childId: string, text: string): unknown[] {
+  return [
+    { type: "message.updated", properties: { sessionID: childId, info: { id: "msg_child_reply", role: "assistant", sessionID: childId } } },
+    {
+      type: "message.part.updated",
+      properties: { sessionID: childId, part: { id: "prt_child_text", messageID: "msg_child_reply", sessionID: childId, type: "text", text: "", time: { start: 1 } } }
+    },
+    { type: "message.part.delta", properties: { sessionID: childId, messageID: "msg_child_reply", partID: "prt_child_text", field: "text", delta: text } }
+  ];
+}
+
+/** The next `task.started` for `agentId` the session emits from now on — none before counts. */
+function nextStartOf(harness: Harness, agentId: string): Promise<Extract<RuntimeEvent, { type: "task.started" }>> {
+  const earlier = new Set<RuntimeEvent>(harness.events);
+  return waitFor(harness, "task.started", (event) => event.agentId === agentId && !earlier.has(event));
+}
+
+/** The liveness registry the host keeps, fed every event the session emitted. */
+function livenessOf(harness: Harness): ReturnType<typeof createLivenessRegistry> {
+  const liveness = createLivenessRegistry({ clock: harness.ctx.clock });
+  for (const event of harness.events) liveness.observe(event);
+  return liveness;
+}
+
+test("a child that survives the Stop counts live again: its own start re-emitted — the roster keeps the Stop's end — and its own idle and answer end it, once", async () => {
+  const harness = makeHarness();
+  // The abort never reaches it (a `task_id` extension's run, a job started
+  // after the abort listed the jobs): the server still runs it after.
+  harness.fake.statusMap = { ses_bg: { type: "busy" } };
+  const { session, sessionId } = await stoppedWithChild(harness);
+  assert.equal(livenessOf(harness).liveness("thread-1"), null, "closed, it held no drain");
+
+  const revival = nextStartOf(harness, "ses_bg");
+  pushAll(harness.fake, childStreams("ses_bg", "a.ts, README.md"));
+  const revived = await revival;
+  assert.equal(revived.payload.toolUseId, "call_bg", "its own start, naming its own launch");
+  assert.equal(session.hasLiveSubagents(), true);
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working", "it holds a deploy's drain again");
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  const afterRevival = host.fold().roster.find((row) => row.id === "ses_bg");
+  assert.equal(afterRevival?.status, "interrupted", "a late delivery to the roster: the Stop's end stays");
+
+  // Its run calls a tool, ends, and its answer reaches the parent (the Stop's
+  // leftovers still linger there: no new run has said busy).
+  const fed = harness.events.length;
+  pushAll(harness.fake, [
+    {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_bg",
+        part: {
+          id: "prt_child_tool",
+          messageID: "msg_child_reply",
+          sessionID: "ses_bg",
+          type: "tool",
+          tool: "bash",
+          callID: "call_child_ls",
+          state: { status: "running", title: "ls", input: { command: "ls" }, metadata: { output: "" }, time: { start: 1 } }
+        }
+      }
+    },
+    ...runSettles("ses_bg"),
+    ...injectedAnswer({ sessionId, promptId: "msg_answer", childId: "ses_bg", answer: "Found README.md.", description: "list files" })
+  ]);
+  await waitFor(harness, "task.completed", (event) => {
+    const completed = event as Extract<RuntimeEvent, { type: "task.completed" }>;
+    return completed.payload.taskId === "ses_bg" && completed.payload.summary === "Found README.md.";
+  });
+  assert.deepEqual(taskEnds(harness.events.slice(fed)), ["ses_bg:completed", "ses_bg:completed:Found README.md."]);
+  const statuses = harness.events
+    .slice(fed)
+    .filter((event) => event.type === "task.updated" || event.type === "task.progress")
+    .map((event) => ("status" in event.payload ? event.payload.status : undefined));
+  assert.ok(statuses.length > 0, "its call reported progress");
+  assert.deepEqual(
+    statuses.filter((status) => status !== undefined),
+    [],
+    "a revived run's rows name no status, which would reopen or flip the roster's row"
+  );
+  assert.equal(livenessOf(harness).liveness("thread-1"), null, "its own end drops it");
+  await host.ingest(harness.events.slice(fed));
+  const end = host.fold().roster.find((row) => row.id === "ses_bg");
+  assert.deepEqual(
+    [end?.status, end?.result],
+    ["interrupted", "interrupted"],
+    "the roster keeps the Stop's end whole — its first terminal write wins; the answer is the log's result row"
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a child the Stop ended sends its leftovers: the server says it runs nothing, and it stays ended", async () => {
+  const harness = makeHarness();
+  const { session } = await stoppedWithChild(harness);
+  const fed = harness.events.length;
+  const statusReads = (): number =>
+    harness.fake.requests.filter((request) => request.method === "GET" && request.path === "/session/status").length;
+  const readsBefore = statusReads();
+  // Its run's last frames, published before its cancel, reach the stream late.
+  const asked = harness.fake.nextRequest("GET", "/session/status");
+  pushAll(harness.fake, [
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "busy" } } },
+    ...childStreams("ses_bg", "a.ts")
+  ]);
+  await asked;
+  await nextTurn();
+  assert.equal(statusReads() - readsBefore, 1, "one question for the whole burst");
+  // Told it runs nothing, more of its text asks nothing more; a `busy` asks again.
+  pushAll(harness.fake, [
+    { type: "message.part.delta", properties: { sessionID: "ses_bg", messageID: "msg_child_reply", partID: "prt_child_text", field: "text", delta: ", b.ts" } }
+  ]);
+  await drainedWith(harness, session.sessionId, "after another leftover");
+  assert.equal(statusReads() - readsBefore, 1);
+  const askedAgain = harness.fake.nextRequest("GET", "/session/status");
+  harness.fake.push({ type: "session.status", properties: { sessionID: "ses_bg", status: { type: "busy" } } });
+  await askedAgain;
+  await nextTurn();
+  assert.equal(statusReads() - readsBefore, 2);
+  pushAll(harness.fake, [
+    { type: "session.error", properties: { sessionID: "ses_bg", error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: "ses_bg" } }
+  ]);
+  await drainedWith(harness, session.sessionId, "after the leftovers");
+  assert.deepEqual(
+    harness.events.slice(fed).filter((event) => event.type.startsWith("task.")),
+    [],
+    "no start, no end: it stays ended on the Stop's word"
+  );
+  assert.equal(livenessOf(harness).liveness("thread-1"), null);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a child the Stop closed that reports while the server cannot say counts live again: the drain outranks a duplicate row", async () => {
+  const harness = makeHarness();
+  const { session } = await stoppedWithChild(harness);
+  harness.fake.overrides.set("GET /session/status", () => new Response("boom", { status: 500 }));
+  const revival = nextStartOf(harness, "ses_bg");
+  pushAll(harness.fake, childStreams("ses_bg", "a.ts"));
+  await revival;
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a report from a child the Stop closed, arriving while a later Stop is under way, is judged after that Stop: its abort may end the child", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await stoppedWithChild(harness);
+  // Until the second Stop's abort, the child runs; that abort cancels it.
+  harness.fake.statusMap = { ses_bg: { type: "busy" } };
+  const abortSent = deferred<void>();
+  const abortAnswered = deferred<void>();
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, async () => {
+    abortSent.resolve();
+    await abortAnswered.promise;
+    harness.fake.statusMap = {};
+    return json(true);
+  });
+  const stopping = session.interruptTurn();
+  await abortSent.promise;
+  const readsBefore = harness.fake.requests.filter((request) => request.path === "/session/status").length;
+  const fed = harness.events.length;
+  pushAll(harness.fake, childStreams("ses_bg", "a.ts"));
+  await drainedWith(harness, sessionId, "during the second Stop");
+  await nextTurn();
+  assert.equal(
+    harness.fake.requests.filter((request) => request.path === "/session/status").length,
+    readsBefore,
+    "no question to the server while the abort that may end the child is under way"
+  );
+  const asked = harness.fake.nextRequest("GET", "/session/status");
+  abortAnswered.resolve();
+  await stopping;
+  await asked;
+  await nextTurn();
+  assert.deepEqual(harness.events.slice(fed).filter((event) => event.type === "task.started"), [], "the abort ended it: no revival");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a child whose own idle arrives while the server is asked about it is not revived: that report was its last", async () => {
+  const harness = makeHarness();
+  const { session } = await stoppedWithChild(harness);
+  harness.fake.statusMap = { ses_bg: { type: "busy" } };
+  const asked = deferred<void>();
+  const answer = deferred<void>();
+  harness.fake.overrides.set("GET /session/status", async () => {
+    asked.resolve();
+    await answer.promise;
+    return json(harness.fake.statusMap);
+  });
+  const fed = harness.events.length;
+  pushAll(harness.fake, childStreams("ses_bg", "a.ts"));
+  await asked.promise;
+  pushAll(harness.fake, [
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: "ses_bg" } }
+  ]);
+  await drainedWith(harness, session.sessionId, "after its idle");
+  answer.resolve();
+  await nextTurn();
+  assert.deepEqual(harness.events.slice(fed).filter((event) => event.type.startsWith("task.")), []);
+  assert.equal(livenessOf(harness).liveness("thread-1"), null);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
