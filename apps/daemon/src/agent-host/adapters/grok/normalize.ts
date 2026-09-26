@@ -3129,10 +3129,16 @@ export class GrokNormalizer {
   }
 
   /** `_x.ai/ask_user_question` → `user-input.requested`. */
+  /**
+   * `turnId`: the turn the question's rows ride, stamped once by the session
+   * so the request and its resolution agree — `null` for none at all, never
+   * the open turn (`GrokSession.questionTurnId`).
+   */
   userInputRequested(input: {
     requestId: string;
     params: XaiAskUserQuestionParams;
     raw: RuntimeEventRaw;
+    turnId?: string | null;
   }): RuntimeEvent {
     const questions: UserInputQuestion[] = input.params.questions.map((question) => ({
       // The question carries NO `id` on this CLI, so the text is the only key
@@ -3152,15 +3158,15 @@ export class GrokNormalizer {
     const base = this.event(
       "user-input.requested",
       { questions, dismissible: false },
-      undefined,
+      input.turnId ?? undefined,
       input.raw
     );
-    return { ...base, requestId: input.requestId };
+    return ridingTurn({ ...base, requestId: input.requestId }, input.turnId);
   }
 
-  userInputResolved(requestId: string, answers: Record<string, unknown>): RuntimeEvent {
-    const base = this.event("user-input.resolved", { answers });
-    return { ...base, requestId: requestId };
+  userInputResolved(requestId: string, answers: Record<string, unknown>, turnId?: string | null): RuntimeEvent {
+    const base = this.event("user-input.resolved", { answers }, turnId ?? undefined);
+    return ridingTurn({ ...base, requestId: requestId }, turnId);
   }
 
   // ---------------------------------------------------------------- turns
@@ -3243,6 +3249,15 @@ export class GrokNormalizer {
       payload
     } as RuntimeEvent;
   }
+}
+
+/** An event on the turn given — with `null`, on none at all, whatever turn is open. */
+function ridingTurn(event: RuntimeEvent, turnId: string | null | undefined): RuntimeEvent {
+  if (turnId !== null) {
+    return event;
+  }
+  const { turnId: _open, ...turnless } = event;
+  return turnless as RuntimeEvent;
 }
 
 /** `killed`→`cancelled`, `paused`→`idle`, normalised at the adapter (§4.2). */

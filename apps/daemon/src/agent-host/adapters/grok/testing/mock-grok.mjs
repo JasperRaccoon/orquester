@@ -173,6 +173,12 @@ function handle(frame) {
   }
   const { id, method, params } = frame;
 
+  // The adapter's answer to `_x.ai/ask_user_question`, likewise.
+  if (method === undefined && id === QUESTION_REQUEST_ID && frame.result !== undefined) {
+    questionAnswer = frame.result;
+    return;
+  }
+
   // The adapter's reply to `session/request_permission` is an ordinary
   // response frame travelling the other way down the same pipe.
   if (method === undefined && id === pendingPermissionId && frame.result !== undefined) {
@@ -604,6 +610,70 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "wake-question") {
+    // The CLI finished our prompt and runs one of its own, which asks the user
+    // a question (fixture 07b's request) before our RPC result went out —
+    // fixture 20's window. Our prompt is answered while the question waits;
+    // the wake goes on once the question is answered.
+    sendTogether([
+      chunkFrame("ours;", promptId),
+      turnCompletedFrame(promptId),
+      announceFrame(WAKE_ID),
+      questionRequestFrame(sessionId)
+    ]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    await waitFor(() => questionAnswer !== null);
+    sendTogether([chunkFrame(`answered:${JSON.stringify(questionAnswer.answers)};`, WAKE_ID), turnCompletedFrame(WAKE_ID)]);
+    return;
+  }
+
+  if (scenario === "child-question") {
+    // A subagent's child session asks the user while our prompt runs: the
+    // request names the CHILD's session. Our prompt goes on once answered.
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "one;" } },
+      _meta: { totalTokens: 1700, promptId }
+    });
+    send(questionRequestFrame(CHILD_SESSION_ID));
+    await waitFor(() => questionAnswer !== null);
+    sendTogether([chunkFrame("two;", promptId), turnCompletedFrame(promptId)]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "wake-auto-permission") {
+    // A waiting wake's tool asks for permission — under full-access, answered
+    // by the adapter itself, no card — while our RPC result is still out.
+    sendTogether([
+      chunkFrame("ours;", promptId),
+      turnCompletedFrame(promptId),
+      announceFrame(WAKE_ID),
+      chunkFrame("w1;", WAKE_ID),
+      {
+        jsonrpc: "2.0",
+        id: 9100,
+        method: "session/request_permission",
+        params: {
+          sessionId,
+          toolCall: { toolCallId: "call-w-1", kind: "execute", title: "Run `ls`", rawInput: { command: "ls" } },
+          options: [
+            { optionId: "allow-once", name: "Yes", kind: "allow_once" },
+            { optionId: "reject-once", name: "No", kind: "reject_once" }
+          ]
+        }
+      },
+      chunkFrame("w2;", WAKE_ID),
+      turnCompletedFrame(WAKE_ID),
+      readMarkerFrame()
+    ]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
   if (scenario === "wake-spawn-reorder") {
     // A woken parent spawns a subagent while our RPC result is still out, as
     // fixture 16's parent does: the call names the wake, and the
@@ -746,6 +816,35 @@ async function runPrompt(id, params) {
 /** The CLI's own prompt the wake scenarios run: a background agent's end (fixture 16). */
 const WAKE_ID = "subagent-completed-01a0d90e-56c2-78d2-9a27-2d007429d073";
 let firstPromptAnswered = false;
+
+/** A subagent's child session (`subagent_spawned.child_session_id`). */
+const CHILD_SESSION_ID = "01a0d90e-56c2-78d2-9a27-2d007429d0bb";
+const QUESTION_REQUEST_ID = 7100;
+let questionAnswer = null;
+
+/** Fixture 07b's `_x.ai/ask_user_question`, asked in `inSession`. */
+function questionRequestFrame(inSession) {
+  return {
+    jsonrpc: "2.0",
+    id: QUESTION_REQUEST_ID,
+    method: "_x.ai/ask_user_question",
+    params: {
+      sessionId: inSession,
+      toolCallId: "call-q-1",
+      questions: [
+        {
+          question: "alpha or beta?",
+          options: [
+            { label: "alpha", description: "Name it alpha" },
+            { label: "beta", description: "Name it beta" }
+          ],
+          multiSelect: null
+        }
+      ],
+      mode: "default"
+    }
+  };
+}
 
 /** A prompt the CLI starts itself, announced as fixture 20 records it: never listed in `entries`. */
 function announceFrame(wake) {

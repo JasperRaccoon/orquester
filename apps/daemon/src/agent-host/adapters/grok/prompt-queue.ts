@@ -112,7 +112,7 @@ interface PendingWake {
   finished: boolean;
   /**
    * Its frames stopped waiting: they joined the open turn, in order (too many
-   * held, or a request the user must see now). It still gets a turn of its
+   * held, or a card opening on that turn). It still gets a turn of its
    * own when that turn settles, for whatever it streams after — unless it
    * finished before, when there is nothing left to give one.
    */
@@ -262,9 +262,10 @@ export interface WakeOptions {
  * **A held frame is never discarded.** When a waiting prompt can no longer
  * get its own turn, or its frames can wait no longer, what is held joins the
  * open turn, in order — merged, but kept:
- * - too many held ({@link HELD_FRAMES_MAX}) or a request the user must see now
- *   ({@link merge}): the waiting prompts keep a turn of their own for what
- *   they stream after the open one settles, unless they finished by then;
+ * - too many held ({@link HELD_FRAMES_MAX}), or a card opening on the open
+ *   turn — the session's call ({@link merge}): the waiting prompts keep a
+ *   turn of their own for what they stream after the open one settles,
+ *   unless they finished by then;
  * - a cancel ({@link cancelEnds}): the newest waiting prompt still running
  *   ends with it, and gets no turn;
  * - our own prompt running ({@link queueChanged}): every waiting prompt is
@@ -292,6 +293,15 @@ export class GrokWakes {
   /** How many frames wait for a turn. */
   get heldFrames(): number {
     return this.held.length;
+  }
+
+  /**
+   * Whether the prompt the CLI runs now is one of its own still waiting for
+   * a turn — it runs one prompt at a time, so a waiting prompt that has not
+   * finished is the one running (fixture 20's window, while ours settles).
+   */
+  waitingPromptRuns(): boolean {
+    return this.queue.newestRunning() !== undefined;
   }
 
   /** One `_x.ai/queue/changed` of the parent session. */

@@ -1029,6 +1029,58 @@ test("an exit with frames waiting for a wake's turn keeps them: they join the op
   await r.dispose();
 });
 
+test("a question the CLI's own prompt asks while our turn settles rides no turn — our turn's end cannot sweep it", async () => {
+  const r = await rig({ scenario: "wake-question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the wake's question");
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  assert.equal(asked.turnId, undefined, "never our turn: the host dismisses a turn's questions when it ends, and the CLI would wait on");
+  await r.adapter.respondToUserInput("t1", asked.requestId!, { "alpha or beta?": ["alpha"] });
+  const woken = await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    "the wake's own turn's end"
+  );
+  await r.drain();
+  const resolved = r.events.find((event) => event.type === "user-input.resolved");
+  assert.equal(resolved?.turnId, undefined, "its resolution rides no turn either");
+  assert.equal(
+    turnText(r.events, woken.turnId),
+    'answered:{"alpha or beta?":["alpha"]};',
+    "the answer reached the CLI, and the wake went on in its own turn"
+  );
+  await r.dispose();
+});
+
+test("a subagent's child session's question rides no turn, as Codex's does", async () => {
+  const r = await rig({ scenario: "child-question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the child's question");
+  assert.equal(asked.turnId, undefined);
+  await r.adapter.respondToUserInput("t1", asked.requestId!, { "alpha or beta?": ["beta"] });
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "one;two;");
+  assert.equal(r.events.find((event) => event.type === "user-input.resolved")?.turnId, undefined);
+  await r.dispose();
+});
+
+test("a request answered without a card leaves a waiting wake's frames waiting for its own turn", async () => {
+  const r = await rig({ scenario: "wake-auto-permission" });
+  await start(r, { runtimeMode: "full-access" });
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const woken = await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    "the wake's own turn's end"
+  );
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "ours;");
+  assert.equal(turnText(r.events, woken.turnId), "w1;w2;", "no card, so nothing to put the wake's frames in order before");
+  assert.equal(r.events.some((event) => event.type === "request.opened"), false);
+  await r.dispose();
+});
+
 test("a woken parent's spawn is one agent, launched by its call: its subagent_spawned waits behind it", async () => {
   const r = await rig({ scenario: "wake-spawn-reorder" });
   await start(r);

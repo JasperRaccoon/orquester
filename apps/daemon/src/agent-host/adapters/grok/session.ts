@@ -180,6 +180,8 @@ interface PendingApproval {
 
 interface PendingUserInput {
   readonly params: XaiAskUserQuestionParams;
+  /** The turn its rows ride, stamped once ({@link GrokSession.questionTurnId}); `null` for none. */
+  readonly turnId: string | null;
   resolve(answers: Record<string, unknown> | null): void;
 }
 
@@ -602,7 +604,6 @@ export class GrokSession {
   // ------------------------------------------------------------- approvals
 
   private async onPermissionRequest(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-    this.wakes.merge("a request the user must answer arrived");
     const requestType = permissionRequestType(params.toolCall);
     const grantKey = approvalGrantKey(params.toolCall);
 
@@ -622,6 +623,14 @@ export class GrokSession {
         return { outcome: { outcome: "selected", optionId } };
       }
       // No usable option: fall through and ask rather than cancel.
+    }
+
+    // A card, in order behind what the CLI streamed before it: the frames
+    // held for a prompt of its own waiting for a turn join the open turn
+    // first. Only for a request of the parent's — a child session's has
+    // nothing to do with them — and never for one answered without a card.
+    if (this.isParentSession(params.sessionId)) {
+      this.wakes.merge("a request the user must answer arrived");
     }
 
     const requestId = this.options.uuid();
@@ -663,15 +672,19 @@ export class GrokSession {
   // --------------------------------------------------------------- questions
 
   private async onAskUserQuestion(params: XaiAskUserQuestionParams): Promise<unknown> {
-    this.wakes.merge("a question the user must answer arrived");
+    const turnId = this.questionTurnId(params);
+    if (turnId !== null) {
+      this.wakes.merge("a question the user must answer arrived");
+    }
     const requestId = this.options.uuid();
     const pending = deferred<Record<string, unknown> | null>();
-    this.pendingUserInputs.set(requestId, { params, resolve: pending.resolve });
+    this.pendingUserInputs.set(requestId, { params, turnId, resolve: pending.resolve });
 
     this.emitEvent(
       this.normalizer.userInputRequested({
         requestId,
         params,
+        turnId,
         raw: {
           source: XAI_RAW_SOURCE,
           method: XAI_EXTENSION_REQUESTS.ask_user_question,
@@ -682,9 +695,31 @@ export class GrokSession {
 
     const answers = await pending.promise;
     this.pendingUserInputs.delete(requestId);
-    this.emitEvent(this.normalizer.userInputResolved(requestId, answers ?? {}));
+    this.emitEvent(this.normalizer.userInputResolved(requestId, answers ?? {}, turnId));
 
     return answers === null ? { outcome: "cancelled" } : answersToXaiResponse(params, answers);
+  }
+
+  /**
+   * The turn a question's rows ride — Codex's `questionTurnId` rule. A turn's
+   * end dismisses every question on it, in the log only, never answering the
+   * adapter (`settleStrandedQuestions` in the orchestrator, §6.2: there the
+   * provider's request died with its turn). So a question whose asker
+   * outlives the open turn rides NONE, and is answered or cancelled like any
+   * other card (a Stop, the exit, a host's first load settle it):
+   * - one the CLI's own prompt asks while it waits for its turn — fixture
+   *   20's window, before our RPC result: on our turn it was swept at our
+   *   turn's end while the CLI stayed blocked, and the wake's turn read
+   *   running with no card and no progress, holding a deploy's drain;
+   * - one a subagent's child session asks, whose run is not our turn's.
+   * Any other question rides the open turn — the wake's own, once its turn
+   * is open. Stamped once, so the request and its resolution agree.
+   */
+  private questionTurnId(params: XaiAskUserQuestionParams): string | null {
+    if (!this.isParentSession(params.sessionId) || this.wakes.waitingPromptRuns()) {
+      return null;
+    }
+    return this.activeTurn?.turnId ?? null;
   }
 
   respondToUserInput(requestId: string, answers: Record<string, unknown>): void {
@@ -1241,7 +1276,7 @@ export class GrokSession {
     for (const [requestId, pending] of [...this.pendingUserInputs.entries()]) {
       this.pendingUserInputs.delete(requestId);
       pending.resolve(null);
-      this.emitEvent(this.normalizer.userInputResolved(requestId, {}));
+      this.emitEvent(this.normalizer.userInputResolved(requestId, {}, pending.turnId));
     }
     await Promise.resolve();
   }
@@ -1386,7 +1421,7 @@ export class GrokSession {
     for (const [requestId, pending] of [...this.pendingUserInputs.entries()]) {
       this.pendingUserInputs.delete(requestId);
       pending.resolve(null);
-      this.emitEvent(this.normalizer.userInputResolved(requestId, {}));
+      this.emitEvent(this.normalizer.userInputResolved(requestId, {}, pending.turnId));
     }
 
     this.emitAll(this.normalizer.failOpenTools("The agent process exited."));
