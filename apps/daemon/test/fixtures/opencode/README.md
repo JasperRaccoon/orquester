@@ -33,7 +33,11 @@ scenario.
 
 ### What was redacted or trimmed
 
-- Every absolute path under this host's home is rewritten to `~`.
+- Every absolute path under this host's home is rewritten to `~` — in its **percent-encoded**
+  spelling too (`%2Fvar%2Flib%2F…`, either hex case), which every `?directory=` query uses for
+  the cwd. Missed by the plain-path rule until 2026-09-26; that export applied it to every file
+  (01–14), and nothing else in them changed. The adapter's own redactor (`support/stderr.ts`,
+  which `raw.ndjson` goes through) collapses both spellings as well.
 - API keys, tokens and email addresses are replaced with `<redacted>`.
 - **`GET /config` and `GET /config/providers` have their bodies replaced by a
   shape-only skeleton.** This host's real config carries MCP server credentials and
