@@ -421,3 +421,24 @@ describe("the viewer's reads, one at a time", () => {
     assert.equal(viewer.begin().aborted, false, "and the next read starts afresh");
   });
 });
+
+describe("an agent's launch prompt in the viewer (§7.6: 'Load the full prompt')", () => {
+  const start = (extra: Record<string, unknown>) =>
+    activity("task.started", { taskId: "a1", agentKind: "agent", title: "Find callers", ...extra }, { turnId: "t1" });
+
+  it("shows the prompt itself, never its launch row as JSON", () => {
+    const whole = "Find every caller of parse().\n".repeat(900);
+    assert.equal(fullOutputText(start({ prompt: whole })), whole);
+    assert.deepEqual(fullOutputNotes({ kind: "item", item: start({ prompt: whole }) }), []);
+  });
+
+  it("says when only the prompt's start was ever kept", () => {
+    const item = start({ prompt: "The start of it", promptTruncated: true });
+    assert.deepEqual(fullOutputNotes({ kind: "item", item }), ["Only the start of this prompt was kept."]);
+  });
+
+  it("a start with no prompt is its payload, as before", () => {
+    const item = start({});
+    assert.equal(fullOutputText(item), JSON.stringify(item.payload, null, 2));
+  });
+});

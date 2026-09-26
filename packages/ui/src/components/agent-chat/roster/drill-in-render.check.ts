@@ -296,5 +296,71 @@ assert.ok(failing.includes("boom: the approval could not be sent"), `a failed co
 assert.ok(failing.includes('aria-label="Dismiss"'), "and the banner can be dismissed there");
 assert.ok(!live.includes('aria-label="Dismiss"'), "no banner without an error");
 
+// ---------------------------------------------------------------------------
+// Its prompt at the top (§7.6): the launch's `payload.prompt`, the first row
+// ---------------------------------------------------------------------------
+
+const PROMPTED = "agent-prompted";
+/** A Claude launch: the PARENT's row, found by its task id — before any row of the agent's. */
+const LAUNCHED_AT = "2026-09-21T09:59:00.000Z";
+const promptedLaunch = (extra: Record<string, unknown>, id: string) =>
+  wireActivity(
+    "task.started",
+    { taskId: PROMPTED, agentKind: "agent", taskType: "subagent", toolUseId: `launch-${id}`, title: "Find callers", ...extra },
+    { id, tone: "info", createdAt: LAUNCHED_AT, updatedAt: LAUNCHED_AT }
+  );
+const promptedAgent = rosterRow(PROMPTED, {
+  title: "Find callers",
+  status: "completed",
+  result: "Found three callers of parse() in src/lib and one more in the test suite, which it mocks."
+});
+const answer = wireActivity(
+  "tool.completed",
+  { toolUseId: "grep-1", itemType: "command_execution", title: "grep", command: "grep -rn parse src", status: "completed" },
+  { agentId: PROMPTED, id: "grep-1" }
+);
+
+async function promptedDrillIn(items: ThreadItem[]): Promise<string> {
+  const sessionId = await seededThread({ items, roster: [promptedAgent] });
+  return render({ sessionId, agentId: PROMPTED, roster: [promptedAgent], bottomInset: 0, onBack: NOOP });
+}
+
+const prompted = await promptedDrillIn([
+  promptedLaunch({ prompt: "Find every caller of parse() and say which ones pass a buffer." }, "launch-a"),
+  answer
+]);
+const firstRowId = /data-timeline-row-id="([^"]+)"/.exec(prompted)?.[1];
+assert.equal(firstRowId, "agent-prompt:launch-a", `the prompt is the first row of the scroll: ${prompted}`);
+assert.ok(prompted.includes('data-agent-prompt="true"'), "rendered as the agent's prompt");
+assert.ok(prompted.includes("Find every caller of parse() and say which ones pass a buffer."));
+assert.ok(prompted.includes("rounded-2xl bg-neutral-800"), "in the user's bubble: to the agent it is its user turn");
+assert.ok(!prompted.includes("Rewind to here"), "read-only: a child rolls back nothing");
+
+// The line under the breadcrumb: one line, whatever it says, so nothing below it moves.
+const block = /<div class="shrink-0 border-b[^>]*><div[^>]*><p class="([^"]*)"( title="([^"]*)")?/.exec(prompted);
+assert.ok(block, "the activity line renders");
+assert.ok(block[1]!.split(" ").includes("truncate"), `one line, truncated: ${block[1]}`);
+assert.equal(block[3], promptedAgent.result, "the whole line is its tooltip");
+assert.ok(!block[1]!.includes("whitespace-pre-wrap"), "never a block that wraps and shifts the rows");
+
+const longPrompt = `${"Trace every call site of parse(), then read each caller's tests. ".repeat(20)}`;
+const long = await promptedDrillIn([promptedLaunch({ prompt: longPrompt }, "launch-long")]);
+assert.ok(long.includes("Show full prompt"), "a long prompt collapses past a few lines");
+
+const wireCut = await promptedDrillIn([
+  promptedLaunch({ prompt: `${"x".repeat(20_000)}` }, "launch-wire")
+]);
+assert.ok(wireCut.includes("Load the full prompt"), "a prompt the wire cut reads whole with the item read");
+assert.ok(!wireCut.includes("Copy prompt"), "and hands over no cut text as if it were whole");
+assert.ok(prompted.includes("Copy prompt"), "a whole prompt copies");
+
+const restCut = await promptedDrillIn([
+  promptedLaunch({ prompt: "The start of a very long prompt", promptTruncated: true }, "launch-rest")
+]);
+assert.ok(restCut.includes("Only the start of this prompt was kept."), "a prompt cut at rest says so");
+
+const unprompted = await promptedDrillIn([promptedLaunch({}, "launch-none"), answer]);
+assert.ok(!unprompted.includes('data-agent-prompt="true"'), "no prompt on the launch, no prompt row");
+
 resetThreadStores();
 console.log("agent-chat drill-in render checks passed");

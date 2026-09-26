@@ -2,9 +2,11 @@
  * The subagent drill-in (§7.6).
  *
  * Clicking a roster row swaps the **main area** — not the whole view — to that
- * agent's own timeline: its prompt at the top, then its items filtered by
- * `agentId`, streaming live, rendered with the same row components, read-only,
- * with a breadcrumb and Escape back to main.
+ * agent's own timeline: its prompt at the top (the first row of the scroll,
+ * from its launch's `task.started`, `agent-prompt.logic.ts`), then its items
+ * filtered by `agentId`, streaming live, rendered with the same row
+ * components, read-only, with a breadcrumb and Escape back to main. Under the
+ * breadcrumb, one fixed line says what it is doing now, or how it ended.
  *
  * Two constraints shape the component:
  *
@@ -199,16 +201,21 @@ export function AgentDrillIn({
 
   const visuals = agent ? rosterRowVisual(agent) : null;
   const Icon = background ? Terminal : rosterRowIcon(agent ?? { kind: "subagent" });
-  // The agent's prompt is the task description the provider reported: the
-  // live/settled precedence of the roster's own activity line, so a settled
-  // child leads with its outcome here too. A shell's description is its title
-  // (the Bash call's own `description`), and the header already carries its
-  // state twice — the status chip and the metrics line — so the prompt block
-  // is the one place the full, untruncated description can live.
+  // The line under the breadcrumb: what the agent is doing now, or how it
+  // ended — the roster's own activity line, live/settled precedence and all.
+  // Its prompt is not here: that is the first row of the scroll, where a
+  // prompt of any length has room (`agent-prompt.logic.ts`). A shell's line
+  // is its description, its title (the Bash call's own `description`): the
+  // header already carries its state twice — the status chip and the
+  // metrics line. ONE line, whatever it says, with the whole of it as the
+  // tooltip: a line that wrapped as the activity changed moved every row
+  // below it.
   const description = background ? (agent?.title.trim() ?? "") : "";
   const activity = agent ? agentActivityText(agent) : null;
-  const prompt =
-    background && description.length > 0 && description !== agentId ? description : activity;
+  const line =
+    (background && description.length > 0 && description !== agentId ? description : activity) ??
+    visuals?.label ??
+    "";
   // The chip reads the shell's own state word — "Running", "Exited with code
   // 0" — rather than the agent vocabulary ("Working", "Completed"), which is
   // the same string its roster row shows. The DOT keeps the status colour and
@@ -254,8 +261,8 @@ export function AgentDrillIn({
       {agent ? (
         <div className="shrink-0 border-b border-neutral-800 px-3 py-2 sm:px-5">
           <div className="mx-auto w-full max-w-3xl">
-            <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-neutral-300">
-              {prompt ?? visuals?.label ?? ""}
+            <p className="truncate text-sm leading-relaxed text-neutral-300" title={line}>
+              {line}
             </p>
             <p className="ac-tabular mt-1 truncate font-mono text-[11px] text-neutral-500">
               {rosterRowMetrics(agent).join(" · ")}

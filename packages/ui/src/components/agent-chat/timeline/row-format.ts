@@ -7,6 +7,7 @@
  * import from this file; nothing here imports a component.
  */
 
+import { agentPromptOf } from "../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
 import { isCompactCommandMessage } from "./row-chrome";
 
@@ -25,7 +26,9 @@ export function rowBottomPadding(row: AgentChatTimelineRow): string {
   // A `/compact` submission renders as a marker, not a bubble (§4.6.5(b)), so
   // it takes the marker's spacing too — otherwise a hairline sits in a 16px
   // conversation gap and reads as a turn boundary.
-  if (row.kind === "message" && isCompactCommandMessage(row.message)) return "pb-2";
+  if (row.kind === "message" && isCompactCommandMessage(row.message) && agentPromptOf(row.message) === null) {
+    return "pb-2";
+  }
   if (row.kind === "work" && row.isExpandedToolGroup) return "pb-1";
   if ((row.kind === "work-toggle" || row.kind === "work-live") && row.expanded) return "pb-0";
   if (row.kind === "turn-fold" || row.kind === "working") return "pb-1.5";

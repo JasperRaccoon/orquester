@@ -51,6 +51,7 @@ import type {
   QueuedComposerMessage,
   WorkLogEntry
 } from "./contracts";
+import { agentPromptOf } from "./agent-prompt.logic";
 import { isStreamingMessageTextUpdate, type TimelineEntry } from "./entries.logic";
 import {
   omitSupersededLifecycleMarkers,
@@ -1272,8 +1273,9 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     // ── Message ───────────────────────────────────────────────────────────
     const message = timelineEntry.message;
     // §4.6.5(b): the `/compact` the host persisted verbatim is rendered as the
-    // compaction marker, never as a bubble (fix-wave R2-4).
-    if (isCompactCommandMessage(message)) {
+    // compaction marker, never as a bubble (fix-wave R2-4). An agent's launch
+    // prompt is never the thread's command, whatever it says.
+    if (isCompactCommandMessage(message) && agentPromptOf(message) === null) {
       continue;
     }
     const stillInProgress =

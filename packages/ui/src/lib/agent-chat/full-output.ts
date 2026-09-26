@@ -168,6 +168,12 @@ export function fullOutputText(item: ThreadItem): string {
   if (item.kind === "message") {
     return item.text;
   }
+  // An agent's launch: its prompt is what the drill-in's "Load the full
+  // prompt" asked for, never the row it rides as JSON (§7.6).
+  const prompt = launchPrompt(item);
+  if (prompt !== null) {
+    return prompt.text;
+  }
   const stored = storedCommandOutput(item.activityKind, item.payload);
   if (stored?.whole === true) {
     return stored.text;
@@ -184,6 +190,17 @@ export function fullOutputText(item: ThreadItem): string {
   return json ?? item.summary;
 }
 
+/** An agent's launch prompt (`task.started`'s `payload.prompt`), and whether it was cut at rest. */
+function launchPrompt(item: ThreadItem): { text: string; cutAtRest: boolean } | null {
+  if (item.kind !== "activity" || item.activityKind !== "task.started") {
+    return null;
+  }
+  const payload = asRecord(item.payload);
+  return typeof payload?.prompt === "string"
+    ? { text: payload.prompt, cutAtRest: payload.promptTruncated === true }
+    : null;
+}
+
 /** The host's cap on a join, in the unit it is set in. */
 const CAP_LABEL = `${THREAD_ITEM_OUTPUT_MAX_BYTES / (1024 * 1024)} MiB`;
 
@@ -196,10 +213,18 @@ const CAP_LABEL = `${THREAD_ITEM_OUTPUT_MAX_BYTES / (1024 * 1024)} MiB`;
  * head its generic cut kept before its note, or the one-line preview a first
  * load's closer copied from an update — which
  * part, and how much, the viewer cannot tell, so the note says neither. An
- * item needs no note.
+ * item needs no note, but an agent's launch prompt ingestion cut at rest:
+ * only its start was ever kept, and the viewer says so.
  */
 export function fullOutputNotes(output: FullOutput): string[] {
   const notes: string[] = [];
+  if (output.kind === "item") {
+    // A prompt ingestion cut at rest: no read holds the rest.
+    if (launchPrompt(output.item)?.cutAtRest === true) {
+      notes.push("Only the start of this prompt was kept.");
+    }
+    return notes;
+  }
   if (output.kind === "kept") {
     notes.push("Only part of this output was kept.");
     return notes;

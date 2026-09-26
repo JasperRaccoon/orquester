@@ -691,6 +691,106 @@ describe("a drill-in's turn folds start open, and a collapse sticks (R4, S11)", 
   });
 });
 
+describe("its prompt at the top (§7.6): each launch's prompt heads the run it started", () => {
+  const launch = (id: string, at: number, prompt: string, toolUseId: string): ThreadItem =>
+    activity(
+      "task.started",
+      { taskId: "a1", agentKind: "agent", taskType: "subagent", title: "Find callers", toolUseId, prompt },
+      { id, turnId: "t1", tone: "info", createdAt: stamp(at) }
+    );
+  const call = (id: string, at: number, status: "inProgress" | "completed") =>
+    activity(
+      "tool.started",
+      { itemType: "command_execution", toolUseId: `call-${id}`, title: "grep", command: "grep parse", status },
+      { id, agentId: "a1", turnId: "t1", createdAt: stamp(at) }
+    );
+  const context = (status: RuntimeSubagentStatus) =>
+    messageStreamingContext({
+      head: head({ session: { status: "ready", activeTurnId: null } }),
+      roster: [{ id: "a1", status }]
+    });
+  const kinds = (rows: readonly AgentChatTimelineRow[]) => rows.map((row) => `${row.kind}:${row.id}`);
+
+  it("is the first row, a user turn with no rewind — the parent's launch row found by its task id", () => {
+    const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items: [
+        launch("start", 1, "Find every caller of parse().", "call-agent"),
+        message("assistant", "Three callers.", { id: "said", agentId: "a1", turnId: "t1", createdAt: stamp(3) })
+      ],
+      agentId: "a1",
+      messageStreaming: context("completed")
+    }).stable.result;
+    const first = rows[0];
+    assert.ok(first && first.kind === "message", kinds(rows).join(", "));
+    assert.equal(first.id, "agent-prompt:start");
+    assert.equal(first.message.role, "user");
+    assert.equal(first.message.text, "Find every caller of parse().");
+    assert.equal(first.revertTurnCount, undefined, "a child rolls back nothing");
+  });
+
+  it("heads a live agent's run: the working row follows the prompt", () => {
+    const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items: [launch("start", 1, "Find every caller of parse().", "call-agent"), call("c1", 2, "inProgress")],
+      agentId: "a1",
+      messageStreaming: context("running"),
+      agent: { startedAt: stamp(1) }
+    }).stable.result;
+    assert.deepEqual(kinds(rows).slice(0, 2), ["message:agent-prompt:start", "working:working-indicator-row"]);
+    const working = rows[1];
+    assert.equal(working?.kind === "working" ? working.createdAt : null, stamp(1), "timed from the launch");
+  });
+
+  it("a relaunch's prompt heads the current run; the run before it folds under its own prompt", () => {
+    const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items: [
+        launch("first", 1, "First task.", "call-1"),
+        activity(
+          "tool.completed",
+          { itemType: "command_execution", toolUseId: "call-c0", title: "ls", command: "ls", status: "completed" },
+          { id: "c0", agentId: "a1", turnId: "t0", createdAt: stamp(2) }
+        ),
+        message("assistant", "Done once.", { id: "once", agentId: "a1", turnId: "t0", createdAt: stamp(3) }),
+        launch("again", 10, "Now the second.", "call-2"),
+        call("c1", 11, "inProgress")
+      ],
+      agentId: "a1",
+      messageStreaming: context("running"),
+      agent: { startedAt: stamp(10) }
+    }).stable.result;
+    const ids = kinds(rows);
+    const at = (id: string) => ids.indexOf(id);
+    assert.ok(at("message:agent-prompt:first") === 0, ids.join(", "));
+    assert.ok(at("turn-fold:turn-fold:t0") > at("message:agent-prompt:first"), "the first run's fold, under its prompt");
+    assert.equal(at("working:working-indicator-row"), at("message:agent-prompt:again") + 1, "the current run's header");
+    assert.ok(at("message:agent-prompt:again") > at("message:once"));
+  });
+
+  it("a prompt is never mistaken for the thread's own `/compact`: it renders whatever it says", () => {
+    const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items: [launch("start", 1, "/compact", "call-agent")],
+      agentId: "a1",
+      messageStreaming: context("completed")
+    }).stable.result;
+    assert.deepEqual(kinds(rows), ["message:agent-prompt:start"]);
+  });
+
+  it("no prompt on the launch, no prompt row: the client never invents one", () => {
+    const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items: [
+        activity(
+          "task.started",
+          { taskId: "a1", agentKind: "agent", taskType: "subagent", title: "Find callers" },
+          { id: "start", turnId: "t1", tone: "info", createdAt: stamp(1) }
+        ),
+        message("assistant", "Three callers.", { id: "said", agentId: "a1", turnId: "t1", createdAt: stamp(3) })
+      ],
+      agentId: "a1",
+      messageStreaming: context("completed")
+    }).stable.result;
+    assert.ok(!rows.some((row) => row.kind === "message" && row.message.role === "user"), kinds(rows).join(", "));
+  });
+});
+
 describe("a drill-in holds its disclosure sets only while their members stay the same", () => {
   it("expanding one group in place of another re-derives the rows", () => {
     // Two activity groups, one per turn, each opened by a thought of the agent's.

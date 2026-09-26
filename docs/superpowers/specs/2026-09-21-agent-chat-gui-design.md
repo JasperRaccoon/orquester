@@ -4318,6 +4318,19 @@ child's words link to, a changed-file line and a diff heading open it as they do
 "Load full output" reads in the parent's viewer (`roster/drill-in-callbacks.ts`). The thread's error
 banner overlays the child's timeline as it does the thread's: the overlay stays live over a child,
 and its commands (approve, answer, dismiss, Stop, compact) report a failure only there.*
+*Built (2026-09-27, the client half of "its prompt at the top"): the prompt is the FIRST row of the
+drill-in's scroll — the launch's `task.started` `payload.prompt`, found by `payload.taskId` whoever
+owns the row (Claude's launch is the parent's) — rendered in the user's bubble under a "Prompt"
+caption, because to the agent it is its user turn; read-only, no rewind. Each relaunch that carries
+one adds a prompt row at its place, heading the run it started: the rows derivation times that run's
+fold from it and a live run's working row follows it (`lib/agent-chat/agent-prompt.logic.ts`). A long
+prompt clamps behind "Show full prompt"; one the wire cut (the item's `truncated`) reads whole in the
+parent's viewer ("Load the full prompt", `GET …/items/:itemId`, as "Load the full summary" does) and
+offers no Copy of the cut text; one ingestion cut at rest (`promptTruncated`) says only its start was
+kept. No prompt on the launch — an older log, a provider that reports none, a shell — no row: the
+client never invents one. The block under the breadcrumb is no longer the "prompt": it keeps the
+roster's live activity / outcome line at one fixed line with the whole of it as its tooltip, so its
+wrapping never moves the rows below.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

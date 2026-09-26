@@ -1,6 +1,7 @@
 import React from "react";
 
 import { cn } from "../../../lib/cn";
+import { agentPromptOf } from "../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
 import { isCompactCommandMessage } from "./row-chrome";
 import { rowBottomPadding } from "./row-format";
@@ -11,6 +12,7 @@ import {
   WorkToggleRow
 } from "./rows/ActivityRows";
 import {
+  AgentPromptRow,
   AssistantMessageRow,
   AssistantMetaRow,
   QueuedMessageRow,
@@ -41,7 +43,11 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
       return <TurnFoldRow row={row} />;
     case "context-compaction":
       return <CompactionRow row={row} />;
-    case "message":
+    case "message": {
+      // An agent's launch prompt at the head of its run (§7.6) — first, so a
+      // prompt reads as the prompt whatever it says.
+      const prompt = agentPromptOf(row.message);
+      if (prompt !== null) return <AgentPromptRow row={row} prompt={prompt} />;
       // §4.6.5(b): the submission is persisted verbatim as `/compact` and
       // **re-recognised at render time** so it reads as a compaction marker
       // rather than a literal slash-command bubble.
@@ -49,6 +55,7 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
       if (row.message.role === "user") return <UserMessageRow row={row} />;
       if (row.message.role === "reasoning") return <ReasoningRow row={row} />;
       return <AssistantMessageRow row={row} />;
+    }
     case "assistant-meta":
       return <AssistantMetaRow row={row} />;
     case "turn-diff":

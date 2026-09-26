@@ -245,7 +245,7 @@ assert.ok(drillIn.includes("Agents"), "the breadcrumb has a root");
 assert.ok(drillIn.includes("Back"));
 assert.ok(
   drillIn.includes("Reading src/index.ts"),
-  "the prompt block leads with what the provider reported the agent is doing"
+  "the line under the breadcrumb says what the provider reported the agent is doing"
 );
 assert.ok(
   drillIn.includes('data-agent-id="agent-1"'),

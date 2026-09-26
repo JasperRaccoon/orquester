@@ -1,8 +1,10 @@
 /**
  * Agent chat — the drill-in's rows: one subagent's own timeline (§7.6).
  *
- * Its items filtered by `agentId` (`itemsForAgent`), through the very same
- * three layers as the parent's timeline — entries, rows, stable rows — held
+ * Its items filtered by `agentId` (`itemsForAgent`), each launch's prompt at
+ * its place (`drillInItems`, `agent-prompt.logic.ts` — "its prompt at the
+ * top"), through the very same three layers as the parent's timeline —
+ * entries, rows, stable rows — held
  * between renders so a streamed token in the child's timeline changes one row
  * object, exactly as in the parent. `useAgentChatDrillIn` (hooks.ts) holds the
  * projection; this is the derivation, so it is testable without a renderer.
@@ -29,10 +31,10 @@
 
 import type { MessageStreamingContext, RuntimeSubagent, ThreadItem } from "@orquester/api/agent-chat";
 
+import { agentPromptOf, drillInItems } from "./agent-prompt.logic";
 import {
   deriveTimelineEntriesFromItems,
   EMPTY_TIMELINE_PROJECTION,
-  itemsForAgent,
   type ThreadTimelineProjection,
   type TimelineEntry
 } from "./entries.logic";
@@ -163,13 +165,16 @@ export function latestLaunchAt(items: readonly ThreadItem[], agentId: string): s
 
 /**
  * Where a live agent's current run begins in its entries: the first row at or
- * after the run's start. Nothing known of the start — every row is the run.
+ * after the run's start that is not a launch's prompt — the prompt heads the
+ * run, so its working row follows it. Nothing known of the start — every row
+ * is the run.
  */
 export function agentRunStart(entries: readonly TimelineEntry[], runStartedAt: string | null): number {
-  if (runStartedAt === null) {
-    return 0;
-  }
-  const at = entries.findIndex((entry) => entry.createdAt >= runStartedAt);
+  const at = entries.findIndex(
+    (entry) =>
+      (runStartedAt === null || entry.createdAt >= runStartedAt) &&
+      !(entry.kind === "message" && agentPromptOf(entry.message) !== null)
+  );
   return at < 0 ? entries.length : at;
 }
 
@@ -183,7 +188,8 @@ export function projectAgentDrillIn(
   // agent's projection as the fast path's baseline.
   const held = previous.agentId === agentId ? previous : null;
   const timeline = deriveTimelineEntriesFromItems(
-    itemsForAgent(input.items, agentId),
+    // Its own items, each launch's prompt at its place (`agent-prompt.logic.ts`).
+    drillInItems(input.items, agentId),
     held?.timeline ?? null,
     // The agent's own rows are agent-internal to the parent, not to itself.
     { ownerAgentId: agentId }
