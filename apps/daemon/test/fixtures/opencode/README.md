@@ -720,6 +720,11 @@ What the normaliser makes of it (`linkChildFromTaskPart`):
 - Any other part whose `callID` is not the child's current launch — a frame of any call
   seen for it before (an earlier launch, a call handed over while it worked), a call on a
   child that is still working — emits no task row: it can neither start a run nor end one.
+- A child no part named before its own frames started it has no known launch to compare a
+  call with, but the call that launches a child creates it and names no `task_id`: a part
+  whose `task_id` names the child is never its launch. Settled, the child is relaunched by
+  it, as above; still working, the call is handed over — no row, and never taken for its
+  launch, so its rows never name that call.
 - A `completed` part with `metadata.background: true` does not settle the child.
 
 A capture of a real `task_id` resume would confirm the frame order; none has been made.

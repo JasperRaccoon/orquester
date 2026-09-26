@@ -1400,16 +1400,24 @@ function linkChildFromTaskPart(
   }
   addRelatedSession(state, childId);
 
-  // A call that is not the one this child's run was launched by. A live part
-  // of a call never seen before, on a SETTLED child, is a relaunch: the run
-  // reopens under the new call, and the tail below emits its start — whose
+  // A call that is not the one this child's run was launched by: another
+  // call than its known launch — or, for a child no part named before its own
+  // frames started it, a call naming it as the task to RESUME (`task_id`),
+  // since the call that launches a child creates it and names none. A live
+  // part of a call never seen before, on a SETTLED child, is a relaunch: the
+  // run reopens under the new call, and the tail below emits its start — whose
   // changed `toolUseId` is what reopens a terminal roster row — before any row
   // of the new run. Anything else is not this run's — a stale frame of an
   // earlier call, or a second call on a child that is still working, which
   // 1.18.32 hands to the running job and answers at once — and emits no task
-  // row, so it can never end the run.
+  // row, so it can never end the run, nor is it ever taken for its launch.
   const known = state.childAgents.get(childId);
-  if (known !== undefined && known.toolUseId !== undefined && known.toolUseId !== part.callID) {
+  const notItsLaunch =
+    known !== undefined &&
+    (known.toolUseId !== undefined
+      ? known.toolUseId !== part.callID
+      : resumedTaskId(part) === childId);
+  if (known !== undefined && notItsLaunch) {
     const live = part.state.status === "pending" || part.state.status === "running";
     const settled = known.completed || known.lastStatus === "idle";
     const earlier = known.seenCallIds?.has(part.callID) === true;
@@ -1481,6 +1489,12 @@ function linkChildFromTaskPart(
     return;
   }
   emitTaskProgress(state, agent, raw, out, { status: "running" });
+}
+
+/** The child a `task` call resumes (its `task_id`), or nothing for a launch. */
+function resumedTaskId(part: Extract<OpenCodePart, { type: "tool" }>): string | undefined {
+  const input = isRecord(part.state.input) ? part.state.input : undefined;
+  return typeof input?.task_id === "string" ? input.task_id : undefined;
 }
 
 /**

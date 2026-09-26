@@ -1692,6 +1692,81 @@ test("a child whose own frames beat its launching part names the provider's call
   assert.equal(roster.find((row) => row.id === "ses_background_child")?.status, "running", "reopened");
 });
 
+/** Fixture 12's parent session, fresh: no frame of the capture replayed yet. */
+function freshChildParent(): Pick<Replay, "state" | "ctx"> {
+  const parent = sessionIds(readFixture(CHILD_FIXTURE))[2];
+  assert.ok(parent !== undefined);
+  return liveSession(parent);
+}
+
+/** A `task` part frame whose call names `childId` as the task to resume (`task_id`). */
+function resumingTask(frame: OpenCodeRawEvent, childId: string): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: { input?: Record<string, unknown> } } };
+  };
+  copy.properties.part.state.input = { ...(copy.properties.part.state.input ?? {}), task_id: childId };
+  return copy as unknown as OpenCodeRawEvent;
+}
+
+test("a child no part ever named, resumed by a `task_id` call once settled, is relaunched: a start naming the call, running, then completed with its answer", async () => {
+  const run = freshChildParent();
+  // Fixture 12's child with its launching part never read: its own frames
+  // start it under its own launch id, and its idle settles it.
+  const [created] = childFixtureFrames([141]);
+  assert.ok(created);
+  const first = feed(run, [created, ...childFixtureFrames([148, 177, 178, 179])]).flat();
+  assert.deepEqual(taskRows(first), ["task.started", "task.updated:running", "task.updated:idle", "task.completed:completed"]);
+  assert.deepEqual(
+    eventsOfType(first, "task.started").map((event) => event.payload.toolUseId),
+    [`opencode-child:${CHILD_SESSION_ID}`]
+  );
+
+  // A `task` call resuming it (`task_id`): a new run, which the roster reopens for.
+  const resume = resumeFrames("call_resume");
+  const relaunch = feed(run, [resume.pending, resumingTask(resume.running, CHILD_SESSION_ID)]).flat();
+  assert.deepEqual(
+    eventsOfType(relaunch, "task.started").map((event) => event.payload.toolUseId),
+    ["call_resume"],
+    "a relaunch, not the first launch's late part"
+  );
+  const rest = feed(run, [...resume.work, ...resume.settle, resume.completed]).flat();
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+  const { roster: whileRunning } = await throughHost([live, ...first, ...relaunch]);
+  const reopened = whileRunning.find((row) => row.id === CHILD_SESSION_ID);
+  assert.deepEqual([reopened?.status, reopened?.activationCount], ["running", 2], "reopened");
+  const { roster: afterEnd } = await throughHost([live, ...first, ...relaunch, ...rest]);
+  const ended = afterEnd.find((row) => row.id === CHILD_SESSION_ID);
+  assert.deepEqual([ended?.status, ended?.result], ["completed", CHILD_RESULT]);
+});
+
+test("a `task_id` call on a child no part named is no launch of its run: while it works, and never adopted as its call", () => {
+  const run = freshChildParent();
+  const [created] = childFixtureFrames([141]);
+  assert.ok(created);
+  feed(run, [created, ...childFixtureFrames([148])]);
+  // A call handed to the working child: no start, and its rows never name it.
+  const resume = resumeFrames("call_handed_over");
+  const handed = feed(run, [resume.pending, resumingTask(resume.running, CHILD_SESSION_ID)]).flat();
+  assert.deepEqual(eventsOfType(handed, "task.started"), []);
+  const later = feed(run, [...resume.work, ...childFixtureFrames([177, 178, 179])]).flat();
+  assert.ok(later.some((event) => event.type === "task.completed"));
+  assert.deepEqual(
+    later
+      .filter((event) => event.type.startsWith("task."))
+      .filter((event) => (event.payload as { toolUseId?: string }).toolUseId === "call_handed_over"),
+    [],
+    "the call is not the run's launch"
+  );
+});
+
 test("a revival whose run started with no launch id (an older log) seeds one first, so the roster reopens: running, then completed", async () => {
   const run = liveSession("ses_parent");
   // What a host from before every start named a launch left: a grandchild's
