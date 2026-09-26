@@ -744,10 +744,13 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
   end's dismissal of a stranded question (§6.2) that the adapter settles later
   (`repeatsHostClosure`). A real answer racing the Stop keeps its row.*
   *Built (final fix wave 2026-09-26): a card the adapter settles on its own, with no host Stop
-  before it — an interrupt, a steer's cancel, a rewind, the process's exit — is one row too,
-  marked `withdrawn`, so it reads "Request cancelled" / "Question cancelled". Grok wrote it twice
-  (the teardown's row and the parked handler's own, the second after `session.exited`); Claude's
-  and OpenCode's teardowns wrote it as "Approval resolved" / "User input submitted".*
+  before it — an interrupt, a steer's cancel, a rewind, the process's exit — is one row too, in
+  all four adapters, marked `withdrawn`, so it reads "Request cancelled" / "Question cancelled".
+  Grok wrote it twice (the teardown's row and the parked handler's own, the second after
+  `session.exited`); Claude's, Codex's and OpenCode's teardowns wrote it as "Approval resolved" /
+  "User input submitted" — Codex's crash path on no turn, after the dying turn had settled, so a
+  question on it went to the host's turn-end dismissal instead. Every adapter now withdraws its
+  cards before that turn settles.*
 - **Interrupt is turn-scoped.** `interruptTurn` carries the turn id the user pressed Stop on and
   is a no-op when that turn is no longer the active one, so a Stop that races a settling turn
   cannot kill the next one.

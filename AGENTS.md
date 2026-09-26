@@ -745,11 +745,16 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   racing the Stop keeps its row; a new request reusing the id is not the host's closure (ids may be
   recycled, `pending.ts`); the adapter's answer on the wire is never touched. A card an ADAPTER
   closes on its own — its session's teardown on an interrupt, a steer's cancel, a rewind or the
-  process's exit — is one row too, and it is marked `withdrawn` (`RequestResolvedPayload`), so it
-  reads "Request cancelled" / "Question cancelled": Grok wrote that closure twice (the teardown's
-  row, then the parked handler's own — on an exit, after `session.exited`), and Claude's and
-  OpenCode's teardowns wrote it as "Approval resolved" / "User input submitted". Grok's parked
-  handler is now its cards' only emitter (`withdrawPendingRequests`).
+  process's exit — is one row too, in all four adapters, and it is marked `withdrawn`
+  (`RequestResolvedPayload`), so it reads "Request cancelled" / "Question cancelled": Grok wrote
+  that closure twice (the teardown's row, then the parked handler's own — on an exit, after
+  `session.exited`), and Claude's, Codex's and OpenCode's teardowns wrote it as "Approval resolved"
+  / "User input submitted" (Codex's crash path on no turn at all). Grok's parked handler is now its
+  cards' only emitter (`withdrawPendingRequests`); a Codex card's teardown cancel and crash go
+  through the card's own `cancel` / `fail`, never `settle`, which carries the user's answers (a
+  `cancel` among them), and on its own stamps. Every adapter withdraws its cards BEFORE the dying
+  turn settles (Codex's `handleExit` settled the turn first), so a question on that turn is closed
+  as nobody's answer, not left for the host's dismissal at the turn's end.
 - **A non-image attachment reaches the agent as a PATH, guarded twice.** The upload reply
   carries `AttachmentRef.path` — the absolute host path; `validate.ts` rebuilds every ref from
   `{type, id, name, mimeType, sizeBytes}`, so the host's validation strips it from every command
@@ -774,8 +779,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.
 - **A running state never outlives its process — a dead host's included.** Before
-  `session.exited` the adapter settles the in-flight turn, closes every live task `stopped` and
-  fails every parked request. Every wait on a child has a deadline (`support/deadline.ts`), and an
+  `session.exited` the adapter withdraws every parked request (one `withdrawn` row each, before the
+  turn settles), settles the in-flight turn and closes every live task `stopped`. Every wait on a
+  child has a deadline (`support/deadline.ts`), and an
   expired one kills the child. A host that is killed (a crash, an OOM, a hard stop) runs none of
   that teardown, and left alone its requests, calls and tasks stay open in the log for good: a card
   no process can answer blocks the composer ("Answer the request above first.") and the MCP's

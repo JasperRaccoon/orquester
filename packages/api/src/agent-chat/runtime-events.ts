@@ -716,16 +716,20 @@ export interface RequestResolvedPayload {
   resolution?: unknown;
   /**
    * Nobody answered it, and the wait on it has ended — the adapter settled the
-   * card itself. Either the session's own teardown did (a Stop, an interrupt, a
-   * steer's cancel, a rewind, the process's exit: Claude, Grok and OpenCode
-   * send the cancel, deny or reject their protocol expects), or the work that
-   * asked is over (a Codex collab child's own turn ended or its thread closed)
-   * or the provider resolved the request itself (Codex's
-   * `serverRequest/resolved`), and Codex answers nothing on the wire. Ingestion
-   * writes the host's own cancelled row for it (`cancelledRequestActivity`:
-   * "Request cancelled"), never "Approval resolved", which would say someone
-   * answered. `decision` is `"cancel"`. One closing row per card: an adapter
-   * that withdraws a card writes nothing more for it.
+   * card itself, one of two ways. (1) The session's own teardown — a Stop, an
+   * interrupt, a steer's cancel, a rewind, the process's exit — in all four
+   * adapters: Claude, Codex, Grok and OpenCode each answer the request with
+   * the cancel, deny or reject their protocol expects while the transport
+   * lives, and nothing once it is gone. (2) Codex only: the work that asked
+   * is over (the turn that raised the card ended, or a collab child's own turn
+   * or thread did) or the server resolved the request itself
+   * (`serverRequest/resolved`), and Codex answers nothing on the wire.
+   * Ingestion writes the host's own cancelled row for it
+   * (`cancelledRequestActivity`: "Request cancelled"), never "Approval
+   * resolved", which would say someone answered. `decision` is `"cancel"`.
+   * One closing row per card: an adapter that withdraws a card writes nothing
+   * more for it. The user's own answers, a `cancel` among them, are never
+   * marked.
    */
   withdrawn?: true;
 }
