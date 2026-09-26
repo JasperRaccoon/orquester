@@ -50,6 +50,15 @@ export const XAI_EXTENSION_NOTIFICATIONS = {
   task_completed: "x.ai/task_completed",
   /** One line a monitor's command printed, as its own frame (observation 41). */
   monitor_event: "x.ai/monitor_event",
+  /**
+   * The scheduler's own reports (`/loop`, `scheduler_create`), each a
+   * `{sessionId, update, _meta}` frame of its own (fixture 29, observation 52):
+   * a scheduled prompt created, fired — naming the subagent its fire runs in —
+   * and deleted.
+   */
+  scheduled_task_created: "x.ai/scheduled_task_created",
+  scheduled_task_fired: "x.ai/scheduled_task_fired",
+  scheduled_task_deleted: "x.ai/scheduled_task_deleted",
   models_update: "x.ai/models/update",
   settings_update: "x.ai/settings/update",
   announcements_update: "x.ai/announcements/update",
@@ -115,7 +124,7 @@ export const XAI_EXTENSION_CATALOG: ReadonlyArray<XaiExtensionEntry> = [
     observed: true,
     observedSpelling: "underscore",
     observedWrapped: false,
-    note: "The private live event channel. Carries turn_completed, response_completed, hook_*, pending_interaction, background_tasks, tool_call_delta_chunk, model_changed, auto_compact_completed, last_turn_summary, session_summary_generated, and (2026-09-25) subagent_spawned / subagent_progress / subagent_finished. A subagent's child session speaks on it too, under the child's own sessionId.",
+    note: "The private live event channel. Carries turn_completed, response_completed, hook_*, pending_interaction, background_tasks, tool_call_delta_chunk, model_changed, auto_compact_completed, last_turn_summary, session_summary_generated, (2026-09-25) subagent_spawned / subagent_progress / subagent_finished, and (2026-09-26) goal_updated. A subagent's child session speaks on it too, under the child's own sessionId.",
   },
   {
     method: "x.ai/session/update",
@@ -148,6 +157,30 @@ export const XAI_EXTENSION_CATALOG: ReadonlyArray<XaiExtensionEntry> = [
     observedSpelling: "underscore",
     observedWrapped: false,
     note: "{ update: { sessionUpdate: monitor_event, task_id, description, event_text } } — one line of a monitor's output; the CLI then wakes the agent with it as a prompt of its own.",
+  },
+  {
+    method: "x.ai/scheduled_task_created",
+    kind: "notification",
+    observed: true,
+    observedSpelling: "underscore",
+    observedWrapped: false,
+    note: "{ update: { sessionUpdate: scheduled_task_created, task_id, prompt, human_schedule, next_fire_at } } — a scheduled prompt (`/loop`, `scheduler_create`) created; `_meta` adds `x.ai/schedulerGeneration` and `x.ai/schedulerRevision` (fixture 29).",
+  },
+  {
+    method: "x.ai/scheduled_task_fired",
+    kind: "notification",
+    observed: true,
+    observedSpelling: "underscore",
+    observedWrapped: false,
+    note: "{ update: { sessionUpdate: scheduled_task_fired, task_id, prompt, human_schedule, next_fire_at, subagent_id } } — one fire, run in a detached background subagent the CLI spawns itself; its `subagent_spawned` follows (fixture 29).",
+  },
+  {
+    method: "x.ai/scheduled_task_deleted",
+    kind: "notification",
+    observed: true,
+    observedSpelling: "underscore",
+    observedWrapped: false,
+    note: "{ update: { sessionUpdate: scheduled_task_deleted, task_id, reason } } — `reason: \"deleted\"` after `scheduler_delete` (fixture 29); expiry after seven days is read off the docs, not captured.",
   },
   {
     method: "x.ai/models/update",
@@ -488,6 +521,57 @@ export interface XaiMonitorEventParams {
     readonly event_text: string;
   };
   readonly _meta?: XaiUpdateMeta;
+}
+
+/**
+ * `_x.ai/scheduled_task_created` / `_fired` / `_deleted` params (fixture 29):
+ * the scheduler's reports of one scheduled prompt, keyed by its `task_id` (the
+ * id `scheduler_create` answered and `scheduler_delete` takes).
+ */
+export interface XaiScheduledTaskParams {
+  readonly sessionId: SessionId;
+  readonly update: {
+    readonly sessionUpdate: "scheduled_task_created" | "scheduled_task_fired" | "scheduled_task_deleted";
+    readonly task_id: string;
+    readonly prompt?: string;
+    /** `"every 1 minute"`. */
+    readonly human_schedule?: string;
+    readonly next_fire_at?: string;
+    /** A fire's: the subagent it runs in, whose `subagent_spawned` follows. */
+    readonly subagent_id?: string;
+    /** A deletion's: `"deleted"` after `scheduler_delete`. */
+    readonly reason?: string;
+  };
+  readonly _meta?: XaiUpdateMeta;
+}
+
+/**
+ * `goal_updated` on the parent's `_x.ai/session_notification` (fixture 30):
+ * an autonomous goal's state, restated whole at every change — and every few
+ * seconds while its planner or worker runs. `status` was `active`, then
+ * `budget_limited` once its token budget ran out, and `cleared` (every id and
+ * text emptied) after `/goal clear`.
+ */
+export interface XaiGoalUpdatedUpdate {
+  readonly sessionUpdate: "goal_updated";
+  readonly goal_id: string;
+  readonly objective: string;
+  readonly status: "active" | "budget_limited" | "cleared" | (string & {});
+  /** `executing`, `idle`, … */
+  readonly phase?: string;
+  readonly planning?: boolean;
+  readonly token_budget?: number;
+  readonly tokens_used?: number;
+  readonly elapsed_ms?: number;
+  readonly total_deliverables?: number;
+  readonly completed_deliverables?: number;
+  readonly total_worker_rounds?: number;
+  readonly total_verify_rounds?: number;
+  /** `goal_created`, `budget_exceeded`, … */
+  readonly last_event?: string;
+  readonly last_event_timestamp?: string;
+  readonly result_summary?: string;
+  readonly pause_message?: string;
 }
 
 /**

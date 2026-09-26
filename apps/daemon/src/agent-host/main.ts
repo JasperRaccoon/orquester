@@ -18,7 +18,7 @@
  * changed source into it is a correctness bug.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readCodeStamp } from "./support/code-stamp.ts";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -29,6 +29,7 @@ import {
   agentChatDir,
   agentChatIndexPath,
   agentChatThreadAttachmentsDir,
+  agentChatThreadLeftoverWorkPath,
   agentHostSocketPath,
   agentHostTokenPath,
   appConfigPath,
@@ -341,6 +342,7 @@ export async function startAgentHost(
     resolveAttachmentPath: (threadId, attachmentId) =>
       store.resolveAttachment(threadId, attachmentId),
     attachmentsDir: (threadId) => agentChatThreadAttachmentsDir(appdir, threadId),
+    leftoverWorkPath: (threadId) => agentChatThreadLeftoverWorkPath(appdir, threadId),
     logRawFrame: (threadId, frame) => store.logRawFrame(threadId, frame),
     buildEnv: ({ threadId, home, projectPath, extraEnv }) => {
       // The §6.1 launcher env the daemon composed for this thread: the registry
@@ -365,6 +367,12 @@ export async function startAgentHost(
         ...(accountHomeDir !== undefined ? { accountHomeDir } : {}),
         extraEnv: { ...extraEnv, ...launch?.launchEnv },
         sessionId: threadId,
+        // One marker per launch — every call builds one child's env — and
+        // never the injectable `uuid()`, whose deterministic test ids two
+        // hosts could share. Every adapter's provider and what it starts carry
+        // it, so Settings → System can reach what outlives the provider; only
+        // the Grok adapter sweeps by it (it stamps its own value over this one).
+        launchId: randomUUID(),
         // For a cliproxy launcher the proxy token IS the selected identity, so
         // it is the one ambient credential that may survive the denylist —
         // without this, `claudex`/`claudemix` launch with no credential at all.

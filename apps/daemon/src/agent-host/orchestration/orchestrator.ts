@@ -1561,7 +1561,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     for (const question of userInputs) {
       try {
-        await adapter.respondToUserInput(runtime.id, question.requestId, {});
+        // Flagged as the host's cancel: `{}` alone is also what a user's
+        // empty answer looks like, and a provider with a cancel of its own
+        // (Grok) must not be told the user answered nothing.
+        await adapter.respondToUserInput(runtime.id, question.requestId, {}, { cancel: true });
       } catch (error) {
         logger.warn("agent-host: failed to cancel a pending question", error);
       }
@@ -1634,13 +1637,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     await settlePendingRequests(runtime);
     if (adapter && adapter.hasSession(runtime.id)) {
       try {
-        await adapter.stopSession(runtime.id);
+        // The session stop command and a closed tab are the user ending the
+        // session: an adapter whose provider leaves its work running past its
+        // own exit stops that work now, and only now (Grok).
+        await adapter.stopSession(runtime.id, { endedByUser: true });
       } catch (error) {
         await appendActivity(runtime, {
           kind: "provider.session.stop.failed",
           summary: "Provider session stop failed",
           detail: describeFailure(error)
         });
+      }
+    }
+    // And what EARLIER launches left running — a deploy, a restart or a crash
+    // ended them without the user — live session or not (Grok).
+    if (adapter?.sweepEndedSession) {
+      try {
+        await adapter.sweepEndedSession(runtime.id);
+      } catch (error) {
+        logger.warn("agent-host: failed to sweep the work earlier launches left running", error);
       }
     }
     runtime.bound = null;

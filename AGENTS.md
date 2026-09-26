@@ -288,6 +288,8 @@ child and dies with it; the boot reconcile recovers.
                        adapterKey/runtimeMode/providerInstanceId/status. Never replaced whole —
                        merged field-wise (undefined = unchanged, null = cleared). See the gotchas.
       events.ndjson    append-only DOMAIN events, per-thread monotonic `seq` — the durable record
+      leftover-work.json  the user's work earlier launches left running (Grok): each launch's task
+                       sessions, swept at the user's next end of the session; 0600, the adapter's own
       state.json       the fold snapshot: the folded state as of one seq, a CACHE of the log;
                        rewritten (0600, atomic) on every head-shaped change and, inside a turn, at
                        most once per 200 events AND 30 s; discarded on version, seq or byte mismatch
@@ -1322,7 +1324,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   summary}}`, each `{task_id, command, status, exit_code, started, ended, duration_secs, output, …}`
   (a running entry's `output` is advice to the model, not output), and `KillTask {Result: {task_id,
   outcome: "killed", message}}`; `explicitly_killed` / `kill_result_delivered` are snapshot fields,
-  never a kill answer's, and `already_exited` is read as the outcome's other value (not captured). A
+  never a kill answer's. The other outcome, `already_exited` (captured 2026-09-26, fixture 27:
+  "Task had already completed" / "Subagent already completed", no status, no exit code), means the
+  kill found the task done: its end was reported first and the answer adds nothing, and a run whose
+  end the adapter never saw reads `completed` — never `stopped`, nobody stopped it (`killEnd`). A
   monitor (fixture 20) starts from `_x.ai/task_backgrounded` (it carries `monitor_description`) or
   its call's `Monitor` answer (`{type, taskId, timeoutMs, persistent}`, T3's reader), is typed
   `monitor` (the registry's monitoring bucket), reports each line by `_x.ai/monitor_event` (a
@@ -1408,13 +1413,135 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (`snapshotChange`) — nothing needs a re-arm from it (a shell is a TTL-bounded watch loop, a
   monitor re-arms on its lines, an agent on its heartbeat). (10) Teardown closes calls before tasks,
   as every adapter's does (Stop, the session's stop, the exit; a run's end closes its child's open
-  calls before its task row). Noise the captures showed, silenced: a child's `skills-reload` /
-  `workflows-reload` replies to requests the CLI sent itself are not warnings (the ACP peer drops a
-  reply to nothing that carries an id the adapter names, `agentOwnReplyIds`); an MCP server's
-  failure is said once until it recovers (the CLI re-handshakes the thread's servers at every
-  spawn); the self-resolved-approvals advisory is said once, and only where approval cards were
-  promised (never under `auto` / `full-access`, where the CLI resolving its own interactions is the
-  mode working).
+  calls before its task row). A call a `session/cancel` cut is closed by the adapter too: the CLI
+  never answers it after the cancel (fixtures 05's `write`, 23's spawn call, 31's question — every
+  other call in every capture gets a terminal frame), so the Stop's `interrupt()` fails the prompt's
+  own open calls on its turn before the turn settles (`cutTurnCalls`, "Stopped."), and so does a
+  steer's cancel ("Cancelled: a new message was sent.") — left open, each read in progress in the
+  MCP transcript, took an open-work retention slot and got the next host's "Stopped when the agent
+  host restarted." A subagent's own calls are not the prompt's: a cut foreground child's close with
+  its run at `subagent_finished`, a background child's outlive the turn. A question the HOST cancels
+  (a Stop, the session's stop, a closed tab) reaches the CLI as its own cancel,
+  `{outcome: "cancelled"}`: the host flags it (`respondToUserInput`'s host-only `options.cancel`,
+  which the other adapters ignore), because its `{}` is also a user's skip — passed on as an answer,
+  it told the CLI the user had answered, nothing. (11) **What the 2026-09-26 captures settled**
+  (fixtures 25–30, observations 49–53).
+  Supervised, the spawn call itself asks first (`x.ai/tool` kind `task`, "Yes, send once" or
+  decline), and a subagent's own tool asks on the PARENT's session, naming the child's call: the
+  parent's card, on the parent's open turn, no owner — Codex's collab rule — while the call itself
+  is the agent's own row. A run that ends short is `subagent_finished {status: "cancelled", error}`
+  every way it does — a kill, a Stop, a declined tool, the runtime's turn cap ("max turns reached
+  (limit: 1)"); the CLI never said `failed`, so the run reads `stopped` and its `error` is the row's
+  reason (a bare "Stopped" before). The scheduler (`/loop`, `scheduler_create`) reports by methods
+  of its own, `_x.ai/scheduled_task_created` / `_fired` / `_deleted` (a peer warning per frame
+  before they were registered — one per fire of a week-long loop), and `/goal` by `goal_updated` on
+  the private channel (an "unmapped" warning every few seconds of a goal run): each loop and the
+  goal is a roster row, typed `scheduled` / `goal`, which the roster folds to a kind of its own,
+  `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what it is, a metrics line of its own
+  ("scheduled prompt"; "goal · 48.4k tok", the count the goal reports), a live loop `Scheduled` and
+  a live goal `Active` rather than "Working", a settled one's line its end reason ("Token budget
+  reached: …"), never a shell's row, and never counted or token-summed as work
+  (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) — background, and
+  `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain (its work does,
+  each fire and each planner being a subagent the CLI spawns itself: an agent row under its own id,
+  whose end wakes the parent), and the open tab's own liveness skips both
+  (`deriveBackgroundLiveness` in the store), agreeing with the host, the tab strip, the Attention
+  Center, pushes and the account-switch gate that a thread with only a loop or a goal live is idle.
+  A fire notes itself on the loop's row and a goal's change of phase on the goal's, in place (a
+  token tick alone does not); `scheduled_task_deleted` ends a loop (`stopped`, `completed` on
+  expiry) and a goal leaving `active` ends it (`budget_limited`, `paused`, `cleared` → `stopped`
+  with the reason, `completed` with its result); the session's end closes both, as the loop and the
+  goal live in the CLI's process (whether a Stop's `session/cancel` stops either is not captured: a
+  later fire or goal update notes itself on the ended row, and only the CLI re-creating a loop or
+  resuming a goal it ended itself opens a new run). A genuine `failed` status was not triggered: a
+  subagent's model is set only in the account home's `config.toml`, never written. Noise the
+  captures showed, silenced: a child's `skills-reload` / `workflows-reload` replies to requests the
+  CLI sent itself are not warnings (the ACP peer drops a reply to nothing that carries an id the
+  adapter names, `agentOwnReplyIds`); an MCP server's failure is said once until it recovers (the
+  CLI re-handshakes the thread's servers at every spawn); the self-resolved-approvals advisory is
+  said once, and only where approval cards were promised (never under `auto` / `full-access`, where
+  the CLI resolving its own interactions is the mode working).
+- **What a Grok CLI starts outlives it. Its helpers are stopped at every end of its session; the
+  work its agent started only when the USER ends the session — a deploy must never kill running
+  work.** The CLI starts every child of its own — the MCP servers it boots from the host's
+  configuration (observation 30) and its shells — in a session of its own (`pgid = sid = pid`; Grok
+  fixtures README observations 48 and 55, verified live on 2026-09-26), so `spawnProviderChild`'s
+  group signal reaches the CLI alone: after a clean SIGTERM a `bash` with its `sleep` and two MCP
+  servers ran on, reparented to init, and every session leaked the MCP servers it had booted. Every
+  Grok launch's env carries `ORQUESTER_AGENT_LAUNCH` (`AGENT_LAUNCH_ENV_VAR`), one random value per
+  launch — never the injectable `uuid()`: two test files' deterministic ids would stop each other's
+  processes — which every descendant inherits (eleven processes carried it in that run). A sweep
+  (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`) takes only processes carrying it IN
+  A SESSION ONE OF THE CLI'S CHILDREN LED, recorded while the CLI lives, so a process that
+  daemonized into a session of its own (agent-browser's daemon, an SSH ControlMaster: host-wide
+  helpers a chat may have started first) is spared — verified for agent-browser 0.34: its browser
+  daemon, spawned at the first browser command, leads a session of its own under init, Chrome runs
+  in the daemon's session, and nothing of the browser stays in the MCP server's (Grok fixtures
+  README observation 56); SIGTERM, then SIGKILL past `DEFAULT_KILL_GRACE_MS` to whatever a fresh
+  scan still finds, each pid identified by its `/proc` starttime on both sides of the environment
+  read and again before each signal, a live session leader against the one recorded — the kill
+  guard's rule: never a recycled pid; a zombie is gone. Two kinds, two rules. **The CLI's own
+  helpers** — its children the moment `session/new` / `session/load` answered, which are its MCP
+  servers (fixture 31: all four existed then, none of the user's work had run) — are swept at EVERY
+  end: a restart of a thread that goes on (an account, permission-mode or cwd change — Grok switches
+  models in-session), the host's teardown (a drain-restart's included), the CLI's own exit (a crash,
+  an open that failed), the user's stop. **The work its agent started** — its shells, the dev
+  servers they run — is swept ONLY when the user ends the session: the session stop command or a
+  closed tab (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`; the MCP's
+  `stop_session` and `close_session` are that command and that close) — recorded FIRST in that stop,
+  before anything reaches the CLI, and swept by a sweep of their own (`stopTaskLeftovers`), so a CLI
+  exiting in the middle of the stop (on its card's cancel, say) cannot hand the stop a helpers-only
+  sweep — and on an open that failed, where nothing of the user's has run. Never at a deploy's
+  teardown or a restart: the drain waits for live work only within its bound (a watch loop's TTL, an
+  agent's hour), and a dev server started in a Grok chat must survive every deploy that comes after
+  it. Never at a crash either (no user ended anything). There it runs on as a marked orphan, listed
+  and killable in Settings → System, and never silently: its task's closing row says so — "Left
+  running when the agent host stopped / the session restarted / the agent process exited — stop it
+  from Settings → System." (`leftRunningNote`), marked `leftRunning` on the row and the roster entry
+  — the one summary a stopped shell's row shows in place of a bare "Stopped"; any other completion
+  summary (the CLI's stop sentence, a killed shell's output line) never replaces it. Nor is it
+  forgotten: each launch's task sessions — recorded as the CLI reports the work (a shell's, a
+  monitor's `task.started`: nothing can be read off a CLI that crashed) and again at every end,
+  while it lives — are kept in the thread's `leftover-work.json` (SID, leader starttime, launch id;
+  the last 8 launches; 0600, atomic, written only while the thread's directory exists (a late record
+  must not raise a deleted thread), the adapter's own file, never `binding.json`;
+  `support/leftover-work.ts`), so a LATER user end — the session stop command or a closed tab, live
+  session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession` either way — sweeps
+  what every earlier launch left, with the same identity checks. A Claude chat's background shells
+  outlive their session the same way — the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s
+  later, before the CLI's own 5 s wind-down would stop them, and they run on under init
+  (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
+  2026-09-26). An open that fails stops its CLI now too: a `session/load` the CLI refused (a cursor
+  it no longer knows) left it running outside the adapter's map, holding its pipes. It adds no row
+  of its own either: the start's rejection is its whole report, which the host writes — an exit row
+  besides it read as a crash of a session that never ran (`GrokSession.announced`) — and a CLI that
+  ends after `session/new` answered but before the session is announced (on the open's
+  `session/set_model`, say) fails the open with its exit rather than being announced ready, dead. A
+  work process whose shell had exited before the stop is in no recorded session and stays running; a
+  process that scrubs its environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills
+  nothing: its `session/cancel` leaves the CLI — which owns them — running (fixture 21). Linux-only
+  (`/proc`); elsewhere the sweep reads and signals nothing. **Settings → System reads the same
+  marker**: a process of the daemon's own uid that no root reaches, whose parent is init (or gone)
+  and that carries any launch's marker is a root of its own — listed under the chat its
+  `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in `system-status.ts`),
+  what it started coming with it as its descendants — so the work a session end left running, and
+  whatever a crashed host never swept, is in reach. A marked process whose parent still runs outside
+  every root is that parent's, never a root: no marker makes it ours — nor is one a subreaper
+  adopted (`systemd --user`, a container's non-pid-1 init; the kill-guard gotcha). Every adapter's
+  launches carry the marker (next bullet); only Grok's sweep by it.
+- **Every provider launch carries a launch marker; only the Grok adapter sweeps by it.** The host's
+  `buildEnv` (`agent-host/main.ts`) stamps `ORQUESTER_AGENT_LAUNCH` on every provider child's
+  environment through `buildProviderEnv`'s required `launchId` — one `randomUUID()` per call, and
+  every adapter builds one env per launch: the Claude CLI the SDK spawns for a thread, each Codex
+  `app-server`, each OpenCode `serve` (one per project), each Grok CLI (whose session stamps its own
+  value over it), and the probes — set last, so no launcher env shadows it. Every process a provider
+  starts inherits it, so Settings → System reaches what outlives its provider (a Claude chat's
+  background shells run on under init after its CLI is gone — `bun run dev`, `stripe listen`, `vite`
+  on the owner's host on 2026-09-26) exactly as it reaches a Grok chat's: listed under the chat its
+  `ORQUESTER_SESSION_ID` names, killable, never swept. For Claude, Codex and OpenCode it is a marker
+  and nothing more — no adapter but Grok's records sessions or sweeps; a sweep for another adapter
+  would need its own evidence of what its children are and its own ruling on when the user's work
+  may be stopped (the Grok bullet above).
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
@@ -1717,15 +1844,22 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   terminal runs fine. Probed per request (not cached) so a tool installed from a tab lights its
   card up on the next modal open.
 - **`/api/system/processes/kill` protects the daemon, the tmux server, and the managed cliproxy
-  process** (the route passes the proxy's live child pid via the service's `protectedPids` hook —
-  on a no-tmux host cliproxy is a daemon child and would otherwise be a legal target).
-  Everything else must descend from a daemon-tree root (its own children plus every `orq-*` tmux
-  pane pid) or it's `PROCESS_NOT_MANAGED`. The guard is two-pass on `/proc` starttime, never on the shared 2 s
-  snapshot cache: once the first SIGTERM lands, children reparent and `ppid` stops being an
-  identity, so pass one records starttimes while the tree is intact and pass two re-checks each one
-  immediately before signalling (a recycled pid must never get the signal). Everything under
-  `/api/system/*` is Linux-only by construction (all `/proc`); off Linux each route answers
-  `supported: false` with zeroed data, the same host-gating shape `/api/fs/capabilities` uses.
+  process** (the route passes the proxy's live child pid via the service's `protectedPids` hook — on
+  a no-tmux host cliproxy is a daemon child and would otherwise be a legal target). Everything else
+  must descend from a daemon-tree root (its own children plus every `orq-*` tmux pane pid, the agent
+  host, and every orphan of the daemon's uid carrying an agent-host launch marker — what a provider
+  CLI left behind, see "What a Grok CLI starts outlives it") or it's `PROCESS_NOT_MANAGED`. An
+  orphan is rooted only when init adopted it or its parent is gone (`launchedOrphans`): **one a
+  SUBREAPER adopted is not** — `systemd --user` when the desktop app runs inside a user session (it
+  is `PR_SET_CHILD_SUBREAPER`, so every orphan of that session goes to it, not to pid 1), or a
+  container's non-pid-1 init — so there Settings → System neither lists nor kills what a provider
+  left running; it is found (and stopped) by hand, or by ending the chat's session, which sweeps a
+  Grok chat's work. The guard is two-pass on `/proc` starttime, never on the shared 2 s snapshot
+  cache: once the first SIGTERM lands, children reparent and `ppid` stops being an identity, so pass
+  one records starttimes while the tree is intact and pass two re-checks each one immediately before
+  signalling (a recycled pid must never get the signal). Everything under `/api/system/*` is
+  Linux-only by construction (all `/proc`); off Linux each route answers `supported: false` with
+  zeroed data, the same host-gating shape `/api/fs/capabilities` uses.
 - **Adapter/localStorage loads must go through a schema (or field-wise validation) with
   fallback — old bundles' payloads outlive deploys.** Raw `JSON.parse` output must never reach
   typed code: a `usage` blob persisted by a pre-migration bundle once crashed the whole web

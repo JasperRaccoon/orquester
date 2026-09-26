@@ -47,10 +47,12 @@ Tests sit beside each file as `*.test.ts` and run through `pnpm --filter @orques
 | File | What it gives you |
 |---|---|
 | `spawn.ts` | `spawnProviderChild()` — an **explicit** env (never a spread of `process.env`), all three stdio piped, a recorded pid, an `exited` promise that never rejects, and `kill()` escalating SIGTERM→SIGKILL on a grace deadline, signalling the whole **process group** for a `detached` child. Plus `exitOutcome()`, the §3.1 exit rule in one place. |
-| `env.ts` | `buildProviderEnv()` per §3.1 "Launch environment": session PATH, `TMPDIR`, `HOME`, `ORQUESTER_SESSION_ID`, the per-adapter account-home variable (`ACCOUNT_HOME_ENV_VAR`), and extra launcher env — with ambient vendor credentials stripped unless explicitly allowed. `needsShellExpansion()` is the assertion that a value is already absolute. |
+| `env.ts` | `buildProviderEnv()` per §3.1 "Launch environment": session PATH, `TMPDIR`, `HOME`, `ORQUESTER_SESSION_ID`, the per-adapter account-home variable (`ACCOUNT_HOME_ENV_VAR`), the launch marker (`ORQUESTER_AGENT_LAUNCH`, the required `launchId`: one value per launch, which every adapter's provider and its descendants carry — Settings → System reads it, only Grok sweeps by it), and extra launcher env — with ambient vendor credentials stripped unless explicitly allowed. `needsShellExpansion()` is the assertion that a value is already absolute. |
 | `stderr.ts` | `StderrCapture` — line split with a carried remainder, ANSI strip, classification (drop / warning / error) and the §3.1 **redaction** (home paths → `~`, `Authorization`/`x-api-key` values, `Bearer`, `sk-`/`ghp_`/`xox*` shapes), plus a bounded 4 KiB rolling tail that only ever holds redacted text. |
 | `deadline.ts` | `withDeadline()` and `DeadlineExceededError`, plus `AGENT_HOST_DEADLINES` and `TURN_LIVENESS_WINDOWS` — every bounded window §3.1 and §4.5 name, in one object. |
 | `ndjson.ts` | `NdjsonLineReader` (partial chunks, `\r\n`, BOM), `parseNdjsonLine()` (skips blanks and `:` comments) and `NdjsonWriter`, a backpressure-aware writer that queues on `drain` and **drops** past its budget rather than growing host memory. |
+| `leftover-processes.ts` | What a provider CLI leaves behind: `AGENT_LAUNCH_ENV_VAR` (`ORQUESTER_AGENT_LAUNCH`, one value per launch, inherited by every descendant), `recordChildSessions()` (the sessions a CLI's children lead, recorded while it lives), `findLeftoverProcesses()` and `stopLeftoverProcesses()` — only processes carrying the marker IN a recorded session (a daemon that `setsid`s away is spared); SIGTERM, then SIGKILL past the grace to what a fresh scan still finds, each pid checked against its `/proc` starttime before every signal, a live session leader against the one recorded. The Grok CLI starts its shells and MCP servers in sessions of their own, so the group kill in `spawn.ts` reaches it alone; its session sweeps its helpers (the MCP servers, its children as the session opened) at every end, and the work its agent started only when the user ends the session — a deploy never kills running work (`GrokSession.stopLeftovers`). The daemon's kill guard reads the same marker (`system-status.ts`). Linux-only; a no-op elsewhere. |
+| `leftover-work.ts` | The user's work earlier launches of a thread left running, remembered until the user ends its session: `recordLeftoverWork()` merges one launch's task sessions (SID, leader starttime) under its launch id into the thread's `leftover-work.json` (0600, atomic, the last 8 launches, 64 sessions each, one writer per file at a time); `sweepLeftoverWork()` stops each launch's work by its own marker in its own sessions (`stopLeftoverProcesses`'s identity checks) — every launch at once, one grace window for the lot — and forgets it. Read entry-wise tolerantly. Grok's `sweepEndedSession` is its only caller. |
 
 Two deliberate non-`unref` decisions, both load-bearing and both covered by tests: the deadline
 timer and the child process handle are **ref'd**, because `onTimeout` is what kills a wedged
@@ -108,14 +110,17 @@ closes — so indexing never holds a deploy's stop) → store close.
   child rather than leaving the thread `starting` forever.
 - **A running state never outlives its process** (§3.1/§4.1). Before `session.exited` the adapter
   withdraws every parked request (one `withdrawn` row each, before the turn settles), settles the
-  turn, and closes every live task `stopped`. A host that
-  died without that teardown has it written for it: a thread's first load in the next host
-  lifetime appends the rows that cancel every request (a message-mode question excepted) and close
-  every call and task its window still shows open — but a call no row anchors (`anchorsCall`),
-  which no view shows (`closeLeftoverWork`, `orchestration/leftover-work.ts`). A turn that
-  process was running is settled at the time it last wrote, before anything else is appended
-  (`crashSettleAt`: the log's last line, or a later start of a turn it settles): it ended when its
-  process died, and the downtime is not part of it.
+  turn, and closes every live task `stopped` — and a CLI whose children escape its process group
+  (Grok's) has its own helpers stopped as well, by the launch marker they inherited
+  (`support/leftover-processes.ts`); the processes its agent's work started are stopped only when
+  the user ends the session, and otherwise run on as marked orphans Settings → System can kill,
+  because a deploy must never kill running work. A host that died without that teardown has it
+  written for it: a thread's first load in the next host lifetime appends the rows that cancel every
+  request (a message-mode question excepted) and close every call and task its window still shows
+  open — but a call no row anchors (`anchorsCall`), which no view shows (`closeLeftoverWork`,
+  `orchestration/leftover-work.ts`). A turn that process was running is settled at the time it last
+  wrote, before anything else is appended (`crashSettleAt`: the log's last line, or a later start of
+  a turn it settles): it ended when its process died, and the downtime is not part of it.
 - **An unknown frame is surfaced, never dropped by a catch-all** (§10): a `satisfies never` at
   compile time, a `runtime.warning` at run time — which never ends an active turn.
 - **Wait on receipts and drains, never on sleeps** (§9). `ThreadStore.drain()` and

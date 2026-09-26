@@ -10,12 +10,14 @@ import { readFileSync } from "node:fs";
 import { readFile, readdir, readlink, statfs } from "node:fs/promises";
 import { cpus } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { AGENT_LAUNCH_ENV_VAR } from "./agent-host/support/leftover-processes.ts";
 import { Tmux } from "./tmux";
 
 /**
  * Host observability for a headless VPS: CPU/memory/disk, the process tree that
  * belongs to THIS daemon (its own children plus every tmux session pane and their
- * descendants), and the TCP ports those processes listen on.
+ * descendants — and whatever a provider CLI left behind, see `rootPids`), and
+ * the TCP ports those processes listen on.
  *
  * Linux-only by construction — everything here reads `/proc`, which no other
  * platform provides. Off Linux every read returns a `supported: false` payload
@@ -105,6 +107,8 @@ export interface ProcSnapshot {
   name: string;
   cmdline: string;
   rssBytes: number;
+  /** The real uid, when the status names one: only our own processes' environments are read. */
+  uid?: number;
 }
 
 /** Aggregate jiffies of the `cpu ` line of /proc/stat. */
@@ -170,14 +174,18 @@ export function parseMemInfo(content: string): { totalBytes: number; availableBy
 }
 
 /**
- * Name/PPid/VmRSS from /proc/<pid>/status. Preferred over /proc/<pid>/stat: it
- * carries the RSS in kB (so there is no page-size to guess) and needs none of
- * stat's "comm may contain spaces and parentheses" handling.
+ * Name/PPid/VmRSS (and the real uid) from /proc/<pid>/status. Preferred over
+ * /proc/<pid>/stat: it carries the RSS in kB (so there is no page-size to
+ * guess) and needs none of stat's "comm may contain spaces and parentheses"
+ * handling.
  */
-export function parseProcStatus(content: string): { name: string; ppid: number; rssBytes: number } | null {
+export function parseProcStatus(
+  content: string
+): { name: string; ppid: number; rssBytes: number; uid?: number } | null {
   let name: string | null = null;
   let ppid: number | null = null;
   let rssBytes = 0;
+  let uid: number | undefined;
   for (const line of content.split("\n")) {
     if (name === null && line.startsWith("Name:")) {
       name = line.slice("Name:".length).trim();
@@ -187,12 +195,39 @@ export function parseProcStatus(content: string): { name: string; ppid: number; 
     } else if (line.startsWith("VmRSS:")) {
       const parsed = Number(line.slice("VmRSS:".length).replace(/kB$/i, "").trim());
       rssBytes = Number.isFinite(parsed) ? parsed * 1024 : 0;
+    } else if (uid === undefined && line.startsWith("Uid:")) {
+      // Real, effective, saved, filesystem: the first is the owner.
+      const parsed = Number(line.slice("Uid:".length).trim().split(/\s+/)[0]);
+      uid = Number.isInteger(parsed) ? parsed : undefined;
     }
   }
   if (name === null || ppid === null) {
     return null;
   }
-  return { name, ppid, rssBytes };
+  return uid === undefined ? { name, ppid, rssBytes } : { name, ppid, rssBytes, uid };
+}
+
+/**
+ * The agent host's launch marker in a NUL-separated /proc/<pid>/environ —
+ * `ORQUESTER_AGENT_LAUNCH=<one value per provider launch>`, which every process
+ * a provider CLI starts inherits (`agent-host/support/leftover-processes.ts`) —
+ * and the chat it was launched for (`ORQUESTER_SESSION_ID`, on the same launch
+ * env). Null without a non-empty marker.
+ */
+export function launchMarkerOf(environ: string): { launchId: string; sessionId?: string } | null {
+  let launchId: string | undefined;
+  let sessionId: string | undefined;
+  for (const entry of environ.split("\0")) {
+    if (launchId === undefined && entry.startsWith(`${AGENT_LAUNCH_ENV_VAR}=`)) {
+      launchId = entry.slice(AGENT_LAUNCH_ENV_VAR.length + 1);
+    } else if (sessionId === undefined && entry.startsWith("ORQUESTER_SESSION_ID=")) {
+      sessionId = entry.slice("ORQUESTER_SESSION_ID=".length);
+    }
+  }
+  if (launchId === undefined || launchId.length === 0) {
+    return null;
+  }
+  return sessionId === undefined || sessionId.length === 0 ? { launchId } : { launchId, sessionId };
 }
 
 /**
@@ -814,7 +849,13 @@ export class SystemStatusService {
       return pending;
     }
     const scan = (async (): Promise<TreeSnapshot> => {
-      const [procs, roots] = await Promise.all([snapshotProcs(), this.rootPids()]);
+      const known = this.options.listSessionIds();
+      const [procs, roots] = await Promise.all([snapshotProcs(), this.rootPids(known)]);
+      // Whatever a provider CLI left behind is ours too, though no root leads
+      // to it any more: an orphan is found by the launch marker it inherited.
+      for (const [pid, sessionId] of await launchedOrphans(procs, collectTree(procs, roots), known)) {
+        roots.set(pid, sessionId);
+      }
       const value: TreeSnapshot = { at: now, procs, roots, tree: collectTree(procs, roots) };
       this.treeCache = value;
       return value;
@@ -840,9 +881,8 @@ export class SystemStatusService {
    * managed model proxy) are deliberately excluded — they are not user sessions
    * and must not become kill targets.
    */
-  private async rootPids(): Promise<Map<number, string | undefined>> {
+  private async rootPids(known: Set<string>): Promise<Map<number, string | undefined>> {
     const roots = new Map<number, string | undefined>([[process.pid, undefined]]);
-    const known = this.options.listSessionIds();
     for (const [sessionId, pids] of await this.tmux.panePids()) {
       for (const pid of pids) {
         roots.set(pid, known.has(sessionId) ? sessionId : undefined);
@@ -862,6 +902,63 @@ export class SystemStatusService {
     }
     return roots;
   }
+}
+
+/**
+ * The orphans a provider CLI left behind, as extra roots: every process of ours
+ * OUTSIDE the tree whose parent is init — or gone — and whose environment
+ * carries the agent host's launch marker ({@link launchMarkerOf}), labelled
+ * with its chat when the daemon knows it. What an orphan started comes with it
+ * as its descendant ({@link collectTree}), never as a root of its own; and a
+ * marked process whose parent still runs outside every root is that parent's —
+ * no marker makes it ours. A gap by construction: an orphan a SUBREAPER adopted
+ * (`systemd --user` around the desktop app, a container's non-pid-1 init) has a
+ * live parent that is not init, and is not rooted either. The Grok CLI starts
+ * its background shells and MCP servers in sessions of their own, so they
+ * outlive it reparented to init; the host stops its MCP servers at every
+ * session end but the work its agent started only when the user ends the
+ * session — a deploy must never kill running work — so a dev server runs on
+ * here by design, and a host that crashed swept nothing (Grok fixtures README
+ * observation 48). A parent chain is gone once a process is orphaned — its
+ * environment is not. Only processes of this daemon's own uid are read (another
+ * user's environment is not ours to read, and nothing of theirs is ours to
+ * kill), and only those no root already reaches.
+ */
+async function launchedOrphans(
+  procs: Map<number, ProcSnapshot>,
+  tree: Map<number, string | undefined>,
+  known: Set<string>
+): Promise<Map<number, string | undefined>> {
+  const uid = process.getuid?.();
+  const candidates = [...procs.values()].filter(
+    (proc) =>
+      !tree.has(proc.pid) &&
+      proc.pid > 1 &&
+      (proc.ppid === 1 || !procs.has(proc.ppid)) &&
+      (uid === undefined || proc.uid === uid)
+  );
+  const markers = await mapLimited(candidates, PROC_READ_CONCURRENCY, async (proc) => {
+    // latin1: an environment is bytes; the marker is ASCII and must not hide
+    // behind a value elsewhere that is not UTF-8.
+    let environ: string;
+    try {
+      environ = await readFile(`/proc/${proc.pid}/environ`, "latin1");
+    } catch {
+      return null;
+    }
+    const marker = launchMarkerOf(environ);
+    return marker === null ? null : { pid: proc.pid, sessionId: marker.sessionId };
+  });
+  const orphans = new Map<number, string | undefined>();
+  for (const marker of markers) {
+    if (marker !== null) {
+      orphans.set(
+        marker.pid,
+        marker.sessionId !== undefined && known.has(marker.sessionId) ? marker.sessionId : undefined
+      );
+    }
+  }
+  return orphans;
 }
 
 /** Every process on the host, by pid. Vanished/unreadable entries are skipped. */

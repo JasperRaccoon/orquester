@@ -15,6 +15,7 @@
  * under a bare `node`, not through tsx.
  */
 
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const scenario = process.env.GROK_MOCK_SCENARIO ?? "happy";
@@ -27,10 +28,13 @@ const sessionId = "01a0c19e-de22-78c0-a72a-7e230ccfbec0";
  * its own order, with no frame invented. Every client frame the harness sent
  * is a sync point: when the adapter sends a frame of the same method, the
  * frames the agent sent after it — up to the harness's next frame — are
- * played, a recorded reply's id rewritten to the adapter's. A client frame the
- * capture has no match for is answered `{}` (a request) or ignored. Frames are
- * paced by their recorded gaps, clamped to 1–25 ms, so each reaches the
- * adapter in its own read, as it did live.
+ * played, a recorded reply's id rewritten to the adapter's. The harness's
+ * reply to a request of the agent's (a permission, a question) is one too,
+ * met by the adapter's reply to the same request id: the CLI waited for the
+ * answer, and so does the replay. A client frame the capture has no match for
+ * is answered `{}` (a request) or ignored. Frames are paced by their recorded
+ * gaps, clamped to 1–25 ms, so each reaches the adapter in its own read, as it
+ * did live.
  */
 const replay =
   scenario === "replay"
@@ -45,24 +49,30 @@ const replayIds = new Map();
 let replayQueue = Promise.resolve();
 
 function handleReplay(frame) {
-  if (typeof frame.method !== "string") {
-    return; // the adapter answering a request of the agent's: nothing recorded to match
+  // The adapter answering a request of the agent's: met by the harness's
+  // recorded reply to the same request id, if the capture has one.
+  const reply = typeof frame.method !== "string" && frame.id !== undefined;
+  if (typeof frame.method !== "string" && !reply) {
+    return;
   }
   let at = -1;
   for (let index = replayCursor; index < replay.length; index += 1) {
     const entry = replay[index];
-    if (entry.dir === "send" && entry.frame?.method === frame.method) {
+    const matches = reply
+      ? entry.frame?.method === undefined && entry.frame?.id === frame.id
+      : entry.frame?.method === frame.method;
+    if (entry.dir === "send" && matches) {
       at = index;
       break;
     }
   }
   if (at === -1) {
-    if (frame.id !== undefined) {
+    if (frame.id !== undefined && !reply) {
       result(frame.id, {});
     }
     return;
   }
-  if (frame.id !== undefined && replay[at].frame.id !== undefined) {
+  if (!reply && frame.id !== undefined && replay[at].frame.id !== undefined) {
     replayIds.set(replay[at].frame.id, frame.id);
   }
   let end = at + 1;
@@ -176,6 +186,11 @@ function handle(frame) {
   // The adapter's answer to `_x.ai/ask_user_question`, likewise.
   if (method === undefined && id === QUESTION_REQUEST_ID && frame.result !== undefined) {
     questionAnswer = frame.result;
+    if (scenario === "leftover-question-exit") {
+      // The CLI ending on its own the moment a user's stop answers its card:
+      // its exit lands in the middle of that stop.
+      process.exit(0);
+    }
     return;
   }
 
@@ -199,6 +214,7 @@ function handle(frame) {
     return;
   }
   if (method === "session/new") {
+    startHelper();
     result(id, { sessionId, models: initializeResult._meta.modelState });
     // The real CLI pushes the full 69-command catalog once a session exists.
     notify("session/update", {
@@ -216,6 +232,7 @@ function handle(frame) {
     return;
   }
   if (method === "session/load") {
+    startHelper();
     if (params.sessionId !== sessionId) {
       send({
         jsonrpc: "2.0",
@@ -239,6 +256,11 @@ function handle(frame) {
     return;
   }
   if (method === "session/set_model") {
+    if (scenario === "exit-on-set-model") {
+      // The CLI dying after its session opened and before the adapter has
+      // announced it: the set_model RPC is never answered.
+      process.exit(3);
+    }
     if (params.modelId === "grok-build" || params.modelId === "nope") {
       send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid params", data: "unknown model id" } });
       return;
@@ -375,6 +397,43 @@ async function runPrompt(id, params) {
         usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsdTicks: 1_000_000 }
       }
     });
+    return;
+  }
+
+  if (scenario === "steer-call") {
+    // A steer that cuts a call in flight: the first prompt's command never
+    // gets a terminal frame after the cancel, as no cut call does (fixtures
+    // 05, 23, 31).
+    if (promptSeq === 1) {
+      notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-steer-cut-0",
+          title: "run_terminal_command",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: { command: "sleep 30" }
+        },
+        _meta: { promptId }
+      });
+      await waitFor(() => cancelled);
+      notify("_x.ai/session/prompt_complete", {
+        sessionId,
+        promptId,
+        stopReason: "cancelled",
+        cancellationCategory: "MidTurnAbort"
+      });
+      result(id, { stopReason: "cancelled", _meta: { sessionId, promptId } });
+      return;
+    }
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "DONE" } },
+      _meta: { promptId }
+    });
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
     return;
   }
 
@@ -649,6 +708,85 @@ async function runPrompt(id, params) {
     }
     await waitFor(() => questionAnswer !== null);
     sendTogether([chunkFrame("two;", promptId), turnCompletedFrame(promptId)]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "leftover-question-exit") {
+    // A background shell as `leftover` starts one, then a question left open:
+    // the user's stop answers it first, and this CLI exits on that answer.
+    const shell = spawn(
+      "sh",
+      ["-c", 'sleep 302 & setsid sh -c "echo daemon; exec sleep 303" & echo shell; wait'],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+    );
+    shell.unref();
+    await linesFrom(shell.stdout, ["shell", "daemon"]);
+    notify("_x.ai/task_backgrounded", {
+      sessionId,
+      update: {
+        sessionUpdate: "task_backgrounded",
+        tool_call_id: "call-bg-1",
+        task_id: "task-bg-1",
+        command: "sleep 302",
+        description: "leftover"
+      }
+    });
+    send(questionRequestFrame(sessionId));
+    await waitFor(() => false);
+    return;
+  }
+
+  if (scenario === "leftover" || scenario === "leftover-exit") {
+    // A background shell as the real CLI starts one — a session of its own —
+    // so the group signal of a stop never reaches it and it outlives this
+    // process, reparented to init (Grok fixtures README observation 48). It
+    // runs a member of its session (`sleep 302`) and a daemon that `setsid`s
+    // away (`sleep 303`, a browser daemon's or an SSH master's move). Each
+    // says it is in place once it is, and only then does the turn go on: no
+    // timing. All inherit the launch environment, marker included.
+    const shell = spawn(
+      "sh",
+      ["-c", 'sleep 302 & setsid sh -c "echo daemon; exec sleep 303" & echo shell; wait'],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+    );
+    shell.unref();
+    await linesFrom(shell.stdout, ["shell", "daemon"]);
+    notify("_x.ai/task_backgrounded", {
+      sessionId,
+      update: {
+        sessionUpdate: "task_backgrounded",
+        tool_call_id: "call-bg-1",
+        task_id: "task-bg-1",
+        command: "sleep 302",
+        description: "leftover"
+      }
+    });
+    sendTogether([
+      chunkFrame(`launch:${process.env.ORQUESTER_AGENT_LAUNCH ?? "none"};`, promptId),
+      turnCompletedFrame(promptId)
+    ]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    if (scenario === "leftover-exit") {
+      setTimeout(() => process.exit(143), 20);
+    }
+    return;
+  }
+
+  if (scenario === "question") {
+    // Our own prompt asks the user (fixture 07b's request, in the parent's
+    // session) and goes on once answered, echoing the WHOLE reply it got — so
+    // a test reads exactly what reached the CLI: an answer, or a cancel.
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "one;" } },
+      _meta: { totalTokens: 1700, promptId }
+    });
+    send(questionRequestFrame(sessionId));
+    await waitFor(() => questionAnswer !== null);
+    sendTogether([chunkFrame(`reply:${JSON.stringify(questionAnswer)};`, promptId), turnCompletedFrame(promptId)]);
     notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
     result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
     return;
@@ -929,6 +1067,39 @@ async function wakeUntilCancelled() {
   notify("_x.ai/session_notification", {
     sessionId,
     update: { sessionUpdate: "turn_completed", prompt_id: wake, stop_reason: "cancelled" }
+  });
+}
+
+/**
+ * The `leftover` scenarios' helper — an MCP server's stand-in: a session of
+ * its own, started before `session/new` (or `session/load`) answers, as the
+ * real CLI's MCP servers are (fixture 31).
+ */
+function startHelper() {
+  if (!scenario.startsWith("leftover")) {
+    return;
+  }
+  spawn("sleep", ["301"], { detached: true, stdio: "ignore" }).unref();
+}
+
+/** Resolve once every one of `names` has been printed, one per line, on `stream`. */
+function linesFrom(stream, names) {
+  return new Promise((resolve) => {
+    const seen = new Set();
+    let buffer = "";
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk) => {
+      buffer += chunk;
+      let index = buffer.indexOf("\n");
+      while (index !== -1) {
+        seen.add(buffer.slice(0, index).trim());
+        buffer = buffer.slice(index + 1);
+        index = buffer.indexOf("\n");
+      }
+      if (names.every((name) => seen.has(name))) {
+        resolve();
+      }
+    });
   });
 }
 

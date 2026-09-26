@@ -101,13 +101,13 @@ async function replayRig(fixture: string): Promise<ReplayRig> {
   };
 }
 
-async function start(r: ReplayRig): Promise<void> {
+async function start(r: ReplayRig, runtimeMode: "full-access" | "approval-required" = "full-access"): Promise<void> {
   await r.adapter.startSession({
     threadId: "t1",
     cwd: "/tmp",
     home: { kind: "system", path: "/tmp" },
     modelSelection: { model: "grok-4.7" },
-    runtimeMode: "full-access"
+    runtimeMode
   });
 }
 
@@ -292,6 +292,154 @@ test("21 replayed: the session-scoped Stop closes the work; the poll that says t
       r.events.filter((event) => event.type === "task.completed" && event.payload.taskId === AGENT).length,
       1,
       "the CLI's own cancel of the agent adds no second end"
+    );
+  } finally {
+    await r.dispose();
+  }
+});
+
+test("25 replayed, supervised: a subagent's own write asks on the PARENT's session — the parent's card, on the parent's turn", async () => {
+  const SPAWN = "call-b3e76da4-ba41-4077-ba32-0ac796f0a406-0";
+  const CHILD_WRITE = "call-4788fbf7-40c9-4968-a7db-62c3e7eee640-0";
+  const r = await replayRig("25-subagent-child-approval.ndjson");
+  try {
+    await start(r, "approval-required");
+    const turnId = await send(r, "spawn a writer");
+    const isCard = (event: RuntimeEvent): event is Extract<RuntimeEvent, { type: "request.opened" }> =>
+      event.type === "request.opened";
+    const spawnCard = (await r.waitForNth(1, isCard, "the spawn's own card")) as Extract<
+      RuntimeEvent,
+      { type: "request.opened" }
+    >;
+    // The CLI waits for the answer, and so does the replay.
+    await r.adapter.respondToApproval("t1", spawnCard.requestId!, "accept");
+    const writeCard = (await r.waitForNth(2, isCard, "the child's write card")) as Extract<
+      RuntimeEvent,
+      { type: "request.opened" }
+    >;
+    // Supervised, the spawn itself asks first (`x.ai/tool` kind `task`): a card
+    // of its own, before the subagent exists.
+    assert.equal((spawnCard.payload.args as { toolCallId?: string }).toolCallId, SPAWN);
+    // The child's write is asked on the parent's session, naming the child's call.
+    assert.equal((writeCard.payload.args as { toolCallId?: string }).toolCallId, CHILD_WRITE);
+    assert.equal(writeCard.payload.requestType, "file_change_approval");
+    for (const card of [spawnCard, writeCard]) {
+      assert.equal(card.turnId, turnId, "on the parent's turn, open while its foreground spawn runs");
+      assert.equal(card.agentId, undefined, "the parent's card, as a Codex collab child's approval is");
+    }
+    const childCall = r.events.find(
+      (event) => event.type === "item.started" && event.itemId === CHILD_WRITE
+    );
+    assert.equal(childCall?.agentId, SPAWN, "while the call itself is the agent's own row");
+    await r.adapter.respondToApproval("t1", writeCard.requestId!, "accept");
+    const done = (await r.waitFor(isTurnCompleted, "the turn")) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+    assert.equal(done.turnId, turnId);
+    const resolved = r.events.filter(
+      (event) => event.type === "request.resolved" && event.requestId === writeCard.requestId
+    );
+    assert.deepEqual(
+      resolved.map((event) => (event.payload as { decision?: string }).decision),
+      ["accept"]
+    );
+    const ends = r.events.filter((event) => event.type === "task.completed" && event.payload.taskId === SPAWN);
+    assert.deepEqual(
+      ends.map((event) => [(event.payload as { status?: string }).status, (event.payload as { summary?: string }).summary]),
+      [["completed", "done"]],
+      "allowed, the child wrote its file and finished"
+    );
+  } finally {
+    await r.dispose();
+  }
+});
+
+test("29 replayed: the scheduler's reports reach the normaliser — a loop row, never an unhandled-method warning", async () => {
+  const LOOP = "01a0de9b-e17c-7fa0-83dc-a436461e59b5";
+  const r = await replayRig("29-loop-scheduled-task.ndjson");
+  try {
+    await start(r);
+    await send(r, "/loop 60s Reply with exactly: tick");
+    await r.waitFor(isTurnCompleted, "the /loop turn");
+    await r.waitForNth(2, isTurnCompleted, "the wake its fire caused");
+    await send(r, "delete it");
+    await r.waitFor(
+      (event) => event.type === "task.completed" && event.payload.taskId === LOOP,
+      "the loop's end, at scheduled_task_deleted"
+    );
+    const loop = r.events.filter(
+      (event) => event.type.startsWith("task.") && (event.payload as { taskId?: string }).taskId === LOOP
+    );
+    assert.deepEqual(
+      loop.map((event) => event.type),
+      ["task.started", "task.progress", "task.completed"]
+    );
+    const warnings = r.events
+      .filter((event): event is Extract<RuntimeEvent, { type: "runtime.warning" }> => event.type === "runtime.warning")
+      .map((event) => event.payload.message);
+    assert.deepEqual(warnings, ["grok: MCP server not ready"], "no acp: unhandled notification _x.ai/scheduled_task_*");
+  } finally {
+    await r.dispose();
+  }
+});
+
+test("31 replayed: the host's cancel of a question is the CLI's own; a Stop's order ends the turn interrupted", async () => {
+  const r = await replayRig("31-question-cancelled.ndjson");
+  try {
+    await start(r);
+    const isQuestion = (event: RuntimeEvent): boolean => event.type === "user-input.requested";
+
+    // Turn 1: the question answered with the host's cancel alone. The CLI
+    // reads it as the user declining ("User declined to answer the
+    // questions…") and the model goes on.
+    const first = await send(r, "ask me");
+    const asked = await r.waitForNth(1, isQuestion, "the first question");
+    await r.adapter.respondToUserInput("t1", asked.requestId!, {}, { cancel: true });
+    const firstDone = (await r.waitFor(isTurnCompleted, "turn 1")) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+    assert.equal(firstDone.turnId, first);
+    const declined = r.events.findIndex(
+      (event) => event.type === "user-input.resolved" && event.requestId === asked.requestId
+    );
+    assert.equal(textOn(r.events.slice(0, declined), first), "I'll ask that one question now.");
+    assert.equal(textOn(r.events.slice(declined), first), "NONE", "the model heard nobody answered");
+
+    // Turn 2: a Stop — the host cancels the question, then interrupts.
+    const second = await send(r, "ask me again");
+    const again = await r.waitForNth(2, isQuestion, "the second question");
+    await r.adapter.respondToUserInput("t1", again.requestId!, {}, { cancel: true });
+    await r.adapter.interruptTurn("t1");
+    const secondDone = (await r.waitForNth(2, isTurnCompleted, "turn 2")) as Extract<
+      RuntimeEvent,
+      { type: "turn.completed" }
+    >;
+    assert.equal(secondDone.turnId, second);
+    assert.equal(secondDone.payload.state, "interrupted");
+
+    // Each question's call ends: turn 1's by the CLI's own answer, turn 2's —
+    // which the CLI never answers after session/cancel — by the Stop itself.
+    const callEnds = (callId: string) =>
+      r.events
+        .filter((event) => event.type === "item.completed" && event.itemId === callId)
+        .map((event) => [event.turnId, (event.payload as { status?: string; detail?: string }).status, (event.payload as { detail?: string }).detail]);
+    assert.deepEqual(callEnds("call-721b1099-8446-4d59-843d-02d01179a915-0").map(([turn, status]) => [turn, status]), [
+      [first, "completed"]
+    ]);
+    assert.deepEqual(callEnds("call-e4a64fcb-5df1-46b5-8e49-678a0977d4cf-1"), [[second, "failed", "Stopped."]]);
+    const opened = new Set(r.events.filter((event) => event.type === "item.started").map((event) => event.itemId));
+    const ended = new Set(r.events.filter((event) => event.type === "item.completed").map((event) => event.itemId));
+    assert.deepEqual([...opened].filter((id) => !ended.has(id)), [], "no call is left in progress");
+
+    const resolutions = r.events.filter((event) => event.type === "user-input.resolved");
+    assert.deepEqual(
+      resolutions.map((event) => [event.requestId, (event.payload as { withdrawn?: boolean }).withdrawn]),
+      [
+        [asked.requestId, true],
+        [again.requestId, true]
+      ],
+      "one closing row per card, each nobody's answer"
+    );
+    assert.equal(
+      r.events.filter(isTurnCompleted).length,
+      2,
+      "the cancelled prompt's own result, arriving after the interrupt, settles nothing twice"
     );
   } finally {
     await r.dispose();

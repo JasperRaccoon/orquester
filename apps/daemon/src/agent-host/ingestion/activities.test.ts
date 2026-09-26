@@ -457,6 +457,22 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
     );
     assert.equal("exitCode" in payloadOf(unreported!), false, "no code reported, none written");
   });
+
+  it("task.completed carries the adapter's left-running marker, and only when set", () => {
+    const [marked] = runtimeEventToActivities(
+      runtimeEvent("task.completed", {
+        taskId: "task-1",
+        status: "stopped",
+        summary: "Left running when the agent host stopped — stop it from Settings → System.",
+        leftRunning: true
+      })
+    );
+    assert.equal(payloadOf(marked!).leftRunning, true);
+    const [plain] = runtimeEventToActivities(
+      runtimeEvent("task.completed", { taskId: "task-1", status: "stopped", summary: "VITE v5.4.0 ready in 312 ms" })
+    );
+    assert.equal("leftRunning" in payloadOf(plain!), false);
+  });
 });
 
 describe("tool progress, denials and diagnostics (§5.1 catch-all)", () => {

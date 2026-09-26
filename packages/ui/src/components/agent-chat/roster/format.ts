@@ -13,7 +13,8 @@
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
 import {
   agentActivityText as activityTextFor,
-  isActiveSubagentStatus
+  isActiveSubagentStatus,
+  isLoopOrGoalRow
 } from "../../../lib/agent-chat/roster.logic";
 
 /** U+25B8 + space. The mark that says "this line names a tool, not a summary". */
@@ -24,6 +25,19 @@ export const BACKGROUND_SHELL_CHIP = "shell";
 
 /** The shell row's third line — where an agent row names its model. */
 export const BACKGROUND_SHELL_METRIC = "background shell";
+
+/** The chips of the two rows that drive work rather than do it (§7.6). */
+export const LOOP_CHIP = "loop";
+export const GOAL_CHIP = "goal";
+
+/** A loop's third line: what it is — it has no model, and its fires spend the tokens. */
+export const LOOP_METRIC = "scheduled prompt";
+
+/** A goal's third line leads with what it is, then the tokens it reported spending. */
+export const GOAL_METRIC = "goal";
+
+/** The row's kind, where a caller has it: a loop and a goal present as themselves. */
+type MaybeKind = { kind?: RuntimeSubagent["kind"] };
 
 /**
  * The model chip's text: the provider's slug with the noise stripped, plus the
@@ -84,15 +98,16 @@ export const isLiveStatus = isActiveSubagentStatus;
 export function agentActivityText(
   agent: Pick<
     RuntimeSubagent,
-    "agentKind" | "status" | "progress" | "lastToolName" | "result" | "error" | "exitCode"
-  >
+    "agentKind" | "status" | "progress" | "lastToolName" | "result" | "error" | "exitCode" | "leftRunning"
+  > &
+    MaybeKind
 ): string | null {
   const text = activityTextFor(agent as RuntimeSubagent);
   if (text === null) return null;
   // A shell has no tools, so the `▸ ` marker would be a lie about what the
   // line names — and a shell whose progress happens to equal a tool name is
-  // exactly how it would sneak in.
-  if (agent.agentKind === "background") return text;
+  // exactly how it would sneak in. Nor has a loop or a goal.
+  if (agent.agentKind === "background" || isLoopOrGoalRow(agent)) return text;
   const tool = agent.lastToolName?.trim();
   return tool !== undefined && tool.length > 0 && text === tool ? `${TOOL_PREFIX}${text}` : text;
 }
@@ -109,8 +124,22 @@ export function rosterRowMetrics(
   agent: Pick<
     RuntimeSubagent,
     "agentKind" | "model" | "effort" | "usage" | "activationCount" | "exitCode"
-  >
+  > &
+    MaybeKind
 ): string[] {
+  const run = agent.activationCount > 1 ? [`run ${agent.activationCount}`] : [];
+  // A loop and a goal say what they are, as a shell does — neither has a
+  // model of its own. A goal's tokens are the ones it reported spending (its
+  // turns' and agents', which the roster never sums twice); a loop's fires
+  // spend theirs on their own rows.
+  if (agent.kind === "loop") return [LOOP_METRIC, ...run];
+  if (agent.kind === "goal") {
+    return [
+      GOAL_METRIC,
+      agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok",
+      ...run
+    ];
+  }
   // A shell has no model and spends no tokens: the launching agent's model
   // leaked onto the row (and `— tok` beside it) is precisely what made a
   // background command read as a subagent. The line says what the row IS.
@@ -141,8 +170,12 @@ export function rosterRowMetrics(
  * *T3: `AgentsPanel.tsx:146-149`.*
  */
 export function rosterRoleChip(
-  agent: Pick<RuntimeSubagent, "agentKind" | "title" | "role">
+  agent: Pick<RuntimeSubagent, "agentKind" | "title" | "role"> & MaybeKind
 ): string | null {
+  // A loop and a goal chip their kind, as a shell does: the one slot on the
+  // row that says what kind of thing it is.
+  if (agent.kind === "loop") return LOOP_CHIP;
+  if (agent.kind === "goal") return GOAL_CHIP;
   if (agent.agentKind === "background") return BACKGROUND_SHELL_CHIP;
   const role = agent.role?.trim();
   if (!role) return null;

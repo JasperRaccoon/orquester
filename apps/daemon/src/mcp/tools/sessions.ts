@@ -343,7 +343,7 @@ const interruptSession = defineTool({
 const stopSession = defineTool({
   name: "stop_session",
   title: "Stop the agent process",
-  description: "Stop the provider process but keep the tab, its history and resume cursor; the next send_message resumes it. Use it to recover a session whose chat.sessionStatus is error.",
+  description: "Stop the provider process but keep the tab, its history and resume cursor; the next send_message resumes it. Use it to recover a session whose chat.sessionStatus is error. For Grok it also stops the processes the agent's work started (background shells, a dev server they run), earlier launches' included, which a deploy, a restart or a crash leaves running.",
   input: { sessionId: sessionIdField },
   annotations: MUTATING_IDEMPOTENT,
   async run(args, { api }) {
@@ -356,7 +356,7 @@ const stopSession = defineTool({
 const closeSession = defineTool({
   name: "close_session",
   title: "Close a session",
-  description: "Close a tab (chat or terminal). A chat's thread is deleted; the provider's own transcript stays resumable via list_conversations for Claude, Codex and Grok (and claudex/claudemix from their proxy homes); OpenCode history is not listed.",
+  description: "Close a tab (chat or terminal). A chat's thread is deleted; the provider's own transcript stays resumable via list_conversations for Claude, Codex and Grok (and claudex/claudemix from their proxy homes); OpenCode history is not listed. A Grok chat's background processes are stopped as stop_session stops them.",
   input: { sessionId: sessionIdField },
   annotations: DESTRUCTIVE,
   async run(args, { api }) {

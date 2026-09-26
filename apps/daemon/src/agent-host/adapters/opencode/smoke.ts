@@ -22,6 +22,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -126,7 +127,8 @@ async function main(): Promise<void> {
         sessionPath: process.env.PATH ?? "",
         tmpDir: tmpdir(),
         homeDir: home,
-        sessionId: "smoke"
+        sessionId: "smoke",
+        launchId: randomUUID()
       }),
     resolveBin: async () => bin,
     sessionPath: () => process.env.PATH ?? "",

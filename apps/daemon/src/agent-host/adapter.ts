@@ -179,11 +179,21 @@ export interface AgentAdapter {
     requestId: string,
     decision: ApprovalDecision
   ): Promise<void>;
-  /** Attachments are folded into the answer text by the host before this call. */
+  /**
+   * Attachments are folded into the answer text by the host before this call.
+   *
+   * `options.cancel` is the HOST's cancel — a Stop, the session's stop, a
+   * closed tab (`settlePendingRequests`): nobody answered, and `answers` is
+   * then `{}`. An adapter whose provider has a cancel of its own answers with
+   * it — Grok's `{outcome: "cancelled"}`, where `{}` reached the CLI as an
+   * empty answer — and every other one answers `{}` as it always has. A
+   * user's answer, an empty one or a skip included, never carries it.
+   */
   respondToUserInput(
     threadId: string,
     requestId: string,
-    answers: Record<string, unknown>
+    answers: Record<string, unknown>,
+    options?: { cancel?: boolean }
   ): Promise<void>;
   compact(threadId: string): Promise<void>;
   /**
@@ -242,7 +252,28 @@ export interface AgentAdapter {
 
   listSessions(): ProviderSession[];
   hasSession(threadId: string): boolean;
-  stopSession(threadId: string): Promise<void>;
+  /**
+   * `options.endedByUser`: the user ended the session — the session stop
+   * command or a closed tab (`stopSessionInternal`) — rather than the host
+   * restarting it for a thread that goes on (an account, permission-mode or
+   * cwd change; a stale adapter's session) or tearing down (`stopAll`, a
+   * drain-restart included). An adapter whose provider leaves the processes
+   * its work started running past its own exit stops them only then (Grok:
+   * `GrokSession.stop`): a deploy must never kill running work. Every other
+   * adapter ignores it.
+   */
+  stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void>;
+  /**
+   * The user ended the thread's session — the session stop command, a closed
+   * tab — so stop what EARLIER launches of the thread left running that only
+   * a user's end may stop, live session or not (Grok: the work its agent
+   * started, which a deploy, a restart or a crash left running;
+   * `support/leftover-work.ts`). Called after `stopSession(…, {endedByUser:
+   * true})` when a session was live, and on its own when none was. Optional:
+   * an adapter that leaves no such work has nothing to sweep.
+   */
+  sweepEndedSession?(threadId: string): Promise<void>;
+  /** The host's teardown: never the user ending a session (see {@link stopSession}). */
   stopAll(): Promise<void>;
 
   /**
@@ -354,6 +385,14 @@ export interface AdapterContext {
   sessionPath(): string;
   /** `<appdir>/tmp` — `/tmp` is unavailable under `ProtectSystem=strict`. */
   tmpDir(): string;
+  /**
+   * The thread's `leftover-work.json` (`agentChatThreadLeftoverWorkPath`):
+   * where an adapter whose provider leaves the user's work running past its
+   * own exit remembers each launch's task sessions until the user ends the
+   * thread's session (Grok). Optional: a context without it remembers
+   * nothing, and a later user end sweeps only a live session.
+   */
+  leftoverWorkPath?(threadId: string): string;
   /** Aborted when the host is shutting down; every adapter must honour it. */
   signal: AbortSignal;
 }

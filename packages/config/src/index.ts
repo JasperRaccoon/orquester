@@ -201,6 +201,16 @@ export function agentChatThreadAttachmentsDir(baseDir: string, threadId: string)
 }
 
 /**
+ * The user's work a provider's earlier launches of the thread left running —
+ * each launch's task sessions, under its launch marker — kept until the user
+ * ends the thread's session, which sweeps them (0600, rewritten atomically;
+ * the adapter's own file, never `binding.json`).
+ */
+export function agentChatThreadLeftoverWorkPath(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "leftover-work.json");
+}
+
+/**
  * The fold snapshot: the thread's folded state as of one `seq`, rewritten
  * atomically every N events so a cold load folds only the log's tail. A cache
  * of the log, never an authority — a missing, corrupt or older-version file is

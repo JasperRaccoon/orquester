@@ -7,12 +7,14 @@ import {
   buildProviderEnv,
   needsShellExpansion
 } from "./env.ts";
+import { AGENT_LAUNCH_ENV_VAR } from "./leftover-processes.ts";
 
 const base = {
   sessionPath: "/usr/local/bin:/usr/bin:/home/orq/.local/bin",
   tmpDir: "/var/lib/orquester/tmp",
   homeDir: "/var/lib/orquester",
-  sessionId: "sess-1"
+  sessionId: "sess-1",
+  launchId: "launch-1"
 } as const;
 
 test("the env is built from nothing — process.env is never spread", () => {
@@ -22,6 +24,7 @@ test("the env is built from nothing — process.env is never spread", () => {
     assert.equal(env.ORQ_ENV_LEAK_CANARY, undefined);
     assert.deepEqual(Object.keys(env).sort(), [
       "HOME",
+      "ORQUESTER_AGENT_LAUNCH",
       "ORQUESTER_SESSION_ID",
       "PATH",
       "TMPDIR"
@@ -107,6 +110,18 @@ test("undefined values are dropped, never stringified", () => {
   });
   assert.ok(!("MAYBE" in env));
   assert.equal(env.REAL, "1");
+});
+
+test("every adapter's launch carries its own launch marker, which no launcher env shadows", () => {
+  for (const adapter of Object.keys(ACCOUNT_HOME_ENV_VAR) as Array<keyof typeof ACCOUNT_HOME_ENV_VAR>) {
+    const env = buildProviderEnv({
+      adapter,
+      ...base,
+      launchId: `launch-of-${adapter}`,
+      extraEnv: { [AGENT_LAUNCH_ENV_VAR]: "a-launcher-env-value" }
+    });
+    assert.equal(env[AGENT_LAUNCH_ENV_VAR], `launch-of-${adapter}`, adapter);
+  }
 });
 
 test("ORQUESTER_SESSION_ID is always stamped", () => {

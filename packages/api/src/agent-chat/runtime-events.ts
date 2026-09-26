@@ -302,8 +302,15 @@ export const MONITOR_TASK_TYPES: ReadonlySet<string> = new Set([
   "shell"
 ]);
 
-/** Task types that are neither agents nor watch loops (plan-mode bookkeeping). */
-export const INERT_TASK_TYPES: ReadonlySet<string> = new Set(["plan", "dream"]);
+/**
+ * Task types that are neither agents nor watch loops: plan-mode bookkeeping,
+ * and a provider's scheduled prompt (`scheduled`, a Grok `/loop`) or
+ * autonomous goal (`goal`, a Grok `/goal`), which run nothing of their own —
+ * their fires, turns and subagents are the work, and each is live on its own
+ * rows. A row of these types is background, never live work: a week-long loop
+ * must not hold a deploy's drain between its fires.
+ */
+export const INERT_TASK_TYPES: ReadonlySet<string> = new Set(["plan", "dream", "scheduled", "goal"]);
 
 /** Server-stamped classification carried on every task row (§4.2). */
 export type TaskAgentKind = "agent" | "background";
@@ -805,6 +812,14 @@ export interface TaskCompletedPayload extends TaskAgentLinkage {
   usage?: RuntimeTaskUsage;
   /** A background shell's exit code, when the provider reports one. */
   exitCode?: number;
+  /**
+   * The adapter's own word that the task's PROCESS outlived this end — a
+   * deploy, a restart, a crash ended its session without the user (Grok) —
+   * with `summary` the note that says so and where to stop it. The one
+   * summary a stopped shell's roster row shows; any other (the CLI's stop
+   * sentence, its output's line) stays out of it.
+   */
+  leftRunning?: boolean;
 }
 
 export interface HookStartedPayload {

@@ -400,3 +400,19 @@ test("23 cut: session/cancel cancels the foreground child — never sent to the 
     "no task.updated {isBackgrounded}: the CLI cancels a cut foreground child (subagent_finished cancelled)"
   );
 });
+
+test("23 cut: the Stop closes the spawn call it cut — the CLI never answers it after session/cancel", () => {
+  const run = driveCapture("23-stop-cuts-foreground-subagent.ndjson", {
+    atNote: (note, control) => (/sending session\/cancel mid-turn/.test(note) ? control.interrupt() : [])
+  });
+  const rows = callRows(run.events, CUT_CALL);
+  const closed = rows.filter((row) => row.type === "item.completed");
+  assert.equal(closed.length, 1, "closed once");
+  assert.deepEqual(
+    [closed[0]!.turnId, (closed[0]!.payload as { status?: string; detail?: string }).status, (closed[0]!.payload as { detail?: string }).detail],
+    ["turn-1", "failed", "Stopped."]
+  );
+  const turnEnd = run.events.findIndex((event) => event.type === "turn.completed" && event.turnId === "turn-1");
+  assert.ok(run.events.indexOf(closed[0]!) < turnEnd, "on the turn it cut, before that turn settles");
+  assert.equal(rows.at(-1), closed[0], "and nothing of the call after it");
+});

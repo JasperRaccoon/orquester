@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
+import { withDeadline } from "./agent-host/support/deadline.ts";
+import { AGENT_LAUNCH_ENV_VAR } from "./agent-host/support/leftover-processes.ts";
 import type { SystemStatusOptions } from "./system-status.ts";
 import {
   SYSTEM_STATUS_SUPPORTED,
@@ -15,6 +19,7 @@ import {
   cpuPercentFromSamples,
   decodeProcNetAddress,
   descendsFromRoot,
+  launchMarkerOf,
   mapLimited,
   parseCmdline,
   parseCpuSample,
@@ -29,6 +34,52 @@ import {
 } from "./system-status.ts";
 
 const exec = promisify(execFile);
+
+/**
+ * This test process's environment without the agent host's launch marker: run
+ * from a Grok chat's shell, every orphan these tests make would carry it, and
+ * an "unmanaged" orphan would be managed after all.
+ */
+function unmarkedEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env[AGENT_LAUNCH_ENV_VAR];
+  return env;
+}
+
+/**
+ * Run `script` under a `sh` that exits at once, orphaning what it started in
+ * the background — which must announce its pids as ONE line on stdout. Resolves
+ * once that line arrived AND the shell exited (so the orphans are init's, no
+ * longer this process's); `gone` settles when every process still holding the
+ * announcing pipe — the orphan and whatever inherited its stdout — has exited.
+ * Nothing polls: both are events of the pipe and the shell.
+ */
+async function orphaned(
+  script: string,
+  env: NodeJS.ProcessEnv
+): Promise<{ pids: number[]; gone: Promise<void> }> {
+  const shell = spawn("sh", ["-c", script], { env, stdio: ["ignore", "pipe", "ignore"] });
+  shell.stdout.setEncoding("utf8");
+  const gone = once(shell.stdout, "close").then(() => undefined);
+  const announced = new Promise<string>((resolve, reject) => {
+    let buffer = "";
+    shell.stdout.on("data", (chunk: string) => {
+      buffer += chunk;
+      const end = buffer.indexOf("\n");
+      if (end !== -1) resolve(buffer.slice(0, end));
+    });
+    void gone.then(() => reject(new Error("the orphan exited before it announced its pids")));
+  });
+  const [line] = await Promise.all([announced, once(shell, "exit")]);
+  const pids = line.trim().split(/\s+/).map(Number);
+  assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 1), `announced: ${line}`);
+  return { pids, gone };
+}
+
+/** `gone`, bounded: a process that survives fails the test instead of hanging it. */
+async function allGone(gone: Promise<void>, label: string): Promise<void> {
+  await withDeadline(gone, { label, timeoutMs: 5_000 });
+}
 
 test("parseCpuSample sums the aggregate line and counts iowait as idle", () => {
   const sample = parseCpuSample("cpu  100 2 30 900 50 0 8 0 0 0\ncpu0 1 1 1 1\n");
@@ -54,6 +105,27 @@ test("parseMemInfo falls back to MemFree on pre-3.14 kernels", () => {
 test("parseProcStatus reads name, ppid and RSS", () => {
   const status = "Name:\tclaude\nUmask:\t0022\nState:\tS (sleeping)\nPPid:\t1197\nVmRSS:\t  832852 kB\n";
   assert.deepEqual(parseProcStatus(status), { name: "claude", ppid: 1197, rssBytes: 832852 * 1024 });
+});
+
+test("parseProcStatus reads the real uid when the status names one", () => {
+  const status = "Name:\tgrok\nPPid:\t1\nUid:\t999\t998\t997\t996\nVmRSS:\t  4 kB\n";
+  assert.deepEqual(parseProcStatus(status), { name: "grok", ppid: 1, rssBytes: 4096, uid: 999 });
+});
+
+test("launchMarkerOf reads the agent host's launch marker and the chat it belongs to", () => {
+  const environ = (vars: Record<string, string>): string =>
+    Object.entries(vars)
+      .map(([key, value]) => `${key}=${value}\0`)
+      .join("");
+  assert.deepEqual(
+    launchMarkerOf(environ({ PATH: "/bin", [AGENT_LAUNCH_ENV_VAR]: "l-1", ORQUESTER_SESSION_ID: "chat-1" })),
+    { launchId: "l-1", sessionId: "chat-1" }
+  );
+  assert.deepEqual(launchMarkerOf(environ({ [AGENT_LAUNCH_ENV_VAR]: "l-2" })), { launchId: "l-2" });
+  assert.equal(launchMarkerOf(environ({ [AGENT_LAUNCH_ENV_VAR]: "" })), null, "an empty marker is none");
+  assert.equal(launchMarkerOf(environ({ ORQUESTER_SESSION_ID: "chat-1" })), null, "a session id alone is not a launch");
+  assert.equal(launchMarkerOf(`X${AGENT_LAUNCH_ENV_VAR}=l-3\0`), null);
+  assert.equal(launchMarkerOf(""), null);
 });
 
 test("parseProcStatus tolerates a kernel thread with no VmRSS", () => {
@@ -343,7 +415,9 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
 
   // A live process OUTSIDE the tree: `sh` exits immediately, so its backgrounded
   // sleep is reparented away from this process and is no longer ours to kill.
-  const { stdout: orphanPid } = await exec("sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"]);
+  const { stdout: orphanPid } = await exec("sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], {
+    env: unmarkedEnv()
+  });
   const orphan = Number(orphanPid.trim());
   assert.ok(Number.isInteger(orphan) && orphan > 1);
   try {
@@ -380,6 +454,83 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
   for (const pid of [victim.pid, ...subtree]) {
     const { stdout } = await exec("sh", ["-c", `kill -0 ${pid} 2>/dev/null && echo alive || echo gone`]);
     assert.equal(stdout.trim(), "gone", `pid ${pid} survived the subtree kill`);
+  }
+});
+
+test("a process carrying the agent host's launch marker is managed even as an orphan: listed, labelled, killable", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) {
+    return;
+  }
+  // What a provider CLI leaves behind when it dies with the host: a shell in a
+  // session of its own, with two children, reparented away from every root —
+  // only its environment still says whose it is.
+  const env = { ...unmarkedEnv(), [AGENT_LAUNCH_ENV_VAR]: randomUUID(), ORQUESTER_SESSION_ID: "chat-1" };
+  const { pids, gone } = await orphaned(
+    `setsid sh -c 'sleep 30 & a=$!; sleep 30 & b=$!; echo "$$ $a $b"; wait' &`,
+    env
+  );
+  const [orphan, ...children] = pids as [number, ...number[]];
+  try {
+    assert.equal(children.length, 2, "the orphan started its two sleeps");
+    const status = service({ listSessionIds: () => new Set(["chat-1"]) });
+    const listed = (await status.processes()).processes;
+    const root = listed.find((row) => row.pid === orphan);
+    assert.ok(root, "the marked orphan is listed");
+    assert.equal(root?.sessionId, "chat-1", "labelled with the chat its launch belongs to");
+    for (const child of children) {
+      const sleep = listed.find((row) => row.pid === child);
+      assert.ok(sleep, "and so is what it started");
+      assert.equal(sleep?.sessionId, "chat-1");
+    }
+
+    const result = await status.kill(orphan);
+    assert.equal(result.ok, true, "managed: the kill guard lets it through");
+    // `killed` counts signals actually sent: the shell may exit on its own once
+    // its foreground sleep dies, so only the two sleeps are guaranteed.
+    assert.ok(result.ok === true && result.killed >= 2, "the orphan's subtree is signalled");
+    await allGone(gone, "the orphan and its two sleeps exiting after the kill");
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+});
+
+test("a marked process whose parent still runs outside every root is no orphan: never listed, never killable", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) {
+    return;
+  }
+  // Only a process init adopted — or whose parent is gone — is what a provider
+  // CLI left behind; what such an orphan started comes with it, as a
+  // descendant. A marked process whose parent is alive and none of ours (here
+  // an unmarked shell that set the marker on its child by hand) is that
+  // parent's, and no marker makes it ours.
+  const { pids, gone } = await orphaned(
+    `setsid sh -c '${AGENT_LAUNCH_ENV_VAR}=${randomUUID()} ORQUESTER_SESSION_ID=chat-1 sleep 30 & echo "$$ $!"; wait' &`,
+    unmarkedEnv()
+  );
+  const [parent, marked] = pids as [number, number];
+  try {
+    const status = service({ listSessionIds: () => new Set(["chat-1"]) });
+    const listed = (await status.processes()).processes;
+    assert.equal(listed.find((row) => row.pid === marked), undefined, "the marked child is not listed");
+    assert.equal(listed.find((row) => row.pid === parent), undefined, "nor is its unmarked parent");
+    const refused = await status.kill(marked);
+    assert.equal(refused.ok === false && refused.code, "PROCESS_NOT_MANAGED");
+    assert.doesNotThrow(() => process.kill(marked, 0), "a refused kill signalled nothing");
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    await allGone(gone, "the test's own processes exiting");
   }
 });
 

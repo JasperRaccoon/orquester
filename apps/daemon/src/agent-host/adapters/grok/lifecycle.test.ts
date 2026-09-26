@@ -13,7 +13,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +30,7 @@ import {
 
 import type { AdapterContext } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
+import { readLeftoverWork } from "../../support/leftover-work.ts";
 import { createGrokAdapter, GROK_CAPABILITIES, isBlockedGrokCommand } from "./index.ts";
 import { parseGrokResumeCursor } from "./session.ts";
 
@@ -43,6 +46,10 @@ interface Rig {
   dispose(): Promise<void>;
   disposed: boolean;
   cwd: string;
+  /** `GROK_RIG_MARK` in this rig's launch env: finds its own processes in `/proc`. */
+  mark: string;
+  /** The thread `t1`'s `leftover-work.json`: what its launches left running for a later user end. */
+  leftoverWork: string;
 }
 
 /**
@@ -53,9 +60,21 @@ interface Rig {
 const openRigs: Rig[] = [];
 
 async function rig(
-  options: { scenario?: string; version?: string; bin?: string | null; env?: Record<string, string> } = {}
+  options: {
+    scenario?: string;
+    version?: string;
+    bin?: string | null;
+    env?: Record<string, string>;
+    /** Share another rig's `leftover-work.json`: a later host of the same thread. */
+    leftoverWork?: string;
+  } = {}
 ): Promise<Rig> {
   const cwd = await mkdtemp(join(tmpdir(), "grok-lifecycle-"));
+  const mark = randomUUID();
+  const leftoverWork = options.leftoverWork ?? join(cwd, "threads", "t1", "leftover-work.json");
+  // The thread's directory, as the store creates it with the thread: the
+  // adapter never creates it (a late record must not raise a deleted thread).
+  await mkdir(dirname(leftoverWork), { recursive: true });
   const events: RuntimeEvent[] = [];
   const waiters: Array<{ predicate: (event: RuntimeEvent) => boolean; resolve: (event: RuntimeEvent) => void }> = [];
 
@@ -77,12 +96,14 @@ async function rig(
       HOME: cwd,
       TMPDIR: cwd,
       GROK_MOCK_SCENARIO: options.scenario ?? "happy",
+      GROK_RIG_MARK: mark,
       ...(options.version === undefined ? {} : { GROK_MOCK_VERSION: options.version }),
       ...options.env
     }),
     resolveBin: async () => await Promise.resolve(options.bin === undefined ? MOCK : options.bin),
     sessionPath: () => process.env["PATH"] ?? "",
     tmpDir: () => cwd,
+    leftoverWorkPath: (threadId) => (threadId === "t1" ? leftoverWork : join(cwd, "threads", threadId, "leftover-work.json")),
     signal: controller.signal
   };
 
@@ -131,7 +152,9 @@ async function rig(
       controller.abort();
       await adapter.stopAll();
     },
-    cwd
+    cwd,
+    mark,
+    leftoverWork
   };
   openRigs.push(built);
   return built;
@@ -189,7 +212,78 @@ test("a CLI below the minimum version is refused with the required version", asy
 test("a handshake that never answers times out and kills the child", async () => {
   const r = await rig({ scenario: "no-handshake" });
   await assert.rejects(async () => await start(r), /timed out/);
+  await r.drain();
+  assert.deepEqual(lifecycleRows(r.events), [], "the timeout is the report, never a crash");
   await r.dispose();
+});
+
+/**
+ * The rows a session reports of its own life. A session that never announced
+ * `session.started` has none: the start's rejection is its whole report, and
+ * the host writes that — an exit row besides it read as a crash of a session
+ * that never ran.
+ */
+function lifecycleRows(events: readonly RuntimeEvent[]): string[] {
+  return events
+    .filter(
+      (event) =>
+        event.type.startsWith("session.") ||
+        event.type.startsWith("thread.") ||
+        event.type === "turn.completed" ||
+        event.type === "runtime.error"
+    )
+    .map((event) => event.type);
+}
+
+test("a CLI that dies after its session opened but before it was announced fails the open — never announced ready", async () => {
+  const r = await rig({ scenario: "exit-on-set-model" });
+  try {
+    await assert.rejects(
+      async () =>
+        await r.adapter.startSession({
+          threadId: "t1",
+          cwd: r.cwd,
+          home: home(r.cwd),
+          // Not the CLI's current model: the open's last step, `session/set_model`, is what the CLI dies on.
+          modelSelection: { model: "grok-4.7" },
+          runtimeMode: "approval-required"
+        }),
+      /exited with code 3 before its session opened/
+    );
+    await r.drain();
+    assert.equal(r.adapter.hasSession("t1"), false);
+    assert.deepEqual(lifecycleRows(r.events), [], "no session.started, no ready — and no crash row beside the rejection");
+    assert.deepEqual(
+      r.events.filter((event) => event.type === "runtime.warning").map((event) => event.payload.message),
+      [],
+      "and no model-switch warning from a CLI that is gone"
+    );
+  } finally {
+    await r.dispose();
+  }
+});
+
+test("a session that fails to open reports nothing of its own: its start's rejection is the report", async () => {
+  const cases = [
+    { label: "the version gate", rig: { version: "0.9.0" }, cursor: undefined, error: /0\.9\.0 is too old/ },
+    {
+      label: "a cursor the CLI no longer knows",
+      rig: {},
+      cursor: { schemaVersion: 1, sessionId: "01a0c19e-0000-7000-8000-000000000000" },
+      error: /Path not found/
+    }
+  ];
+  for (const { label, rig: options, cursor, error } of cases) {
+    const r = await rig(options);
+    try {
+      await assert.rejects(async () => await start(r, cursor === undefined ? {} : { resumeCursor: cursor }), error);
+      await r.drain();
+      assert.deepEqual(lifecycleRows(r.events), [], `${label}: no exit row, no state, no crash`);
+      assert.equal(r.adapter.hasSession("t1"), false);
+    } finally {
+      await r.dispose();
+    }
+  }
 });
 
 test("the happy path: session, turn, usage, and a settled turn", async () => {
@@ -710,6 +804,25 @@ test("the adapter runs no watchdog of its own — the host owns it", async () =>
 });
 
 
+test("a steer closes the call its cancel cut, on the turn it steers — the CLI never answers it", async () => {
+  const r = await rig({ scenario: "steer-call" });
+  try {
+    await start(r);
+    const first = await r.adapter.sendTurn({ threadId: "t1", input: "run it", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "item.started" && event.itemId === "call-steer-cut-0", "the call in flight");
+    await r.adapter.sendTurn({ threadId: "t1", input: "no, say DONE", attachments: [], interactionMode: "default" });
+    const done = await r.waitFor((event) => event.type === "turn.completed", "the steered turn's end");
+    const ends = r.events.filter((event) => event.type === "item.completed" && event.itemId === "call-steer-cut-0");
+    assert.deepEqual(
+      ends.map((event) => [event.turnId, (event.payload as { status?: string }).status, (event.payload as { detail?: string }).detail]),
+      [[first.turnId, "failed", "Cancelled: a new message was sent."]]
+    );
+    assert.ok(r.events.indexOf(ends[0]!) < r.events.indexOf(done), "closed before the turn settles");
+  } finally {
+    await r.dispose();
+  }
+});
+
 test("a steer settles the turn from the STEERED prompt, not the cancelled one", async () => {
   // R4 #1 / Q1 #4 (blocker). The old guard was inverted: the cancelled first
   // prompt matched `turn.epoch` and ended the turn, and the steered answer was
@@ -1066,6 +1179,46 @@ test("a subagent's child session's question rides no turn, as Codex's does", asy
   await r.dispose();
 });
 
+test("the host's cancel of a question reaches the CLI as `cancelled`, never as an empty answer", async () => {
+  // A Stop, the session's stop and a closed tab settle a pending question with
+  // the host's cancel (`settlePendingRequests`): `answers` is then `{}`, and
+  // sent as `{outcome: "accepted", answers: {}}` it told the CLI the user had
+  // answered — nothing at all.
+  const r = await rig({ scenario: "question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the question");
+  await r.adapter.respondToUserInput("t1", asked.requestId!, {}, { cancel: true });
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), 'one;reply:{"outcome":"cancelled"};');
+  const resolved = r.events.filter((event) => event.type === "user-input.resolved");
+  assert.equal(resolved.length, 1, "one resolution row");
+  assert.equal(
+    (resolved[0].payload as { withdrawn?: boolean }).withdrawn,
+    true,
+    "nobody answered: the host's own cancelled row, which repeats the Stop's"
+  );
+  await r.dispose();
+});
+
+test("a user's empty answer to a question stays an answer", async () => {
+  // A skip is the user's word, not a cancel: only the host's cancel flag reads
+  // as `cancelled`, whatever the answers hold.
+  const r = await rig({ scenario: "question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the question");
+  await r.adapter.respondToUserInput("t1", asked.requestId!, {});
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), 'one;reply:{"outcome":"accepted","answers":{}};');
+  const resolved = r.events.filter((event) => event.type === "user-input.resolved");
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0].payload as { withdrawn?: boolean }).withdrawn, undefined);
+  await r.dispose();
+});
+
 test("a request answered without a card leaves a waiting wake's frames waiting for its own turn", async () => {
   const r = await rig({ scenario: "wake-auto-permission" });
   await start(r, { runtimeMode: "full-access" });
@@ -1224,6 +1377,304 @@ test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => 
   await r.dispose();
 });
 
+
+// ---------------------------------------------------------------------------
+// What the CLI leaves behind (AGENTS.md, "What a Grok CLI starts outlives it";
+// Grok fixtures README observations 48 and 55)
+// ---------------------------------------------------------------------------
+//
+// The real CLI starts its MCP servers and background shells in sessions of
+// their own, so a stop's group signal reaches the CLI alone and they outlive
+// it, reparented to init. The mock's `leftover` scenarios do the same: a
+// helper (`sleep 301`, an MCP server's stand-in) before `session/new`
+// answers, and during the turn a shell (`sh -c 'sleep 302 & …'`) whose
+// member `sleep 302` stays in its session while `sleep 303` daemonizes into
+// one of its own. They are found by the launch marker they inherited and the
+// sessions recorded while the CLI lived — never by the parent chain they lost.
+
+/** Whether `pid` is a live (non-zombie) process. */
+function isRunning(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "latin1");
+    const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+    return state !== "Z" && state !== "X";
+  } catch {
+    return false;
+  }
+}
+
+/** Every live process whose environment carries `name=value`. */
+function processesWith(name: string, value: string): number[] {
+  const found: number[] = [];
+  for (const entry of readdirSync("/proc")) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 1) continue;
+    try {
+      if (readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(`${name}=${value}`) && isRunning(pid)) {
+        found.push(pid);
+      }
+    } catch {
+      // Gone, or not ours to read.
+    }
+  }
+  return found;
+}
+
+/** What the rig's launch left running, by role: the helper, the shell, its member, the daemon. */
+function leftovers(r: Rig): { helper: number[]; shell: number[]; member: number[]; daemon: number[] } {
+  const found = { helper: [] as number[], shell: [] as number[], member: [] as number[], daemon: [] as number[] };
+  for (const pid of processesWith("GROK_RIG_MARK", r.mark)) {
+    let argv: string[];
+    try {
+      argv = readFileSync(`/proc/${pid}/cmdline`, "latin1").split("\0").filter(Boolean);
+    } catch {
+      continue;
+    }
+    const line = argv.join(" ");
+    if (line === "sleep 301") found.helper.push(pid);
+    else if (line === "sleep 302") found.member.push(pid);
+    else if (line === "sleep 303") found.daemon.push(pid);
+    else if (argv[0] === "sh" && line.includes("sleep 302 &")) found.shell.push(pid);
+  }
+  return found;
+}
+
+/** Kill what a test left alive, so nothing outlives the suite. */
+function reap(r: Rig): void {
+  for (const pid of processesWith("GROK_RIG_MARK", r.mark)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+/** The launch marker the mock saw, off its `launch:<id>;` chunk. */
+function launchOf(events: readonly RuntimeEvent[], turnId: string): string {
+  const match = /launch:([^;]+);/.exec(turnText(events, turnId));
+  assert.ok(match, "the mock names its launch");
+  return match[1]!;
+}
+
+async function turnWithLeftovers(r: Rig, threadId = "t1"): Promise<string> {
+  const { turnId } = await r.adapter.sendTurn({ threadId, input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "the turn's end");
+  await r.drain();
+  return turnId;
+}
+
+test("a session's end stops its helpers — and never what daemonized into a session of its own", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  try {
+    await start(r);
+    const turnId = await turnWithLeftovers(r);
+    assert.notEqual(launchOf(r.events, turnId), "none", "the launch env carries the marker");
+    const before = leftovers(r);
+    assert.equal(before.helper.length, 1);
+    assert.equal(before.daemon.length, 1);
+    await r.adapter.stopSession("t1");
+    const after = leftovers(r);
+    assert.deepEqual(after.helper, [], "no group signal reached it; its recorded session did");
+    assert.deepEqual(after.daemon, before.daemon, "it left the shell's session: a host-wide helper, never ours to stop");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
+test("the host's teardown and a restart stop a Grok session's helpers — never its running work", { skip: process.platform !== "linux" }, async () => {
+  // A drain-restart, and an account, permission-mode or cwd restart of a
+  // thread that goes on: the drain rule — a deploy must not kill running
+  // work — holds for the dev server a Grok chat started.
+  for (const end of ["teardown", "restart"] as const) {
+    const r = await rig({ scenario: "leftover" });
+    try {
+      await start(r);
+      await turnWithLeftovers(r);
+      const before = leftovers(r);
+      assert.equal(before.shell.length, 1);
+      assert.equal(before.member.length, 1);
+      if (end === "teardown") {
+        await r.adapter.stopAll();
+      } else {
+        await r.adapter.stopSession("t1");
+      }
+      const after = leftovers(r);
+      assert.deepEqual(after.helper, [], `${end}: its MCP servers are per-session helpers, swept at every end`);
+      assert.deepEqual(after.shell, before.shell, `${end}: the shell runs on, a marked orphan`);
+      assert.deepEqual(after.member, before.member, `${end}: and so does what it started`);
+      assert.deepEqual(after.daemon, before.daemon);
+      // Its row says so — never a silent "stopped" for work that runs on.
+      assert.deepEqual(shellEnds(r), [
+        [
+          "stopped",
+          end === "teardown"
+            ? "Left running when the agent host stopped — stop it from Settings → System."
+            : "Left running when the session restarted — stop it from Settings → System."
+        ]
+      ]);
+      const remembered = await readLeftoverWork(r.leftoverWork);
+      assert.equal(remembered.length, 1, `${end}: the launch's work is remembered for a later user end`);
+      assert.ok(remembered[0]!.sessions.length >= 1);
+    } finally {
+      reap(r);
+      await r.dispose();
+    }
+  }
+});
+
+test("the user ending the session stops its running work too — never what daemonized away", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  try {
+    await start(r);
+    await turnWithLeftovers(r);
+    const before = leftovers(r);
+    await r.adapter.stopSession("t1", { endedByUser: true });
+    const after = leftovers(r);
+    assert.deepEqual(shellEnds(r), [["stopped", undefined]], "it really stopped: nothing to say");
+    assert.deepEqual(after.helper, []);
+    assert.deepEqual(after.shell, [], "the session stop command or a closed tab: the agent's work goes with it");
+    assert.deepEqual(after.member, []);
+    assert.deepEqual(after.daemon, before.daemon, "a host-wide helper it started is never the session's");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
+test("the user's stop sweeps the running work even when the CLI exits in the middle of it", { skip: process.platform !== "linux" }, async () => {
+  // The stop answers the open card first (the host's cancel), and this CLI
+  // exits on that answer: its exit lands inside the stop. A sweep it started
+  // must not be the one the stop reuses, without the user's work in it.
+  const r = await rig({ scenario: "leftover-question-exit" });
+  try {
+    await start(r);
+    await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "user-input.requested", "the open card");
+    await r.waitFor((event) => event.type === "task.started", "the shell's task");
+    const before = leftovers(r);
+    assert.equal(before.shell.length, 1);
+    assert.equal(before.member.length, 1);
+    await r.adapter.stopSession("t1", { endedByUser: true });
+    const after = leftovers(r);
+    assert.deepEqual(after.helper, []);
+    assert.deepEqual(after.shell, [], "the user ended the session: its work goes with it");
+    assert.deepEqual(after.member, []);
+    assert.deepEqual(after.daemon, before.daemon, "never what daemonized away");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
+/** `[status, summary]` of the leftover shell's closing rows — a summary only with the adapter's marker. */
+function shellEnds(r: Rig): Array<[string | undefined, string | undefined]> {
+  return r.events
+    .filter((event) => event.type === "task.completed" && (event.payload as { taskId?: string }).taskId === "task-bg-1")
+    .map((event) => {
+      const payload = event.payload as { status?: string; summary?: string; leftRunning?: boolean };
+      assert.equal(payload.leftRunning === true, payload.summary !== undefined, "the note rides its marker, and only it");
+      return [payload.status, payload.summary];
+    });
+}
+
+test("a deploy leaves the dev server running and says so; closing the tab under the next host stops it", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  let next: Rig | undefined;
+  try {
+    await start(r);
+    await turnWithLeftovers(r);
+    const before = leftovers(r);
+    await r.adapter.stopAll();
+    assert.deepEqual(leftovers(r).shell, before.shell, "the deploy never kills running work");
+    assert.deepEqual(leftovers(r).member, before.member);
+    // The next host: no session of the thread is live when its tab closes.
+    next = await rig({ leftoverWork: r.leftoverWork });
+    assert.equal(next.adapter.hasSession("t1"), false);
+    await next.adapter.sweepEndedSession!("t1");
+    const after = leftovers(r);
+    assert.deepEqual(after.shell, [], "the user's end reaches what the earlier host's launch left");
+    assert.deepEqual(after.member, []);
+    assert.deepEqual(after.daemon, before.daemon, "never what daemonized away");
+    assert.equal(existsSync(r.leftoverWork), false, "and the thread remembers none of it any more");
+  } finally {
+    reap(r);
+    await r.dispose();
+    await next?.dispose();
+  }
+});
+
+test("a CLI that exits on its own takes its helpers with it", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover-exit" });
+  try {
+    await start(r);
+    const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "session.exited", "session.exited");
+    await r.drain();
+    assert.notEqual(launchOf(r.events, turnId), "none");
+    // `stopAll` is the host's teardown: it waits for a sweep still in flight.
+    await r.adapter.stopAll();
+    const after = leftovers(r);
+    assert.deepEqual(after.helper, []);
+    assert.equal(after.shell.length, 1, "a crash is no user's end: the running work stays, a marked orphan");
+    assert.equal(after.member.length, 1);
+    assert.equal(after.daemon.length, 1);
+    assert.deepEqual(shellEnds(r), [
+      ["stopped", "Left running when the agent process exited — stop it from Settings → System."]
+    ]);
+    // Recorded when the CLI reported it, while it lived: nothing can be read
+    // off a CLI that is gone. The user ending the session later sweeps it.
+    assert.equal((await readLeftoverWork(r.leftoverWork)).length, 1);
+    await r.adapter.sweepEndedSession!("t1");
+    const swept = leftovers(r);
+    assert.deepEqual(swept.shell, [], "the user's end reaches what the crashed launch left");
+    assert.deepEqual(swept.member, []);
+    assert.deepEqual(swept.daemon, after.daemon, "never what daemonized away");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
+test("a session's end sweeps its own launch's sessions — another launch's processes are never touched", { skip: process.platform !== "linux" }, async () => {
+  const one = await rig({ scenario: "leftover" });
+  const two = await rig({ scenario: "leftover" });
+  try {
+    await start(one);
+    await start(two);
+    const first = await turnWithLeftovers(one);
+    const second = await turnWithLeftovers(two);
+    assert.notEqual(launchOf(one.events, first), launchOf(two.events, second), "one marker value per launch");
+    await one.adapter.stopSession("t1");
+    assert.deepEqual(leftovers(one).helper, []);
+    assert.equal(leftovers(two).helper.length, 1, "another launch's helper is not this session's to stop");
+    await two.adapter.stopSession("t1");
+    assert.deepEqual(leftovers(two).helper, []);
+  } finally {
+    reap(one);
+    reap(two);
+    await one.dispose();
+    await two.dispose();
+  }
+});
+
+test("a session that fails to open stops everything its CLI started", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  try {
+    // `session/load` of a session the CLI does not know answers an error
+    // (fixture 13) — after the mock started its helper, as the real CLI's
+    // MCP servers start with the session.
+    await assert.rejects(
+      async () => await start(r, { resumeCursor: { schemaVersion: 1, sessionId: "01a0c19e-0000-7000-8000-000000000000" } }),
+      /Path not found/
+    );
+    assert.deepEqual(processesWith("GROK_RIG_MARK", r.mark), [], "nothing of the launch is left running");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
 
 test("teardown: no provider child outlives the suite", async () => {
   const leaked = openRigs.filter((entry) => !entry.disposed);

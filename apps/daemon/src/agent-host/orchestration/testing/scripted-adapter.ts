@@ -44,6 +44,7 @@ export interface ScriptedCall {
     | "projectHistory"
     | "rollbackThread"
     | "stopSession"
+    | "sweepEndedSession"
     | "stopAll"
     | "refreshSnapshot";
   threadId?: string;
@@ -227,9 +228,14 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
     async respondToUserInput(
       threadId: string,
       requestId: string,
-      answers: Record<string, unknown>
+      answers: Record<string, unknown>,
+      options?: { cancel?: boolean }
     ): Promise<void> {
-      calls.push({ kind: "respondToUserInput", threadId, detail: { requestId, answers } });
+      calls.push({
+        kind: "respondToUserInput",
+        threadId,
+        detail: { requestId, answers, ...(options?.cancel === true ? { cancel: true } : {}) }
+      });
     },
 
     async compact(threadId: string): Promise<void> {
@@ -279,8 +285,17 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
       return sessions.has(threadId);
     },
 
-    async stopSession(threadId: string): Promise<void> {
-      calls.push({ kind: "stopSession", threadId });
+    async sweepEndedSession(threadId: string): Promise<void> {
+      calls.push({ kind: "sweepEndedSession", threadId });
+      await Promise.resolve();
+    },
+
+    async stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void> {
+      calls.push({
+        kind: "stopSession",
+        threadId,
+        ...(options?.endedByUser === true ? { detail: { endedByUser: true } } : {})
+      });
       sessions.delete(threadId);
     },
 

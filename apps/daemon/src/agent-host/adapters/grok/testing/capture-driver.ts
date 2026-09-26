@@ -36,7 +36,10 @@ export const XAI_ROUTED_METHODS: ReadonlySet<string> = new Set<string>([
   ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.session_update),
   ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.task_backgrounded),
   ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.task_completed),
-  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.monitor_event)
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.monitor_event),
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.scheduled_task_created),
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.scheduled_task_fired),
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.scheduled_task_deleted)
 ]);
 
 /**
@@ -149,8 +152,10 @@ export function driveCapture(
     interrupt: () => {
       const before = events.length;
       // As the session's `interrupt`: the cancel ends the CLI prompt still
-      // running, which opens no turn; what it streamed joins this one.
+      // running, which opens no turn; what it streamed joins this one; the
+      // calls it cut close on the turn before it settles.
       wakes.cancelEnds();
+      events.push(...grok.cutTurnCalls("Stopped."));
       settle({ stopReason: "cancelled", cancellationCategory: "MidTurnAbort" });
       return events.splice(before);
     }

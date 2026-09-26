@@ -549,6 +549,103 @@ assert.ok(
 );
 
 // ---------------------------------------------------------------------------
+// A loop and a goal: rows of their own kind, never a shell's (§7.6)
+// ---------------------------------------------------------------------------
+
+const loopRow = agent("loop-1", {
+  kind: "loop",
+  agentKind: "background",
+  title: "Every 1 minute: Reply with exactly: tick",
+  progress: "Fired once",
+  model: "fable-5-1"
+});
+const goalRow = agent("goal:g1", {
+  kind: "goal",
+  agentKind: "background",
+  title: "Create goal.txt",
+  status: "interrupted",
+  progress: "Executing · 0 of 20000 tokens",
+  result: "Token budget reached: 48386 of 20000 tokens",
+  usage: { totalTokens: 48_386 },
+  completedAt: "2026-09-21T10:01:30.000Z"
+});
+const drivers = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [loopRow, goalRow, shell()],
+    panel: emptyPanel,
+    expanded: false,
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.ok(drivers.includes(">loop<") && drivers.includes(">goal<"), "each wears its own chip");
+assert.ok(drivers.includes("lucide-repeat") && drivers.includes("lucide-target"), "and its own glyph");
+assert.ok(drivers.includes(">scheduled prompt<"), "a loop's metrics line says what it is");
+assert.ok(drivers.includes(">goal · 48.4k tok<"), "a goal's names the tokens it reported spending");
+assert.ok(!drivers.includes("fable-5-1"), "neither has a model of its own");
+assert.ok(drivers.includes(">Fired once<"), "a live loop says what it last did");
+assert.ok(
+  drivers.includes("Every 1 minute: Reply with exactly: tick — Scheduled"),
+  "and stands scheduled between its fires, never 'Working'"
+);
+assert.ok(
+  drivers.includes(">Token budget reached: 48386 of 20000 tokens<"),
+  "a finished goal says why it ended, never a bare 'Stopped'"
+);
+assert.ok(
+  drivers.indexOf('data-agent-id="goal:g1"') < drivers.indexOf('data-roster-shells="true"'),
+  "both render with the agents, above the shells' section"
+);
+assert.ok(drivers.includes(">Shell<"), "whose caption counts the one shell alone");
+
+const driversFolded = render(
+  createElement(AgentRoster, {
+    sessionId: "s1",
+    agents: [loopRow, goalRow, shell()],
+    panel: emptyPanel,
+    expanded: false,
+    collapsed: true,
+    onCollapsedChange: () => {},
+    onExpandedChange: () => {},
+    onOpenAgent: () => {}
+  })
+);
+assert.match(driversFolded, /1 shell \(<span class="text-info-300">1 running<\/span>\) · 1 loop · 1 goal/);
+
+const goalDrillIn = render(
+  createElement(AgentDrillIn, {
+    sessionId: "s1",
+    agentId: "goal:g1",
+    agent: goalRow,
+    roster: [goalRow],
+    rows: [],
+    onBack: () => {}
+  })
+);
+assert.ok(goalDrillIn.includes("Token budget reached: 48386 of 20000 tokens"), "the drill-in leads with how it ended");
+assert.ok(goalDrillIn.includes("goal · 48.4k tok"));
+assert.ok(goalDrillIn.includes("lucide-target"));
+assert.ok(
+  goalDrillIn.includes("A goal&#x27;s work runs in the thread&#x27;s own turns and the agents it starts."),
+  "and says where its work is, not that it printed nothing"
+);
+assert.ok(!goalDrillIn.includes("No output yet.") && !goalDrillIn.includes("has not reported anything yet"));
+
+const loopDrillIn = render(
+  createElement(AgentDrillIn, {
+    sessionId: "s1",
+    agentId: "loop-1",
+    agent: loopRow,
+    roster: [loopRow],
+    rows: [],
+    onBack: () => {}
+  })
+);
+assert.ok(loopDrillIn.includes("Each fire runs as an agent of its own, in the roster."));
+assert.ok(loopDrillIn.includes(">Scheduled<"), "its header's state word is a loop's");
+
+// ---------------------------------------------------------------------------
 // The status line
 // ---------------------------------------------------------------------------
 
