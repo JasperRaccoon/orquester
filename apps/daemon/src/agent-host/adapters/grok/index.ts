@@ -8,7 +8,9 @@
  * One `grok agent stdio` child **per thread**, speaking ACP plus the `x.ai/*`
  * extensions in both spellings. The generic transport lives in `acp/`; the
  * per-thread machinery in `session.ts`; the frame→event translation in
- * `normalize.ts`; the probe in `probe.ts`.
+ * `normalize.ts` and the modules it routes to (`normalizer-state.ts`,
+ * `segments.ts`, `tool-calls.ts`, `subagents.ts`, `background-tasks.ts`,
+ * `loops-goals.ts`); the probe in `probe.ts`.
  *
  * Where this adapter deviates from spec §4.5, it is because the CLI installed
  * on this host behaves differently and the fixtures prove it. Each deviation

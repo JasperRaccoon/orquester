@@ -14,6 +14,19 @@
  * needs — assistant segmentation, tool-call coalescing counters, the plan-mode
  * flag, the background-task registry, the context size — lives on the instance.
  *
+ * This file is the entry point: `GrokNormalizer`, the class the session and
+ * the tests drive, and the frame routing — the ACP `session/update` switch and
+ * the private channel's, a subagent's child session's frames included. What a
+ * frame does to the work the normaliser tracks is in the module for its
+ * concern, each a set of functions over the state the instance holds
+ * (`normalizer-state.ts`, with the envelope every row is built with):
+ * `segments.ts` (assistant text and reasoning, the parent's and a child
+ * session's), `tool-calls.ts` (a call's rows, finished calls, the plan card),
+ * `subagents.ts` (spawn calls, the `subagent_*` reports, child sessions,
+ * `resume_from`), `background-tasks.ts` (shells and monitors: snapshots, the
+ * CLI's reports, poll and kill answers, ended-task memory and revival) and
+ * `loops-goals.ts` (scheduled prompts and the goal).
+ *
  * §10's rule is enforced two ways: the ACP `session/update` switch ends in
  * `satisfies never`, so a protocol release that adds a variant is a TYPE
  * error; and every unrecognised vendor `sessionUpdate` or method emits

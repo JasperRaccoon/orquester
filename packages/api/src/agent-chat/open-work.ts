@@ -32,7 +32,7 @@
  * still in it — and the trim then keeps that row, within its cap. Two ways
  * that happens: Grok forgets a call at its terminal update, so a status-less
  * update after it comes out as a fresh `item.started`, a `tool.started` row
- * behind the completion (`adapters/grok/normalize.ts`); and a closer written in
+ * behind the completion (`adapters/grok/tool-calls.ts`); and a closer written in
  * another window than its opener — stamped with another owner — can age out of
  * its own window first. A rewind that removes the turn holding a call's closer
  * but not the one holding its opener reopens the call as well; that one is
