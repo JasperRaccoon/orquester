@@ -507,6 +507,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // layer never sees its key: the first Escape under the viewer used to stop
   // the turn, or leave the drill-in behind it. `anotherLayerOwnsTheKeyboard()`
   // is the one set (`lib/open-layers.ts`); the composer's arms read it too.
+  // A held Escape is one press — its auto-repeat does nothing at all — so a
+  // hold whose first keydown a layer took cannot go on to stop the turn.
   //
   // **The idle Escape is the CLI's double press** (§5.5): with nothing to
   // leave and nothing to stop, two Escapes in a row outside the composer open
@@ -537,9 +539,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         blockingLayerOpen: anotherLayerOwnsTheKeyboard(),
         insideComposer: inside(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`),
         drillInOpen: state.drillInAgentId !== null,
-        turnActive: state.turnActive
+        turnActive: state.turnActive,
+        repeat: event.repeat
       };
-      const step = chatEscapeSequenceStep({ ...gate, repeat: event.repeat });
+      const step = chatEscapeSequenceStep(gate);
       if (step === "reset") {
         sequence?.reset();
       }

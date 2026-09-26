@@ -1496,10 +1496,16 @@ export function ChatComposer({
         event.preventDefault();
         // It left the drill-in or stopped the turn: nobody's first press.
         escapeSequence.reset();
-        // The token menu is the textarea's, never this arm's.
+        // The token menu is the textarea's, never this arm's, and the table
+        // never answers a held key's repeat.
         if (
-          composerEscapeAction({ menuOpen: false, layerOpen, drillInOpen, isTurnActive }) ===
-          "leave-drill-in"
+          composerEscapeAction({
+            repeat: false,
+            menuOpen: false,
+            layerOpen,
+            drillInOpen,
+            isTurnActive
+          }) === "leave-drill-in"
         ) {
           onLeaveDrillIn?.();
           return;
@@ -1553,18 +1559,22 @@ export function ChatComposer({
     }
 
     if (event.key === "Escape") {
-      // Which of these it is — the menu's, an open layer's, the drill-in's,
-      // the turn's or half of Esc Esc — is `composerEscapeAction`'s call, pure
-      // and tested beside the ownership rules; this keeps what touches the
-      // event.
+      // Which of these it is — a held key's repeat, the menu's, an open
+      // layer's, the drill-in's, the turn's or half of Esc Esc — is
+      // `composerEscapeAction`'s call, pure and tested beside the ownership
+      // rules; this keeps what touches the event.
       switch (
         composerEscapeAction({
+          repeat: event.repeat,
           menuOpen: showMenu,
           layerOpen: anotherLayerOwnsTheKeyboard(),
           drillInOpen: onLeaveDrillIn !== undefined,
           isTurnActive
         })
       ) {
+        case "hold":
+          // A held key is one press, and its first keydown already acted.
+          return;
         case "close-menu":
           // The menu takes Escape before the turn does: closing a menu the
           // user just opened must not also stop the agent — nor count as the
@@ -1592,10 +1602,9 @@ export function ChatComposer({
           interrupt();
           return;
         case "rewind-press":
-          // Idle, no menu: the CLI's double Escape opens the rewind picker. A
-          // held key's auto-repeat is one press, not two.
+          // Idle, no menu: the CLI's double Escape opens the rewind picker.
           event.preventDefault();
-          if (!event.repeat) pressRewindEscape();
+          pressRewindEscape();
           return;
       }
     }

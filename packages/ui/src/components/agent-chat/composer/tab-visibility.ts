@@ -121,6 +121,10 @@ export function shellOwnsEscape(input: {
 /**
  * What an Escape the composer's textarea receives does — first match wins:
  *
+ * - `"hold"` — a held key's auto-repeat. Holding Escape is one press: the
+ *   first keydown closed the menu, yielded to a layer or left the drill-in,
+ *   and its repeats — ~500 ms on, with none of those left — used to stop the
+ *   turn. Nothing happens, and the double press keeps its count.
  * - `"close-menu"` — the token menu (`@`, `/`, `$`) is showing. It is the
  *   textarea's own, and closing a menu the user just opened must not also
  *   stop the agent, nor count as half of a rewind.
@@ -145,6 +149,7 @@ export function shellOwnsEscape(input: {
  * asks the same question for its two actions: leave, else interrupt.
  */
 export type ComposerEscapeAction =
+  | "hold"
   | "close-menu"
   | "yield-to-layer"
   | "leave-drill-in"
@@ -152,6 +157,8 @@ export type ComposerEscapeAction =
   | "rewind-press";
 
 export interface ComposerEscapeInput {
+  /** `KeyboardEvent.repeat`. */
+  repeat: boolean;
   /** The token menu is showing (`showMenu`). */
   menuOpen: boolean;
   /** Another layer is up: `anotherLayerOwnsTheKeyboard()`. */
@@ -162,6 +169,7 @@ export interface ComposerEscapeInput {
 }
 
 export function composerEscapeAction(input: ComposerEscapeInput): ComposerEscapeAction {
+  if (input.repeat) return "hold";
   if (input.menuOpen) return "close-menu";
   if (input.layerOpen) return "yield-to-layer";
   if (input.drillInOpen) return "leave-drill-in";

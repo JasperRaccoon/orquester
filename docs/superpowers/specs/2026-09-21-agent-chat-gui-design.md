@@ -3876,7 +3876,9 @@ command palette — registers while it is open (`useOpenLayer`, `packages/ui/src
 `anotherLayerOwnsTheKeyboard()` reads that registry beside the store's own modals, and all three
 handlers stand down while it answers true. The layer closes itself, nothing is interrupted or left,
 and an Escape a layer took is never half of Esc Esc. The same set gates the Attention Center's
-`Ctrl+Shift+A`.*
+`Ctrl+Shift+A`. Holding Escape is one press: the key's auto-repeat does nothing in any of the three
+handlers (the composer's `window` arm never took one), so a hold whose first keydown closed a layer
+or left a drill-in no longer stops the turn half a second later.*
 
 Prompt-length validation measures the **larger of the literal draft and its wire-expanded form**, so
 a short reference that expands on the wire cannot smuggle the thread past §4.1's input bound;

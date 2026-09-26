@@ -61,6 +61,13 @@ export interface ChatEscapeInput {
   /** A turn is running on this thread. */
   turnActive: boolean;
   /**
+   * `KeyboardEvent.repeat`: a held key's auto-repeat. Holding Escape is ONE
+   * press, so a repeat does nothing here — a hold whose first keydown a layer
+   * took, or that left the drill-in, used to stop the turn ~500 ms later,
+   * once the repeats found nothing else open.
+   */
+  repeat: boolean;
+  /**
    * This Escape completes a double press: the listener's
    * `createEscapeSequence()` answered `true` for it. The listener only presses
    * the sequence for an Escape {@link chatEscapeSequenceStep} says counts, so a
@@ -79,13 +86,15 @@ export type ChatEscapeGate = Omit<ChatEscapeInput, "secondPress" | "rewindAvaila
 
 /**
  * An Escape this side would otherwise ignore **only because nothing is
- * happening**: the visible tab, nothing modal on top, focus outside the
- * composer, no drill-in to leave and no turn to stop. Exactly these are the
- * Escapes the double press counts — the ones that did nothing else.
+ * happening**: a fresh press (not a held key's repeat) on the visible tab, no
+ * layer on top, focus outside the composer, no drill-in to leave and no turn
+ * to stop. Exactly these are the Escapes the double press counts — the ones
+ * that did nothing else.
  */
 export function isIdleChatEscape(input: ChatEscapeGate): boolean {
   return (
     input.key === "Escape" &&
+    !input.repeat &&
     !input.defaultPrevented &&
     input.isActiveTab &&
     !input.blockingLayerOpen &&
@@ -108,12 +117,7 @@ export function isIdleChatEscape(input: ChatEscapeGate): boolean {
  *   (`blockingLayerOpen`); its Escape lands in the portaled panel, outside the
  *   composer shell, so nothing else here tells it from an idle one.
  */
-export function chatEscapeSequenceStep(
-  input: ChatEscapeGate & {
-    /** `KeyboardEvent.repeat`. */
-    repeat: boolean;
-  }
-): "press" | "keep" | "reset" {
+export function chatEscapeSequenceStep(input: ChatEscapeGate): "press" | "keep" | "reset" {
   if (input.repeat) {
     return "keep";
   }
@@ -129,7 +133,7 @@ export function chatEscapeSequenceStep(
  * idle Escape does, and only the second of two.
  */
 export function resolveChatEscape(input: ChatEscapeInput): ChatEscapeAction {
-  if (input.key !== "Escape" || input.defaultPrevented) {
+  if (input.key !== "Escape" || input.defaultPrevented || input.repeat) {
     return "ignore";
   }
   if (!input.isActiveTab || input.blockingLayerOpen || input.insideComposer) {

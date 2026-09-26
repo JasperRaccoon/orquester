@@ -16,6 +16,7 @@ const base: ChatEscapeInput = {
   insideComposer: false,
   drillInOpen: false,
   turnActive: false,
+  repeat: false,
   secondPress: false,
   rewindAvailable: false
 };
@@ -82,6 +83,19 @@ test("an event another listener already handled is not handled twice", () => {
   );
 });
 
+test("a held Escape is one press: its auto-repeat never stops the turn the first press spared", () => {
+  // Hold Escape to close the output viewer: the first keydown is the viewer's,
+  // and ~500 ms later the repeats arrive with nothing left open — each one
+  // stopped the running turn. The same after leaving a drill-in: the child
+  // closed, then the repeat stopped the parent.
+  assert.equal(resolveChatEscape({ ...base, repeat: true, turnActive: true }), "ignore");
+  assert.equal(resolveChatEscape({ ...base, repeat: true, drillInOpen: true }), "ignore");
+  assert.equal(
+    resolveChatEscape({ ...base, repeat: true, drillInOpen: true, turnActive: true }),
+    "ignore"
+  );
+});
+
 test("only Escape", () => {
   for (const key of ["Enter", "Esc", "escape", "a", ""]) {
     assert.equal(resolveChatEscape({ ...base, key, drillInOpen: true }), "ignore", key);
@@ -119,8 +133,10 @@ test("the double press never outranks leaving a drill-in or stopping a turn", ()
 });
 
 test("the rewind obeys every gate the other two do", () => {
-  // A hidden tab, a modal, the composer's own scope and an already-handled
-  // event each keep the key away from this side, whatever the sequence says.
+  // A hidden tab, a modal, the composer's own scope, an already-handled event
+  // and a held key each keep the key away from this side, whatever the
+  // sequence says.
+  assert.equal(resolveChatEscape({ ...rewindReady, repeat: true }), "ignore");
   assert.equal(resolveChatEscape({ ...rewindReady, isActiveTab: false }), "ignore");
   assert.equal(resolveChatEscape({ ...rewindReady, blockingLayerOpen: true }), "ignore");
   assert.equal(resolveChatEscape({ ...rewindReady, insideComposer: true }), "ignore");
@@ -139,6 +155,7 @@ function everyEscapeInput(): ChatEscapeInput[] {
     "insideComposer",
     "drillInOpen",
     "turnActive",
+    "repeat",
     "secondPress",
     "rewindAvailable"
   ] as const;
@@ -162,7 +179,11 @@ test("under an open layer the shell does nothing, whatever the drill-in, the tur
   for (const input of everyEscapeInput()) {
     if (!input.blockingLayerOpen) continue;
     assert.equal(resolveChatEscape(input), "ignore", JSON.stringify(input));
-    assert.equal(chatEscapeSequenceStep({ ...input, repeat: false }), "reset", JSON.stringify(input));
+    assert.equal(
+      chatEscapeSequenceStep(input),
+      input.repeat ? "keep" : "reset",
+      JSON.stringify(input)
+    );
   }
 });
 
@@ -201,10 +222,12 @@ test("an idle Escape is exactly the one this side would otherwise ignore for doi
   assert.equal(isIdleChatEscape({ ...base, insideComposer: true }), false);
   assert.equal(isIdleChatEscape({ ...base, drillInOpen: true }), false);
   assert.equal(isIdleChatEscape({ ...base, turnActive: true }), false);
+  // A held key's repeat is not a new Escape at all, idle or not.
+  assert.equal(isIdleChatEscape({ ...base, repeat: true }), false);
 });
 
 const step = (overrides: Partial<Parameters<typeof chatEscapeSequenceStep>[0]>) =>
-  chatEscapeSequenceStep({ ...base, repeat: false, ...overrides });
+  chatEscapeSequenceStep({ ...base, ...overrides });
 
 test("only an idle Escape is pressed into the double-press sequence", () => {
   assert.equal(step({}), "press");

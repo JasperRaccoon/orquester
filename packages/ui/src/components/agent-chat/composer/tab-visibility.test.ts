@@ -224,6 +224,7 @@ test("Escape with no turn running never interrupts from the composer", () => {
 // ---------------------------------------------------------------------------
 
 const idleTextarea: ComposerEscapeInput = {
+  repeat: false,
   menuOpen: false,
   layerOpen: false,
   drillInOpen: false,
@@ -302,7 +303,23 @@ test("every combination resolves by the one precedence: menu, layer, drill-in, t
     [true, true, true, true, "close-menu"]
   ];
   for (const [menuOpen, layerOpen, drillInOpen, isTurnActive, want] of table) {
-    const input = { menuOpen, layerOpen, drillInOpen, isTurnActive };
+    const input = { repeat: false, menuOpen, layerOpen, drillInOpen, isTurnActive };
     assert.equal(composerEscapeAction(input), want, JSON.stringify(input));
+  }
+});
+
+test("a held Escape is one press: its auto-repeat does nothing, whatever is open", () => {
+  // The first keydown closed the menu, yielded to a layer or left the
+  // drill-in; ~500 ms later the repeats found nothing of that left and
+  // stopped the turn. A repeat is never half of Esc Esc either.
+  for (const menuOpen of [false, true]) {
+    for (const layerOpen of [false, true]) {
+      for (const drillInOpen of [false, true]) {
+        for (const isTurnActive of [false, true]) {
+          const input = { repeat: true, menuOpen, layerOpen, drillInOpen, isTurnActive };
+          assert.equal(composerEscapeAction(input), "hold", JSON.stringify(input));
+        }
+      }
+    }
   }
 });
