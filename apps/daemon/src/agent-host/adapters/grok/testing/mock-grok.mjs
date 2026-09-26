@@ -461,31 +461,181 @@ async function runPrompt(id, params) {
     // out yet: fixture 20's 15 ms window, held open until the client's Stop.
     // The cancel then ends the CLI's prompt, the one running.
     const wake = "notifications-01a0d913-68c6-71f3-9a84-ffc23e5f43ed";
-    notify("session/update", {
-      sessionId,
-      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "WATCHING" } },
-      _meta: { totalTokens: 1700, promptId }
-    });
-    notify("_x.ai/session_notification", {
-      sessionId,
-      update: { sessionUpdate: "turn_completed", prompt_id: promptId, stop_reason: "end_turn" }
-    });
-    notify("_x.ai/queue/changed", {
-      sessionId,
-      entries: [],
-      runningPromptId: wake,
-      runningText: '<monitor-event task_id="task-mon-1">\n[tick watch] tick 1\n</monitor-event>',
-      runningKind: "prompt"
-    });
-    notify("_x.ai/session_notification", {
-      sessionId,
-      update: { sessionUpdate: "hook_run_started", event_name: "user_prompt_submit", prompt_id: wake, count: 1 }
-    });
+    sendTogether([
+      chunkFrame("WATCHING", promptId),
+      turnCompletedFrame(promptId),
+      {
+        jsonrpc: "2.0",
+        method: "_x.ai/queue/changed",
+        params: {
+          sessionId,
+          entries: [],
+          runningPromptId: wake,
+          runningText: '<monitor-event task_id="task-mon-1">\n[tick watch] tick 1\n</monitor-event>',
+          runningKind: "prompt"
+        }
+      },
+      {
+        jsonrpc: "2.0",
+        method: "_x.ai/session_notification",
+        params: {
+          sessionId,
+          update: { sessionUpdate: "hook_run_started", event_name: "user_prompt_submit", prompt_id: wake, count: 1 }
+        }
+      },
+      readMarkerFrame()
+    ]);
     await waitFor(() => cancelled);
     notify("_x.ai/session_notification", {
       sessionId,
       update: { sessionUpdate: "turn_completed", prompt_id: wake, stop_reason: "cancelled" }
     });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "wake-held" || scenario === "wake-finished-stop") {
+    // The CLI finished our prompt and ran one of its own to its end — a
+    // background agent's, `GROK_MOCK_WAKE_CHUNKS` chunks and its
+    // `turn_completed` — before our RPC result went out: fixture 20's window,
+    // as long as a steer or a `set_model` round trip can make it.
+    // `wake-held` answers our prompt right after; `wake-finished-stop` only
+    // once the client cancels (a Stop after the wake finished).
+    const count = Number(process.env.GROK_MOCK_WAKE_CHUNKS ?? "300");
+    sendTogether([
+      chunkFrame("ours;", promptId),
+      turnCompletedFrame(promptId),
+      announceFrame(WAKE_ID),
+      ...Array.from({ length: count }, (_, index) => chunkFrame(`w${index + 1};`, WAKE_ID)),
+      turnCompletedFrame(WAKE_ID),
+      readMarkerFrame()
+    ]);
+    if (scenario === "wake-finished-stop") {
+      await waitFor(() => cancelled);
+    }
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "wake-queued-steer") {
+    if (promptSeq === 1) {
+      notify("session/update", {
+        sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "one;" } },
+        _meta: { totalTokens: 1700, promptId }
+      });
+      await waitFor(() => cancelled);
+      notify("_x.ai/session/prompt_complete", {
+        sessionId,
+        promptId,
+        stopReason: "cancelled",
+        cancellationCategory: "MidTurnAbort"
+      });
+      result(id, { stopReason: "cancelled", _meta: { sessionId, promptId } });
+      firstPromptAnswered = true;
+      return;
+    }
+    // The steered prompt queues behind a prompt of the CLI's own — a
+    // background agent's end, queued while the first prompt ran — and the CLI
+    // runs its queue in order (fixture 08): the wake first, then ours.
+    await waitFor(() => firstPromptAnswered);
+    sendTogether([
+      {
+        jsonrpc: "2.0",
+        method: "_x.ai/queue/changed",
+        params: {
+          sessionId,
+          entries: [{ id: promptId, version: 0, kind: "prompt", text, position: 0 }],
+          runningPromptId: WAKE_ID,
+          runningText: "<system-reminder>…</system-reminder>",
+          runningKind: "prompt"
+        }
+      },
+      chunkFrame("woke;", WAKE_ID),
+      turnCompletedFrame(WAKE_ID),
+      {
+        jsonrpc: "2.0",
+        method: "_x.ai/queue/changed",
+        params: { sessionId, entries: [], runningPromptId: promptId, runningKind: "prompt" }
+      },
+      chunkFrame("steered;", promptId),
+      turnCompletedFrame(promptId)
+    ]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, {
+      stopReason: "end_turn",
+      _meta: { sessionId, promptId, usage: { inputTokens: 40, outputTokens: 4, totalTokens: 44 } }
+    });
+    return;
+  }
+
+  if (scenario === "wake-pending-hold" || scenario === "wake-pending-exit") {
+    // Our prompt is done and the CLI runs one of its own, but our RPC result
+    // never comes: the session stops (`wake-pending-hold`) or the process
+    // exits (`wake-pending-exit`) while the wake's frames wait for its turn.
+    sendTogether([
+      chunkFrame("ours;", promptId),
+      turnCompletedFrame(promptId),
+      announceFrame(WAKE_ID),
+      chunkFrame("w1;", WAKE_ID),
+      chunkFrame("w2;", WAKE_ID),
+      readMarkerFrame()
+    ]);
+    if (scenario === "wake-pending-exit") {
+      setTimeout(() => process.exit(143), 20);
+    }
+    return;
+  }
+
+  if (scenario === "wake-spawn-reorder") {
+    // A woken parent spawns a subagent while our RPC result is still out, as
+    // fixture 16's parent does: the call names the wake, and the
+    // `subagent_spawned` right after it names none (only `parent_prompt_id`).
+    const call = "call-a00d2553-adc5-48f4-9181-4a66616fc94f-0";
+    const child = "01a0d90e-56c2-78d2-9a27-2d007429d0aa";
+    sendTogether([
+      turnCompletedFrame(promptId),
+      announceFrame(WAKE_ID),
+      {
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: call,
+            title: "spawn_subagent",
+            rawInput: { description: "check it", prompt: "Check it.", subagent_type: "general-purpose", background: true },
+            _meta: {
+              "x.ai/tool": { version: 1, name: "spawn_subagent", kind: "task", namespace: "grok_build", label: "Subagent", read_only: false },
+              subagentBackground: true
+            }
+          },
+          _meta: { totalTokens: 1800, promptId: WAKE_ID }
+        }
+      },
+      {
+        jsonrpc: "2.0",
+        method: "_x.ai/session_notification",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "subagent_spawned",
+            subagent_id: child,
+            child_session_id: child,
+            parent_session_id: sessionId,
+            parent_prompt_id: WAKE_ID,
+            subagent_type: "general-purpose",
+            description: "check it",
+            effective_context_source: "new"
+          }
+        }
+      },
+      turnCompletedFrame(WAKE_ID),
+      readMarkerFrame()
+    ]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
     result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
     return;
   }
@@ -575,6 +725,52 @@ async function runPrompt(id, params) {
   if (scenario === "wake-steer") {
     await wakeUntilCancelled();
   }
+}
+
+/** The CLI's own prompt the wake scenarios run: a background agent's end (fixture 16). */
+const WAKE_ID = "subagent-completed-01a0d90e-56c2-78d2-9a27-2d007429d073";
+let firstPromptAnswered = false;
+
+/** A prompt the CLI starts itself, announced as fixture 20 records it: never listed in `entries`. */
+function announceFrame(wake) {
+  return {
+    jsonrpc: "2.0",
+    method: "_x.ai/queue/changed",
+    params: { sessionId, entries: [], runningPromptId: wake, runningText: "<system-reminder>…</system-reminder>", runningKind: "prompt" }
+  };
+}
+
+function chunkFrame(text, promptId) {
+  return {
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+      _meta: { totalTokens: 1800, promptId }
+    }
+  };
+}
+
+function turnCompletedFrame(promptId) {
+  return {
+    jsonrpc: "2.0",
+    method: "_x.ai/session_notification",
+    params: { sessionId, update: { sessionUpdate: "turn_completed", prompt_id: promptId, stop_reason: "end_turn" } }
+  };
+}
+
+/**
+ * A frame the adapter reports the moment it reads it — an MCP server's
+ * failure is never held for a turn — so a test that waits for its warning
+ * knows every frame written before it was read.
+ */
+function readMarkerFrame() {
+  return {
+    jsonrpc: "2.0",
+    method: "_x.ai/mcp/server_status",
+    params: { sessionId, name: "read-marker", status: "unavailable" }
+  };
 }
 
 /**

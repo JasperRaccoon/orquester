@@ -5,11 +5,15 @@
  *
  * - A `session/prompt` the harness sent opens a turn; its RPC result settles
  *   it (the richest source, as the session's `trackPrompt` does).
- * - A prompt the CLI started on its own — a wake — is told apart by the
- *   session's own rule (`prompt-queue.ts`, `GrokPromptQueue`), opens a turn
- *   of its own once no other is open, re-arms the monitors it carries lines
- *   of, and replays the frames that named it while it waited; that prompt's
- *   `turn_completed` settles it (fixtures README observation 40).
+ * - A prompt the CLI started on its own — a wake — runs through the session's
+ *   OWN coordinator (`prompt-queue.ts`, `GrokWakes`): the same rule tells it
+ *   apart, the same gate holds the frames that wait for its turn (every frame
+ *   after the first one naming it, in order, bounded, never dropped), and the
+ *   same code opens its turn, re-arms the monitors it carries lines of and
+ *   hands the frames back; that prompt's `turn_completed` settles it
+ *   (fixtures README observation 40). A Stop is the session's cancel rule,
+ *   and the capture's end is its exit: whatever still waits joins the open
+ *   turn.
  * - A harness `note` is handed to `atNote`, which is how a test plays the
  *   user's part at the recorded moment (a Stop, say).
  *
@@ -23,7 +27,7 @@ import type { SessionNotification } from "../acp/_generated/schema.ts";
 import { XAI_EXTENSION_NOTIFICATIONS, xaiMethodSpellings } from "../acp/_generated/xai.ts";
 import { readCapture, type JsonRpcFrame } from "../fixtures.ts";
 import { GrokNormalizer, type GrokTurnOutcome } from "../normalize.ts";
-import { framePromptId, GrokPromptQueue, type CliPrompt } from "../prompt-queue.ts";
+import { GrokWakes, isParentSessionId } from "../prompt-queue.ts";
 import { parseXaiUsage } from "../usage.ts";
 
 /** Every private-channel method a session routes to `handleXaiNotification`. */
@@ -99,11 +103,9 @@ export function driveCapture(
   const events: RuntimeEvent[] = [];
   const turns: string[] = [];
   const promptTurns = new Map<unknown, string>();
-  const queue = new GrokPromptQueue();
-  const held = new Map<string, JsonRpcFrame[]>();
   let wakePromptId: string | undefined;
   let sessionId = "";
-  let wakes = 0;
+  let wakeCount = 0;
   let prompts = 0;
 
   const open = (id: string): void => {
@@ -112,6 +114,24 @@ export function driveCapture(
     grok.beginTurn();
     events.push(grok.event("turn.started", {}, id));
   };
+  const isParent = (id: unknown): boolean => isParentSessionId(sessionId, id);
+  const wakes = new GrokWakes(
+    grok,
+    {
+      turnOpen: () => turn.current !== undefined,
+      openTurn: (prompt) => {
+        wakeCount += 1;
+        wakePromptId = prompt.promptId;
+        open(`wake-${wakeCount}`);
+      },
+      emit: (rows) => {
+        events.push(...rows);
+      },
+      notePrompt: () => {},
+      debug: () => {}
+    },
+    { parentSessionId: () => sessionId }
+  );
   const settle = (outcome: GrokTurnOutcome): void => {
     const id = turn.current;
     if (id === undefined) {
@@ -121,34 +141,16 @@ export function driveCapture(
     events.push(grok.turnCompleted(id, outcome));
     turn.current = undefined;
     wakePromptId = undefined;
-    const next = queue.takePending();
-    if (next !== undefined) {
-      openWake(next);
-    }
-  };
-  const openWake = (prompt: CliPrompt): void => {
-    wakes += 1;
-    wakePromptId = prompt.promptId;
-    open(`wake-${wakes}`);
-    events.push(...grok.rearmMonitors(prompt.monitorTaskIds));
-    const frames = held.get(prompt.promptId) ?? [];
-    held.delete(prompt.promptId);
-    for (const frame of frames) {
-      fold(frame);
-    }
+    wakes.turnSettled();
   };
   const control: DriverControl = {
     grok,
     turn,
     interrupt: () => {
       const before = events.length;
-      // As the session's `interrupt`: the cancel ends the CLI prompt already
-      // running, which opens no turn (`dropWakeTheCancelEnds`).
-      const running = queue.newestPending();
-      if (running !== undefined) {
-        queue.dropPending(running.promptId);
-        held.delete(running.promptId);
-      }
+      // As the session's `interrupt`: the cancel ends the CLI prompt still
+      // running, which opens no turn; what it streamed joins this one.
+      wakes.cancelEnds();
       settle({ stopReason: "cancelled", cancellationCategory: "MidTurnAbort" });
       return events.splice(before);
     }
@@ -188,51 +190,45 @@ export function driveCapture(
     }
     fold(frame);
   }
+  // The capture's end is the process's: what still waits joins the open turn.
+  wakes.drop("the capture ended");
   return { events, grok, turns, sessionId };
 
-  /** One agent frame: held while it names a wake waiting for its turn, as the session holds it. */
+  /** One agent frame, through the session's own gate. */
   function fold(frame: JsonRpcFrame): void {
     const method = frame.method;
     if (typeof method !== "string") {
       return;
     }
     const params = frame.params as { sessionId?: string; update?: Record<string, unknown> } | undefined;
-    const holdable = method === "session/update" || method === "_x.ai/session_notification";
-    const named = holdable && params?.sessionId === sessionId ? framePromptId(params) : undefined;
-    if (named !== undefined && queue.isPending(named)) {
-      held.set(named, [...(held.get(named) ?? []), frame]);
+    if (method === "_x.ai/queue/changed") {
+      if (isParent(params?.sessionId)) {
+        wakes.queueChanged(frame.params);
+      }
+      return;
+    }
+    if (method !== "session/update" && !XAI_ROUTED_METHODS.has(method)) {
+      return;
+    }
+    if (wakes.offer(frame.params, () => fold(frame))) {
       return;
     }
     if (method === "session/update") {
       events.push(...grok.handleSessionUpdate(frame.params as SessionNotification));
       return;
     }
-    if (XAI_ROUTED_METHODS.has(method)) {
-      events.push(...grok.handleXaiNotification(method, frame.params));
-      const update = params?.update;
-      if (
-        params?.sessionId === sessionId &&
-        update?.["sessionUpdate"] === "turn_completed" &&
-        wakePromptId !== undefined &&
-        update["prompt_id"] === wakePromptId
-      ) {
-        settle({
-          stopReason: typeof update["stop_reason"] === "string" ? update["stop_reason"] : null,
-          usage: parseXaiUsage(update["usage"])
-        });
-      }
-      return;
-    }
-    if (method === "_x.ai/queue/changed" && params?.sessionId === sessionId) {
-      const seen = queue.observe(frame.params);
-      if (seen.kind === "cli") {
-        if (turn.current === undefined) {
-          openWake(seen.prompt);
-        } else {
-          queue.pend(seen.prompt);
-        }
-      }
+    events.push(...grok.handleXaiNotification(method, frame.params));
+    const update = params?.update;
+    if (
+      isParent(params?.sessionId) &&
+      update?.["sessionUpdate"] === "turn_completed" &&
+      wakePromptId !== undefined &&
+      update["prompt_id"] === wakePromptId
+    ) {
+      settle({
+        stopReason: typeof update["stop_reason"] === "string" ? update["stop_reason"] : null,
+        usage: parseXaiUsage(update["usage"])
+      });
     }
   }
-
 }
