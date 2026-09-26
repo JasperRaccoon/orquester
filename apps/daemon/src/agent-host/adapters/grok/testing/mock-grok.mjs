@@ -209,6 +209,7 @@ function handle(frame) {
     return;
   }
   if (method === "session/new") {
+    startHelper();
     result(id, { sessionId, models: initializeResult._meta.modelState });
     // The real CLI pushes the full 69-command catalog once a session exists.
     notify("session/update", {
@@ -226,6 +227,7 @@ function handle(frame) {
     return;
   }
   if (method === "session/load") {
+    startHelper();
     if (params.sessionId !== sessionId) {
       send({
         jsonrpc: "2.0",
@@ -665,25 +667,32 @@ async function runPrompt(id, params) {
   }
 
   if (scenario === "leftover" || scenario === "leftover-exit") {
-    // A background command detached the way the real CLI detaches its
-    // shells and MCP servers — a session of its own — so the group signal of
-    // a stop never reaches it and it outlives this process, reparented to
-    // init (Grok fixtures README observation 48). It inherits the launch
-    // environment, marker included; the chunk names it and the launch.
-    const leftover = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
-    leftover.unref();
+    // A background shell as the real CLI starts one — a session of its own —
+    // so the group signal of a stop never reaches it and it outlives this
+    // process, reparented to init (Grok fixtures README observation 48). It
+    // runs a member of its session (`sleep 302`) and a daemon that `setsid`s
+    // away (`sleep 303`, a browser daemon's or an SSH master's move). Each
+    // says it is in place once it is, and only then does the turn go on: no
+    // timing. All inherit the launch environment, marker included.
+    const shell = spawn(
+      "sh",
+      ["-c", 'sleep 302 & setsid sh -c "echo daemon; exec sleep 303" & echo shell; wait'],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+    );
+    shell.unref();
+    await linesFrom(shell.stdout, ["shell", "daemon"]);
     notify("_x.ai/task_backgrounded", {
       sessionId,
       update: {
         sessionUpdate: "task_backgrounded",
         tool_call_id: "call-bg-1",
         task_id: "task-bg-1",
-        command: "sleep 300",
+        command: "sleep 302",
         description: "leftover"
       }
     });
     sendTogether([
-      chunkFrame(`bg:${leftover.pid};launch:${process.env.ORQUESTER_AGENT_LAUNCH ?? "none"};`, promptId),
+      chunkFrame(`launch:${process.env.ORQUESTER_AGENT_LAUNCH ?? "none"};`, promptId),
       turnCompletedFrame(promptId)
     ]);
     notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
@@ -986,6 +995,39 @@ async function wakeUntilCancelled() {
   notify("_x.ai/session_notification", {
     sessionId,
     update: { sessionUpdate: "turn_completed", prompt_id: wake, stop_reason: "cancelled" }
+  });
+}
+
+/**
+ * The `leftover` scenarios' helper — an MCP server's stand-in: a session of
+ * its own, started before `session/new` (or `session/load`) answers, as the
+ * real CLI's MCP servers are (fixture 31).
+ */
+function startHelper() {
+  if (!scenario.startsWith("leftover")) {
+    return;
+  }
+  spawn("sleep", ["301"], { detached: true, stdio: "ignore" }).unref();
+}
+
+/** Resolve once every one of `names` has been printed, one per line, on `stream`. */
+function linesFrom(stream, names) {
+  return new Promise((resolve) => {
+    const seen = new Set();
+    let buffer = "";
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk) => {
+      buffer += chunk;
+      let index = buffer.indexOf("\n");
+      while (index !== -1) {
+        seen.add(buffer.slice(0, index).trim());
+        buffer = buffer.slice(index + 1);
+        index = buffer.indexOf("\n");
+      }
+      if (names.every((name) => seen.has(name))) {
+        resolve();
+      }
+    });
   });
 }
 

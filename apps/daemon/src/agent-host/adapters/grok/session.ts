@@ -25,7 +25,12 @@ import type {
 import { randomUUID } from "node:crypto";
 
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
-import { AGENT_LAUNCH_ENV_VAR, stopLeftoverProcesses } from "../../support/leftover-processes.ts";
+import {
+  AGENT_LAUNCH_ENV_VAR,
+  recordChildSessions,
+  stopLeftoverProcesses,
+  type RecordedSession
+} from "../../support/leftover-processes.ts";
 import type { ChildExitReason } from "../../support/spawn.ts";
 import { exitOutcome } from "../../support/spawn.ts";
 import type { ClassifiedStderrLine } from "../../support/stderr.ts";
@@ -256,6 +261,14 @@ export class GrokSession {
    * files running at once would let one stop the other's.
    */
   private readonly launchId = randomUUID();
+  /**
+   * The sessions the CLI's children lead, recorded while it lives
+   * ({@link recordSessions}): its MCP servers' when its session opens, and
+   * every child's again right before a stop. A sweep takes only what sits in
+   * one of them: a process that daemonized into a session of its own — a
+   * browser daemon, an SSH master — carries the marker too, and is spared.
+   */
+  private readonly childSessions = new Map<number, RecordedSession>();
   /** The sweep of what this launch left running, once started — the exit and a stop share it. */
   private leftovers: Promise<void> | null = null;
   /** The self-resolved-approvals advisory is said once per session. */
@@ -445,11 +458,17 @@ export class GrokSession {
       // Whatever failed, the CLI goes with it: a `session/new` or
       // `session/load` that failed (a cursor the CLI no longer knows answers
       // "Path not found", fixture 13) used to leave it running, holding its
-      // pipes, outside the adapter's map — nothing would ever stop it. Its
-      // exit then sweeps what it had started ({@link onExit}).
+      // pipes, outside the adapter's map — nothing would ever stop it. What it
+      // had started is recorded first, while it lives; its exit sweeps it
+      // ({@link onExit}).
+      await this.recordSessions();
       await connection.stop();
+      await this.stopLeftovers();
       throw error;
     }
+    // Its MCP servers, started with the session (fixture 31: all four existed
+    // the moment `session/new` answered).
+    await this.recordSessions();
 
     const modelState = modelStateOf(initialize._meta) ?? (setup as { models?: unknown }).models;
     this.currentModelId = currentModelIdOf(modelState);
@@ -1504,7 +1523,10 @@ export class GrokSession {
       // Never launched: nothing carries the marker.
       return Promise.resolve();
     }
-    this.leftovers ??= stopLeftoverProcesses({ launchId: this.launchId }).then(
+    this.leftovers ??= stopLeftoverProcesses({
+      launchId: this.launchId,
+      sessions: [...this.childSessions.values()]
+    }).then(
       (result) => {
         if (result.found > 0) {
           this.options.logger.debug("grok: stopped what the agent left running", { ...result });
@@ -1575,6 +1597,25 @@ export class GrokSession {
     );
   }
 
+  /**
+   * Record the sessions the CLI's children lead, while it lives: the sweep
+   * takes only processes in one of them ({@link childSessions}). Best-effort:
+   * a read that fails records nothing, and nothing is then swept for it.
+   */
+  private async recordSessions(): Promise<void> {
+    const pid = this.connection?.pid;
+    if (pid === undefined) {
+      return;
+    }
+    try {
+      for (const session of await recordChildSessions(pid)) {
+        this.childSessions.set(session.sid, session);
+      }
+    } catch (error) {
+      this.options.logger.warn("grok: could not record the agent's child sessions", error);
+    }
+  }
+
   /** Host-initiated stop. Idempotent — a session that already ended still waits for its sweep. */
   async stop(): Promise<void> {
     if (this.stopped) {
@@ -1600,6 +1641,9 @@ export class GrokSession {
       );
       this.activeTurn = null;
     }
+    // Every child's session, while the CLI still lives: once it is gone, its
+    // children are init's, and only their sessions tie them to this launch.
+    await this.recordSessions();
     await this.connection?.stop();
     // The CLI is gone; what it started outside its process group is not.
     await this.stopLeftovers();

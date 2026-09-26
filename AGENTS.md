@@ -1387,7 +1387,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (`AGENT_LAUNCH_ENV_VAR`), one random value per launch — never the injectable `uuid()`: two test
   files' deterministic ids would stop each other's processes — which every descendant inherits
   (eleven processes carried it in that run), and every end of the session stops whatever still
-  carries it (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`): a stop — the user's
+  carries it IN A SESSION ONE OF THE CLI'S CHILDREN LED — recorded while the CLI lives (at open, and
+  right before a stop), so a process that daemonized into a session of its own (agent-browser's
+  daemon, an SSH ControlMaster: host-wide helpers a chat may have started first) is spared
+  (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`): a stop — the user's
   session stop, a closed tab, a restart for an account or a model, the host's teardown — awaits it
   once the CLI itself has exited, and the CLI's own exit (a crash, an open that failed) starts it,
   which `stopAll` waits for. An open that fails stops its CLI now too: a `session/load` the CLI

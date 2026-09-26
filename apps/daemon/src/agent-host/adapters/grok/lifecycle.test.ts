@@ -1273,15 +1273,18 @@ test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => 
 
 
 // ---------------------------------------------------------------------------
-// What the CLI leaves behind (AGENTS.md, "A running state never outlives its
-// process"; Grok fixtures README observation 48)
+// What the CLI leaves behind (AGENTS.md, "What a Grok CLI starts outlives it";
+// Grok fixtures README observations 48 and 55)
 // ---------------------------------------------------------------------------
 //
-// The real CLI starts its background shells and MCP servers in sessions of
+// The real CLI starts its MCP servers and background shells in sessions of
 // their own, so a stop's group signal reaches the CLI alone and they outlive
-// it, reparented to init. The mock's `leftover` scenarios detach a `sleep` the
-// same way and name its pid; the session's end must stop it — found by the
-// launch marker it inherited, never by the parent chain it lost.
+// it, reparented to init. The mock's `leftover` scenarios do the same: a
+// helper (`sleep 301`, an MCP server's stand-in) before `session/new`
+// answers, and during the turn a shell (`sh -c 'sleep 302 & …'`) whose
+// member `sleep 302` stays in its session while `sleep 303` daemonizes into
+// one of its own. They are found by the launch marker they inherited and the
+// sessions recorded while the CLI lived — never by the parent chain they lost.
 
 /** Whether `pid` is a live (non-zombie) process. */
 function isRunning(pid: number): boolean {
@@ -1311,16 +1314,28 @@ function processesWith(name: string, value: string): number[] {
   return found;
 }
 
-/** The leftover's pid and the launch marker the mock saw, off its `bg:<pid>;launch:<id>;` chunk. */
-function leftoverOf(events: readonly RuntimeEvent[], turnId: string): { pid: number; launch: string } {
-  const match = /bg:(\d+);launch:([^;]+);/.exec(turnText(events, turnId));
-  assert.ok(match, "the mock names its leftover");
-  return { pid: Number(match[1]), launch: match[2]! };
+/** What the rig's launch left running, by role: the helper, the shell, its member, the daemon. */
+function leftovers(r: Rig): { helper: number[]; shell: number[]; member: number[]; daemon: number[] } {
+  const found = { helper: [] as number[], shell: [] as number[], member: [] as number[], daemon: [] as number[] };
+  for (const pid of processesWith("GROK_RIG_MARK", r.mark)) {
+    let argv: string[];
+    try {
+      argv = readFileSync(`/proc/${pid}/cmdline`, "latin1").split("\0").filter(Boolean);
+    } catch {
+      continue;
+    }
+    const line = argv.join(" ");
+    if (line === "sleep 301") found.helper.push(pid);
+    else if (line === "sleep 302") found.member.push(pid);
+    else if (line === "sleep 303") found.daemon.push(pid);
+    else if (argv[0] === "sh" && line.includes("sleep 302 &")) found.shell.push(pid);
+  }
+  return found;
 }
 
-/** Kill a leftover a failed assertion left alive, so it cannot outlive the suite. */
-function reap(pids: readonly number[]): void {
-  for (const pid of pids) {
+/** Kill what a test left alive, so nothing outlives the suite. */
+function reap(r: Rig): void {
+  for (const pid of processesWith("GROK_RIG_MARK", r.mark)) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
@@ -1329,78 +1344,93 @@ function reap(pids: readonly number[]): void {
   }
 }
 
-test("stopSession stops what the CLI left running outside its process group", { skip: process.platform !== "linux" }, async () => {
-  const r = await rig({ scenario: "leftover" });
-  await start(r);
-  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+/** The launch marker the mock saw, off its `launch:<id>;` chunk. */
+function launchOf(events: readonly RuntimeEvent[], turnId: string): string {
+  const match = /launch:([^;]+);/.exec(turnText(events, turnId));
+  assert.ok(match, "the mock names its launch");
+  return match[1]!;
+}
+
+async function turnWithLeftovers(r: Rig, threadId = "t1"): Promise<string> {
+  const { turnId } = await r.adapter.sendTurn({ threadId, input: "go", attachments: [], interactionMode: "default" });
   await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "the turn's end");
   await r.drain();
-  const leftover = leftoverOf(r.events, turnId);
+  return turnId;
+}
+
+test("a session's end stops its helpers — and never what daemonized into a session of its own", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
   try {
-    assert.ok(leftover.launch.length > 0 && leftover.launch !== "none", "the launch env carries the marker");
-    assert.equal(isRunning(leftover.pid), true);
+    await start(r);
+    const turnId = await turnWithLeftovers(r);
+    assert.notEqual(launchOf(r.events, turnId), "none", "the launch env carries the marker");
+    const before = leftovers(r);
+    assert.equal(before.helper.length, 1);
+    assert.equal(before.daemon.length, 1);
     await r.adapter.stopSession("t1");
-    assert.equal(isRunning(leftover.pid), false, "the session's end stopped it, though no group signal reached it");
+    const after = leftovers(r);
+    assert.deepEqual(after.helper, [], "no group signal reached it; its recorded session did");
+    assert.deepEqual(after.daemon, before.daemon, "it left the shell's session: a host-wide helper, never ours to stop");
   } finally {
-    reap([leftover.pid]);
+    reap(r);
     await r.dispose();
   }
 });
 
-test("a CLI that exits on its own leaves nothing running: its leftovers are stopped", { skip: process.platform !== "linux" }, async () => {
+test("a CLI that exits on its own takes its helpers with it", { skip: process.platform !== "linux" }, async () => {
   const r = await rig({ scenario: "leftover-exit" });
-  await start(r);
-  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
-  await r.waitFor((event) => event.type === "session.exited", "session.exited");
-  await r.drain();
-  const leftover = leftoverOf(r.events, turnId);
   try {
+    await start(r);
+    const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "session.exited", "session.exited");
+    await r.drain();
+    assert.notEqual(launchOf(r.events, turnId), "none");
     // `stopAll` is the host's teardown: it waits for a sweep still in flight.
     await r.adapter.stopAll();
-    assert.equal(isRunning(leftover.pid), false);
+    const after = leftovers(r);
+    assert.deepEqual(after.helper, []);
+    assert.equal(after.daemon.length, 1);
   } finally {
-    reap([leftover.pid]);
+    reap(r);
     await r.dispose();
   }
 });
 
-test("a session's end stops its own launch's leftovers and nobody else's", { skip: process.platform !== "linux" }, async () => {
+test("a session's end sweeps its own launch's sessions — another launch's processes are never touched", { skip: process.platform !== "linux" }, async () => {
+  const one = await rig({ scenario: "leftover" });
+  const two = await rig({ scenario: "leftover" });
+  try {
+    await start(one);
+    await start(two);
+    const first = await turnWithLeftovers(one);
+    const second = await turnWithLeftovers(two);
+    assert.notEqual(launchOf(one.events, first), launchOf(two.events, second), "one marker value per launch");
+    await one.adapter.stopSession("t1");
+    assert.deepEqual(leftovers(one).helper, []);
+    assert.equal(leftovers(two).helper.length, 1, "another launch's helper is not this session's to stop");
+    await two.adapter.stopSession("t1");
+    assert.deepEqual(leftovers(two).helper, []);
+  } finally {
+    reap(one);
+    reap(two);
+    await one.dispose();
+    await two.dispose();
+  }
+});
+
+test("a session that fails to open stops everything its CLI started", { skip: process.platform !== "linux" }, async () => {
   const r = await rig({ scenario: "leftover" });
-  await start(r, { threadId: "t1" });
-  await start(r, { threadId: "t2" });
-  const first = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
-  const second = await r.adapter.sendTurn({ threadId: "t2", input: "go", attachments: [], interactionMode: "default" });
-  for (const turnId of [first.turnId, second.turnId]) {
-    await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "a turn's end");
-  }
-  await r.drain();
-  const mine = leftoverOf(r.events, first.turnId);
-  const theirs = leftoverOf(r.events, second.turnId);
   try {
-    assert.notEqual(mine.launch, theirs.launch, "one marker value per launch");
-    await r.adapter.stopSession("t1");
-    assert.equal(isRunning(mine.pid), false);
-    assert.equal(isRunning(theirs.pid), true, "another launch's leftover is not this session's to stop");
-    await r.adapter.stopSession("t2");
-    assert.equal(isRunning(theirs.pid), false);
+    // `session/load` of a session the CLI does not know answers an error
+    // (fixture 13) — after the mock started its helper, as the real CLI's
+    // MCP servers start with the session.
+    await assert.rejects(
+      async () => await start(r, { resumeCursor: { schemaVersion: 1, sessionId: "01a0c19e-0000-7000-8000-000000000000" } }),
+      /Path not found/
+    );
+    assert.deepEqual(processesWith("GROK_RIG_MARK", r.mark), [], "nothing of the launch is left running");
   } finally {
-    reap([mine.pid, theirs.pid]);
-    await r.dispose();
-  }
-});
-
-test("a session that fails to open stops its CLI: nothing of the launch is left running", { skip: process.platform !== "linux" }, async () => {
-  const r = await rig();
-  // `session/load` of a session the CLI does not know answers an error (fixture 13).
-  await assert.rejects(
-    async () => await start(r, { resumeCursor: { schemaVersion: 1, sessionId: "01a0c19e-0000-7000-8000-000000000000" } }),
-    /Path not found/
-  );
-  const left = processesWith("GROK_RIG_MARK", r.mark);
-  try {
-    assert.deepEqual(left, [], "the CLI of a failed open was left running, holding its pipes");
-  } finally {
-    reap(left);
+    reap(r);
     await r.dispose();
   }
 });
