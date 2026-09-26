@@ -551,17 +551,25 @@ export interface OpenCodeChildAgent {
   survivalCheck?: "pending" | "notRunning";
   survivalCheckId?: number;
   /**
-   * The launch id the run's rows name when the ADAPTER reopened it —
-   * `opencode-revive:<callID>:<n>`, the `n`th relaunch of the child
-   * (`revivals`) after an end the adapter wrote itself, on the server's word
-   * that it runs (`settleChildSurvival`). The relaunch contract: a changed
+   * The launch id the adapter gives the run's rows where no provider call
+   * does: `opencode-child:<session id>` for a child no `task` part this
+   * thread reads ever named, on its first start (every agent's FIRST start
+   * names a launch — the relaunch contract), and `opencode-revive:<callID>:<n>`
+   * for the `n`th relaunch (`revivals`) of a run the adapter ended itself, on
+   * the server's word that it runs (`settleChildSurvival`) — a changed
    * `toolUseId` on `task.started` is what reopens the roster's terminal row.
-   * `toolUseId` stays the provider's launching call, which the parent's
-   * `task` part still names. Cleared by a provider relaunch, whose rows name
-   * its own new call.
+   * `toolUseId` stays the provider's launching call, which a `task` part still
+   * names. Cleared by a provider relaunch, whose rows name its own new call.
    */
   launchId?: string;
   revivals?: number;
+  /**
+   * The launch the run's start row named, as the adapter wrote it. Every
+   * start this adapter writes names one; a run whose start named none (a log
+   * from before) gets a seed first when it is relaunched, or the roster could
+   * not reopen it (`settleChildSurvival`).
+   */
+  startLaunchId?: string;
 }
 
 /**

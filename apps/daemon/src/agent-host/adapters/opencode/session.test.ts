@@ -2222,6 +2222,58 @@ test("a second Stop closes a relaunched child, and a confirmed report relaunches
   harness.dispose();
 });
 
+test("a NESTED subagent that survives the Stop is relaunched too: its first start names its call, and it reads running, then completed with its own answer", async () => {
+  const harness = makeHarness();
+  harness.fake.statusMap = { ses_gc: { type: "busy" } };
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+  const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
+    messageID: string;
+  }).messageID;
+  // The child launches a grandchild of its own, in the background: the
+  // grandchild's `session.created`, then the CHILD's own `task` part.
+  const grandchildStart = nextStartOf(harness, "ses_gc");
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: promptId, role: "user", sessionID: sessionId } } },
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    ...childLaunch({ sessionId, childId: "ses_bg", callId: "call_bg", description: "list files", background: true }),
+    ...childLaunch({ sessionId: "ses_bg", childId: "ses_gc", callId: "call_gc", description: "dig deeper", background: true })
+  ]);
+  const first = await grandchildStart;
+  assert.equal(first.payload.toolUseId, "call_gc", "its FIRST start names a launch: the child's own call");
+  assert.equal(first.payload.parentAgentId, "ses_bg");
+  await session.interruptTurn(turn.turnId);
+  assert.deepEqual(taskEnds(harness.events).sort(), ["ses_bg:stopped:interrupted", "ses_gc:stopped:interrupted"]);
+
+  const host = createHostIngestion();
+  let fed = harness.events.length;
+  await host.ingest(harness.events);
+  const revival = nextStartOf(harness, "ses_gc");
+  pushAll(harness.fake, childStreams("ses_gc", "found it"));
+  assert.equal((await revival).payload.toolUseId, "opencode-revive:call_gc:1");
+  await host.ingest(harness.events.slice(fed));
+  fed = harness.events.length;
+  assert.equal(host.fold().roster.find((row) => row.id === "ses_gc")?.status, "running", "reopened");
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working");
+
+  // Its run ends, and its answer is prompted into the child that launched it.
+  pushAll(harness.fake, [
+    ...runSettles("ses_gc"),
+    ...injectedAnswer({ sessionId: "ses_bg", promptId: "msg_gc_answer", childId: "ses_gc", answer: "Deep answer.", description: "dig deeper" })
+  ]);
+  await waitFor(harness, "task.completed", (event) => {
+    const completed = event as Extract<RuntimeEvent, { type: "task.completed" }>;
+    return completed.payload.taskId === "ses_gc" && completed.payload.summary === "Deep answer.";
+  });
+  await host.ingest(harness.events.slice(fed));
+  const end = host.fold().roster.find((row) => row.id === "ses_gc");
+  assert.deepEqual([end?.status, end?.result], ["completed", "Deep answer."]);
+  assert.equal(livenessOf(harness).liveness("thread-1"), null);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("a child the Stop ended sends its leftovers: the server says it runs nothing, and it stays ended", async () => {
   const harness = makeHarness();
   const { session } = await stoppedWithChild(harness);

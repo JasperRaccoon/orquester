@@ -1640,7 +1640,11 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `completed` with its result, once; a later Stop or the exit closes it again. The Stop returns the
   session to `ready` after its `turn.aborted`, as Claude's and Grok's do after every settled turn:
   read `stopped`, the roster took every running row for dead and the host refused the next Stop.
-  The Grok adapter keeps its own end on a revival, its reports not confirmed the same way.*
+  A grandchild's launch is its child's own `task` call, which names it — and gives it its answer —
+  as the parent's names a child; a child no call names starts under `opencode-child:<session id>`,
+  so every first start names a launch; and a relaunched run whose start named none (a log from
+  before) gets a seed naming its first run's first. The Grok adapter keeps its own end on a
+  revival, its reports not confirmed the same way.*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

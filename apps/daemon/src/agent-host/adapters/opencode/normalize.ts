@@ -1012,11 +1012,19 @@ function emitTaskStarted(
     return;
   }
   agent.started = true;
+  // Every agent's FIRST start names a launch (the relaunch contract): a child
+  // no `task` part this thread reads has named yet gets a stable one of its
+  // own, or the roster could never reopen its row.
+  if (agent.launchId === undefined && agent.toolUseId === undefined) {
+    agent.launchId = `opencode-child:${agent.sessionId}`;
+  }
+  const linkage = childLinkage(agent);
+  agent.startLaunchId = linkage.toolUseId;
   out.push({
     ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
     type: "task.started",
     payload: {
-      ...childLinkage(agent),
+      ...linkage,
       taskId: agent.sessionId,
       description: agent.description
     }
@@ -1244,12 +1252,29 @@ export function settleChildSurvival(
   }
   agent.survivalCheck = undefined;
   agent.endedByAdapter = false;
+  const out = new Emitter(state, ctx);
+  if (agent.startLaunchId === undefined) {
+    // The run started with no launch named — a log from before every start
+    // named one — and the roster reopens a row only on a CHANGED launch: a
+    // seed naming the first run's own comes first, which it reads as a late
+    // delivery (the shape `legacyLaunchStarts` writes on a first load).
+    agent.launchId = `opencode-child:${agent.sessionId}`;
+    out.push({
+      ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
+      type: "task.started",
+      payload: {
+        ...childLinkage(agent),
+        taskId: agent.sessionId,
+        description: agent.description
+      }
+    });
+  }
   agent.revivals = (agent.revivals ?? 0) + 1;
   agent.launchId = `opencode-revive:${agent.toolUseId ?? agent.sessionId}:${agent.revivals}`;
+  agent.startLaunchId = agent.launchId;
   agent.completed = false;
   agent.lastStatus = undefined;
   agent.resultPending = false;
-  const out = new Emitter(state, ctx);
   out.push({
     ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
     type: "task.started",
@@ -1729,6 +1754,12 @@ function demuxChild(
         // Output first: a completion closes the call's output buffer.
         emitCommandOutput(state, tool, turnId, raw, out, childSessionId);
         emitToolItem(tool, turnId, raw, out, childSessionId);
+        if (tool.tool === "task") {
+          // A child launching a subagent of its own: the call names the
+          // grandchild as the parent's parts name a child — its launch, its
+          // relaunches and its answer (`linkChildFromTaskPart`).
+          linkChildFromTaskPart(state, tool, raw, out);
+        }
         if (tool.state.status === "running" || tool.state.status === "pending") {
           emitTaskProgress(state, agent, raw, out, {
             lastToolName: tool.tool,

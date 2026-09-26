@@ -909,37 +909,38 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   ends with the adapter's usual end row, and no stale end of an earlier run follows; and the
   adapter's own live set reopens, so Stop and exit close the new run `stopped`. A status-only
   reopen is not enough: an appended `task.updated {running}` is an ordinary row of the agent's
-  window, and once retention drops it the roster reads the old end mid-run. OpenCode — a `task`
-  call with `task_id` re-prompts the existing child, no `session.created` — starts every run from
-  the parent's `running` `task` part under its `callID`; a live part naming a settled child under a
-  call never seen for it is the relaunch; a frame of any call seen before, or a call on a live
-  child, emits no task row (`linkChildFromTaskPart`); and a child a Stop closed that the server
-  confirms still runs is relaunched by the adapter itself under `opencode-revive:<callID>:<n>` (see
-  "OpenCode: a subagent's answer arrives after its run ended", point 7). Codex starts under
-  `codex-launch:<item id>`
-  at `subAgentActivity started` and again under `codex-run:<turn id>` at a child's own
-  `turn/started` after a settled run, or for a child this session never saw launched
-  (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no end, and
-  `interacted` carries no status — neither is evidence about the run in progress. Grok starts an
-  agent at its `spawn_subagent` call's first frame under the call's id, and a `resume_from` launch
-  starts the SAME task again under the new call — the resume's own, NEW subagent id joined to it by
-  `subagent_spawned.resumed_from` (`launchSubagent`, `subagentSpawned`; see "Grok: shells are live
-  work"). An agent first launched by a host older than the relaunch fix (2026-09-24) has no launch
-  id on its first start, so a relaunch from a terminal state could not reopen it; rather than weaken
-  the late-delivery guard in the fold, a thread's first load in a host lifetime gives each settled
-  one — OpenCode and Codex threads only (the head's adapter): Claude always launched with an id, and
-  Grok surfaced no agents before it did so with ids — one appended `task.started` naming
-  `legacy-launch:<taskId>` (`legacyLaunchStarts`
-  in `leftover-work.ts`, `recordLegacyLaunches`, after the leftover closings so an agent they stop
-  counts as settled). It rides the agent's first start's turn (a rewind keeps or drops the two
-  together) and owner, carries its newest row's linkage like a closer, and its row's
-  `createdAt`/`updatedAt` are the roster's own `updatedAt` for the agent (the event is stamped with
-  the load's time), so the roster reads exactly as before — a row stamped with the load's time
-  would rank every legacy agent newest among the settled rows and let the 100-row cap drop the
-  agents that really are — and only the launch id moves; it is that agent's anchor, merged into its
-  spawn row, never a row of its own. An `idle` agent gets none (any start reopens it, and this one
-  would), an active one is the closings' to settle first, and one with no start in the window gets
-  none (a start would create it in the roster, running, once retention dropped its other rows).
+  window, and once retention drops it the roster reads the old end mid-run. OpenCode — a `task` call
+  with `task_id` re-prompts the existing child, no `session.created` — starts every run from the
+  parent's `running` `task` part under its `callID`; a live part naming a settled child under a call
+  never seen for it is the relaunch; a frame of any call seen before, or a call on a live child,
+  emits no task row (`linkChildFromTaskPart`) — a child's own `task` parts name ITS subagents the
+  same way, and a child no part names starts under `opencode-child:<session id>`; and a child a Stop
+  closed that the server confirms still runs is relaunched by the adapter itself under
+  `opencode-revive:<callID>:<n>`, after a seed naming the first run's launch where its start named
+  none (see "OpenCode: a subagent's answer arrives after its run ended", point 7). Codex starts
+  under `codex-launch:<item id>` at `subAgentActivity started` and again under `codex-run:<turn id>`
+  at a child's own `turn/started` after a settled run, or for a child this session never saw
+  launched (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no
+  end, and `interacted` carries no status — neither is evidence about the run in progress. Grok
+  starts an agent at its `spawn_subagent` call's first frame under the call's id, and a
+  `resume_from` launch starts the SAME task again under the new call — the resume's own, NEW
+  subagent id joined to it by `subagent_spawned.resumed_from` (`launchSubagent`, `subagentSpawned`;
+  see "Grok: shells are live work"). An agent first launched by a host older than the relaunch fix
+  (2026-09-24) has no launch id on its first start, so a relaunch from a terminal state could not
+  reopen it; rather than weaken the late-delivery guard in the fold, a thread's first load in a host
+  lifetime gives each settled one — OpenCode and Codex threads only (the head's adapter): Claude
+  always launched with an id, and Grok surfaced no agents before it did so with ids — one appended
+  `task.started` naming `legacy-launch:<taskId>` (`legacyLaunchStarts` in `leftover-work.ts`,
+  `recordLegacyLaunches`, after the leftover closings so an agent they stop counts as settled). It
+  rides the agent's first start's turn (a rewind keeps or drops the two together) and owner, carries
+  its newest row's linkage like a closer, and its row's `createdAt`/`updatedAt` are the roster's own
+  `updatedAt` for the agent (the event is stamped with the load's time), so the roster reads exactly
+  as before — a row stamped with the load's time would rank every legacy agent newest among the
+  settled rows and let the 100-row cap drop the agents that really are — and only the launch id
+  moves; it is that agent's anchor, merged into its spawn row, never a row of its own. An `idle`
+  agent gets none (any start reopens it, and this one would), an active one is the closings' to
+  settle first, and one with no start in the window gets none (a start would create it in the
+  roster, running, once retention dropped its other rows).
   Once per agent: the next load finds a launch id and names nothing.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
@@ -1234,17 +1235,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   RELAUNCHED under the relaunch contract ("Agent rows must survive resumes and retention", rule
   (1)): a new `task.started` naming a NEW launch id, `opencode-revive:<callID>:<n>` (`launchId`,
   which every row of the reopened run names; `toolUseId` stays the provider's call, whose part still
-  gives the run its answer). The roster reopens the row — running, the Stop's end and summary
-  cleared — liveness counts it, it is back in the live set (a later Stop or the exit closes it
-  `stopped`), and its own idle and answer end it `completed` with its result, once. For the roster
-  to read it running the session must read live after a Stop: `turn.aborted` folds to `stopped`, a
-  dead session to the roster (every running row `interrupted`) and one the host refuses the next
-  Stop on, so the Stop now returns it to `ready` (`session.state.changed`, `turn:interrupted`), as
-  Claude's and Grok's do after every settled turn. Idle — the report was a cancelled run's last
-  frames: nothing, and only a `busy` asks again. The child's own idle voids a check in flight; a
-  read that fails relaunches it too (the drain outranks a duplicate row). The Grok adapter keeps its
-  adapter-written end on a revival (a late delivery, status-less rows): its reports are the CLI's
-  own listings and frames, not confirmed by a status read like this one.
+  gives the run its answer). A grandchild is launched by its child's own `task` part, which names it
+  as a parent's part names a child — its launch, and its answer; a child no part names starts under
+  `opencode-child:<session id>`; and a run whose start named no launch (a log from before) gets a
+  seed naming its first run's before the relaunch, since the roster reopens only on a changed
+  launch. The roster reopens the row — running, the Stop's end and summary cleared — liveness counts
+  it, it is back in the live set (a later Stop or the exit closes it `stopped`), and its own idle
+  and answer end it `completed` with its result, once. For the roster to read it running the session
+  must read live after a Stop: `turn.aborted` folds to `stopped`, a dead session to the roster
+  (every running row `interrupted`) and one the host refuses the next Stop on, so the Stop now
+  returns it to `ready` (`session.state.changed`, `turn:interrupted`), as Claude's and Grok's do
+  after every settled turn. Idle — the report was a cancelled run's last frames: nothing, and only a
+  `busy` asks again. The child's own idle voids a check in flight; a read that fails relaunches it
+  too (the drain outranks a duplicate row). The Grok adapter keeps its adapter-written end on a
+  revival (a late delivery, status-less rows): its reports are the CLI's own listings and frames,
+  not confirmed by a status read like this one.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

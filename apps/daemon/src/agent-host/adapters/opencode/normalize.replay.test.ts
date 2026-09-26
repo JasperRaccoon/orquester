@@ -1617,6 +1617,77 @@ test("after an adapter relaunch, a provider relaunch names its own new call", ()
   );
 });
 
+test("a child no task part names still starts under a launch id of its own: `opencode-child:<session>`", () => {
+  const run = liveSession("ses_parent");
+  // Its `session.created`, then its own frames — the part that launched it
+  // never reached this stream (a gap, or a launch inside a session this
+  // thread does not read).
+  const started = feed(run, [
+    { type: "session.created", properties: { sessionID: "ses_orphan", info: { id: "ses_orphan", parentID: "ses_parent", title: "digging" } } },
+    { type: "session.status", properties: { sessionID: "ses_orphan", status: { type: "busy" } } }
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(started, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-child:ses_orphan"],
+    "every agent's FIRST start names a launch: the relaunch contract"
+  );
+});
+
+test("a revival whose run started with no launch id (an older log) seeds one first, so the roster reopens: running, then completed", async () => {
+  const run = liveSession("ses_parent");
+  // What a host from before every start named a launch left: a grandchild's
+  // start with none, in the log and in the adapter's own record of it.
+  run.state.relatedSessionIds.add("ses_gc");
+  run.state.childAgents.set("ses_gc", {
+    sessionId: "ses_gc",
+    parentSessionId: "ses_bg",
+    parentAgentId: "ses_bg",
+    description: "dig deeper",
+    started: true,
+    completed: false
+  });
+  const olderStart: RuntimeEvent = {
+    eventId: "evt-older-start",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    agentId: "ses_gc",
+    providerRefs: { providerTurnId: "ses_gc" },
+    type: "task.started",
+    payload: { taskId: "ses_gc", taskType: "subagent", agentId: "ses_gc", parentAgentId: "ses_bg", description: "dig deeper" }
+  };
+  const stopped = closeLiveChildAgents(run.state, run.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    run.state,
+    { type: "session.status", properties: { sessionID: "ses_gc", status: { type: "busy" } } },
+    run.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  const relaunched = settleChildSurvival(run.state, "ses_gc", reported.checkId, true, run.ctx);
+  assert.deepEqual(
+    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-child:ses_gc", "opencode-revive:ses_gc:1"],
+    "a seed naming the first run's launch — a late delivery — then the relaunch"
+  );
+  const ended = feed(run, [
+    { type: "session.status", properties: { sessionID: "ses_gc", status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: "ses_gc" } }
+  ]).flat();
+
+  // A live session: the roster reads no run of a dead one as running.
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+  const { roster: whileRunning } = await throughHost([live, olderStart, ...stopped, ...relaunched]);
+  assert.equal(whileRunning.find((row) => row.id === "ses_gc")?.status, "running", "reopened");
+  const { roster: afterEnd } = await throughHost([live, olderStart, ...stopped, ...relaunched, ...ended]);
+  assert.equal(afterEnd.find((row) => row.id === "ses_gc")?.status, "completed");
+});
+
 test("a background answer that arrives before the child's idle rides the run's own end", () => {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-background";
