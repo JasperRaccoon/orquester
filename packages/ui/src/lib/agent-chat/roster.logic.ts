@@ -68,10 +68,13 @@ export function rosterRowLook(status: RuntimeSubagentStatus): RosterRowLook {
  * with an exit code.
  *
  * Never `null`: the line always says something, because "nothing reported yet"
- * is not a state a shell can be in — it either runs or it does not.
+ * is not a state a shell can be in — it either runs or it does not. A stopped
+ * shell is the one exception to "never the provider's sentence": its reason,
+ * when it has one, is why the row is stopped at all (Grok's "Left running when
+ * the agent host stopped — stop it from Settings → System.").
  */
 export function backgroundShellActivityText(
-  shell: Pick<RuntimeSubagent, "status" | "progress" | "exitCode">
+  shell: Pick<RuntimeSubagent, "status" | "progress" | "exitCode"> & { result?: string | null }
 ): string {
   const exit = typeof shell.exitCode === "number" ? shell.exitCode : null;
   switch (shell.status) {
@@ -89,8 +92,13 @@ export function backgroundShellActivityText(
     case "failed":
       return exit === null ? "Failed" : `Failed · exit ${exit}`;
     case "cancelled":
-    case "interrupted":
-      return "Stopped";
+    case "interrupted": {
+      // A stop the adapter wrote at an end that left the process running — a
+      // deploy, a restart, a crash (Grok) — says so and where to stop it: a
+      // bare "Stopped" read as done for a dev server that runs on.
+      const said = shell.result?.trim();
+      return said !== undefined && said.length > 0 ? said : "Stopped";
+    }
     case "idle":
       return "Idle";
     default: {

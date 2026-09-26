@@ -3414,19 +3414,37 @@ export class GrokNormalizer {
    * The session closes the open calls FIRST ({@link failOpenTools}): calls
    * before tasks, as every adapter's teardown orders them.
    *
+   * `leftRunning` is said on a shell's or a monitor's row when its PROCESS
+   * outlives this end — a deploy, a restart or a crash ends the session
+   * without the user, and only the user's end sweeps the work
+   * (`GrokSession.stop`): a subagent, a loop and a goal live in the CLI and
+   * end with it.
+   *
    * These are the adapter's own ends, not the CLI's: fixture 21 shows a
    * session-scoped Stop's `session/cancel` cancelling a background subagent
    * (`subagent_finished {status: "cancelled"}`, which then adds no row) while
    * a background shell runs on — and on past the CLI's own exit — so a later
    * report that a task still runs counts it live again ({@link shellReport}).
    */
-  stopBackgroundTasks(): RuntimeEvent[] {
+  stopBackgroundTasks(leftRunning?: string): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     // Shells and monitors first: a subagent's own ones are closed with the
     // rest, so its end below leaves none to count on its own.
     for (const [taskId, track] of [...this.tasks.entries()]) {
       this.endShell(taskId, "adapter");
-      events.push(this.event("task.completed", { ...this.shellLinkage(taskId, track), status: "stopped" }, track.turnId));
+      events.push(
+        this.event(
+          "task.completed",
+          {
+            ...this.shellLinkage(taskId, track),
+            status: "stopped",
+            // Its process outlives this end (a deploy, a restart, a crash):
+            // the row says so rather than reading stopped for work that runs.
+            ...(leftRunning === undefined ? {} : { summary: leftRunning })
+          },
+          track.turnId
+        )
+      );
     }
     // A loop and a goal live in the CLI's process: its exit ends them (a loop
     // made `durable` would be the CLI's to bring back, not captured). After a

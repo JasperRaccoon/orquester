@@ -343,7 +343,7 @@ const interruptSession = defineTool({
 const stopSession = defineTool({
   name: "stop_session",
   title: "Stop the agent process",
-  description: "Stop the provider process but keep the tab, its history and resume cursor; the next send_message resumes it. Use it to recover a session whose chat.sessionStatus is error. For Grok it also stops the processes the agent's work started (background shells, a dev server they run), which a deploy or a restart leaves running.",
+  description: "Stop the provider process but keep the tab, its history and resume cursor; the next send_message resumes it. Use it to recover a session whose chat.sessionStatus is error. For Grok it also stops the processes the agent's work started (background shells, a dev server they run), earlier launches' included, which a deploy, a restart or a crash leaves running.",
   input: { sessionId: sessionIdField },
   annotations: MUTATING_IDEMPOTENT,
   async run(args, { api }) {

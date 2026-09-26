@@ -416,6 +416,13 @@ test("the shell's activity line is its state, and never carries the tool marker"
   assert.equal(agentActivityText({ ...shell, status: "interrupted" }), "Stopped");
 });
 
+test("a shell its session's end left running says so, not a bare 'Stopped'", () => {
+  const shell = agent("bg", { agentKind: "background", title: "pnpm dev", status: "interrupted" });
+  const note = "Left running when the agent host stopped — stop it from Settings → System.";
+  assert.equal(agentActivityText({ ...shell, result: note }), note, "its process outlived the session: say where to stop it");
+  assert.equal(agentActivityText({ ...shell, result: "  " }), "Stopped");
+});
+
 // ---------------------------------------------------------------------------
 // A loop and a goal are rows of their own kind — never a shell's (§7.6)
 // ---------------------------------------------------------------------------

@@ -263,6 +263,16 @@ export interface AgentAdapter {
    * adapter ignores it.
    */
   stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void>;
+  /**
+   * The user ended the thread's session — the session stop command, a closed
+   * tab — so stop what EARLIER launches of the thread left running that only
+   * a user's end may stop, live session or not (Grok: the work its agent
+   * started, which a deploy, a restart or a crash left running;
+   * `support/leftover-work.ts`). Called after `stopSession(…, {endedByUser:
+   * true})` when a session was live, and on its own when none was. Optional:
+   * an adapter that leaves no such work has nothing to sweep.
+   */
+  sweepEndedSession?(threadId: string): Promise<void>;
   /** The host's teardown: never the user ending a session (see {@link stopSession}). */
   stopAll(): Promise<void>;
 
@@ -375,6 +385,14 @@ export interface AdapterContext {
   sessionPath(): string;
   /** `<appdir>/tmp` — `/tmp` is unavailable under `ProtectSystem=strict`. */
   tmpDir(): string;
+  /**
+   * The thread's `leftover-work.json` (`agentChatThreadLeftoverWorkPath`):
+   * where an adapter whose provider leaves the user's work running past its
+   * own exit remembers each launch's task sessions until the user ends the
+   * thread's session (Grok). Optional: a context without it remembers
+   * nothing, and a later user end sweeps only a live session.
+   */
+  leftoverWorkPath?(threadId: string): string;
   /** Aborted when the host is shutting down; every adapter must honour it. */
   signal: AbortSignal;
 }

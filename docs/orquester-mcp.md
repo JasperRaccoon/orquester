@@ -487,8 +487,9 @@ and its default model (the flagged one, else the first) are never shed.
   (`This thread's session is in an error state. Stop the session or rewind to continue.`). Either
   way: `stop_session`, then try again. For Grok it also stops the processes the agent's work
   started — its background shells and whatever they run (a dev server), which the Grok CLI starts
-  outside its own process tree: a deploy, a restart or a crash leaves those running, and only the
-  user ending the session (this, or `close_session`) stops them.
+  outside its own process tree: a deploy, a restart or a crash leaves those running (their task
+  rows close saying so), and only the user ending the session (this, or `close_session`) stops them
+  — what earlier launches of the chat left included, whether or not a session is live.
 - **`close_session`** — closes a chat or a terminal tab. A chat tab's Orquester thread (its event
   log) is deleted; the provider's own transcript survives and stays resumable through
   `list_conversations` for Claude, Codex and Grok (and claudex/claudemix from their proxy homes).

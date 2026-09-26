@@ -1649,6 +1649,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         });
       }
     }
+    // And what EARLIER launches left running — a deploy, a restart or a crash
+    // ended them without the user — live session or not (Grok).
+    if (adapter?.sweepEndedSession) {
+      try {
+        await adapter.sweepEndedSession(runtime.id);
+      } catch (error) {
+        logger.warn("agent-host: failed to sweep the work earlier launches left running", error);
+      }
+    }
     runtime.bound = null;
     releaseProviderThreads(runtime.id);
     liveness.clear(runtime.id);

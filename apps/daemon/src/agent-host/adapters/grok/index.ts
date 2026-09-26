@@ -63,6 +63,7 @@ import {
   probeSkills
 } from "./probe.ts";
 import { GrokSession, parseGrokResumeCursor } from "./session.ts";
+import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
 
 /** The registry ids this adapter serves. */
 const GROK_REF_IDS = ["grok"] as const;
@@ -272,6 +273,12 @@ class GrokAdapter implements AgentAdapter {
       // A crashed child would otherwise leave a dead session in the map, so
       // `hasSession` stays true and `listSessions()` keeps reporting it to the
       // §3.3 reconcile and the drain-restart (Q1 #30).
+      persistTaskSessions: async (launchId, sessions) => {
+        const path = this.context.leftoverWorkPath?.(input.threadId);
+        if (path !== undefined) {
+          await recordLeftoverWork(path, { launchId, recordedAt: this.context.clock.nowIso(), sessions });
+        }
+      },
       onClosed: (threadId) => {
         if (this.sessions.get(threadId) === session) {
           this.sessions.delete(threadId);
@@ -462,13 +469,35 @@ class GrokAdapter implements AgentAdapter {
       return;
     }
     this.sessions.delete(threadId);
-    await session.stop(options);
+    // Anything but the user's end — an account, permission-mode or cwd
+    // restart, a stale session — is a restart of a thread that goes on.
+    await session.stop({ ...options, cause: "restart" });
   }
 
   async stopAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.all([...sessions.map(async (session) => await session.stop()), ...this.sweeps]);
+    // The host's teardown — a deploy's drain-restart included — is never the
+    // user ending a session: the work each left running is remembered.
+    await Promise.all([...sessions.map(async (session) => await session.stop({ cause: "host" })), ...this.sweeps]);
+  }
+
+  /**
+   * The user ended the thread's session: stop what EARLIER launches left
+   * running — a deploy, a restart or a crash ended them without the user —
+   * from the thread's `leftover-work.json`, each launch by its own marker in
+   * its own recorded sessions, then forget them (`support/leftover-work.ts`).
+   * The live session, if any, was stopped first and swept its own launch's.
+   */
+  async sweepEndedSession(threadId: string): Promise<void> {
+    const path = this.context.leftoverWorkPath?.(threadId);
+    if (path === undefined) {
+      return;
+    }
+    const result = await sweepLeftoverWork(path);
+    if (result.found > 0) {
+      this.context.logger.debug("grok: stopped the work earlier launches left running", { threadId, ...result });
+    }
   }
 
   // ------------------------------------------------------------- snapshot

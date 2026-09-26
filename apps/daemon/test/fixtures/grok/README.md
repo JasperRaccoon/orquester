@@ -1342,7 +1342,10 @@ pid checked against its `/proc` starttime before every signal. Two kinds, two ru
   session (the session stop command, a closed tab), and on an open that failed. A deploy must
   never kill running work: a dev server started in a Grok chat outlives a drain-restart, a
   restart and a crash as a marked orphan, which the daemon's Settings → System lists and kills as
-  its own (any process carrying a launch's marker).
+  its own (any process carrying a launch's marker); its task's closing row says so ("Left running
+  when … — stop it from Settings → System."), and its sessions — recorded as the CLI reports the
+  work and again at the end — are remembered in the thread's `leftover-work.json`, which the user's
+  next end of the session sweeps, whatever launch left them.
 
 A Stop's `session/cancel` kills nothing (the CLI lives on and owns them, observation 44).
 Linux-only: elsewhere nothing is read or signalled.

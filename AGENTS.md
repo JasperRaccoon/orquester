@@ -288,6 +288,8 @@ child and dies with it; the boot reconcile recovers.
                        adapterKey/runtimeMode/providerInstanceId/status. Never replaced whole —
                        merged field-wise (undefined = unchanged, null = cleared). See the gotchas.
       events.ndjson    append-only DOMAIN events, per-thread monotonic `seq` — the durable record
+      leftover-work.json  the user's work earlier launches left running (Grok): each launch's task
+                       sessions, swept at the user's next end of the session; 0600, the adapter's own
       state.json       the fold snapshot: the folded state as of one seq, a CACHE of the log;
                        rewritten (0600, atomic) on every head-shaped change and, inside a turn, at
                        most once per 200 events AND 30 s; discarded on version, seq or byte mismatch
@@ -1417,13 +1419,23 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   an open that failed), the user's stop. **The work its agent started** — its shells, the dev
   servers they run — is swept ONLY when the user ends the session: the session stop command or a
   closed tab (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`; the MCP's
-  `stop_session` and `close_session` are that command and that close), its sessions recorded right
-  before the CLI is stopped; and on an open that failed, where nothing of the user's has run. Never
-  at a deploy's teardown or a restart: the drain waits for live work only within its bound (a watch
-  loop's TTL, an agent's hour), and a dev server started in a Grok chat must survive every deploy
-  that comes after it. Never at a crash either (no user ended anything). There it runs on as a
-  marked orphan, listed and killable in Settings → System; its roster row still closes `stopped`
-  with the session (no CLI is left to report on it), so the chat no longer shows it. A Claude chat's
+  `stop_session` and `close_session` are that command and that close) — recorded FIRST in that stop,
+  before anything reaches the CLI, and swept by a sweep of their own (`stopTaskLeftovers`), so a CLI
+  exiting in the middle of the stop (on its card's cancel, say) cannot hand the stop a helpers-only
+  sweep — and on an open that failed, where nothing of the user's has run. Never at a deploy's
+  teardown or a restart: the drain waits for live work only within its bound (a watch loop's TTL, an
+  agent's hour), and a dev server started in a Grok chat must survive every deploy that comes after
+  it. Never at a crash either (no user ended anything). There it runs on as a marked orphan, listed
+  and killable in Settings → System, and never silently: its task's closing row says so — "Left
+  running when the agent host stopped / the session restarted / the agent process exited — stop it
+  from Settings → System." (`leftRunningNote`), which the roster's shell row shows in place of a
+  bare "Stopped". Nor is it forgotten: each launch's task sessions — recorded as the CLI reports the
+  work (a shell's, a monitor's `task.started`: nothing can be read off a CLI that crashed) and again
+  at every end, while it lives — are kept in the thread's `leftover-work.json` (SID, leader
+  starttime, launch id; the last 8 launches; 0600, atomic, the adapter's own file, never
+  `binding.json`; `support/leftover-work.ts`), so a LATER user end — the session stop command or a
+  closed tab, live session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession`
+  either way — sweeps what every earlier launch left, with the same identity checks. A Claude chat's
   background shells outlive their session the same way — the SDK closes the Claude CLI's stdin and
   SIGTERMs it 2 s later, before the CLI's own 5 s wind-down would stop them, and they run on under
   init (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on

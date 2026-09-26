@@ -14,7 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,6 +30,7 @@ import {
 
 import type { AdapterContext } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
+import { readLeftoverWork } from "../../support/leftover-work.ts";
 import { createGrokAdapter, GROK_CAPABILITIES, isBlockedGrokCommand } from "./index.ts";
 import { parseGrokResumeCursor } from "./session.ts";
 
@@ -47,6 +48,8 @@ interface Rig {
   cwd: string;
   /** `GROK_RIG_MARK` in this rig's launch env: finds its own processes in `/proc`. */
   mark: string;
+  /** The thread `t1`'s `leftover-work.json`: what its launches left running for a later user end. */
+  leftoverWork: string;
 }
 
 /**
@@ -57,10 +60,18 @@ interface Rig {
 const openRigs: Rig[] = [];
 
 async function rig(
-  options: { scenario?: string; version?: string; bin?: string | null; env?: Record<string, string> } = {}
+  options: {
+    scenario?: string;
+    version?: string;
+    bin?: string | null;
+    env?: Record<string, string>;
+    /** Share another rig's `leftover-work.json`: a later host of the same thread. */
+    leftoverWork?: string;
+  } = {}
 ): Promise<Rig> {
   const cwd = await mkdtemp(join(tmpdir(), "grok-lifecycle-"));
   const mark = randomUUID();
+  const leftoverWork = options.leftoverWork ?? join(cwd, "threads", "t1", "leftover-work.json");
   const events: RuntimeEvent[] = [];
   const waiters: Array<{ predicate: (event: RuntimeEvent) => boolean; resolve: (event: RuntimeEvent) => void }> = [];
 
@@ -89,6 +100,7 @@ async function rig(
     resolveBin: async () => await Promise.resolve(options.bin === undefined ? MOCK : options.bin),
     sessionPath: () => process.env["PATH"] ?? "",
     tmpDir: () => cwd,
+    leftoverWorkPath: (threadId) => (threadId === "t1" ? leftoverWork : join(cwd, "threads", threadId, "leftover-work.json")),
     signal: controller.signal
   };
 
@@ -138,7 +150,8 @@ async function rig(
       await adapter.stopAll();
     },
     cwd,
-    mark
+    mark,
+    leftoverWork
   };
   openRigs.push(built);
   return built;
@@ -1489,6 +1502,18 @@ test("the host's teardown and a restart stop a Grok session's helpers — never 
       assert.deepEqual(after.shell, before.shell, `${end}: the shell runs on, a marked orphan`);
       assert.deepEqual(after.member, before.member, `${end}: and so does what it started`);
       assert.deepEqual(after.daemon, before.daemon);
+      // Its row says so — never a silent "stopped" for work that runs on.
+      assert.deepEqual(shellEnds(r), [
+        [
+          "stopped",
+          end === "teardown"
+            ? "Left running when the agent host stopped — stop it from Settings → System."
+            : "Left running when the session restarted — stop it from Settings → System."
+        ]
+      ]);
+      const remembered = await readLeftoverWork(r.leftoverWork);
+      assert.equal(remembered.length, 1, `${end}: the launch's work is remembered for a later user end`);
+      assert.ok(remembered[0]!.sessions.length >= 1);
     } finally {
       reap(r);
       await r.dispose();
@@ -1504,6 +1529,7 @@ test("the user ending the session stops its running work too — never what daem
     const before = leftovers(r);
     await r.adapter.stopSession("t1", { endedByUser: true });
     const after = leftovers(r);
+    assert.deepEqual(shellEnds(r), [["stopped", undefined]], "it really stopped: nothing to say");
     assert.deepEqual(after.helper, []);
     assert.deepEqual(after.shell, [], "the session stop command or a closed tab: the agent's work goes with it");
     assert.deepEqual(after.member, []);
@@ -1539,6 +1565,42 @@ test("the user's stop sweeps the running work even when the CLI exits in the mid
   }
 });
 
+/** `[status, summary]` of the leftover shell's closing rows. */
+function shellEnds(r: Rig): Array<[string | undefined, string | undefined]> {
+  return r.events
+    .filter((event) => event.type === "task.completed" && (event.payload as { taskId?: string }).taskId === "task-bg-1")
+    .map((event) => {
+      const payload = event.payload as { status?: string; summary?: string };
+      return [payload.status, payload.summary];
+    });
+}
+
+test("a deploy leaves the dev server running and says so; closing the tab under the next host stops it", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  let next: Rig | undefined;
+  try {
+    await start(r);
+    await turnWithLeftovers(r);
+    const before = leftovers(r);
+    await r.adapter.stopAll();
+    assert.deepEqual(leftovers(r).shell, before.shell, "the deploy never kills running work");
+    assert.deepEqual(leftovers(r).member, before.member);
+    // The next host: no session of the thread is live when its tab closes.
+    next = await rig({ leftoverWork: r.leftoverWork });
+    assert.equal(next.adapter.hasSession("t1"), false);
+    await next.adapter.sweepEndedSession!("t1");
+    const after = leftovers(r);
+    assert.deepEqual(after.shell, [], "the user's end reaches what the earlier host's launch left");
+    assert.deepEqual(after.member, []);
+    assert.deepEqual(after.daemon, before.daemon, "never what daemonized away");
+    assert.equal(existsSync(r.leftoverWork), false, "and the thread remembers none of it any more");
+  } finally {
+    reap(r);
+    await r.dispose();
+    await next?.dispose();
+  }
+});
+
 test("a CLI that exits on its own takes its helpers with it", { skip: process.platform !== "linux" }, async () => {
   const r = await rig({ scenario: "leftover-exit" });
   try {
@@ -1554,6 +1616,17 @@ test("a CLI that exits on its own takes its helpers with it", { skip: process.pl
     assert.equal(after.shell.length, 1, "a crash is no user's end: the running work stays, a marked orphan");
     assert.equal(after.member.length, 1);
     assert.equal(after.daemon.length, 1);
+    assert.deepEqual(shellEnds(r), [
+      ["stopped", "Left running when the agent process exited — stop it from Settings → System."]
+    ]);
+    // Recorded when the CLI reported it, while it lived: nothing can be read
+    // off a CLI that is gone. The user ending the session later sweeps it.
+    assert.equal((await readLeftoverWork(r.leftoverWork)).length, 1);
+    await r.adapter.sweepEndedSession!("t1");
+    const swept = leftovers(r);
+    assert.deepEqual(swept.shell, [], "the user's end reaches what the crashed launch left");
+    assert.deepEqual(swept.member, []);
+    assert.deepEqual(swept.daemon, after.daemon, "never what daemonized away");
   } finally {
     reap(r);
     await r.dispose();

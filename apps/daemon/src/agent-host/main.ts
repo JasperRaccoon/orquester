@@ -29,6 +29,7 @@ import {
   agentChatDir,
   agentChatIndexPath,
   agentChatThreadAttachmentsDir,
+  agentChatThreadLeftoverWorkPath,
   agentHostSocketPath,
   agentHostTokenPath,
   appConfigPath,
@@ -341,6 +342,7 @@ export async function startAgentHost(
     resolveAttachmentPath: (threadId, attachmentId) =>
       store.resolveAttachment(threadId, attachmentId),
     attachmentsDir: (threadId) => agentChatThreadAttachmentsDir(appdir, threadId),
+    leftoverWorkPath: (threadId) => agentChatThreadLeftoverWorkPath(appdir, threadId),
     logRawFrame: (threadId, frame) => store.logRawFrame(threadId, frame),
     buildEnv: ({ threadId, home, projectPath, extraEnv }) => {
       // The §6.1 launcher env the daemon composed for this thread: the registry

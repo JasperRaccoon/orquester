@@ -1575,6 +1575,27 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
     assert.deepEqual(stops(stopped), [{ endedByUser: true }]);
     assert.deepEqual(stops(closed), [{ endedByUser: true }]);
     assert.deepEqual(stops(restarted), [null], "a restart is not the user ending the session");
+    const sweeps = (threadId: string) =>
+      host.adapter.calls.filter((call) => call.kind === "sweepEndedSession" && call.threadId === threadId).length;
+    assert.equal(sweeps(stopped), 1, "the user's end sweeps what earlier launches left running");
+    assert.equal(sweeps(closed), 1);
+    assert.equal(sweeps(restarted), 0, "a restart sweeps none of it");
+    await host.stop();
+  });
+
+  it("closing a tab whose session is no longer live still sweeps what its earlier launches left running", async () => {
+    // A deploy, a restart or a crash ended the last launch without the user:
+    // its work runs on, and no session is live when the tab is closed.
+    const host = createTestHost();
+    const threadId = await host.createThread({ threadId: "thread-cold" });
+    assert.equal(host.adapter.hasSession(threadId), false);
+    await host.orchestrator.deleteThread(threadId);
+    const calls = host.adapter.calls.filter((call) => call.threadId === threadId).map((call) => call.kind);
+    assert.deepEqual(
+      calls.filter((kind) => kind === "stopSession" || kind === "sweepEndedSession"),
+      ["sweepEndedSession"],
+      "no session to stop; the sweep all the same"
+    );
     await host.stop();
   });
 

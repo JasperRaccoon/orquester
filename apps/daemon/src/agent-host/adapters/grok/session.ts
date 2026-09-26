@@ -182,6 +182,35 @@ export interface GrokSessionOptions {
    * `listSessions()` keeps reporting it to the §3.3 reconcile (Q1 #30).
    */
   onClosed?(threadId: string): void;
+  /**
+   * Remember this launch's task sessions for a later user end (the thread's
+   * `leftover-work.json`, `support/leftover-work.ts`): called whenever the
+   * CLI reports new work and at an end that leaves it running. Best-effort.
+   */
+  persistTaskSessions?(launchId: string, sessions: readonly RecordedSession[]): Promise<void>;
+}
+
+/** Why a session ended without the user: what the closing row of work left running names. */
+export type GrokSessionEndCause = "restart" | "host";
+
+/**
+ * The line a shell's or a monitor's closing row says when its process
+ * outlives the end — never a bare "stopped" for work that runs on.
+ */
+export function leftRunningNote(
+  cause: GrokSessionEndCause | "exit",
+  platform: NodeJS.Platform = process.platform
+): string {
+  const when =
+    cause === "restart"
+      ? "the session restarted"
+      : cause === "host"
+        ? "the agent host stopped"
+        : "the agent process exited";
+  // Settings → System reads `/proc`: elsewhere it lists nothing to stop.
+  return platform === "linux"
+    ? `Left running when ${when} — stop it from Settings → System.`
+    : `Left running when ${when}.`;
 }
 
 /**
@@ -284,6 +313,10 @@ export class GrokSession {
    * running.
    */
   private taskLeftovers: Promise<void> | null = null;
+  /** The user is ending the session: an exit in the middle of it leaves nothing running to say so of. */
+  private endingByUser = false;
+  /** Recordings of the user's work as the CLI reports it, one at a time ({@link recordTaskWork}). */
+  private taskRecording: Promise<void> = Promise.resolve();
   /**
    * `session.started` went out. Until then the session has no life of its own
    * to report: an open that fails is reported by `start()`'s rejection, which
@@ -1625,7 +1658,9 @@ export class GrokSession {
     this.withdrawPendingRequests();
 
     this.emitAll(this.normalizer.failOpenTools("The agent process exited."));
-    this.emitAll(this.normalizer.stopBackgroundTasks());
+    // Its work runs on past it — unless the user was ending the session, whose
+    // stop sweeps it ({@link stop}).
+    this.emitAll(this.normalizer.stopBackgroundTasks(this.endingByUser ? undefined : leftRunningNote("exit")));
 
     if (turn !== null && !turn.settled) {
       const outcome = exitOutcome(reason, this.hostInitiatedStop);
@@ -1709,21 +1744,51 @@ export class GrokSession {
    * Best-effort: a read that fails records nothing, and nothing is then swept
    * for it.
    */
-  private async recordSessions(kind: "helpers" | "tasks"): Promise<void> {
+  private async recordSessions(kind: "helpers" | "tasks"): Promise<boolean> {
     const pid = this.connection?.pid;
     if (pid === undefined) {
-      return;
+      return false;
     }
+    let added = false;
     try {
       for (const session of await recordChildSessions(pid)) {
         if (kind === "helpers") {
           this.helperSessions.set(session.sid, session);
-        } else if (!this.helperSessions.has(session.sid)) {
+        } else if (!this.helperSessions.has(session.sid) && !this.taskSessions.has(session.sid)) {
           this.taskSessions.set(session.sid, session);
+          added = true;
         }
       }
     } catch (error) {
       this.options.logger.warn("grok: could not record the agent's child sessions", error);
+    }
+    return added;
+  }
+
+  /**
+   * The CLI reported new work (a shell, a monitor): record its session now,
+   * while the CLI lives — a crash leaves nothing to read — and remember it
+   * for a later user end. One recording at a time; never rejects.
+   */
+  private recordTaskWork(): void {
+    this.taskRecording = this.taskRecording
+      .then(async () => {
+        if (!this.stopped && (await this.recordSessions("tasks"))) {
+          await this.persistTaskSessions();
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  /** Remember this launch's task sessions for a later user end. Never rejects. */
+  private async persistTaskSessions(): Promise<void> {
+    if (this.taskSessions.size === 0 || this.options.persistTaskSessions === undefined) {
+      return;
+    }
+    try {
+      await this.options.persistTaskSessions(this.launchId, [...this.taskSessions.values()]);
+    } catch (error) {
+      this.options.logger.warn("grok: could not remember the work the agent left running", error);
     }
   }
 
@@ -1731,27 +1796,30 @@ export class GrokSession {
    * Host-initiated stop. Idempotent — a session that already ended still waits
    * for its sweep. `endedByUser`: the user ended the session (the session stop
    * command, a closed tab), and the work its agent left running goes with it
-   * ({@link stopLeftovers}); any other stop — a restart, the host's teardown —
-   * leaves that work running.
+   * ({@link stopLeftovers}); any other stop — a restart (`cause: "restart"`),
+   * the host's teardown (`"host"`) — leaves that work running, says so on its
+   * closing row ({@link leftRunningNote}) and remembers its sessions for the
+   * user's next end ({@link GrokSessionOptions.persistTaskSessions}).
    */
-  async stop(options: { endedByUser?: boolean } = {}): Promise<void> {
+  async stop(options: { endedByUser?: boolean; cause?: GrokSessionEndCause } = {}): Promise<void> {
     if (this.stopped) {
       await this.leftovers;
       return;
     }
     const endedByUser = options.endedByUser === true;
-    if (endedByUser) {
-      // FIRST — before the host path is armed and before anything reaches the
-      // CLI (the card's cancel below can end it): every child's session, while
-      // the CLI still lives. Once it is gone its children are init's, and only
-      // their sessions tie them to it.
-      await this.recordSessions("tasks");
-      if (this.stopped) {
-        // It ended while they were read, and its exit settled the session
-        // ({@link onExit}). The user's work is still the user's to stop.
-        await Promise.all([this.leftovers, this.stopTaskLeftovers()]);
-        return;
-      }
+    this.endingByUser = endedByUser;
+    // FIRST — before the host path is armed and before anything reaches the
+    // CLI (the card's cancel below can end it): every child's session, while
+    // the CLI still lives, after any recording already in flight. Once it is
+    // gone its children are init's, and only their sessions tie them to it.
+    await this.taskRecording;
+    await this.recordSessions("tasks");
+    if (this.stopped) {
+      // It ended while they were read, and its exit settled the session
+      // ({@link onExit}). The user's work is still the user's to stop — and
+      // anyone else's end leaves it running, remembered for the user's.
+      await Promise.all([this.leftovers, endedByUser ? this.stopTaskLeftovers() : this.persistTaskSessions()]);
+      return;
     }
     // Kept, as at an exit: held frames join the open turn before it settles.
     this.wakes.drop("the session stops");
@@ -1759,7 +1827,9 @@ export class GrokSession {
     this.hostInitiatedStop = true;
     await this.settlePendingAsCancelled();
     this.emitAll(this.normalizer.failOpenTools("The session was stopped."));
-    this.emitAll(this.normalizer.stopBackgroundTasks());
+    this.emitAll(
+      this.normalizer.stopBackgroundTasks(endedByUser ? undefined : leftRunningNote(options.cause ?? "restart"))
+    );
     const turn = this.activeTurn;
     if (turn !== null && !turn.settled) {
       turn.settled = true;
@@ -1775,19 +1845,38 @@ export class GrokSession {
     await this.connection?.stop();
     // The CLI is gone; what it started outside its process group is not: its
     // helpers at every end, the user's work only at the user's — by a sweep of
-    // its own, which a helpers' sweep an exit started cannot stand in for.
-    await Promise.all([this.stopLeftovers(), endedByUser ? this.stopTaskLeftovers() : undefined]);
+    // its own, which a helpers' sweep an exit started cannot stand in for —
+    // and remembered at every other end, so a later user end still reaches it.
+    await Promise.all([this.stopLeftovers(), endedByUser ? this.stopTaskLeftovers() : this.persistTaskSessions()]);
   }
 
   // --------------------------------------------------------------- helpers
 
   private emitEvent(event: RuntimeEvent): void {
     this.options.emit(event);
+    this.noteWork(event);
   }
 
   private emitAll(events: readonly RuntimeEvent[]): void {
     for (const event of events) {
       this.options.emit(event);
+      this.noteWork(event);
+    }
+  }
+
+  /**
+   * A shell's or a monitor's start (the only task rows stamped `background`
+   * here — a subagent, a loop and a goal live in the CLI): new user work, in
+   * a session of its own, recorded while the CLI can still be read
+   * ({@link recordTaskWork}).
+   */
+  private noteWork(event: RuntimeEvent): void {
+    if (
+      event.type === "task.started" &&
+      !this.stopped &&
+      (event.payload as { agentKind?: unknown }).agentKind === "background"
+    ) {
+      this.recordTaskWork();
     }
   }
 

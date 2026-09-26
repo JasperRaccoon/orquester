@@ -44,6 +44,7 @@ export interface ScriptedCall {
     | "projectHistory"
     | "rollbackThread"
     | "stopSession"
+    | "sweepEndedSession"
     | "stopAll"
     | "refreshSnapshot";
   threadId?: string;
@@ -282,6 +283,11 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
 
     hasSession(threadId: string): boolean {
       return sessions.has(threadId);
+    },
+
+    async sweepEndedSession(threadId: string): Promise<void> {
+      calls.push({ kind: "sweepEndedSession", threadId });
+      await Promise.resolve();
     },
 
     async stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void> {
