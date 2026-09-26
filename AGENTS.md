@@ -1183,7 +1183,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   every settled turn — an `error` session is a dead one to the roster (every running row
   `interrupted`) and refuses commands until a Stop, which would cancel that job. The turn stays
   `failed` (the activity ladder still ranks it `error`). Closed, the child read "interrupted"
-  while it worked, left the drain's liveness, and lost its answer as its result.
+  while it worked, left the drain's liveness, and lost its answer as its result. (5) A child
+  session's question rides no turn, and neither does its resolution (`questionTurnId` in
+  `normalize.ts`, Codex's and Grok's rule): a turn's end dismisses every question on it in the log
+  only (`settleStrandedQuestions`), and a background child outlives the parent's turn, so its card
+  was swept at the parent's turn end while the child still waited on the answer. A resolution on a
+  turn its question does not ride would reopen the card after a rewind of that turn. The parent's
+  own questions, and every approval, ride the parent's open turn.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

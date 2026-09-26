@@ -1510,6 +1510,55 @@ test("a live subagent is closed `stopped` before session.exited", async () => {
   harness.dispose();
 });
 
+test("a child session's question rides no turn, and so does its answer; the parent's own ride its turn", async () => {
+  // Codex's and Grok's `questionTurnId` rule: a turn's end dismisses every
+  // question on it in the log only (`settleStrandedQuestions`), and a
+  // background child outlives the parent's turn — riding it, the child's card
+  // was swept at the parent's turn end while the child still waited on it.
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({
+    threadId: "thread-1",
+    input: "delegate it",
+    attachments: [],
+    interactionMode: "default"
+  });
+  announceChild(harness.fake, sessionId, "digging (@explore subagent)");
+  await waitFor(harness, "task.started");
+  harness.fake.push({
+    type: "question.asked",
+    properties: {
+      id: "que_child",
+      sessionID: "ses_child",
+      questions: [{ question: "Which file?", header: "File", options: [{ label: "a.ts" }] }]
+    }
+  });
+  harness.fake.push({
+    type: "question.asked",
+    properties: {
+      id: "que_parent",
+      sessionID: sessionId,
+      questions: [{ question: "Proceed?", header: "Proceed", options: [{ label: "Yes" }] }]
+    }
+  });
+  const child = await waitFor(harness, "user-input.requested", (event) => event.requestId === "que_child");
+  const parent = await waitFor(harness, "user-input.requested", (event) => event.requestId === "que_parent");
+  assert.equal(child.turnId, undefined, "the child's question rides no turn");
+  assert.equal(parent.turnId, turn.turnId, "the parent's own question rides its turn");
+
+  await session.respondToUserInput("que_child", { "question-0-file": "a.ts" });
+  await session.respondToUserInput("que_parent", { "question-0-proceed": "Yes" });
+  const answers = eventsOfType(harness.events, "user-input.resolved");
+  const childAnswer = answers.find((event) => event.requestId === "que_child");
+  const parentAnswer = answers.find((event) => event.requestId === "que_parent");
+  assert.ok(childAnswer !== undefined && parentAnswer !== undefined);
+  assert.equal(childAnswer.turnId, undefined, "its answer rides the same: none");
+  assert.equal(parentAnswer.turnId, turn.turnId);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("interrupting a turn closes its subagents too", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
