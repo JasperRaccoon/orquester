@@ -940,8 +940,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   moves; it is that agent's anchor, merged into its spawn row, never a row of its own. An `idle`
   agent gets none (any start reopens it, and this one would), an active one is the closings' to
   settle first, and one with no start in the window gets none (a start would create it in the
-  roster, running, once retention dropped its other rows).
-  Once per agent: the next load finds a launch id and names nothing.
+  roster, running, once retention dropped its other rows). Once per agent: the next load finds a
+  launch id and names nothing.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
