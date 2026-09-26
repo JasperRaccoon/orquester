@@ -754,6 +754,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onBack={() => setDrillInAgentId(null)}
               bottomInset={bottomInset}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
+              onOpenFile={paintOnly ? noop : openFile}
             />
           ) : (
             <ChatTimeline

@@ -14,13 +14,13 @@
  *    and takes `onBack` rather than owning any navigation. They float over it
  *    as they float over the thread's own timeline, so it takes the view's
  *    `bottomInset` too.
- *  - **The child view dispatches no commands.** Every timeline callback here
+ *  - **The child view dispatches no commands.** Every command callback here
  *    is inert: there is no revert, no approval and no queue inside a child.
- *    The one exception is opening a file, which is navigation, not a command —
- *    and even that is left to the parent through props we do not have, so it
- *    is a no-op here too. Reading a call's whole output is no command either:
- *    the parent's viewer serves it (`onLoadFullOutput`), because an agent's
- *    window keeps 200 rows and a long command's output outlives them.
+ *    Navigation and reads are no commands, and pass the parent's own handlers
+ *    through (`drill-in-callbacks.ts`): opening a file a child's words link to
+ *    (`onOpenFile`), and reading a call's whole output in the parent's viewer
+ *    (`onLoadFullOutput`) — an agent's window keeps 200 rows, and a long
+ *    command's output outlives them.
  *
  * §7.2's rule holds on the way in: items stamped with an `agentId` never
  * render in the parent timeline, they are re-homed here. **Both halves come
@@ -60,6 +60,7 @@ import type { AgentDrillInProps } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import { backgroundShellDisclosureIds, backgroundShellRows } from "./background-shell";
+import { drillInTimelineCallbacks } from "./drill-in-callbacks";
 import { rosterRowIcon } from "./AgentRosterRow";
 import { agentActivityText, rosterRowMetrics } from "./format";
 import { isBackgroundShellRow, rosterRowTicks, rosterRowVisual } from "./roster-rows";
@@ -87,7 +88,8 @@ export function AgentDrillIn({
   bottomInset,
   roster,
   projectPath,
-  onLoadFullOutput
+  onLoadFullOutput,
+  onOpenFile
 }: AgentDrillInProps): React.ReactElement {
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
   // Live-follow for the child's own list (§7.3): armed on entry, disarmed by
@@ -185,6 +187,12 @@ export function AgentDrillIn({
     };
   }, [collapsedShellRowIds, disclosures, openTurnIds, shellRowIds]);
 
+  // Navigation and reads are the host's; every command is inert (§7.6).
+  const callbacks = React.useMemo(
+    () => drillInTimelineCallbacks({ onOpenFile, onLoadFullOutput }),
+    [onOpenFile, onLoadFullOutput]
+  );
+
   const visuals = agent ? rosterRowVisual(agent) : null;
   const Icon = background ? Terminal : rosterRowIcon(agent ?? { kind: "subagent" });
   // The agent's prompt is the task description the provider reported: the
@@ -275,14 +283,7 @@ export function AgentDrillIn({
         disclosures={timelineDisclosures}
         onDisclosureChange={onDisclosureChange}
         bottomInset={bottomInset}
-        canRevert={false}
-        onRevert={noop}
-        onOpenTurnDiff={noop}
-        onOpenFile={noop}
-        onLoadFullOutput={onLoadFullOutput ?? noop}
-        onOpenAgent={noop}
-        onSendQueuedNow={noop}
-        onReturnQueuedToComposer={noop}
+        {...callbacks}
         errorBanner={null}
         onDismissErrorBanner={noop}
       />

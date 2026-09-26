@@ -387,6 +387,14 @@ export interface AgentDrillInProps {
    * command's output outlives it in the host's join. Absent means inert.
    */
   onLoadFullOutput?: ((itemId: string, source?: FullOutputSource) => void) | undefined;
+  /**
+   * The parent view's click-through to the file browser: navigation, not a
+   * command, so a file a child's words link to, a changed-file line and a
+   * diff heading open it as they do in the thread. Absent means inert.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  onOpenFile?: ((path: string) => void) | undefined;
 }
 
 export interface ChatStatusLineProps {
