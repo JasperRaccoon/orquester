@@ -14,14 +14,9 @@ import type { RuntimeEvent, RuntimeEventRaw, RuntimeEventRawSource } from "@orqu
 
 import type { BackgroundTrack, EndedTask } from "./background-tasks.ts";
 import type { GoalTrack, LoopTrack } from "./loops-goals.ts";
-import type {
-  ChildSession,
-  FinishedCall,
-  SubagentLaunch,
-  SubagentTrack,
-  ToolTrack
-} from "./normalize.ts";
+import type { FinishedCall, ToolTrack } from "./normalize.ts";
 import type { PlanPathHost } from "./plan.ts";
+import type { ChildSession, SubagentLaunch, SubagentTrack } from "./subagents.ts";
 
 export const ACP_RAW_SOURCE: RuntimeEventRawSource = "acp.jsonrpc";
 export const XAI_RAW_SOURCE: RuntimeEventRawSource = "acp.grok.extension";

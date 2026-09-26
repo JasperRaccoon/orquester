@@ -14,16 +14,7 @@ import type { RuntimeEvent, RuntimeEventRaw, RuntimeTaskStatus } from "@orqueste
 
 import type { ToolCallStatus } from "./acp/_generated/schema.ts";
 import type { XaiBackgroundTask, XaiTaskSnapshot } from "./acp/_generated/xai.ts";
-import {
-  closeSubagent,
-  isTerminalToolStatus,
-  subagentAnswerText,
-  subagentFromSnapshot,
-  subagentLinkage,
-  subagentNamed,
-  subagentOfBackgroundTask,
-  subagentReport
-} from "./normalize.ts";
+import { isTerminalToolStatus } from "./normalize.ts";
 import {
   ACP_RAW_SOURCE,
   asRecord,
@@ -32,6 +23,15 @@ import {
   textArgument,
   type GrokNormalizerState
 } from "./normalizer-state.ts";
+import {
+  closeSubagent,
+  subagentAnswerText,
+  subagentFromSnapshot,
+  subagentLinkage,
+  subagentNamed,
+  subagentOfBackgroundTask,
+  subagentReport
+} from "./subagents.ts";
 
 /**
  * Where a background task was started: `session` is the ACP session whose

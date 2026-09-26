@@ -9,7 +9,6 @@
 import type { RuntimeEvent, RuntimeEventRaw } from "@orquester/api/agent-chat";
 
 import type { SessionNotification } from "./acp/_generated/schema.ts";
-import type { ChildSession } from "./normalize.ts";
 import {
   ACP_RAW_SOURCE,
   event,
@@ -17,6 +16,7 @@ import {
   ownedEvent,
   type GrokNormalizerState
 } from "./normalizer-state.ts";
+import type { ChildSession } from "./subagents.ts";
 
 /**
  * A child's words: the agent's assistant message, a segment of its own
