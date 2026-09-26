@@ -12,13 +12,12 @@
 
 import type { RuntimeEvent, RuntimeEventRaw, RuntimeEventRawSource } from "@orquester/api/agent-chat";
 
+import type { GoalTrack, LoopTrack } from "./loops-goals.ts";
 import type {
   BackgroundTrack,
   ChildSession,
   EndedTask,
   FinishedCall,
-  GoalTrack,
-  LoopTrack,
   SubagentLaunch,
   SubagentTrack,
   ToolTrack
