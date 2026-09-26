@@ -61,7 +61,12 @@ import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
 import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
-import { chatEscapeSequenceStep, resolveChatEscape } from "./escape-action";
+import {
+  chatEscapeSequenceStep,
+  chatEscapeTargetGate,
+  resolveChatEscape,
+  type EscapeTargetLike
+} from "./escape-action";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
@@ -508,7 +513,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // the turn, or leave the drill-in behind it. `anotherLayerOwnsTheKeyboard()`
   // is the one set (`lib/open-layers.ts`); the composer's arms read it too.
   // A held Escape is one press — its auto-repeat does nothing at all — so a
-  // hold whose first keydown a layer took cannot go on to stop the turn.
+  // hold whose first keydown a layer took cannot go on to stop the turn. And
+  // an Escape typed into a field that is not this chat's (the tab strip's
+  // rename box, the sidebar's name field) is that field's: being first here
+  // used to mean the rename never cancelled and the turn stopped instead.
   //
   // **The idle Escape is the CLI's double press** (§5.5): with nothing to
   // leave and nothing to stop, two Escapes in a row outside the composer open
@@ -528,16 +536,19 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     // A tab coming back into view starts a fresh count.
     sequence?.reset();
     const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as Element | null;
       const state = escapeState.current;
-      const inside = (selector: string): boolean =>
-        typeof target?.closest === "function" && target.closest(selector) !== null;
+      const id = CSS.escape(sessionId);
       const gate = {
         key: event.key,
         defaultPrevented: event.defaultPrevented,
         isActiveTab: isActiveChatTab(sessionId),
         blockingLayerOpen: anotherLayerOwnsTheKeyboard(),
-        insideComposer: inside(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`),
+        // Where it landed: this thread's composer, or a field that is not this
+        // chat's — the rename box in the tab strip, a terminal — whose key it is.
+        ...chatEscapeTargetGate(event.target as EscapeTargetLike | null, {
+          chatRoot: `[data-agent-chat="${id}"]`,
+          composerShell: `[data-agent-chat-composer-shell="${id}"]`
+        }),
         drillInOpen: state.drillInAgentId !== null,
         turnActive: state.turnActive,
         repeat: event.repeat

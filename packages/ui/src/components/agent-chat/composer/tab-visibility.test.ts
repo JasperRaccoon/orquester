@@ -49,6 +49,7 @@ function everyEscapeShape(): Array<{
   drillInOpen: boolean;
   rewindPress: boolean;
   layerOpen: boolean;
+  editableOutsideChat: boolean;
 }> {
   const shapes = [];
   for (const defaultPrevented of [false, true]) {
@@ -58,17 +59,22 @@ function everyEscapeShape(): Array<{
           for (const drillInOpen of [false, true]) {
             for (const rewindPress of [false, true]) {
               for (const layerOpen of [false, true]) {
-                // A textarea is by definition inside the shell.
-                if (isTextarea && !insideComposerShell) continue;
-                shapes.push({
-                  defaultPrevented,
-                  insideComposerShell,
-                  isTextarea,
-                  isTurnActive,
-                  drillInOpen,
-                  rewindPress,
-                  layerOpen
-                });
+                for (const editableOutsideChat of [false, true]) {
+                  // A textarea is by definition inside the shell, and nothing
+                  // inside the composer shell is outside the chat.
+                  if (isTextarea && !insideComposerShell) continue;
+                  if (editableOutsideChat && insideComposerShell) continue;
+                  shapes.push({
+                    defaultPrevented,
+                    insideComposerShell,
+                    isTextarea,
+                    isTurnActive,
+                    drillInOpen,
+                    rewindPress,
+                    layerOpen,
+                    editableOutsideChat
+                  });
+                }
               }
             }
           }
@@ -98,7 +104,13 @@ test("an Escape that stops a running turn is claimed by exactly one owner", () =
   // handled and no layer up, some owner must take it — otherwise Escape
   // silently does nothing.
   for (const shape of everyEscapeShape()) {
-    if (shape.defaultPrevented || !shape.isTurnActive || shape.isTextarea || shape.layerOpen) {
+    if (
+      shape.defaultPrevented ||
+      !shape.isTurnActive ||
+      shape.isTextarea ||
+      shape.layerOpen ||
+      shape.editableOutsideChat
+    ) {
       continue;
     }
     assert.equal(
@@ -121,6 +133,16 @@ test("while a layer is up, neither owner claims Escape — it is the layer's", (
   }
 });
 
+test("an Escape typed into a field outside this chat is claimed by neither owner", () => {
+  // The tab strip's rename box, the sidebar's name field: the field's own
+  // handler cancels the edit, and the shell used to stop the turn first.
+  for (const shape of everyEscapeShape()) {
+    if (!shape.editableOutsideChat) continue;
+    assert.equal(composerOwnsEscape(shape), false, `composer claimed ${JSON.stringify(shape)}`);
+    assert.equal(shellOwnsEscape(shape), false, `shell claimed ${JSON.stringify(shape)}`);
+  }
+});
+
 test("with a subagent's view open, some owner takes every Escape outside the textarea", () => {
   // The shell leaves the drill-in for an Escape outside the composer; inside
   // it, the composer's arm must — idle or not. It claimed only a running
@@ -128,7 +150,13 @@ test("with a subagent's view open, some owner takes every Escape outside the tex
   // composer chip, Escape interrupted the parent while the child stayed open,
   // or did nothing at all when idle.
   for (const shape of everyEscapeShape()) {
-    if (!shape.drillInOpen || shape.defaultPrevented || shape.layerOpen || shape.isTextarea) {
+    if (
+      !shape.drillInOpen ||
+      shape.defaultPrevented ||
+      shape.layerOpen ||
+      shape.isTextarea ||
+      shape.editableOutsideChat
+    ) {
       continue;
     }
     assert.equal(
@@ -140,7 +168,13 @@ test("with a subagent's view open, some owner takes every Escape outside the tex
 });
 
 test("the composer owns Escape inside its shell, the shell owns it outside", () => {
-  const live = { defaultPrevented: false, isTurnActive: true, drillInOpen: false, layerOpen: false };
+  const live = {
+    defaultPrevented: false,
+    isTurnActive: true,
+    drillInOpen: false,
+    layerOpen: false,
+    editableOutsideChat: false
+  };
   assert.equal(
     composerOwnsEscape({ ...live, insideComposerShell: true, isTextarea: false }),
     true
@@ -168,7 +202,13 @@ test("the textarea keeps Escape to itself — the token menu gets first refusal"
 });
 
 test("whoever ran first can stand the other down via defaultPrevented", () => {
-  const handled = { defaultPrevented: true, isTurnActive: true, drillInOpen: true, layerOpen: false };
+  const handled = {
+    defaultPrevented: true,
+    isTurnActive: true,
+    drillInOpen: true,
+    layerOpen: false,
+    editableOutsideChat: false
+  };
   assert.equal(
     composerOwnsEscape({ ...handled, insideComposerShell: true, isTextarea: false }),
     false
@@ -185,7 +225,8 @@ test("the shell's double-press rewind stays outside the composer shell", () => {
     isTurnActive: false,
     drillInOpen: false,
     rewindPress: true,
-    layerOpen: false
+    layerOpen: false,
+    editableOutsideChat: false
   };
   assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: false }), true);
   assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: true }), false);
@@ -213,7 +254,8 @@ test("Escape with no turn running never interrupts from the composer", () => {
       insideComposerShell: false,
       isTurnActive: false,
       drillInOpen: true,
-      layerOpen: false
+      layerOpen: false,
+      editableOutsideChat: false
     }),
     true
   );

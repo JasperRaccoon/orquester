@@ -107,9 +107,12 @@ export function shellOwnsEscape(input: {
   rewindPress?: boolean;
   /** `resolveChatEscape`'s `blockingLayerOpen`: the same gate, the same set. */
   layerOpen: boolean;
+  /** Typed into a field that is not this chat's (`chatEscapeTargetGate`): the field's. */
+  editableOutsideChat: boolean;
 }): boolean {
   if (input.defaultPrevented) return false;
   if (input.layerOpen) return false;
+  if (input.editableOutsideChat) return false;
   if (input.insideComposerShell) return false;
   return input.drillInOpen || input.isTurnActive || input.rewindPress === true;
 }

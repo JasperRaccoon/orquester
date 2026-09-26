@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 
 import {
   chatEscapeSequenceStep,
+  chatEscapeTargetGate,
+  isEditableTarget,
   isIdleChatEscape,
   resolveChatEscape,
-  type ChatEscapeInput
+  type ChatEscapeInput,
+  type EscapeTargetLike
 } from "./escape-action.ts";
+import { composerEscapeAction, composerOwnsEscape } from "./composer/tab-visibility.ts";
 
 const base: ChatEscapeInput = {
   key: "Escape",
@@ -14,6 +18,7 @@ const base: ChatEscapeInput = {
   isActiveTab: true,
   blockingLayerOpen: false,
   insideComposer: false,
+  editableOutsideChat: false,
   drillInOpen: false,
   turnActive: false,
   repeat: false,
@@ -153,6 +158,7 @@ function everyEscapeInput(): ChatEscapeInput[] {
     "isActiveTab",
     "blockingLayerOpen",
     "insideComposer",
+    "editableOutsideChat",
     "drillInOpen",
     "turnActive",
     "repeat",
@@ -220,6 +226,7 @@ test("an idle Escape is exactly the one this side would otherwise ignore for doi
   assert.equal(isIdleChatEscape({ ...base, isActiveTab: false }), false);
   assert.equal(isIdleChatEscape({ ...base, blockingLayerOpen: true }), false);
   assert.equal(isIdleChatEscape({ ...base, insideComposer: true }), false);
+  assert.equal(isIdleChatEscape({ ...base, editableOutsideChat: true }), false);
   assert.equal(isIdleChatEscape({ ...base, drillInOpen: true }), false);
   assert.equal(isIdleChatEscape({ ...base, turnActive: true }), false);
   // A held key's repeat is not a new Escape at all, idle or not.
@@ -262,4 +269,178 @@ test("holding Escape is one press, and its auto-repeat breaks nothing either", (
   assert.equal(step({ repeat: true }), "keep");
   assert.equal(step({ repeat: true, key: "a" }), "keep");
   assert.equal(step({ repeat: true, turnActive: true }), "keep");
+});
+
+// ---------------------------------------------------------------------------
+// Where the Escape landed: a field outside this chat is that field's own
+// ---------------------------------------------------------------------------
+
+const CHAT_ROOT = '[data-agent-chat="thread-1"]';
+const COMPOSER_SHELL = '[data-agent-chat-composer-shell="thread-1"]';
+const SCOPE = { chatRoot: CHAT_ROOT, composerShell: COMPOSER_SHELL };
+
+/**
+ * An element as the gate reads one: its tag, an input's type, whether it sits
+ * in an editing host, and the ancestors `closest` finds — by the exact
+ * selectors this thread's gate asks for, and no other.
+ */
+function element(
+  tagName: string,
+  options: { type?: string; contentEditable?: boolean; within?: readonly string[] } = {}
+): EscapeTargetLike {
+  const within = options.within ?? [];
+  return {
+    tagName,
+    ...(options.type !== undefined ? { type: options.type } : {}),
+    isContentEditable: options.contentEditable === true,
+    closest: (selector: string) => (within.includes(selector) ? {} : null)
+  };
+}
+
+/** The gate for an Escape landing on `target` in thread-1, with the rest of the state given. */
+function gateAt(
+  target: EscapeTargetLike | null,
+  state: Partial<ChatEscapeInput> = {}
+): ChatEscapeInput {
+  return { ...base, ...chatEscapeTargetGate(target, SCOPE), ...state };
+}
+
+/** Every thing the shell could otherwise do: leave, stop, rewind. */
+const ACTIVE_STATES: ReadonlyArray<Partial<ChatEscapeInput>> = [
+  { turnActive: true },
+  { drillInOpen: true },
+  { drillInOpen: true, turnActive: true },
+  { secondPress: true, rewindAvailable: true }
+];
+
+test("a text field, a select or an editor takes its own keys; a button, a checkbox or the page does not", () => {
+  const editable: Array<[string, EscapeTargetLike]> = [
+    ["an input with no type", element("INPUT")],
+    ["a text input", element("INPUT", { type: "text" })],
+    ["a search input", element("INPUT", { type: "search" })],
+    ["a password input", element("INPUT", { type: "password" })],
+    ["a textarea (xterm's helper included)", element("TEXTAREA")],
+    ["a select", element("SELECT")],
+    ["an editing host (CodeMirror's .cm-content)", element("DIV", { contentEditable: true })],
+    ["an element inside an editing host", element("SPAN", { contentEditable: true })]
+  ];
+  for (const [name, target] of editable) {
+    assert.equal(isEditableTarget(target), true, name);
+  }
+  const notEditable: Array<[string, EscapeTargetLike | null]> = [
+    ["the page", element("BODY")],
+    ["a button", element("BUTTON")],
+    ["a plain div", element("DIV")],
+    ["a checkbox", element("INPUT", { type: "checkbox" })],
+    ["an input button", element("INPUT", { type: "button" })],
+    ["a submit input", element("INPUT", { type: "submit" })],
+    ["no target", null]
+  ];
+  for (const [name, target] of notEditable) {
+    assert.equal(isEditableTarget(target), false, name);
+  }
+});
+
+test("an Escape typed into a field outside this chat is that field's: nothing here, and Esc Esc starts over", () => {
+  // The tab strip's rename box, the sidebar's name field, a terminal, a file
+  // editor. This listener runs first and stops the event when it acts, so
+  // Escape in the rename box stopped the running turn (or left the drill-in)
+  // and the box never cancelled.
+  const fields: Array<[string, EscapeTargetLike]> = [
+    ["the tab strip's rename box", element("INPUT", { type: "text" })],
+    ["a terminal's textarea", element("TEXTAREA")],
+    ["a file editor", element("DIV", { contentEditable: true })]
+  ];
+  for (const [name, field] of fields) {
+    assert.deepEqual(
+      chatEscapeTargetGate(field, SCOPE),
+      { insideComposer: false, editableOutsideChat: true },
+      name
+    );
+    for (const state of ACTIVE_STATES) {
+      const input = gateAt(field, state);
+      assert.equal(resolveChatEscape(input), "ignore", `${name} ${JSON.stringify(state)}`);
+      assert.equal(chatEscapeSequenceStep(input), "reset", `${name} ${JSON.stringify(state)}`);
+    }
+  }
+});
+
+test("the same field inside this chat's composer keeps the composer's rules", () => {
+  // The composer's own textarea: the shell hands it over as before, and the
+  // composer resolves it as it always has — the drill-in first (S6).
+  const textarea = element("TEXTAREA", { within: [COMPOSER_SHELL, CHAT_ROOT] });
+  assert.deepEqual(chatEscapeTargetGate(textarea, SCOPE), {
+    insideComposer: true,
+    editableOutsideChat: false
+  });
+  for (const state of ACTIVE_STATES) {
+    assert.equal(resolveChatEscape(gateAt(textarea, state)), "ignore", JSON.stringify(state));
+  }
+  const composer = {
+    repeat: false,
+    menuOpen: false,
+    layerOpen: false,
+    drillInOpen: false,
+    isTurnActive: true
+  };
+  assert.equal(composerEscapeAction(composer), "interrupt");
+  assert.equal(composerEscapeAction({ ...composer, drillInOpen: true }), "leave-drill-in");
+  // …and the composer's window arm leaves the textarea to its own handler.
+  assert.equal(
+    composerOwnsEscape({
+      defaultPrevented: false,
+      insideComposerShell: true,
+      isTextarea: true,
+      isTurnActive: true,
+      drillInOpen: false,
+      layerOpen: false
+    }),
+    false
+  );
+});
+
+test("a field inside this chat but outside its composer keeps today's rules", () => {
+  // The question card's custom answer, in the banner dock above the composer:
+  // it is this chat's own, so Escape there still leaves the drill-in first and
+  // otherwise stops the turn.
+  const answer = element("INPUT", { type: "text", within: [CHAT_ROOT] });
+  assert.deepEqual(chatEscapeTargetGate(answer, SCOPE), {
+    insideComposer: false,
+    editableOutsideChat: false
+  });
+  assert.equal(resolveChatEscape(gateAt(answer, { drillInOpen: true, turnActive: true })), "close-drill-in");
+  assert.equal(resolveChatEscape(gateAt(answer, { turnActive: true })), "interrupt");
+});
+
+test("a target that takes no text keeps today's rules, inside this chat or out", () => {
+  // The page itself (focus falls to <body> after a click elsewhere), and a
+  // timeline button.
+  const targets: Array<[string, EscapeTargetLike | null]> = [
+    ["the page", element("BODY")],
+    ["a timeline button", element("BUTTON", { within: [CHAT_ROOT] })],
+    ["no target", null]
+  ];
+  for (const [name, target] of targets) {
+    assert.deepEqual(
+      chatEscapeTargetGate(target, SCOPE),
+      { insideComposer: false, editableOutsideChat: false },
+      name
+    );
+    assert.equal(resolveChatEscape(gateAt(target, { drillInOpen: true })), "close-drill-in", name);
+    assert.equal(resolveChatEscape(gateAt(target, { turnActive: true })), "interrupt", name);
+    assert.equal(
+      resolveChatEscape(gateAt(target, { secondPress: true, rewindAvailable: true })),
+      "rewind",
+      name
+    );
+    assert.equal(chatEscapeSequenceStep(gateAt(target)), "press", name);
+  }
+});
+
+test("an Escape a field outside this chat owns is never acted on, whatever else is true", () => {
+  for (const input of everyEscapeInput()) {
+    if (!input.editableOutsideChat) continue;
+    assert.equal(resolveChatEscape(input), "ignore", JSON.stringify(input));
+    assert.equal(isIdleChatEscape(input), false, JSON.stringify(input));
+  }
 });

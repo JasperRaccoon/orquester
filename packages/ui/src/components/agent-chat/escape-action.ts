@@ -31,7 +31,9 @@
  * capture phase — before any modal's, sheet's, menu's or popover's own Escape
  * listener — and stops the event when it acts, so the only way a layer gets
  * its Escape is for this side to stand down while one is up
- * (`blockingLayerOpen`). The composer's two arms do the same.
+ * (`blockingLayerOpen`). The composer's two arms do the same. **So does a field
+ * that is not this chat's**: an Escape typed into one is that field's
+ * (`editableOutsideChat`).
  */
 
 export type ChatEscapeAction = "close-drill-in" | "interrupt" | "rewind" | "ignore";
@@ -56,6 +58,13 @@ export interface ChatEscapeInput {
    * token menu can consume it before the turn does.
    */
   insideComposer: boolean;
+  /**
+   * The Escape was typed into an editable element that is not this chat's —
+   * the tab strip's rename box, the sidebar's name field, a terminal, a file
+   * editor ({@link chatEscapeTargetGate}). It is that field's key: cancelling
+   * an edit must not stop the turn or leave the drill-in.
+   */
+  editableOutsideChat: boolean;
   /** A subagent drill-in is open on this tab. */
   drillInOpen: boolean;
   /** A turn is running on this thread. */
@@ -85,11 +94,80 @@ export interface ChatEscapeInput {
 export type ChatEscapeGate = Omit<ChatEscapeInput, "secondPress" | "rewindAvailable">;
 
 /**
+ * The part of an event target the gate reads — duck-typed rather than
+ * `instanceof Element`, so it can be exercised as data and a target from
+ * another realm still answers.
+ */
+export interface EscapeTargetLike {
+  tagName?: string;
+  /** `HTMLInputElement.type`; `"text"` when the attribute is absent. */
+  type?: string;
+  /** True for an editing host and everything inside one. */
+  isContentEditable?: boolean;
+  closest?(selector: string): unknown;
+}
+
+/** `<input>` types that take no typed text, so no Escape of theirs to keep. */
+const NON_TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
+  "button",
+  "checkbox",
+  "color",
+  "file",
+  "hidden",
+  "image",
+  "radio",
+  "range",
+  "reset",
+  "submit"
+]);
+
+/**
+ * An element that owns its keys the way a field does: an `<input>` that takes
+ * text, a `<textarea>` (a terminal's helper textarea included), a `<select>`,
+ * or anything in an editing host — a CodeMirror editor's content is one.
+ */
+export function isEditableTarget(target: EscapeTargetLike | null | undefined): boolean {
+  if (!target) return false;
+  if (target.isContentEditable === true) return true;
+  const tag = typeof target.tagName === "string" ? target.tagName.toUpperCase() : "";
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag !== "INPUT") return false;
+  return !NON_TEXT_INPUT_TYPES.has((target.type ?? "text").toLowerCase());
+}
+
+/**
+ * The gate's fields that come from where the Escape landed, for the thread
+ * whose chat root and composer shell the two selectors name.
+ *
+ * `editableOutsideChat` is the rule the shell stands down for: an Escape typed
+ * into a field that is not this chat's belongs to that field. The shell's
+ * listener runs first on `window` and stops the event when it acts, so the tab
+ * strip's rename box never cancelled — the key stopped the turn (or left the
+ * drill-in) instead. One rule rather than a registration per field: the
+ * sidebar's name field, a terminal and a file editor in another cell of the
+ * grid are all covered, and so is any field added later. This chat's own
+ * fields keep this chat's rules — the composer's (`insideComposer`, its own
+ * scope) and the question card's answer in the dock, which still leaves the
+ * drill-in or stops the turn.
+ */
+export function chatEscapeTargetGate(
+  target: EscapeTargetLike | null,
+  scope: { chatRoot: string; composerShell: string }
+): Pick<ChatEscapeGate, "insideComposer" | "editableOutsideChat"> {
+  const inside = (selector: string): boolean =>
+    typeof target?.closest === "function" && target.closest(selector) !== null;
+  return {
+    insideComposer: inside(scope.composerShell),
+    editableOutsideChat: isEditableTarget(target) && !inside(scope.chatRoot)
+  };
+}
+
+/**
  * An Escape this side would otherwise ignore **only because nothing is
  * happening**: a fresh press (not a held key's repeat) on the visible tab, no
- * layer on top, focus outside the composer, no drill-in to leave and no turn
- * to stop. Exactly these are the Escapes the double press counts — the ones
- * that did nothing else.
+ * layer on top, not typed into the composer or into a field that is not this
+ * chat's, no drill-in to leave and no turn to stop. Exactly these are the
+ * Escapes the double press counts — the ones that did nothing else.
  */
 export function isIdleChatEscape(input: ChatEscapeGate): boolean {
   return (
@@ -99,6 +177,7 @@ export function isIdleChatEscape(input: ChatEscapeGate): boolean {
     input.isActiveTab &&
     !input.blockingLayerOpen &&
     !input.insideComposer &&
+    !input.editableOutsideChat &&
     !input.drillInOpen &&
     !input.turnActive
   );
@@ -136,7 +215,12 @@ export function resolveChatEscape(input: ChatEscapeInput): ChatEscapeAction {
   if (input.key !== "Escape" || input.defaultPrevented || input.repeat) {
     return "ignore";
   }
-  if (!input.isActiveTab || input.blockingLayerOpen || input.insideComposer) {
+  if (
+    !input.isActiveTab ||
+    input.blockingLayerOpen ||
+    input.insideComposer ||
+    input.editableOutsideChat
+  ) {
     return "ignore";
   }
   if (input.drillInOpen) {

@@ -3878,7 +3878,13 @@ handlers stand down while it answers true. The layer closes itself, nothing is i
 and an Escape a layer took is never half of Esc Esc. The same set gates the Attention Center's
 `Ctrl+Shift+A`. Holding Escape is one press: the key's auto-repeat does nothing in any of the three
 handlers (the composer's `window` arm never took one), so a hold whose first keydown closed a layer
-or left a drill-in no longer stops the turn half a second later.*
+or left a drill-in no longer stops the turn half a second later. An Escape typed into a field that
+is not this chat's — the tab strip's rename box, the sidebar's name field, a terminal, a file editor:
+any text `<input>`, `<textarea>`, `<select>` or editing host, CodeMirror's included — is that
+field's too. The shell does nothing with it and Esc Esc starts over (`chatEscapeTargetGate`); before,
+cancelling a tab rename stopped the turn instead. This chat's own fields keep this chat's rules: the
+composer's, and the question card's answer in the dock, which still leaves a drill-in or stops the
+turn.*
 
 Prompt-length validation measures the **larger of the literal draft and its wire-expanded form**, so
 a short reference that expands on the wire cannot smuggle the thread past §4.1's input bound;

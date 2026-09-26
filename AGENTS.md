@@ -2069,7 +2069,10 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   (`packages/ui/src/lib/open-layers.ts`). A layer closes on its own `document` listener, which a
   `window` capture handler always runs before, so a layer missing from the set loses its Escape to
   whichever of them acts: the chat's Escape stopped the turn under an open output viewer, which
-  stayed up. A new layer primitive calls `useOpenLayer(open)`; nothing keeps a second list.
+  stayed up. A new layer primitive calls `useOpenLayer(open)`; nothing keeps a second list. The
+  chat's shell also leaves alone an Escape typed into any editable field that is not the chat's own
+  (`chatEscapeTargetGate` in `agent-chat/escape-action.ts`): a rename box, a sidebar field, a
+  terminal or an editor in another grid cell keeps its key, with no registration per field.
 - **Mobile safe-area insets: one layer owns insets *and* vertical sizing.** The app shell
   (`AppWrapper`, `#root`'s only child) is what `useViewportHeight` sizes from
   `visualViewport.height` so it fits above the soft keyboard, so `apps/web/src/styles.css` pads the
