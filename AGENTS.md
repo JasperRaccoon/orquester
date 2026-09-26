@@ -1412,7 +1412,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   CLI's own 5 s wind-down would stop them, and they run on under init (`bun run dev`,
   `stripe listen`, `vite` of closed Claude chats, live on the owner's host on 2026-09-26). An open
   that fails stops its CLI now too: a `session/load` the CLI refused (a cursor it no longer knows)
-  left it running outside the adapter's map, holding its pipes. A work process whose shell had
+  left it running outside the adapter's map, holding its pipes. It adds no row of its own either:
+  the start's rejection is its whole report, which the host writes — an exit row besides it read as
+  a crash of a session that never ran (`GrokSession.announced`). A work process whose shell had
   exited before the stop is in no recorded session and stays running; a process that scrubs its
   environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills nothing: its `session/cancel`
   leaves the CLI — which owns them — running (fixture 21). Linux-only (`/proc`); elsewhere the sweep

@@ -278,6 +278,12 @@ export class GrokSession {
   private sweepTasks = false;
   /** The sweep of what this launch left running, once started — the exit and a stop share it. */
   private leftovers: Promise<void> | null = null;
+  /**
+   * `session.started` went out. Until then the session has no life of its own
+   * to report: an open that fails is reported by `start()`'s rejection, which
+   * the host writes, and its CLI's exit adds no row ({@link onExit}).
+   */
+  private announced = false;
   /** The self-resolved-approvals advisory is said once per session. */
   private selfResolveAdvised = false;
   /** `<server>\u0000<status>` of every MCP failure already reported, until the server is ready again. */
@@ -490,6 +496,7 @@ export class GrokSession {
 
     this.status = "ready";
     this.touch();
+    this.announced = true;
     this.emitEvent(
       this.normalizer.event("session.started", {
         ...(cursor === null ? {} : { resume: cursor })
@@ -1490,6 +1497,16 @@ export class GrokSession {
   // ------------------------------------------------------------------ exit
 
   private onExit(reason: ChildExitReason, stderrTail: string): void {
+    if (!this.announced) {
+      // The open failed, or is failing: `start()` rejects, and that rejection
+      // is the whole report — the host writes it. An exit row here read as a
+      // crash of a session that never ran. Nothing can be open yet: no turn,
+      // no card, no task.
+      this.stopped = true;
+      void this.stopLeftovers();
+      this.options.onClosed?.(this.threadId);
+      return;
+    }
     if (this.stopped && this.hostInitiatedStop) {
       // Already settled by `stop()`, which awaits this same sweep.
       this.emitExited(reason, stderrTail, true);

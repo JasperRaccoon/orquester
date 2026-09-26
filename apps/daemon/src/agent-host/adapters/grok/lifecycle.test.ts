@@ -196,7 +196,50 @@ test("a CLI below the minimum version is refused with the required version", asy
 test("a handshake that never answers times out and kills the child", async () => {
   const r = await rig({ scenario: "no-handshake" });
   await assert.rejects(async () => await start(r), /timed out/);
+  await r.drain();
+  assert.deepEqual(lifecycleRows(r.events), [], "the timeout is the report, never a crash");
   await r.dispose();
+});
+
+/**
+ * The rows a session reports of its own life. A session that never announced
+ * `session.started` has none: the start's rejection is its whole report, and
+ * the host writes that — an exit row besides it read as a crash of a session
+ * that never ran.
+ */
+function lifecycleRows(events: readonly RuntimeEvent[]): string[] {
+  return events
+    .filter(
+      (event) =>
+        event.type.startsWith("session.") ||
+        event.type.startsWith("thread.") ||
+        event.type === "turn.completed" ||
+        event.type === "runtime.error"
+    )
+    .map((event) => event.type);
+}
+
+test("a session that fails to open reports nothing of its own: its start's rejection is the report", async () => {
+  const cases = [
+    { label: "the version gate", rig: { version: "0.9.0" }, cursor: undefined, error: /0\.9\.0 is too old/ },
+    {
+      label: "a cursor the CLI no longer knows",
+      rig: {},
+      cursor: { schemaVersion: 1, sessionId: "01a0c19e-0000-7000-8000-000000000000" },
+      error: /Path not found/
+    }
+  ];
+  for (const { label, rig: options, cursor, error } of cases) {
+    const r = await rig(options);
+    try {
+      await assert.rejects(async () => await start(r, cursor === undefined ? {} : { resumeCursor: cursor }), error);
+      await r.drain();
+      assert.deepEqual(lifecycleRows(r.events), [], `${label}: no exit row, no state, no crash`);
+      assert.equal(r.adapter.hasSession("t1"), false);
+    } finally {
+      await r.dispose();
+    }
+  }
 });
 
 test("the happy path: session, turn, usage, and a settled turn", async () => {
