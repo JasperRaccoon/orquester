@@ -2077,12 +2077,18 @@ function resolveRequest(state: OpenCodeSessionState, requestId: string): void {
   state.requestRelationRetries.delete(requestId);
 }
 
+/**
+ * `withdrawn`: nobody answered the card — the session's own settle (a Stop,
+ * an interrupt, a rewind, the server's death) rejected it — so ingestion
+ * writes "Request cancelled" / "Question cancelled" (`emitTerminalQuestion`).
+ */
 export function emitTerminalPermission(
   state: OpenCodeSessionState,
   requestId: string,
   decision: ReturnType<typeof fromOpenCodePermissionReply> | undefined,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  withdrawn = false
 ): void {
   if (state.emittedTerminalRequestIds.has(requestId)) {
     return;
@@ -2101,7 +2107,8 @@ export function emitTerminalPermission(
     payload: {
       requestType:
         request !== undefined ? mapPermissionToRequestType(request.permission) : "unknown",
-      ...(decision !== undefined ? { decision } : {})
+      ...(decision !== undefined ? { decision } : {}),
+      ...(withdrawn ? { withdrawn: true } : {})
     }
   });
 }
@@ -2111,7 +2118,8 @@ export function emitTerminalQuestion(
   requestId: string,
   answers: string[][] | undefined,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  withdrawn = false
 ): void {
   if (state.emittedTerminalRequestIds.has(requestId)) {
     return;
@@ -2131,7 +2139,7 @@ export function emitTerminalQuestion(
   out.push({
     ...out.base({ turnId: state.activeTurnId, requestId, raw }),
     type: "user-input.resolved",
-    payload: { answers: resolved }
+    payload: { answers: resolved, ...(withdrawn ? { withdrawn: true } : {}) }
   });
 }
 

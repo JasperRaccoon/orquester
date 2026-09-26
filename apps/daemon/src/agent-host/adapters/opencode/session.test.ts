@@ -2268,3 +2268,118 @@ test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async ()
   );
   harness.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// A card nobody answered is withdrawn (final fix wave)
+// ---------------------------------------------------------------------------
+
+/** Every closing row the adapter wrote for one request. */
+function closingsOf(harness: Harness, requestId: string): RuntimeEvent[] {
+  return harness.events.filter(
+    (event) =>
+      (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+      event.requestId === requestId
+  );
+}
+
+/** A running turn holding one approval and one question, both unanswered. */
+async function sessionWithParkedCards(harness: Harness): Promise<OpenCodeThreadSession> {
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  await session.sendTurn({
+    threadId: "thread-1",
+    input: "run it",
+    attachments: [],
+    interactionMode: "default"
+  });
+  harness.fake.push({
+    type: "permission.asked",
+    properties: { id: "per_1", sessionID: sessionId, permission: "bash", patterns: ["sleep 60"] }
+  });
+  harness.fake.push({
+    type: "question.asked",
+    properties: {
+      id: "que_1",
+      sessionID: sessionId,
+      questions: [{ question: "Which colour?", header: "Colour", options: [{ label: "Red" }] }]
+    }
+  });
+  await waitFor(harness, "request.opened");
+  await waitFor(harness, "user-input.requested");
+  return session;
+}
+
+function assertWithdrawnOnce(harness: Harness): void {
+  const approval = closingsOf(harness, "per_1");
+  assert.equal(approval.length, 1, "one closing row per card");
+  assert.deepEqual(
+    approval[0]?.payload,
+    { requestType: "command_execution_approval", decision: "cancel", withdrawn: true },
+    "nobody answered it: 'Request cancelled', never 'Approval resolved'"
+  );
+  const question = closingsOf(harness, "que_1");
+  assert.equal(question.length, 1, "one closing row per card");
+  assert.deepEqual(
+    question[0]?.payload,
+    { answers: {}, withdrawn: true },
+    "nobody answered it: 'Question cancelled', never 'User input submitted'"
+  );
+}
+
+test("a stop withdraws every parked card, once each", async () => {
+  const harness = makeHarness();
+  const session = await sessionWithParkedCards(harness);
+  await session.stop({ reason: "tab closed", hostInitiated: true });
+  assertWithdrawnOnce(harness);
+  harness.dispose();
+});
+
+test("an interrupt withdraws every parked card, once each", async () => {
+  const harness = makeHarness();
+  const session = await sessionWithParkedCards(harness);
+  await session.interruptTurn();
+  assertWithdrawnOnce(harness);
+  await session.stop({ reason: "test", hostInitiated: true });
+  assert.equal(closingsOf(harness, "per_1").length, 1, "the stop finds nothing left to close");
+  harness.dispose();
+});
+
+test("a dead server withdraws every parked card once, before session.exited", async () => {
+  const harness = makeHarness();
+  await sessionWithParkedCards(harness);
+  harness.killServer();
+  await waitFor(harness, "session.exited");
+  assertWithdrawnOnce(harness);
+  const order = typesOf(harness.events);
+  assert.ok(
+    order.lastIndexOf("user-input.resolved") < order.lastIndexOf("session.exited"),
+    "the cards close before the exit"
+  );
+  harness.dispose();
+});
+
+test("the user's own answers are never withdrawn — and the server's echo adds no row", async () => {
+  const harness = makeHarness();
+  const session = await sessionWithParkedCards(harness);
+  await session.respondToApproval("per_1", "cancel");
+  await session.respondToUserInput("que_1", {});
+  harness.fake.push({
+    type: "permission.replied",
+    properties: { sessionID: session.sessionId, requestID: "per_1", reply: "reject" }
+  });
+  harness.fake.push({
+    type: "question.rejected",
+    properties: { sessionID: session.sessionId, requestID: "que_1" }
+  });
+  await session.stop({ reason: "test", hostInitiated: true });
+  const approval = closingsOf(harness, "per_1");
+  assert.equal(approval.length, 1);
+  assert.deepEqual(approval[0]?.payload, {
+    requestType: "command_execution_approval",
+    decision: "cancel"
+  });
+  const question = closingsOf(harness, "que_1");
+  assert.equal(question.length, 1);
+  assert.deepEqual(question[0]?.payload, { answers: {} });
+  harness.dispose();
+});

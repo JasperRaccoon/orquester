@@ -741,7 +741,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   repeats the closure as a cancellation (`repeatsHostClosure`: an approval's `decision: "cancel"`,
   a question with no answer — the adapters' echo and ingestion's `withdrawn` row). A real answer
   racing the Stop keeps its row; a new request reusing the id is not the host's closure (ids may be
-  recycled, `pending.ts`); the adapter's answer on the wire is never touched.
+  recycled, `pending.ts`); the adapter's answer on the wire is never touched. A card an ADAPTER
+  closes on its own — its session's teardown on an interrupt, a steer's cancel, a rewind or the
+  process's exit — is one row too, and it is marked `withdrawn` (`RequestResolvedPayload`), so it
+  reads "Request cancelled" / "Question cancelled": Grok wrote that closure twice (the teardown's
+  row, then the parked handler's own — on an exit, after `session.exited`), and Claude's and
+  OpenCode's teardowns wrote it as "Approval resolved" / "User input submitted". Grok's parked
+  handler is now its cards' only emitter (`withdrawPendingRequests`).
 - **A non-image attachment reaches the agent as a PATH, guarded twice.** The upload reply
   carries `AttachmentRef.path` — the absolute host path; `validate.ts` rebuilds every ref from
   `{type, id, name, mimeType, sizeBytes}`, so the host's validation strips it from every command

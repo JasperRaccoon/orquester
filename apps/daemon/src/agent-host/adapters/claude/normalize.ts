@@ -567,11 +567,16 @@ export class ClaudeNormalizer {
     };
   }
 
+  /**
+   * `withdrawn`: nobody answered the card — the session's teardown or the
+   * CLI's own abort settled it — so ingestion writes "Request cancelled".
+   */
   requestResolved(input: {
     requestId: string;
     requestType: CanonicalRequestType;
     decision: ApprovalDecision;
     toolUseId?: string;
+    withdrawn?: true;
   }): RuntimeEvent {
     return {
       ...this.base({
@@ -586,7 +591,11 @@ export class ClaudeNormalizer {
         }
       }),
       type: "request.resolved",
-      payload: { requestType: input.requestType, decision: input.decision }
+      payload: {
+        requestType: input.requestType,
+        decision: input.decision,
+        ...(input.withdrawn === true ? { withdrawn: true } : {})
+      }
     };
   }
 
@@ -618,10 +627,12 @@ export class ClaudeNormalizer {
     };
   }
 
+  /** `withdrawn`: nobody answered the question ("Question cancelled"), as for an approval. */
   userInputResolved(input: {
     requestId: string;
     answers: Record<string, unknown>;
     toolUseId?: string;
+    withdrawn?: true;
   }): RuntimeEvent {
     return {
       ...this.base({
@@ -636,7 +647,7 @@ export class ClaudeNormalizer {
         }
       }),
       type: "user-input.resolved",
-      payload: { answers: input.answers }
+      payload: { answers: input.answers, ...(input.withdrawn === true ? { withdrawn: true } : {}) }
     };
   }
 

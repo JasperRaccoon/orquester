@@ -284,7 +284,7 @@ async function runPrompt(id, params) {
     return;
   }
 
-  if (scenario === "permission" || scenario === "cancel") {
+  if (scenario === "permission" || scenario === "cancel" || scenario === "permission-exit") {
     notify("session/update", {
       sessionId,
       update: {
@@ -317,6 +317,11 @@ async function runPrompt(id, params) {
         ]
       }
     });
+    // The process dies with the card open: the adapter settles it itself.
+    if (scenario === "permission-exit") {
+      setTimeout(() => process.exit(143), 20);
+      return;
+    }
     // The real CLI settles a cancel WITHOUT waiting for the pending reply.
     if (scenario === "cancel") {
       await waitFor(() => cancelled);
@@ -628,7 +633,7 @@ async function runPrompt(id, params) {
     return;
   }
 
-  if (scenario === "child-question") {
+  if (scenario === "child-question" || scenario === "child-question-exit") {
     // A subagent's child session asks the user while our prompt runs: the
     // request names the CHILD's session. Our prompt goes on once answered.
     notify("session/update", {
@@ -637,6 +642,11 @@ async function runPrompt(id, params) {
       _meta: { totalTokens: 1700, promptId }
     });
     send(questionRequestFrame(CHILD_SESSION_ID));
+    // The process dies with the question open: the adapter settles it itself.
+    if (scenario === "child-question-exit") {
+      setTimeout(() => process.exit(143), 20);
+      return;
+    }
     await waitFor(() => questionAnswer !== null);
     sendTogether([chunkFrame("two;", promptId), turnCompletedFrame(promptId)]);
     notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });

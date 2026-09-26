@@ -3116,14 +3116,20 @@ export class GrokNormalizer {
     return { ...base, requestId: input.requestId };
   }
 
+  /**
+   * `withdrawn`: nobody answered the card — a Stop, a steer, the session's
+   * stop, the exit — so ingestion writes the host's own "Request cancelled".
+   */
   requestResolved(input: {
     requestId: string;
     requestType: CanonicalRequestType;
     decision: ApprovalDecision;
+    withdrawn?: true;
   }): RuntimeEvent {
     const base = this.event("request.resolved", {
       requestType: input.requestType,
-      decision: input.decision
+      decision: input.decision,
+      ...(input.withdrawn === true ? { withdrawn: true } : {})
     });
     return { ...base, requestId: input.requestId };
   }
@@ -3164,8 +3170,18 @@ export class GrokNormalizer {
     return ridingTurn({ ...base, requestId: input.requestId }, input.turnId);
   }
 
-  userInputResolved(requestId: string, answers: Record<string, unknown>, turnId?: string | null): RuntimeEvent {
-    const base = this.event("user-input.resolved", { answers }, turnId ?? undefined);
+  /** `withdrawn`: nobody answered the question ("Question cancelled"), as for an approval. */
+  userInputResolved(
+    requestId: string,
+    answers: Record<string, unknown>,
+    turnId?: string | null,
+    withdrawn = false
+  ): RuntimeEvent {
+    const base = this.event(
+      "user-input.resolved",
+      { answers, ...(withdrawn ? { withdrawn: true } : {}) },
+      turnId ?? undefined
+    );
     return ridingTurn({ ...base, requestId: requestId }, turnId);
   }
 

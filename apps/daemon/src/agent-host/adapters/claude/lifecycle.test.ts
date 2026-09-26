@@ -1054,6 +1054,89 @@ describe("claude adapter — questions", () => {
   });
 });
 
+describe("claude adapter — a card nobody answered is withdrawn (final fix wave)", () => {
+  // The session's own teardown settled a parked card as `cancel` / `{}` —
+  // which ingestion writes as "Approval resolved" / "User input submitted",
+  // saying someone answered. Nobody did: its row is marked `withdrawn`, so it
+  // reads as the host's own "Request cancelled" / "Question cancelled". Once.
+  async function parked(tool: "Bash" | "AskUserQuestion"): Promise<{
+    harness: Harness;
+    reply: Promise<unknown>;
+    abort: AbortController;
+  }> {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const abort = new AbortController();
+    const input =
+      tool === "Bash"
+        ? { command: "rm -f x" }
+        : {
+            questions: [
+              { question: "Which file?", header: "Choice", options: [{ label: "a.txt", description: "" }], multiSelect: false }
+            ]
+          };
+    const reply = peer.canUseTool!(tool, input, {
+      signal: abort.signal,
+      toolUseID: "toolu_1",
+      requestId: "req-1"
+    } as unknown as Parameters<CanUseTool>[2]);
+    await harness.waitFor(tool === "Bash" ? "request.opened" : "user-input.requested");
+    return { harness, reply, abort };
+  }
+
+  const resolutions = (harness: Harness): RuntimeEvent[] =>
+    harness.events.filter(
+      (event) =>
+        (event.type === "request.resolved" || event.type === "user-input.resolved") && event.requestId === "req-1"
+    );
+
+  it("a stop settles an open approval once, withdrawn", async () => {
+    const { harness, reply } = await parked("Bash");
+    await harness.adapter.stopSession(START.threadId);
+    await harness.drain();
+    const rows = resolutions(harness);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]!.payload, { requestType: "command_execution_approval", decision: "cancel", withdrawn: true });
+    assert.equal(((await reply) as { behavior: string }).behavior, "deny");
+  });
+
+  it("a stop settles an open question once, withdrawn", async () => {
+    const { harness, reply } = await parked("AskUserQuestion");
+    await harness.adapter.stopSession(START.threadId);
+    await harness.drain();
+    const rows = resolutions(harness);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]!.payload, { answers: {}, withdrawn: true });
+    assert.equal(((await reply) as { behavior: string }).behavior, "deny");
+  });
+
+  it("the CLI aborting a pending request withdraws it once", async () => {
+    const { harness, abort } = await parked("Bash");
+    abort.abort();
+    await harness.drain();
+    const rows = resolutions(harness);
+    assert.equal(rows.length, 1);
+    assert.equal((rows[0]!.payload as { withdrawn?: boolean }).withdrawn, true);
+  });
+
+  it("the user's own decision is never withdrawn", async () => {
+    const { harness } = await parked("Bash");
+    harness.adapter.respondToApproval(START.threadId, "req-1", "cancel");
+    await harness.drain();
+    const rows = resolutions(harness);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]!.payload, { requestType: "command_execution_approval", decision: "cancel" });
+  });
+});
+
 describe("claude adapter — death and recovery", () => {
   it("a stream that ends mid-turn settles the turn and closes live tasks first", async () => {
     const harness = await makeHarness();
