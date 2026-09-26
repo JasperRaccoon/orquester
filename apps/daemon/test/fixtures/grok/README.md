@@ -90,6 +90,16 @@ Applied at record time and again on export:
   added for the 2026-09-25 export, where it only ever hid the `resource_metadata` parameter of an
   MCP server's `WWW-Authenticate` challenge on stderr (observation 46). The older files hold no
   `Bearer`: the rule changed none of them.
+- **the owner's other projects** → placeholders. `session/list` (13) answers every Grok session
+  the host has, and the owner's real projects were among them: a session outside the sandbox keeps
+  its id, timestamps and shape, while every workspace and project name — in its `cwd`, its facets'
+  `cwd` / `gitRoot` / `repo` and the result's `x.ai/facets` histogram — becomes a numbered
+  placeholder, the same one wherever the name appears (`~/workspaces/<workspace-2>/<project-3>`),
+  and its `title`, which the CLI writes from that conversation's first message,
+  `<redacted-title>`. Added 2026-09-26, to the harness's `redact.mjs` too (a re-export of every
+  file reproduces the committed set byte for byte): the reply and the harness note echoing it are
+  the only two lines that changed, and no other file names a workspace, a project, a user, an
+  e-mail address or a host beyond the rules above.
 
 ### Elision
 
