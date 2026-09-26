@@ -192,6 +192,67 @@ describe("background liveness expiry (Grok: tasks that never complete)", () => {
 });
 
 /**
+ * A turn the PROVIDER started — a Grok wake, an OpenCode woken reply, Claude's
+ * synthetic woken turn — is not the agent working on the user's behalf, and a
+ * watch loop's silence through it says nothing: its end sweeps nothing. Wakes
+ * come at every background end and monitor line, so sweeping at theirs dropped
+ * a silent dev server long before its TTL.
+ */
+describe("a turn the provider started sweeps nothing at its end", () => {
+  const providerTurn = { providerInitiatedTurn: true } as const;
+
+  it("a silent shell survives a wake's end, and still expires at its TTL", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "sh1", taskType: "shell" }));
+
+    clock.set(1_000);
+    registry.observe(turn("turn.started"), providerTurn);
+    clock.set(2_000);
+    registry.observe(turn("turn.completed"));
+    assert.equal(registry.liveness("t1"), "monitoring", "silent through a wake is not dead");
+
+    clock.set(3_000);
+    registry.observe(turn("turn.started"), providerTurn);
+    clock.set(4_000);
+    registry.observe(turn("turn.aborted"));
+    assert.equal(registry.liveness("t1"), "monitoring", "an aborted wake sweeps nothing either");
+
+    clock.set(BACKGROUND_LIVENESS_TTL_MS - 1);
+    assert.equal(registry.liveness("t1"), "monitoring");
+    clock.set(BACKGROUND_LIVENESS_TTL_MS);
+    assert.equal(registry.liveness("t1"), null, "the TTL still bounds a silent watch loop");
+  });
+
+  it("a turn the host sent still sweeps — after a wake as before one", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(task("task.started", { taskId: "sh1", taskType: "shell" }));
+    clock.set(1_000);
+    registry.observe(turn("turn.started"), providerTurn);
+    clock.set(2_000);
+    registry.observe(turn("turn.completed"));
+
+    clock.set(3_000);
+    registry.observe(turn("turn.started"), { providerInitiatedTurn: false });
+    clock.set(4_000);
+    registry.observe(turn("turn.completed"));
+    assert.equal(registry.liveness("t1"), null, "silent through the user's own turn");
+  });
+
+  it("a thread left with nothing live keeps no state behind a wake", () => {
+    const clock = createTestClock(0);
+    const registry = createLivenessRegistry({ clock });
+    registry.observe(turn("turn.started"), providerTurn);
+    assert.equal(registry.liveness("t1"), null);
+    registry.observe(task("task.started", { taskId: "sh1", taskType: "shell" }));
+    registry.observe(task("task.completed", { taskId: "sh1", taskType: "shell", status: "completed" }));
+    registry.observe(turn("turn.completed"));
+    assert.equal(registry.liveness("t1"), null);
+  });
+});
+
+/**
  * An `agentId` names the agent a task belongs to. Grok stamps a background
  * shell with ITSELF (`adapters/grok/normalize.ts`, every `task.*` of a shell
  * carries `agentId: taskId`), so the "a subagent's internal work is covered by

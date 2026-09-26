@@ -410,11 +410,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   reported each as "didn't finish before the previous session ended" on the next message with no
   notice in between. `/health` now also carries `backgroundWorkThreadIds` (the host's liveness
   registry, `working` and `monitoring` both — the registry's TTL bounds a silent watch loop, so a
-  dev server cannot defer a deploy for longer than that window, and every turn end drops a watch
-  loop that reported nothing during that turn, which on Grok also runs at the end of every turn
-  the CLI starts itself — a subagent's end, a monitor's line — so a silent Grok shell stops holding
-  the drain sooner, while a monitor is re-armed inside the wake its own line caused (see the Grok
-  gotcha); an agent holds the drain until its
+  dev server cannot defer a deploy for longer than that window, and the end of a turn the HOST
+  sent drops a watch loop that reported nothing during that turn. Never the end of a turn the
+  provider started itself — a Grok wake, an OpenCode woken reply, Claude's synthetic woken turn,
+  read off the fold as a `turn.started` with no `/turn` row (`livenessObservation` in
+  `orchestrator.ts`, `LivenessObservation.providerInitiatedTurn`): wakes come at every background
+  end and monitor line, and sweeping at their ends dropped a silent dev server long before its
+  TTL, so a deploy's drain killed it. An agent holds the drain until its
   end, except one whose rows carry `livenessTtlMs` — Grok's, whose runs report their end and a
   heartbeat but whose chat lives until Stop or the tab closes — which holds it for at most 60
   minutes after the latest row naming it, see the Grok gotcha); the supervisor unions it with the
@@ -741,7 +743,18 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   repeats the closure as a cancellation (`repeatsHostClosure`: an approval's `decision: "cancel"`,
   a question with no answer — the adapters' echo and ingestion's `withdrawn` row). A real answer
   racing the Stop keeps its row; a new request reusing the id is not the host's closure (ids may be
-  recycled, `pending.ts`); the adapter's answer on the wire is never touched.
+  recycled, `pending.ts`); the adapter's answer on the wire is never touched. A card an ADAPTER
+  closes on its own — its session's teardown on an interrupt, a steer's cancel, a rewind or the
+  process's exit — is one row too, in all four adapters, and it is marked `withdrawn`
+  (`RequestResolvedPayload`), so it reads "Request cancelled" / "Question cancelled": Grok wrote
+  that closure twice (the teardown's row, then the parked handler's own — on an exit, after
+  `session.exited`), and Claude's, Codex's and OpenCode's teardowns wrote it as "Approval resolved"
+  / "User input submitted" (Codex's crash path on no turn at all). Grok's parked handler is now its
+  cards' only emitter (`withdrawPendingRequests`); a Codex card's teardown cancel and crash go
+  through the card's own `cancel` / `fail`, never `settle`, which carries the user's answers (a
+  `cancel` among them), and on its own stamps. Every adapter withdraws its cards BEFORE the dying
+  turn settles (Codex's `handleExit` settled the turn first), so a question on that turn is closed
+  as nobody's answer, not left for the host's dismissal at the turn's end.
 - **A non-image attachment reaches the agent as a PATH, guarded twice.** The upload reply
   carries `AttachmentRef.path` — the absolute host path; `validate.ts` rebuilds every ref from
   `{type, id, name, mimeType, sizeBytes}`, so the host's validation strips it from every command
@@ -766,8 +779,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   read, and Grok's `_x.ai/mcp/servers_updated` carries the host's real MCP credentials. Redaction
   runs before anything is written, and before any stderr excerpt leaves the host.
 - **A running state never outlives its process — a dead host's included.** Before
-  `session.exited` the adapter settles the in-flight turn, closes every live task `stopped` and
-  fails every parked request. Every wait on a child has a deadline (`support/deadline.ts`), and an
+  `session.exited` the adapter withdraws every parked request (one `withdrawn` row each, before the
+  turn settles), settles the in-flight turn and closes every live task `stopped`. Every wait on a
+  child has a deadline (`support/deadline.ts`), and an
   expired one kills the child. A host that is killed (a crash, an OOM, a hard stop) runs none of
   that teardown, and left alone its requests, calls and tasks stay open in the log for good: a card
   no process can answer blocks the composer ("Answer the request above first.") and the MCP's
@@ -1002,11 +1016,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `cancelledRequestActivity`, through ingestion's `withdrawn` rule), on the stamp the card was
   opened with — a child's before the rows its end writes, the parent's own after its turn's end, so
   a question the host dismissed at that end keeps the dismissal as its one row
-  (`repeatsHostClosure`) — and nothing is answered on the wire (`CodexRequestWithdrawn`). Whether the server still holds such a request is read, not captured:
-  the 0.155.1 binary's "client request resolved because the turn state was changed" reads as the
-  server resolving a thread's pending requests itself at its turn's end, but "client request"
-  could also name a client→server request (codex fixtures README observations 5 and 20). Writing
-  no answer is safe either way — the server resolved the request, or the turn that asked is over.
+  (`repeatsHostClosure`) — and nothing is answered on the wire (`CodexRequestWithdrawn`). Whether
+  the server still holds such a request is read, not captured: the 0.155.1 binary's "client
+  request resolved because the turn state was changed" reads as the server resolving a thread's
+  pending requests itself at its turn's end, but "client request" could also name a
+  client→server request (codex fixtures README observations 5 and 20). Writing no answer is safe
+  either way — the server resolved the request, or the turn that asked is over.
   Left open, the card blocked the composer ("Answer the request above first.") and the MCP's
   `send_message` until the user answered a request nothing waited on, or pressed Stop. A card
   answered first is settled once, by its answer. A child's MCP progress is its heartbeat
@@ -1175,7 +1190,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   every settled turn — an `error` session is a dead one to the roster (every running row
   `interrupted`) and refuses commands until a Stop, which would cancel that job. The turn stays
   `failed` (the activity ladder still ranks it `error`). Closed, the child read "interrupted"
-  while it worked, left the drain's liveness, and lost its answer as its result.
+  while it worked, left the drain's liveness, and lost its answer as its result. (5) A child
+  session's question rides no turn, and neither does its resolution (`questionTurnId` in
+  `normalize.ts`, Codex's and Grok's rule): a turn's end dismisses every question on it in the log
+  only (`settleStrandedQuestions`), and a background child outlives the parent's turn, so its card
+  was swept at the parent's turn end while the child still waited on the answer. A resolution on a
+  turn its question does not ride would reopen the card after a rewind of that turn. The parent's
+  own questions, and every approval, ride the parent's open turn.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures
@@ -1275,7 +1296,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   open turn — the wake's own once its turn is open — and its resolution rides the same. **A
   monitor's wake re-arms it**: its line arrives just BEFORE the wake it causes, so the liveness
   registry's turn-boundary sweep read it as silent through that turn and dropped it at the wake's
-  end — a code-only deploy stopped waiting for a running monitor between its lines. The wake's turn
+  end — a code-only deploy stopped waiting for a running monitor between its lines. A wake's end
+  sweeps nothing now (a turn the provider started, see "Drained" means…), but a wake that adopted
+  a user's pending turn row reads as the host's and does, so the wake's turn
   opens with a status-less `task.progress` for each live monitor its `runningText` names (a
   `<monitor-event>` block's `task_id`, in any attribute order; `rearmMonitors`), replaced in place;
   only those, since re-arming every monitor at every wake would let unrelated wakes hold a silent

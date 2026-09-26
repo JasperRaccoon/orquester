@@ -1236,3 +1236,98 @@ test("teardown: no provider child outlives the suite", async () => {
     "a test returned without stopping its session; the child would keep the host alive"
   );
 });
+
+// ---------------------------------------------------------------------------
+// A card nobody answered is settled ONCE (final fix wave, item 2)
+// ---------------------------------------------------------------------------
+//
+// Every teardown path resolved the parked card's deferred AND emitted its
+// resolution, and the handler awaiting that deferred then emitted another:
+// two closing rows for one card, the second of an exit landing after
+// `session.exited`. One emitter per card now, at the moment it is settled;
+// a card nobody answered is marked `withdrawn`, which ingestion writes as the
+// host's own "Request cancelled" / "Question cancelled".
+
+/** Every resolution the adapter emitted for one card. */
+function resolutionsOf(events: readonly RuntimeEvent[], requestId: string | undefined): RuntimeEvent[] {
+  return events.filter(
+    (event) =>
+      (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+      event.requestId === requestId
+  );
+}
+
+test("stopSession with a parked approval settles it once, as nobody's answer", async () => {
+  const r = await rig({ scenario: "permission" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
+  const opened = await r.waitFor((event) => event.type === "request.opened", "request.opened");
+  await r.adapter.stopSession("t1");
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const resolutions = resolutionsOf(r.events, opened.requestId);
+  assert.equal(resolutions.length, 1, "one closing row");
+  assert.deepEqual(resolutions[0]!.payload, {
+    requestType: "file_change_approval",
+    decision: "cancel",
+    withdrawn: true
+  });
+  await r.dispose();
+});
+
+test("stopSession with a parked question settles it once, as nobody's answer, on the stamp it was asked with", async () => {
+  const r = await rig({ scenario: "child-question" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the child's question");
+  await r.adapter.stopSession("t1");
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const resolutions = resolutionsOf(r.events, asked.requestId);
+  assert.equal(resolutions.length, 1, "one closing row");
+  assert.deepEqual(resolutions[0]!.payload, { answers: {}, withdrawn: true });
+  assert.equal(resolutions[0]!.turnId, undefined, "turnless, as the child's question was asked");
+  await r.dispose();
+});
+
+test("an exit with a parked approval settles it once, before session.exited", async () => {
+  const r = await rig({ scenario: "permission-exit" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
+  const opened = await r.waitFor((event) => event.type === "request.opened", "request.opened");
+  const exited = await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const resolutions = resolutionsOf(r.events, opened.requestId);
+  assert.equal(resolutions.length, 1, "one closing row, none after the exit");
+  assert.equal((resolutions[0]!.payload as { withdrawn?: boolean }).withdrawn, true);
+  assert.ok(r.events.indexOf(resolutions[0]!) < r.events.indexOf(exited), "a running state never outlives its process");
+  await r.dispose();
+});
+
+test("an exit with a parked question settles it once, before session.exited", async () => {
+  const r = await rig({ scenario: "child-question-exit" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the child's question");
+  const exited = await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const resolutions = resolutionsOf(r.events, asked.requestId);
+  assert.equal(resolutions.length, 1, "one closing row, none after the exit");
+  assert.deepEqual(resolutions[0]!.payload, { answers: {}, withdrawn: true });
+  assert.ok(r.events.indexOf(resolutions[0]!) < r.events.indexOf(exited));
+  await r.dispose();
+});
+
+test("an answered approval is settled once, by the answer", async () => {
+  const r = await rig({ scenario: "permission" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
+  const opened = await r.waitFor((event) => event.type === "request.opened", "request.opened");
+  await r.adapter.respondToApproval("t1", opened.requestId!, "accept");
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.drain();
+  const resolutions = resolutionsOf(r.events, opened.requestId);
+  assert.equal(resolutions.length, 1);
+  assert.deepEqual(resolutions[0]!.payload, { requestType: "file_change_approval", decision: "accept" });
+  await r.dispose();
+});

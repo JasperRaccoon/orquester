@@ -881,6 +881,81 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
   });
 });
 
+describe("a background shell's exit code, from the normaliser through the real fold", () => {
+  it("Claude: the notification's `(exit code N)` is the roster row's exit code", async () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: THREAD_ID,
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    const events = [...normalizer.beginTurn({ turnId: "turn-1" })];
+    const feed = (frame: Record<string, unknown>): void => {
+      events.push(...normalizer.handleMessage({ uuid: "u", session_id: "s", ...frame } as unknown as SDKMessage));
+    };
+    feed({
+      type: "stream_event",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_sh",
+          name: "Bash",
+          input: { command: "make test", run_in_background: true }
+        }
+      }
+    });
+    feed({
+      type: "system",
+      subtype: "task_started",
+      task_id: "bsh1",
+      tool_use_id: "toolu_sh",
+      description: "Run the tests",
+      task_type: "local_bash",
+      is_backgrounded: true
+    });
+    feed({
+      type: "user",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_sh",
+            content:
+              "Command running in background with ID: bsh1. Output is being written to: /tmp/claude/tasks/bsh1.output"
+          }
+        ]
+      }
+    });
+    feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "bsh1",
+      tool_use_id: "toolu_sh",
+      status: "failed",
+      output_file: "/tmp/claude/tasks/bsh1.output",
+      summary: 'Background command "Run the tests" failed (exit code 2)'
+    });
+    assert.equal(
+      events.find((event) => event.type === "task.completed")?.payload.exitCode,
+      2,
+      "the normaliser reports it"
+    );
+
+    const { ingestion, sink } = harness();
+    for (const event of events) {
+      await ingestion.ingest(event);
+    }
+    await ingestion.drain();
+    const shell = fold(sink.events()).roster.find((row) => row.id === "bsh1");
+    assert.ok(shell, "the background shell is on the roster");
+    assert.equal(shell.exitCode, 2, "and so does its roster row");
+  });
+});
+
 describe("a Claude subagent's calls, from the normaliser through the real fold", () => {
   /** Every tool row of each call, keyed by `payload.toolUseId`. */
   function callRows(state: ReturnType<typeof fold>): Map<string, ThreadActivityItem[]> {

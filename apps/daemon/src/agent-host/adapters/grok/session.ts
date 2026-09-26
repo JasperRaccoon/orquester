@@ -173,16 +173,28 @@ export interface GrokSessionOptions {
   onClosed?(threadId: string): void;
 }
 
+/**
+ * A parked card. Settling it — `resolve` (the user's answer) or `withdraw`
+ * (nobody's: a Stop, a steer, the session's stop, the exit) — emits its ONE
+ * resolution row there and then and answers the CLI; the handler awaiting it
+ * emits nothing. Every teardown used to emit a row AND resolve the deferred,
+ * and the handler then emitted another — two closing rows per card, the
+ * second of an exit landing after `session.exited`.
+ */
 interface PendingApproval {
   readonly requestType: ReturnType<typeof permissionRequestType>;
   resolve(decision: ApprovalDecision): void;
+  /** `cancel` to the CLI, and a row marked `withdrawn` ("Request cancelled"). */
+  withdraw(): void;
 }
 
 interface PendingUserInput {
   readonly params: XaiAskUserQuestionParams;
   /** The turn its rows ride, stamped once ({@link GrokSession.questionTurnId}); `null` for none. */
   readonly turnId: string | null;
-  resolve(answers: Record<string, unknown> | null): void;
+  resolve(answers: Record<string, unknown>): void;
+  /** `cancelled` to the CLI, and a row marked `withdrawn` ("Question cancelled"). */
+  withdraw(): void;
 }
 
 /** One settled turn, kept for `readThread`'s provider-side snapshot. */
@@ -635,7 +647,26 @@ export class GrokSession {
 
     const requestId = this.options.uuid();
     const decision = deferred<ApprovalDecision>();
-    this.pendingApprovals.set(requestId, { requestType, resolve: decision.resolve });
+    // The card's one resolution row, where it is settled (`PendingApproval`).
+    const settle = (resolved: ApprovalDecision, withdrawn: boolean): void => {
+      if (!this.pendingApprovals.delete(requestId)) {
+        return;
+      }
+      this.emitEvent(
+        this.normalizer.requestResolved({
+          requestId,
+          requestType,
+          decision: resolved,
+          ...(withdrawn ? { withdrawn: true as const } : {})
+        })
+      );
+      decision.resolve(resolved);
+    };
+    this.pendingApprovals.set(requestId, {
+      requestType,
+      resolve: (answer) => settle(answer, false),
+      withdraw: () => settle("cancel", true)
+    });
 
     this.emitEvent(
       this.normalizer.requestOpened({
@@ -648,10 +679,6 @@ export class GrokSession {
     );
 
     const resolved = await decision.promise;
-    this.pendingApprovals.delete(requestId);
-
-    this.emitEvent(this.normalizer.requestResolved({ requestId, requestType, decision: resolved }));
-
     const optionId = resolved === "cancel" ? undefined : selectPermissionOptionId(params.options, resolved);
     if (resolved === "acceptForSession" && optionId !== undefined && grantKey !== undefined) {
       this.sessionGrants.add(grantKey);
@@ -678,7 +705,20 @@ export class GrokSession {
     }
     const requestId = this.options.uuid();
     const pending = deferred<Record<string, unknown> | null>();
-    this.pendingUserInputs.set(requestId, { params, turnId, resolve: pending.resolve });
+    // The card's one resolution row, where it is settled (`PendingUserInput`).
+    const settle = (answers: Record<string, unknown> | null): void => {
+      if (!this.pendingUserInputs.delete(requestId)) {
+        return;
+      }
+      this.emitEvent(this.normalizer.userInputResolved(requestId, answers ?? {}, turnId, answers === null));
+      pending.resolve(answers);
+    };
+    this.pendingUserInputs.set(requestId, {
+      params,
+      turnId,
+      resolve: (answers) => settle(answers),
+      withdraw: () => settle(null)
+    });
 
     this.emitEvent(
       this.normalizer.userInputRequested({
@@ -694,9 +734,6 @@ export class GrokSession {
     );
 
     const answers = await pending.promise;
-    this.pendingUserInputs.delete(requestId);
-    this.emitEvent(this.normalizer.userInputResolved(requestId, answers ?? {}, turnId));
-
     return answers === null ? { outcome: "cancelled" } : answersToXaiResponse(params, answers);
   }
 
@@ -1266,19 +1303,22 @@ export class GrokSession {
   }
 
   private async settlePendingAsCancelled(): Promise<void> {
-    for (const [requestId, pending] of [...this.pendingApprovals.entries()]) {
-      this.pendingApprovals.delete(requestId);
-      pending.resolve("cancel");
-      this.emitEvent(
-        this.normalizer.requestResolved({ requestId, requestType: pending.requestType, decision: "cancel" })
-      );
-    }
-    for (const [requestId, pending] of [...this.pendingUserInputs.entries()]) {
-      this.pendingUserInputs.delete(requestId);
-      pending.resolve(null);
-      this.emitEvent(this.normalizer.userInputResolved(requestId, {}, pending.turnId));
-    }
+    this.withdrawPendingRequests();
     await Promise.resolve();
+  }
+
+  /**
+   * Settle every parked card with nobody's answer: one `withdrawn` row each,
+   * emitted now, and the CLI's `cancelled` — never a second row from the
+   * handler that awaited it.
+   */
+  private withdrawPendingRequests(): void {
+    for (const pending of [...this.pendingApprovals.values()]) {
+      pending.withdraw();
+    }
+    for (const pending of [...this.pendingUserInputs.values()]) {
+      pending.withdraw();
+    }
   }
 
   // ----------------------------------------------------------------- model
@@ -1411,18 +1451,9 @@ export class GrokSession {
     const turn = this.activeTurn;
     const detail = stderrTail.trim().length > 0 ? `\n${stderrTail.trim()}` : "";
 
-    for (const [requestId, pending] of [...this.pendingApprovals.entries()]) {
-      this.pendingApprovals.delete(requestId);
-      pending.resolve("cancel");
-      this.emitEvent(
-        this.normalizer.requestResolved({ requestId, requestType: pending.requestType, decision: "cancel" })
-      );
-    }
-    for (const [requestId, pending] of [...this.pendingUserInputs.entries()]) {
-      this.pendingUserInputs.delete(requestId);
-      pending.resolve(null);
-      this.emitEvent(this.normalizer.userInputResolved(requestId, {}, pending.turnId));
-    }
+    // Before `session.exited`: each card's one row is emitted as it is
+    // withdrawn, never by the handler, which resumes only after this returns.
+    this.withdrawPendingRequests();
 
     this.emitAll(this.normalizer.failOpenTools("The agent process exited."));
     this.emitAll(this.normalizer.stopBackgroundTasks());

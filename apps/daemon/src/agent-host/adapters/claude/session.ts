@@ -712,7 +712,11 @@ export class ClaudeSession {
     this.options.onClosed(this);
   }
 
-  /** Settle every parked request with `cancel`, and report each resolution. */
+  /**
+   * Settle every parked request with `cancel`, and report each resolution —
+   * `withdrawn`: nobody answered it, so it reads "Request cancelled" /
+   * "Question cancelled", never "Approval resolved" / "User input submitted".
+   */
   private cancelPendingRequests(): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     for (const pending of [...this.pendingApprovals.values()]) {
@@ -723,7 +727,8 @@ export class ClaudeSession {
           requestId: pending.requestId,
           requestType: pending.requestType,
           decision: "cancel",
-          ...(pending.toolUseId !== undefined ? { toolUseId: pending.toolUseId } : {})
+          ...(pending.toolUseId !== undefined ? { toolUseId: pending.toolUseId } : {}),
+          withdrawn: true
         })
       );
     }
@@ -734,7 +739,8 @@ export class ClaudeSession {
         this.normalizer.userInputResolved({
           requestId: pending.requestId,
           answers: {},
-          ...(pending.toolUseId !== undefined ? { toolUseId: pending.toolUseId } : {})
+          ...(pending.toolUseId !== undefined ? { toolUseId: pending.toolUseId } : {}),
+          withdrawn: true
         })
       );
     }
@@ -853,6 +859,7 @@ export class ClaudeSession {
       }
       this.pendingApprovals.delete(requestId);
       open.settle("cancel");
+      // The CLI withdrew it: nobody answered.
       this.emit([
         this.normalizer.requestResolved({
           requestId,
@@ -860,7 +867,8 @@ export class ClaudeSession {
           decision: "cancel",
           ...(callbackOptions.toolUseID !== undefined
             ? { toolUseId: callbackOptions.toolUseID }
-            : {})
+            : {}),
+          withdrawn: true
         })
       ]);
     };
@@ -948,13 +956,15 @@ export class ClaudeSession {
       }
       this.pendingUserInputs.delete(requestId);
       open.settle(null);
+      // The CLI withdrew it: nobody answered.
       this.emit([
         this.normalizer.userInputResolved({
           requestId,
           answers: {},
           ...(callbackOptions.toolUseID !== undefined
             ? { toolUseId: callbackOptions.toolUseID }
-            : {})
+            : {}),
+          withdrawn: true
         })
       ]);
     };

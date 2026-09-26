@@ -235,6 +235,14 @@ not live.
 
 *T3: `apps/server/src/orchestration/ThreadBackgroundLiveness.ts:1-166` — the whole registry, its two-state vocabulary and the "no persistence, no migration" rationale; `apps/server/src/orchestration/ThreadSettlementPolicy.ts:118-124` — live background work blocks auto-settlement; `apps/server/src/provider/Layers/ProviderSessionReaper.ts:81-95` — differs: T3 consults it to skip reaping a thread; Orquester never reaps, so it feeds only the activity/attention derivation*
 
+*Built: background rows expire (`orchestration/liveness.ts`) — a watch loop silent for 10 minutes,
+an agent whose rows carry `livenessTtlMs` that long after its latest row — and the end of a turn
+the host sent drops every watch loop that reported nothing during it. A turn the provider started
+itself — a Grok wake, an OpenCode woken reply, Claude's synthetic woken turn: no `/turn` row in
+the fold when its `turn.started` is consumed — sweeps nothing (final fix wave 2026-09-26). Wakes
+come at every background end and monitor line, and sweeping at their ends dropped a silent dev
+server long before its TTL, which let a deploy's drain kill it.*
+
 **No-tmux hosts** (Windows, stock macOS dev): the host is a direct daemon child and dies with it.
 The same reconcile in §3.3 recovers on boot. Nothing else differs.
 
@@ -735,6 +743,14 @@ Rules of the interface, enforced by the orchestration layer so no adapter can fo
   adapter row that repeats as a cancellation a closure the host wrote itself — this one, and a turn
   end's dismissal of a stranded question (§6.2) that the adapter settles later
   (`repeatsHostClosure`). A real answer racing the Stop keeps its row.*
+  *Built (final fix wave 2026-09-26): a card the adapter settles on its own, with no host Stop
+  before it — an interrupt, a steer's cancel, a rewind, the process's exit — is one row too, in
+  all four adapters, marked `withdrawn`, so it reads "Request cancelled" / "Question cancelled".
+  Grok wrote it twice (the teardown's row and the parked handler's own, the second after
+  `session.exited`); Claude's, Codex's and OpenCode's teardowns wrote it as "Approval resolved" /
+  "User input submitted" — Codex's crash path on no turn, after the dying turn had settled, so a
+  question on it went to the host's turn-end dismissal instead. Every adapter now withdraws its
+  cards before that turn settles.*
 - **Interrupt is turn-scoped.** `interruptTurn` carries the turn id the user pressed Stop on and
   is a no-op when that turn is no longer the active one, so a Stop that races a settling turn
   cannot kill the next one.
@@ -1795,7 +1811,8 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   cannot dismiss it while the CLI waits for the answer. A user message during its turn steers it:
   cancel, then prompt under the same turn id. A monitor's wake opens by re-arming the monitors its
   `runningText` carries lines of, which the liveness registry's turn-boundary sweep would otherwise
-  drop at the wake's end (`adapters/grok/prompt-queue.ts`, `GrokWakes` — which the capture-replay
+  drop at the end of a wake that adopted a user's pending turn (a wake of its own sweeps nothing,
+  §3.1) (`adapters/grok/prompt-queue.ts`, `GrokWakes` — which the capture-replay
   driver runs too; `session.ts`, `onQueueChanged`, `onPrivateUpdate`; the Grok fixtures README,
   observations 40–41).*
 - **Interrupt** marks the turn id as interrupted **synchronously, before taking the thread lock**,
@@ -4137,7 +4154,9 @@ that started it, so it stays on screen until it ends or is stopped.
 put a roster row on screen for every `ls`. Only a detached task is surfaced (the SDK's
 `is_backgrounded`, promoted later by `task_updated {patch:{is_backgrounded:true}}` when the user
 hits Ctrl+B); `ambient`/`skip_transcript` tasks are not activity at all. `task.started` carries
-`isBackgrounded` and `task.completed` carries `exitCode` so the row can say so. A surfaced shell
+`isBackgrounded` and `task.completed` carries `exitCode` so the row can say so — onto its
+activity row too, which the roster reads (ingestion dropped it until 2026-09-26, so every shell's
+roster row read `exitCode: null`, Grok's included). A surfaced shell
 additionally owns a `command_execution` item (`itemId: "bgshell:<taskId>"`, `agentId: <taskId>`)
 whose `command_output` deltas are **tailed off a file**: the CLI writes a background command's
 output to its own tmp tree rather than streaming it, so a drill-in with no tail reads "has not

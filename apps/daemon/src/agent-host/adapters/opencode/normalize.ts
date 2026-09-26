@@ -2061,7 +2061,7 @@ function openQuestion(
   }
   state.pendingQuestions.set(request.id, request);
   out.push({
-    ...out.base({ turnId: state.activeTurnId, requestId: request.id, raw }),
+    ...out.base({ turnId: questionTurnId(state, request), requestId: request.id, raw }),
     type: "user-input.requested",
     payload: {
       questions: normalizeQuestions(request),
@@ -2072,17 +2072,42 @@ function openQuestion(
   });
 }
 
+/**
+ * The turn a question's rows ride. A child session's question rides none —
+ * Codex's and Grok's `questionTurnId` rule: a turn's end dismisses every
+ * question on it in the log only (`settleStrandedQuestions`), and a background
+ * child outlives the parent's turn, so riding it, the child's card was swept
+ * at the parent's turn end while the child still waited on the answer. Its
+ * resolution rides the same (none): a rewind drops a row by its turn, and a
+ * resolution on a turn its question does not ride would reopen the card. The
+ * parent's own questions ride its open turn; approvals stay on it too.
+ */
+function questionTurnId(
+  state: OpenCodeSessionState,
+  request: OpenCodeQuestionRequest | undefined
+): string | undefined {
+  return request !== undefined && request.sessionID !== state.openCodeSessionId
+    ? undefined
+    : state.activeTurnId;
+}
+
 function resolveRequest(state: OpenCodeSessionState, requestId: string): void {
   state.resolvedRequestIds.add(requestId);
   state.requestRelationRetries.delete(requestId);
 }
 
+/**
+ * `withdrawn`: nobody answered the card — the session's own settle (a Stop,
+ * an interrupt, a rewind, the server's death) rejected it — so ingestion
+ * writes "Request cancelled" / "Question cancelled" (`emitTerminalQuestion`).
+ */
 export function emitTerminalPermission(
   state: OpenCodeSessionState,
   requestId: string,
   decision: ReturnType<typeof fromOpenCodePermissionReply> | undefined,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  withdrawn = false
 ): void {
   if (state.emittedTerminalRequestIds.has(requestId)) {
     return;
@@ -2101,7 +2126,8 @@ export function emitTerminalPermission(
     payload: {
       requestType:
         request !== undefined ? mapPermissionToRequestType(request.permission) : "unknown",
-      ...(decision !== undefined ? { decision } : {})
+      ...(decision !== undefined ? { decision } : {}),
+      ...(withdrawn ? { withdrawn: true } : {})
     }
   });
 }
@@ -2111,7 +2137,8 @@ export function emitTerminalQuestion(
   requestId: string,
   answers: string[][] | undefined,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  withdrawn = false
 ): void {
   if (state.emittedTerminalRequestIds.has(requestId)) {
     return;
@@ -2129,9 +2156,9 @@ export function emitTerminalQuestion(
         )
       : {};
   out.push({
-    ...out.base({ turnId: state.activeTurnId, requestId, raw }),
+    ...out.base({ turnId: questionTurnId(state, request), requestId, raw }),
     type: "user-input.resolved",
-    payload: { answers: resolved }
+    payload: { answers: resolved, ...(withdrawn ? { withdrawn: true } : {}) }
   });
 }
 

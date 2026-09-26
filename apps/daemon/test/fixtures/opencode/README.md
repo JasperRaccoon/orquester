@@ -503,7 +503,10 @@ so `toolUseId` = `callID`, `role` = `subagent_type`, `model` = `providerID/model
 Two invariants worth restating: a child's `step-finish` tokens are a *different session's*
 spend and never join the parent turn's accumulator (only `hasSubagents` is set), and a
 child's permission/question frames keep the original routing — an approval belongs on the
-parent thread whichever session raised it.
+parent thread whichever session raised it. The parent THREAD, not the parent's turn, for a
+question: a child session's question and its resolution ride no turn (`questionTurnId`, Codex's
+and Grok's rule), because a turn's end dismisses the questions on it in the log only and a
+background child outlives the parent's turn. An approval rides the parent's open turn.
 
 ### 20. Auth: T3's Basic scheme is exact, and the username is checked
 

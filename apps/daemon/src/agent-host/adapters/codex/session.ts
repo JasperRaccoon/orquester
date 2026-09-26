@@ -175,6 +175,18 @@ interface ParkedRequest {
    * ({@link CodexRequestWithdrawn}).
    */
   withdraw: (reason: string) => void;
+  /**
+   * The session's own teardown cancels it (an interrupt, a Stop): its
+   * cancelled row — `withdrawn`, nobody answered — and the handler answers the
+   * server's request as a cancel (`cancel`, or no answers), which a transport
+   * that answers inline needs before the interrupt reaches it (§4.1). Never
+   * `settle`, which carries the user's own answers — a `cancel` among them.
+   */
+  cancel: () => void;
+  /**
+   * The transport is gone: its cancelled row (`withdrawn`), and the handler
+   * fails — nothing can be written back.
+   */
   fail: (error: Error) => void;
 }
 
@@ -641,7 +653,7 @@ export class CodexSession {
       return;
     }
 
-    this.settlePendingRequests("cancel");
+    this.settlePendingRequests();
 
     const peer = this.peer;
     if (peer === null || peer.isClosed) {
@@ -915,7 +927,7 @@ export class CodexSession {
       } catch {
         // A wedged interrupt must not stop the kill.
       }
-      this.settlePendingRequests("cancel");
+      this.settlePendingRequests();
       this.peer?.close("session stopped");
       const child = this.child;
       if (child !== null && !child.hasExited()) {
@@ -1346,11 +1358,18 @@ export class CodexSession {
               resolved(answered, false);
               resolve(answered);
             },
+            cancel: () => {
+              resolved({}, true);
+              resolve({});
+            },
             withdraw: (reason) => {
               resolved({}, true);
               reject(new CodexRequestWithdrawn(reason));
             },
-            fail: reject
+            fail: (error) => {
+              resolved({}, true);
+              reject(error);
+            }
           });
           this.emit({
             type: "user-input.requested",
@@ -1425,11 +1444,18 @@ export class CodexSession {
           resolved(decision, false);
           resolve(decision);
         },
+        cancel: () => {
+          resolved("cancel", true);
+          resolve("cancel");
+        },
         withdraw: (reason) => {
           resolved("cancel", true);
           reject(new CodexRequestWithdrawn(reason));
         },
-        fail: reject
+        fail: (error) => {
+          resolved("cancel", true);
+          reject(error);
+        }
       });
       if (input.itemId !== undefined) {
         // Remember that the USER was asked about this item, so its `declined`
@@ -1471,24 +1497,28 @@ export class CodexSession {
   // -------------------------------------------------------------------------
 
   /**
-   * Resolve every open request with one decision and emit the matching
-   * `request.resolved` / `user-input.resolved` (§4.1 "Settle before
-   * interrupt").
+   * Cancel every open request — the session's own teardown, §4.1 "Settle
+   * before interrupt": each card's one `request.resolved` /
+   * `user-input.resolved`, marked `withdrawn` (nobody answered it: "Request
+   * cancelled" / "Question cancelled", as Claude's, Grok's and OpenCode's
+   * teardowns write), and the server's request answered as a cancel. It used
+   * to go through `settle`, and read "Approval resolved {cancel}" / "User
+   * input submitted" — saying someone answered.
    */
-  private settlePendingRequests(decision: ApprovalDecision): void {
+  private settlePendingRequests(): void {
     const approvals = [...this.pendingApprovals.values()];
     this.pendingApprovals.clear();
     for (const approval of approvals) {
-      approval.settle(decision);
+      approval.cancel();
     }
 
     const inputs = [...this.pendingUserInputs.values()];
     this.pendingUserInputs.clear();
     for (const input of inputs) {
-      // `settle` owns the emit (as it does for approvals), so settling here
+      // The card owns the emit (as it does for approvals), so cancelling here
       // does NOT also emit — otherwise every interrupted question produced two
       // `user-input.resolved` rows for one requestId (Q1 finding 17).
-      input.settle({});
+      input.cancel();
     }
     // The watchdog was paused while these were open; resume the clock from now
     // rather than from when the cards opened (Q1 finding 16).
@@ -1560,35 +1590,31 @@ export class CodexSession {
     }
   }
 
-  /** Fail every parked request outright — used when the transport is gone. */
+  /**
+   * Fail every parked request outright — used when the transport is gone.
+   * Each card writes its own one row (`fail`): `withdrawn`, on the stamps it
+   * was opened with. This used to emit "Approval resolved {cancel}" / "User
+   * input submitted" itself, on no turn at all.
+   */
   private failPendingRequests(reason: string): void {
     const error = new Error(reason);
     const approvals = [...this.pendingApprovals.values()];
     this.pendingApprovals.clear();
     for (const approval of approvals) {
-      this.emit({
-        type: "request.resolved",
-        payload: { requestType: canonicalRequestType(approval.method), decision: "cancel" },
-        requestId: approval.requestId
-      });
       approval.fail(error);
     }
     const inputs = [...this.pendingUserInputs.values()];
     this.pendingUserInputs.clear();
     for (const input of inputs) {
-      this.emit({
-        type: "user-input.resolved",
-        payload: { answers: {} },
-        requestId: input.requestId
-      });
       input.fail(error);
     }
   }
 
   /**
    * §3.1, the whole rule in one place: a dead child never leaves a running
-   * turn. The turn is settled, every live task is closed `stopped`, every
-   * parked request is failed — and only THEN is `session.exited` emitted.
+   * turn. Every parked request is failed (each card's one `withdrawn` row),
+   * the open items close, the turn is settled, every live task is closed
+   * `stopped` — and only THEN is `session.exited` emitted.
    */
   private handleExit(reason: ChildExitReason): void {
     if (this.exitHandled) {
@@ -1599,6 +1625,15 @@ export class CodexSession {
 
     const outcome = exitOutcome(reason, this.hostInitiatedClose);
     const excerpt = this.stderr.excerpt();
+
+    // 0. Fail every request still parked on the dead transport — each card's
+    //    one `withdrawn` row, on its own stamps — and make every later call
+    //    fail fast. FIRST, as Claude's, Grok's and OpenCode's teardowns
+    //    withdraw theirs before the turn settles: a question on the dying
+    //    turn is closed as nobody's answer ("Question cancelled"), not left
+    //    for the host's dismissal at that turn's end.
+    this.peer?.close(describeExit(reason));
+    this.failPendingRequests(`codex exited: ${describeExit(reason)}`);
 
     // 1. Close every item the dead child left `inProgress`. A SIGTERM'd child
     //    writes not one further byte (fixtures README obs. 16), so no
@@ -1650,12 +1685,7 @@ export class CodexSession {
     }
     this.liveTasks.clear();
 
-    // 4. Fail every request still parked on the dead transport, and make every
-    //    later call fail fast.
-    this.peer?.close(describeExit(reason));
-    this.failPendingRequests(`codex exited: ${describeExit(reason)}`);
-
-    // 5. Only now the exit itself.
+    // 4. Only now the exit itself.
     this.setStatus(outcome.status);
     if (outcome.status === "error") {
       this.lastError = excerpt.length > 0 ? `${outcome.reason}\n${excerpt}` : outcome.reason;

@@ -1378,13 +1378,15 @@ export class OpenCodeThreadSession {
     const permissions = [...this.state.pendingPermissions.keys()];
     const questions = [...this.state.pendingQuestions.keys()];
     const out = new NormalizerEmitter(this.state, this.normalizeContext());
+    // Withdrawn: nobody answered these cards — "Request cancelled" /
+    // "Question cancelled", never "Approval resolved" / "User input submitted".
     for (const requestId of permissions) {
       this.state.resolvedRequestIds.add(requestId);
-      emitTerminalPermission(this.state, requestId, "cancel", undefined, out);
+      emitTerminalPermission(this.state, requestId, "cancel", undefined, out, true);
     }
     for (const requestId of questions) {
       this.state.resolvedRequestIds.add(requestId);
-      emitTerminalQuestion(this.state, requestId, undefined, undefined, out);
+      emitTerminalQuestion(this.state, requestId, undefined, undefined, out, true);
     }
     for (const event of out.events) {
       this.emit(event);

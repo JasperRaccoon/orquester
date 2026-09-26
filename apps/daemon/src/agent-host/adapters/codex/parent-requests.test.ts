@@ -177,6 +177,45 @@ describe("a parent card nobody answered, when the wait on it ends (sweep)", () =
   }
 });
 
+describe("a parent card open when the app-server dies (final fix wave)", () => {
+  for (const item of ["command", "question"] as const) {
+    it(`the ${item} card: one '${CANCELLED[item]}' row on its own turn, before session.exited`, async () => {
+      const host = await asking(askScript(item, ["exit"]));
+      await waitUntil(() => openedCard(host) !== null, "the card opened");
+      const card = openedCard(host)!;
+      await waitUntil(
+        () => host.handled.some((event) => event.type === "session.exited"),
+        "the host handled the exit"
+      );
+      await host.orchestrator.drain();
+
+      const asked = activitiesOf(host.log()).find(
+        (row) => (row.payload as { requestId?: string } | null)?.requestId === card.requestId
+      );
+      assert.ok(asked !== undefined);
+      assert.notEqual(asked.turnId, null, "the card rode its turn");
+      // Nobody answered it: the host's own cancelled row, through ingestion's
+      // `withdrawn` rule — never "Approval resolved" / "User input submitted",
+      // and never the host's turn-end dismissal of a question the dying
+      // turn's settle would otherwise have stranded.
+      assert.deepEqual(
+        closingRows(host, card.requestId).map((row) => [row.id, row.summary, row.turnId]),
+        [[`settle-cancel:${card.requestId}`, CANCELLED[item], asked.turnId]]
+      );
+      const closedAt = host.handled.findIndex(
+        (event) =>
+          (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+          event.requestId === card.requestId
+      );
+      assert.ok(closedAt !== -1);
+      assert.ok(closedAt < host.handled.findIndex((event) => event.type === "session.exited"));
+      assert.deepEqual(host.orchestrator.summary("thread-1")?.pendingRequests, []);
+      assert.deepEqual(answersTo(host, card.providerRequestId), [], "nothing reaches a dead server");
+      await host.stop();
+    });
+  }
+});
+
 describe("a parent card the user answered before its turn ended (sweep)", () => {
   for (const item of ["command", "question"] as const) {
     it(`the ${item} card: settled once, by the answer, and the answer reaches the provider`, async () => {

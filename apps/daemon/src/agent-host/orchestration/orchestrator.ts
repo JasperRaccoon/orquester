@@ -107,6 +107,7 @@ import type {
   CaptureResult,
   CheckpointService,
   Ingestion,
+  LivenessObservation,
   LivenessRegistry,
   ProviderSnapshotRegistry,
   ThreadStore
@@ -1659,6 +1660,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       clock,
       setTimer,
       clearTimer,
+      // A card the user holds is never a stall — an earlier turn's included
+      // (a question whose asker outlived its turn rides none, and the
+      // watchdog's own per-turn pause forgets it when that turn ends). Only a
+      // card that blocks the provider: a message-mode question parks nothing,
+      // an ordinary message answers it, so it pauses no later turn.
+      waitingOnUser: () => {
+        const pending = runtime.state.pending;
+        return (
+          (pending?.approvals.length ?? 0) > 0 ||
+          (pending?.userInputs ?? []).some((question) => question.responseMode !== "message")
+        );
+      },
       onStalled: ({ threadId, turnId, elapsedMs, windowMs }) => {
         const message = stalledTurnMessage(elapsedMs, windowMs);
         void runEffect(runtime, async () => {
@@ -4080,13 +4093,39 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   // Runtime event consumption
   // -------------------------------------------------------------------------
 
+  /**
+   * What the liveness registry cannot read off the event: on `turn.started`,
+   * whether the host sent the turn. A turn the host sent has a row in the fold
+   * before its `turn.started` is consumed — the command's pending row
+   * (`thread.turn-start-requested`, which the first turn to start adopts) or,
+   * once `sendTurn` has answered, that row under the provider's id. A turn
+   * with neither is the provider's own — a Grok wake, an OpenCode woken reply,
+   * Claude's synthetic woken turn — and its end sweeps no watch loop
+   * (`liveness.ts`). A continuation after a restart may read as either; a
+   * registry the restart emptied holds nothing its sweep could drop.
+   */
+  const livenessObservation = (
+    runtime: ThreadRuntime | undefined,
+    event: RuntimeEvent
+  ): LivenessObservation | undefined => {
+    if (event.type !== "turn.started" || runtime === undefined) {
+      return undefined;
+    }
+    const hostSent = (runtime.state.turns ?? []).some(
+      (turn) =>
+        (turn.turnId === null && turn.state === "pending") ||
+        (event.turnId !== undefined && turn.turnId === event.turnId)
+    );
+    return { providerInitiatedTurn: !hostSent };
+  };
+
   const consume = async (adapter: AgentAdapter): Promise<void> => {
     try {
       for await (const event of adapter.events) {
         if (stopped) break;
         try {
-          liveness.observe(event);
           const runtime = runtimes.get(event.threadId);
+          liveness.observe(event, livenessObservation(runtime, event));
           if (runtime) {
             runtime.watchdog?.observe(event);
             if (event.type === "session.exited") {

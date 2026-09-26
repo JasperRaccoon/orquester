@@ -84,9 +84,10 @@ export function createFakeContext(
  * answer, one frame per step, in order: the turn's `turn/completed` with that
  * status (`turn-interrupted`, `turn-failed`), or its own
  * `serverRequest/resolved` naming the request. `["resolved"]` resolves it
- * mid-turn — the turn runs on until a Stop.
+ * mid-turn — the turn runs on until a Stop. `exit` is a crash: the process
+ * exits (code 1) with the card still open, and no step after it runs.
  */
-export type MockParentAskEnd = ("turn-interrupted" | "turn-failed" | "resolved")[];
+export type MockParentAskEnd = ("turn-interrupted" | "turn-failed" | "resolved" | "exit")[];
 
 /** One programmed turn. */
 export type MockTurnScript =
@@ -376,6 +377,9 @@ const endParentAsk = (turnId, requestId, steps) => {
   for (const step of steps) {
     if (step === "resolved") {
       send({ method: "serverRequest/resolved", params: { threadId, requestId } });
+    } else if (step === "exit") {
+      setTimeout(() => { process.exit(1); }, 10);
+      return;
     } else {
       send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, step.slice("turn-".length)) } });
       activeTurnId = null;

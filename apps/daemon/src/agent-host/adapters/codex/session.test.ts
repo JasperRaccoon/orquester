@@ -2042,6 +2042,119 @@ describe("codex session — a dead child never leaves a running state", () => {
   });
 });
 
+/**
+ * A card nobody answered, closed by the session's own teardown — an interrupt,
+ * a Stop, the process dying under it — is one row marked `withdrawn` ("Request
+ * cancelled" / "Question cancelled"), on the stamps the card was opened with,
+ * as Claude's, Grok's and OpenCode's are. It used to be "Approval resolved
+ * {cancel}" / "User input submitted", saying someone answered — and on a
+ * crash with no turn at all. The user's own answers, a `cancel` among them,
+ * keep their normal row.
+ */
+describe("codex session — a card nobody answered, closed by the session's own teardown", () => {
+  const closings = (r: Rig, requestId: string | undefined): RuntimeEvent[] =>
+    r.events.events.filter(
+      (event) =>
+        (event.type === "request.resolved" || event.type === "user-input.resolved") &&
+        event.requestId === requestId
+    );
+  const approval = (afterAsking?: MockParentAskEnd): MockTurnScript => ({
+    kind: "command-approval",
+    command: "sleep 30",
+    ...(afterAsking !== undefined ? { afterAsking } : {})
+  });
+  const question = (afterAsking?: MockParentAskEnd): MockTurnScript => ({
+    kind: "user-input",
+    questionId: "q",
+    header: "H",
+    question: "Q?",
+    options: [{ label: "a", description: "b" }],
+    ...(afterAsking !== undefined ? { afterAsking } : {})
+  });
+  const WITHDRAWN = {
+    approval: { requestType: "command_execution_approval", decision: "cancel", withdrawn: true },
+    question: { answers: {}, withdrawn: true }
+  } as const;
+
+  /** A session whose one turn has parked the card `script` asks. */
+  async function parked(
+    item: "approval" | "question",
+    afterAsking?: MockParentAskEnd
+  ): Promise<{ r: Rig; opened: RuntimeEvent }> {
+    const r = rig({ turns: [item === "approval" ? approval(afterAsking) : question(afterAsking)] });
+    await r.session.start();
+    await r.session.sendTurn({
+      input: "x",
+      attachments: [],
+      interactionMode: item === "approval" ? "default" : "plan"
+    });
+    const opened = await r.events.waitForType(item === "approval" ? "request.opened" : "user-input.requested");
+    return { r, opened };
+  }
+
+  for (const item of ["approval", "question"] as const) {
+    it(`an interrupt withdraws a parked ${item}: one row, on its own stamps — and still cancels it on the wire`, async () => {
+      const { r, opened } = await parked(item);
+      await r.session.interruptTurn();
+      await waitUntil(() => closings(r, opened.requestId).length > 0, "the card's closing row");
+      const rows = closings(r, opened.requestId);
+      assert.equal(rows.length, 1, "one closing row");
+      assert.deepEqual(rows[0]!.payload, WITHDRAWN[item], "nobody answered it");
+      assert.equal(rows[0]!.turnId, opened.turnId, "on the turn the card was opened with");
+      const answered = r.received().filter((frame) => frame.result !== undefined).at(-1);
+      assert.deepEqual(
+        answered?.result,
+        item === "approval" ? { decision: "cancel" } : { answers: {} },
+        "the server's request is still answered before the interrupt (§4.1)"
+      );
+      await r.stop();
+      assert.equal(closings(r, opened.requestId).length, 1, "a later Stop writes nothing more");
+    });
+
+    it(`a crash withdraws a parked ${item}: one row, on its own stamps, before session.exited`, async () => {
+      const { r, opened } = await parked(item, ["exit"]);
+      await r.events.waitForType("session.exited");
+      const rows = closings(r, opened.requestId);
+      assert.equal(rows.length, 1, "one closing row");
+      assert.deepEqual(rows[0]!.payload, WITHDRAWN[item], "nobody answered it");
+      assert.equal(rows[0]!.turnId, opened.turnId, "on the turn the card was opened with");
+      if (item === "approval") {
+        assert.equal(rows[0]!.itemId, opened.itemId, "and on its item");
+      }
+      const order = r.events.events;
+      const closedAt = order.indexOf(rows[0]!);
+      assert.ok(
+        closedAt < order.findIndex((event) => event.type === "turn.completed"),
+        "the card closes before its turn settles, as every adapter's does"
+      );
+      assert.ok(closedAt < order.findIndex((event) => event.type === "session.exited"));
+      await r.stop();
+    });
+  }
+
+  it("the user's own cancel is an answer: its normal row, never withdrawn", async () => {
+    const { r, opened } = await parked("approval");
+    r.session.respondToApproval(opened.requestId!, "cancel");
+    await r.events.waitForType("turn.completed");
+    const rows = closings(r, opened.requestId);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]!.payload, { requestType: "command_execution_approval", decision: "cancel" });
+    assert.equal(rows[0]!.turnId, opened.turnId);
+    await r.stop();
+  });
+
+  it("the user's own answer to a question keeps its normal row", async () => {
+    const { r, opened } = await parked("question");
+    r.session.respondToUserInput(opened.requestId!, { q: "a" });
+    await r.events.waitForType("turn.completed");
+    const rows = closings(r, opened.requestId);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]!.payload, { answers: { q: "a" } });
+    assert.equal(rows[0]!.turnId, opened.turnId);
+    await r.stop();
+  });
+});
+
 describe("codex session — spawn and handshake failures", () => {
   it("a missing binary is an outcome, not an exception that hides the cause", async () => {
     const r = rig({ bin: "/nonexistent/codex-binary", turns: [] });
