@@ -66,6 +66,7 @@ import {
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
+import { DrillInErrorBoundary } from "./roster/DrillInErrorBoundary";
 import {
   EMPTY_DRILL_IN_MEMORY,
   recallDrillIn,
@@ -255,6 +256,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
 
   // --- the subagent drill-in (§7.6) ----------------------------------------
   const [drillInAgentId, setDrillInAgentId] = React.useState<string | null>(null);
+  const closeDrillIn = React.useCallback(() => setDrillInAgentId(null), []);
   // What each agent's drill-in was left as — its disclosures, reading
   // position and follow — so re-opening an agent (Back, an auto-return, a
   // switch to another agent and back) returns to where the reader was. In
@@ -778,30 +780,37 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         !active && "[--ac-anim-state:paused]"
       )}
     >
-      <ChatErrorBoundary sessionId={sessionId}>
+      {/* Its "Try again" also leaves an open drill-in: the fallback replaced the
+          Back button and the roster, and a child row that threw would throw
+          again. A child's own crash is caught below, around the drill-in. */}
+      <ChatErrorBoundary sessionId={sessionId} onReset={closeDrillIn}>
         {/* Main area — the one thing the drill-in swaps. */}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-950">
           {drillInAgentId ? (
-            <AgentDrillIn
-              // One mount per agent: each opens from its own memory.
-              key={drillInAgentId}
-              remembered={recallDrillIn(drillInMemory.current, drillInAgentId)}
-              onRemember={rememberDrillInAgent}
-              sessionId={sessionId}
-              agentId={drillInAgentId}
-              roster={roster.agents}
-              projectPath={projectPath}
-              onBack={() => setDrillInAgentId(null)}
-              bottomInset={bottomInset}
-              onLoadFullOutput={paintOnly ? noop : loadFullOutput}
-              onOpenFile={paintOnly ? noop : openFile}
-              // A nested spawn row's member: switch the drill-in to it.
-              onOpenAgent={paintOnly ? noop : setDrillInAgentId}
-              // The overlay's commands fail through the thread's banner, and
-              // the overlay stays live over a child.
-              errorBanner={paintOnly ? null : slice.errorBanner}
-              onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
-            />
+            // One mount per agent — each opens from its own memory — inside a
+            // boundary of its own: a child row that throws takes down the
+            // child's view alone, the overlay stays, and its fallback offers
+            // the way back on any device.
+            <DrillInErrorBoundary key={drillInAgentId} agentId={drillInAgentId} onBack={closeDrillIn}>
+              <AgentDrillIn
+                remembered={recallDrillIn(drillInMemory.current, drillInAgentId)}
+                onRemember={rememberDrillInAgent}
+                sessionId={sessionId}
+                agentId={drillInAgentId}
+                roster={roster.agents}
+                projectPath={projectPath}
+                onBack={closeDrillIn}
+                bottomInset={bottomInset}
+                onLoadFullOutput={paintOnly ? noop : loadFullOutput}
+                onOpenFile={paintOnly ? noop : openFile}
+                // A nested spawn row's member: switch the drill-in to it.
+                onOpenAgent={paintOnly ? noop : setDrillInAgentId}
+                // The overlay's commands fail through the thread's banner, and
+                // the overlay stays live over a child.
+                errorBanner={paintOnly ? null : slice.errorBanner}
+                onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
+              />
+            </DrillInErrorBoundary>
           ) : (
             <ChatTimeline
               sessionId={displayed.displaySessionId}

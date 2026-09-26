@@ -4359,6 +4359,12 @@ reader who opened a finished agent from a running one's view) and only while the
 child's end: a reader who scrolled up stays, and the header's status chip says it finished. And a
 palette search hit, which only the thread's timeline takes, closes an open drill-in so that timeline
 takes it at once — it used to wait, unmounted, and fire minutes later on Back.*
+*Built (2026-09-27): the drill-in renders inside an error boundary of its own
+(`roster/DrillInErrorBoundary.tsx`): a child row that throws takes down the child's view alone — the
+overlay stays mounted over it — and its fallback's "Back to the thread" is a real, touch-sized button.
+The thread's own boundary wrapped everything and kept the open agent, so a crashing child replaced the
+composer, the roster and Back, and on a touch device only closing the tab recovered; its "Try again"
+now also leaves an open drill-in.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything
