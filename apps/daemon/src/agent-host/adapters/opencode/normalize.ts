@@ -112,9 +112,9 @@ export type NormalizerSignal =
   | { kind: "turn-woken"; turnId: string }
   /**
    * A request reached the thread while an interrupt was ending its runs, or
-   * after one while no turn runs (`holdsRequests`): nothing was shown or
-   * answered, and nothing will be until the server says whether its asker
-   * still waits (`judgeHeldRequest` in `session.ts`).
+   * after one before any run has said `busy` (`holdsRequests`): nothing was
+   * shown or answered, and nothing will be until the server says whether its
+   * asker still waits (`judgeHeldRequest` in `session.ts`).
    */
   | { kind: "request-after-interrupt"; held: OpenCodeHeldRequest; raw: unknown };
 

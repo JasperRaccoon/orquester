@@ -1172,15 +1172,16 @@ export class OpenCodeThreadSession {
 
   /**
    * A request that reached the thread while an interrupt was ending its runs,
-   * or after one while no turn runs (`holdsRequests` in `normalize.ts`). Its
-   * asker may be one the abort ended — its frame reached the stream late — or
-   * one the abort never reached, which waits on it for good unless it is shown.
-   * So once the interrupt in flight is over, the server is asked
-   * (`askerWaits`): a request whose asker still waits is shown as any would be
-   * (`openHeldRequest`); one whose asker is gone writes no card and is
-   * rejected on the wire, which releases what an older server kept listed
-   * (fixtures README observation 11). A request answered elsewhere meanwhile
-   * is dropped from the hold by its terminal frame, and nothing is done here.
+   * or after one before any run has said `busy` (`holdsRequests` in
+   * `normalize.ts`). Its asker may be one the abort ended — its frame reached
+   * the stream late — or one the abort never reached, which waits on it for
+   * good unless it is shown. So once the interrupt in flight is over, the
+   * server is asked (`askerWaits`): a request whose asker still waits is shown
+   * as any would be (`openHeldRequest`); one whose asker is gone writes no
+   * card and is rejected on the wire, which releases what an older server
+   * kept listed (fixtures README observation 11). A request answered
+   * elsewhere meanwhile is dropped from the hold by its terminal frame, and
+   * nothing is done here.
    */
   private async judgeHeldRequest(held: OpenCodeHeldRequest, raw: unknown): Promise<void> {
     const requestId = held.request.id;
