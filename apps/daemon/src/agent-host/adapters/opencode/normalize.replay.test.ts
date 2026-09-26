@@ -1419,6 +1419,99 @@ test("no result after a run the child's own session.error ended", () => {
   assert.deepEqual(taskRows(feed(run, [...resume.settle, resume.completed]).flat()), []);
 });
 
+/** A session's `busy`, as its runner says it at the top of a step. */
+function busyOf(sessionId: string): OpenCodeRawEvent {
+  return { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } };
+}
+
+/**
+ * A launch's `task` part as 1.18.32's processor closes it when an abort cuts
+ * the call: `error` "Tool execution aborted", `metadata.interrupted: true`
+ * (fixtures README observation 29, read from the source).
+ */
+function abortedCall(frame: OpenCodeRawEvent): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: Record<string, unknown> } };
+  };
+  const state = copy.properties.part.state;
+  state.status = "error";
+  state.error = "Tool execution aborted";
+  state.metadata = { ...(state.metadata as Record<string, unknown>), interrupted: true };
+  return copy as unknown as OpenCodeRawEvent;
+}
+
+test("a child an abort cancels ends stopped, never failed, when its own abort error or its call's cleanup beats the adapter's close — a grandchild too", async () => {
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+
+  // Its own `MessageAbortedError`.
+  {
+    const run = liveSession("ses_parent");
+    const launched = feed(run, [
+      ...childLaunch({ sessionId: "ses_parent", childId: "ses_child", callId: "call_child", description: "list files", background: false }),
+      busyOf("ses_child")
+    ]).flat();
+    const ended = feed(run, [
+      { type: "session.error", properties: { sessionID: "ses_child", error: { name: "MessageAbortedError", data: { message: "Aborted" } } } }
+    ]).flat();
+    assert.deepEqual(eventsOfType(ended, "task.completed").map((event) => event.payload.status), ["stopped"]);
+    assert.deepEqual(closeLiveChildAgents(run.state, run.ctx, "interrupted"), [], "ended already");
+    const { roster } = await throughHost([live, ...launched, ...ended]);
+    assert.equal(roster.find((row) => row.id === "ses_child")?.status, "interrupted");
+  }
+
+  // Its launching call's cleanup — the child's in the parent's session, and a
+  // grandchild's in the child's own.
+  {
+    const run = liveSession("ses_parent");
+    const [created, running] = childLaunch({ sessionId: "ses_parent", childId: "ses_child", callId: "call_child", description: "list files", background: false });
+    const [gcCreated, gcRunning] = childLaunch({ sessionId: "ses_child", childId: "ses_gc", callId: "call_gc", description: "dig deeper", background: false });
+    assert.ok(created && running && gcCreated && gcRunning);
+    const launched = feed(run, [created, running, busyOf("ses_child"), gcCreated, gcRunning, busyOf("ses_gc")]).flat();
+    assert.deepEqual(eventsOfType(launched, "task.started").map((event) => event.payload.taskId), ["ses_child", "ses_gc"]);
+    const ended = feed(run, [abortedCall(gcRunning), abortedCall(running)]).flat();
+    assert.deepEqual(
+      eventsOfType(ended, "task.completed").map((event) => [event.payload.taskId, event.payload.status, event.payload.summary]),
+      [
+        ["ses_gc", "stopped", "Tool execution aborted"],
+        ["ses_child", "stopped", "Tool execution aborted"]
+      ]
+    );
+    const { roster } = await throughHost([live, ...launched, ...ended]);
+    assert.deepEqual(
+      ["ses_child", "ses_gc"].map((id) => roster.find((row) => row.id === id)?.status),
+      ["interrupted", "interrupted"]
+    );
+    // The cleanup is the parent's word on its call, not the child's on its
+    // run — a job the abort did not reach runs on: a report that it runs is
+    // judged, as after the adapter's own close.
+    const reported = normalizeOpenCodeEvent(run.state, busyOf("ses_child"), run.ctx).signals;
+    assert.deepEqual(reported.map((signal) => signal.kind), ["child-reports-run"]);
+  }
+
+  // A call that fails on its own — no abort's mark — still fails the run, on
+  // the provider's word: nothing for a later report to undo.
+  {
+    const run = liveSession("ses_parent");
+    const [created, running] = childLaunch({ sessionId: "ses_parent", childId: "ses_child", callId: "call_child", description: "list files", background: false });
+    assert.ok(created && running);
+    feed(run, [created, running, busyOf("ses_child")]);
+    const ended = feed(run, [erroredPart(running, "the subagent crashed")]).flat();
+    assert.deepEqual(
+      eventsOfType(ended, "task.completed").map((event) => [event.payload.status, event.payload.summary]),
+      [["failed", "the subagent crashed"]]
+    );
+    assert.deepEqual(normalizeOpenCodeEvent(run.state, busyOf("ses_child"), run.ctx).signals, []);
+  }
+});
+
 test("no result after a run the host stopped", () => {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-resume";

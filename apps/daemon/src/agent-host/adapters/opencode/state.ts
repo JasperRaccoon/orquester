@@ -534,10 +534,12 @@ export interface OpenCodeChildAgent {
    */
   answersInBackground?: boolean;
   /**
-   * The run's end was the adapter's own (`closeLiveChildAgents`: a Stop, a
-   * failed admission's abort, a failed turn), not the provider's word: a
-   * report that the run goes on may relaunch it (`reportChildRun`). Cleared
-   * by that relaunch and by the provider's.
+   * The run's end was the adapter's judgement, not the child's own word: its
+   * own close (`closeLiveChildAgents`: a Stop, a failed admission's abort, a
+   * failed turn) or its launching call cut by an abort (`metadata.interrupted`
+   * on the `task` part — the parent's word on its call, which a job the abort
+   * did not reach outlives). A report that the run goes on may relaunch it
+   * (`reportChildRun`). Cleared by that relaunch and by the provider's.
    */
   endedByAdapter?: boolean;
   /**

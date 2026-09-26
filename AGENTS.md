@@ -1236,7 +1236,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   a reject on the wire, and no row when it closes. A read that fails shows the card: a reject would
   answer for the user, and 1.18.32's `Permission.reply` rejects every other ask of that session with
   it. (7) A child the adapter closed itself (a Stop, a failed admission's abort, a failed turn:
-  `closeLiveChildAgents` marks `endedByAdapter`) that runs on — a `task_id` extension's child, a job
+  `closeLiveChildAgents` marks `endedByAdapter`, as does its launching call's abort cleanup
+  (`interrupted: true`, the parent's word on its call) — which, like the child's own abort error,
+  ends the run `stopped`, never `failed`) that runs on — a `task_id` extension's child, a job
   started after the abort listed the jobs — read "interrupted" and held no drain while it worked. An
   end the adapter wrote is not the provider's word: a report of a live run (the child's `busy`, a
   delta, a text part with no end, a running call, a reply not completed) asks the server once the

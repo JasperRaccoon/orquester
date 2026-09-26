@@ -1980,6 +1980,55 @@ function nextTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+test("a child whose abort frames beat the Stop's own close ends stopped — its own abort error, or its call's cleanup — never failed", async () => {
+  for (const first of ["its abort error", "its call's cleanup"] as const) {
+    const harness = makeHarness();
+    const session = await startSession(harness);
+    const sessionId = session.sessionId;
+    const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+    const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
+      messageID: string;
+    }).messageID;
+    const [created, running] = childLaunch({ sessionId, childId: "ses_fg", callId: "call_fg", description: "list files", background: false });
+    assert.ok(created && running);
+    pushAll(harness.fake, [
+      { type: "message.updated", properties: { sessionID: sessionId, info: { id: promptId, role: "user", sessionID: sessionId } } },
+      { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+      created,
+      running,
+      { type: "session.status", properties: { sessionID: "ses_fg", status: { type: "busy" } } }
+    ]);
+    await waitFor(harness, "task.started", (event) => event.agentId === "ses_fg");
+
+    // The server cancels the child while it answers the abort: its frame
+    // reaches the stream before the Stop closes anything.
+    const cut = JSON.parse(JSON.stringify(running)) as { properties: { part: { state: Record<string, unknown> } } };
+    cut.properties.part.state = {
+      ...cut.properties.part.state,
+      status: "error",
+      error: "Tool execution aborted",
+      metadata: { ...(cut.properties.part.state.metadata as Record<string, unknown>), interrupted: true }
+    };
+    harness.fake.overrides.set(`POST /session/${sessionId}/abort`, async () => {
+      harness.fake.push(
+        first === "its abort error"
+          ? { type: "session.error", properties: { sessionID: "ses_fg", error: { name: "MessageAbortedError", data: { message: "Aborted" } } } }
+          : cut
+      );
+      await drainedWith(harness, sessionId, "during the abort");
+      return json(true);
+    });
+    await session.interruptTurn(turn.turnId);
+    assert.deepEqual(
+      taskEnds(harness.events),
+      [first === "its abort error" ? "ses_fg:stopped:Aborted" : "ses_fg:stopped:Tool execution aborted"],
+      `${first}: one end, stopped — the Stop's close found it ended`
+    );
+    await session.stop({ reason: "test", hostInitiated: true });
+    harness.dispose();
+  }
+});
+
 test("a background child outlives its launching turn's failure — running in the roster and in liveness — and ends by its own idle and answer", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);

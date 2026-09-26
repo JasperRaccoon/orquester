@@ -979,6 +979,14 @@ before its parent's cancel goes on. So nothing a stopped run wrote follows its s
 and a `busy` after that idle is a new run's — the boundary the adapter ends a Stop's leftovers at
 (observation 27).
 
+A cancelled child's frames can reach the stream before the adapter's own close: its
+`MessageAbortedError`, or its launching call's cleanup (`error` "Tool execution aborted",
+`interrupted: true` — a grandchild's call is its child's). Neither fails the run: both end it
+`stopped`, which the roster reads `interrupted`, as after the adapter's close — they used to read
+`failed`. The child's own abort error is its word on its run. The call's cleanup is only the
+parent's word on its call, which a job the abort did not reach outlives, so it ends the run as the
+adapter's close does: a report that the run goes on is judged the same way.
+
 An asker it interrupts leaves nothing behind: `Permission.ask` and `Question.ask` await their
 answer under `ensuring`, which deletes the request from the pending list, and nothing is
 published — no `permission.replied`, no `question.rejected`. After the abort, `GET /permission`

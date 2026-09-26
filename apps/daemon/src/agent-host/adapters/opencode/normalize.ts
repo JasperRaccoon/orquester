@@ -1469,15 +1469,26 @@ function linkChildFromTaskPart(
     }
     const text =
       part.state.status === "completed" ? taskResultText(part.state.output) : part.state.error;
+    // A call an abort cut (`metadata.interrupted`: 1.18.32's cleanup closes
+    // every open call "Tool execution aborted") stopped the run, it did not
+    // fail it. And that is the parent's word on its call, not the child's on
+    // its run — a job the abort did not reach runs on — so it is an end like
+    // the adapter's own close, which a report that the run goes on may undo
+    // (`reportChildRun`), whichever of the two came first.
+    const cut = part.state.status === "error" && metadata?.interrupted === true;
     if (!agent.completed) {
       emitTaskCompleted(
         state,
         agent,
-        part.state.status === "completed" ? "completed" : "failed",
+        part.state.status === "completed" ? "completed" : cut ? "stopped" : "failed",
         raw,
         out,
         text
       );
+      if (cut) {
+        agent.endedByAdapter = true;
+        agent.survivalCheck = undefined;
+      }
       return;
     }
     // The child's own idle ended the run first (fixture 12, lines 179-180):
@@ -1708,13 +1719,17 @@ function demuxChild(
 
     case "session.error": {
       const agent = ensureChildAgent(state, childSessionId);
+      const error = event.properties.error;
+      // An abort stops a run, it does not fail it — a Stop's abort reaching
+      // the child before the adapter's own close (`closeLiveChildAgents`)
+      // included: the roster reads `interrupted`, as after that close.
       emitTaskCompleted(
         state,
         agent,
-        "failed",
+        isAbortError(error) ? "stopped" : "failed",
         raw,
         out,
-        sessionErrorMessage(event.properties.error)
+        sessionErrorMessage(error)
       );
       return;
     }
