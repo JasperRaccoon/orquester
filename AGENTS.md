@@ -1428,18 +1428,20 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   that fails stops its CLI now too: a `session/load` the CLI refused (a cursor it no longer knows)
   left it running outside the adapter's map, holding its pipes. It adds no row of its own either:
   the start's rejection is its whole report, which the host writes — an exit row besides it read as
-  a crash of a session that never ran (`GrokSession.announced`). A work process whose shell had
-  exited before the stop is in no recorded session and stays running; a process that scrubs its
-  environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills nothing: its `session/cancel`
-  leaves the CLI — which owns them — running (fixture 21). Linux-only (`/proc`); elsewhere the sweep
-  reads and signals nothing. **Settings → System reads the same marker**: a process of the daemon's
-  own uid that no root reaches, whose parent is init (or gone) and that carries any launch's marker
-  is a root of its own — listed under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill
-  target (`launchedOrphans` in `system-status.ts`), what it started coming with it as its
-  descendants — so the work a session end left running, and whatever a crashed host never swept, is
-  in reach. A marked process whose parent still runs outside every root is that parent's, never a
-  root: no marker makes it ours. Every adapter's launches carry the marker (next bullet); only
-  Grok's sweep by it.
+  a crash of a session that never ran (`GrokSession.announced`) — and a CLI that ends after
+  `session/new` answered but before the session is announced (on the open's `session/set_model`,
+  say) fails the open with its exit rather than being announced ready, dead. A work process whose
+  shell had exited before the stop is in no recorded session and stays running; a process that
+  scrubs its environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills nothing: its
+  `session/cancel` leaves the CLI — which owns them — running (fixture 21). Linux-only (`/proc`);
+  elsewhere the sweep reads and signals nothing. **Settings → System reads the same marker**: a
+  process of the daemon's own uid that no root reaches, whose parent is init (or gone) and that
+  carries any launch's marker is a root of its own — listed under the chat its
+  `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in `system-status.ts`),
+  what it started coming with it as its descendants — so the work a session end left running, and
+  whatever a crashed host never swept, is in reach. A marked process whose parent still runs outside
+  every root is that parent's, never a root: no marker makes it ours. Every adapter's launches carry
+  the marker (next bullet); only Grok's sweep by it.
 - **Every provider launch carries a launch marker; only the Grok adapter sweeps by it.** The host's
   `buildEnv` (`agent-host/main.ts`) stamps `ORQUESTER_AGENT_LAUNCH` on every provider child's
   environment through `buildProviderEnv`'s required `launchId` — one `randomUUID()` per call, and

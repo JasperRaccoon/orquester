@@ -251,6 +251,11 @@ function handle(frame) {
     return;
   }
   if (method === "session/set_model") {
+    if (scenario === "exit-on-set-model") {
+      // The CLI dying after its session opened and before the adapter has
+      // announced it: the set_model RPC is never answered.
+      process.exit(3);
+    }
     if (params.modelId === "grok-build" || params.modelId === "nope") {
       send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid params", data: "unknown model id" } });
       return;

@@ -219,6 +219,34 @@ function lifecycleRows(events: readonly RuntimeEvent[]): string[] {
     .map((event) => event.type);
 }
 
+test("a CLI that dies after its session opened but before it was announced fails the open — never announced ready", async () => {
+  const r = await rig({ scenario: "exit-on-set-model" });
+  try {
+    await assert.rejects(
+      async () =>
+        await r.adapter.startSession({
+          threadId: "t1",
+          cwd: r.cwd,
+          home: home(r.cwd),
+          // Not the CLI's current model: the open's last step, `session/set_model`, is what the CLI dies on.
+          modelSelection: { model: "grok-4.7" },
+          runtimeMode: "approval-required"
+        }),
+      /exited with code 3 before its session opened/
+    );
+    await r.drain();
+    assert.equal(r.adapter.hasSession("t1"), false);
+    assert.deepEqual(lifecycleRows(r.events), [], "no session.started, no ready — and no crash row beside the rejection");
+    assert.deepEqual(
+      r.events.filter((event) => event.type === "runtime.warning").map((event) => event.payload.message),
+      [],
+      "and no model-switch warning from a CLI that is gone"
+    );
+  } finally {
+    await r.dispose();
+  }
+});
+
 test("a session that fails to open reports nothing of its own: its start's rejection is the report", async () => {
   const cases = [
     { label: "the version gate", rig: { version: "0.9.0" }, cursor: undefined, error: /0\.9\.0 is too old/ },

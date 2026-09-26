@@ -32,7 +32,7 @@ import {
   type RecordedSession
 } from "../../support/leftover-processes.ts";
 import type { ChildExitReason } from "../../support/spawn.ts";
-import { exitOutcome } from "../../support/spawn.ts";
+import { describeExit, exitOutcome } from "../../support/spawn.ts";
 import type { ClassifiedStderrLine } from "../../support/stderr.ts";
 import { appendAttachmentPathLines } from "../attachment-lines.ts";
 import { AcpConnection } from "./acp/connection.ts";
@@ -284,6 +284,8 @@ export class GrokSession {
    * the host writes, and its CLI's exit adds no row ({@link onExit}).
    */
   private announced = false;
+  /** How the CLI ended while its session was still opening — the open's rejection names it. */
+  private exitBeforeOpen: { reason: ChildExitReason; stderrTail: string } | null = null;
   /** The self-resolved-approvals advisory is said once per session. */
   private selfResolveAdvised = false;
   /** `<server>\u0000<status>` of every MCP failure already reported, until the server is ready again. */
@@ -494,6 +496,13 @@ export class GrokSession {
 
     await this.applyModelSelection(this.options.modelSelection);
 
+    if (this.stopped) {
+      // The CLI ended while its session was still opening — after
+      // `session/new` answered, on the `session/set_model` above, say: its
+      // exit wrote no row ({@link onExit}), so this rejection is the whole
+      // report. Announcing it ready would hand the host a dead session.
+      throw new Error(this.openAbortedMessage());
+    }
     this.status = "ready";
     this.touch();
     this.announced = true;
@@ -1464,6 +1473,11 @@ export class GrokSession {
         this.currentReasoningEffort = update.meta.reasoningEffort;
       }
     } catch (error) {
+      if (this.stopped) {
+        // The CLI is gone: its exit (or an open's rejection) is the report,
+        // not a model it could not switch to.
+        return;
+      }
       // A rejected model must not fail the turn: the session keeps the model
       // it has and the user is told which one it is — once.
       if (error instanceof AcpRpcError && error.code === ACP_ERROR_CODES.invalidParams) {
@@ -1511,6 +1525,7 @@ export class GrokSession {
       // is the whole report — the host writes it. An exit row here read as a
       // crash of a session that never ran. Nothing can be open yet: no turn,
       // no card, no task.
+      this.exitBeforeOpen = { reason, stderrTail };
       this.stopped = true;
       void this.stopLeftovers();
       this.options.onClosed?.(this.threadId);
@@ -1644,6 +1659,16 @@ export class GrokSession {
         ...(excerpt.length === 0 ? {} : { detail: excerpt })
       })
     );
+  }
+
+  /** Why an open ended before its session was announced: the CLI's exit, or the host's stop. */
+  private openAbortedMessage(): string {
+    const exit = this.exitBeforeOpen;
+    if (exit === null || this.hostInitiatedStop) {
+      return "grok: the session was stopped before it opened";
+    }
+    const tail = exit.stderrTail.trim();
+    return `The agent process ${describeExit(exit.reason)} before its session opened.${tail.length > 0 ? `\n${tail}` : ""}`;
   }
 
   /**
