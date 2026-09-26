@@ -1417,10 +1417,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills nothing: its `session/cancel`
   leaves the CLI — which owns them — running (fixture 21). Linux-only (`/proc`); elsewhere the sweep
   reads and signals nothing. **Settings → System reads the same marker**: a process of the daemon's
-  own uid that no root reaches but that carries any launch's marker is a root of its own — listed
-  under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in
-  `system-status.ts`) — so the work a session end left running, and whatever a crashed host never
-  swept, is in reach. Only Grok launches carry the marker today.
+  own uid that no root reaches, whose parent is init (or gone) and that carries any launch's marker
+  is a root of its own — listed under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill
+  target (`launchedOrphans` in `system-status.ts`), what it started coming with it as its
+  descendants — so the work a session end left running, and whatever a crashed host never swept, is
+  in reach. A marked process whose parent still runs outside every root is that parent's, never a
+  root: no marker makes it ours. Only Grok launches carry the marker today.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission

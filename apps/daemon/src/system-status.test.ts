@@ -500,6 +500,40 @@ test("a process carrying the agent host's launch marker is managed even as an or
   }
 });
 
+test("a marked process whose parent still runs outside every root is no orphan: never listed, never killable", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) {
+    return;
+  }
+  // Only a process init adopted — or whose parent is gone — is what a provider
+  // CLI left behind; what such an orphan started comes with it, as a
+  // descendant. A marked process whose parent is alive and none of ours (here
+  // an unmarked shell that set the marker on its child by hand) is that
+  // parent's, and no marker makes it ours.
+  const { pids, gone } = await orphaned(
+    `setsid sh -c '${AGENT_LAUNCH_ENV_VAR}=${randomUUID()} ORQUESTER_SESSION_ID=chat-1 sleep 30 & echo "$$ $!"; wait' &`,
+    unmarkedEnv()
+  );
+  const [parent, marked] = pids as [number, number];
+  try {
+    const status = service({ listSessionIds: () => new Set(["chat-1"]) });
+    const listed = (await status.processes()).processes;
+    assert.equal(listed.find((row) => row.pid === marked), undefined, "the marked child is not listed");
+    assert.equal(listed.find((row) => row.pid === parent), undefined, "nor is its unmarked parent");
+    const refused = await status.kill(marked);
+    assert.equal(refused.ok === false && refused.code, "PROCESS_NOT_MANAGED");
+    assert.doesNotThrow(() => process.kill(marked, 0), "a refused kill signalled nothing");
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    await allGone(gone, "the test's own processes exiting");
+  }
+});
+
 test("kill() refuses a protectedPids entry, directly and inside a subtree", async () => {
   if (!SYSTEM_STATUS_SUPPORTED) {
     return;

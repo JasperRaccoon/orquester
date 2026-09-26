@@ -905,18 +905,22 @@ export class SystemStatusService {
 }
 
 /**
- * The orphans a provider CLI left behind, as extra roots: every process of
- * ours OUTSIDE the tree whose environment carries the agent host's launch
- * marker ({@link launchMarkerOf}), labelled with its chat when the daemon
- * knows it. The Grok CLI starts its background shells and MCP servers in
- * sessions of their own, so they outlive it reparented to init; the host stops
- * its MCP servers at every session end but the work its agent started only
- * when the user ends the session — a deploy must never kill running work — so
- * a dev server runs on here by design, and a host that crashed swept nothing
- * (Grok fixtures README observation 48). A parent chain is gone once a process
- * is orphaned — its environment is not. Only processes of this daemon's own
- * uid are read (another user's environment is not ours to read, and nothing
- * of theirs is ours to kill), and only those no root already reaches.
+ * The orphans a provider CLI left behind, as extra roots: every process of ours
+ * OUTSIDE the tree whose parent is init — or gone — and whose environment
+ * carries the agent host's launch marker ({@link launchMarkerOf}), labelled
+ * with its chat when the daemon knows it. What an orphan started comes with it
+ * as its descendant ({@link collectTree}), never as a root of its own; and a
+ * marked process whose parent still runs outside every root is that parent's —
+ * no marker makes it ours. The Grok CLI starts its background shells and MCP
+ * servers in sessions of their own, so they outlive it reparented to init; the
+ * host stops its MCP servers at every session end but the work its agent
+ * started only when the user ends the session — a deploy must never kill
+ * running work — so a dev server runs on here by design, and a host that
+ * crashed swept nothing (Grok fixtures README observation 48). A parent chain
+ * is gone once a process is orphaned — its environment is not. Only processes
+ * of this daemon's own uid are read (another user's environment is not ours to
+ * read, and nothing of theirs is ours to kill), and only those no root already
+ * reaches.
  */
 async function launchedOrphans(
   procs: Map<number, ProcSnapshot>,
@@ -925,7 +929,11 @@ async function launchedOrphans(
 ): Promise<Map<number, string | undefined>> {
   const uid = process.getuid?.();
   const candidates = [...procs.values()].filter(
-    (proc) => !tree.has(proc.pid) && proc.pid > 1 && (uid === undefined || proc.uid === uid)
+    (proc) =>
+      !tree.has(proc.pid) &&
+      proc.pid > 1 &&
+      (proc.ppid === 1 || !procs.has(proc.ppid)) &&
+      (uid === undefined || proc.uid === uid)
   );
   const markers = await mapLimited(candidates, PROC_READ_CONCURRENCY, async (proc) => {
     // latin1: an environment is bytes; the marker is ASCII and must not hide
