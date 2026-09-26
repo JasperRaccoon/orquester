@@ -18,9 +18,10 @@
  *    is inert: there is no revert, no approval and no queue inside a child.
  *    Navigation and reads are no commands, and pass the parent's own handlers
  *    through (`drill-in-callbacks.ts`): opening a file a child's words link to
- *    (`onOpenFile`), and reading a call's whole output in the parent's viewer
+ *    (`onOpenFile`), reading a call's whole output in the parent's viewer
  *    (`onLoadFullOutput`) — an agent's window keeps 200 rows, and a long
- *    command's output outlives them.
+ *    command's output outlives them — and opening an agent the child launched
+ *    from its spawn row (`onOpenAgent`), which switches this view to it.
  *
  * §7.2's rule holds on the way in: items stamped with an `agentId` never
  * render in the parent timeline, they are re-homed here. **Both halves come
@@ -89,7 +90,8 @@ export function AgentDrillIn({
   roster,
   projectPath,
   onLoadFullOutput,
-  onOpenFile
+  onOpenFile,
+  onOpenAgent
 }: AgentDrillInProps): React.ReactElement {
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
   // Live-follow for the child's own list (§7.3): armed on entry, disarmed by
@@ -189,8 +191,8 @@ export function AgentDrillIn({
 
   // Navigation and reads are the host's; every command is inert (§7.6).
   const callbacks = React.useMemo(
-    () => drillInTimelineCallbacks({ onOpenFile, onLoadFullOutput }),
-    [onOpenFile, onLoadFullOutput]
+    () => drillInTimelineCallbacks({ onOpenFile, onLoadFullOutput, onOpenAgent }),
+    [onOpenFile, onLoadFullOutput, onOpenAgent]
   );
 
   const visuals = agent ? rosterRowVisual(agent) : null;

@@ -755,6 +755,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               bottomInset={bottomInset}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
               onOpenFile={paintOnly ? noop : openFile}
+              // A nested spawn row's member: switch the drill-in to it.
+              onOpenAgent={paintOnly ? noop : setDrillInAgentId}
             />
           ) : (
             <ChatTimeline

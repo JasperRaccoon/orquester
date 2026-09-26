@@ -467,14 +467,23 @@ export const WorkRow = React.memo(function WorkRow({ row }: { row: Row<"work"> }
   );
   return (
     <div className={row.isExpandedToolGroup ? "ms-7 flex flex-col" : "flex flex-col"}>
-      {entries.map((entry) => (
-        <ToolEntryRow
-          key={entry.id}
-          entry={entry}
-          insideExpandedGroup={row.isExpandedToolGroup}
-          displayLabel={entries.length === 1 ? row.displayLabel : undefined}
-        />
-      ))}
+      {entries.map((entry) =>
+        // A spawn batch is its spawn row in every state — "Kicked off …" while
+        // a member works, "Ran …" once all are done, its members one click
+        // from their drill-ins — never a plain tool row labelled with the
+        // first agent's description (§7.6). *T3: `SimpleWorkEntryRow`,
+        // `MessagesTimeline.tsx:4701-4711`, active unless inside a group.*
+        entry.agentSpawn ? (
+          <AgentSpawnRow key={entry.id} entry={entry} active={!row.isExpandedToolGroup} />
+        ) : (
+          <ToolEntryRow
+            key={entry.id}
+            entry={entry}
+            insideExpandedGroup={row.isExpandedToolGroup}
+            displayLabel={entries.length === 1 ? row.displayLabel : undefined}
+          />
+        )
+      )}
     </div>
   );
 });
@@ -745,7 +754,11 @@ const MEMBER_STATUS_LABEL: Record<RuntimeSubagent["status"], string> = {
 };
 
 /**
- * One row per spawn batch.
+ * One row per spawn batch, in every state: the running turn's live row
+ * (`WorkLiveRow`) and a settled turn's hoisted row (`WorkRow`) alike — "Kicked
+ * off 3 subagents" while a member works, "Ran 3 subagents" once all are done,
+ * each member one click from its drill-in (in a child's drill-in too, which
+ * switches to it).
  *
  * **The row stores only ids** — the batch's `workflowId` and its member task
  * ids — and resolves its label, live flag and member list from the roster **at

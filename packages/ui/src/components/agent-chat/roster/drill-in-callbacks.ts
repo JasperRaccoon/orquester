@@ -3,8 +3,9 @@
  *
  * "The child view dispatches no commands": no rewind, no approval, no queue
  * inside a child — each of those callbacks is inert here. Navigation and
- * reads are no commands, though: opening a file a child's words link to, and
- * reading a call's whole output in the parent's viewer, pass the host's own
+ * reads are no commands, though: opening a file a child's words link to,
+ * reading a call's whole output in the parent's viewer, and opening an agent
+ * the child launched (a nested spawn row's member) pass the host's own
  * handlers through, as the thread's timeline has them. One table, pure, so
  * the rule is tested rather than spread over a component's props.
  */
@@ -17,6 +18,8 @@ export interface DrillInTimelineHost {
   onOpenFile?: ChatTimelineProps["onOpenFile"] | undefined;
   /** The parent's full-output viewer: a read, not a command. */
   onLoadFullOutput?: ChatTimelineProps["onLoadFullOutput"] | undefined;
+  /** Switch the drill-in to another agent — a nested spawn row's member. */
+  onOpenAgent?: ChatTimelineProps["onOpenAgent"] | undefined;
 }
 
 /** The callbacks a drill-in's `ChatTimeline` takes. */
@@ -46,7 +49,7 @@ export function drillInTimelineCallbacks(host: DrillInTimelineHost): DrillInTime
     onOpenTurnDiff: inert,
     onOpenFile: host.onOpenFile ?? inert,
     onLoadFullOutput: host.onLoadFullOutput ?? inert,
-    onOpenAgent: inert,
+    onOpenAgent: host.onOpenAgent ?? inert,
     onSendQueuedNow: inert,
     onReturnQueuedToComposer: inert
   };

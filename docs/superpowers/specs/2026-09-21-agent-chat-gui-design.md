@@ -4277,6 +4277,12 @@ The timeline's spawn row stores only ids — the batch's `workflowId` and its me
 resolves its label, live flag and member list from the roster model at render time. Persisting a
 count in the row would go stale the moment a member finishes.
 *T3: `apps/web/src/session-logic.ts:85-94` — `agentSpawn: {workflowId, agentTaskIds}` and the "derives its live status and member list from the agent panel model at render time" comment; `apps/web/src/components/chat/MessagesTimeline.tsx:4594-4664` — `AgentSpawnRow` re-resolving against the panel model each render; `apps/web/src/components/chat/agentSpawnSummary.ts:8-64` — `deriveAgentSpawnSummary`: "Kicked off 3 subagents" live, "Ran 3 subagents" settled, and a status of `N working` / `N failed` / `N idle` / `Status unavailable` / `✓ completed` that never reads a missing agent as completed*
+*Built (2026-09-27): the spawn row renders every batch, in both states and both views — the running
+turn's live row (`WorkLiveRow`) and a settled turn's hoisted row (`WorkRow`) alike, as T3's
+`SimpleWorkEntryRow` renders `AgentSpawnRow` for every entry carrying `agentSpawn`
+(`MessagesTimeline.tsx:4701-4711`). The port had brought only the live half, so a settled batch read
+as a plain tool row labelled with its first agent's description, with no members to open. Inside a
+child's drill-in a nested batch's member opens that agent's drill-in (navigation, not a command).*
 
 Rows past five collapse behind "N more", and finished rows fade and disappear when the turn ends —
 except a live background row, which is exempt from both: it is always rendered, it does not count

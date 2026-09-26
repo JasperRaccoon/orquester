@@ -259,5 +259,23 @@ const settled = render({ sessionId: settledSession, agentId: AGENT, roster: [set
 assert.ok(!settled.includes('data-timeline-row-kind="working"'), "a settled agent is not working");
 assert.ok(!settled.includes('data-timeline-row-kind="work-live"'));
 
+// ---------------------------------------------------------------------------
+// A nested agent: the outer agent's drill-in lists it as a spawn row
+// ---------------------------------------------------------------------------
+
+// Claude stamps a launched task with its OWNER: the inner agent's start is the
+// outer agent's row, so it is the outer drill-in's spawn row.
+const innerLaunch = wireActivity(
+  "task.started",
+  { taskId: "agent-inner", agentKind: "agent", taskType: "subagent", toolUseId: "call-spawn", title: "Read the tests" },
+  { agentId: AGENT, id: "inner-launch", tone: "info" }
+);
+const outer = rosterRow(AGENT, { title: "Run the suite", status: "completed" });
+const inner = rosterRow("agent-inner", { title: "Read the tests", status: "completed" });
+const nestedSession = await seededThread({ items: [innerLaunch], roster: [outer, inner] });
+const nested = render({ sessionId: nestedSession, agentId: AGENT, roster: [outer, inner], bottomInset: 0, onBack: NOOP });
+assert.ok(nested.includes("Ran 1 subagent"), `the settled batch is a spawn row: ${nested}`);
+assert.ok(nested.includes("✓ completed"));
+
 resetThreadStores();
 console.log("agent-chat drill-in render checks passed");

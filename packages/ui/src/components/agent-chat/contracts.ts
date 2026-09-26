@@ -395,6 +395,14 @@ export interface AgentDrillInProps {
    * *Added with the drill-in fixes (2026-09-27).*
    */
   onOpenFile?: ((path: string) => void) | undefined;
+  /**
+   * Switch the drill-in to another agent: a spawn row inside a child — an
+   * agent that launched its own — lists its members, and opening one is
+   * navigation, as the roster's rows are. Absent means inert.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  onOpenAgent?: ((agentId: string) => void) | undefined;
 }
 
 export interface ChatStatusLineProps {
