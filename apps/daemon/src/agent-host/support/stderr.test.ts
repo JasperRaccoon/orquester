@@ -23,6 +23,25 @@ test("redaction collapses home paths, longest first", () => {
   assert.equal(out, "read ~/creds");
 });
 
+test("redaction collapses a percent-encoded home too, in either hex case", () => {
+  // Grok keys its session dirs by the URL-encoded cwd, and its task snapshots
+  // name files there (the Grok fixtures README, redaction).
+  const out = redactStderr(
+    "tail /var/lib/orq/.grok/sessions/%2Fvar%2Flib%2Forq%2Fwork/a.log and %2fvar%2flib%2forq%2fwork",
+    { homeDirs: ["/var/lib/orq"] }
+  );
+  assert.equal(out, "tail ~/.grok/sessions/~%2Fwork/a.log and ~%2fwork");
+  // A dir that encodes to itself adds no second pass, and regex characters in
+  // a home are literal.
+  assert.equal(redactStderr("x %2Fa.b%2Fc", { homeDirs: ["/a.b"] }), "x ~%2Fc");
+  assert.equal(redactStderr("x %2FaXb%2Fc", { homeDirs: ["/a.b"] }), "x %2FaXb%2Fc");
+  // The compiled pattern is kept per dir (the redactor runs on every string
+  // of every raw frame): a second call, a longer value, a match at its end.
+  for (const value of ["y %2Fa.b", "a much longer line that ends %2Fa.b", "y %2Fa.b"]) {
+    assert.equal(redactStderr(value, { homeDirs: ["/a.b"] }), value.replace("%2Fa.b", "~"));
+  }
+});
+
 test("redaction masks auth headers, bearer values and token shapes", () => {
   assert.equal(
     redactStderr("Authorization: Bearer abc.def-ghi"),

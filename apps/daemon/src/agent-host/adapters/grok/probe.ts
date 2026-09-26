@@ -61,9 +61,15 @@ export const COMPACT_SLASH_COMMAND: SlashCommand = {
 };
 
 /**
- * The bundled fallback catalog for the §3.2 pending snapshot — the two model
- * families `grok models` printed on every capture host, so a never-probed Grok
- * row is still launchable.
+ * The bundled fallback catalog for the §3.2 pending snapshot, so a
+ * never-probed Grok row is still launchable: the catalogue the newest captured
+ * CLI advertised in its `initialize` (grok 1.0.34 on 2026-09-25, fixtures
+ * 15–23 — `pending.test.ts` holds the two equal), default included. An older
+ * CLI knew only `grok-4.6` (then the default) and `grok-4.5` (fixture 01,
+ * `12-cli-text/`); a chat launched on this seed there asks for `grok-4.7` at
+ * its start and with every turn, which the CLI refuses: the session warns once
+ * and remembers the refusal (`applyModelSelection`), and the CLI keeps its own
+ * default. The first probe replaces this list wholesale.
  *
  * *T3: `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640` — a pending
  * provider carries its bundled catalog, not an empty list.*
@@ -74,7 +80,9 @@ export const COMPACT_SLASH_COMMAND: SlashCommand = {
  * the `grok` CLI itself accepts. The live probe replaces this list wholesale.
  */
 export const FALLBACK_GROK_MODELS: readonly ProviderModel[] = [
-  { slug: "grok-4.6", name: "Grok 4.6", isDefault: true, capabilities: null },
+  { slug: "grok-4.7", name: "Grok 4.7", isDefault: true, capabilities: null },
+  { slug: "grok-4.7-build-fast", name: "Grok 4.7 Fast", capabilities: null },
+  { slug: "grok-4.6", name: "Grok 4.6", capabilities: null },
   { slug: "grok-4.5", name: "Grok 4.5", capabilities: null }
 ];
 
@@ -159,6 +167,8 @@ export async function runCommand(
 // ---------------------------------------------------------------------------
 
 /**
+ * As recorded in `12-cli-text/` (an older CLI, whose default was `grok-4.6`):
+ *
  * ```
  * You are logged in with grok.com.
  *

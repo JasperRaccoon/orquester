@@ -32,10 +32,10 @@
  *    `"unknown"` is its closest.
  * 3. **The best catalog it can give without probing.** A pending snapshot with
  *    no model is still unlaunchable, which is most of the bug. Claude ships a
- *    bundled fallback catalog; Grok a two-model one; Codex and OpenCode
- *    enumerate nothing statically (both read their catalog from a live server)
- *    and answer `[]` — for them the boot probe of layer three, not the pending
- *    seed, is what closes the window.
+ *    bundled fallback catalog; Grok the one its CLI last advertised; Codex
+ *    and OpenCode enumerate nothing statically (both read their catalog from
+ *    a live server) and answer `[]` — for them the boot probe of layer three,
+ *    not the pending seed, is what closes the window.
  */
 
 /** The sentence's invariant tail — the part that does not vary by provider. */

@@ -75,6 +75,15 @@ export interface AcpPeerOptions {
   onWarning?(message: string, detail?: unknown): void;
   /** Default per-request deadline. Individual calls may override it. */
   defaultTimeoutMs?: number;
+  /**
+   * Ids the AGENT gives requests it sends itself and then answers on our
+   * stdout — Grok's `skills-reload` / `workflows-reload`, a subagent's child
+   * session reloading its skills (fixture 15). A reply carrying one is the
+   * agent's own traffic: it answers nothing of ours (this peer mints numeric
+   * ids only), so it is dropped — already logged raw by `onFrame` — instead
+   * of warned about as a reply to nothing.
+   */
+  agentOwnReplyIds?: ReadonlySet<string>;
 }
 
 interface PendingRequest {
@@ -365,6 +374,9 @@ export class AcpPeer {
     const id = typeof frame.id === "number" ? frame.id : Number(frame.id);
     const entry = Number.isFinite(id) ? this.pending.get(id) : undefined;
     if (entry === undefined) {
+      if (typeof frame.id === "string" && this.options.agentOwnReplyIds?.has(frame.id) === true) {
+        return;
+      }
       // A reply to a request whose deadline already expired, or one we never
       // sent. Neither is fatal; both must be visible.
       this.warn("acp: response for an unknown request id", { id: frame.id });

@@ -53,7 +53,7 @@ interface Rig {
 const openRigs: Rig[] = [];
 
 async function rig(
-  options: { scenario?: string; version?: string; bin?: string | null } = {}
+  options: { scenario?: string; version?: string; bin?: string | null; env?: Record<string, string> } = {}
 ): Promise<Rig> {
   const cwd = await mkdtemp(join(tmpdir(), "grok-lifecycle-"));
   const events: RuntimeEvent[] = [];
@@ -77,7 +77,8 @@ async function rig(
       HOME: cwd,
       TMPDIR: cwd,
       GROK_MOCK_SCENARIO: options.scenario ?? "happy",
-      ...(options.version === undefined ? {} : { GROK_MOCK_VERSION: options.version })
+      ...(options.version === undefined ? {} : { GROK_MOCK_VERSION: options.version }),
+      ...options.env
     }),
     resolveBin: async () => await Promise.resolve(options.bin === undefined ? MOCK : options.bin),
     sessionPath: () => process.env["PATH"] ?? "",
@@ -790,6 +791,378 @@ test("Stop with NO active turn is session-scoped: live background work is closed
   assert.equal(stopped.payload.taskId, "task-bg-1");
   // The session itself stays up: the user pressed Stop, not Close.
   assert.equal(r.adapter.hasSession("t1"), true);
+  await r.dispose();
+});
+
+/** `[type, id]` of the item and task ends, in emission order. */
+function ends(events: readonly RuntimeEvent[]): Array<[string, string | undefined]> {
+  return events
+    .filter((event) => event.type === "item.completed" || event.type === "task.completed")
+    .map((event) => [event.type, event.itemId ?? (event.payload as { taskId?: string }).taskId]);
+}
+
+const OPEN_WORK_ENDS: Array<[string, string]> = [
+  ["item.completed", "call-open-1"],
+  ["task.completed", "task-bg-1"]
+];
+
+test("Stop with no turn closes the open call BEFORE the background task", async () => {
+  // Every adapter's teardown closes calls before tasks (AGENTS.md, "A running
+  // state never outlives its process"): a background shell's call closes
+  // before its task.
+  const r = await rig({ scenario: "open-work" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "work", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const before = r.events.length;
+  await r.adapter.interruptTurn("t1");
+  await r.waitFor((event) => event.type === "task.completed", "task.completed");
+  await r.drain();
+  assert.deepEqual(ends(r.events.slice(before)), OPEN_WORK_ENDS);
+  await r.dispose();
+});
+
+test("stopSession closes the open call BEFORE the background task", async () => {
+  const r = await rig({ scenario: "open-work" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "work", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const before = r.events.length;
+  await r.adapter.stopSession("t1");
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  assert.deepEqual(ends(r.events.slice(before)), OPEN_WORK_ENDS);
+  await r.dispose();
+});
+
+test("an exit closes the open call BEFORE the background task, both before session.exited", async () => {
+  const r = await rig({ scenario: "open-work-exit" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "work", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const before = r.events.length;
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const after = r.events.slice(before);
+  assert.deepEqual(ends(after), OPEN_WORK_ENDS);
+  assert.equal(after.at(-1)?.type, "session.exited");
+  await r.dispose();
+});
+
+test("the CLI's own prompt after a turn is a turn of its own; a message during it steers it", async () => {
+  const r = await rig({ scenario: "wake-steer" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "hello", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn 1");
+  const wake = await r.waitFor(
+    (event) => event.type === "turn.started" && r.events.filter((e) => e.type === "turn.started").indexOf(event) === 1,
+    "the woken turn"
+  );
+  await r.waitFor(
+    (event) => event.type === "content.delta" && event.turnId === wake.turnId,
+    "the woken reply"
+  );
+  const steered = await r.adapter.sendTurn({ threadId: "t1", input: "go on", attachments: [], interactionMode: "default" });
+  assert.equal(steered.turnId, wake.turnId, "a steer of the woken turn, not a turn of its own");
+  const done = (await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId === wake.turnId,
+    "the steered turn's end"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(done.payload.state, "completed", "settled by the steered prompt, never by the cancelled wake");
+  assert.equal(done.payload.tokenUsage?.inputTokens, 40);
+  await r.drain();
+  const text = r.events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.turnId === wake.turnId && event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+  assert.equal(text, "The subagent finishedsteered");
+  assert.equal(r.events.filter((event) => event.type === "turn.completed").length, 2, "one end per turn");
+  await r.dispose();
+});
+
+test("a Stop while the CLI's own prompt waits for its turn opens no turn for it — what it streamed joins ours", async () => {
+  const r = await rig({ scenario: "wake-pending-stop" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "watch", attachments: [], interactionMode: "default" });
+  await r.waitFor(READ_MARKER, "the CLI's own prompt announced, and its hook read");
+  await r.adapter.interruptTurn("t1", turnId);
+  await r.waitFor((event) => event.type === "turn.completed", "the stopped turn");
+  await r.waitFor(
+    (event) => event.type === "session.state.changed" && (event.payload as { state: string }).state === "ready",
+    "ready after the Stop"
+  );
+  await r.drain();
+  assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"], "no empty turn for the prompt the Stop ended");
+  const hooks = r.events.filter((event) => event.type === "hook.started");
+  assert.equal(hooks.length, 1, "what that prompt streamed before the cancel is kept");
+  assert.equal(hooks[0]!.turnId, turnId, "on the turn the Stop settled");
+  await r.dispose();
+});
+
+/** `turn.started` / `turn.completed` in order, each marked ours or another turn's. */
+function turnMarks(events: readonly RuntimeEvent[], ours: string): string[] {
+  return events
+    .filter((event) => event.type === "turn.started" || event.type === "turn.completed")
+    .map((event) => `${event.type}:${event.turnId === ours ? "ours" : "other"}`);
+}
+
+/** The assistant text a turn streamed, in order. */
+function turnText(events: readonly RuntimeEvent[], turnId: string | undefined): string {
+  return events
+    .filter((event): event is Extract<RuntimeEvent, { type: "content.delta" }> => event.type === "content.delta")
+    .filter((event) => event.turnId === turnId && event.payload.streamKind === "assistant_text")
+    .map((event) => event.payload.delta)
+    .join("");
+}
+
+/** The mock's wake text: `w1;w2;…` */
+function wakeChunks(count: number): string {
+  return Array.from({ length: count }, (_, index) => `w${index + 1};`).join("");
+}
+
+const READ_MARKER = (event: RuntimeEvent): boolean =>
+  event.type === "runtime.warning" &&
+  (event.payload as { detail?: { name?: unknown } }).detail?.name === "read-marker";
+
+test("a waiting wake that outgrows the hold loses nothing: all 300 chunks join the open turn, in order", async () => {
+  const r = await rig({ scenario: "wake-held", env: { GROK_MOCK_WAKE_CHUNKS: "300" } });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), `ours;${wakeChunks(300)}`, "every chunk, in the order the CLI streamed it");
+  assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"], "no turn for a wake that ended merged");
+  await r.dispose();
+});
+
+test("a waiting wake within the hold gets its own turn with every chunk", async () => {
+  const r = await rig({ scenario: "wake-held", env: { GROK_MOCK_WAKE_CHUNKS: "100" } });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const woken = await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    "the wake's own turn's end"
+  );
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "ours;");
+  assert.equal(turnText(r.events, woken.turnId), wakeChunks(100));
+  assert.deepEqual(turnMarks(r.events, turnId), [
+    "turn.started:ours",
+    "turn.completed:ours",
+    "turn.started:other",
+    "turn.completed:other"
+  ]);
+  await r.dispose();
+});
+
+test("a Stop after the waiting wake finished keeps its reply, on a turn of its own", async () => {
+  const r = await rig({ scenario: "wake-finished-stop", env: { GROK_MOCK_WAKE_CHUNKS: "50" } });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor(READ_MARKER, "every frame of the finished wake read");
+  await r.adapter.interruptTurn("t1", turnId);
+  const woken = (await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    "the wake's own turn's end"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "ours;");
+  assert.equal(turnText(r.events, woken.turnId), wakeChunks(50), "the cancel ended nothing: the wake had finished");
+  assert.equal(woken.payload.state, "completed");
+  await r.dispose();
+});
+
+test("a steer after the waiting wake finished keeps its reply: it joins the turn the steer continues, before ours", async () => {
+  const r = await rig({ scenario: "wake-finished-steer", env: { GROK_MOCK_WAKE_CHUNKS: "50" } });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor(READ_MARKER, "every frame of the finished wake read");
+  const steered = await r.adapter.sendTurn({ threadId: "t1", input: "go on", attachments: [], interactionMode: "default" });
+  assert.equal(steered.turnId, turnId);
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "the steered turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), `ours;${wakeChunks(50)}steered;`, "nothing the wake said is lost");
+  assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
+  await r.dispose();
+});
+
+test("a steer while the CLI has its own prompt queued keeps that prompt's reply, in the order the CLI ran it", async () => {
+  const r = await rig({ scenario: "wake-queued-steer" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "hi", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "content.delta" && event.turnId === turnId, "the first prompt's words");
+  const steered = await r.adapter.sendTurn({ threadId: "t1", input: "go on", attachments: [], interactionMode: "default" });
+  assert.equal(steered.turnId, turnId);
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "the steered turn's end");
+  await r.drain();
+  assert.equal(
+    turnText(r.events, turnId),
+    "one;woke;steered;",
+    "the wake ran between the cancelled prompt and ours, so its reply sits between them, in the turn ours continues"
+  );
+  assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
+  await r.dispose();
+});
+
+test("stopSession with frames waiting for a wake's turn keeps them: they join the open turn", async () => {
+  const r = await rig({ scenario: "wake-pending-hold" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor(READ_MARKER, "the wake's frames read");
+  await r.adapter.stopSession("t1");
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "ours;w1;w2;");
+  assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
+  await r.dispose();
+});
+
+test("an exit with frames waiting for a wake's turn keeps them: they join the open turn", async () => {
+  const r = await rig({ scenario: "wake-pending-exit" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "ours;w1;w2;");
+  assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
+  await r.dispose();
+});
+
+test("a question the CLI's own prompt asks while our turn settles rides no turn — our turn's end cannot sweep it", async () => {
+  const r = await rig({ scenario: "wake-question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the wake's question");
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  assert.equal(asked.turnId, undefined, "never our turn: the host dismisses a turn's questions when it ends, and the CLI would wait on");
+  await r.adapter.respondToUserInput("t1", asked.requestId!, { "alpha or beta?": ["alpha"] });
+  const woken = await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    "the wake's own turn's end"
+  );
+  await r.drain();
+  const resolved = r.events.find((event) => event.type === "user-input.resolved");
+  assert.equal(resolved?.turnId, undefined, "its resolution rides no turn either");
+  assert.equal(
+    turnText(r.events, woken.turnId),
+    'answered:{"alpha or beta?":["alpha"]};',
+    "the answer reached the CLI, and the wake went on in its own turn"
+  );
+  await r.dispose();
+});
+
+test("a subagent's child session's question rides no turn, as Codex's does", async () => {
+  const r = await rig({ scenario: "child-question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the child's question");
+  assert.equal(asked.turnId, undefined);
+  await r.adapter.respondToUserInput("t1", asked.requestId!, { "alpha or beta?": ["beta"] });
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "one;two;");
+  assert.equal(r.events.find((event) => event.type === "user-input.resolved")?.turnId, undefined);
+  await r.dispose();
+});
+
+test("a request answered without a card leaves a waiting wake's frames waiting for its own turn", async () => {
+  const r = await rig({ scenario: "wake-auto-permission" });
+  await start(r, { runtimeMode: "full-access" });
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const woken = await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    "the wake's own turn's end"
+  );
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), "ours;");
+  assert.equal(turnText(r.events, woken.turnId), "w1;w2;", "no card, so nothing to put the wake's frames in order before");
+  assert.equal(r.events.some((event) => event.type === "request.opened"), false);
+  await r.dispose();
+});
+
+test("a woken parent's spawn is one agent, launched by its call: its subagent_spawned waits behind it", async () => {
+  const r = await rig({ scenario: "wake-spawn-reorder" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const woken = await r.waitFor(
+    (event) => event.type === "turn.completed" && event.turnId !== turnId,
+    "the wake's own turn's end"
+  );
+  await r.drain();
+  const agents = r.events.filter(
+    (event): event is Extract<RuntimeEvent, { type: "task.started" }> =>
+      event.type === "task.started" && event.payload.taskType === "subagent"
+  );
+  assert.deepEqual(
+    agents.map((event) => [event.payload.taskId, event.turnId]),
+    [["call-a00d2553-adc5-48f4-9181-4a66616fc94f-0", woken.turnId]],
+    "one agent, under its launching call, on the wake's turn — no phantom under the subagent's id"
+  );
+  await r.dispose();
+});
+
+test("a model the CLI refuses warns once per session, not at every turn", async () => {
+  // An outdated CLI and a chat created on the pending catalogue: the thread's
+  // selection names a model this CLI does not know, and every turn carries it.
+  const r = await rig({ scenario: "happy" });
+  await r.adapter.startSession({
+    threadId: "t1",
+    cwd: r.cwd,
+    home: home(r.cwd),
+    modelSelection: { model: "nope" },
+    runtimeMode: "approval-required"
+  });
+  for (const input of ["one", "two"]) {
+    await r.adapter.sendTurn({
+      threadId: "t1",
+      input,
+      attachments: [],
+      modelSelection: { model: "nope" },
+      interactionMode: "default"
+    });
+    await r.waitFor(
+      (event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === (input === "one" ? 1 : 2),
+      `turn ${input}`
+    );
+  }
+  await r.drain();
+  const refusals = r.events.filter(
+    (event) =>
+      event.type === "runtime.warning" &&
+      (event.payload as { message?: string }).message === "grok: could not switch model to nope"
+  );
+  assert.equal(refusals.length, 1, "the CLI's refusal is remembered for the session");
+  await r.dispose();
+});
+
+function advisories(events: readonly RuntimeEvent[]): number {
+  return events.filter(
+    (event) => event.type === "runtime.warning" && /support_permission/.test(event.payload.message)
+  ).length;
+}
+
+test("full-access: a CLI resolving its own interactions is what was asked for — no advisory", async () => {
+  const r = await rig({ scenario: "self-resolve" });
+  await start(r, { runtimeMode: "full-access" });
+  await r.adapter.sendTurn({ threadId: "t1", input: "one", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn 1");
+  await r.adapter.sendTurn({ threadId: "t1", input: "two", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2, "turn 2");
+  await r.drain();
+  assert.equal(advisories(r.events), 0);
+  await r.dispose();
+});
+
+test("supervised: a CLI resolving its own interactions is told ONCE, not at every turn end", async () => {
+  const r = await rig({ scenario: "self-resolve" });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "one", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn 1");
+  await r.adapter.sendTurn({ threadId: "t1", input: "two", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2, "turn 2");
+  await r.drain();
+  assert.equal(advisories(r.events), 1);
   await r.dispose();
 });
 
