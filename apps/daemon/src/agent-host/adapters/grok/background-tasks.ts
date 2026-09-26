@@ -14,7 +14,6 @@ import type { RuntimeEvent, RuntimeEventRaw, RuntimeTaskStatus } from "@orqueste
 
 import type { ToolCallStatus } from "./acp/_generated/schema.ts";
 import type { XaiBackgroundTask, XaiTaskSnapshot } from "./acp/_generated/xai.ts";
-import { isTerminalToolStatus } from "./normalize.ts";
 import {
   ACP_RAW_SOURCE,
   asRecord,
@@ -32,6 +31,7 @@ import {
   subagentOfBackgroundTask,
   subagentReport
 } from "./subagents.ts";
+import { isTerminalToolStatus } from "./tool-calls.ts";
 
 /**
  * Where a background task was started: `session` is the ACP session whose

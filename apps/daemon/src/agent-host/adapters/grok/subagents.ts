@@ -30,9 +30,9 @@ import {
   rememberEndedTask,
   type TaskEndSource
 } from "./background-tasks.ts";
-import { failTool, isTerminalToolStatus } from "./normalize.ts";
 import { asRecord, event, evictOldest, textArgument, type GrokNormalizerState } from "./normalizer-state.ts";
 import { closeChildSegments } from "./segments.ts";
+import { failTool, isTerminalToolStatus } from "./tool-calls.ts";
 import { toolContentText } from "./tool-output.ts";
 
 /**
