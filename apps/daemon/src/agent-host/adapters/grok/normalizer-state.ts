@@ -1,13 +1,16 @@
 /**
  * Grok adapter — the normaliser's shared state, the envelope every row it
- * emits is built with, and the frame readers its functions share.
+ * emits is built with, and the helpers its functions share: the frame readers
+ * `textArgument` and `asRecord`, and `evictOldest` for its bounded memories.
  *
  * `GrokNormalizer` (`normalize.ts`) routes the provider's frames; what a frame
  * does to the work the normaliser tracks is a function over this state — one
  * object for all of them, so a subagent's end can close its calls and its
- * shells, and a tool call's answer can end a subagent. The session-level
- * readings only the routing touches — the catalog, the mode and model, the
- * context meter, the turn's usage, the hooks — stay on the class.
+ * shells, and a tool call's answer can end a subagent. What none of these
+ * functions touch stays on the class: the replayed history and the
+ * session-level readings — the catalog, the mode and model, the context
+ * meter, the turn's usage, the hooks, the request counters and the
+ * permission-denied flag.
  */
 
 import type { RuntimeEvent, RuntimeEventRaw, RuntimeEventRawSource } from "@orquester/api/agent-chat";
