@@ -270,6 +270,11 @@ pending approval resolved with `cancel` and emitted as `request.resolved` before
 `interruptTurn` reaches the provider) is therefore correctness, not tidiness — without it
 the next `GET /permission` recovery sweep re-opens a card for a turn that no longer exists.
 
+1.18.32 no longer leaves it there (read from the source, not captured): an ask whose run the
+abort interrupts drops out of `GET /permission` and `GET /question` by itself, with no event
+saying so — observation 29, which is also what a request reaching the thread after a Stop
+is judged by.
+
 Related: **`POST /session/<nonexistent>/abort` returns `200 true`** (fixture 13). Abort is
 not 404-guarded, so a successful abort proves nothing about the session existing.
 
@@ -928,6 +933,61 @@ name holds "bash" or "command" as a command) can therefore end its completion wi
 such a completion is marked `truncated` the same way (`isCutFinalOutput`). It streams nothing, so
 no join answers: both readers show the kept head as only part of the output. Only at the very end:
 the note anywhere else is output.
+
+### 29. A Stop's abort ends what it reaches — and a request can still reach the thread after it
+
+**Read from 1.18.32's source, not captured.** `POST /session/{id}/abort` (`SessionHttpApi.abort`)
+is `SessionPrompt.cancel`, which is `SessionRunState.cancel`, and before it answers that:
+
+1. cancels the session's background jobs (`cancelBackgroundJobs`): every job still `running`
+   whose id, `metadata.sessionId` or `metadata.parentSessionId` names the session, then — adding
+   each cancelled job's child session — the jobs those children launched, walking one snapshot of
+   `BackgroundJob.list`. In 1.18.32 every `task` call runs as such a job, foreground or
+   background, keyed by the child session's id with `{parentSessionId, sessionId}` in its
+   metadata. Cancelling one closes the job's scope, which interrupts its run, whose `onInterrupt`
+   cancels the child session the same way (`promptOps.cancel`);
+2. interrupts the session's own run (its runner's `cancel`) and marks the session idle.
+
+An asker it interrupts leaves nothing behind: `Permission.ask` and `Question.ask` await their
+answer under `ensuring`, which deletes the request from the pending list, and nothing is
+published — no `permission.replied`, no `question.rejected`. After the abort, `GET /permission`
+and `GET /question` list no request of a run it ended, and a reply to one is a 404 (observation
+12's `PermissionNotFoundError`). 1.18.5 kept such a request listed (observation 11).
+
+What still reaches the thread after a Stop:
+
+- **The frames of the asks it ended.** Each was published before the interrupt, and the stream
+  and the abort's own HTTP answer race (fixture 06 shows the stream winning; nothing makes it
+  win). Their asker is gone.
+- **Asks of a run the abort never reached**, whose asker waits on them:
+  - the parent's own, from a run started after it: a job that completed just before the Stop has
+    its answer injected by a fiber of the `task` tool's own scope (`notifyBackgroundResult` →
+    `injectBackgroundResult`, observation 27), and that prompt starts a new run when it lands
+    after `cancel` found the runner idle;
+  - a child whose run no job's interrupt cancels: a `task_id` resume of a child whose job still
+    runs extends that job (`BackgroundJob.extend`), and the extension's run carries no
+    `onInterrupt` — cancelling the job interrupts only the fiber awaiting the child's run, which
+    `ensureRunning` forks into the runner's own scope, so the child runs on;
+  - a job started after the snapshot step 1 walked.
+
+  The adapter's own walk after the abort (`abortDescendants`: `GET …/children`, then an abort
+  for each, bounded) reaches the children it lists in time, and no others.
+
+The adapter used to mark every request that arrived while no turn ran after an interrupt resolved,
+write nothing and answer nothing: a live asker waited for good, and so did the parent's next turn,
+whose prompt joins the running run (`ensureRunning` awaits it). Now a request that arrives while
+an interrupt is ending the runs, or after one before any run has said `busy` — the windows in
+which the parent's own output is dropped (`interruptionLingers`) — is held (`holdsRequests`) and
+judged once the interrupt in flight is over (`judgeHeldRequest`), on the server's word:
+`GET /permission` (or `/question`) and `GET /session/status`. Its asker is gone when the request
+is no longer listed, or when the asker's session runs nothing — an older server's orphan, listed
+and idle (fixture 06): no card, the request is rejected on the wire, which releases what an older
+server kept listed, and its closing frame writes no row. Otherwise it is shown as any request is:
+the card on the turn running then, if one does — a child's question on none — or, with full
+access, a `once`. A read that fails decides nothing, and the card is shown: the user answers it,
+and a reply to a gone request settles locally, whereas a reject would answer for them — and
+1.18.32's `Permission.reply` rejects every other pending ask of that session with it. A request
+answered elsewhere while it is judged leaves the hold with its closing frame, and writes no row.
 
 ---
 

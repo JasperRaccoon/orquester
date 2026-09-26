@@ -1196,7 +1196,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   only (`settleStrandedQuestions`), and a background child outlives the parent's turn, so its card
   was swept at the parent's turn end while the child still waited on the answer. A resolution on a
   turn its question does not ride would reopen the card after a rewind of that turn. The parent's
-  own questions, and every approval, ride the parent's open turn.
+  own questions, and every approval, ride the parent's open turn. (6) A request that reaches the
+  thread after a Stop waits for the server's word on its asker (README observation 29, read from
+  the source). The abort ends every run and job it reaches, and an ask it interrupts drops out of
+  `GET /permission`/`GET /question` with no event, but that ask's frame can still arrive late —
+  and a run it never reached asks from a live asker: a background answer injected after it starts
+  the parent again; a `task_id` extension's child runs on. The adapter marked every request that
+  arrived while no turn ran after an interrupt resolved and answered nothing, so a live asker
+  waited for good (and so did the next turn, which joins the blocked run). Now one that arrives
+  while the interrupt is in flight, or after it before any run says `busy`
+  (`interruptionLingers`, the windows the parent's output is dropped in), is held
+  (`holdsRequests`) and judged once the abort is over (`judgeHeldRequest`): listed by the server
+  and its session busy — the card, as any (a child's question on no turn), or full access's
+  `once`; unlisted or its session idle (an older server's orphan) — no card, a reject on the wire,
+  and no row when it closes. A read that fails shows the card: a reject would answer for the user,
+  and 1.18.32's `Permission.reply` rejects every other ask of that session with it.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures
