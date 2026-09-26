@@ -97,6 +97,8 @@ async function rig(
       TMPDIR: cwd,
       GROK_MOCK_SCENARIO: options.scenario ?? "happy",
       GROK_RIG_MARK: mark,
+      // The thread's `leftover-work.json`: `leftover-exit` exits once its work is recorded there.
+      GROK_MOCK_LEFTOVER_WORK: leftoverWork,
       ...(options.version === undefined ? {} : { GROK_MOCK_VERSION: options.version }),
       ...options.env
     }),
