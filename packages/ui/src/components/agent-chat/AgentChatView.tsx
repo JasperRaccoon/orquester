@@ -752,6 +752,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               roster={roster.agents}
               projectPath={projectPath}
               onBack={() => setDrillInAgentId(null)}
+              bottomInset={bottomInset}
               onLoadFullOutput={paintOnly ? noop : loadFullOutput}
             />
           ) : (

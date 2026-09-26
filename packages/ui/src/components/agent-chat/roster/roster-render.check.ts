@@ -236,6 +236,7 @@ const drillIn = render(
       recentActivity: [{ at: "2026-09-21T10:00:01.000Z", summary: "Reading src/index.ts" }]
     }),
     rows: [],
+    bottomInset: 0,
     onBack: () => {}
   })
 );
@@ -250,6 +251,25 @@ assert.ok(
   drillIn.includes('data-agent-id="agent-1"'),
   "the child timeline renders, scoped to this agent"
 );
+assert.ok(!drillIn.includes("Scroll to end"), "a child's view opens at its end, following");
+
+// The composer overlay floats over the drill-in as over the thread's own
+// timeline, so the child's list reserves the same footer: at 0 its newest rows
+// sat behind the composer and the roster, and no scroll could bring them up.
+const insetDrillIn = render(
+  createElement(AgentDrillIn, {
+    sessionId: "s1",
+    agentId: "agent-1",
+    agent: agent("agent-1"),
+    rows: [],
+    onBack: () => {},
+    bottomInset: 212
+  })
+);
+assert.ok(
+  insetDrillIn.includes('style="height:212px"'),
+  "the child's timeline reserves the overlay's height below its last row"
+);
 
 const unknownAgent = render(
   createElement(AgentDrillIn, {
@@ -257,6 +277,7 @@ const unknownAgent = render(
     agentId: "gone",
     agent: null,
     rows: [],
+    bottomInset: 0,
     onBack: () => {}
   })
 );
@@ -455,6 +476,7 @@ const shellDrillIn = render(
     agent: shell(),
     roster: [shell()],
     rows: backgroundShellRows(shellItems, "task-bg-1"),
+    bottomInset: 0,
     onBack: () => {}
   })
 );
@@ -480,6 +502,7 @@ const exitedDrillIn = render(
     agent: shell({ status: "completed", exitCode: 0, completedAt: "2026-09-21T10:00:30.000Z" }),
     roster: [shell({ status: "completed", exitCode: 0 })],
     rows: backgroundShellRows(shellItems, "task-bg-1"),
+    bottomInset: 0,
     onBack: () => {}
   })
 );
@@ -522,6 +545,7 @@ const quietShellDrillIn = render(
     agent: shell(),
     roster: [shell()],
     rows: backgroundShellRows([shellItems[0]!], "task-bg-1"),
+    bottomInset: 0,
     onBack: () => {}
   })
 );
@@ -538,6 +562,7 @@ const silentShell = render(
     agent: shell(),
     roster: [shell()],
     rows: [],
+    bottomInset: 0,
     onBack: () => {}
   })
 );
@@ -620,6 +645,7 @@ const goalDrillIn = render(
     agent: goalRow,
     roster: [goalRow],
     rows: [],
+    bottomInset: 0,
     onBack: () => {}
   })
 );
@@ -639,6 +665,7 @@ const loopDrillIn = render(
     agent: loopRow,
     roster: [loopRow],
     rows: [],
+    bottomInset: 0,
     onBack: () => {}
   })
 );

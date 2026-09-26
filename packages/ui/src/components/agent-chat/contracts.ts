@@ -363,6 +363,14 @@ export interface AgentDrillInProps {
   /** Read-only: the child view dispatches no commands (§7.6). */
   onBack: () => void;
   /**
+   * The docked overlay's measured height — status line, banner dock, composer
+   * and roster. The drill-in swaps only the main area, so the overlay floats
+   * over the child's timeline exactly as over the thread's own, and that
+   * timeline reserves the same footer: at 0 the child's newest rows stayed
+   * behind the composer, out of reach of any scroll.
+   */
+  bottomInset: number;
+  /**
    * The thread's roster, forwarded to the timeline so a spawn row *inside* a
    * child (an agent that spawned its own) resolves its members at render time
    * instead of reading "Status unavailable".

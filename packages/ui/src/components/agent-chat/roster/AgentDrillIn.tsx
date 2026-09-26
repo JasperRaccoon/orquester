@@ -11,7 +11,9 @@
  *  - **It must not remount the parent.** The composer and the roster stay
  *    mounted around it so the parent thread can still be steered while the
  *    user watches a child, which is why this renders only the scrolling area
- *    and takes `onBack` rather than owning any navigation.
+ *    and takes `onBack` rather than owning any navigation. They float over it
+ *    as they float over the thread's own timeline, so it takes the view's
+ *    `bottomInset` too.
  *  - **The child view dispatches no commands.** Every timeline callback here
  *    is inert: there is no revert, no approval and no queue inside a child.
  *    The one exception is opening a file, which is navigation, not a command —
@@ -103,11 +105,24 @@ export function AgentDrillIn({
   agent: agentOverride,
   rows: rowsOverride,
   onBack,
+  bottomInset,
   roster,
   projectPath,
   onLoadFullOutput
 }: AgentDrillInProps): React.ReactElement {
   const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
+  // Live-follow for the child's own list (§7.3): armed on entry, disarmed by
+  // the user's scroll, re-armed by the band at the end or the pill. The
+  // parent's flag lives in its slice, and a child's list is not the thread's,
+  // so it is kept here — and another agent opens at its end, following again.
+  // Pinned to `true` with every change dropped, each streamed row pulled a
+  // reader back down and the pill never showed.
+  const [follow, setFollow] = React.useState(true);
+  const [followAgentId, setFollowAgentId] = React.useState(agentId);
+  if (followAgentId !== agentId) {
+    setFollowAgentId(agentId);
+    setFollow(true);
+  }
   const live = useAgentChatDrillIn(sessionId, agentId, disclosures);
   const agent = agentOverride ?? live.agent;
   const background = agent !== null && isBackgroundShellRow(agent);
@@ -247,11 +262,11 @@ export function AgentDrillIn({
         roster={roster}
         projectPath={projectPath}
         rows={rows}
-        follow
-        onFollowChange={noop}
+        follow={follow}
+        onFollowChange={setFollow}
         disclosures={timelineDisclosures}
         onDisclosureChange={onDisclosureChange}
-        bottomInset={0}
+        bottomInset={bottomInset}
         canRevert={false}
         onRevert={noop}
         onOpenTurnDiff={noop}
