@@ -1133,7 +1133,9 @@ progress (replaced in place), and ends it at `task_completed` with its last line
 A line arrives just BEFORE the wake it causes (40), so the liveness registry's turn-boundary sweep
 would read the monitor as silent through that wake and drop it at the wake's end: the wake's turn
 opens with a status-less `task.progress` for each live monitor its `runningText` names, and for no
-other.
+other. (Since the final fix wave (2026-09-26) a turn the provider started sweeps nothing at its
+end, so this matters only for a wake that adopted a user's pending turn, which the host reads as
+its own.)
 
 ### 42. Kills
 

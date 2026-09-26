@@ -235,6 +235,14 @@ not live.
 
 *T3: `apps/server/src/orchestration/ThreadBackgroundLiveness.ts:1-166` — the whole registry, its two-state vocabulary and the "no persistence, no migration" rationale; `apps/server/src/orchestration/ThreadSettlementPolicy.ts:118-124` — live background work blocks auto-settlement; `apps/server/src/provider/Layers/ProviderSessionReaper.ts:81-95` — differs: T3 consults it to skip reaping a thread; Orquester never reaps, so it feeds only the activity/attention derivation*
 
+*Built: background rows expire (`orchestration/liveness.ts`) — a watch loop silent for 10 minutes,
+an agent whose rows carry `livenessTtlMs` that long after its latest row — and the end of a turn
+the host sent drops every watch loop that reported nothing during it. A turn the provider started
+itself — a Grok wake, an OpenCode woken reply, Claude's synthetic woken turn: no `/turn` row in
+the fold when its `turn.started` is consumed — sweeps nothing (final fix wave 2026-09-26). Wakes
+come at every background end and monitor line, and sweeping at their ends dropped a silent dev
+server long before its TTL, which let a deploy's drain kill it.*
+
 **No-tmux hosts** (Windows, stock macOS dev): the host is a direct daemon child and dies with it.
 The same reconcile in §3.3 recovers on boot. Nothing else differs.
 
@@ -1800,7 +1808,8 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   cannot dismiss it while the CLI waits for the answer. A user message during its turn steers it:
   cancel, then prompt under the same turn id. A monitor's wake opens by re-arming the monitors its
   `runningText` carries lines of, which the liveness registry's turn-boundary sweep would otherwise
-  drop at the wake's end (`adapters/grok/prompt-queue.ts`, `GrokWakes` — which the capture-replay
+  drop at the end of a wake that adopted a user's pending turn (a wake of its own sweeps nothing,
+  §3.1) (`adapters/grok/prompt-queue.ts`, `GrokWakes` — which the capture-replay
   driver runs too; `session.ts`, `onQueueChanged`, `onPrivateUpdate`; the Grok fixtures README,
   observations 40–41).*
 - **Interrupt** marks the turn id as interrupted **synchronously, before taking the thread lock**,

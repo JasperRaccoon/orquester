@@ -26,7 +26,14 @@
  *   dropped (evaluated lazily on read, so there is no timer to leak and a test
  *   drives it with a set clock);
  * - a turn ending drops every background row that reported nothing **during
- *   that turn** — it was already not live while the agent worked.
+ *   that turn** — it was already not live while the agent worked. Only a turn
+ *   the host sent: a turn the provider started itself (a Grok wake, an
+ *   OpenCode woken reply, Claude's synthetic woken turn —
+ *   `LivenessObservation.providerInitiatedTurn`) is not the agent working on
+ *   anyone's behalf, and a watch loop's silence through it proves nothing.
+ *   Wakes come at every background end and monitor line, so sweeping at their
+ *   ends dropped a silent dev server long before its TTL — and let a deploy
+ *   kill it.
  *
  * Agent rows are never expired — a subagent that runs for hours is real work —
  * unless the row says otherwise: an adapter whose agents' ends can go
@@ -45,7 +52,7 @@ import {
   type RuntimeEvent
 } from "@orquester/api/agent-chat";
 
-import type { LivenessRegistry } from "../services.ts";
+import type { LivenessObservation, LivenessRegistry } from "../services.ts";
 import { systemClock, type Clock } from "./runtime-seams.ts";
 
 /**
@@ -63,7 +70,11 @@ interface ThreadLivenessState {
   readonly agents: Map<string, number | null>;
   /** taskId → the epoch ms of its last transition, for the TTL. */
   readonly monitors: Map<string, number>;
-  /** When the thread's current turn started, for the turn-boundary sweep. */
+  /**
+   * When the thread's current turn started, for the turn-boundary sweep;
+   * `null` outside a turn and through a turn the provider started, whose end
+   * sweeps nothing.
+   */
   turnStartedAt: number | null;
 }
 
@@ -275,12 +286,21 @@ export function createLivenessRegistry(
   };
 
   return {
-    observe(event: RuntimeEvent): void {
+    observe(event: RuntimeEvent, observation: LivenessObservation = {}): void {
       if (event.type === "session.exited") {
         stateByThreadId.delete(event.threadId);
         return;
       }
       if (event.type === "turn.started") {
+        if (observation.providerInitiatedTurn === true) {
+          // A turn the provider started arms no sweep: its end drops nothing.
+          const state = stateByThreadId.get(event.threadId);
+          if (state) {
+            state.turnStartedAt = null;
+            dropIfEmpty(event.threadId, state);
+          }
+          return;
+        }
         const state = stateFor(event.threadId);
         state.turnStartedAt = clock.now().getTime();
         return;

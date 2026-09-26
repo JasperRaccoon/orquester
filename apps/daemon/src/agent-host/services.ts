@@ -454,9 +454,19 @@ export interface CheckpointService {
  * Deliberately not persisted: after a host restart the registry is empty,
  * which is correct, because orphaned background work is not live.
  */
+/** What the host knows about an event that the event itself does not say. */
+export interface LivenessObservation {
+  /**
+   * On `turn.started`: nobody asked the host for this turn — the provider
+   * started it (a Grok wake, an OpenCode woken reply, Claude's synthetic woken
+   * turn). Its end sweeps nothing (`liveness.ts`). Absent = the host's own.
+   */
+  providerInitiatedTurn?: boolean;
+}
+
 export interface LivenessRegistry {
-  /** Fold one task event into the registry. */
-  observe(event: RuntimeEvent): void;
+  /** Fold one task or turn event into the registry. */
+  observe(event: RuntimeEvent, observation?: LivenessObservation): void;
   /** `"working"` | `"monitoring"` | `null`, per §3.1. */
   liveness(threadId: string): BackgroundLiveness | null;
   /** How many live *agent* rows the thread has, for the banner's copy (§7.6). */

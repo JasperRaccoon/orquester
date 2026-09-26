@@ -410,11 +410,13 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   reported each as "didn't finish before the previous session ended" on the next message with no
   notice in between. `/health` now also carries `backgroundWorkThreadIds` (the host's liveness
   registry, `working` and `monitoring` both — the registry's TTL bounds a silent watch loop, so a
-  dev server cannot defer a deploy for longer than that window, and every turn end drops a watch
-  loop that reported nothing during that turn, which on Grok also runs at the end of every turn
-  the CLI starts itself — a subagent's end, a monitor's line — so a silent Grok shell stops holding
-  the drain sooner, while a monitor is re-armed inside the wake its own line caused (see the Grok
-  gotcha); an agent holds the drain until its
+  dev server cannot defer a deploy for longer than that window, and the end of a turn the HOST
+  sent drops a watch loop that reported nothing during that turn. Never the end of a turn the
+  provider started itself — a Grok wake, an OpenCode woken reply, Claude's synthetic woken turn,
+  read off the fold as a `turn.started` with no `/turn` row (`livenessObservation` in
+  `orchestrator.ts`, `LivenessObservation.providerInitiatedTurn`): wakes come at every background
+  end and monitor line, and sweeping at their ends dropped a silent dev server long before its
+  TTL, so a deploy's drain killed it. An agent holds the drain until its
   end, except one whose rows carry `livenessTtlMs` — Grok's, whose runs report their end and a
   heartbeat but whose chat lives until Stop or the tab closes — which holds it for at most 60
   minutes after the latest row naming it, see the Grok gotcha); the supervisor unions it with the
@@ -1281,7 +1283,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   open turn — the wake's own once its turn is open — and its resolution rides the same. **A
   monitor's wake re-arms it**: its line arrives just BEFORE the wake it causes, so the liveness
   registry's turn-boundary sweep read it as silent through that turn and dropped it at the wake's
-  end — a code-only deploy stopped waiting for a running monitor between its lines. The wake's turn
+  end — a code-only deploy stopped waiting for a running monitor between its lines. A wake's end
+  sweeps nothing now (a turn the provider started, see "Drained" means…), but a wake that adopted
+  a user's pending turn row reads as the host's and does, so the wake's turn
   opens with a status-less `task.progress` for each live monitor its `runningText` names (a
   `<monitor-event>` block's `task_id`, in any attribute order; `rearmMonitors`), replaced in place;
   only those, since re-arming every monitor at every wake would let unrelated wakes hold a silent
