@@ -1592,6 +1592,16 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   in `GET /permission`, so settling before interrupt (§4.1) is correctness here, not tidiness. And
   under the supervised ruleset the `task` tool's own permission ask stalls a subagent turn
   indefinitely — a known gap, surfaced rather than hidden.*
+  *Built (2026-09-26): 1.18.32 no longer leaves it listed — an ask whose run the abort interrupts
+  drops out of both lists with no event (read from the source) — and a request can still reach the
+  thread after a Stop: the late frame of an ask the abort ended, or the ask of a run it never
+  reached (a background answer injected after it starts the parent again; a `task_id` extension's
+  child runs on). Such a request was marked resolved and neither shown nor answered, so a live
+  asker waited for good. It is now held while an interrupt is under way — a Stop from its first
+  step, before its abort; a failed admission's abort — and until a run says `busy` again, then
+  judged on the server's lists and session status: a live asker's is shown as any request is, a
+  gone asker's is rejected on the wire and writes nothing, and a read that fails shows the card
+  (`adapters/opencode/normalize.ts`, `session.ts`; fixtures README observation 29).*
 - **Child-session event routing.** Parent-session events pass; **child-session events pass only if
   they are permission or question events**, behind an ancestry-resolution retry loop (250 ms→5 s
   backoff; asked-events retry forever, terminal events give up after 5). This is the whole reason
@@ -1648,7 +1658,11 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   first — its context already full — opens the turn at the summary, so the thread reads working
   through the compaction. An interruption's guard ends when any later turn settles, a failed one
   included: a Stop followed by a turn that failed on a rate limit used to drop every woken reply
-  after it. And the child's end always precedes the answer's prompt (1.18.32's runner publishes
+  after it. *Built (2026-09-26): and when a NEW run says `busy` once the interrupt is over and
+  the parent has said idle since it began — 1.18.32 publishes a cancelled run's idle only after
+  its fiber ended, so only a run started after the abort can — a background answer injected after
+  a Stop used to have its reply dropped with the leftovers; it now gets its woken turn.* And the
+  child's end always precedes the answer's prompt (1.18.32's runner publishes
   its idle before it resolves the run), so neither the child's end nor its result rides the woken
   turn, and a rewind of that turn can never take an agent's end while its start stays.*
   *Built (addendum): a run in the background outlives a turn that fails on its own (a
@@ -1658,6 +1672,23 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   and Grok do after every settled turn: an `error` session reads, to §7.6's roster, as a dead one,
   and refuses commands until a Stop, which would cancel that job. The child keeps working in the
   roster and in liveness, and ends by its own idle and answer.*
+  *Built (2026-09-26): and a child a Stop closed that runs on — the abort does not reach every run
+  (fixtures README observation 29) — is relaunched on the server's word: a frame of a live run from
+  it asks `GET /session/status` once the interrupts are over, and a busy child gets a new
+  `task.started` under a new launch id, `opencode-revive:<callID>:<n>` — the relaunch contract,
+  which reopens the roster's row, running, without the Stop's end or summary; live work to the
+  liveness registry, so a deploy's drain waits for it — and its own idle and answer end it
+  `completed` with its result, once; a later Stop or the exit closes it again. The Stop returns the
+  session to `ready` after its `turn.aborted`, as Claude's and Grok's do after every settled turn:
+  while it read `stopped`, the roster took every running row for dead and the host refused the next
+  Stop. (After a failed admission the session reads `error`, a transport doubt kept on purpose, so a
+  child relaunched after one reads `interrupted` there while liveness still counts it.) A
+  grandchild's launch is its child's own `task` call, which names it — and gives it its answer — as
+  the parent's names a child; a child no call has named yet starts under
+  `opencode-child:<session id>`, so every first start names a launch, and its rows name the call
+  once one does; and a relaunched run whose start named none (a log from before) gets a seed naming
+  its first run's first. The Grok adapter keeps its own end on a revival, its reports not confirmed
+  the same way.*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*
   every step resolved; otherwise `partial`, or `unavailable` when no part carried tokens.

@@ -33,7 +33,11 @@ scenario.
 
 ### What was redacted or trimmed
 
-- Every absolute path under this host's home is rewritten to `~`.
+- Every absolute path under this host's home is rewritten to `~` — in its **percent-encoded**
+  spelling too (`%2Fvar%2Flib%2F…`, either hex case), which every `?directory=` query uses for
+  the cwd. Missed by the plain-path rule until 2026-09-26; that export applied it to every file
+  (01–14), and nothing else in them changed. The adapter's own redactor (`support/stderr.ts`,
+  which `raw.ndjson` goes through) collapses both spellings as well.
 - API keys, tokens and email addresses are replaced with `<redacted>`.
 - **`GET /config` and `GET /config/providers` have their bodies replaced by a
   shape-only skeleton.** This host's real config carries MCP server credentials and
@@ -266,6 +270,11 @@ pending approval resolved with `cancel` and emitted as `request.resolved` before
 `interruptTurn` reaches the provider) is therefore correctness, not tidiness — without it
 the next `GET /permission` recovery sweep re-opens a card for a turn that no longer exists.
 
+1.18.32 no longer leaves it there (read from the source, not captured): an ask whose run the
+abort interrupts drops out of `GET /permission` and `GET /question` by itself, with no event
+saying so — observation 29, which is also what a request reaching the thread after a Stop
+is judged by.
+
 Related: **`POST /session/<nonexistent>/abort` returns `200 true`** (fixture 13). Abort is
 not 404-guarded, so a successful abort proves nothing about the session existing.
 
@@ -473,7 +482,7 @@ the roster shows whatever the provider reports. The mapping this capture support
 | Frame | Becomes |
 |---|---|
 | child `session.created` | no row yet — it registers the child; `taskId` = `agentId` = the **child session id**, the only identifier every one of these frames carries |
-| the parent's `task` part going `running` (next frame) | `task.started` with `toolUseId` = the part's `callID`, the launch id a relaunch is told apart by (observation 26), then `task.progress` |
+| the parent's `task` part going `running` (next frame) | `task.started` with `toolUseId` = the part's `callID`, the launch id a relaunch is told apart by (observation 26), then `task.progress`. A CHILD's own `task` part names a grandchild the same way — its launch, and its answer. A child no part names starts under `opencode-child:<session id>`: every agent's first start names a launch |
 | child `session.updated` | `task.progress` on a real title change (an unchanged title is re-stated on every recompute — observation 25) |
 | child `session.status` | `task.updated {status: running \| idle}` |
 | child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal; the parent's `task` part that follows it gives that end its result (observation 27) |
@@ -700,6 +709,10 @@ What the normaliser makes of it (`linkChildFromTaskPart`):
   its `task.started` carries the `callID` — the id the roster fold compares to tell a
   relaunch from a late delivery (AGENTS.md, "Agent rows must survive resumes and
   retention").
+- A child whose own frames come first — the part's `running` frame lost in a reconnect gap —
+  starts under `opencode-child:<session id>`, on that start alone: once a part names its
+  `callID`, every row names the call, since the timeline hides a launching call only behind
+  an agent row that names it.
 - A live part naming a **settled** child under a `callID` never seen for it is a relaunch: a
   new `task.started` naming it, before any row of the new run; the child's own
   `session.idle` ends it, and the part's own end then gives that run its result
@@ -707,6 +720,11 @@ What the normaliser makes of it (`linkChildFromTaskPart`):
 - Any other part whose `callID` is not the child's current launch — a frame of any call
   seen for it before (an earlier launch, a call handed over while it worked), a call on a
   child that is still working — emits no task row: it can neither start a run nor end one.
+- A child no part named before its own frames started it has no known launch to compare a
+  call with, but the call that launches a child creates it and names no `task_id`: a part
+  whose `task_id` names the child is never its launch. Settled, the child is relaunched by
+  it, as above; still working, the call is handed over — no row, and never taken for its
+  launch, so its rows never name that call.
 - A `completed` part with `metadata.background: true` does not settle the child.
 
 A capture of a real `task_id` resume would confirm the frame order; none has been made.
@@ -793,9 +811,21 @@ a live run says `busy` again at its next iteration. Never opened: a reply that h
 ended — a fork copies a session's messages whole, completed ones included (fixture 10), and a
 rewind claims every prompt its fork copied, so a copy its dead run never completed opens nothing
 either — and anything that follows an interruption, which the demux drops first. That last guard
-lasts until a later turn settles, by ANY path: a later turn that failed (a rate limit) used to
-leave the Stop's id behind for good (`completeTurn` alone cleared it), and every woken reply after
-it was dropped — never written, the thread idle.
+lasts until a later turn settles, by ANY path: a later turn that failed (a rate limit) used to leave
+the Stop's id behind for good (`completeTurn` alone cleared it), and every woken reply after it was
+dropped — never written, the thread idle. Or until a NEW run: a `busy` once the interrupt is over
+and the parent has said idle since it began, which only a run started after the abort can send
+(observation 29) — a background answer injected after the Stop starts the parent again, and its
+reply gets its woken turn. That run may still be one the abort cancels — an idle the last run wrote
+just before the Stop can pass for the stopped run's, and the stream can deliver the new `busy`
+before the abort's own answer — so the first `MessageAbortedError` after the boundary, until the
+parent's next idle, is taken for that abort's echo and dropped: it used to fail the woken turn, or
+read the session `error`. Only a run the provider started, though: the user's next message is
+prompted only once the abort has answered, so its run began after the abort did, and the stopped
+run's abort error comes before that run's own idle. Once that idle has come and the prompt is taken,
+an abort error fails the host's turn — whether its `busy` ended the interruption (the busy before
+the prompt's answer) or the interruption's residue outlived that `busy` (the answer first, as
+fixture 10 has it, the busy 30 ms after it); both used to drop it, for the whole turn.
 
 A compaction's summary (`summary: true`, fixture 09) answers no prompt of the conversation: its
 prompt is claimed but never joins `promptMessageIds`, so the summary call stays off the meter and
@@ -924,6 +954,109 @@ name holds "bash" or "command" as a command) can therefore end its completion wi
 such a completion is marked `truncated` the same way (`isCutFinalOutput`). It streams nothing, so
 no join answers: both readers show the kept head as only part of the output. Only at the very end:
 the note anywhere else is output.
+
+### 29. A Stop's abort ends what it reaches — and a request can still reach the thread after it
+
+**Read from 1.18.32's source, not captured.** `POST /session/{id}/abort` (`SessionHttpApi.abort`)
+is `SessionPrompt.cancel`, which is `SessionRunState.cancel`, and before it answers that:
+
+1. cancels the session's background jobs (`cancelBackgroundJobs`): every job still `running`
+   whose id, `metadata.sessionId` or `metadata.parentSessionId` names the session, then — adding
+   each cancelled job's child session — the jobs those children launched, walking one snapshot of
+   `BackgroundJob.list`. In 1.18.32 every `task` call runs as such a job, foreground or
+   background, keyed by the child session's id with `{parentSessionId, sessionId}` in its
+   metadata. Cancelling one closes the job's scope, which interrupts its run, whose `onInterrupt`
+   cancels the child session the same way (`promptOps.cancel`);
+2. interrupts the session's own run (its runner's `cancel`) and marks the session idle.
+
+In what order the stream sees it: an interrupted `SessionProcessor` publishes the abort's
+`session.error` and an idle (`halt`, in its `onInterrupt`), then its cleanup — the open text and
+reasoning parts closed, up to 250 ms for its tool calls, each call still open marked `error`
+"Tool execution aborted" with `interrupted: true`, the reply's `time.completed` — and only once
+the run's fiber has ended does the runner publish its own idle (`SessionStatus.set` publishes
+`session.status` and, for idle, `session.idle`, every time). Each cancelled child does the same
+before its parent's cancel goes on. So nothing a stopped run wrote follows its session's idle,
+and a `busy` after that idle is a new run's — the boundary the adapter ends a Stop's leftovers at
+(observation 27).
+
+A cancelled child's frames can reach the stream before the adapter's own close: its
+`MessageAbortedError`, or its launching call's cleanup (`error` "Tool execution aborted",
+`interrupted: true` — a grandchild's call is its child's). Neither fails the run: both end it
+`stopped`, which the roster reads `interrupted`, as after the adapter's close — they used to read
+`failed`. The child's own abort error is its word on its run. The call's cleanup is only the
+parent's word on its call, which a job the abort did not reach outlives, so it ends the run as the
+adapter's close does: a report that the run goes on is judged the same way.
+
+An asker it interrupts leaves nothing behind: `Permission.ask` and `Question.ask` await their
+answer under `ensuring`, which deletes the request from the pending list, and nothing is
+published — no `permission.replied`, no `question.rejected`. After the abort, `GET /permission`
+and `GET /question` list no request of a run it ended, and a reply to one is a 404 (observation
+12's `PermissionNotFoundError`). 1.18.5 kept such a request listed (observation 11).
+
+What still reaches the thread after a Stop:
+
+- **The frames of the asks it ended.** Each was published before the interrupt, and the stream
+  and the abort's own HTTP answer race (fixture 06 shows the stream winning; nothing makes it
+  win). Their asker is gone.
+- **Asks of a run the abort never reached**, whose asker waits on them:
+  - the parent's own, from a run started after it: a job that completed just before the Stop has
+    its answer injected by a fiber of the `task` tool's own scope (`notifyBackgroundResult` →
+    `injectBackgroundResult`, observation 27), and that prompt starts a new run when it lands
+    after `cancel` found the runner idle;
+  - a child whose run no job's interrupt cancels: a `task_id` resume of a child whose job still
+    runs extends that job (`BackgroundJob.extend`), and the extension's run carries no
+    `onInterrupt` — cancelling the job interrupts only the fiber awaiting the child's run, which
+    `ensureRunning` forks into the runner's own scope, so the child runs on;
+  - a job started after the snapshot step 1 walked.
+
+  The adapter's own walk after the abort (`abortDescendants`: `GET …/children`, then an abort
+  for each, bounded) reaches the children it lists in time, and no others.
+
+**A child that runs on.** The Stop closes every child `stopped` on the adapter's own word
+(`closeLiveChildAgents`), so one that survived read "interrupted" and held no drain while it worked.
+An end the adapter wrote is not the provider's word: a frame of a live run from such a child (its
+`busy`, a delta, a text part with no end, a running call, a reply not completed) asks the server,
+once every interrupt is over, and again if another began while it answered, whether its session runs
+(`GET /session/status`). A cancelled child sends such frames too, late — its last ones, published
+before its cancel — and only the server tells the two apart; each cancelled child's own idle comes
+after them. Busy — confirmed — the child is RELAUNCHED under the relaunch contract: a new
+`task.started` naming a new launch id, `opencode-revive:<callID>:<n>`, which every row of the
+reopened run names while the provider's call stays the one its part is matched by. A grandchild is
+relaunched the same way: its launch is its child's own `task` call. A run whose start named no
+launch (a log from before every start named one) gets a seed first, naming its first run's (its
+call, else `opencode-child:<session id>`): the roster reopens only on a changed launch, and reads
+the seed as a late delivery. The roster reopens the row, running, with the Stop's end and summary
+cleared; the liveness registry counts it; the adapter's live set holds it again, so a later Stop or
+the exit closes it `stopped`; and its own idle and answer end it `completed` with its result, once.
+The roster reads it running only while the thread's session reads live, so the Stop now returns the
+session to `ready` after its `turn.aborted` (which folds to `stopped`, a dead session to the roster
+and one the host refuses a later Stop on), as Claude's and Grok's do after every settled turn. The
+one exception is a failed admission: its session reads `error` (a transport doubt, kept), which the
+roster reads as dead too, so a child relaunched after one reads `interrupted` there until the
+session reads live again — liveness still counts it. Not running, the frames were leftovers: nothing
+is written, and only a `busy` asks again. Its idle voids a check in flight. A read that fails
+relaunches it: the drain outranks a duplicate row. The Grok adapter keeps its adapter-written end on
+a revival (a late delivery with status-less rows): its reports are the CLI's own listings and
+frames, not confirmed by a status read like this one.
+
+The adapter used to mark every request that arrived while no turn ran after an interrupt resolved,
+write nothing and answer nothing: a live asker waited for good, and so did the parent's next turn,
+whose prompt joins the running run (`ensureRunning` awaits it). Now a request that arrives while an
+interrupt is under way — a Stop from its first step, withdrawing the parked cards, which comes
+before its abort; a failed admission's abort, which is `SessionRunState.cancel` too and now leaves
+the lingering state a Stop does — or after one before any run has said `busy` (the windows in which
+the parent's own output is dropped, `interruptionLingers`) is held (`holdsRequests`) and judged once
+every interrupt is over (`judgeHeldRequest`), and again if another began while the server answered —
+a Stop that starts and ends during the reads makes their answer stale — on the server's word: `GET
+/permission` (or `/question`) and `GET /session/status`. Its asker is gone when the request is no
+longer listed, or when the asker's session runs nothing — an older server's orphan, listed and idle
+(fixture 06): no card, the request is rejected on the wire, which releases what an older server kept
+listed, and its closing frame writes no row. Otherwise it is shown as any request is: the card on
+the turn running then, if one does — a child's question on none — or, with full access, a `once`. A
+read that fails decides nothing, and the card is shown: the user answers it, and a reply to a gone
+request settles locally, whereas a reject would answer for them — and 1.18.32's `Permission.reply`
+rejects every other pending ask of that session with it. A request answered elsewhere while it is
+judged leaves the hold with its closing frame, and writes no row.
 
 ---
 

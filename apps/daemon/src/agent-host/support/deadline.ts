@@ -34,6 +34,17 @@ export interface DeadlineOptions {
   onTimeout?: () => void;
   /** Aborts the wait early; the rejection is this signal's reason. */
   signal?: AbortSignal;
+  /**
+   * The timer the window runs on, injectable so a caller's tests can see the
+   * window armed and expire it without elapsed time (§9). Absent, it is
+   * `setTimeout` — never unref'd (see below).
+   */
+  timers?: DeadlineTimers;
+}
+
+export interface DeadlineTimers {
+  set(fire: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
 }
 
 /**
@@ -46,7 +57,7 @@ export function withDeadline<T>(
   work: Promise<T> | (() => Promise<T>),
   options: DeadlineOptions
 ): Promise<T> {
-  const { label, timeoutMs, onTimeout, signal } = options;
+  const { label, timeoutMs, onTimeout, signal, timers } = options;
   const promise = typeof work === "function" ? work() : work;
 
   if (signal?.aborted) {
@@ -56,18 +67,24 @@ export function withDeadline<T>(
 
   return new Promise<T>((resolve, reject) => {
     let settled = false;
+    // Declared first: an injected timer may fire as it is set.
+    let timer: unknown;
 
     const finish = (fn: () => void): void => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
+      if (timers !== undefined) {
+        timers.clear(timer);
+      } else {
+        clearTimeout(timer as ReturnType<typeof setTimeout>);
+      }
       signal?.removeEventListener("abort", onAbort);
       fn();
     };
 
-    const timer = setTimeout(() => {
+    const expire = (): void => {
       finish(() => {
         try {
           onTimeout?.();
@@ -77,7 +94,8 @@ export function withDeadline<T>(
         }
         reject(new DeadlineExceededError(label, timeoutMs));
       });
-    }, timeoutMs);
+    };
+    timer = timers !== undefined ? timers.set(expire, timeoutMs) : setTimeout(expire, timeoutMs);
     // Deliberately NOT unref'd: `onTimeout` is what kills a wedged child, and
     // a timer the loop is free to skip would let the host exit with the child
     // still running. Callers that need an early exit pass `signal`.

@@ -70,7 +70,7 @@ import type {
 
 import type { AdapterLogger } from "../adapter.ts";
 import type { ProviderSnapshotRegistry } from "../services.ts";
-import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
+import { AGENT_HOST_DEADLINES, type DeadlineTimers, withDeadline } from "../support/deadline.ts";
 import { ADAPTER_IDS, ADAPTER_PENDING_SNAPSHOTS, isAgentAdapterId } from "../adapters/index.ts";
 import { isPendingSnapshot } from "../adapters/pending.ts";
 import { AGENT_HOST_PROTOCOL_VERSION } from "../host-protocol.ts";
@@ -559,13 +559,22 @@ export function createProviderSnapshotRegistry(
     return result;
   };
 
+  // A probe's ceiling rides the injected timer when there is one, so a test
+  // sees which ceiling is armed and expires it without elapsed time (§9); the
+  // host's own runs on `withDeadline`'s, which is never unref'd.
+  const probeTimers: DeadlineTimers | undefined =
+    options.setTimer !== undefined
+      ? { set: options.setTimer, clear: options.clearTimer ?? (() => undefined) }
+      : undefined;
+
   const probeOnce = async (
     probe: ProviderProbe,
     input?: { cwd?: string }
   ): Promise<ProviderSnapshot> =>
     withDeadline(() => probe.refresh(input), {
       timeoutMs: probe.timeoutMs ?? AGENT_HOST_DEADLINES.authProbeMs,
-      label: `provider-snapshot:${probe.id}`
+      label: `provider-snapshot:${probe.id}`,
+      ...(probeTimers !== undefined ? { timers: probeTimers } : {})
     });
 
   const refreshOne = async (

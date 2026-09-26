@@ -40,6 +40,7 @@ import { joinToolOutput } from "../../store/tool-output.ts";
 import {
   closeLiveChildAgents,
   normalizeOpenCodeEvent,
+  settleChildSurvival,
   taskResultText,
   type NormalizeContext,
   type NormalizerSignal
@@ -61,7 +62,13 @@ import {
   suffixPrefixOverlap,
   type OpenCodeSessionState
 } from "./state.ts";
-import { compactionContinues, compactionPrompt, compactionSummary, wokenReply } from "./testing/woken.ts";
+import {
+  childLaunch,
+  compactionContinues,
+  compactionPrompt,
+  compactionSummary,
+  wokenReply
+} from "./testing/woken.ts";
 
 const FIXTURE_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -1412,6 +1419,99 @@ test("no result after a run the child's own session.error ended", () => {
   assert.deepEqual(taskRows(feed(run, [...resume.settle, resume.completed]).flat()), []);
 });
 
+/** A session's `busy`, as its runner says it at the top of a step. */
+function busyOf(sessionId: string): OpenCodeRawEvent {
+  return { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } };
+}
+
+/**
+ * A launch's `task` part as 1.18.32's processor closes it when an abort cuts
+ * the call: `error` "Tool execution aborted", `metadata.interrupted: true`
+ * (fixtures README observation 29, read from the source).
+ */
+function abortedCall(frame: OpenCodeRawEvent): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: Record<string, unknown> } };
+  };
+  const state = copy.properties.part.state;
+  state.status = "error";
+  state.error = "Tool execution aborted";
+  state.metadata = { ...(state.metadata as Record<string, unknown>), interrupted: true };
+  return copy as unknown as OpenCodeRawEvent;
+}
+
+test("a child an abort cancels ends stopped, never failed, when its own abort error or its call's cleanup beats the adapter's close — a grandchild too", async () => {
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+
+  // Its own `MessageAbortedError`.
+  {
+    const run = liveSession("ses_parent");
+    const launched = feed(run, [
+      ...childLaunch({ sessionId: "ses_parent", childId: "ses_child", callId: "call_child", description: "list files", background: false }),
+      busyOf("ses_child")
+    ]).flat();
+    const ended = feed(run, [
+      { type: "session.error", properties: { sessionID: "ses_child", error: { name: "MessageAbortedError", data: { message: "Aborted" } } } }
+    ]).flat();
+    assert.deepEqual(eventsOfType(ended, "task.completed").map((event) => event.payload.status), ["stopped"]);
+    assert.deepEqual(closeLiveChildAgents(run.state, run.ctx, "interrupted"), [], "ended already");
+    const { roster } = await throughHost([live, ...launched, ...ended]);
+    assert.equal(roster.find((row) => row.id === "ses_child")?.status, "interrupted");
+  }
+
+  // Its launching call's cleanup — the child's in the parent's session, and a
+  // grandchild's in the child's own.
+  {
+    const run = liveSession("ses_parent");
+    const [created, running] = childLaunch({ sessionId: "ses_parent", childId: "ses_child", callId: "call_child", description: "list files", background: false });
+    const [gcCreated, gcRunning] = childLaunch({ sessionId: "ses_child", childId: "ses_gc", callId: "call_gc", description: "dig deeper", background: false });
+    assert.ok(created && running && gcCreated && gcRunning);
+    const launched = feed(run, [created, running, busyOf("ses_child"), gcCreated, gcRunning, busyOf("ses_gc")]).flat();
+    assert.deepEqual(eventsOfType(launched, "task.started").map((event) => event.payload.taskId), ["ses_child", "ses_gc"]);
+    const ended = feed(run, [abortedCall(gcRunning), abortedCall(running)]).flat();
+    assert.deepEqual(
+      eventsOfType(ended, "task.completed").map((event) => [event.payload.taskId, event.payload.status, event.payload.summary]),
+      [
+        ["ses_gc", "stopped", "Tool execution aborted"],
+        ["ses_child", "stopped", "Tool execution aborted"]
+      ]
+    );
+    const { roster } = await throughHost([live, ...launched, ...ended]);
+    assert.deepEqual(
+      ["ses_child", "ses_gc"].map((id) => roster.find((row) => row.id === id)?.status),
+      ["interrupted", "interrupted"]
+    );
+    // The cleanup is the parent's word on its call, not the child's on its
+    // run — a job the abort did not reach runs on: a report that it runs is
+    // judged, as after the adapter's own close.
+    const reported = normalizeOpenCodeEvent(run.state, busyOf("ses_child"), run.ctx).signals;
+    assert.deepEqual(reported.map((signal) => signal.kind), ["child-reports-run"]);
+  }
+
+  // A call that fails on its own — no abort's mark — still fails the run, on
+  // the provider's word: nothing for a later report to undo.
+  {
+    const run = liveSession("ses_parent");
+    const [created, running] = childLaunch({ sessionId: "ses_parent", childId: "ses_child", callId: "call_child", description: "list files", background: false });
+    assert.ok(created && running);
+    feed(run, [created, running, busyOf("ses_child")]);
+    const ended = feed(run, [erroredPart(running, "the subagent crashed")]).flat();
+    assert.deepEqual(
+      eventsOfType(ended, "task.completed").map((event) => [event.payload.status, event.payload.summary]),
+      [["failed", "the subagent crashed"]]
+    );
+    assert.deepEqual(normalizeOpenCodeEvent(run.state, busyOf("ses_child"), run.ctx).signals, []);
+  }
+});
+
 test("no result after a run the host stopped", () => {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-resume";
@@ -1520,6 +1620,299 @@ test("a background run's answer, injected into the parent, becomes its result, o
   const child = roster.find((row) => row.id === "ses_background_child");
   assert.equal(child?.status, "completed");
   assert.equal(child?.result, "Found README.md and a.ts.");
+});
+
+test("a background run's answer injected while a Stop's leftovers are still dropped is its result all the same", () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  launchInBackground(run);
+  run.state.activeTurnId = undefined;
+  feed(run, childFixtureFrames([179], BACKGROUND_RENAMES));
+  // A Stop whose leftovers still linger: the parent's own output is dropped,
+  // but a user message's part is none of it.
+  run.state.interruptedTurnId = "turn-stopped";
+  run.state.reconcileIdleStatus = true;
+  const result = feed(run, injectedResult("ses_background_child", "Found it.")).flat();
+  assert.deepEqual(
+    eventsOfType(result, "task.completed").map((event) => [event.payload.taskId, event.payload.summary]),
+    [["ses_background_child", "Found it."]]
+  );
+});
+
+test("a child relaunched on the server's word still takes its own call's answer: the parent's part ends the reopened run, naming its new launch", () => {
+  const run = liveSession("ses_parent");
+  feed(run, childLaunch({ sessionId: "ses_parent", childId: "ses_fg", callId: "call_fg", description: "read the code", background: false }));
+  closeLiveChildAgents(run.state, run.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    run.state,
+    { type: "session.status", properties: { sessionID: "ses_fg", status: { type: "busy" } } },
+    run.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  const relaunched = settleChildSurvival(run.state, "ses_fg", reported.checkId, true, run.ctx);
+  assert.deepEqual(
+    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-revive:call_fg:1"]
+  );
+  // Its answer rides the call it was launched by, which the provider still names.
+  const answered = feed(run, [
+    {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_parent",
+        part: {
+          id: "prt_call_fg",
+          messageID: "msg_launch_call_fg",
+          sessionID: "ses_parent",
+          type: "tool",
+          tool: "task",
+          callID: "call_fg",
+          state: {
+            status: "completed",
+            title: "read the code",
+            input: { subagent_type: "explore", description: "read the code", prompt: "read the code" },
+            metadata: { parentSessionId: "ses_parent", sessionId: "ses_fg" },
+            output: '<task id="ses_fg" state="completed">\n<task_result>\nIt is fine.\n</task_result>\n</task>',
+            time: { start: 1, end: 2 }
+          }
+        }
+      }
+    }
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(answered, "task.completed").map((event) => [event.payload.status, event.payload.summary, event.payload.toolUseId]),
+    [["completed", "It is fine.", "opencode-revive:call_fg:1"]]
+  );
+});
+
+test("after an adapter relaunch, a provider relaunch names its own new call", () => {
+  const run = liveSession("ses_parent");
+  feed(run, childLaunch({ sessionId: "ses_parent", childId: "ses_bg", callId: "call_bg", description: "list files", background: true }));
+  closeLiveChildAgents(run.state, run.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    run.state,
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "busy" } } },
+    run.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  settleChildSurvival(run.state, "ses_bg", reported.checkId, true, run.ctx);
+  // The relaunched run ends by its own idle; then the model resumes the child
+  // with `task_id`, under a call of its own.
+  feed(run, [
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: "ses_bg" } }
+  ]);
+  const resumed = feed(run, childLaunch({ sessionId: "ses_parent", childId: "ses_bg", callId: "call_resume", description: "list files", background: true }).slice(1)).flat();
+  assert.deepEqual(
+    eventsOfType(resumed, "task.started").map((event) => event.payload.toolUseId),
+    ["call_resume"],
+    "its own call: a changed id the roster reopens for, not the adapter's last relaunch id"
+  );
+});
+
+test("a child no task part names still starts under a launch id of its own: `opencode-child:<session>`", () => {
+  const run = liveSession("ses_parent");
+  // Its `session.created`, then its own frames — the part that launched it
+  // never reached this stream (a gap, or a launch inside a session this
+  // thread does not read).
+  const started = feed(run, [
+    { type: "session.created", properties: { sessionID: "ses_orphan", info: { id: "ses_orphan", parentID: "ses_parent", title: "digging" } } },
+    { type: "session.status", properties: { sessionID: "ses_orphan", status: { type: "busy" } } }
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(started, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-child:ses_orphan"],
+    "every agent's FIRST start names a launch: the relaunch contract"
+  );
+});
+
+test("a child whose own frames beat its launching part names the provider's call on every row once the part is read, and a relaunch still reopens it", async () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  // Fixture 12's launch in the background, its `running` frame lost in a
+  // reconnect gap: the child's `session.created`, then its own `busy` — no
+  // part has named it yet — then the part's `completed` frame, which does.
+  const [pending, created, completed] = childFixtureFrames([140, 141, 180], BACKGROUND_RENAMES);
+  assert.ok(pending && created && completed);
+  const before = feed(run, [pending, created, ...childFixtureFrames([148], BACKGROUND_RENAMES)]).flat();
+  assert.deepEqual(
+    eventsOfType(before, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-child:ses_background_child"],
+    "its first start names a launch of its own"
+  );
+  const named = feed(run, [inBackground(completed)]).flat();
+  assert.deepEqual(taskRows(named), [], "a call answered in the background ends nothing");
+  // Its work, its idle, and its answer, injected into the parent.
+  const after = [
+    ...feed(run, childFixtureFrames([156, 157, 158, 159, 160], BACKGROUND_RENAMES)).flat(),
+    ...feed(run, childFixtureFrames([177, 178, 179], BACKGROUND_RENAMES)).flat(),
+    ...feed(run, injectedResult("ses_background_child", "Found README.md.")).flat()
+  ];
+  const rows = after.filter((event) => event.type.startsWith("task."));
+  assert.ok(rows.length > 0);
+  assert.deepEqual(
+    [...new Set(rows.map((event) => (event.payload as { toolUseId?: string }).toolUseId))],
+    ["call_background"],
+    "once the call is known, every row names it: the timeline hides the launching call behind the agent"
+  );
+
+  // The start's own launch is what a relaunch changes: a Stop closes the run,
+  // and the server's word that it runs reopens it under a new launch id.
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+  const relaunchRun = replayChildParent();
+  relaunchRun.state.activeTurnId = "turn-background";
+  const launched = feed(relaunchRun, [pending, created, ...childFixtureFrames([148], BACKGROUND_RENAMES), inBackground(completed)]).flat();
+  const stopped = closeLiveChildAgents(relaunchRun.state, relaunchRun.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    relaunchRun.state,
+    childFixtureFrames([148], BACKGROUND_RENAMES)[0]!,
+    relaunchRun.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  const relaunched = settleChildSurvival(relaunchRun.state, "ses_background_child", reported.checkId, true, relaunchRun.ctx);
+  assert.deepEqual(
+    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-revive:call_background:1"]
+  );
+  const { roster } = await throughHost([live, ...launched, ...stopped, ...relaunched]);
+  assert.equal(roster.find((row) => row.id === "ses_background_child")?.status, "running", "reopened");
+});
+
+/** Fixture 12's parent session, fresh: no frame of the capture replayed yet. */
+function freshChildParent(): Pick<Replay, "state" | "ctx"> {
+  const parent = sessionIds(readFixture(CHILD_FIXTURE))[2];
+  assert.ok(parent !== undefined);
+  return liveSession(parent);
+}
+
+/** A `task` part frame whose call names `childId` as the task to resume (`task_id`). */
+function resumingTask(frame: OpenCodeRawEvent, childId: string): OpenCodeRawEvent {
+  const copy = JSON.parse(JSON.stringify(frame)) as {
+    type: string;
+    properties: { part: { state: { input?: Record<string, unknown> } } };
+  };
+  copy.properties.part.state.input = { ...(copy.properties.part.state.input ?? {}), task_id: childId };
+  return copy as unknown as OpenCodeRawEvent;
+}
+
+test("a child no part ever named, resumed by a `task_id` call once settled, is relaunched: a start naming the call, running, then completed with its answer", async () => {
+  const run = freshChildParent();
+  // Fixture 12's child with its launching part never read: its own frames
+  // start it under its own launch id, and its idle settles it.
+  const [created] = childFixtureFrames([141]);
+  assert.ok(created);
+  const first = feed(run, [created, ...childFixtureFrames([148, 177, 178, 179])]).flat();
+  assert.deepEqual(taskRows(first), ["task.started", "task.updated:running", "task.updated:idle", "task.completed:completed"]);
+  assert.deepEqual(
+    eventsOfType(first, "task.started").map((event) => event.payload.toolUseId),
+    [`opencode-child:${CHILD_SESSION_ID}`]
+  );
+
+  // A `task` call resuming it (`task_id`): a new run, which the roster reopens for.
+  const resume = resumeFrames("call_resume");
+  const relaunch = feed(run, [resume.pending, resumingTask(resume.running, CHILD_SESSION_ID)]).flat();
+  assert.deepEqual(
+    eventsOfType(relaunch, "task.started").map((event) => event.payload.toolUseId),
+    ["call_resume"],
+    "a relaunch, not the first launch's late part"
+  );
+  const rest = feed(run, [...resume.work, ...resume.settle, resume.completed]).flat();
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+  const { roster: whileRunning } = await throughHost([live, ...first, ...relaunch]);
+  const reopened = whileRunning.find((row) => row.id === CHILD_SESSION_ID);
+  assert.deepEqual([reopened?.status, reopened?.activationCount], ["running", 2], "reopened");
+  const { roster: afterEnd } = await throughHost([live, ...first, ...relaunch, ...rest]);
+  const ended = afterEnd.find((row) => row.id === CHILD_SESSION_ID);
+  assert.deepEqual([ended?.status, ended?.result], ["completed", CHILD_RESULT]);
+});
+
+test("a `task_id` call on a child no part named is no launch of its run: while it works, and never adopted as its call", () => {
+  const run = freshChildParent();
+  const [created] = childFixtureFrames([141]);
+  assert.ok(created);
+  feed(run, [created, ...childFixtureFrames([148])]);
+  // A call handed to the working child: no start, and its rows never name it.
+  const resume = resumeFrames("call_handed_over");
+  const handed = feed(run, [resume.pending, resumingTask(resume.running, CHILD_SESSION_ID)]).flat();
+  assert.deepEqual(eventsOfType(handed, "task.started"), []);
+  const later = feed(run, [...resume.work, ...childFixtureFrames([177, 178, 179])]).flat();
+  assert.ok(later.some((event) => event.type === "task.completed"));
+  assert.deepEqual(
+    later
+      .filter((event) => event.type.startsWith("task."))
+      .filter((event) => (event.payload as { toolUseId?: string }).toolUseId === "call_handed_over"),
+    [],
+    "the call is not the run's launch"
+  );
+});
+
+test("a revival whose run started with no launch id (an older log) seeds one first, so the roster reopens: running, then completed", async () => {
+  const run = liveSession("ses_parent");
+  // What a host from before every start named a launch left: a grandchild's
+  // start with none, in the log and in the adapter's own record of it.
+  run.state.relatedSessionIds.add("ses_gc");
+  run.state.childAgents.set("ses_gc", {
+    sessionId: "ses_gc",
+    parentSessionId: "ses_bg",
+    parentAgentId: "ses_bg",
+    description: "dig deeper",
+    started: true,
+    completed: false
+  });
+  const olderStart: RuntimeEvent = {
+    eventId: "evt-older-start",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    agentId: "ses_gc",
+    providerRefs: { providerTurnId: "ses_gc" },
+    type: "task.started",
+    payload: { taskId: "ses_gc", taskType: "subagent", agentId: "ses_gc", parentAgentId: "ses_bg", description: "dig deeper" }
+  };
+  const stopped = closeLiveChildAgents(run.state, run.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    run.state,
+    { type: "session.status", properties: { sessionID: "ses_gc", status: { type: "busy" } } },
+    run.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  const relaunched = settleChildSurvival(run.state, "ses_gc", reported.checkId, true, run.ctx);
+  assert.deepEqual(
+    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-child:ses_gc", "opencode-revive:ses_gc:1"],
+    "a seed naming the first run's launch — a late delivery — then the relaunch"
+  );
+  const ended = feed(run, [
+    { type: "session.status", properties: { sessionID: "ses_gc", status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: "ses_gc" } }
+  ]).flat();
+
+  // A live session: the roster reads no run of a dead one as running.
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+  const { roster: whileRunning } = await throughHost([live, olderStart, ...stopped, ...relaunched]);
+  assert.equal(whileRunning.find((row) => row.id === "ses_gc")?.status, "running", "reopened");
+  const { roster: afterEnd } = await throughHost([live, olderStart, ...stopped, ...relaunched, ...ended]);
+  assert.equal(afterEnd.find((row) => row.id === "ses_gc")?.status, "completed");
 });
 
 test("a background answer that arrives before the child's idle rides the run's own end", () => {
@@ -1897,6 +2290,36 @@ test("output that follows an interruption opens nothing, a woken reply's include
   const events = feed(run, [...reply.begins, ...reply.streams, ...reply.ends]).flat();
   assert.deepEqual(events, []);
   assert.equal(run.state.activeTurnId, undefined);
+});
+
+test("a request after an interruption waits for the server's word on its asker: no card, one signal; a repeat adds nothing, an answer meanwhile no row", () => {
+  const run = liveSession("ses_parent");
+  run.state.activeTurnId = undefined;
+  run.state.interruptedTurnId = "turn-stopped";
+  run.state.reconcileIdleStatus = true;
+  const asks: OpenCodeRawEvent[] = [
+    {
+      type: "permission.asked",
+      properties: { id: "per_1", sessionID: "ses_parent", permission: "bash", patterns: ["ls"] }
+    },
+    {
+      type: "question.asked",
+      properties: { id: "que_1", sessionID: "ses_parent", questions: [{ question: "Which?", header: "Which", options: [] }] }
+    }
+  ];
+  for (const ask of asks) {
+    const first = normalizeOpenCodeEvent(run.state, ask, run.ctx);
+    assert.deepEqual(first.events, [], `${ask.type}: nothing is shown`);
+    assert.deepEqual(first.signals.map((signal) => signal.kind), ["request-after-interrupt"]);
+    const again = normalizeOpenCodeEvent(run.state, ask, run.ctx);
+    assert.deepEqual([again.events, again.signals], [[], []], `${ask.type}: a repeated frame adds nothing`);
+  }
+  const answered = feed(run, [
+    { type: "permission.replied", properties: { sessionID: "ses_parent", requestID: "per_1", reply: "once" } },
+    { type: "question.rejected", properties: { sessionID: "ses_parent", requestID: "que_1" } }
+  ]).flat();
+  assert.deepEqual(answered, [], "answered elsewhere while held: no card was written, so no row closes one");
+  assert.deepEqual([...run.state.heldRequestIds], []);
 });
 
 // ---------------------------------------------------------------------------
