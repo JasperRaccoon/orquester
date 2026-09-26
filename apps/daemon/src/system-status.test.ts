@@ -448,39 +448,45 @@ test("a process carrying the agent host's launch marker is managed even as an or
   const env = { ...unmarkedEnv(), [AGENT_LAUNCH_ENV_VAR]: randomUUID(), ORQUESTER_SESSION_ID: "chat-1" };
   const { stdout } = await exec(
     "sh",
-    ["-c", "setsid sh -c 'sleep 30 & wait' </dev/null >/dev/null 2>&1 & echo $!"],
+    ["-c", "setsid sh -c 'sleep 30 & sleep 30' </dev/null >/dev/null 2>&1 & echo $!"],
     { env }
   );
   const orphan = Number(stdout.trim());
   assert.ok(Number.isInteger(orphan) && orphan > 1);
-  let child = 0;
+  let children: number[] = [];
   try {
-    // The inner shell forks its sleep a beat after `sh` printed the pid.
+    // The inner shell forks its two sleeps a beat after `sh` printed the pid.
     const deadline = Date.now() + 5_000;
-    while (child === 0 && Date.now() < deadline) {
+    while (children.length < 2 && Date.now() < deadline) {
       try {
-        child = Number((await exec("pgrep", ["-P", String(orphan)])).stdout.trim().split("\n")[0]);
+        children = (await exec("pgrep", ["-P", String(orphan)])).stdout.trim().split("\n").map(Number);
       } catch {
-        await setTimeoutPromise(10);
+        children = [];
       }
+      if (children.length < 2) await setTimeoutPromise(10);
     }
-    assert.ok(child > 1, "the orphan started its child");
+    assert.equal(children.length, 2, "the orphan started its two sleeps");
     const status = service({ listSessionIds: () => new Set(["chat-1"]) });
     const listed = (await status.processes()).processes;
     const root = listed.find((row) => row.pid === orphan);
     assert.ok(root, "the marked orphan is listed");
     assert.equal(root?.sessionId, "chat-1", "labelled with the chat its launch belongs to");
-    const sleep = listed.find((row) => row.pid === child);
-    assert.ok(sleep, "and so is what it started");
-    assert.equal(sleep?.sessionId, "chat-1");
+    for (const child of children) {
+      const sleep = listed.find((row) => row.pid === child);
+      assert.ok(sleep, "and so is what it started");
+      assert.equal(sleep?.sessionId, "chat-1");
+    }
 
     const result = await status.kill(orphan);
     assert.equal(result.ok, true, "managed: the kill guard lets it through");
-    assert.ok(result.ok === true && result.killed >= 2, "the orphan and its child are signalled");
-    assert.equal(await waitGone(orphan), true);
-    assert.equal(await waitGone(child), true);
+    // `killed` counts signals actually sent: the shell may exit on its own once
+    // its foreground sleep dies, so only the two sleeps are guaranteed.
+    assert.ok(result.ok === true && result.killed >= 2, "the orphan's subtree is signalled");
+    for (const pid of [orphan, ...children]) {
+      assert.equal(await waitGone(pid), true, `pid ${pid} survived the kill`);
+    }
   } finally {
-    for (const pid of [orphan, child]) {
+    for (const pid of [orphan, ...children]) {
       try {
         if (pid > 1) process.kill(pid, "SIGKILL");
       } catch {
