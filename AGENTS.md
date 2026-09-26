@@ -1403,40 +1403,42 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`) takes only processes carrying it IN
   A SESSION ONE OF THE CLI'S CHILDREN LED, recorded while the CLI lives, so a process that
   daemonized into a session of its own (agent-browser's daemon, an SSH ControlMaster: host-wide
-  helpers a chat may have started first) is spared; SIGTERM, then SIGKILL past
-  `DEFAULT_KILL_GRACE_MS` to whatever a fresh scan still finds, each pid identified by its `/proc`
-  starttime on both sides of the environment read and again before each signal, a live session
-  leader against the one recorded — the kill guard's rule: never a recycled pid; a zombie is gone.
-  Two kinds, two rules. **The CLI's own helpers** — its children the moment `session/new` /
-  `session/load` answered, which are its MCP servers (fixture 31: all four existed then, none of the
-  user's work had run) — are swept at EVERY end: a restart of a thread that goes on (an account,
-  permission-mode or cwd change — Grok switches models in-session), the host's teardown (a
-  drain-restart's included), the CLI's own exit (a crash, an open that failed), the user's stop.
-  **The work its agent started** — its shells, the dev servers they run — is swept ONLY when the
-  user ends the session: the session stop command or a closed tab (`stopSessionInternal` passes
-  `stopSession(…, {endedByUser: true})`; the MCP's `stop_session` and `close_session` are that
-  command and that close), its sessions recorded right before the CLI is stopped; and on an open
-  that failed, where nothing of the user's has run. Never at a deploy's teardown or a restart: the
-  drain waits for live work only within its bound (a watch loop's TTL, an agent's hour), and a dev
-  server started in a Grok chat must survive every deploy that comes after it. Never at a crash
-  either (no user ended anything). There it runs on as a marked orphan, listed and killable in
-  Settings → System; its roster row still closes `stopped` with the session (no CLI is left to
-  report on it), so the chat no longer shows it. A Claude chat's background shells outlive their
-  session the same way — the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s later, before the
-  CLI's own 5 s wind-down would stop them, and they run on under init (`bun run dev`,
-  `stripe listen`, `vite` of closed Claude chats, live on the owner's host on 2026-09-26). An open
-  that fails stops its CLI now too: a `session/load` the CLI refused (a cursor it no longer knows)
-  left it running outside the adapter's map, holding its pipes. It adds no row of its own either:
-  the start's rejection is its whole report, which the host writes — an exit row besides it read as
-  a crash of a session that never ran (`GrokSession.announced`) — and a CLI that ends after
-  `session/new` answered but before the session is announced (on the open's `session/set_model`,
-  say) fails the open with its exit rather than being announced ready, dead. A work process whose
-  shell had exited before the stop is in no recorded session and stays running; a process that
-  scrubs its environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills nothing: its
-  `session/cancel` leaves the CLI — which owns them — running (fixture 21). Linux-only (`/proc`);
-  elsewhere the sweep reads and signals nothing. **Settings → System reads the same marker**: a
-  process of the daemon's own uid that no root reaches, whose parent is init (or gone) and that
-  carries any launch's marker is a root of its own — listed under the chat its
+  helpers a chat may have started first) is spared — verified for agent-browser 0.34: its browser
+  daemon, spawned at the first browser command, leads a session of its own under init, Chrome runs
+  in the daemon's session, and nothing of the browser stays in the MCP server's (Grok fixtures
+  README observation 56); SIGTERM, then SIGKILL past `DEFAULT_KILL_GRACE_MS` to whatever a fresh
+  scan still finds, each pid identified by its `/proc` starttime on both sides of the environment
+  read and again before each signal, a live session leader against the one recorded — the kill
+  guard's rule: never a recycled pid; a zombie is gone. Two kinds, two rules. **The CLI's own
+  helpers** — its children the moment `session/new` / `session/load` answered, which are its MCP
+  servers (fixture 31: all four existed then, none of the user's work had run) — are swept at EVERY
+  end: a restart of a thread that goes on (an account, permission-mode or cwd change — Grok switches
+  models in-session), the host's teardown (a drain-restart's included), the CLI's own exit (a crash,
+  an open that failed), the user's stop. **The work its agent started** — its shells, the dev
+  servers they run — is swept ONLY when the user ends the session: the session stop command or a
+  closed tab (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`; the MCP's
+  `stop_session` and `close_session` are that command and that close), its sessions recorded right
+  before the CLI is stopped; and on an open that failed, where nothing of the user's has run. Never
+  at a deploy's teardown or a restart: the drain waits for live work only within its bound (a watch
+  loop's TTL, an agent's hour), and a dev server started in a Grok chat must survive every deploy
+  that comes after it. Never at a crash either (no user ended anything). There it runs on as a
+  marked orphan, listed and killable in Settings → System; its roster row still closes `stopped`
+  with the session (no CLI is left to report on it), so the chat no longer shows it. A Claude chat's
+  background shells outlive their session the same way — the SDK closes the Claude CLI's stdin and
+  SIGTERMs it 2 s later, before the CLI's own 5 s wind-down would stop them, and they run on under
+  init (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
+  2026-09-26). An open that fails stops its CLI now too: a `session/load` the CLI refused (a cursor
+  it no longer knows) left it running outside the adapter's map, holding its pipes. It adds no row
+  of its own either: the start's rejection is its whole report, which the host writes — an exit row
+  besides it read as a crash of a session that never ran (`GrokSession.announced`) — and a CLI that
+  ends after `session/new` answered but before the session is announced (on the open's
+  `session/set_model`, say) fails the open with its exit rather than being announced ready, dead. A
+  work process whose shell had exited before the stop is in no recorded session and stays running; a
+  process that scrubs its environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills
+  nothing: its `session/cancel` leaves the CLI — which owns them — running (fixture 21). Linux-only
+  (`/proc`); elsewhere the sweep reads and signals nothing. **Settings → System reads the same
+  marker**: a process of the daemon's own uid that no root reaches, whose parent is init (or gone)
+  and that carries any launch's marker is a root of its own — listed under the chat its
   `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in `system-status.ts`),
   what it started coming with it as its descendants — so the work a session end left running, and
   whatever a crashed host never swept, is in reach. A marked process whose parent still runs outside

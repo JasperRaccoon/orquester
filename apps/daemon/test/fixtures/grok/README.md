@@ -1540,6 +1540,29 @@ running at a deploy (as before 2026-09-26), never killed early. After the adapte
 CLI's group, `serena` ran on under init this time (in 24 `jira-cloud` did too; the others end on
 their stdin's end) — a helper, swept by its recorded session.
 
+### 56. agent-browser's daemon leaves its MCP server's session — the helper sweep spares the shared browser
+
+Not an ACP capture: a probe run on 2026-09-26 (the harness's `ab-probe-2026-09-26.mjs`, isolated
+from the host's shared browser by its own `HOME` and `AGENT_BROWSER_SOCKET_DIR`, every process it
+started stopped by its marker afterwards). `agent-browser mcp` (0.34.0), started as the Grok CLI
+starts its MCP servers — a session of its own — and asked for one `agent_browser_open about:blank`:
+
+| process | parent | process group | session |
+|---|---|---|---|
+| `agent-browser mcp` (the MCP server) | the probe | its own | its own |
+| `agent-browser-linux-x64` (the browser daemon, spawned at the first browser command) | init | its own | **its own** |
+| `chrome --remote-debugging-port=0 …` | the daemon | its own | the daemon's |
+| two `chrome_crashpad_handler` | init | their own | their own |
+
+So the daemon `setsid`s away (its binary imports both `setsid` and `setpgid`: the second is Chrome's,
+put in a group of its own inside the daemon's session). Nothing of the browser stays in the MCP
+server's session, which is the helper session a Grok sweep takes at every end of the session
+(observations 48, 55): the host-shared browser, and every other client's use of it, survives it —
+exactly as the round-1 "never a process that daemonized away" rule meant. Serena does the same with
+its language servers (fixture 24's listing: the TypeScript server leads a session of its own under
+serena). A helper that only `setpgid`ed a host-shared daemon would stay in its session and be swept;
+none was seen.
+
 ## Reproducing
 
 The harness is deliberately not committed. To re-capture:
