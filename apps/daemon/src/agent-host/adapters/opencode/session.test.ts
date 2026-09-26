@@ -2392,6 +2392,38 @@ test("a report from a child the Stop closed, arriving while a later Stop is unde
   harness.dispose();
 });
 
+test("a Stop that begins and ends while the server is asked about a child makes that answer stale: it asks again, and does not relaunch a child it ended", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await stoppedWithChild(harness);
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, () => {
+    harness.fake.statusMap = {};
+    return json(true);
+  });
+  const asked = deferred<void>();
+  const answer = deferred<void>();
+  harness.fake.overrides.set("GET /session/status", async () => {
+    asked.resolve();
+    await answer.promise;
+    return json({ ses_bg: { type: "busy" } });
+  });
+  const fed = harness.events.length;
+  pushAll(harness.fake, childStreams("ses_bg", "a.ts"));
+  await asked.promise;
+  await session.interruptTurn();
+  const askedAgain = harness.fake.nextRequest("GET", "/session/status");
+  answer.resolve();
+  await askedAgain;
+  await nextTurn();
+  assert.deepEqual(
+    harness.events.slice(fed).filter((event) => event.type === "task.started"),
+    [],
+    "the second answer is the one that counts: the Stop ended it"
+  );
+  assert.equal(livenessOf(harness).liveness("thread-1"), null);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("a child whose own idle arrives while the server is asked about it is not revived: that report was its last", async () => {
   const harness = makeHarness();
   const { session } = await stoppedWithChild(harness);
@@ -3163,6 +3195,41 @@ test("after a prompt admission fails and aborts the session, a request is judged
   const opened = await waitFor(harness, "request.opened");
   assert.equal(opened.requestId, "per_live");
   assert.deepEqual(eventsOfType(harness.events, "request.opened").map((event) => event.requestId), ["per_live"]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a Stop that begins and ends while the server is asked about a held request makes that answer stale: it asks again", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await stoppedAfterLaunching(harness);
+  // Before the second Stop the asker waits (listed, its session busy); that
+  // Stop's abort ends it.
+  harness.fake.statusMap = { ses_bg: { type: "busy" } };
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, () => {
+    harness.fake.statusMap = {};
+    return json(true);
+  });
+  const asked = deferred<void>();
+  const answer = deferred<void>();
+  harness.fake.overrides.set("GET /permission", async () => {
+    asked.resolve();
+    await answer.promise;
+    return json([permissionAsk("per_quick", "ses_bg")]);
+  });
+  harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_quick", "ses_bg") });
+  await asked.promise;
+  // The whole second Stop happens while the list is read: no interrupt is
+  // under way by the time the (stale) answer lands.
+  await session.interruptTurn();
+  answer.resolve();
+
+  const rejected = await harness.fake.waitForRequest("POST", "/permission/per_quick/reply");
+  assert.deepEqual(rejected.body, { reply: "reject" }, "asked again after that Stop: its asker is gone");
+  assert.deepEqual(
+    eventsOfType(harness.events, "request.opened").filter((event) => event.requestId === "per_quick"),
+    [],
+    "no card for an asker the Stop ended while it was being judged"
+  );
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

@@ -990,45 +990,47 @@ What still reaches the thread after a Stop:
 (`closeLiveChildAgents`), so one that survived read "interrupted" and held no drain while it worked.
 An end the adapter wrote is not the provider's word: a frame of a live run from such a child (its
 `busy`, a delta, a text part with no end, a running call, a reply not completed) asks the server,
-once every interrupt is over, whether its session runs (`GET /session/status`). A cancelled child
-sends such frames too, late — its last ones, published before its cancel — and only the server tells
-the two apart; each cancelled child's own idle comes after them. Busy — confirmed — the child is
-RELAUNCHED under the relaunch contract: a new `task.started` naming a new launch id,
-`opencode-revive:<callID>:<n>`, which every row of the reopened run names while the provider's call
-stays the one its part is matched by. A grandchild is relaunched the same way: its launch is its
-child's own `task` call. A run whose start named no launch (a log from before every start named one)
-gets a seed first, naming its first run's (`opencode-child:<session id>`): the roster reopens only
-on a changed launch, and reads the seed as a late delivery. The roster reopens the row, running,
-with the Stop's end and summary cleared; the liveness registry counts it; the adapter's live set
-holds it again, so a later Stop or the exit closes it `stopped`; and its own idle and answer end it
-`completed` with its result, once. The roster reads it running only while the thread's session reads
-live, so the Stop now returns the session to `ready` after its `turn.aborted` (which folds to
-`stopped`, a dead session to the roster and one the host refuses a later Stop on), as Claude's and
-Grok's do after every settled turn. The one exception is a failed admission: its session reads
-`error` (a transport doubt, kept), which the roster reads as dead too, so a child relaunched after
-one reads `interrupted` there until the session reads live again — liveness still counts it. Not
-running, the frames were leftovers: nothing is written, and only a `busy` asks again. Its idle voids
-a check in flight. A read that fails relaunches it: the drain outranks a duplicate row. The Grok
-adapter keeps its adapter-written end on a revival (a late delivery with status-less rows): its
-reports are the CLI's own listings and frames, not confirmed by a status read like this one.
+once every interrupt is over, and again if another began while it answered, whether its session runs
+(`GET /session/status`). A cancelled child sends such frames too, late — its last ones, published
+before its cancel — and only the server tells the two apart; each cancelled child's own idle comes
+after them. Busy — confirmed — the child is RELAUNCHED under the relaunch contract: a new
+`task.started` naming a new launch id, `opencode-revive:<callID>:<n>`, which every row of the
+reopened run names while the provider's call stays the one its part is matched by. A grandchild is
+relaunched the same way: its launch is its child's own `task` call. A run whose start named no
+launch (a log from before every start named one) gets a seed first, naming its first run's
+(`opencode-child:<session id>`): the roster reopens only on a changed launch, and reads the seed as
+a late delivery. The roster reopens the row, running, with the Stop's end and summary cleared; the
+liveness registry counts it; the adapter's live set holds it again, so a later Stop or the exit
+closes it `stopped`; and its own idle and answer end it `completed` with its result, once. The
+roster reads it running only while the thread's session reads live, so the Stop now returns the
+session to `ready` after its `turn.aborted` (which folds to `stopped`, a dead session to the roster
+and one the host refuses a later Stop on), as Claude's and Grok's do after every settled turn. The
+one exception is a failed admission: its session reads `error` (a transport doubt, kept), which the
+roster reads as dead too, so a child relaunched after one reads `interrupted` there until the
+session reads live again — liveness still counts it. Not running, the frames were leftovers: nothing
+is written, and only a `busy` asks again. Its idle voids a check in flight. A read that fails
+relaunches it: the drain outranks a duplicate row. The Grok adapter keeps its adapter-written end on
+a revival (a late delivery with status-less rows): its reports are the CLI's own listings and
+frames, not confirmed by a status read like this one.
 
 The adapter used to mark every request that arrived while no turn ran after an interrupt resolved,
 write nothing and answer nothing: a live asker waited for good, and so did the parent's next turn,
-whose prompt joins the running run (`ensureRunning` awaits it). Now a request that arrives while
-an interrupt is under way — a Stop from its first step, withdrawing the parked cards, which comes
+whose prompt joins the running run (`ensureRunning` awaits it). Now a request that arrives while an
+interrupt is under way — a Stop from its first step, withdrawing the parked cards, which comes
 before its abort; a failed admission's abort, which is `SessionRunState.cancel` too and now leaves
-the lingering state a Stop does — or after one before any run has said `busy` (the windows in
-which the parent's own output is dropped, `interruptionLingers`) is held (`holdsRequests`) and
-judged once every interrupt is over (`judgeHeldRequest`), on the server's word:
-`GET /permission` (or `/question`) and `GET /session/status`. Its asker is gone when the request
-is no longer listed, or when the asker's session runs nothing — an older server's orphan, listed
-and idle (fixture 06): no card, the request is rejected on the wire, which releases what an older
-server kept listed, and its closing frame writes no row. Otherwise it is shown as any request is:
-the card on the turn running then, if one does — a child's question on none — or, with full
-access, a `once`. A read that fails decides nothing, and the card is shown: the user answers it,
-and a reply to a gone request settles locally, whereas a reject would answer for them — and
-1.18.32's `Permission.reply` rejects every other pending ask of that session with it. A request
-answered elsewhere while it is judged leaves the hold with its closing frame, and writes no row.
+the lingering state a Stop does — or after one before any run has said `busy` (the windows in which
+the parent's own output is dropped, `interruptionLingers`) is held (`holdsRequests`) and judged once
+every interrupt is over (`judgeHeldRequest`), and again if another began while the server answered —
+a Stop that starts and ends during the reads makes their answer stale — on the server's word: `GET
+/permission` (or `/question`) and `GET /session/status`. Its asker is gone when the request is no
+longer listed, or when the asker's session runs nothing — an older server's orphan, listed and idle
+(fixture 06): no card, the request is rejected on the wire, which releases what an older server kept
+listed, and its closing frame writes no row. Otherwise it is shown as any request is: the card on
+the turn running then, if one does — a child's question on none — or, with full access, a `once`. A
+read that fails decides nothing, and the card is shown: the user answers it, and a reply to a gone
+request settles locally, whereas a reject would answer for them — and 1.18.32's `Permission.reply`
+rejects every other pending ask of that session with it. A request answered elsewhere while it is
+judged leaves the hold with its closing frame, and writes no row.
 
 ---
 

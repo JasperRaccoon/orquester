@@ -245,6 +245,12 @@ export class OpenCodeThreadSession {
   private readonly ancestryAttempts = new Map<string, number>();
   /** The interrupts under way (`asInterrupt`), each settling when it ends. */
   private readonly interruptFlights = new Set<Promise<void>>();
+  /**
+   * How many interrupts have begun. A judge compares it across its reads: one
+   * that began — and maybe already ended — while the server answered may have
+   * ended what was asked about, so that answer is stale.
+   */
+  private interruptsBegun = 0;
   private pumpConnections = 0;
   private closed = false;
   private closing: Promise<void> | undefined;
@@ -514,6 +520,7 @@ export class OpenCodeThreadSession {
   private async asInterrupt<T>(work: () => Promise<T>): Promise<T> {
     const flight = deferred<void>();
     this.interruptFlights.add(flight.promise);
+    this.interruptsBegun += 1;
     this.state.interrupting = true;
     // Only an idle from here on says the run this interrupts is over.
     this.state.idleAfterInterrupt = false;
@@ -1241,12 +1248,14 @@ export class OpenCodeThreadSession {
       if (this.closed || !this.state.heldRequestIds.has(requestId)) {
         return;
       }
+      const interruptsBefore = this.interruptsBegun;
       const waits = await this.askerWaits(held);
       if (this.closed || !this.state.heldRequestIds.has(requestId)) {
         return;
       }
-      // An interrupt that began while the server answered may end it too.
-      if (this.state.interrupting && round < 2) {
+      // An interrupt that began while the server answered — under way still,
+      // or already over — may have ended the asker: that answer is stale.
+      if (this.interruptsBegun !== interruptsBefore && round < 2) {
         continue;
       }
       this.state.heldRequestIds.delete(requestId);
@@ -1314,17 +1323,26 @@ export class OpenCodeThreadSession {
    * kill running work.
    */
   private async judgeChildSurvival(childId: string, checkId: number): Promise<void> {
-    await this.interruptsSettled();
-    if (this.closed) {
+    for (let round = 0; ; round += 1) {
+      await this.interruptsSettled();
+      if (this.closed) {
+        return;
+      }
+      const interruptsBefore = this.interruptsBegun;
+      const statuses = await this.readSessionStatuses();
+      if (this.closed) {
+        return;
+      }
+      // A Stop that began while the server answered may have ended the child:
+      // that answer is stale.
+      if (this.interruptsBegun !== interruptsBefore && round < 2) {
+        continue;
+      }
+      const running = statuses === undefined || runsIn(statuses, childId);
+      for (const event of settleChildSurvival(this.state, childId, checkId, running, this.normalizeContext())) {
+        this.emit(event);
+      }
       return;
-    }
-    const statuses = await this.readSessionStatuses();
-    if (this.closed) {
-      return;
-    }
-    const running = statuses === undefined || runsIn(statuses, childId);
-    for (const event of settleChildSurvival(this.state, childId, checkId, running, this.normalizeContext())) {
-      this.emit(event);
     }
   }
 
