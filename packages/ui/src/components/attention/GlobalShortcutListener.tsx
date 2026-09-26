@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import { useApi } from "../../context/orquester-context";
 import type { ApiClient } from "../../lib/api-client";
+import { isAnyLayerOpen } from "../../lib/open-layers";
 import { ensureProjectIndex } from "../../lib/project-index";
 import { insideShortcutBailZone } from "../../lib/session-nav";
 import { useAppStore } from "../../store/app";
@@ -64,13 +65,23 @@ export function matchesPaletteToggle(event: ShortcutEventLike): boolean {
 }
 
 /**
- * A blocking layer owns the screen: jumping a tab out from under an open
- * Settings modal, close-confirmation or palette would leave the layer floating
- * over a view the user never asked for. Same gate the palette's own opener uses.
+ * A layer owns the screen and the keyboard: jumping a tab out from under an
+ * open Settings modal, close-confirmation, palette, viewer or menu would leave
+ * the layer floating over a view the user never asked for, and an Escape meant
+ * to close it would act on the view beneath instead.
  *
- * Exported because the chat surface's own scoped Escape listener has to stand
- * down for exactly the same set — two copies of this list would drift, and the
- * drift would only show up as a shortcut firing under a modal.
+ * The set is every layer that closes on Escape: the store's modals, the
+ * palette, and whatever is registered as open (`lib/open-layers.ts` — every
+ * `Modal`, `BottomSheet`, `Dropdown`, `ContextMenu` and `ComposerPopover`,
+ * through `useOpenLayer`). Those close from their own `document` listeners,
+ * which every `window` capture handler runs before, and the chat's Escape
+ * stops the event when it acts: a layer missing from this set lost its
+ * Escape to it.
+ *
+ * Exported because the chat's Escape handlers — the shell's listener
+ * (`AgentChatView`) and the composer's two arms — must stand down for exactly
+ * the same set: two copies of this list would drift, and the drift would only
+ * show up as a shortcut firing under a modal.
  */
 export function anotherLayerOwnsTheKeyboard(): boolean {
   const state = useAppStore.getState();
@@ -78,7 +89,8 @@ export function anotherLayerOwnsTheKeyboard(): boolean {
     state.settingsOpen ||
     state.authPrompt !== null ||
     state.pendingCloseTabId !== null ||
-    isCommandPaletteOpen()
+    isCommandPaletteOpen() ||
+    isAnyLayerOpen()
   );
 }
 

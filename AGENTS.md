@@ -2062,7 +2062,14 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   reserves `Ctrl+Shift+A`** for its own tab search, so an installed PWA may never receive it —
   the Attention Center menu is the reliable path. `Ctrl/Cmd+K` matches the physical `code`
   (`KeyK`), survives layouts that rewrite `key`, and only swallows the event when a mounted
-  palette actually took it.
+  palette actually took it. **`anotherLayerOwnsTheKeyboard()` is the one set of open layers** the
+  `Ctrl+Shift+A` cycle and the chat's Escape (the shell's listener and both composer arms) stand
+  down for: the store's modals, the palette, and every `Modal`/`BottomSheet`/`Dropdown`/
+  `ContextMenu`/`ComposerPopover` open at the moment — each registers through `useOpenLayer`
+  (`packages/ui/src/lib/open-layers.ts`). A layer closes on its own `document` listener, which a
+  `window` capture handler always runs before, so a layer missing from the set loses its Escape to
+  whichever of them acts: the chat's Escape stopped the turn under an open output viewer, which
+  stayed up. A new layer primitive calls `useOpenLayer(open)`; nothing keeps a second list.
 - **Mobile safe-area insets: one layer owns insets *and* vertical sizing.** The app shell
   (`AppWrapper`, `#root`'s only child) is what `useViewportHeight` sizes from
   `visualViewport.height` so it fits above the soft keyboard, so `apps/web/src/styles.css` pads the

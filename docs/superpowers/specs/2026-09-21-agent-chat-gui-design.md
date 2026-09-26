@@ -3864,6 +3864,20 @@ second, inside the 600 ms window of `createEscapeSequence`, opens the control. A
 outside the composer goes through the shell's resolver (`escape-action.ts`), which returns
 `"rewind"` for the same double press and opens the control through the composer bridge.*
 
+*Built: **an open layer takes its own Escape first.** The chat's Escape handlers — the shell's
+`window` capture listener (`resolveChatEscape`) and the composer's two arms (its `window` arm,
+`composerOwnsEscape`, and the textarea's own handler, `composerEscapeAction`, both in
+`composer/tab-visibility.ts`) — run before any layer's own listener, and used to act under it: with
+the output or turn-diff viewer, the context meter's panel or a composer popover up, Escape stopped
+the running turn (in a drill-in it closed the child behind the viewer, and the next one stopped the
+parent), and where the shell acted the layer never saw the key and stayed open. Every layer that
+closes on Escape — `Modal`, `BottomSheet`, `Dropdown`, `ContextMenu`, `ComposerPopover`, the
+command palette — registers while it is open (`useOpenLayer`, `packages/ui/src/lib/open-layers.ts`);
+`anotherLayerOwnsTheKeyboard()` reads that registry beside the store's own modals, and all three
+handlers stand down while it answers true. The layer closes itself, nothing is interrupted or left,
+and an Escape a layer took is never half of Esc Esc. The same set gates the Attention Center's
+`Ctrl+Shift+A`.*
+
 Prompt-length validation measures the **larger of the literal draft and its wire-expanded form**, so
 a short reference that expands on the wire cannot smuggle the thread past §4.1's input bound;
 answers to a pending question are exempt, because they are not a provider turn. A paste of 32 KiB or

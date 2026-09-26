@@ -2,9 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  composerEscapeAction,
   composerOwnsEscape,
   isChatTabListenerActive,
-  shellOwnsEscape
+  shellOwnsEscape,
+  type ComposerEscapeAction,
+  type ComposerEscapeInput
 } from "./tab-visibility.ts";
 
 const visible = { getClientRects: () => ({ length: 1 }) };
@@ -45,6 +48,7 @@ function everyEscapeShape(): Array<{
   isTurnActive: boolean;
   drillInOpen: boolean;
   rewindPress: boolean;
+  layerOpen: boolean;
 }> {
   const shapes = [];
   for (const defaultPrevented of [false, true]) {
@@ -53,16 +57,19 @@ function everyEscapeShape(): Array<{
         for (const isTurnActive of [false, true]) {
           for (const drillInOpen of [false, true]) {
             for (const rewindPress of [false, true]) {
-              // A textarea is by definition inside the shell.
-              if (isTextarea && !insideComposerShell) continue;
-              shapes.push({
-                defaultPrevented,
-                insideComposerShell,
-                isTextarea,
-                isTurnActive,
-                drillInOpen,
-                rewindPress
-              });
+              for (const layerOpen of [false, true]) {
+                // A textarea is by definition inside the shell.
+                if (isTextarea && !insideComposerShell) continue;
+                shapes.push({
+                  defaultPrevented,
+                  insideComposerShell,
+                  isTextarea,
+                  isTurnActive,
+                  drillInOpen,
+                  rewindPress,
+                  layerOpen
+                });
+              }
             }
           }
         }
@@ -88,9 +95,12 @@ test("one Escape is claimed by at most one owner — never both", () => {
 
 test("an Escape that stops a running turn is claimed by exactly one owner", () => {
   // Coverage the other way round: for a live turn with nothing already
-  // handled, some owner must take it — otherwise Escape silently does nothing.
+  // handled and no layer up, some owner must take it — otherwise Escape
+  // silently does nothing.
   for (const shape of everyEscapeShape()) {
-    if (shape.defaultPrevented || !shape.isTurnActive || shape.isTextarea) continue;
+    if (shape.defaultPrevented || !shape.isTurnActive || shape.isTextarea || shape.layerOpen) {
+      continue;
+    }
     assert.equal(
       composerOwnsEscape(shape) || shellOwnsEscape(shape),
       true,
@@ -99,8 +109,20 @@ test("an Escape that stops a running turn is claimed by exactly one owner", () =
   }
 });
 
+test("while a layer is up, neither owner claims Escape — it is the layer's", () => {
+  // The output viewer, the context meter's panel, a composer popover: each
+  // closes on its own Escape, from a `document` listener that runs AFTER both
+  // `window` owners. An owner that claimed it would stop the turn (or leave the
+  // drill-in) under the open layer.
+  for (const shape of everyEscapeShape()) {
+    if (!shape.layerOpen) continue;
+    assert.equal(composerOwnsEscape(shape), false, `composer claimed ${JSON.stringify(shape)}`);
+    assert.equal(shellOwnsEscape(shape), false, `shell claimed ${JSON.stringify(shape)}`);
+  }
+});
+
 test("the composer owns Escape inside its shell, the shell owns it outside", () => {
-  const live = { defaultPrevented: false, isTurnActive: true, drillInOpen: false };
+  const live = { defaultPrevented: false, isTurnActive: true, drillInOpen: false, layerOpen: false };
   assert.equal(
     composerOwnsEscape({ ...live, insideComposerShell: true, isTextarea: false }),
     true
@@ -119,14 +141,15 @@ test("the textarea keeps Escape to itself — the token menu gets first refusal"
       defaultPrevented: false,
       insideComposerShell: true,
       isTextarea: true,
-      isTurnActive: true
+      isTurnActive: true,
+      layerOpen: false
     }),
     false
   );
 });
 
 test("whoever ran first can stand the other down via defaultPrevented", () => {
-  const handled = { defaultPrevented: true, isTurnActive: true, drillInOpen: true };
+  const handled = { defaultPrevented: true, isTurnActive: true, drillInOpen: true, layerOpen: false };
   assert.equal(
     composerOwnsEscape({ ...handled, insideComposerShell: true, isTextarea: false }),
     false
@@ -138,7 +161,13 @@ test("the shell's double-press rewind stays outside the composer shell", () => {
   // Esc Esc inside the composer is the textarea's own sequence; the shell's
   // arm may only ever claim the second press OUTSIDE it — so one Escape can
   // never open the picker twice, or open it and interrupt.
-  const idle = { defaultPrevented: false, isTurnActive: false, drillInOpen: false, rewindPress: true };
+  const idle = {
+    defaultPrevented: false,
+    isTurnActive: false,
+    drillInOpen: false,
+    rewindPress: true,
+    layerOpen: false
+  };
   assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: false }), true);
   assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: true }), false);
   assert.equal(shellOwnsEscape({ ...idle, insideComposerShell: false, defaultPrevented: true }), false);
@@ -152,7 +181,8 @@ test("Escape with no turn running never interrupts from the composer", () => {
       defaultPrevented: false,
       insideComposerShell: true,
       isTextarea: false,
-      isTurnActive: false
+      isTurnActive: false,
+      layerOpen: false
     }),
     false
   );
@@ -162,8 +192,66 @@ test("Escape with no turn running never interrupts from the composer", () => {
       defaultPrevented: false,
       insideComposerShell: false,
       isTurnActive: false,
-      drillInOpen: true
+      drillInOpen: true,
+      layerOpen: false
     }),
     true
   );
+});
+
+// ---------------------------------------------------------------------------
+// The textarea's own Escape (§7.4) — the composer's other arm
+// ---------------------------------------------------------------------------
+
+const idleTextarea: ComposerEscapeInput = {
+  menuOpen: false,
+  layerOpen: false,
+  isTurnActive: false
+};
+
+test("the token menu takes the textarea's Escape before anything else", () => {
+  // Closing a menu the user just opened must not also stop the agent.
+  assert.equal(composerEscapeAction({ ...idleTextarea, menuOpen: true }), "close-menu");
+  assert.equal(
+    composerEscapeAction({ ...idleTextarea, menuOpen: true, isTurnActive: true }),
+    "close-menu"
+  );
+});
+
+test("an open layer takes the textarea's Escape: no interrupt, and no half of Esc Esc", () => {
+  // The context meter opens on hover, so its panel can be up while the caret
+  // sits in the textarea — whose React handler runs before the panel's own
+  // `document` listener. Interrupting there stopped the turn AND closed the
+  // panel; counting it made the next Escape open the rewind picker.
+  assert.equal(
+    composerEscapeAction({ ...idleTextarea, layerOpen: true, isTurnActive: true }),
+    "yield-to-layer"
+  );
+  assert.equal(composerEscapeAction({ ...idleTextarea, layerOpen: true }), "yield-to-layer");
+});
+
+test("with nothing open, Escape stops a running turn, and an idle one is half of Esc Esc", () => {
+  assert.equal(composerEscapeAction({ ...idleTextarea, isTurnActive: true }), "interrupt");
+  assert.equal(composerEscapeAction(idleTextarea), "rewind-press");
+});
+
+test("every combination resolves by the one precedence: menu, layer, turn, idle", () => {
+  // [menuOpen, layerOpen, isTurnActive] → the action, each worked out by hand.
+  const table: Array<[boolean, boolean, boolean, ComposerEscapeAction]> = [
+    [false, false, false, "rewind-press"],
+    [false, false, true, "interrupt"],
+    [false, true, false, "yield-to-layer"],
+    [false, true, true, "yield-to-layer"],
+    [true, false, false, "close-menu"],
+    [true, false, true, "close-menu"],
+    [true, true, false, "close-menu"],
+    [true, true, true, "close-menu"]
+  ];
+  for (const [menuOpen, layerOpen, isTurnActive, want] of table) {
+    assert.equal(
+      composerEscapeAction({ menuOpen, layerOpen, isTurnActive }),
+      want,
+      JSON.stringify({ menuOpen, layerOpen, isTurnActive })
+    );
+  }
 });

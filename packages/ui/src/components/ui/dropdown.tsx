@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 
 export interface DropdownProps {
@@ -54,7 +55,9 @@ const MARGIN = 8;
  * Lightweight popover menu. The panel is rendered in a portal on `document.body`
  * with fixed positioning derived from the trigger, so it never gets clipped or
  * pushed around by `overflow`/flex ancestors (e.g. the scrollable tab strip).
- * Closes on outside click or Escape.
+ * Closes on outside click or Escape — an open layer while it is up
+ * (`useOpenLayer`), hover-opened included, so the app-level key handlers that
+ * run first leave that Escape to it.
  */
 export const Dropdown: React.FC<DropdownProps> = ({
   trigger,
@@ -73,6 +76,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const close = useCallback(() => setOpen(false), []);
+  useOpenLayer(open);
 
   const cancelHoverTimer = useCallback(() => {
     if (hoverTimer.current !== null) {

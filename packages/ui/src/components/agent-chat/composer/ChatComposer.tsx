@@ -66,7 +66,12 @@ import {
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
-import { composerOwnsEscape, isChatTabListenerActive } from "./tab-visibility";
+import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
+import {
+  composerEscapeAction,
+  composerOwnsEscape,
+  isChatTabListenerActive
+} from "./tab-visibility";
 import {
   findComposerShortcutTarget,
   resolveChatShortcut,
@@ -1444,6 +1449,11 @@ export function ChatComposer({
        * composer shell — that is the one that leaves a drill-in — and this arm
        * owns the inside, minus the textarea, whose own handler gives an open
        * token menu first refusal. `scroll-to-end` stays the timeline's.
+       *
+       * Neither owns it while a layer is up (`anotherLayerOwnsTheKeyboard`):
+       * this arm runs before any layer's own listener, so under an open
+       * composer popover — whose trigger keeps focus inside this shell — one
+       * Escape stopped the turn and closed the popover too.
        */
       if (shortcut.kind === "interrupt") {
         // V1 §10.1: the shell registers a second window Escape listener. It
@@ -1455,12 +1465,18 @@ export function ChatComposer({
         const target = event.target;
         const insideComposerShell =
           target instanceof Node && shellRef.current?.contains(target) === true;
+        const layerOpen = anotherLayerOwnsTheKeyboard();
+        // An Escape a layer takes is nobody's first press. The textarea resets
+        // its own count when it sees one, but a composer popover stops the key
+        // in the capture phase — the textarea never sees that one.
+        if (layerOpen) escapeSequence.reset();
         if (
           !composerOwnsEscape({
             defaultPrevented: event.defaultPrevented,
             insideComposerShell,
             isTextarea: target === textareaRef.current,
-            isTurnActive
+            isTurnActive,
+            layerOpen
           })
         ) {
           return;
@@ -1512,31 +1528,46 @@ export function ChatComposer({
           return;
         }
       }
-      if (event.key === "Escape") {
-        // The menu takes Escape before the turn does: closing a menu the user
-        // just opened must not also stop the agent — nor count as the first
-        // half of a rewind.
-        event.preventDefault();
-        event.stopPropagation();
-        setMenuDismissed(true);
-        escapeSequence.reset();
-        return;
-      }
     }
 
-    if (event.key === "Escape" && isTurnActive) {
-      event.preventDefault();
-      // This Escape stopped the turn; it is nobody's first press.
-      escapeSequence.reset();
-      interrupt();
-      return;
-    }
     if (event.key === "Escape") {
-      // Idle, no menu: the CLI's double Escape opens the rewind picker. A
-      // held key's auto-repeat is one press, not two.
-      event.preventDefault();
-      if (!event.repeat) pressRewindEscape();
-      return;
+      // Which of these it is — the menu's, an open layer's, the turn's or
+      // half of Esc Esc — is `composerEscapeAction`'s call, pure and tested
+      // beside the ownership rules; this keeps what touches the event.
+      switch (
+        composerEscapeAction({
+          menuOpen: showMenu,
+          layerOpen: anotherLayerOwnsTheKeyboard(),
+          isTurnActive
+        })
+      ) {
+        case "close-menu":
+          // The menu takes Escape before the turn does: closing a menu the
+          // user just opened must not also stop the agent — nor count as the
+          // first half of a rewind.
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuDismissed(true);
+          escapeSequence.reset();
+          return;
+        case "yield-to-layer":
+          // The layer's own listener closes it after this handler; touching
+          // the event here would be acting under it. Nobody's first press.
+          escapeSequence.reset();
+          return;
+        case "interrupt":
+          event.preventDefault();
+          // This Escape stopped the turn; it is nobody's first press.
+          escapeSequence.reset();
+          interrupt();
+          return;
+        case "rewind-press":
+          // Idle, no menu: the CLI's double Escape opens the rewind picker. A
+          // held key's auto-repeat is one press, not two.
+          event.preventDefault();
+          if (!event.repeat) pressRewindEscape();
+          return;
+      }
     }
     if (event.key !== "Enter") return;
 

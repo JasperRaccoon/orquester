@@ -26,6 +26,12 @@
  * outside the composer, and each keeps its own `createEscapeSequence()` — so
  * one Escape can never advance both, and a press is only ever the first half
  * of a rewind when it did nothing else.
+ *
+ * **An open layer comes before all of it.** This side runs on `window` in the
+ * capture phase — before any modal's, sheet's, menu's or popover's own Escape
+ * listener — and stops the event when it acts, so the only way a layer gets
+ * its Escape is for this side to stand down while one is up
+ * (`blockingLayerOpen`). The composer's two arms do the same.
  */
 
 export type ChatEscapeAction = "close-drill-in" | "interrupt" | "rewind" | "ignore";
@@ -37,7 +43,13 @@ export interface ChatEscapeInput {
   defaultPrevented: boolean;
   /** This tab is the visible one (every tab stays mounted, §7.1). */
   isActiveTab: boolean;
-  /** A modal, the auth prompt, a close-confirm or the palette owns the screen. */
+  /**
+   * A layer that closes on Escape is up anywhere in the app —
+   * `anotherLayerOwnsTheKeyboard()`: the auth prompt, Settings, a
+   * close-confirm, the palette, and every open `Modal`, `BottomSheet`,
+   * `Dropdown`, `ContextMenu` and `ComposerPopover` (`lib/open-layers.ts`) —
+   * this thread's own output viewer and context meter among them.
+   */
   blockingLayerOpen: boolean;
   /**
    * Focus is inside this thread's composer, which owns Escape there so an open
@@ -91,22 +103,21 @@ export function isIdleChatEscape(input: ChatEscapeGate): boolean {
  *   double one, and the repeat must not break a sequence either.
  * - `"reset"` — everything else. A double press is two CONSECUTIVE Escapes:
  *   a key typed in between, an Escape that stopped a turn or left a drill-in,
- *   and an Escape a composer popover takes to close itself (it lands in the
- *   portaled panel, outside the composer shell, so it looks idle from here)
- *   all start the count over rather than becoming its first half.
+ *   and an Escape a layer takes to close itself all start the count over
+ *   rather than becoming its first half. A composer popover is such a layer
+ *   (`blockingLayerOpen`); its Escape lands in the portaled panel, outside the
+ *   composer shell, so nothing else here tells it from an idle one.
  */
 export function chatEscapeSequenceStep(
   input: ChatEscapeGate & {
     /** `KeyboardEvent.repeat`. */
     repeat: boolean;
-    /** The target sits in a composer popover (`data-chat-composer-floating-layer`). */
-    insideFloatingLayer: boolean;
   }
 ): "press" | "keep" | "reset" {
   if (input.repeat) {
     return "keep";
   }
-  return isIdleChatEscape(input) && !input.insideFloatingLayer ? "press" : "reset";
+  return isIdleChatEscape(input) ? "press" : "reset";
 }
 
 /**

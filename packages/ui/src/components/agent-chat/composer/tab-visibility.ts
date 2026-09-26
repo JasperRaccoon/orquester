@@ -55,6 +55,13 @@ export function isChatTabListenerActive(
  *
  * Without this, one Escape fired two `actions.interrupt()` calls: two POSTs,
  * two `commandId`s and a redundant queue drain.
+ *
+ * **Neither owns an Escape while a layer is up** (`layerOpen`, which is
+ * `anotherLayerOwnsTheKeyboard()`): a modal, a sheet, a menu, a composer
+ * popover, the palette. Each closes on its own Escape from a `document`
+ * listener, which both `window` owners run before — so an owner that acted
+ * stopped the turn under the open layer. The shell also stops the event, and
+ * the layer never saw the key at all.
  */
 export function composerOwnsEscape(input: {
   /** The other listener already acted on this event. */
@@ -64,8 +71,11 @@ export function composerOwnsEscape(input: {
   /** The target is the textarea, which handles Escape on its own. */
   isTextarea: boolean;
   isTurnActive: boolean;
+  /** A layer that closes on Escape is up: the key is that layer's. */
+  layerOpen: boolean;
 }): boolean {
   if (input.defaultPrevented) return false;
+  if (input.layerOpen) return false;
   if (!input.isTurnActive) return false;
   // The textarea's own handler runs first and owns the menu-vs-interrupt call.
   if (input.isTextarea) return false;
@@ -89,8 +99,48 @@ export function shellOwnsEscape(input: {
   isTurnActive: boolean;
   drillInOpen: boolean;
   rewindPress?: boolean;
+  /** `resolveChatEscape`'s `blockingLayerOpen`: the same gate, the same set. */
+  layerOpen: boolean;
 }): boolean {
   if (input.defaultPrevented) return false;
+  if (input.layerOpen) return false;
   if (input.insideComposerShell) return false;
   return input.drillInOpen || input.isTurnActive || input.rewindPress === true;
+}
+
+// ---------------------------------------------------------------------------
+// The textarea's own Escape (§7.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * What an Escape the composer's textarea receives does — first match wins:
+ *
+ * - `"close-menu"` — the token menu (`@`, `/`, `$`) is showing. It is the
+ *   textarea's own, and closing a menu the user just opened must not also
+ *   stop the agent, nor count as half of a rewind.
+ * - `"yield-to-layer"` — another layer is up. The textarea's React handler
+ *   runs before a modal's, a sheet's or a menu's `document` listener (a
+ *   composer popover's capture listener stops the key before it gets here),
+ *   so it does nothing and the layer closes itself; the double press starts
+ *   over. The case that bit: the context meter's panel opens on hover, so it
+ *   can be up with the caret in the textarea, and one Escape stopped the turn
+ *   AND closed the panel.
+ * - `"interrupt"` — a turn is running.
+ * - `"rewind-press"` — idle: one half of Esc Esc (§5.5).
+ */
+export type ComposerEscapeAction = "close-menu" | "yield-to-layer" | "interrupt" | "rewind-press";
+
+export interface ComposerEscapeInput {
+  /** The token menu is showing (`showMenu`). */
+  menuOpen: boolean;
+  /** Another layer is up: `anotherLayerOwnsTheKeyboard()`. */
+  layerOpen: boolean;
+  isTurnActive: boolean;
+}
+
+export function composerEscapeAction(input: ComposerEscapeInput): ComposerEscapeAction {
+  if (input.menuOpen) return "close-menu";
+  if (input.layerOpen) return "yield-to-layer";
+  if (input.isTurnActive) return "interrupt";
+  return "rewind-press";
 }

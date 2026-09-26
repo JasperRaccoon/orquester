@@ -500,6 +500,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // Every rule lives in `resolveChatEscape`, which is pure and tested; this
   // keeps only the three lines that touch the event.
   //
+  // **An open layer comes first.** Being first on `window` also puts this
+  // ahead of every layer's own Escape listener — this thread's output viewer
+  // and context meter, a composer popover, any modal, sheet or menu — and it
+  // stops the event when it acts, so it must stand down while one is up or the
+  // layer never sees its key: the first Escape under the viewer used to stop
+  // the turn, or leave the drill-in behind it. `anotherLayerOwnsTheKeyboard()`
+  // is the one set (`lib/open-layers.ts`); the composer's arms read it too.
+  //
   // **The idle Escape is the CLI's double press** (§5.5): with nothing to
   // leave and nothing to stop, two Escapes in a row outside the composer open
   // the composer's rewind picker — the textarea counts its own Escapes the
@@ -531,11 +539,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         drillInOpen: state.drillInAgentId !== null,
         turnActive: state.turnActive
       };
-      const step = chatEscapeSequenceStep({
-        ...gate,
-        repeat: event.repeat,
-        insideFloatingLayer: inside("[data-chat-composer-floating-layer]")
-      });
+      const step = chatEscapeSequenceStep({ ...gate, repeat: event.repeat });
       if (step === "reset") {
         sequence?.reset();
       }

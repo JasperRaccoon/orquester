@@ -153,6 +153,19 @@ function everyEscapeInput(): ChatEscapeInput[] {
   return inputs;
 }
 
+test("under an open layer the shell does nothing, whatever the drill-in, the turn or the sequence", () => {
+  // `blockingLayerOpen` is `anotherLayerOwnsTheKeyboard()`, which sees every
+  // layer that closes on Escape — the output viewer, the context meter's
+  // panel, a composer popover, a sheet, a menu (`lib/open-layers.ts`). Before
+  // it did, the first Escape under the viewer stopped the turn; in a drill-in
+  // it closed the child behind the viewer, and the second stopped the parent.
+  for (const input of everyEscapeInput()) {
+    if (!input.blockingLayerOpen) continue;
+    assert.equal(resolveChatEscape(input), "ignore", JSON.stringify(input));
+    assert.equal(chatEscapeSequenceStep({ ...input, repeat: false }), "reset", JSON.stringify(input));
+  }
+});
+
 test("the rewind is returned exactly for an idle second press with somewhere to go", () => {
   for (const input of everyEscapeInput()) {
     assert.equal(
@@ -191,7 +204,7 @@ test("an idle Escape is exactly the one this side would otherwise ignore for doi
 });
 
 const step = (overrides: Partial<Parameters<typeof chatEscapeSequenceStep>[0]>) =>
-  chatEscapeSequenceStep({ ...base, repeat: false, insideFloatingLayer: false, ...overrides });
+  chatEscapeSequenceStep({ ...base, repeat: false, ...overrides });
 
 test("only an idle Escape is pressed into the double-press sequence", () => {
   assert.equal(step({}), "press");
@@ -210,9 +223,11 @@ test("an Escape that did something else starts the count over", () => {
 });
 
 test("an Escape a composer popover takes to close itself is not half of a rewind", () => {
-  // The panel is portaled to <body>, outside the composer shell, so from here
-  // it looks idle — but the popover is about to consume it.
-  assert.equal(step({ insideFloatingLayer: true }), "reset");
+  // The panel is portaled to <body>, outside the composer shell, so by its
+  // target it looks idle — but the popover is an open layer, and the layer
+  // gate is what says so (it used to be a selector on the target).
+  assert.equal(step({ blockingLayerOpen: true }), "reset");
+  assert.equal(resolveChatEscape({ ...rewindReady, blockingLayerOpen: true }), "ignore");
 });
 
 test("any other key between two Escapes breaks the sequence", () => {
