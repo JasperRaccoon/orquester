@@ -1004,11 +1004,13 @@ holds it again, so a later Stop or the exit closes it `stopped`; and its own idl
 `completed` with its result, once. The roster reads it running only while the thread's session reads
 live, so the Stop now returns the session to `ready` after its `turn.aborted` (which folds to
 `stopped`, a dead session to the roster and one the host refuses a later Stop on), as Claude's and
-Grok's do after every settled turn. Not running, the frames were leftovers: nothing is written, and
-only a `busy` asks again. Its idle voids a check in flight. A read that fails relaunches it: the
-drain outranks a duplicate row. The Grok adapter keeps its adapter-written end on a revival (a late
-delivery with status-less rows): its reports are the CLI's own listings and frames, not confirmed by
-a status read like this one.
+Grok's do after every settled turn. The one exception is a failed admission: its session reads
+`error` (a transport doubt, kept), which the roster reads as dead too, so a child relaunched after
+one reads `interrupted` there until the session reads live again — liveness still counts it. Not
+running, the frames were leftovers: nothing is written, and only a `busy` asks again. Its idle voids
+a check in flight. A read that fails relaunches it: the drain outranks a duplicate row. The Grok
+adapter keeps its adapter-written end on a revival (a late delivery with status-less rows): its
+reports are the CLI's own listings and frames, not confirmed by a status read like this one.
 
 The adapter used to mark every request that arrived while no turn ran after an interrupt resolved,
 write nothing and answer nothing: a live asker waited for good, and so did the parent's next turn,

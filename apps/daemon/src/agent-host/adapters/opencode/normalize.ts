@@ -1225,7 +1225,10 @@ function noteChildIdle(agent: OpenCodeChildAgent): void {
  * live set, so a Stop or the exit closes it `stopped` again. Its own idle and
  * answer end it as they end any run, once — with its result, which, for a run
  * the provider still runs as the same job, still answers in the background if
- * its launch did. Not running: that report was a cancelled run's last frames.
+ * its launch did. (After a failed admission the session reads `error`, which
+ * the roster takes for dead: the reopened row reads `interrupted` there until
+ * the session reads live, while liveness counts it.) Not running: that report
+ * was a cancelled run's last frames.
  * A check the child's own idle made void writes nothing. `running` is also the
  * answer when the server cannot say: a duplicate row costs less than a deploy
  * killing running work.

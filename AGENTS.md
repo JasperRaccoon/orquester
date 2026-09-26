@@ -1245,11 +1245,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   must read live after a Stop: `turn.aborted` folds to `stopped`, a dead session to the roster
   (every running row `interrupted`) and one the host refuses the next Stop on, so the Stop now
   returns it to `ready` (`session.state.changed`, `turn:interrupted`), as Claude's and Grok's do
-  after every settled turn. Idle — the report was a cancelled run's last frames: nothing, and only a
-  `busy` asks again. The child's own idle voids a check in flight; a read that fails relaunches it
-  too (the drain outranks a duplicate row). The Grok adapter keeps its adapter-written end on a
-  revival (a late delivery, status-less rows): its reports are the CLI's own listings and frames,
-  not confirmed by a status read like this one.
+  after every settled turn. One exception: a failed admission leaves the session `error` — a
+  transport doubt, kept as ruled — which the roster reads as dead too, so a child relaunched after
+  one reads `interrupted` there until the session reads live again, while liveness counts it all the
+  same. Idle — the report was a cancelled run's last frames: nothing, and only a `busy` asks again.
+  The child's own idle voids a check in flight; a read that fails relaunches it too (the drain
+  outranks a duplicate row). The Grok adapter keeps its adapter-written end on a revival (a late
+  delivery, status-less rows): its reports are the CLI's own listings and frames, not confirmed by a
+  status read like this one.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

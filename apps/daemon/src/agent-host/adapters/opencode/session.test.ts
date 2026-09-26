@@ -2274,6 +2274,34 @@ test("a NESTED subagent that survives the Stop is relaunched too: its first star
   harness.dispose();
 });
 
+test("after a failed admission a relaunched child holds the drain, but reads interrupted: that session reads error, which the roster takes for dead", async () => {
+  const harness = makeHarness();
+  harness.fake.statusMap = { ses_bg: { type: "busy" } };
+  const session = await startSession(harness, { delay: async () => undefined });
+  const sessionId = session.sessionId;
+  // The prompt's message never shows: machine (3) fails the turn and aborts,
+  // closing the child the turn launched.
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+  pushAll(harness.fake, childLaunch({ sessionId, childId: "ses_bg", callId: "call_bg", description: "list files", background: true }));
+  await waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId);
+  assert.deepEqual(taskEnds(harness.events).map((row) => row.split(":").slice(0, 2).join(":")), ["ses_bg:stopped"]);
+
+  const revival = nextStartOf(harness, "ses_bg");
+  pushAll(harness.fake, childStreams("ses_bg", "a.ts"));
+  assert.equal((await revival).payload.toolUseId, "opencode-revive:call_bg:1");
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working", "the drain waits for it");
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  assert.equal(host.fold().head?.session.status, "error", "a failed admission keeps its transport doubt");
+  assert.equal(
+    host.fold().roster.find((row) => row.id === "ses_bg")?.status,
+    "interrupted",
+    "the documented exception: the roster reads no run of a session it takes for dead"
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("a child the Stop ended sends its leftovers: the server says it runs nothing, and it stays ended", async () => {
   const harness = makeHarness();
   const { session } = await stoppedWithChild(harness);
