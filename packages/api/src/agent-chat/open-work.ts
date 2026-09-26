@@ -30,14 +30,17 @@
  * **The list is all it reads**, so a finished call reads open again once its
  * closer has left the window while a later opener-kind row of the same call is
  * still in it — and the trim then keeps that row, within its cap. Two ways
- * that happens: Grok forgets a call at its terminal update, so a status-less
- * update after it comes out as a fresh `item.started`, a `tool.started` row
- * behind the completion (`adapters/grok/tool-calls.ts`); and a closer written in
- * another window than its opener — stamped with another owner — can age out of
- * its own window first. A rewind that removes the turn holding a call's closer
- * but not the one holding its opener reopens the call as well; that one is
- * deterministic, a function of the list like everything here, which is all the
- * fold needs.
+ * that happens. An opener can follow a completion: Grok's adapter never
+ * reopens a call it saw finish, but remembers only the last 1 024 of them
+ * (`FINISHED_CALLS_REMEMBERED`, `adapters/grok/tool-calls.ts`), so a
+ * status-less update of one that finished longer ago still comes out as a
+ * fresh `item.started`, a `tool.started` row behind the completion — and a log
+ * an older host wrote, whose adapter forgot every call at its terminal update,
+ * can hold such rows. And a closer written in another window than its opener —
+ * stamped with another owner — can age out of its own window first. A rewind
+ * that removes the turn holding a call's closer but not the one holding its
+ * opener reopens the call as well; that one is deterministic, a function of the
+ * list like everything here, which is all the fold needs.
  *
  * **What this decides, retention keeps** (`fold.ts`, `activitiesToDrop`):
  * changing a definition here changes what the fold produces from the same log,
