@@ -383,7 +383,10 @@ notification went out at `t=3995` and:
 
 The late `{"outcome":{"outcome":"cancelled"}}` sent 2.5 s afterwards was accepted with no error.
 So T3's ordering remains correct and safe — it is simply not load-bearing here, and the adapter
-must be ready for the prompt to settle *before* it finishes answering.
+must be ready for the prompt to settle *before* it finishes answering. The `write` itself never gets
+a terminal frame — nor does any call a cancel cuts (23, 31) — so the adapter's interrupt closes the
+prompt's open calls itself, `failed` "Stopped.", on the turn before it settles (`cutTurnCalls`,
+2026-09-26).
 
 ### 12. A rejected tool ends the whole turn as `cancelled`, not `end_turn`
 
@@ -1230,7 +1233,8 @@ child session, so they never stream into the first run's.
   a start frame).
 - A turn-scoped Stop that cuts a foreground spawn (23): the cancel ends the parent's turn
   (`MidTurnAbort`), the child's turn ends `cancelled`, `subagent_finished {status: "cancelled"}`
-  arrives 42 ms later, and the spawn call gets no terminal frame at all (as fixture 05's `write`).
+  arrives 42 ms later, and the spawn call gets no terminal frame at all (as fixture 05's `write`):
+  the adapter's interrupt closes it, `failed` "Stopped." (`cutTurnCalls`).
   The binary's "foreground subagent caller gone; auto-backgrounding (child keeps running)" is not
   what `session/cancel` does. The adapter therefore sends nothing to the background when a turn
   ends with a spawn call open; `subagent_finished` ends the run.
@@ -1508,12 +1512,15 @@ Fixture 31, two turns, each asking one `_x.ai/ask_user_question` ("alpha or beta
   later `turn_completed {stop_reason: "cancelled"}`, `prompt_complete {stopReason: "cancelled",
   cancellationCategory: "MidTurnAbort"}` and the prompt's `{stopReason: "cancelled"}`. No
   `tool_call_update` ever closes the question's call and no model call follows: as for a cut
-  spawn call (observation 44), a cancelled turn's open calls are the adapter's to close.
+  spawn call (observation 44) and 05's `write` (observation 11), the adapter's interrupt closes the
+  prompt's open calls itself — the question's call `failed` "Stopped.", on the turn, before it
+  settles (`cutTurnCalls`).
 
 Pinned through the real session (`session-replay.test.ts`, "31 replayed"): the host's cancel
 (`respondToUserInput(…, {cancel: true})`) reaches the CLI as exactly that reply and writes one
-`withdrawn` row per card, turn 1 settles with the model's own answer, turn 2 settles `interrupted`
-by the adapter's interrupt, and the prompt's late `cancelled` result settles nothing twice.
+`withdrawn` row per card, turn 1 settles with the model's own answer (its question's call completed
+by the CLI), turn 2 settles `interrupted` by the adapter's interrupt with its question's call closed
+by it, no call is left in progress, and the prompt's late `cancelled` result settles nothing twice.
 
 ### 55. The CLI's helpers exist the moment its session opens
 

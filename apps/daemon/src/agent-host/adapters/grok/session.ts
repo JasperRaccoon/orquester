@@ -919,6 +919,9 @@ export class GrokSession {
         } catch {
           // A cancel that cannot be written is not a reason to drop the turn.
         }
+        // The superseded prompt's calls: the cancel cut them, and the CLI
+        // answers none of them ({@link GrokNormalizer.cutTurnCalls}).
+        this.emitAll(this.normalizer.cutTurnCalls("Cancelled: a new message was sent."));
         // Re-open the assistant stream: `endTurn()` may have closed it, and a
         // closed stream silently drops every chunk the steered prompt streams.
         this.normalizer.beginTurn();
@@ -1295,8 +1298,9 @@ export class GrokSession {
    * one is a no-op, so it cannot kill the next turn.
    *
    * Ordering is the contract (§4.1): every pending approval and user input is
-   * settled as `cancel` FIRST, then `session/cancel` goes out, then the turn
-   * is settled. `05-cancel-with-pending-permission.ndjson` shows the CLI does
+   * settled as `cancel` FIRST, then `session/cancel` goes out, then the calls
+   * it cut are closed on the turn (the CLI answers none of them), then the
+   * turn is settled. `05-cancel-with-pending-permission.ndjson` shows the CLI does
    * not actually wait for the pending permission — it settles the turn 3 ms
    * after the cancel and accepts a late `{"outcome":"cancelled"}` 2.5 s
    * afterwards — so the ordering is not load-bearing *here*, but it remains
@@ -1332,6 +1336,11 @@ export class GrokSession {
       } catch {
         // Nothing to cancel on a dead transport.
       }
+      // The turn's own calls the cancel cut, closed on that turn before it
+      // settles: the CLI never answers them (fixtures 05, 23, 31). Work that
+      // outlives the turn — a background shell, a subagent's run — is not a
+      // call of it ({@link GrokNormalizer.cutTurnCalls}).
+      this.emitAll(this.normalizer.cutTurnCalls("Stopped."));
       this.settleTurn(turn.turnId, turn.epoch, {
         stopReason: "cancelled",
         cancellationCategory: "MidTurnAbort",

@@ -16,7 +16,7 @@ import { createTestClock } from "../../orchestration/testing/fakes.ts";
 import { captureFiles, readCapture, agentFrames, promptResults, type JsonRpcFrame } from "./fixtures.ts";
 import { GrokNormalizer } from "./normalize.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
-import { XAI_ROUTED_METHODS as XAI_CHANNEL_METHODS } from "./testing/capture-driver.ts";
+import { XAI_ROUTED_METHODS as XAI_CHANNEL_METHODS, driveCapture } from "./testing/capture-driver.ts";
 
 interface ReplayRun {
   events: RuntimeEvent[];
@@ -226,6 +226,22 @@ test("05 cancel: the same stop reason carries MidTurnAbort instead", () => {
   const params = complete?.params as Record<string, unknown>;
   assert.equal(params["stopReason"], "cancelled");
   assert.equal(params["cancellationCategory"], "MidTurnAbort");
+});
+
+test("05 Stop: the write its permission held is closed with the turn it cut — the CLI never answers it", () => {
+  const WRITE = "call-02831799-9eea-411d-8f2d-a4d739e7504f-0";
+  const run = driveCapture("05-cancel-with-pending-permission.ndjson", {
+    atNote: (note, control) => (/sending session\/cancel notification/.test(note) ? control.interrupt() : [])
+  });
+  const rows = run.events.filter(
+    (event) => event.type.startsWith("item.") && (event as { itemId?: string }).itemId === WRITE
+  );
+  const closed = rows.filter((row) => row.type === "item.completed");
+  assert.equal(closed.length, 1, "closed once");
+  const payload = closed[0]!.payload as { status?: string; detail?: string };
+  assert.deepEqual([closed[0]!.turnId, payload.status, payload.detail], ["turn-1", "failed", "Stopped."]);
+  const turnEnd = run.events.findIndex((event) => event.type === "turn.completed" && event.turnId === "turn-1");
+  assert.ok(run.events.indexOf(closed[0]!) < turnEnd, "before the turn it rides settles");
 });
 
 test("06 session/load: every replayed frame is dropped from the live stream", () => {

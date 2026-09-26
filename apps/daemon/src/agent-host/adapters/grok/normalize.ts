@@ -3477,6 +3477,30 @@ export class GrokNormalizer {
     return events;
   }
 
+  /**
+   * The calls a `session/cancel` cut: every open PARENT call — the prompt's
+   * own foreground work: a question's call, a `write` its permission held, a
+   * foreground spawn — failed with the reason and remembered as the adapter's
+   * end. After the cancel the CLI answers none of them (fixtures 05, 23 and
+   * 31: no terminal frame, ever — every other call in every capture gets
+   * one), so left open each read in progress for good: in the MCP transcript,
+   * in one of retention's open-work slots, and to the next host's first
+   * load, which closed it "when the agent host restarted". A background
+   * launch is no open call: its call answers at once and the WORK runs on. A
+   * subagent's own calls are not the prompt's either: a cut foreground
+   * child's close with its run when `subagent_finished` comes
+   * ({@link closeSubagent}), a background child's outlive the turn.
+   */
+  cutTurnCalls(reason: string): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    for (const [toolCallId, track] of [...this.tools.entries()]) {
+      if (track.owned === undefined) {
+        events.push(...this.failTool(toolCallId, track, reason));
+      }
+    }
+    return events;
+  }
+
   /** One live call, failed by the adapter: its end, and remembered as the adapter's. */
   private failTool(toolCallId: string, track: ToolTrack, reason: string): RuntimeEvent[] {
     this.tools.delete(toolCallId);

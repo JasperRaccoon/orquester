@@ -390,6 +390,43 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "steer-call") {
+    // A steer that cuts a call in flight: the first prompt's command never
+    // gets a terminal frame after the cancel, as no cut call does (fixtures
+    // 05, 23, 31).
+    if (promptSeq === 1) {
+      notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-steer-cut-0",
+          title: "run_terminal_command",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: { command: "sleep 30" }
+        },
+        _meta: { promptId }
+      });
+      await waitFor(() => cancelled);
+      notify("_x.ai/session/prompt_complete", {
+        sessionId,
+        promptId,
+        stopReason: "cancelled",
+        cancellationCategory: "MidTurnAbort"
+      });
+      result(id, { stopReason: "cancelled", _meta: { sessionId, promptId } });
+      return;
+    }
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "DONE" } },
+      _meta: { promptId }
+    });
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
   if (scenario === "steer") {
     if (promptSeq === 1) {
       notify("session/update", {

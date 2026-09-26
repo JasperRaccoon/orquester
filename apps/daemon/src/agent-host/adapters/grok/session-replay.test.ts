@@ -413,6 +413,20 @@ test("31 replayed: the host's cancel of a question is the CLI's own; a Stop's or
     assert.equal(secondDone.turnId, second);
     assert.equal(secondDone.payload.state, "interrupted");
 
+    // Each question's call ends: turn 1's by the CLI's own answer, turn 2's —
+    // which the CLI never answers after session/cancel — by the Stop itself.
+    const callEnds = (callId: string) =>
+      r.events
+        .filter((event) => event.type === "item.completed" && event.itemId === callId)
+        .map((event) => [event.turnId, (event.payload as { status?: string; detail?: string }).status, (event.payload as { detail?: string }).detail]);
+    assert.deepEqual(callEnds("call-721b1099-8446-4d59-843d-02d01179a915-0").map(([turn, status]) => [turn, status]), [
+      [first, "completed"]
+    ]);
+    assert.deepEqual(callEnds("call-e4a64fcb-5df1-46b5-8e49-678a0977d4cf-1"), [[second, "failed", "Stopped."]]);
+    const opened = new Set(r.events.filter((event) => event.type === "item.started").map((event) => event.itemId));
+    const ended = new Set(r.events.filter((event) => event.type === "item.completed").map((event) => event.itemId));
+    assert.deepEqual([...opened].filter((id) => !ended.has(id)), [], "no call is left in progress");
+
     const resolutions = r.events.filter((event) => event.type === "user-input.resolved");
     assert.deepEqual(
       resolutions.map((event) => [event.requestId, (event.payload as { withdrawn?: boolean }).withdrawn]),

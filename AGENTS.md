@@ -1342,11 +1342,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (`snapshotChange`) — nothing needs a re-arm from it (a shell is a TTL-bounded watch loop, a
   monitor re-arms on its lines, an agent on its heartbeat). (10) Teardown closes calls before tasks,
   as every adapter's does (Stop, the session's stop, the exit; a run's end closes its child's open
-  calls before its task row). A question the HOST cancels (a Stop, the session's stop, a closed
-  tab) reaches the CLI as its own cancel, `{outcome: "cancelled"}`: the host flags it
-  (`respondToUserInput`'s host-only `options.cancel`, which the other adapters ignore), because its
-  `{}` is also a user's skip — passed on as an answer, it told the CLI the user had answered,
-  nothing. (11) **What the 2026-09-26 captures settled** (fixtures 25–30, observations 49–53).
+  calls before its task row). A call a `session/cancel` cut is closed by the adapter too: the CLI
+  never answers it after the cancel (fixtures 05's `write`, 23's spawn call, 31's question — every
+  other call in every capture gets a terminal frame), so the Stop's `interrupt()` fails the prompt's
+  own open calls on its turn before the turn settles (`cutTurnCalls`, "Stopped."), and so does a
+  steer's cancel ("Cancelled: a new message was sent.") — left open, each read in progress in the
+  MCP transcript, took an open-work retention slot and got the next host's "Stopped when the agent
+  host restarted." A subagent's own calls are not the prompt's: a cut foreground child's close with
+  its run at `subagent_finished`, a background child's outlive the turn. A question the HOST cancels
+  (a Stop, the session's stop, a closed tab) reaches the CLI as its own cancel,
+  `{outcome: "cancelled"}`: the host flags it (`respondToUserInput`'s host-only `options.cancel`,
+  which the other adapters ignore), because its `{}` is also a user's skip — passed on as an answer,
+  it told the CLI the user had answered, nothing. (11) **What the 2026-09-26 captures settled**
+  (fixtures 25–30, observations 49–53).
   Supervised, the spawn call itself asks first (`x.ai/tool` kind `task`, "Yes, send once" or
   decline), and a subagent's own tool asks on the PARENT's session, naming the child's call: the
   parent's card, on the parent's open turn, no owner — Codex's collab rule — while the call itself

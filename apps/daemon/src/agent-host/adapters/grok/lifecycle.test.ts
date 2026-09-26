@@ -760,6 +760,25 @@ test("the adapter runs no watchdog of its own — the host owns it", async () =>
 });
 
 
+test("a steer closes the call its cancel cut, on the turn it steers — the CLI never answers it", async () => {
+  const r = await rig({ scenario: "steer-call" });
+  try {
+    await start(r);
+    const first = await r.adapter.sendTurn({ threadId: "t1", input: "run it", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "item.started" && event.itemId === "call-steer-cut-0", "the call in flight");
+    await r.adapter.sendTurn({ threadId: "t1", input: "no, say DONE", attachments: [], interactionMode: "default" });
+    const done = await r.waitFor((event) => event.type === "turn.completed", "the steered turn's end");
+    const ends = r.events.filter((event) => event.type === "item.completed" && event.itemId === "call-steer-cut-0");
+    assert.deepEqual(
+      ends.map((event) => [event.turnId, (event.payload as { status?: string }).status, (event.payload as { detail?: string }).detail]),
+      [[first.turnId, "failed", "Cancelled: a new message was sent."]]
+    );
+    assert.ok(r.events.indexOf(ends[0]!) < r.events.indexOf(done), "closed before the turn settles");
+  } finally {
+    await r.dispose();
+  }
+});
+
 test("a steer settles the turn from the STEERED prompt, not the cancelled one", async () => {
   // R4 #1 / Q1 #4 (blocker). The old guard was inverted: the cancelled first
   // prompt matched `turn.epoch` and ended the turn, and the steered answer was

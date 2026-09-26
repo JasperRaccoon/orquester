@@ -152,8 +152,10 @@ export function driveCapture(
     interrupt: () => {
       const before = events.length;
       // As the session's `interrupt`: the cancel ends the CLI prompt still
-      // running, which opens no turn; what it streamed joins this one.
+      // running, which opens no turn; what it streamed joins this one; the
+      // calls it cut close on the turn before it settles.
       wakes.cancelEnds();
+      events.push(...grok.cutTurnCalls("Stopped."));
       settle({ stopReason: "cancelled", cancellationCategory: "MidTurnAbort" });
       return events.splice(before);
     }
