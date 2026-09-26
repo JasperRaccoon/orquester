@@ -456,13 +456,13 @@ class GrokAdapter implements AgentAdapter {
     return this.sessions.has(threadId);
   }
 
-  async stopSession(threadId: string): Promise<void> {
+  async stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void> {
     const session = this.sessions.get(threadId);
     if (session === undefined) {
       return;
     }
     this.sessions.delete(threadId);
-    await session.stop();
+    await session.stop(options);
   }
 
   async stopAll(): Promise<void> {

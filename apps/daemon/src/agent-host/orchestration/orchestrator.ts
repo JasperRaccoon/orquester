@@ -1637,7 +1637,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     await settlePendingRequests(runtime);
     if (adapter && adapter.hasSession(runtime.id)) {
       try {
-        await adapter.stopSession(runtime.id);
+        // The session stop command and a closed tab are the user ending the
+        // session: an adapter whose provider leaves its work running past its
+        // own exit stops that work now, and only now (Grok).
+        await adapter.stopSession(runtime.id, { endedByUser: true });
       } catch (error) {
         await appendActivity(runtime, {
           kind: "provider.session.stop.failed",

@@ -284,8 +284,12 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
       return sessions.has(threadId);
     },
 
-    async stopSession(threadId: string): Promise<void> {
-      calls.push({ kind: "stopSession", threadId });
+    async stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void> {
+      calls.push({
+        kind: "stopSession",
+        threadId,
+        ...(options?.endedByUser === true ? { detail: { endedByUser: true } } : {})
+      });
       sessions.delete(threadId);
     },
 

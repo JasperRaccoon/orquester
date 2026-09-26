@@ -485,12 +485,16 @@ and its default model (the flagged one, else the first) are never shed.
   option or permission change), `interrupt_session`, `compact_session`, `answer_question`,
   `dismiss_question` and `resolve_approval` pass through the host's `COMMAND_REJECTED`
   (`This thread's session is in an error state. Stop the session or rewind to continue.`). Either
-  way: `stop_session`, then try again.
+  way: `stop_session`, then try again. For Grok it also stops the processes the agent's work
+  started — its background shells and whatever they run (a dev server), which the Grok CLI starts
+  outside its own process tree: a deploy, a restart or a crash leaves those running, and only the
+  user ending the session (this, or `close_session`) stops them.
 - **`close_session`** — closes a chat or a terminal tab. A chat tab's Orquester thread (its event
   log) is deleted; the provider's own transcript survives and stays resumable through
   `list_conversations` for Claude, Codex and Grok (and claudex/claudemix from their proxy homes).
   OpenCode history is not listed, so for OpenCode closing a tab is final. A terminal tab's command
-  is killed with it.
+  is killed with it, and a Grok chat's background processes are stopped as `stop_session` stops
+  them.
 - **`revert_session`** — keeps the first `keepTurns` started turns and drops the rest
   (`0 ≤ keepTurns < turnCount`). Conversation only — files are not restored. Refused with
   `INVALID_ARGUMENT` for an agent without rollback (Grok) and for a target before the last context

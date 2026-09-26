@@ -1547,6 +1547,37 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
     await host.stop();
   });
 
+  it("the session stop command and a closed tab end the session for the user; a restart does not", async () => {
+    const host = createTestHost();
+    const stopped = await host.createThread({ threadId: "thread-stopped" });
+    await host.orchestrator.command(stopped, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    await host.orchestrator.command(stopped, "session/stop", { commandId: cmd() });
+    await host.settle();
+
+    const restarted = await host.createThread({ threadId: "thread-restarted" });
+    await host.orchestrator.command(restarted, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    // A permission-mode change restarts the session on the next turn: the
+    // thread goes on, and so must what its agent left running.
+    await host.orchestrator.command(restarted, "mode", { commandId: cmd(), runtimeMode: "full-access" });
+    await host.settle();
+
+    const closed = await host.createThread({ threadId: "thread-closed" });
+    await host.orchestrator.command(closed, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    await host.orchestrator.deleteThread(closed);
+
+    const stops = (threadId: string) =>
+      host.adapter.calls
+        .filter((call) => call.kind === "stopSession" && call.threadId === threadId)
+        .map((call) => call.detail ?? null);
+    assert.deepEqual(stops(stopped), [{ endedByUser: true }]);
+    assert.deepEqual(stops(closed), [{ endedByUser: true }]);
+    assert.deepEqual(stops(restarted), [null], "a restart is not the user ending the session");
+    await host.stop();
+  });
+
   it("session/stop cancels a pending question with the host's cancel, never an empty answer", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

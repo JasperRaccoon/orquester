@@ -190,11 +190,17 @@ whole process group is signalled, not just the direct child.
 shells and the MCP servers it boots alike, in a session of its own, so the group signal reaches the
 CLI alone and they outlive it, reparented to init (Grok fixtures README observation 48, verified
 live on 2026-09-26). Its launch env therefore carries a marker, `ORQUESTER_AGENT_LAUNCH`, one value
-per launch, which every descendant inherits, and every end of a Grok session — a stop, the host's
-teardown including a drain-restart's, the CLI's own exit, an open that failed — stops whatever
-still carries it: SIGTERM, then SIGKILL past the grace, each pid checked against its `/proc`
-starttime before each signal (`support/leftover-processes.ts`, `GrokSession.stopLeftovers`).
-Linux-only; a no-op elsewhere.*
+per launch, which every descendant inherits, and a sweep stops what carries it inside a session one
+of the CLI's children led, recorded while the CLI lived (never a process that daemonized away):
+SIGTERM, then SIGKILL past the grace, each pid checked against its `/proc` starttime before each
+signal (`support/leftover-processes.ts`, `GrokSession.stopLeftovers`). Its own helpers — the MCP
+servers, its children as its session opened (the README's observation 55) — go at every end of the
+session: a restart, the host's teardown (a drain-restart's included), the CLI's own exit, an open
+that failed, the user's stop. The work its agent started — shells, the dev servers they run — goes
+only when the USER ends the session (the session stop command or a closed tab:
+`stopSession(…, {endedByUser: true})`) and on an open that failed; a deploy must never kill running
+work, so at a drain-restart, a restart or a crash it runs on as a marked orphan, which the kill
+guard's note below lets Settings → System list and kill. Linux-only; a no-op elsewhere.*
 
 **No restart backoff, by construction.** A child that exits is not respawned. The thread's
 session becomes `stopped`/`error` and the next `sendTurn` starts a fresh one from the persisted
@@ -285,8 +291,9 @@ the same `protectedPids` hook cliproxy uses. Provider children remain legal kill
 *Built: so does what a provider CLI left behind, once no root reaches it. A process of the
 daemon's own uid outside every root that carries an agent-host launch marker
 (`ORQUESTER_AGENT_LAUNCH`, see the supervision note above) is a root of its own — listed under the
-chat its `ORQUESTER_SESSION_ID` names and killable (`launchedOrphans`) — so the orphans of a host
-that crashed before any session end could stop them are not `PROCESS_NOT_MANAGED`.*
+chat its `ORQUESTER_SESSION_ID` names and killable (`launchedOrphans`) — so the work a session end
+left running on purpose (every end but the user's), and the orphans of a host that crashed before
+any sweep, are not `PROCESS_NOT_MANAGED`.*
 
 **Observability.** Per thread, `raw.ndjson` (untranslated provider frames, tagged with source)
 and `events.ndjson` (normalised). Rotation: 10 MiB per file, 10 files, 14 days for raw; events
@@ -4626,10 +4633,11 @@ and are skipped otherwise, so the suite never needs an account or a network.
   *provider* child, not of the daemon. One observed server survived the agent host, the daemon and
   thread deletion, reparented to init holding a fixed loopback port — and, being outside the
   daemon's process tree, it is not a legal kill target in Settings → System either.
-  *Built: for Grok both halves are gone. Its CLI's MCP servers and background shells carry the
-  launch marker the host set, every end of the session stops them, and Settings → System lists and
-  kills one a crashed host left behind (§3.1's supervision and kill-guard notes). Claude, Codex and
-  OpenCode launches carry no marker yet.*
+  *Built: for Grok both halves are gone. Its CLI's MCP servers carry the launch marker the host
+  set and every end of the session stops them; the work its agent started stops when the user ends
+  the session, and until then Settings → System lists and kills it, as it does anything a crashed
+  host left behind (§3.1's supervision and kill-guard notes). Claude, Codex and OpenCode launches
+  carry no marker yet.*
 
 
 - **Old host code after deploy** until drain; a protocol version bump forces the drain-restart

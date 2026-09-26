@@ -262,13 +262,20 @@ export class GrokSession {
    */
   private readonly launchId = randomUUID();
   /**
-   * The sessions the CLI's children lead, recorded while it lives
-   * ({@link recordSessions}): its MCP servers' when its session opens, and
-   * every child's again right before a stop. A sweep takes only what sits in
-   * one of them: a process that daemonized into a session of its own — a
-   * browser daemon, an SSH master — carries the marker too, and is spared.
+   * The sessions of the CLI's own per-session HELPERS — its children the
+   * moment its session opened, which are its MCP servers (fixture 31: all
+   * four existed as `session/new` answered, none of the user's work had run)
+   * — recorded while it lived ({@link recordSessions}). Swept at every end.
    */
-  private readonly childSessions = new Map<number, RecordedSession>();
+  private readonly helperSessions = new Map<number, RecordedSession>();
+  /**
+   * The sessions of the CLI's later children — its shells, the dev servers
+   * they started — recorded right before the USER ends the session, while
+   * the CLI still lives. Swept only then ({@link stop}).
+   */
+  private readonly taskSessions = new Map<number, RecordedSession>();
+  /** The user ended the session: its work goes with it ({@link stop}). */
+  private sweepTasks = false;
   /** The sweep of what this launch left running, once started — the exit and a stop share it. */
   private leftovers: Promise<void> | null = null;
   /** The self-resolved-approvals advisory is said once per session. */
@@ -461,14 +468,14 @@ export class GrokSession {
       // pipes, outside the adapter's map — nothing would ever stop it. What it
       // had started is recorded first, while it lives; its exit sweeps it
       // ({@link onExit}).
-      await this.recordSessions();
+      await this.recordSessions("helpers");
       await connection.stop();
       await this.stopLeftovers();
       throw error;
     }
     // Its MCP servers, started with the session (fixture 31: all four existed
-    // the moment `session/new` answered).
-    await this.recordSessions();
+    // the moment `session/new` answered): per-session helpers, nobody's work.
+    await this.recordSessions("helpers");
 
     const modelState = modelStateOf(initialize._meta) ?? (setup as { models?: unknown }).models;
     this.currentModelId = currentModelIdOf(modelState);
@@ -1500,23 +1507,36 @@ export class GrokSession {
   }
 
   /**
-   * Stop every process this launch left running, once the CLI is gone — at
-   * every end of the session: a stop (the user's, a closed tab, a restart
-   * for an account or a model, the host's teardown — a drain-restart's
-   * included) and the CLI's own exit (a crash, an open that failed).
+   * Stop what this launch left running once the CLI is gone — by the rule a
+   * deploy must never kill running work.
    *
-   * The CLI starts its background shells and MCP servers in sessions of
+   * The CLI starts its MCP servers and background shells in sessions of
    * their own (Grok fixtures README observation 48), so the group signal of
    * `connection.stop()` reaches the CLI alone and they are reparented to init
-   * when it goes: a dev server would run on, unmanaged, while the log said
-   * its task stopped, and two MCP servers leaked with every session. They
-   * carry this launch's marker ({@link launchId}), and nothing else does
-   * (`support/leftover-processes.ts`: SIGTERM, SIGKILL past the grace, never a
-   * recycled pid; Linux-only, a no-op elsewhere). A drain-restart waited for
-   * live work first, within its bound — the liveness TTL a shell's watch loop
-   * or an agent's hour gets — and the Claude CLI does the same to its own
-   * background shells when its session winds down ("print wind-down: killing
-   * background shell … after …ms grace", 2.1.280). Idempotent; never rejects.
+   * when it goes. Found by the launch marker they inherited
+   * ({@link launchId}) in the sessions recorded while the CLI lived
+   * (`support/leftover-processes.ts`: SIGTERM, SIGKILL past the grace, never
+   * a recycled pid, never a process that daemonized away; Linux-only, a no-op
+   * elsewhere), two kinds are swept differently:
+   *
+   * - **The CLI's own helpers** ({@link helperSessions}: its MCP servers) at
+   *   EVERY end — a restart (account, permission mode, cwd), the host's
+   *   teardown (a drain-restart's included), the CLI's own exit (a crash, an
+   *   open that failed), the user's stop. They are pure per-session leaks:
+   *   two survived every session until 2026-09-26.
+   * - **The user's work** ({@link taskSessions}: the shells the agent ran, the
+   *   dev servers they started) ONLY when the user ends the session — the
+   *   session stop command or a closed tab. A deploy's drain waits for live
+   *   work only within its bound (a watch loop's TTL, an agent's hour), and a
+   *   dev server started in a Grok chat must survive every deploy after it;
+   *   so must a thread's restart, and at a crash nobody ended anything. It
+   *   runs on then as a marked orphan, listed and killable in Settings →
+   *   System (`system-status.ts`). A Claude chat's background shells outlive
+   *   their session too: the SDK closes the Claude CLI's stdin and SIGTERMs
+   *   it 2 s later, before the CLI's own wind-down would stop them.
+   *
+   * An open that failed records every child as a helper: nothing of the
+   * user's has run yet. Idempotent; never rejects.
    */
   stopLeftovers(): Promise<void> {
     if (this.connection === null) {
@@ -1525,7 +1545,10 @@ export class GrokSession {
     }
     this.leftovers ??= stopLeftoverProcesses({
       launchId: this.launchId,
-      sessions: [...this.childSessions.values()]
+      sessions: [
+        ...this.helperSessions.values(),
+        ...(this.sweepTasks ? this.taskSessions.values() : [])
+      ]
     }).then(
       (result) => {
         if (result.found > 0) {
@@ -1598,26 +1621,39 @@ export class GrokSession {
   }
 
   /**
-   * Record the sessions the CLI's children lead, while it lives: the sweep
-   * takes only processes in one of them ({@link childSessions}). Best-effort:
-   * a read that fails records nothing, and nothing is then swept for it.
+   * Record the sessions the CLI's children lead, while it lives: as its
+   * helpers' ({@link helperSessions}) when its session opens, as its work's
+   * ({@link taskSessions}) when the user ends it — a session already a
+   * helper's stays one. The sweep takes only processes in a recorded session.
+   * Best-effort: a read that fails records nothing, and nothing is then swept
+   * for it.
    */
-  private async recordSessions(): Promise<void> {
+  private async recordSessions(kind: "helpers" | "tasks"): Promise<void> {
     const pid = this.connection?.pid;
     if (pid === undefined) {
       return;
     }
     try {
       for (const session of await recordChildSessions(pid)) {
-        this.childSessions.set(session.sid, session);
+        if (kind === "helpers") {
+          this.helperSessions.set(session.sid, session);
+        } else if (!this.helperSessions.has(session.sid)) {
+          this.taskSessions.set(session.sid, session);
+        }
       }
     } catch (error) {
       this.options.logger.warn("grok: could not record the agent's child sessions", error);
     }
   }
 
-  /** Host-initiated stop. Idempotent — a session that already ended still waits for its sweep. */
-  async stop(): Promise<void> {
+  /**
+   * Host-initiated stop. Idempotent — a session that already ended still waits
+   * for its sweep. `endedByUser`: the user ended the session (the session stop
+   * command, a closed tab), and the work its agent left running goes with it
+   * ({@link stopLeftovers}); any other stop — a restart, the host's teardown —
+   * leaves that work running.
+   */
+  async stop(options: { endedByUser?: boolean } = {}): Promise<void> {
     if (this.stopped) {
       await this.leftovers;
       return;
@@ -1641,9 +1677,12 @@ export class GrokSession {
       );
       this.activeTurn = null;
     }
-    // Every child's session, while the CLI still lives: once it is gone, its
-    // children are init's, and only their sessions tie them to this launch.
-    await this.recordSessions();
+    if (options.endedByUser === true) {
+      // Every child's session, while the CLI still lives: once it is gone,
+      // its children are init's, and only their sessions tie them to it.
+      await this.recordSessions("tasks");
+      this.sweepTasks = true;
+    }
     await this.connection?.stop();
     // The CLI is gone; what it started outside its process group is not.
     await this.stopLeftovers();

@@ -252,7 +252,18 @@ export interface AgentAdapter {
 
   listSessions(): ProviderSession[];
   hasSession(threadId: string): boolean;
-  stopSession(threadId: string): Promise<void>;
+  /**
+   * `options.endedByUser`: the user ended the session — the session stop
+   * command or a closed tab (`stopSessionInternal`) — rather than the host
+   * restarting it for a thread that goes on (an account, permission-mode or
+   * cwd change; a stale adapter's session) or tearing down (`stopAll`, a
+   * drain-restart included). An adapter whose provider leaves the processes
+   * its work started running past its own exit stops them only then (Grok:
+   * `GrokSession.stop`): a deploy must never kill running work. Every other
+   * adapter ignores it.
+   */
+  stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void>;
+  /** The host's teardown: never the user ending a session (see {@link stopSession}). */
   stopAll(): Promise<void>;
 
   /**

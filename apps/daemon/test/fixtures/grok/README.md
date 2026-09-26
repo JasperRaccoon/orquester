@@ -176,7 +176,7 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `28-subagent-max-turns.ndjson` | the same full-access argv; the sandbox holds `.grok/agents/one-turn.md` (`maxTurns: 1`) | a foreground spawn of that type, given a tool call and an answer to do | The runtime's turn cap ends a run `cancelled` with its own `error` (observation 50). |
 | `29-loop-scheduled-task.ndjson` | the same full-access argv | `/loop 60s Reply with exactly: tick`, its first fire watched, then `scheduler_list` and `scheduler_delete` | The scheduler's `_x.ai/scheduled_task_*`, the fire's subagent the CLI spawns itself, its wake (observation 52). |
 | `30-goal.ndjson` | the same full-access argv | `/goal Create a file named goal.txt containing exactly: ok --budget 20000`, watched to its end, then `/goal clear` | `goal_updated`: `active` → `budget_limited` → `cleared`; the goal's planner, a subagent the CLI spawns itself (observation 53). |
-| `31-question-cancelled.ndjson` | the same full-access argv | two turns, each asking one `ask_user_question` ("alpha or beta?"): the first answered `{outcome: "cancelled"}` alone, the second answered so and followed at once by `session/cancel` (a host Stop's order) | What the CLI makes of the host's cancel of a question, with and without the Stop's cancel after it (observation 54); the CLI's direct children, from `/proc`, right after `session/new` returned, at `_x.ai/mcp_initialized` and at the end (the harness's `note` frames). |
+| `31-question-cancelled.ndjson` | the same full-access argv | two turns, each asking one `ask_user_question` ("alpha or beta?"): the first answered `{outcome: "cancelled"}` alone, the second answered so and followed at once by `session/cancel` (a host Stop's order) | What the CLI makes of the host's cancel of a question, with and without the Stop's cancel after it (observation 54); the CLI's direct children, from `/proc`, right after `session/new` returned, at `_x.ai/mcp_initialized` and at the end (the harness's `note` frames; observation 55). |
 
 ---
 
@@ -1225,8 +1225,9 @@ child session, so they never stream into the first run's.
   after the cancel) and leaves the background shell running: a poll 12 s later answered `running`.
   The shell even outlived the CLI: after the harness's SIGTERM, `sleep 91` was still running,
   reparented to init, and had to be killed by hand — as every child of the CLI does (observation
-  48), which the adapter now stops at the session's end. While the CLI lives, the adapter's own end
-  for it stays revivable by any later CLI report that it runs (a listing, a poll, a start frame).
+  48); the adapter stops such work only when the user ends the session. While the CLI lives, the
+  adapter's own end for it stays revivable by any later CLI report that it runs (a listing, a poll,
+  a start frame).
 - A turn-scoped Stop that cuts a foreground spawn (23): the cancel ends the parent's turn
   (`MidTurnAbort`), the child's turn ends `cancelled`, `subagent_finished {status: "cancelled"}`
   arrives 42 ms later, and the spawn call gets no terminal frame at all (as fixture 05's `write`).
@@ -1322,15 +1323,25 @@ one `run_terminal_command` with `background: true` (`sleep 45`).
   `sleep 91`, found running after the harness's SIGTERM, was the same thing: whatever the CLI
   starts outlives it, MCP servers included — one set leaked per session.
 
-The adapter stops them at every end of a session (`GrokSession.stopLeftovers`,
-`support/leftover-processes.ts`): each launch's environment carries its own marker value, and a
-stop — the user's, a closed tab, a restart, the host's teardown, a drain-restart's included — as
-well as the CLI's own exit or an open that failed sends SIGTERM to every process still carrying it,
-then SIGKILL past a 2 s grace to whatever a fresh scan still finds, each pid checked against its
-`/proc` starttime before every signal. A Stop's `session/cancel` kills nothing (the CLI lives on
-and owns them, observation 44). The daemon's Settings → System lists and kills a process carrying
-any launch's marker as its own, so what a crashed host left behind is not out of reach. Linux-only:
-elsewhere nothing is read or signalled.
+What the adapter does about it (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`):
+each launch's environment carries its own marker value, and a sweep takes only the processes
+carrying it inside a session one of the CLI's children led — recorded while the CLI lived, so a
+process that daemonized into a session of its own (agent-browser's daemon, an SSH ControlMaster)
+is spared — with SIGTERM, then SIGKILL past a 2 s grace to whatever a fresh scan still finds, each
+pid checked against its `/proc` starttime before every signal. Two kinds, two rules:
+
+- **The CLI's own helpers** — its children the moment `session/new` or `session/load` answered,
+  its MCP servers (observation 55) — are swept at every end of the session: a restart of a thread
+  that goes on, the host's teardown (a drain-restart's included), the CLI's own exit (a crash, an
+  open that failed) and the user's stop.
+- **The work its agent started** — its shells and whatever they run — only when the USER ends the
+  session (the session stop command, a closed tab), and on an open that failed. A deploy must
+  never kill running work: a dev server started in a Grok chat outlives a drain-restart, a
+  restart and a crash as a marked orphan, which the daemon's Settings → System lists and kills as
+  its own (any process carrying a launch's marker).
+
+A Stop's `session/cancel` kills nothing (the CLI lives on and owns them, observation 44).
+Linux-only: elsewhere nothing is read or signalled.
 
 ### 49. An approval inside a subagent's child session asks on the PARENT's session
 
@@ -1500,6 +1511,24 @@ Pinned through the real session (`session-replay.test.ts`, "31 replayed"): the h
 (`respondToUserInput(…, {cancel: true})`) reaches the CLI as exactly that reply and writes one
 `withdrawn` row per card, turn 1 settles with the model's own answer, turn 2 settles `interrupted`
 by the adapter's interrupt, and the prompt's late `cancelled` result settles nothing twice.
+
+### 55. The CLI's helpers exist the moment its session opens
+
+Fixture 31's harness notes list the CLI's direct children (`/proc/<pid>/task/*/children`) three
+times: right after `session/new` returned (t=723 ms, before the first prompt), at
+`_x.ai/mcp_initialized` (t=3565, into the first turn — observation 30) and at the end (t=19978).
+Each time the same four, each leading a session of its own: `agent-browser mcp`, `centur`,
+`jira-cloud` and `serena` — the MCP servers the CLI boots from the host's configuration. The
+servers are STARTED by the time `session/new` answers, though their initialisation runs on for
+seconds; nothing of the user's can have run yet.
+
+That is what lets the adapter tell the CLI's own per-session helpers from the work its agent starts
+(observation 48): the sessions its children lead as the open answers are the helpers', swept at
+every end; a session a child leads later is work, swept only when the user ends the session. A
+server the CLI started after its session opened — none was seen — would be work by that rule: left
+running at a deploy (as before 2026-09-26), never killed early. After the adapter's SIGTERM of the
+CLI's group, `serena` ran on under init this time (in 24 `jira-cloud` did too; the others end on
+their stdin's end) — a helper, swept by its recorded session.
 
 ## Reproducing
 

@@ -1377,6 +1377,53 @@ test("a session's end stops its helpers — and never what daemonized into a ses
   }
 });
 
+test("the host's teardown and a restart stop a Grok session's helpers — never its running work", { skip: process.platform !== "linux" }, async () => {
+  // A drain-restart, and an account, permission-mode or cwd restart of a
+  // thread that goes on: the drain rule — a deploy must not kill running
+  // work — holds for the dev server a Grok chat started.
+  for (const end of ["teardown", "restart"] as const) {
+    const r = await rig({ scenario: "leftover" });
+    try {
+      await start(r);
+      await turnWithLeftovers(r);
+      const before = leftovers(r);
+      assert.equal(before.shell.length, 1);
+      assert.equal(before.member.length, 1);
+      if (end === "teardown") {
+        await r.adapter.stopAll();
+      } else {
+        await r.adapter.stopSession("t1");
+      }
+      const after = leftovers(r);
+      assert.deepEqual(after.helper, [], `${end}: its MCP servers are per-session helpers, swept at every end`);
+      assert.deepEqual(after.shell, before.shell, `${end}: the shell runs on, a marked orphan`);
+      assert.deepEqual(after.member, before.member, `${end}: and so does what it started`);
+      assert.deepEqual(after.daemon, before.daemon);
+    } finally {
+      reap(r);
+      await r.dispose();
+    }
+  }
+});
+
+test("the user ending the session stops its running work too — never what daemonized away", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  try {
+    await start(r);
+    await turnWithLeftovers(r);
+    const before = leftovers(r);
+    await r.adapter.stopSession("t1", { endedByUser: true });
+    const after = leftovers(r);
+    assert.deepEqual(after.helper, []);
+    assert.deepEqual(after.shell, [], "the session stop command or a closed tab: the agent's work goes with it");
+    assert.deepEqual(after.member, []);
+    assert.deepEqual(after.daemon, before.daemon, "a host-wide helper it started is never the session's");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
 test("a CLI that exits on its own takes its helpers with it", { skip: process.platform !== "linux" }, async () => {
   const r = await rig({ scenario: "leftover-exit" });
   try {
@@ -1389,6 +1436,8 @@ test("a CLI that exits on its own takes its helpers with it", { skip: process.pl
     await r.adapter.stopAll();
     const after = leftovers(r);
     assert.deepEqual(after.helper, []);
+    assert.equal(after.shell.length, 1, "a crash is no user's end: the running work stays, a marked orphan");
+    assert.equal(after.member.length, 1);
     assert.equal(after.daemon.length, 1);
   } finally {
     reap(r);

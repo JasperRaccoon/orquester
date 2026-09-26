@@ -1376,41 +1376,51 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   spawn); the self-resolved-approvals advisory is said once, and only where approval cards were
   promised (never under `auto` / `full-access`, where the CLI resolving its own interactions is the
   mode working).
-- **What a Grok CLI starts outlives it, so every end of its session stops it — found by a launch
-  marker, never by the process tree.** The CLI starts every child of its own — its background
-  shells and the MCP servers it boots from the host's configuration (observation 30) — in a
-  session of its own (`pgid = sid = pid`; Grok fixtures README observation 48, verified live on
-  2026-09-26), so `spawnProviderChild`'s group signal reaches the CLI alone: after a clean SIGTERM
-  a `bash` with its `sleep` and two MCP servers ran on, reparented to init — a dev server kept
-  running, unmanaged, while the log said its task had stopped, and every session leaked the MCP
-  servers it had booted. Every Grok launch's env carries `ORQUESTER_AGENT_LAUNCH`
-  (`AGENT_LAUNCH_ENV_VAR`), one random value per launch — never the injectable `uuid()`: two test
-  files' deterministic ids would stop each other's processes — which every descendant inherits
-  (eleven processes carried it in that run), and every end of the session stops whatever still
-  carries it IN A SESSION ONE OF THE CLI'S CHILDREN LED — recorded while the CLI lives (at open, and
-  right before a stop), so a process that daemonized into a session of its own (agent-browser's
-  daemon, an SSH ControlMaster: host-wide helpers a chat may have started first) is spared
-  (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`): a stop — the user's
-  session stop, a closed tab, a restart for an account or a model, the host's teardown — awaits it
-  once the CLI itself has exited, and the CLI's own exit (a crash, an open that failed) starts it,
-  which `stopAll` waits for. An open that fails stops its CLI now too: a `session/load` the CLI
-  refused (a cursor it no longer knows) left it running outside the adapter's map, holding its
-  pipes. SIGTERM, then SIGKILL past `DEFAULT_KILL_GRACE_MS` to whatever a fresh scan still finds,
-  each pid identified by its `/proc` starttime on both sides of the environment read and again
-  before each signal — the kill guard's rule: never a recycled pid; a zombie is gone. **A
-  drain-restart's teardown stops them too**: the drain already waited for live work within its
-  bound (a shell's watch-loop TTL, an agent's hour), and the Claude CLI does the same to its own
-  background shells when its session winds down ("print wind-down: killing background shell …
-  after …ms grace", read off the 2.1.280 binary) — a dev server left running in a Grok chat no more
-  survives a code-only deploy past that bound than one in a Claude chat. A Stop kills nothing: its
-  `session/cancel` leaves the CLI — which owns them — running (fixture 21). A process that scrubs
-  its environment (`env -i`, `sudo`'s `env_reset`) escapes. Linux-only (`/proc`); elsewhere the
-  sweep reads and signals nothing. **Settings → System reads the same marker**: a process of the
-  daemon's own uid that no root reaches but that carries any launch's marker is a root of its own —
-  listed under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill target
-  (`launchedOrphans` in `system-status.ts`) — so what a host that crashed before any session end
-  could run is not out of reach. Only Grok launches carry the marker today; another adapter opts in
-  by stamping it on its launch env and sweeping at its session ends.
+- **What a Grok CLI starts outlives it. Its helpers are stopped at every end of its session; the
+  work its agent started only when the USER ends the session — a deploy must never kill running
+  work.** The CLI starts every child of its own — the MCP servers it boots from the host's
+  configuration (observation 30) and its shells — in a session of its own (`pgid = sid = pid`; Grok
+  fixtures README observations 48 and 55, verified live on 2026-09-26), so `spawnProviderChild`'s
+  group signal reaches the CLI alone: after a clean SIGTERM a `bash` with its `sleep` and two MCP
+  servers ran on, reparented to init, and every session leaked the MCP servers it had booted. Every
+  Grok launch's env carries `ORQUESTER_AGENT_LAUNCH` (`AGENT_LAUNCH_ENV_VAR`), one random value per
+  launch — never the injectable `uuid()`: two test files' deterministic ids would stop each other's
+  processes — which every descendant inherits (eleven processes carried it in that run). A sweep
+  (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`) takes only processes carrying it IN
+  A SESSION ONE OF THE CLI'S CHILDREN LED, recorded while the CLI lives, so a process that
+  daemonized into a session of its own (agent-browser's daemon, an SSH ControlMaster: host-wide
+  helpers a chat may have started first) is spared; SIGTERM, then SIGKILL past
+  `DEFAULT_KILL_GRACE_MS` to whatever a fresh scan still finds, each pid identified by its `/proc`
+  starttime on both sides of the environment read and again before each signal, a live session
+  leader against the one recorded — the kill guard's rule: never a recycled pid; a zombie is gone.
+  Two kinds, two rules. **The CLI's own helpers** — its children the moment `session/new` /
+  `session/load` answered, which are its MCP servers (fixture 31: all four existed then, none of the
+  user's work had run) — are swept at EVERY end: a restart of a thread that goes on (an account,
+  permission-mode or cwd change — Grok switches models in-session), the host's teardown (a
+  drain-restart's included), the CLI's own exit (a crash, an open that failed), the user's stop.
+  **The work its agent started** — its shells, the dev servers they run — is swept ONLY when the
+  user ends the session: the session stop command or a closed tab (`stopSessionInternal` passes
+  `stopSession(…, {endedByUser: true})`; the MCP's `stop_session` and `close_session` are that
+  command and that close), its sessions recorded right before the CLI is stopped; and on an open
+  that failed, where nothing of the user's has run. Never at a deploy's teardown or a restart: the
+  drain waits for live work only within its bound (a watch loop's TTL, an agent's hour), and a dev
+  server started in a Grok chat must survive every deploy that comes after it. Never at a crash
+  either (no user ended anything). There it runs on as a marked orphan, listed and killable in
+  Settings → System; its roster row still closes `stopped` with the session (no CLI is left to
+  report on it), so the chat no longer shows it. A Claude chat's background shells outlive their
+  session the same way — the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s later, before the
+  CLI's own 5 s wind-down would stop them, and they run on under init (`bun run dev`,
+  `stripe listen`, `vite` of closed Claude chats, live on the owner's host on 2026-09-26). An open
+  that fails stops its CLI now too: a `session/load` the CLI refused (a cursor it no longer knows)
+  left it running outside the adapter's map, holding its pipes. A work process whose shell had
+  exited before the stop is in no recorded session and stays running; a process that scrubs its
+  environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills nothing: its `session/cancel`
+  leaves the CLI — which owns them — running (fixture 21). Linux-only (`/proc`); elsewhere the sweep
+  reads and signals nothing. **Settings → System reads the same marker**: a process of the daemon's
+  own uid that no root reaches but that carries any launch's marker is a root of its own — listed
+  under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in
+  `system-status.ts`) — so the work a session end left running, and whatever a crashed host never
+  swept, is in reach. Only Grok launches carry the marker today.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
