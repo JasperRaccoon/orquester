@@ -4142,7 +4142,9 @@ that started it, so it stays on screen until it ends or is stopped.
 put a roster row on screen for every `ls`. Only a detached task is surfaced (the SDK's
 `is_backgrounded`, promoted later by `task_updated {patch:{is_backgrounded:true}}` when the user
 hits Ctrl+B); `ambient`/`skip_transcript` tasks are not activity at all. `task.started` carries
-`isBackgrounded` and `task.completed` carries `exitCode` so the row can say so. A surfaced shell
+`isBackgrounded` and `task.completed` carries `exitCode` so the row can say so — onto its
+activity row too, which the roster reads (ingestion dropped it until 2026-09-26, so every shell's
+roster row read `exitCode: null`, Grok's included). A surfaced shell
 additionally owns a `command_execution` item (`itemId: "bgshell:<taskId>"`, `agentId: <taskId>`)
 whose `command_output` deltas are **tailed off a file**: the CLI writes a background command's
 output to its own tmp tree rather than streaming it, so a drill-in with no tail reads "has not

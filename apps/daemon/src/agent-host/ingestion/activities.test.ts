@@ -439,6 +439,24 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
     );
     assert.equal(row!.tone, "error");
   });
+
+  it("task.completed carries a shell's exit code — a signal's negative one included", () => {
+    for (const exitCode of [0, 2, -15]) {
+      const [row] = runtimeEventToActivities(
+        runtimeEvent("task.completed", {
+          taskId: "task-1",
+          taskType: "shell",
+          status: exitCode === 0 ? "completed" : "failed",
+          exitCode
+        })
+      );
+      assert.equal(payloadOf(row!).exitCode, exitCode, `exit code ${exitCode}`);
+    }
+    const [unreported] = runtimeEventToActivities(
+      runtimeEvent("task.completed", { taskId: "task-1", status: "completed" })
+    );
+    assert.equal("exitCode" in payloadOf(unreported!), false, "no code reported, none written");
+  });
 });
 
 describe("tool progress, denials and diagnostics (§5.1 catch-all)", () => {

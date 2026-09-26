@@ -405,6 +405,31 @@ test("a Grok shell a poll ended stays ended while a snapshot lists it: one start
   assert.equal(agent(s, shell).status, "completed");
 });
 
+test("a Grok shell's exit code reaches the roster — from a poll's answer and from task_completed", async () => {
+  const s = seam();
+  await s.startTurn("turn-1");
+  const polled = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
+  const reported = "01a0c1a7-4446-7fc3-894b-56f0bb60a6dc";
+  for (const [task, command] of [
+    [polled, "make test"],
+    [reported, "make lint"]
+  ] as const) {
+    const update = { sessionUpdate: "task_backgrounded", tool_call_id: `call-${task}`, task_id: task, command };
+    await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
+  }
+  await poll(s, { task_id: polled, command: "make test", status: "failed", exit_code: 2, output: "1 failing" });
+  const completed = {
+    sessionUpdate: "task_completed",
+    task_snapshot: { task_id: reported, command: "make lint", exit_code: 1, completed: true, kind: "bash" },
+    will_wake: false
+  };
+  await s.feed(s.grok.handleXaiNotification("_x.ai/task_completed", { sessionId: SESSION, update: completed }));
+  assert.equal(agent(s, polled).status, "failed");
+  assert.equal(agent(s, polled).exitCode, 2);
+  assert.equal(agent(s, reported).status, "failed");
+  assert.equal(agent(s, reported).exitCode, 1);
+});
+
 test("a Grok shell Stop closed counts live again while a snapshot lists it running", async () => {
   const s = seam();
   await s.startTurn("turn-1");
