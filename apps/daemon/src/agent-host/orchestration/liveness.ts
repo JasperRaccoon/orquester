@@ -232,14 +232,14 @@ export function createLivenessRegistry(
     // outlive their parent and must keep the thread working.
     //
     // An `agentId` equal to the task's OWN id names no owner: Grok stamps every
-    // row of a background shell with the shell itself (`adapters/grok/
-    // normalize.ts`), and reading that as "some agent's shell" dropped every
-    // Grok shell — a dev server left running neither read "monitoring" nor
-    // held a deploy's drain. Such a row is the task's own, classified below
-    // like any other: a shell is a watch loop, bounded by the TTL. Claude
-    // stamps only a real owner, and Codex and OpenCode type every live row
-    // `subagent` (Codex's Stop/exit closer carries no type, but it is terminal
-    // either way), so none of them reads differently.
+    // row of a background shell with the shell itself
+    // (`adapters/grok/background-tasks.ts`), and reading that as "some agent's
+    // shell" dropped every Grok shell — a dev server left running neither read
+    // "monitoring" nor held a deploy's drain. Such a row is the task's own,
+    // classified below like any other: a shell is a watch loop, bounded by the
+    // TTL. Claude stamps only a real owner, and Codex and OpenCode type every
+    // live row `subagent` (Codex's Stop/exit closer carries no type, but it is
+    // terminal either way), so none of them reads differently.
     if (
       input.agentId !== undefined &&
       input.agentId.trim().length > 0 &&

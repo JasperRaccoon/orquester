@@ -97,6 +97,8 @@ async function rig(
       TMPDIR: cwd,
       GROK_MOCK_SCENARIO: options.scenario ?? "happy",
       GROK_RIG_MARK: mark,
+      // The thread's `leftover-work.json`: `leftover-exit` exits once its work is recorded there.
+      GROK_MOCK_LEFTOVER_WORK: leftoverWork,
       ...(options.version === undefined ? {} : { GROK_MOCK_VERSION: options.version }),
       ...options.env
     }),
@@ -1610,7 +1612,12 @@ test("a CLI that exits on its own takes its helpers with it", { skip: process.pl
   try {
     await start(r);
     const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
-    await r.waitFor((event) => event.type === "session.exited", "session.exited");
+    // The mock exits only once `leftover-work.json` records its task's session,
+    // so a host that stops recording times out HERE, not at the assertion below.
+    await r.waitFor(
+      (event) => event.type === "session.exited",
+      "session.exited (the mock exits once its task's session is recorded)"
+    );
     await r.drain();
     assert.notEqual(launchOf(r.events, turnId), "none");
     // `stopAll` is the host's teardown: it waits for a sweep still in flight.
