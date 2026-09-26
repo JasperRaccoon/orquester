@@ -1096,14 +1096,16 @@ user's prompt's RPC result. The first such frame starts a hold, and every frame 
 session, naming anything or nothing — waits behind it until the wake's turn opens, then comes back
 in arrival order: a woken parent's spawn call names its prompt, the `subagent_spawned` after it
 names none (only `parent_prompt_id`, 16), and handled first it would start a second agent. A held
-`turn_completed` is the wake's end. Nothing held is ever dropped. Past 256 frames, or when a request
-the user must answer arrives, they join the open turn in order and the wake keeps a turn for what it
-streams after. A cancel while a wake still runs ends it — the CLI runs one prompt at a time, so the
-waiting wake is the prompt running — and its frames join the open turn, with no turn of its own (no
-capture has a Stop in that window; the adapter follows 05 and 23, where a cancel ends the running
-prompt); a wake that already finished keeps its reply and its turn. Our own prompt running — a
-steer, or a prompt sent after a wake started during the `set_model` round trip — ends every wait,
-the frames joining our turn in order, and a stop or an exit flushes them into the open turn.
+`turn_completed` is the wake's end. Nothing held is ever dropped. Past 256 frames, or when a card
+opens on the open turn, they join the open turn in order and the wake keeps a turn for what it
+streams after. A question the waiting wake asks rides no turn (Codex's `questionTurnId` rule): on
+ours, our turn's end would dismiss it in the log while the CLI stayed blocked. A cancel while a wake
+still runs ends it — the CLI runs one prompt at a time, so the waiting wake is the prompt running —
+and its frames join the open turn, with no turn of its own (no capture has a Stop in that window;
+the adapter follows 05 and 23, where a cancel ends the running prompt); a wake that already finished
+keeps its reply and its turn. Our own prompt running — a steer, or a prompt sent after a wake
+started during the `set_model` round trip — ends every wait, the frames joining our turn in order,
+and a stop or an exit flushes them into the open turn.
 
 ### 41. Monitors
 

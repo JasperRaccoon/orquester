@@ -1176,64 +1176,73 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   or nothing — queues behind it** until its turn opens, then comes back through the same gate in
   arrival order. Holding only the named frames reordered the rest: a woken parent's spawn call
   waited while its `subagent_spawned` was handled first, a phantom agent. A held `turn_completed` is
-  its prompt's end. **A held frame is never dropped** — fix round 1 dropped them four ways. Past 256
-  (`HELD_FRAMES_MAX`) or when a request the user must answer arrives, the held frames join the open
-  turn in order, and the prompt keeps a turn of its own for what it streams after that turn settles,
-  unless it finished by then. A cancel (a Stop, a steer's) ends the newest waiting prompt still
-  running: its frames join the open turn and it gets no turn — one that already finished keeps its
-  reply and its turn. Our own prompt running (a steer; a prompt sent after a wake started during the
-  `set_model` round trip) means every waiting prompt is over and none can get a turn before ours,
-  which it continues: their frames join ours, in order. A stop and an exit flush them into the open
-  turn before it settles. **A monitor's wake re-arms it**: its line arrives just BEFORE the wake it
-  causes, so the liveness registry's turn-boundary sweep read it as silent through that turn and
-  dropped it at the wake's end — a code-only deploy stopped waiting for a running monitor between
-  its lines. The wake's turn opens with a status-less `task.progress` for each live monitor its
-  `runningText` names (a `<monitor-event>` block's `task_id`, in any attribute order;
-  `rearmMonitors`), replaced in place; only those, since re-arming every monitor at every wake would
-  let unrelated wakes hold a silent one forever, and a line's wake naming no live monitor logs one
-  debug line. (6) **An hour, not forever**: every row naming a Grok agent carries `livenessTtlMs`
-  (`GROK_AGENT_LIVENESS_TTL_MS`, 60 min), and the registry counts it "working" — holding a deploy's
-  drain — for at most that long after the latest such row; its heartbeat and a poll answering
-  running re-arm it. Only liveness lapses: the roster keeps the row and a later end is recorded as
-  any end is. (7) `resume_from` spawns a NEW subagent id naming its source in `resumed_from`
-  (fixture 17) and starts the SAME task again under the new call (the relaunch contract); the task
-  is found by the subagent id the source's result or spawn reported — the UUIDs in it, read without
-  assuming a shape: `rawOutput` first, the text only when that names none, never an id the launch's
-  own input, the session, a live shell or an ended task names; an id no launch reported (a host
-  restart since) starts a row under that id; a resume the CLI refuses fails the call, never the
-  agent; and any launch resets the agent's snapshot listing. `hasSubagents` is "this turn launched
-  one" (Codex's rule), never "one is live". (8) A finished call never starts again: a frame of a
-  call the CLI already ended is dropped (`finishedCalls`, 1 024 ids) — a status-less one re-opened
-  the call as a new `item.started` and the exit sweep then failed a command that had completed (a
-  monitor's call even streams its output AFTER its completion, fixture 20) — but the CLI's end of a
-  call the adapter closed itself (a Stop's `failOpenTools`) is its first real end, and lands. Nor
-  does a task whose end the CLI reported: its id — a shell's, or every id that named the subagent
-  run — is remembered (`endedTasks`, 1 024 ids), and a snapshot entry or a late frame naming it
-  starts nothing. One rule, for shells and subagents alike: an end the adapter wrote itself (Stop,
-  the session's stop, the exit, a task dropping out of a snapshot unannounced) is not the CLI's word
-  — captured (fixture 21), a Stop's `session/cancel` cancels a background subagent (its
-  `subagent_finished {cancelled}` is then the CLI's final word, with no row) but leaves a background
-  shell running (a poll 12 s later answered `running`; the shell even outlived the CLI's exit), and
-  never letting a deploy kill running work outranks a duplicate row — so ANY report from the CLI
-  that the task still runs (a listing, a start frame, a poll answering `running`, a heartbeat, a
-  monitor's line) counts it live again: its own start row is re-emitted, naming its own launch,
-  which the roster reads as a late delivery (it keeps the adapter's end), while liveness counts it
-  under its own bound, re-armed by further reports — status-less rows, because a status would reopen
-  the roster's row. A report of its end is the CLI's end: remembered, no second row, final. A
-  resting (`idle`) listing says neither. (`shellReport`, `subagentReport`, `reviveShell`,
-  `reviveSubagent`.) (9) **A snapshot emits a row only on a change.** `background_tasks` restates
-  every task of its session whenever one of them starts or ends, and a `task.updated` is an appended
-  row: an entry whose status, title and output file are unchanged emits nothing, and a changed one
-  exactly one row carrying every change (`snapshotChange`) — nothing needs a re-arm from it (a shell
-  is a TTL-bounded watch loop, a monitor re-arms on its lines, an agent on its heartbeat). (10)
-  Teardown closes calls before tasks, as every adapter's does (Stop, the session's stop, the exit; a
-  run's end closes its child's open calls before its task row). Noise the captures showed, silenced:
-  a child's `skills-reload` / `workflows-reload` replies to requests the CLI sent itself are not
-  warnings (the ACP peer drops a reply to nothing that carries an id the adapter names,
-  `agentOwnReplyIds`); an MCP server's failure is said once until it recovers (the CLI re-handshakes
-  the thread's servers at every spawn); the self-resolved-approvals advisory is said once, and only
-  where approval cards were promised (never under `auto` / `full-access`, where the CLI resolving
-  its own interactions is the mode working).
+  its prompt's end. **A held frame is never dropped** — an earlier hold deleted them past its bound,
+  on a cancel after the waiting prompt had already finished, and at a stop or an exit. Past 256
+  (`HELD_FRAMES_MAX`), or when a card opens on the open turn (the parent's approval, or a question
+  that rides that turn — never a request answered without a card, nor a child session's), the held
+  frames join the open turn in order, and the prompt keeps a turn of its own for what it streams
+  after that turn settles, unless it finished by then. A cancel (a Stop, a steer's) ends the newest
+  waiting prompt still running: its frames join the open turn and it gets no turn — one that already
+  finished keeps its reply and its turn. Our own prompt running (a steer; a prompt sent after a wake
+  started during the `set_model` round trip) means every waiting prompt is over and none can get a
+  turn before ours, which it continues: their frames join ours, in order. A stop and an exit flush
+  them into the open turn before it settles. **A question rides no turn when its asker outlives the
+  open one** (Codex's `questionTurnId` rule; `GrokSession.questionTurnId`): a turn's end dismisses
+  every question on it in the log only (`settleStrandedQuestions`), never answering the adapter, so
+  a question the CLI's own waiting prompt asked in that window, riding our turn, was swept at our
+  turn's end while the CLI stayed blocked and the wake's turn read running with no card, holding a
+  deploy's drain; a subagent's child session's question likewise. Every other question rides the
+  open turn — the wake's own once its turn is open — and its resolution rides the same. **A
+  monitor's wake re-arms it**: its line arrives just BEFORE the wake it causes, so the liveness
+  registry's turn-boundary sweep read it as silent through that turn and dropped it at the wake's
+  end — a code-only deploy stopped waiting for a running monitor between its lines. The wake's turn
+  opens with a status-less `task.progress` for each live monitor its `runningText` names (a
+  `<monitor-event>` block's `task_id`, in any attribute order; `rearmMonitors`), replaced in place;
+  only those, since re-arming every monitor at every wake would let unrelated wakes hold a silent
+  one forever, and a line's wake naming no live monitor logs one debug line. (6) **An hour, not
+  forever**: every row naming a Grok agent carries `livenessTtlMs` (`GROK_AGENT_LIVENESS_TTL_MS`, 60
+  min), and the registry counts it "working" — holding a deploy's drain — for at most that long
+  after the latest such row; its heartbeat and a poll answering running re-arm it. Only liveness
+  lapses: the roster keeps the row and a later end is recorded as any end is. (7) `resume_from`
+  spawns a NEW subagent id naming its source in `resumed_from` (fixture 17) and starts the SAME task
+  again under the new call (the relaunch contract); the task is found by the subagent id the
+  source's result or spawn reported — the UUIDs in it, read without assuming a shape: `rawOutput`
+  first, the text only when that names none, never an id the launch's own input, the session, a live
+  shell or an ended task names; an id no launch reported (a host restart since) starts a row under
+  that id; a resume the CLI refuses fails the call, never the agent; and any launch resets the
+  agent's snapshot listing. `hasSubagents` is "this turn launched one" (Codex's rule), never "one is
+  live". (8) A finished call never starts again: a frame of a call the CLI already ended is dropped
+  (`finishedCalls`, 1 024 ids) — a status-less one re-opened the call as a new `item.started` and
+  the exit sweep then failed a command that had completed (a monitor's call even streams its output
+  AFTER its completion, fixture 20) — but the CLI's end of a call the adapter closed itself (a
+  Stop's `failOpenTools`) is its first real end, and lands. Nor does a task whose end the CLI
+  reported: its id — a shell's, or every id that named the subagent run — is remembered
+  (`endedTasks`, 1 024 ids), and a snapshot entry or a late frame naming it starts nothing. One
+  rule, for shells and subagents alike: an end the adapter wrote itself (Stop, the session's stop,
+  the exit, a task dropping out of a snapshot unannounced) is not the CLI's word — captured (fixture
+  21), a Stop's `session/cancel` cancels a background subagent (its `subagent_finished {cancelled}`
+  is then the CLI's final word, with no row) but leaves a background shell running (a poll 12 s
+  later answered `running`; the shell even outlived the CLI's exit), and never letting a deploy kill
+  running work outranks a duplicate row — so ANY report from the CLI that the task still runs (a
+  listing, a start frame, a poll answering `running`, a heartbeat, a monitor's line) counts it live
+  again: its own start row is re-emitted, naming its own launch, which the roster reads as a late
+  delivery (it keeps the adapter's end), while liveness counts it under its own bound, re-armed by
+  further reports — status-less rows, because a status would reopen the roster's row. A report of
+  its end is the CLI's end: remembered, no second row, final. A resting (`idle`) listing says
+  neither. (`shellReport`, `subagentReport`, `reviveShell`, `reviveSubagent`.) (9) **A snapshot
+  emits a row only on a change.** `background_tasks` restates every task of its session whenever one
+  of them starts or ends, and a `task.updated` is an appended row: an entry whose status, title and
+  output file are unchanged emits nothing, and a changed one exactly one row carrying every change
+  (`snapshotChange`) — nothing needs a re-arm from it (a shell is a TTL-bounded watch loop, a
+  monitor re-arms on its lines, an agent on its heartbeat). (10) Teardown closes calls before tasks,
+  as every adapter's does (Stop, the session's stop, the exit; a run's end closes its child's open
+  calls before its task row). Noise the captures showed, silenced: a child's `skills-reload` /
+  `workflows-reload` replies to requests the CLI sent itself are not warnings (the ACP peer drops a
+  reply to nothing that carries an id the adapter names, `agentOwnReplyIds`); an MCP server's
+  failure is said once until it recovers (the CLI re-handshakes the thread's servers at every
+  spawn); the self-resolved-approvals advisory is said once, and only where approval cards were
+  promised (never under `auto` / `full-access`, where the CLI resolving its own interactions is the
+  mode working).
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission

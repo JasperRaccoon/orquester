@@ -1738,12 +1738,14 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   naming it starts a hold and every frame after it queues behind, handed back in arrival order when
   its turn opens; a held `turn_completed` is its end. Nothing held is dropped: when it cannot get a
   turn (a cancel ends it while it runs, our own prompt runs, a stop, an exit) or can wait no longer
-  (256 frames, a request the user must answer), what is held joins the open turn, in order. A user
-  message during its turn steers it: cancel, then prompt under the same turn id. A monitor's wake
-  opens by re-arming the monitors its `runningText` carries lines of, which the liveness registry's
-  turn-boundary sweep would otherwise drop at the wake's end (`adapters/grok/prompt-queue.ts`,
-  `GrokWakes` — which the capture-replay driver runs too; `session.ts`, `onQueueChanged`,
-  `onPrivateUpdate`; the Grok fixtures README, observations 40–41).*
+  (256 frames, a card opening on the open turn), what is held joins the open turn, in order. A
+  question it asks while it waits rides no turn (Codex's `questionTurnId` rule), so our turn's end
+  cannot dismiss it while the CLI waits for the answer. A user message during its turn steers it:
+  cancel, then prompt under the same turn id. A monitor's wake opens by re-arming the monitors its
+  `runningText` carries lines of, which the liveness registry's turn-boundary sweep would otherwise
+  drop at the wake's end (`adapters/grok/prompt-queue.ts`, `GrokWakes` — which the capture-replay
+  driver runs too; `session.ts`, `onQueueChanged`, `onPrivateUpdate`; the Grok fixtures README,
+  observations 40–41).*
 - **Interrupt** marks the turn id as interrupted **synchronously, before taking the thread lock**,
   so late notifications and a late prompt result are dropped; then settles pending approvals and
   user-inputs as cancelled (the ACP spec requires a cancel to answer every pending permission

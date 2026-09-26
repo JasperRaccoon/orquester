@@ -649,7 +649,7 @@ test("21 through the fold: after a Stop, the shell the CLI kept running holds mo
 });
 
 // ---------------------------------------------------------------------------
-// Fix round 1: a resumed run's words are its own; more captures through the fold
+// A resumed run's words are its own; a monitor through its wakes; more captures through the fold
 // ---------------------------------------------------------------------------
 
 function agentMessages(state: ReturnType<typeof fold>, agentId: string, role: "assistant" | "reasoning") {
