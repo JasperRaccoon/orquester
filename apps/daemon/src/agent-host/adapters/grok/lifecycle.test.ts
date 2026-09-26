@@ -15,7 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,6 +72,9 @@ async function rig(
   const cwd = await mkdtemp(join(tmpdir(), "grok-lifecycle-"));
   const mark = randomUUID();
   const leftoverWork = options.leftoverWork ?? join(cwd, "threads", "t1", "leftover-work.json");
+  // The thread's directory, as the store creates it with the thread: the
+  // adapter never creates it (a late record must not raise a deleted thread).
+  await mkdir(dirname(leftoverWork), { recursive: true });
   const events: RuntimeEvent[] = [];
   const waiters: Array<{ predicate: (event: RuntimeEvent) => boolean; resolve: (event: RuntimeEvent) => void }> = [];
 

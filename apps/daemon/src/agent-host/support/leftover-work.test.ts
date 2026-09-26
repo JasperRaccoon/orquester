@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { AGENT_LAUNCH_ENV_VAR, type ProcSource } from "./leftover-processes.ts";
@@ -86,6 +87,15 @@ test("a file that is not what this host writes reads as nothing, entry by entry"
   assert.deepEqual(await readLeftoverWork(path), []);
   await recordLeftoverWork(path, { launchId: "l1", recordedAt: "t", sessions: [{ sid: 7, leaderStarttime: 3 }] });
   assert.equal((await readLeftoverWork(path)).length, 1, "and is replaced by the next record");
+});
+
+test("a record never recreates a thread directory that is gone — no ghost thread at the next boot", async () => {
+  const path = await scratch();
+  const threadDir = dirname(path);
+  await rm(threadDir, { recursive: true });
+  await recordLeftoverWork(path, { launchId: "late", recordedAt: "t", sessions: [{ sid: 9, leaderStarttime: 1 }] });
+  assert.equal(existsSync(threadDir), false, "the store deleted the thread: a late record writes nothing");
+  assert.deepEqual(await readLeftoverWork(path), []);
 });
 
 test("concurrent records of one thread are serialised: none is lost", async () => {

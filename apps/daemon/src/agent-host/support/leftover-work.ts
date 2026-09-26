@@ -14,8 +14,10 @@
  * marker exactly, the recorded session, the leader that was recorded, a
  * starttime check before each signal).
  *
- * The file — `<thread dir>/leftover-work.json`, 0600, rewritten atomically —
- * is the adapter's own: never `binding.json`, which has one writer. It is
+ * The file — `<thread dir>/leftover-work.json`, 0600, rewritten atomically,
+ * and only while the thread's directory exists (a late record must not raise
+ * a thread the store deleted) — is the adapter's own: never `binding.json`,
+ * which has one writer. It is
  * bounded — the newest {@link LEFTOVER_WORK_LAUNCHES} launches,
  * {@link LEFTOVER_WORK_SESSIONS} sessions each — and read entry-wise
  * tolerantly: a file this host did not write reads as nothing. Losing it loses
@@ -23,9 +25,11 @@
  * every marked orphan whatever this file says.
  */
 
-import { rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { open, rename, rm } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
-import { atomicWriteFile, readFileOrNull } from "../store/files.ts";
+import { readFileOrNull } from "../store/files.ts";
 import {
   stopLeftoverProcesses,
   type LeftoverSweepResult,
@@ -107,6 +111,43 @@ export async function readLeftoverWork(path: string): Promise<LeftoverLaunch[]> 
   }
 }
 
+/**
+ * Rewrite `path` atomically (a sibling temp, fsync, rename over, 0600) ONLY
+ * while its directory — the thread's — exists: `false`, having written
+ * nothing, once the store deleted the thread. `atomicWriteFile` creates the
+ * directory it writes into, and a record landing after a closed tab's
+ * deletion recreated the thread's directory: a ghost the store's
+ * `listThreads` would list at the next boot.
+ */
+async function writeIntoExistingDir(path: string, contents: string): Promise<boolean> {
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await open(tmp, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(tmp, path);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  return true;
+}
+
 /** One writer per file at a time: a record and a sweep of one thread never interleave. */
 const chains = new Map<string, Promise<unknown>>();
 
@@ -130,7 +171,8 @@ async function serialised<T>(path: string, work: () => Promise<T>): Promise<T> {
 /**
  * Remember a launch's task sessions: merged with what the launch recorded
  * before (by session id), the launch moved to the newest place, the oldest
- * launches dropped past the bound. Atomic and 0600.
+ * launches dropped past the bound. Atomic and 0600, and only into a thread
+ * directory that still exists ({@link writeIntoExistingDir}).
  */
 export async function recordLeftoverWork(path: string, launch: LeftoverLaunch): Promise<void> {
   await serialised(path, async () => {
@@ -149,7 +191,7 @@ export async function recordLeftoverWork(path: string, launch: LeftoverLaunch): 
     const next = [...launches.filter((entry) => entry.launchId !== launch.launchId), merged].slice(
       -LEFTOVER_WORK_LAUNCHES
     );
-    await atomicWriteFile(path, `${JSON.stringify({ version: LEFTOVER_WORK_VERSION, launches: next })}\n`, 0o600);
+    await writeIntoExistingDir(path, `${JSON.stringify({ version: LEFTOVER_WORK_VERSION, launches: next })}\n`);
   });
 }
 

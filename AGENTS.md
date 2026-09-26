@@ -1434,7 +1434,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   forgotten: each launch's task sessions — recorded as the CLI reports the work (a shell's, a
   monitor's `task.started`: nothing can be read off a CLI that crashed) and again at every end,
   while it lives — are kept in the thread's `leftover-work.json` (SID, leader starttime, launch id;
-  the last 8 launches; 0600, atomic, the adapter's own file, never `binding.json`;
+  the last 8 launches; 0600, atomic, written only while the thread's directory exists (a late record
+  must not raise a deleted thread), the adapter's own file, never `binding.json`;
   `support/leftover-work.ts`), so a LATER user end — the session stop command or a closed tab, live
   session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession` either way — sweeps
   what every earlier launch left, with the same identity checks. A Claude chat's background shells
