@@ -464,6 +464,8 @@ test("a foreground spawn_subagent is a roster agent, started with its call, sett
     toolUseId: "call-s1",
     description: "find callers",
     isBackgrounded: false,
+    // What the launch asked it to do, verbatim: the top of its drill-in (§7.6).
+    prompt: "Find every caller of add() and report file:line.",
     livenessTtlMs: GROK_AGENT_LIVENESS_TTL_MS
   });
 

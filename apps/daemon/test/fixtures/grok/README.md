@@ -1289,6 +1289,15 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
 - **Its child session's frames** are its own rows and touch nothing of the parent's.
 - **A resume** starts the same task again under the new call; its new id joins through
   `resumed_from`, and its child session's words are messages of their own.
+- **Its prompt** rides its start: the call's own `prompt` argument, verbatim (fixture 15, line 83;
+  every captured spawn carries one), as `prompt` on the run's `task.started` — the top of the
+  agent's drill-in (spec §7.6) — and a resume's start carries the resume's own (fixture 17, line
+  212: ``"Now run the shell command `echo resumed-ok`…"``). The child's live `user_message_chunk`
+  (observation 38; fixture 15, line 98) repeats it after the start and stays dropped. None rides a
+  revival's start (the same run, re-emitted), an agent the CLI spawned itself with no call (a
+  `/loop` fire, a goal's planner: its start is `subagent_spawned`, and the prompt reaches the
+  client only afterwards, as the child's first `user_message_chunk`), a shell, a monitor, or a
+  loop's or goal's own row — whose scheduled prompt or objective is already its description.
 - **Shells and monitors** start from `task_backgrounded` / `background_tasks` /
   `BackgroundTaskStarted` / `Monitor`, report by `monitor_event`, polls and listings, and end by
   `task_completed`, a finished poll or a kill (a monitor's summary its last line); a subagent's own

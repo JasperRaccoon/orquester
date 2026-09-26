@@ -1541,6 +1541,13 @@ export class GrokNormalizer {
     // `background` is the tool's own argument (its documented parameter; the
     // first frame carries the model's arguments as it wrote them).
     const background = input?.["background"] === true;
+    // What THIS launch asked the agent to do, verbatim — its `prompt`
+    // argument, a resume's own on a resume (fixtures 15, 17) — for the top of
+    // the agent's drill-in (§7.6). It rides the run's start alone; the child's
+    // `user_message_chunk` repeats it after the start.
+    const rawPrompt = input?.["prompt"];
+    const prompt =
+      typeof rawPrompt === "string" && rawPrompt.trim().length > 0 ? rawPrompt : undefined;
     const existing = this.subagents.get(taskId);
     const opensRun = existing?.live !== true;
     const title = description ?? existing?.title ?? role ?? "Subagent";
@@ -1599,7 +1606,8 @@ export class GrokNormalizer {
         {
           ...this.subagentLinkage(track),
           description: track.description,
-          isBackgrounded: background
+          isBackgrounded: background,
+          ...(prompt === undefined ? {} : { prompt })
         },
         undefined,
         raw
