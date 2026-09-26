@@ -28,10 +28,13 @@ const sessionId = "01a0c19e-de22-78c0-a72a-7e230ccfbec0";
  * its own order, with no frame invented. Every client frame the harness sent
  * is a sync point: when the adapter sends a frame of the same method, the
  * frames the agent sent after it — up to the harness's next frame — are
- * played, a recorded reply's id rewritten to the adapter's. A client frame the
- * capture has no match for is answered `{}` (a request) or ignored. Frames are
- * paced by their recorded gaps, clamped to 1–25 ms, so each reaches the
- * adapter in its own read, as it did live.
+ * played, a recorded reply's id rewritten to the adapter's. The harness's
+ * reply to a request of the agent's (a permission, a question) is one too,
+ * met by the adapter's reply to the same request id: the CLI waited for the
+ * answer, and so does the replay. A client frame the capture has no match for
+ * is answered `{}` (a request) or ignored. Frames are paced by their recorded
+ * gaps, clamped to 1–25 ms, so each reaches the adapter in its own read, as it
+ * did live.
  */
 const replay =
   scenario === "replay"
@@ -46,24 +49,30 @@ const replayIds = new Map();
 let replayQueue = Promise.resolve();
 
 function handleReplay(frame) {
-  if (typeof frame.method !== "string") {
-    return; // the adapter answering a request of the agent's: nothing recorded to match
+  // The adapter answering a request of the agent's: met by the harness's
+  // recorded reply to the same request id, if the capture has one.
+  const reply = typeof frame.method !== "string" && frame.id !== undefined;
+  if (typeof frame.method !== "string" && !reply) {
+    return;
   }
   let at = -1;
   for (let index = replayCursor; index < replay.length; index += 1) {
     const entry = replay[index];
-    if (entry.dir === "send" && entry.frame?.method === frame.method) {
+    const matches = reply
+      ? entry.frame?.method === undefined && entry.frame?.id === frame.id
+      : entry.frame?.method === frame.method;
+    if (entry.dir === "send" && matches) {
       at = index;
       break;
     }
   }
   if (at === -1) {
-    if (frame.id !== undefined) {
+    if (frame.id !== undefined && !reply) {
       result(frame.id, {});
     }
     return;
   }
-  if (frame.id !== undefined && replay[at].frame.id !== undefined) {
+  if (!reply && frame.id !== undefined && replay[at].frame.id !== undefined) {
     replayIds.set(replay[at].frame.id, frame.id);
   }
   let end = at + 1;
