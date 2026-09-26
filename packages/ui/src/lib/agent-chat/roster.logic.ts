@@ -68,13 +68,16 @@ export function rosterRowLook(status: RuntimeSubagentStatus): RosterRowLook {
  * with an exit code.
  *
  * Never `null`: the line always says something, because "nothing reported yet"
- * is not a state a shell can be in — it either runs or it does not. A stopped
- * shell is the one exception to "never the provider's sentence": its reason,
- * when it has one, is why the row is stopped at all (Grok's "Left running when
- * the agent host stopped — stop it from Settings → System.").
+ * is not a state a shell can be in — it either runs or it does not. The one
+ * summary a stopped shell shows is the adapter's own, marked
+ * `leftRunning` (Grok's "Left running when the agent host stopped — stop it
+ * from Settings → System."): never the provider's.
  */
 export function backgroundShellActivityText(
-  shell: Pick<RuntimeSubagent, "status" | "progress" | "exitCode"> & { result?: string | null }
+  shell: Pick<RuntimeSubagent, "status" | "progress" | "exitCode"> & {
+    result?: string | null;
+    leftRunning?: boolean;
+  }
 ): string {
   const exit = typeof shell.exitCode === "number" ? shell.exitCode : null;
   switch (shell.status) {
@@ -95,8 +98,11 @@ export function backgroundShellActivityText(
     case "interrupted": {
       // A stop the adapter wrote at an end that left the process running — a
       // deploy, a restart, a crash (Grok) — says so and where to stop it: a
-      // bare "Stopped" read as done for a dev server that runs on.
-      const said = shell.result?.trim();
+      // bare "Stopped" read as done for a dev server that runs on. Only that
+      // note, by its marker: any other summary — the CLI's stop sentence, its
+      // output's first or last line — is the provider's, and says nothing
+      // about the row.
+      const said = shell.leftRunning === true ? shell.result?.trim() : undefined;
       return said !== undefined && said.length > 0 ? said : "Stopped";
     }
     case "idle":

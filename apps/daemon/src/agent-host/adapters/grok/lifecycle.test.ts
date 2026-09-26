@@ -1565,12 +1565,13 @@ test("the user's stop sweeps the running work even when the CLI exits in the mid
   }
 });
 
-/** `[status, summary]` of the leftover shell's closing rows. */
+/** `[status, summary]` of the leftover shell's closing rows — a summary only with the adapter's marker. */
 function shellEnds(r: Rig): Array<[string | undefined, string | undefined]> {
   return r.events
     .filter((event) => event.type === "task.completed" && (event.payload as { taskId?: string }).taskId === "task-bg-1")
     .map((event) => {
-      const payload = event.payload as { status?: string; summary?: string };
+      const payload = event.payload as { status?: string; summary?: string; leftRunning?: boolean };
+      assert.equal(payload.leftRunning === true, payload.summary !== undefined, "the note rides its marker, and only it");
       return [payload.status, payload.summary];
     });
 }

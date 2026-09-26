@@ -665,6 +665,9 @@ export function runtimeEventToActivities(
             // A background shell's exit code, for the roster row (`roster.ts`
             // reads it off any task row); dropped here, it never reached it.
             ...(event.payload.exitCode !== undefined ? { exitCode: event.payload.exitCode } : {}),
+            // The adapter's marker that the process outlived the end: the
+            // roster shows the summary on a stopped shell only with it.
+            ...(event.payload.leftRunning === true ? { leftRunning: true } : {}),
             ...taskLinkageActivityFields(event.payload as unknown as Record<string, unknown>)
           },
           ...(event.payload.agentId !== undefined ? { agentId: event.payload.agentId } : {})

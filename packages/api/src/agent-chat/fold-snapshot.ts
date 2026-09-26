@@ -562,6 +562,7 @@ const isRuntimeSubagent = shaped<RuntimeSubagent>({
   outputFile: nullable(isString),
   exitCode: nullable(isNumber),
   isBackgrounded: nullable(isBoolean),
+  leftRunning: optional(isBoolean),
   parentAgentId: nullable(isString),
   agentIndex: nullable(isNumber),
   phaseIndex: nullable(isNumber),

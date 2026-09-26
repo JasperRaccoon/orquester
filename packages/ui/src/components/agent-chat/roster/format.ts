@@ -98,7 +98,7 @@ export const isLiveStatus = isActiveSubagentStatus;
 export function agentActivityText(
   agent: Pick<
     RuntimeSubagent,
-    "agentKind" | "status" | "progress" | "lastToolName" | "result" | "error" | "exitCode"
+    "agentKind" | "status" | "progress" | "lastToolName" | "result" | "error" | "exitCode" | "leftRunning"
   > &
     MaybeKind
 ): string | null {

@@ -352,6 +352,9 @@ function applyStatus(agent: MutableAgent, status: RuntimeSubagentStatus, at: str
     agent.result = null;
     agent.error = null;
     agent.completedAt = null;
+    // Deleted, never set undefined: a snapshot's row and the whole-log fold's
+    // must stay equal, and an absent field is how "no marker" is spelled.
+    delete agent.leftRunning;
     if (status === "running") {
       agent.startedAt = at;
     }
@@ -591,6 +594,9 @@ function applyTaskRow(
         } else {
           agent.result = bounded(summary);
         }
+      }
+      if (payload.leftRunning === true && status === "interrupted") {
+        agent.leftRunning = true;
       }
       agent.usage = mergeUsageMax(agent.usage, incomingUsage);
       agent.updatedAt = at;

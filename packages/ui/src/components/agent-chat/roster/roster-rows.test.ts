@@ -419,8 +419,28 @@ test("the shell's activity line is its state, and never carries the tool marker"
 test("a shell its session's end left running says so, not a bare 'Stopped'", () => {
   const shell = agent("bg", { agentKind: "background", title: "pnpm dev", status: "interrupted" });
   const note = "Left running when the agent host stopped — stop it from Settings → System.";
-  assert.equal(agentActivityText({ ...shell, result: note }), note, "its process outlived the session: say where to stop it");
-  assert.equal(agentActivityText({ ...shell, result: "  " }), "Stopped");
+  assert.equal(
+    agentActivityText({ ...shell, result: note, leftRunning: true }),
+    note,
+    "its process outlived the session: say where to stop it"
+  );
+  assert.equal(agentActivityText({ ...shell, result: "  ", leftRunning: true }), "Stopped");
+});
+
+test("any other stopped shell's summary is never its line: only the adapter's left-running note is", () => {
+  // Grok: a shell the CLI killed completes with its output's first line; a monitor with its last.
+  const grokShell = agent("bg", { agentKind: "background", title: "pnpm dev", status: "interrupted", result: "VITE v5.4.0 ready in 312 ms" });
+  assert.equal(agentActivityText(grokShell), "Stopped");
+  const monitor = agent("mon", { agentKind: "background", title: "tail the log", status: "cancelled", result: "GET /health 200" });
+  assert.equal(agentActivityText(monitor), "Stopped");
+  // Claude: the CLI's own stop sentence.
+  const claudeShell = agent("bash_1", {
+    agentKind: "background",
+    title: "npm run dev",
+    status: "interrupted",
+    result: 'Background command "npm run dev" was stopped'
+  });
+  assert.equal(agentActivityText(claudeShell), "Stopped");
 });
 
 // ---------------------------------------------------------------------------

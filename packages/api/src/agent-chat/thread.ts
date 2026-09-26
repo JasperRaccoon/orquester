@@ -522,6 +522,13 @@ export interface RuntimeSubagent {
    * notion.
    */
   isBackgrounded: boolean | null;
+  /**
+   * The run's stop was the adapter's, at an end its process outlived — a
+   * deploy, a restart, a crash (Grok) — and `result` is the note saying so.
+   * Present only then, and dropped by a new run: the one summary a stopped
+   * shell's row shows.
+   */
+  leftRunning?: boolean;
   parentAgentId: string | null;
   agentIndex: number | null;
   phaseIndex: number | null;

@@ -364,6 +364,30 @@ test("a loop and a goal drive work and are no work of their own: never counted, 
   assert.equal(model.liveCount, 1);
 });
 
+test("a stop that left the task's process running is marked, and a new run forgets it", () => {
+  resetActivityIds();
+  const note = "Left running when the agent host stopped — stop it from Settings → System.";
+  const agents = foldSubagentActivities([
+    activity("task.started", { taskId: "shell-1", agentKind: "background", title: "pnpm dev" }),
+    activity("task.completed", { taskId: "shell-1", agentKind: "background", status: "stopped", summary: note, leftRunning: true }),
+    activity("task.started", { taskId: "shell-2", agentKind: "background", title: "vite" }),
+    // Any other completion summary is no such marker: the CLI's own words, its output's line.
+    activity("task.completed", { taskId: "shell-2", agentKind: "background", status: "stopped", summary: "VITE v5.4.0 ready in 312 ms" })
+  ]);
+  assert.equal(byId(agents, "shell-1").leftRunning, true);
+  assert.equal(byId(agents, "shell-1").result, note);
+  assert.equal("leftRunning" in byId(agents, "shell-2"), false);
+
+  // The CLI reports it running again (a revived shell): a new run, no marker.
+  const revived = foldSubagentActivities([
+    activity("task.started", { taskId: "shell-1", agentKind: "background", title: "pnpm dev", toolUseId: "call-1" }),
+    activity("task.completed", { taskId: "shell-1", agentKind: "background", status: "stopped", summary: note, leftRunning: true }),
+    activity("task.progress", { taskId: "shell-1", agentKind: "background", status: "running", summary: "listening" })
+  ]);
+  assert.equal(byId(revived, "shell-1").status, "running");
+  assert.equal("leftRunning" in byId(revived, "shell-1"), false);
+});
+
 // --- session liveness ------------------------------------------------------
 
 test("a dead session interrupts live rows but preserves idle and settled", () => {

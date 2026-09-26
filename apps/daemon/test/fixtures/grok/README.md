@@ -1339,13 +1339,14 @@ pid checked against its `/proc` starttime before every signal. Two kinds, two ru
   that goes on, the host's teardown (a drain-restart's included), the CLI's own exit (a crash, an
   open that failed) and the user's stop.
 - **The work its agent started** — its shells and whatever they run — only when the USER ends the
-  session (the session stop command, a closed tab), and on an open that failed. A deploy must
-  never kill running work: a dev server started in a Grok chat outlives a drain-restart, a
-  restart and a crash as a marked orphan, which the daemon's Settings → System lists and kills as
-  its own (any process carrying a launch's marker); its task's closing row says so ("Left running
-  when … — stop it from Settings → System."), and its sessions — recorded as the CLI reports the
-  work and again at the end — are remembered in the thread's `leftover-work.json`, which the user's
-  next end of the session sweeps, whatever launch left them.
+  session (the session stop command, a closed tab), and on an open that failed. A deploy must never
+  kill running work: a dev server started in a Grok chat outlives a drain-restart, a restart and a
+  crash as a marked orphan, which the daemon's Settings → System lists and kills as its own (any
+  process carrying a launch's marker); its task's closing row says so ("Left running when … — stop
+  it from Settings → System.", marked `leftRunning`: the one summary a stopped shell's roster row
+  shows), and its sessions — recorded as the CLI reports the work and again at the end — are
+  remembered in the thread's `leftover-work.json`, which the user's next end of the session sweeps,
+  whatever launch left them.
 
 A Stop's `session/cancel` kills nothing (the CLI lives on and owns them, observation 44).
 Linux-only: elsewhere nothing is read or signalled.

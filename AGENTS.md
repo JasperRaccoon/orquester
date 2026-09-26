@@ -1428,17 +1428,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   it. Never at a crash either (no user ended anything). There it runs on as a marked orphan, listed
   and killable in Settings → System, and never silently: its task's closing row says so — "Left
   running when the agent host stopped / the session restarted / the agent process exited — stop it
-  from Settings → System." (`leftRunningNote`), which the roster's shell row shows in place of a
-  bare "Stopped". Nor is it forgotten: each launch's task sessions — recorded as the CLI reports the
-  work (a shell's, a monitor's `task.started`: nothing can be read off a CLI that crashed) and again
-  at every end, while it lives — are kept in the thread's `leftover-work.json` (SID, leader
-  starttime, launch id; the last 8 launches; 0600, atomic, the adapter's own file, never
-  `binding.json`; `support/leftover-work.ts`), so a LATER user end — the session stop command or a
-  closed tab, live session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession`
-  either way — sweeps what every earlier launch left, with the same identity checks. A Claude chat's
-  background shells outlive their session the same way — the SDK closes the Claude CLI's stdin and
-  SIGTERMs it 2 s later, before the CLI's own 5 s wind-down would stop them, and they run on under
-  init (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
+  from Settings → System." (`leftRunningNote`), marked `leftRunning` on the row and the roster entry
+  — the one summary a stopped shell's row shows in place of a bare "Stopped"; any other completion
+  summary (the CLI's stop sentence, a killed shell's output line) never replaces it. Nor is it
+  forgotten: each launch's task sessions — recorded as the CLI reports the work (a shell's, a
+  monitor's `task.started`: nothing can be read off a CLI that crashed) and again at every end,
+  while it lives — are kept in the thread's `leftover-work.json` (SID, leader starttime, launch id;
+  the last 8 launches; 0600, atomic, the adapter's own file, never `binding.json`;
+  `support/leftover-work.ts`), so a LATER user end — the session stop command or a closed tab, live
+  session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession` either way — sweeps
+  what every earlier launch left, with the same identity checks. A Claude chat's background shells
+  outlive their session the same way — the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s
+  later, before the CLI's own 5 s wind-down would stop them, and they run on under init
+  (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
   2026-09-26). An open that fails stops its CLI now too: a `session/load` the CLI refused (a cursor
   it no longer knows) left it running outside the adapter's map, holding its pipes. It adds no row
   of its own either: the start's rejection is its whole report, which the host writes — an exit row

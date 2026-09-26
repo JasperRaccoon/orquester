@@ -812,6 +812,14 @@ export interface TaskCompletedPayload extends TaskAgentLinkage {
   usage?: RuntimeTaskUsage;
   /** A background shell's exit code, when the provider reports one. */
   exitCode?: number;
+  /**
+   * The adapter's own word that the task's PROCESS outlived this end — a
+   * deploy, a restart, a crash ended its session without the user (Grok) —
+   * with `summary` the note that says so and where to stop it. The one
+   * summary a stopped shell's roster row shows; any other (the CLI's stop
+   * sentence, its output's line) stays out of it.
+   */
+  leftRunning?: boolean;
 }
 
 export interface HookStartedPayload {

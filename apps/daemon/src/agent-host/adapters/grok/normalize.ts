@@ -3439,8 +3439,10 @@ export class GrokNormalizer {
             ...this.shellLinkage(taskId, track),
             status: "stopped",
             // Its process outlives this end (a deploy, a restart, a crash):
-            // the row says so rather than reading stopped for work that runs.
-            ...(leftRunning === undefined ? {} : { summary: leftRunning })
+            // the row says so rather than reading stopped for work that runs,
+            // marked as the adapter's note — the one summary a stopped
+            // shell's roster row shows.
+            ...(leftRunning === undefined ? {} : { summary: leftRunning, leftRunning: true })
           },
           track.turnId
         )
