@@ -271,13 +271,19 @@ export class GrokSession {
   /**
    * The sessions of the CLI's later children — its shells, the dev servers
    * they started — recorded right before the USER ends the session, while
-   * the CLI still lives. Swept only then ({@link stop}).
+   * the CLI still lives. Swept only then ({@link stop}), by a sweep of their
+   * own ({@link stopTaskLeftovers}).
    */
   private readonly taskSessions = new Map<number, RecordedSession>();
-  /** The user ended the session: its work goes with it ({@link stop}). */
-  private sweepTasks = false;
-  /** The sweep of what this launch left running, once started — the exit and a stop share it. */
+  /** The sweep of the helpers this launch left running, once started — the exit and a stop share it. */
   private leftovers: Promise<void> | null = null;
+  /**
+   * The sweep of the user's work, once started. Its own, never the helpers':
+   * a CLI that exits in the middle of the user's stop starts the helpers'
+   * sweep from {@link onExit}, and a stop that reused it left the work
+   * running.
+   */
+  private taskLeftovers: Promise<void> | null = null;
   /**
    * `session.started` went out. Until then the session has no life of its own
    * to report: an open that fails is reported by `start()`'s rejection, which
@@ -1567,17 +1573,19 @@ export class GrokSession {
    *   two survived every session until 2026-09-26.
    * - **The user's work** ({@link taskSessions}: the shells the agent ran, the
    *   dev servers they started) ONLY when the user ends the session — the
-   *   session stop command or a closed tab. A deploy's drain waits for live
-   *   work only within its bound (a watch loop's TTL, an agent's hour), and a
-   *   dev server started in a Grok chat must survive every deploy after it;
-   *   so must a thread's restart, and at a crash nobody ended anything. It
-   *   runs on then as a marked orphan, listed and killable in Settings →
-   *   System (`system-status.ts`). A Claude chat's background shells outlive
-   *   their session too: the SDK closes the Claude CLI's stdin and SIGTERMs
-   *   it 2 s later, before the CLI's own wind-down would stop them.
+   *   session stop command or a closed tab — by a sweep of its own
+   *   ({@link stopTaskLeftovers}); this one sweeps the helpers alone, and an
+   *   exit in the middle of the user's stop starts it. A deploy's drain waits
+   *   for live work only within its bound (a watch loop's TTL, an agent's
+   *   hour), and a dev server started in a Grok chat must survive every deploy
+   *   after it; so must a thread's restart, and at a crash nobody ended
+   *   anything. It runs on then as a marked orphan, listed and killable in
+   *   Settings → System (`system-status.ts`). A Claude chat's background shells
+   *   outlive their session too: the SDK closes the Claude CLI's stdin and
+   *   SIGTERMs it 2 s later, before the CLI's own wind-down would stop them.
    *
    * An open that failed records every child as a helper: nothing of the
-   * user's has run yet. Idempotent; never rejects.
+   * user's has run yet. This sweeps the helpers; idempotent; never rejects.
    */
   stopLeftovers(): Promise<void> {
     if (this.connection === null) {
@@ -1586,10 +1594,7 @@ export class GrokSession {
     }
     this.leftovers ??= stopLeftoverProcesses({
       launchId: this.launchId,
-      sessions: [
-        ...this.helperSessions.values(),
-        ...(this.sweepTasks ? this.taskSessions.values() : [])
-      ]
+      sessions: [...this.helperSessions.values()]
     }).then(
       (result) => {
         if (result.found > 0) {
@@ -1661,6 +1666,31 @@ export class GrokSession {
     );
   }
 
+  /**
+   * Stop the user's work this launch left running: every process carrying
+   * its marker in a session {@link recordSessions} recorded as a task's.
+   * Only a user's end calls it ({@link stop}). Idempotent; never rejects.
+   */
+  private stopTaskLeftovers(): Promise<void> {
+    if (this.connection === null || this.taskSessions.size === 0) {
+      return Promise.resolve();
+    }
+    this.taskLeftovers ??= stopLeftoverProcesses({
+      launchId: this.launchId,
+      sessions: [...this.taskSessions.values()]
+    }).then(
+      (result) => {
+        if (result.found > 0) {
+          this.options.logger.debug("grok: stopped the work the agent left running", { ...result });
+        }
+      },
+      (error: unknown) => {
+        this.options.logger.warn("grok: could not stop the work the agent left running", error);
+      }
+    );
+    return this.taskLeftovers;
+  }
+
   /** Why an open ended before its session was announced: the CLI's exit, or the host's stop. */
   private openAbortedMessage(): string {
     const exit = this.exitBeforeOpen;
@@ -1709,6 +1739,20 @@ export class GrokSession {
       await this.leftovers;
       return;
     }
+    const endedByUser = options.endedByUser === true;
+    if (endedByUser) {
+      // FIRST — before the host path is armed and before anything reaches the
+      // CLI (the card's cancel below can end it): every child's session, while
+      // the CLI still lives. Once it is gone its children are init's, and only
+      // their sessions tie them to it.
+      await this.recordSessions("tasks");
+      if (this.stopped) {
+        // It ended while they were read, and its exit settled the session
+        // ({@link onExit}). The user's work is still the user's to stop.
+        await Promise.all([this.leftovers, this.stopTaskLeftovers()]);
+        return;
+      }
+    }
     // Kept, as at an exit: held frames join the open turn before it settles.
     this.wakes.drop("the session stops");
     this.stopped = true;
@@ -1728,15 +1772,11 @@ export class GrokSession {
       );
       this.activeTurn = null;
     }
-    if (options.endedByUser === true) {
-      // Every child's session, while the CLI still lives: once it is gone,
-      // its children are init's, and only their sessions tie them to it.
-      await this.recordSessions("tasks");
-      this.sweepTasks = true;
-    }
     await this.connection?.stop();
-    // The CLI is gone; what it started outside its process group is not.
-    await this.stopLeftovers();
+    // The CLI is gone; what it started outside its process group is not: its
+    // helpers at every end, the user's work only at the user's — by a sweep of
+    // its own, which a helpers' sweep an exit started cannot stand in for.
+    await Promise.all([this.stopLeftovers(), endedByUser ? this.stopTaskLeftovers() : undefined]);
   }
 
   // --------------------------------------------------------------- helpers

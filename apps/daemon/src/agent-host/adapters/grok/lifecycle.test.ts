@@ -1514,6 +1514,31 @@ test("the user ending the session stops its running work too — never what daem
   }
 });
 
+test("the user's stop sweeps the running work even when the CLI exits in the middle of it", { skip: process.platform !== "linux" }, async () => {
+  // The stop answers the open card first (the host's cancel), and this CLI
+  // exits on that answer: its exit lands inside the stop. A sweep it started
+  // must not be the one the stop reuses, without the user's work in it.
+  const r = await rig({ scenario: "leftover-question-exit" });
+  try {
+    await start(r);
+    await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "user-input.requested", "the open card");
+    await r.waitFor((event) => event.type === "task.started", "the shell's task");
+    const before = leftovers(r);
+    assert.equal(before.shell.length, 1);
+    assert.equal(before.member.length, 1);
+    await r.adapter.stopSession("t1", { endedByUser: true });
+    const after = leftovers(r);
+    assert.deepEqual(after.helper, []);
+    assert.deepEqual(after.shell, [], "the user ended the session: its work goes with it");
+    assert.deepEqual(after.member, []);
+    assert.deepEqual(after.daemon, before.daemon, "never what daemonized away");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
 test("a CLI that exits on its own takes its helpers with it", { skip: process.platform !== "linux" }, async () => {
   const r = await rig({ scenario: "leftover-exit" });
   try {

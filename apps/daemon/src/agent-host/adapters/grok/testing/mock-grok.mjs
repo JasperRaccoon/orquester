@@ -186,6 +186,11 @@ function handle(frame) {
   // The adapter's answer to `_x.ai/ask_user_question`, likewise.
   if (method === undefined && id === QUESTION_REQUEST_ID && frame.result !== undefined) {
     questionAnswer = frame.result;
+    if (scenario === "leftover-question-exit") {
+      // The CLI ending on its own the moment a user's stop answers its card:
+      // its exit lands in the middle of that stop.
+      process.exit(0);
+    }
     return;
   }
 
@@ -705,6 +710,31 @@ async function runPrompt(id, params) {
     sendTogether([chunkFrame("two;", promptId), turnCompletedFrame(promptId)]);
     notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
     result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "leftover-question-exit") {
+    // A background shell as `leftover` starts one, then a question left open:
+    // the user's stop answers it first, and this CLI exits on that answer.
+    const shell = spawn(
+      "sh",
+      ["-c", 'sleep 302 & setsid sh -c "echo daemon; exec sleep 303" & echo shell; wait'],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+    );
+    shell.unref();
+    await linesFrom(shell.stdout, ["shell", "daemon"]);
+    notify("_x.ai/task_backgrounded", {
+      sessionId,
+      update: {
+        sessionUpdate: "task_backgrounded",
+        tool_call_id: "call-bg-1",
+        task_id: "task-bg-1",
+        command: "sleep 302",
+        description: "leftover"
+      }
+    });
+    send(questionRequestFrame(sessionId));
+    await waitFor(() => false);
     return;
   }
 
