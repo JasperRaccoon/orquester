@@ -1350,6 +1350,38 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   spawn); the self-resolved-approvals advisory is said once, and only where approval cards were
   promised (never under `auto` / `full-access`, where the CLI resolving its own interactions is the
   mode working).
+- **What a Grok CLI starts outlives it, so every end of its session stops it — found by a launch
+  marker, never by the process tree.** The CLI starts every child of its own — its background
+  shells and the MCP servers it boots from the host's configuration (observation 30) — in a
+  session of its own (`pgid = sid = pid`; Grok fixtures README observation 48, verified live on
+  2026-09-26), so `spawnProviderChild`'s group signal reaches the CLI alone: after a clean SIGTERM
+  a `bash` with its `sleep` and two MCP servers ran on, reparented to init — a dev server kept
+  running, unmanaged, while the log said its task had stopped, and every session leaked the MCP
+  servers it had booted. Every Grok launch's env carries `ORQUESTER_AGENT_LAUNCH`
+  (`AGENT_LAUNCH_ENV_VAR`), one random value per launch — never the injectable `uuid()`: two test
+  files' deterministic ids would stop each other's processes — which every descendant inherits
+  (eleven processes carried it in that run), and every end of the session stops whatever still
+  carries it (`GrokSession.stopLeftovers`, `support/leftover-processes.ts`): a stop — the user's
+  session stop, a closed tab, a restart for an account or a model, the host's teardown — awaits it
+  once the CLI itself has exited, and the CLI's own exit (a crash, an open that failed) starts it,
+  which `stopAll` waits for. An open that fails stops its CLI now too: a `session/load` the CLI
+  refused (a cursor it no longer knows) left it running outside the adapter's map, holding its
+  pipes. SIGTERM, then SIGKILL past `DEFAULT_KILL_GRACE_MS` to whatever a fresh scan still finds,
+  each pid identified by its `/proc` starttime on both sides of the environment read and again
+  before each signal — the kill guard's rule: never a recycled pid; a zombie is gone. **A
+  drain-restart's teardown stops them too**: the drain already waited for live work within its
+  bound (a shell's watch-loop TTL, an agent's hour), and the Claude CLI does the same to its own
+  background shells when its session winds down ("print wind-down: killing background shell …
+  after …ms grace", read off the 2.1.280 binary) — a dev server left running in a Grok chat no more
+  survives a code-only deploy past that bound than one in a Claude chat. A Stop kills nothing: its
+  `session/cancel` leaves the CLI — which owns them — running (fixture 21). A process that scrubs
+  its environment (`env -i`, `sudo`'s `env_reset`) escapes. Linux-only (`/proc`); elsewhere the
+  sweep reads and signals nothing. **Settings → System reads the same marker**: a process of the
+  daemon's own uid that no root reaches but that carries any launch's marker is a root of its own —
+  listed under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill target
+  (`launchedOrphans` in `system-status.ts`) — so what a host that crashed before any session end
+  could run is not out of reach. Only Grok launches carry the marker today; another adapter opts in
+  by stamping it on its launch env and sweeping at its session ends.
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission
@@ -1655,7 +1687,9 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   process** (the route passes the proxy's live child pid via the service's `protectedPids` hook —
   on a no-tmux host cliproxy is a daemon child and would otherwise be a legal target).
   Everything else must descend from a daemon-tree root (its own children plus every `orq-*` tmux
-  pane pid) or it's `PROCESS_NOT_MANAGED`. The guard is two-pass on `/proc` starttime, never on the shared 2 s
+  pane pid, the agent host, and every orphan of the daemon's uid carrying an agent-host launch
+  marker — what a Grok CLI left behind, see "What a Grok CLI starts outlives it") or it's
+  `PROCESS_NOT_MANAGED`. The guard is two-pass on `/proc` starttime, never on the shared 2 s
   snapshot cache: once the first SIGTERM lands, children reparent and `ppid` stops being an
   identity, so pass one records starttimes while the tree is intact and pass two re-checks each one
   immediately before signalling (a recycled pid must never get the signal). Everything under

@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
+import { AGENT_LAUNCH_ENV_VAR } from "./agent-host/support/leftover-processes.ts";
 import type { SystemStatusOptions } from "./system-status.ts";
 import {
   SYSTEM_STATUS_SUPPORTED,
@@ -15,6 +17,7 @@ import {
   cpuPercentFromSamples,
   decodeProcNetAddress,
   descendsFromRoot,
+  launchMarkerOf,
   mapLimited,
   parseCmdline,
   parseCpuSample,
@@ -29,6 +32,35 @@ import {
 } from "./system-status.ts";
 
 const exec = promisify(execFile);
+
+/**
+ * This test process's environment without the agent host's launch marker: run
+ * from a Grok chat's shell, every orphan these tests make would carry it, and
+ * an "unmanaged" orphan would be managed after all.
+ */
+function unmarkedEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env[AGENT_LAUNCH_ENV_VAR];
+  return env;
+}
+
+/** Wait (bounded) until `pid` is no longer a running process — a zombie is gone. */
+async function waitGone(pid: number, withinMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + withinMs;
+  for (;;) {
+    let running = false;
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, "latin1");
+      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+      running = state !== "Z" && state !== "X";
+    } catch {
+      running = false;
+    }
+    if (!running) return true;
+    if (Date.now() >= deadline) return false;
+    await setTimeoutPromise(10);
+  }
+}
 
 test("parseCpuSample sums the aggregate line and counts iowait as idle", () => {
   const sample = parseCpuSample("cpu  100 2 30 900 50 0 8 0 0 0\ncpu0 1 1 1 1\n");
@@ -54,6 +86,27 @@ test("parseMemInfo falls back to MemFree on pre-3.14 kernels", () => {
 test("parseProcStatus reads name, ppid and RSS", () => {
   const status = "Name:\tclaude\nUmask:\t0022\nState:\tS (sleeping)\nPPid:\t1197\nVmRSS:\t  832852 kB\n";
   assert.deepEqual(parseProcStatus(status), { name: "claude", ppid: 1197, rssBytes: 832852 * 1024 });
+});
+
+test("parseProcStatus reads the real uid when the status names one", () => {
+  const status = "Name:\tgrok\nPPid:\t1\nUid:\t999\t998\t997\t996\nVmRSS:\t  4 kB\n";
+  assert.deepEqual(parseProcStatus(status), { name: "grok", ppid: 1, rssBytes: 4096, uid: 999 });
+});
+
+test("launchMarkerOf reads the agent host's launch marker and the chat it belongs to", () => {
+  const environ = (vars: Record<string, string>): string =>
+    Object.entries(vars)
+      .map(([key, value]) => `${key}=${value}\0`)
+      .join("");
+  assert.deepEqual(
+    launchMarkerOf(environ({ PATH: "/bin", [AGENT_LAUNCH_ENV_VAR]: "l-1", ORQUESTER_SESSION_ID: "chat-1" })),
+    { launchId: "l-1", sessionId: "chat-1" }
+  );
+  assert.deepEqual(launchMarkerOf(environ({ [AGENT_LAUNCH_ENV_VAR]: "l-2" })), { launchId: "l-2" });
+  assert.equal(launchMarkerOf(environ({ [AGENT_LAUNCH_ENV_VAR]: "" })), null, "an empty marker is none");
+  assert.equal(launchMarkerOf(environ({ ORQUESTER_SESSION_ID: "chat-1" })), null, "a session id alone is not a launch");
+  assert.equal(launchMarkerOf(`X${AGENT_LAUNCH_ENV_VAR}=l-3\0`), null);
+  assert.equal(launchMarkerOf(""), null);
 });
 
 test("parseProcStatus tolerates a kernel thread with no VmRSS", () => {
@@ -343,7 +396,9 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
 
   // A live process OUTSIDE the tree: `sh` exits immediately, so its backgrounded
   // sleep is reparented away from this process and is no longer ours to kill.
-  const { stdout: orphanPid } = await exec("sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"]);
+  const { stdout: orphanPid } = await exec("sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], {
+    env: unmarkedEnv()
+  });
   const orphan = Number(orphanPid.trim());
   assert.ok(Number.isInteger(orphan) && orphan > 1);
   try {
@@ -380,6 +435,58 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
   for (const pid of [victim.pid, ...subtree]) {
     const { stdout } = await exec("sh", ["-c", `kill -0 ${pid} 2>/dev/null && echo alive || echo gone`]);
     assert.equal(stdout.trim(), "gone", `pid ${pid} survived the subtree kill`);
+  }
+});
+
+test("a process carrying the agent host's launch marker is managed even as an orphan: listed, labelled, killable", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) {
+    return;
+  }
+  // What a provider CLI leaves behind when it dies with the host: a shell in a
+  // session of its own, with a child, reparented away from every root — only
+  // its environment still says whose it is.
+  const env = { ...unmarkedEnv(), [AGENT_LAUNCH_ENV_VAR]: randomUUID(), ORQUESTER_SESSION_ID: "chat-1" };
+  const { stdout } = await exec(
+    "sh",
+    ["-c", "setsid sh -c 'sleep 30 & wait' </dev/null >/dev/null 2>&1 & echo $!"],
+    { env }
+  );
+  const orphan = Number(stdout.trim());
+  assert.ok(Number.isInteger(orphan) && orphan > 1);
+  let child = 0;
+  try {
+    // The inner shell forks its sleep a beat after `sh` printed the pid.
+    const deadline = Date.now() + 5_000;
+    while (child === 0 && Date.now() < deadline) {
+      try {
+        child = Number((await exec("pgrep", ["-P", String(orphan)])).stdout.trim().split("\n")[0]);
+      } catch {
+        await setTimeoutPromise(10);
+      }
+    }
+    assert.ok(child > 1, "the orphan started its child");
+    const status = service({ listSessionIds: () => new Set(["chat-1"]) });
+    const listed = (await status.processes()).processes;
+    const root = listed.find((row) => row.pid === orphan);
+    assert.ok(root, "the marked orphan is listed");
+    assert.equal(root?.sessionId, "chat-1", "labelled with the chat its launch belongs to");
+    const sleep = listed.find((row) => row.pid === child);
+    assert.ok(sleep, "and so is what it started");
+    assert.equal(sleep?.sessionId, "chat-1");
+
+    const result = await status.kill(orphan);
+    assert.equal(result.ok, true, "managed: the kill guard lets it through");
+    assert.ok(result.ok === true && result.killed >= 2, "the orphan and its child are signalled");
+    assert.equal(await waitGone(orphan), true);
+    assert.equal(await waitGone(child), true);
+  } finally {
+    for (const pid of [orphan, child]) {
+      try {
+        if (pid > 1) process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
   }
 });
 

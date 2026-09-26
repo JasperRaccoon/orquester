@@ -55,8 +55,10 @@ const ANCESTOR_WALK_LIMIT = 256;
 
 /**
  * Flat `/api/system/processes` list → forest. A pid whose ppid is absent from
- * the list is a root: the daemon itself, and every tmux pane (whose real parent
- * is the tmux server, which the daemon deliberately keeps out of the tree).
+ * the list is a root: the daemon itself, every tmux pane (whose real parent is
+ * the tmux server, which the daemon deliberately keeps out of the tree), and
+ * every orphan a provider CLI left behind (reparented to init, and listed by
+ * the launch marker it inherited).
  *
  * A pid recycled between the daemon's scan passes could in principle describe a
  * cycle; linking is therefore refused whenever the candidate parent already has
