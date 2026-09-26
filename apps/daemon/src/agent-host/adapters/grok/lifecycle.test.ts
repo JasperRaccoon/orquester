@@ -1036,6 +1036,40 @@ test("a woken parent's spawn is one agent, launched by its call: its subagent_sp
   await r.dispose();
 });
 
+test("a model the CLI refuses warns once per session, not at every turn", async () => {
+  // An outdated CLI and a chat created on the pending catalogue: the thread's
+  // selection names a model this CLI does not know, and every turn carries it.
+  const r = await rig({ scenario: "happy" });
+  await r.adapter.startSession({
+    threadId: "t1",
+    cwd: r.cwd,
+    home: home(r.cwd),
+    modelSelection: { model: "nope" },
+    runtimeMode: "approval-required"
+  });
+  for (const input of ["one", "two"]) {
+    await r.adapter.sendTurn({
+      threadId: "t1",
+      input,
+      attachments: [],
+      modelSelection: { model: "nope" },
+      interactionMode: "default"
+    });
+    await r.waitFor(
+      (event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === (input === "one" ? 1 : 2),
+      `turn ${input}`
+    );
+  }
+  await r.drain();
+  const refusals = r.events.filter(
+    (event) =>
+      event.type === "runtime.warning" &&
+      (event.payload as { message?: string }).message === "grok: could not switch model to nope"
+  );
+  assert.equal(refusals.length, 1, "the CLI's refusal is remembered for the session");
+  await r.dispose();
+});
+
 function advisories(events: readonly RuntimeEvent[]): number {
   return events.filter(
     (event) => event.type === "runtime.warning" && /support_permission/.test(event.payload.message)

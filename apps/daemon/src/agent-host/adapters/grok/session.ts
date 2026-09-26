@@ -29,7 +29,7 @@ import type { ClassifiedStderrLine } from "../../support/stderr.ts";
 import { appendAttachmentPathLines } from "../attachment-lines.ts";
 import { AcpConnection } from "./acp/connection.ts";
 import type { AcpFrameDirection } from "./acp/peer.ts";
-import { classifyAcpError } from "./acp/errors.ts";
+import { ACP_ERROR_CODES, AcpRpcError, classifyAcpError } from "./acp/errors.ts";
 import type {
   InitializeResponse,
   LoadSessionResponse,
@@ -235,6 +235,14 @@ export class GrokSession {
 
   private currentModelId: string | undefined;
   private currentReasoningEffort: string | undefined;
+  /**
+   * `session/set_model` requests the CLI refused (`-32602`), by model and
+   * effort. The session keeps the CLI's own model then, and every later turn
+   * carries the same selection — an outdated CLI and a chat created on the
+   * pending catalogue name a model it does not know — so each would ask, and
+   * warn, again. Asked once per session; a timeout is not a refusal.
+   */
+  private readonly refusedModels = new Set<string>();
 
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly pendingUserInputs = new Map<string, PendingUserInput>();
@@ -1283,6 +1291,10 @@ export class GrokSession {
     if (update === null) {
       return;
     }
+    const key = `${update.modelId}\u0000${update.meta?.reasoningEffort ?? ""}`;
+    if (this.refusedModels.has(key)) {
+      return;
+    }
     try {
       await this.peer().request(
         "session/set_model",
@@ -1299,7 +1311,10 @@ export class GrokSession {
       }
     } catch (error) {
       // A rejected model must not fail the turn: the session keeps the model
-      // it has and the user is told which one it is.
+      // it has and the user is told which one it is — once.
+      if (error instanceof AcpRpcError && error.code === ACP_ERROR_CODES.invalidParams) {
+        this.refusedModels.add(key);
+      }
       this.emitEvent(
         this.normalizer.event("runtime.warning", {
           message: `grok: could not switch model to ${update.modelId}`,

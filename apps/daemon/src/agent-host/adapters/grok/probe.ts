@@ -66,9 +66,10 @@ export const COMPACT_SLASH_COMMAND: SlashCommand = {
  * CLI advertised in its `initialize` (grok 1.0.34 on 2026-09-25, fixtures
  * 15–23 — `pending.test.ts` holds the two equal), default included. An older
  * CLI knew only `grok-4.6` (then the default) and `grok-4.5` (fixture 01,
- * `12-cli-text/`); a launch on this seed there asks for `grok-4.7`, which the
- * CLI refuses with one `runtime.warning` and keeps its own default
- * (`applyModelSelection`) — and the first probe replaces this list wholesale.
+ * `12-cli-text/`); a chat launched on this seed there asks for `grok-4.7` at
+ * its start and with every turn, which the CLI refuses: the session warns once
+ * and remembers the refusal (`applyModelSelection`), and the CLI keeps its own
+ * default. The first probe replaces this list wholesale.
  *
  * *T3: `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640` — a pending
  * provider carries its bundled catalog, not an empty list.*
