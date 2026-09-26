@@ -10,6 +10,7 @@ import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
+import { drillInEmptyNotice, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { LoadOlderRow } from "./rows/LoadOlderRow";
 
@@ -151,6 +152,23 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   // nothing — their work is rows of its own, which the empty copy points at.
   const drivesWork = drilledRow !== undefined && isLoopOrGoalRow(drilledRow);
   const backgroundShell = drilledRow !== undefined && drilledRow.agentKind === "background" && !drivesWork;
+
+  /**
+   * What an empty list says, and before which row. The thread's: "No messages
+   * yet." once nothing else takes the space. A drill-in's is judged on the
+   * agent's own rows — its launch prompts and the live placeholders aside —
+   * and says where rows the roster shows it made have gone
+   * (`drillInEmptyNotice`).
+   */
+  const notice = React.useMemo<EmptyNotice | null>(
+    () =>
+      agentId !== undefined
+        ? drillInEmptyNotice({ rows, agent: drilledRow })
+        : rows.length === 0 && !showLoadOlder && !showEmptyPanel
+          ? { text: "No messages yet.", at: 0 }
+          : null,
+    [agentId, drilledRow, rows, showEmptyPanel, showLoadOlder]
+  );
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -775,7 +793,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
             {showLoadOlder ? (
               <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
             ) : null}
-            {rows.map((row) => (
+            {(notice === null ? rows : rows.slice(0, notice.at)).map((row) => (
               <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />
             ))}
             {showEmptyPanel ? (
@@ -783,19 +801,21 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
               // (`EmptyThreadPanel`, built by the view). The wrapper fits the
               // visible area so only the panel's own list scrolls.
               emptyThreadPanel
-            ) : rows.length === 0 && !showLoadOlder ? (
-              <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
-                {agentId === undefined
-                  ? "No messages yet."
-                  : backgroundShell
-                    ? "No output yet."
-                    : drilledRow?.kind === "loop"
-                      ? "Each fire runs as an agent of its own, in the roster."
-                      : drilledRow?.kind === "goal"
-                        ? "A goal's work runs in the thread's own turns and the agents it starts."
-                        : "This agent has not reported anything yet."}
+            ) : notice !== null ? (
+              <div
+                className={cn(
+                  "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
+                  notice.at === 0 ? "py-12" : "py-4"
+                )}
+              >
+                {notice.text}
               </div>
             ) : null}
+            {notice === null
+              ? null
+              : rows
+                  .slice(notice.at)
+                  .map((row) => <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />)}
             {/* The footer spacer reserves exactly what the composer overlay hides. */}
             {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
             <div className="h-3 shrink-0 sm:h-4" aria-hidden />

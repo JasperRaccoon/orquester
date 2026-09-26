@@ -4331,6 +4331,13 @@ kept. No prompt on the launch — an older log, a provider that reports none, a 
 client never invents one. The block under the breadcrumb is no longer the "prompt": it keeps the
 roster's live activity / outcome line at one fixed line with the whole of it as its tooltip, so its
 wrapping never moves the rows below.*
+*Built (2026-09-27): a drill-in reads the thread's live window alone, and retention can empty an
+agent's share of it (its own window keeps 200 rows, the cross-agent ceiling 2 000). When the roster
+row shows the agent worked — usage, a result, a last tool, a settled status — and no row of its own
+is left (its launch prompts and the live placeholders aside), the drill-in says "Its earlier rows
+have left this thread's window." under the prompt, never that it "has not reported anything yet"; a
+settled shell says its output has (`timeline/empty-notice.ts`). Paging an agent's older rows from
+the thread index, as the MCP's drill-in does (`apps/daemon/src/mcp/history.ts`), is a follow-up.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

@@ -362,5 +362,59 @@ assert.ok(restCut.includes("Only the start of this prompt was kept."), "a prompt
 const unprompted = await promptedDrillIn([promptedLaunch({}, "launch-none"), answer]);
 assert.ok(!unprompted.includes('data-agent-prompt="true"'), "no prompt on the launch, no prompt row");
 
+// ---------------------------------------------------------------------------
+// An agent whose rows left the window says so (S7)
+// ---------------------------------------------------------------------------
+
+const EVICTED = "agent-evicted";
+const LEFT = "Its earlier rows have left this thread&#x27;s window.";
+const NOTHING_YET = "This agent has not reported anything yet.";
+const evicted = rosterRow(EVICTED, {
+  title: "Survey the fleet",
+  status: "completed",
+  result: "Surveyed 40 packages.",
+  usage: { totalTokens: 48_000 }
+});
+const evictedSession = await seededThread({ items: [], roster: [evicted] });
+const gone = render({ sessionId: evictedSession, agentId: EVICTED, roster: [evicted], bottomInset: 0, onBack: NOOP });
+assert.ok(gone.includes(LEFT), `a settled agent that did work, with no row left, says where they went: ${gone}`);
+assert.ok(!gone.includes(NOTHING_YET), "never that it reported nothing");
+
+// Its launch prompt survives retention as an anchor: the notice sits under it.
+const promptOnly = await seededThread({
+  items: [
+    wireActivity(
+      "task.started",
+      { taskId: EVICTED, agentKind: "agent", taskType: "subagent", toolUseId: "launch-e", prompt: "Survey the fleet." },
+      { id: "launch-e", tone: "info", createdAt: LAUNCHED_AT, updatedAt: LAUNCHED_AT }
+    )
+  ],
+  roster: [evicted]
+});
+const underPrompt = render({ sessionId: promptOnly, agentId: EVICTED, roster: [evicted], bottomInset: 0, onBack: NOOP });
+assert.ok(underPrompt.includes(LEFT), "a prompt alone is not the agent's work: the notice still shows");
+assert.ok(underPrompt.indexOf("Survey the fleet.") < underPrompt.indexOf(LEFT), "under the prompt");
+
+// A live agent that did work and lost its rows: the notice, then the live rows.
+const liveEvicted = rosterRow(EVICTED, { title: "Survey the fleet", usage: { totalTokens: 9_000 } });
+const liveEvictedSession = await seededThread({ items: [], roster: [liveEvicted] });
+const stillWorking = render({ sessionId: liveEvictedSession, agentId: EVICTED, roster: [liveEvicted], bottomInset: 0, onBack: NOOP });
+assert.ok(stillWorking.includes(LEFT), stillWorking);
+assert.ok(stillWorking.indexOf(LEFT) < stillWorking.indexOf('data-timeline-row-kind="working"'), "above its working row");
+
+// A live agent that has done nothing yet: the live rows say so, no copy.
+const fresh = rosterRow(EVICTED, { title: "Survey the fleet" });
+const freshSession = await seededThread({ items: [], roster: [fresh] });
+const starting = render({ sessionId: freshSession, agentId: EVICTED, roster: [fresh], bottomInset: 0, onBack: NOOP });
+assert.ok(!starting.includes(LEFT) && !starting.includes(NOTHING_YET), starting);
+assert.ok(starting.includes('data-timeline-row-kind="thinking"'));
+
+// A settled shell whose every row left: its output, not "No output yet."
+const exitedShell = rosterRow(SHELL, { agentKind: "background", title: "run the suite", status: "completed", exitCode: 0 });
+const exitedShellSession = await seededThread({ items: [], roster: [exitedShell] });
+const shellGone = render({ sessionId: exitedShellSession, agentId: SHELL, roster: [exitedShell], bottomInset: 0, onBack: NOOP });
+assert.ok(shellGone.includes("Its output has left this thread&#x27;s window."), shellGone);
+assert.ok(!shellGone.includes("No output yet."));
+
 resetThreadStores();
 console.log("agent-chat drill-in render checks passed");
