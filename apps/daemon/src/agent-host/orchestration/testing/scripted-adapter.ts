@@ -227,9 +227,14 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
     async respondToUserInput(
       threadId: string,
       requestId: string,
-      answers: Record<string, unknown>
+      answers: Record<string, unknown>,
+      options?: { cancel?: boolean }
     ): Promise<void> {
-      calls.push({ kind: "respondToUserInput", threadId, detail: { requestId, answers } });
+      calls.push({
+        kind: "respondToUserInput",
+        threadId,
+        detail: { requestId, answers, ...(options?.cancel === true ? { cancel: true } : {}) }
+      });
     },
 
     async compact(threadId: string): Promise<void> {

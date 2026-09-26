@@ -1339,7 +1339,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   (`snapshotChange`) — nothing needs a re-arm from it (a shell is a TTL-bounded watch loop, a
   monitor re-arms on its lines, an agent on its heartbeat). (10) Teardown closes calls before tasks,
   as every adapter's does (Stop, the session's stop, the exit; a run's end closes its child's open
-  calls before its task row). Noise the captures showed, silenced: a child's `skills-reload` /
+  calls before its task row). A question the HOST cancels (a Stop, the session's stop, a closed
+  tab) reaches the CLI as its own cancel, `{outcome: "cancelled"}`: the host flags it
+  (`respondToUserInput`'s host-only `options.cancel`, which the other adapters ignore), because its
+  `{}` is also a user's skip — passed on as an answer, it told the CLI the user had answered,
+  nothing. Noise the captures showed, silenced: a child's `skills-reload` /
   `workflows-reload` replies to requests the CLI sent itself are not warnings (the ACP peer drops a
   reply to nothing that carries an id the adapter names, `agentOwnReplyIds`); an MCP server's
   failure is said once until it recovers (the CLI re-handshakes the thread's servers at every

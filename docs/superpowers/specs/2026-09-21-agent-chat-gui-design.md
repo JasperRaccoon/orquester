@@ -1014,6 +1014,15 @@ card renders without the original request.
 
 *T3: `packages/contracts/src/provider.ts:110-116` — `attachmentsByQuestionId` on the service input; `apps/server/src/provider/Services/ProviderAdapter.ts:105-112` — the adapter takes only `answers`; `packages/contracts/src/orchestration.ts:374-388` — `UserInputAttachments` (≤ 8/question) and `UserInputAttachmentAnswerPayload.questionTextById`*
 
+*Built: `respondToUserInput` takes a fourth, host-internal `options?: {cancel?: boolean}`. The
+host's own cancel of a question — a Stop, the session's stop, a closed tab
+(`settlePendingRequests`) — hands the adapter `{}` flagged `cancel: true`, because `{}` alone is
+also what a user's empty answer (a skip) looks like: Grok's session sent it on as `{outcome:
+"accepted", answers: {}}` — the user had answered, nothing — where the CLI has a cancel of its own,
+`{outcome: "cancelled"}`, which its own teardown already sent. Grok answers the flag with that
+cancel; Claude, Codex and OpenCode ignore it and answer `{}` as before. Nothing on the wire
+changed (`apps/daemon/src/agent-host/adapter.ts`).*
+
 ### 4.4 Permission modes
 
 `RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access"`, default

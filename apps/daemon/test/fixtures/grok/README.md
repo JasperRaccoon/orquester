@@ -876,6 +876,13 @@ Easy to get the wrong way round, and both were observed accepted verbatim:
 | `_x.ai/exit_plan_mode` | `{"outcome":"abandoned","feedback":"…"}` — **flat** |
 | `_x.ai/ask_user_question` | `{"outcome":"accepted","answers":{…}}` — **flat** |
 
+Nobody's answer is a cancel of each shape's own: `{"outcome":{"outcome":"cancelled"}}` for a
+permission (captured, 05) and `{"outcome":"cancelled"}` for a question (T3's shape; not
+captured). A user's empty answer — a skip — is still `{"outcome":"accepted","answers":{}}`, so the
+host flags its own cancel (a Stop, the session's stop, a closed tab) instead of handing the adapter
+an empty answer (`respondToUserInput`'s `options.cancel`): until 2026-09-26 a Stop told the CLI the
+user had answered, nothing.
+
 ### 35. The probe must run under the account home, or it reports a false "not logged in"
 
 Not visible in the captures, found while running the adapter's smoke script: with `GROK_HOME`

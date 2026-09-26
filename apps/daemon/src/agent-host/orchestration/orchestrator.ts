@@ -1561,7 +1561,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     for (const question of userInputs) {
       try {
-        await adapter.respondToUserInput(runtime.id, question.requestId, {});
+        // Flagged as the host's cancel: `{}` alone is also what a user's
+        // empty answer looks like, and a provider with a cancel of its own
+        // (Grok) must not be told the user answered nothing.
+        await adapter.respondToUserInput(runtime.id, question.requestId, {}, { cancel: true });
       } catch (error) {
         logger.warn("agent-host: failed to cancel a pending question", error);
       }

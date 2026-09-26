@@ -767,6 +767,19 @@ export class GrokSession {
     pending.resolve(answers);
   }
 
+  /**
+   * Nobody's answer — the host's cancel (a Stop, the session's stop, a closed
+   * tab): `cancelled` to the CLI and one `withdrawn` row, exactly what this
+   * session's own teardown does to a card ({@link withdrawPendingRequests}).
+   */
+  withdrawUserInput(requestId: string): void {
+    const pending = this.pendingUserInputs.get(requestId);
+    if (pending === undefined) {
+      throw new Error(`grok: no pending question ${requestId}`);
+    }
+    pending.withdraw();
+  }
+
   // ------------------------------------------------------------- plan gate
 
   /**

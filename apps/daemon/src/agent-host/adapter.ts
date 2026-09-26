@@ -179,11 +179,21 @@ export interface AgentAdapter {
     requestId: string,
     decision: ApprovalDecision
   ): Promise<void>;
-  /** Attachments are folded into the answer text by the host before this call. */
+  /**
+   * Attachments are folded into the answer text by the host before this call.
+   *
+   * `options.cancel` is the HOST's cancel — a Stop, the session's stop, a
+   * closed tab (`settlePendingRequests`): nobody answered, and `answers` is
+   * then `{}`. An adapter whose provider has a cancel of its own answers with
+   * it — Grok's `{outcome: "cancelled"}`, where `{}` reached the CLI as an
+   * empty answer — and every other one answers `{}` as it always has. A
+   * user's answer, an empty one or a skip included, never carries it.
+   */
   respondToUserInput(
     threadId: string,
     requestId: string,
-    answers: Record<string, unknown>
+    answers: Record<string, unknown>,
+    options?: { cancel?: boolean }
   ): Promise<void>;
   compact(threadId: string): Promise<void>;
   /**

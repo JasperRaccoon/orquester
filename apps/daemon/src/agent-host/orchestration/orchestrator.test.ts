@@ -448,7 +448,9 @@ describe("orchestrator — a request the host closed itself keeps one closing ro
         .map((call) => call.detail),
       [
         { requestId: "req-1", decision: "cancel" },
-        { requestId: "q-1", answers: {} }
+        // The host's cancel, flagged: `{}` alone reads as a user's empty answer
+        // to an adapter whose provider has a cancel of its own (Grok's).
+        { requestId: "q-1", answers: {}, cancel: true }
       ]
     );
     await adapterResolution(host, "req-1", "approval", { decision: "cancel", requestKind: "command" });
@@ -1542,6 +1544,24 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
     const order = host.adapter.calls.map((call) => call.kind);
     assert.ok(order.indexOf("respondToApproval") < order.lastIndexOf("stopSession"));
     assert.equal(host.adapter.hasSession(threadId), false);
+    await host.stop();
+  });
+
+  it("session/stop cancels a pending question with the host's cancel, never an empty answer", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(host, "q-9", { dismissible: false });
+    await host.settle();
+    await host.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
+    await host.settle();
+
+    assert.deepEqual(
+      host.adapter.calls.filter((call) => call.kind === "respondToUserInput").map((call) => call.detail),
+      [{ requestId: "q-9", answers: {}, cancel: true }]
+    );
+    const order = host.adapter.calls.map((call) => call.kind);
+    assert.ok(order.indexOf("respondToUserInput") < order.lastIndexOf("stopSession"));
     await host.stop();
   });
 });

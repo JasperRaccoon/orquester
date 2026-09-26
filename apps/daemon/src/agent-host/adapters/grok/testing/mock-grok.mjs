@@ -654,6 +654,23 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "question") {
+    // Our own prompt asks the user (fixture 07b's request, in the parent's
+    // session) and goes on once answered, echoing the WHOLE reply it got — so
+    // a test reads exactly what reached the CLI: an answer, or a cancel.
+    notify("session/update", {
+      sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "one;" } },
+      _meta: { totalTokens: 1700, promptId }
+    });
+    send(questionRequestFrame(sessionId));
+    await waitFor(() => questionAnswer !== null);
+    sendTogether([chunkFrame(`reply:${JSON.stringify(questionAnswer)};`, promptId), turnCompletedFrame(promptId)]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
   if (scenario === "wake-auto-permission") {
     // A waiting wake's tool asks for permission — under full-access, answered
     // by the adapter itself, no card — while our RPC result is still out.

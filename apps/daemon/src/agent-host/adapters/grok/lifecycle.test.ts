@@ -1066,6 +1066,46 @@ test("a subagent's child session's question rides no turn, as Codex's does", asy
   await r.dispose();
 });
 
+test("the host's cancel of a question reaches the CLI as `cancelled`, never as an empty answer", async () => {
+  // A Stop, the session's stop and a closed tab settle a pending question with
+  // the host's cancel (`settlePendingRequests`): `answers` is then `{}`, and
+  // sent as `{outcome: "accepted", answers: {}}` it told the CLI the user had
+  // answered — nothing at all.
+  const r = await rig({ scenario: "question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the question");
+  await r.adapter.respondToUserInput("t1", asked.requestId!, {}, { cancel: true });
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), 'one;reply:{"outcome":"cancelled"};');
+  const resolved = r.events.filter((event) => event.type === "user-input.resolved");
+  assert.equal(resolved.length, 1, "one resolution row");
+  assert.equal(
+    (resolved[0].payload as { withdrawn?: boolean }).withdrawn,
+    true,
+    "nobody answered: the host's own cancelled row, which repeats the Stop's"
+  );
+  await r.dispose();
+});
+
+test("a user's empty answer to a question stays an answer", async () => {
+  // A skip is the user's word, not a cancel: only the host's cancel flag reads
+  // as `cancelled`, whatever the answers hold.
+  const r = await rig({ scenario: "question" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const asked = await r.waitFor((event) => event.type === "user-input.requested", "the question");
+  await r.adapter.respondToUserInput("t1", asked.requestId!, {});
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), 'one;reply:{"outcome":"accepted","answers":{}};');
+  const resolved = r.events.filter((event) => event.type === "user-input.resolved");
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0].payload as { withdrawn?: boolean }).withdrawn, undefined);
+  await r.dispose();
+});
+
 test("a request answered without a card leaves a waiting wake's frames waiting for its own turn", async () => {
   const r = await rig({ scenario: "wake-auto-permission" });
   await start(r, { runtimeMode: "full-access" });

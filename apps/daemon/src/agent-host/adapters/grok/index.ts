@@ -346,12 +346,26 @@ class GrokAdapter implements AgentAdapter {
     await Promise.resolve();
   }
 
+  /**
+   * The host's cancel (`options.cancel`: a Stop, the session's stop, a closed
+   * tab) withdraws the question — `{outcome: "cancelled"}` to the CLI, as the
+   * adapter's own teardown answers it. Passed through as an answer, its `{}`
+   * reached the CLI as `{outcome: "accepted", answers: {}}`: the user had
+   * answered, nothing. A user's own answer, an empty one or a skip included,
+   * stays an answer.
+   */
   async respondToUserInput(
     threadId: string,
     requestId: string,
-    answers: Record<string, unknown>
+    answers: Record<string, unknown>,
+    options?: { cancel?: boolean }
   ): Promise<void> {
-    this.requireSession(threadId).respondToUserInput(requestId, answers);
+    const session = this.requireSession(threadId);
+    if (options?.cancel === true) {
+      session.withdrawUserInput(requestId);
+    } else {
+      session.respondToUserInput(requestId, answers);
+    }
     await Promise.resolve();
   }
 
