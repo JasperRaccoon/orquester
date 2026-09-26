@@ -19,6 +19,7 @@ import type {
   AgentPanelModel,
   ProviderSnapshot,
   RuntimeSubagent,
+  ThreadItem,
   ThreadSessionStatus,
   Turn
 } from "@orquester/api/agent-chat";
@@ -45,6 +46,7 @@ import type {
 } from "./contracts";
 import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn, type AgentDrillInProjection } from "./drill-in.logic";
 import { loadProviders, providerForRefId, providersStore } from "./providers";
+import { isBackgroundShellRow } from "./roster.logic";
 import { resolveActivityLabel } from "./status.logic";
 import {
   ensureThreadStore,
@@ -216,6 +218,32 @@ export function turnStartedAt(
   return latestTurn.startedAt;
 }
 
+/** What {@link useAgentChatDrillIn} is asked for beyond the agent. */
+export interface AgentChatDrillInOptions {
+  /**
+   * The drill-in's own disclosure state. Group toggles honour it; turn folds
+   * start OPEN — the child's rows are the reason the view was opened, and a
+   * fold keyed on the parent's turns would hide them behind one more click.
+   */
+  disclosures?: Pick<DisclosureState, "expandedGroupIds" | "expandedTurnIds"> | null;
+  /** The agent's roster row, where the host already holds it; the thread's own otherwise. */
+  agent?: RuntimeSubagent | null;
+}
+
+/** One drill-in, as {@link useAgentChatDrillIn} projects it. */
+export interface AgentChatDrillInView {
+  agent: RuntimeSubagent | null;
+  /**
+   * What the drill-in's timeline renders — the ONE projection of it, which the
+   * timeline takes as it is. `null` for a background shell: its drill-in is
+   * one row, its command, which the caller projects from {@link items}
+   * (`roster/background-shell.ts`), so nothing is projected here for it.
+   */
+  rows: AgentChatTimelineRow[] | null;
+  /** The thread's items: the parent's slice, never a second stream. */
+  items: readonly ThreadItem[];
+}
+
 /**
  * The drill-in view: **one subagent's own timeline** (§7.6).
  *
@@ -224,19 +252,18 @@ export function turnStartedAt(
  * reused rather than opened again, which is what keeps the composer and roster
  * mounted so the parent can be steered while watching a child — and the child
  * view dispatches no commands, so no actions are returned. The rows are
- * `projectAgentDrillIn`'s (`drill-in.logic.ts`); a word streams while the
- * thread's `messageStreamingContext` says it can still be written.
+ * `projectAgentDrillIn`'s (`drill-in.logic.ts`), projected here once per
+ * change and rendered as they are: a second projection beside this one once
+ * won whenever it had rows, and threw a background shell's own rows away. A
+ * word streams while the thread's `messageStreamingContext` says it can still
+ * be written.
  */
 export function useAgentChatDrillIn(
   sessionId: string,
   agentId: string | null,
-  /**
-   * The drill-in's own disclosure state. Group toggles honour it; turn folds
-   * start OPEN — the child's rows are the reason the view was opened, and a
-   * fold keyed on the parent's turns would hide them behind one more click.
-   */
-  disclosures?: Pick<DisclosureState, "expandedGroupIds" | "expandedTurnIds"> | null
-): { rows: AgentChatTimelineRow[]; agent: RuntimeSubagent | null } {
+  options: AgentChatDrillInOptions = {}
+): AgentChatDrillInView {
+  const { disclosures, agent: agentOverride } = options;
   const store = useThreadStore(sessionId);
   const entries = useThreadState(store, (state) => state.slice.entries);
   const roster = useThreadState(store, (state) => state.slice.roster);
@@ -249,7 +276,11 @@ export function useAgentChatDrillIn(
 
   return useMemo(() => {
     if (agentId === null) {
-      return { rows: [], agent: null };
+      return { rows: [], agent: null, items: entries };
+    }
+    const agent = agentOverride ?? roster.find((candidate) => candidate.id === agentId) ?? null;
+    if (agent !== null && isBackgroundShellRow(agent)) {
+      return { rows: null, agent, items: entries };
     }
     projection.current = projectAgentDrillIn(projection.current, {
       items: entries,
@@ -257,11 +288,8 @@ export function useAgentChatDrillIn(
       messageStreaming,
       disclosures
     });
-    return {
-      rows: projection.current.stable.result,
-      agent: roster.find((candidate) => candidate.id === agentId) ?? null
-    };
-  }, [agentId, entries, roster, messageStreaming, disclosures]);
+    return { rows: projection.current.stable.result, agent, items: entries };
+  }, [agentId, agentOverride, entries, roster, messageStreaming, disclosures]);
 }
 
 // ---------------------------------------------------------------------------

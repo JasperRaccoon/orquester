@@ -127,9 +127,10 @@ export interface ChatTimelineProps {
   errorBanner: string | null;
   onDismissErrorBanner: () => void;
   /**
-   * Set by the drill-in (§7.6): the same component renders THIS agent's rows,
-   * already filtered by the store. Its presence also forces {@link readOnly},
-   * because a child view dispatches no commands.
+   * Set by the drill-in (§7.6): `rows` are then THIS agent's, which the
+   * drill-in projected itself (`useAgentChatDrillIn`) — the timeline renders
+   * them as they are, as it renders the thread's. Its presence also forces
+   * {@link readOnly}, because a child view dispatches no commands.
    *
    * *Added by W12; additive to the foundation's contract.*
    */

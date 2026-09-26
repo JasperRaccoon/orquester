@@ -271,8 +271,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     }
   }, [drillInAgentId, drilledStatus]);
   // The child's rows and its roster row come from `useAgentChatDrillIn`, which
-  // AgentDrillIn calls itself: one projection off this thread's slice, sharing
-  // the parent's memoisation instead of a second one beside it.
+  // AgentDrillIn calls itself: one projection of the agent off this thread's
+  // slice, and the one its timeline renders.
 
   // --- roster collapse state (§7.6) ----------------------------------------
   const [rosterExpanded, setRosterExpanded] = React.useState(false);

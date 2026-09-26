@@ -26,17 +26,19 @@
  * render in the parent timeline, they are re-homed here. **Both halves come
  * from W11's `useAgentChatDrillIn`**, which projects them off the *parent's*
  * slice — so the child streams live without opening a second stream, and the
- * parent's composer and roster keep their state. On OpenCode and Grok the
- * surface shows whatever their protocols report and nothing more; when a
- * provider reports a task but no per-agent items, the timeline says so rather
- * than this view inventing lineage.
+ * parent's composer and roster keep their state. **That projection is the one
+ * the timeline renders**: `ChatTimeline` takes the rows handed to it and
+ * projects nothing of its own. On OpenCode and Grok the surface shows whatever
+ * their protocols report and nothing more; when a provider reports a task but
+ * no per-agent items, the timeline says so rather than this view inventing
+ * lineage.
  *
- * **A background shell is the one exception** (§7.6). Its rows are projected
- * here, by `background-shell.ts`, because the shared projection applies the
- * quiet-timeline filter a second time inside the child's own view and drops
- * every row the shell owns — the drill-in then claimed the shell had reported
- * nothing while it was printing. They also open themselves: a shell's output
- * is the reason its row was clicked.
+ * **A background shell is the one exception** (§7.6). Its drill-in is ONE
+ * row, its command with every chunk it printed, projected here by
+ * `background-shell.ts` — the hook projects nothing for a shell — because the
+ * shared projection would fold it behind a turn fold per turn its chunks rode
+ * and cap its output pane like any conversation's tool row. Its rows also open
+ * themselves: a shell's output is the reason its row was clicked.
  *
  * Escape is **not** bound here: the app has one window-level key listener
  * (AGENTS.md), and the view that owns the drill-in state owns the key that
@@ -50,11 +52,9 @@
 
 import React from "react";
 import { ArrowLeft, Terminal } from "lucide-react";
-import type { ThreadItem } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
-import type { DisclosureState } from "../../../lib/agent-chat/contracts";
+import type { AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
-import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { AgentDrillInProps } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
@@ -71,33 +71,11 @@ const EMPTY_DISCLOSURES: DisclosureState = {
   toolOutputOffsets: {}
 };
 
-const EMPTY_ITEMS: readonly ThreadItem[] = [];
+const EMPTY_ROWS: AgentChatTimelineRow[] = [];
 
 const EMPTY_ROW_IDS: readonly string[] = [];
 
 const noop = (): void => {};
-
-/**
- * The thread's own items, live.
- *
- * Only a background shell needs them: its rows come from this component's own
- * projection (see `background-shell.ts`), not from the shared drill-in one.
- * `peekThreadStore` never creates a slice — `useAgentChatDrillIn` has already
- * ensured it during this same render, and a host without one (a static render
- * check) simply reads as an empty thread.
- */
-function useThreadItems(sessionId: string, enabled: boolean): readonly ThreadItem[] {
-  const store = enabled ? peekThreadStore(sessionId) : null;
-  const subscribe = React.useCallback(
-    (onChange: () => void) => (store === null ? noop : store.subscribe(onChange)),
-    [store]
-  );
-  const read = React.useCallback(
-    () => (store === null ? EMPTY_ITEMS : store.getState().slice.entries),
-    [store]
-  );
-  return React.useSyncExternalStore(subscribe, read, read);
-}
 
 export function AgentDrillIn({
   sessionId,
@@ -123,23 +101,27 @@ export function AgentDrillIn({
     setFollowAgentId(agentId);
     setFollow(true);
   }
-  const live = useAgentChatDrillIn(sessionId, agentId, disclosures);
-  const agent = agentOverride ?? live.agent;
+  const live = useAgentChatDrillIn(sessionId, agentId, { disclosures, agent: agentOverride });
+  const agent = live.agent;
   const background = agent !== null && isBackgroundShellRow(agent);
 
-  // A shell's own rows are projected here rather than by the shared drill-in
-  // hook, which applies the quiet-timeline filter a second time and drops
-  // them. See `background-shell.ts`. The shell's roster title names its row
-  // once no frame of its call is left to name it.
-  const items = useThreadItems(sessionId, background);
+  // A shell's own rows are projected here — the hook projects nothing for a
+  // shell (`live.rows` is null) — because its drill-in is one row, its
+  // command, and the shared projection would fold it behind the turn its
+  // chunks rode. See `background-shell.ts`. The shell's roster title names its
+  // row once no frame of its call is left to name it.
   const shellTitle = agent?.title;
   const shellRows = React.useMemo(
-    () => (background ? backgroundShellRows(items, agentId, shellTitle) : null),
-    [background, items, agentId, shellTitle]
+    () =>
+      live.rows === null && rowsOverride === undefined
+        ? backgroundShellRows(live.items, agentId, shellTitle)
+        : null,
+    [live.rows, live.items, rowsOverride, agentId, shellTitle]
   );
-  // The hook is the source; the props are an override for a host that already
-  // holds the projection (and for tests, which have no store).
-  const rows = rowsOverride ?? shellRows ?? live.rows;
+  // The hook is the source, and the ONLY projection: the timeline renders
+  // these rows as they are. The prop overrides it for a host that already
+  // holds the rows (and for tests, which have no store).
+  const rows = rowsOverride ?? live.rows ?? shellRows ?? EMPTY_ROWS;
 
   // A shell's rows open THEMSELVES: the output is the whole reason the row was
   // clicked, and one more click to reach it is the bug this fixes. Seeded by

@@ -4253,7 +4253,12 @@ row only among the most recently active running work (§5.1), so a shell past th
 with its chunks alone: they are still one row, and it is labelled with the shell's roster title (its
 description, or the command itself), which `AgentDrillIn` hands `backgroundShellRows` as its
 fallback title, rather than with the first line of the output — never with the shell's own id, the
-roster's title when nothing ever named the task.*
+roster's title when nothing ever named the task. That row is the one on screen: the drill-in's
+timeline renders exactly the rows its one projection hands it (`useAgentChatDrillIn`, called by
+`AgentDrillIn`; the hook projects nothing for a shell). Until 2026-09-27 a second projection inside
+the timeline rendered its own rows whenever it had any — for a Claude shell, whose rows always ride
+a turn, a "Worked for …" fold, a capped output pane that did not follow, one row per turn its chunks
+rode, and an exited shell's output collapsed.*
 
 Stopping is T3's, not the row's. Once a turn settles the composer's stop button is gone, so while
 `backgroundLiveness` is non-null and no turn is working, a banner sits in the notice stack above the

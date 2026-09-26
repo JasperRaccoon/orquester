@@ -3,7 +3,6 @@ import { TriangleAlert, X } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
 import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
-import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
 import { isLoopOrGoalRow } from "../../../lib/agent-chat/roster.logic";
@@ -67,37 +66,15 @@ const REVEAL_TOP_MARGIN_PX = 16;
  *     page under the pointer.
  *  3. **Rows are `memo`ised on W11's stable row identity** and read everything
  *     else from a context, so one streamed token re-renders one row.
+ *
+ * **It renders exactly the rows it is given**, in both of its surfaces: the
+ * thread's own, and the subagent drill-in (§7.6), which projects its agent's
+ * rows itself (`AgentDrillIn`, through `useAgentChatDrillIn`) and sets
+ * `agentId`, which makes the surface read-only. A second projection in here
+ * once rendered its own rows whenever it had any — two projections per token,
+ * and a background shell's one-row projection thrown away.
  */
 export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
-  // Two surfaces, one component. The drill-in sources its rows from the
-  // per-agent projection (§7.6) rather than from the `rows` prop, so the
-  // subscription that projection needs is not paid for by the parent
-  // timeline — hence a separate component rather than a conditional hook.
-  // The branch is fixed per mount site (W15 never passes `agentId`, W14
-  // always does), so nothing remounts.
-  return props.agentId === undefined ? (
-    <TimelineSurface {...props} rows={props.rows} />
-  ) : (
-    <DrillInTimeline {...props} agentId={props.agentId} />
-  );
-}
-
-/**
- * The drill-in's rows come from `useAgentChatDrillIn`, which reuses the
- * parent's slice and holds its own projection so a streamed token in the
- * child's timeline changes one row object — exactly as in the parent. Filtering
- * the parent's already-projected rows here would rebuild the whole list on
- * every frame and would lose the per-agent turn grouping.
- */
-function DrillInTimeline(props: ChatTimelineProps & { agentId: string }): React.ReactElement {
-  const { rows } = useAgentChatDrillIn(props.sessionId, props.agentId, props.disclosures);
-  // The projection is the source of truth; the prop is the fallback for a
-  // caller that already resolved the child's rows another way, so a surface
-  // that has rows never renders the empty state because the hook has none.
-  return <TimelineSurface {...props} rows={rows.length > 0 ? rows : props.rows} readOnly />;
-}
-
-function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   const {
     sessionId,
     rows,

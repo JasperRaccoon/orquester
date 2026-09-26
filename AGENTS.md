@@ -955,6 +955,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   row from the PARENT timeline, and applying it again inside the agent's own view is how every
   drill-in read "This agent has not reported anything yet". Streamed `tool.output` chunks ride
   `payload.delta` and become the entry's `detail`, untrimmed, for `joinLifecycleDetails` to fold.
+  **The drill-in's timeline renders exactly the rows its one projection hands it**
+  (`useAgentChatDrillIn`, called by `AgentDrillIn`; `ChatTimeline` projects nothing of its own): a
+  second projection inside the timeline once won whenever it had rows, which threw a background
+  shell's one-row projection (`roster/background-shell.ts`) away for every shell on a turn.
   (5) **Message segments are keyed per agent** — `(turnId, agentId | none, role)` in
   `ingestion/index.ts`, with the owner baked into the message id (`ownedBaseKey`) and stamped on
   every `thread.message-sent` of an agent-owned segment: a subagent narrates inside the PARENT's

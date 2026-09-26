@@ -29,7 +29,7 @@ import {
   ROSTER_VISIBLE_ROWS,
   deriveRosterDockView,
   isActiveSubagentStatus,
-  isLoopOrGoalRow,
+  isBackgroundShellRow,
   isTerminalSubagentStatus
 } from "../../../lib/agent-chat/roster.logic";
 import type { ChatTone } from "../primitives/tone";
@@ -79,21 +79,12 @@ export function isFinishedRow(agent: Pick<RuntimeSubagent, "status">): boolean {
 }
 
 /**
- * A shell row — a command the agent ran in the background, listed in the same
- * roster (§7.6, the deliberate difference from T3).
- *
- * Deliberately **status-blind**, unlike {@link isLiveBackgroundRow}: the
- * exemption from the collapse is about a row that outlives its turn, while
- * this is about what the row *is*. A finished shell is still a shell, and it
- * must keep the terminal glyph, the "shell" chip and its exit code while it
- * fades. A loop and a goal are background too, and never shells: they print
- * nothing and exit with no code ({@link isLoopOrGoalRow}).
+ * A shell row — a command the agent ran in the background (§7.6). Status-blind,
+ * unlike {@link isLiveBackgroundRow}: it is about what the row *is*. W11's, in
+ * `lib/agent-chat/roster.logic.ts`, because the drill-in's projection asks it
+ * too; re-exported here, the path the roster's components import it by.
  */
-export function isBackgroundShellRow(
-  agent: Pick<RuntimeSubagent, "agentKind"> & { kind?: RuntimeSubagent["kind"] }
-): boolean {
-  return agent.agentKind === "background" && !isLoopOrGoalRow(agent);
-}
+export { isBackgroundShellRow };
 
 /** A background task that is still running — the row exempt from both rules. */
 export function isLiveBackgroundRow(
