@@ -2834,6 +2834,86 @@ test("while a Stop is under way, a run the abort then cancels says busy after an
   harness.dispose();
 });
 
+test("when the stream wins the race and the boundary is crossed early, the cancelled run's own abort error is an echo: no failure, no error", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const abortSent = deferred<void>();
+  const abortAnswered = deferred<void>();
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, async () => {
+    abortSent.resolve();
+    await abortAnswered.promise;
+    return json(true);
+  });
+  const stopping = session.interruptTurn();
+  await abortSent.promise;
+  // An idle (the last run's, ending just before the Stop), then a run an
+  // injected answer started — whose `busy` reaches us before the abort's answer.
+  pushAll(harness.fake, [
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: sessionId } },
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } }
+  ]);
+  await drainedWith(harness, sessionId, "during the abort");
+  abortAnswered.resolve();
+  await stopping;
+  const fed = harness.events.length;
+
+  // The abort cancelled that run after all: its own error.
+  harness.fake.push({
+    type: "session.error",
+    properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } }
+  });
+  await drainedWith(harness, sessionId, "after the echo");
+  assert.deepEqual(eventsOfType(harness.events.slice(fed), "runtime.error"), [], "the echo of an abort is no provider error");
+  assert.deepEqual(
+    eventsOfType(harness.events.slice(fed), "turn.completed").filter((event) => event.payload.state === "failed"),
+    []
+  );
+  assert.notEqual(session.session.status, "error");
+
+  // One echo only: a second abort error, before any idle, is the provider's word again.
+  harness.fake.push({
+    type: "session.error",
+    properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } }
+  });
+  const reported = await waitFor(harness, "runtime.error");
+  assert.equal((reported as Extract<RuntimeEvent, { type: "runtime.error" }>).payload.message, "Aborted");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("the echo is expected only until the parent's next idle, in either spelling: after a real new run, an abort error nobody here sent is reported", async () => {
+  // 1.18.32 ends a run with `session.status {idle}` and `session.idle`; 1.18.5
+  // after an abort with `session.idle` alone (fixtures README observation 6).
+  for (const idle of ["session.status", "session.idle"] as const) {
+    const harness = makeHarness();
+    const session = await startSession(harness);
+    const sessionId = session.sessionId;
+    const stopped = await turnStreaming(harness, session);
+    await session.interruptTurn(stopped.turnId);
+    // The stopped run's teardown, then a real new run — which ends, with no echo.
+    pushAll(harness.fake, [
+      ...stoppedRunLeftovers(sessionId, stopped),
+      { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+      idle === "session.status"
+        ? { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } }
+        : { type: "session.idle", properties: { sessionID: sessionId } }
+    ]);
+    await drainedWith(harness, sessionId, `after the new run (${idle})`);
+    const fed = harness.events.length;
+    harness.fake.push({
+      type: "session.error",
+      properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } }
+    });
+    const reported = await waitFor(harness, "runtime.error", (event) => harness.events.indexOf(event) >= fed);
+    assert.equal((reported as Extract<RuntimeEvent, { type: "runtime.error" }>).payload.message, "Aborted", idle);
+    await session.stop({ reason: "test", hostInitiated: true });
+    harness.dispose();
+  }
+});
+
 test("after a Stop, a busy from before the stopped run's idle ends nothing: a reply to an unclaimed prompt after it still opens no turn", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);

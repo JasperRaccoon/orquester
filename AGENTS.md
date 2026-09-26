@@ -1166,44 +1166,46 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   sending it) or one a turn already claimed is that turn's; a reply to any other prompt is claimed
   by the turn running when it begins (the server answers a prompt that arrives mid-run in the same
   run, `ensureRunning`), and while none runs it opens the WOKEN turn — `turn.started` named by the
-  prompt's id, as a live turn is by its prompt (a rewind finds it), before any row of the reply,
-  and a `turn-woken` signal for the session's record. From there it is any turn: the run's idle
-  settles it, a `session.error` fails it, a Stop aborts it, the session's stop closes it, a
-  restart's reconcile settles it, and a user message steers it — never Claude's auto-close of a
-  synthetic turn: this run is live, and the prompt joins it. Its steps are its own. Only with a run
-  behind it — the parent's `busy` since its last `idle` (`parentBusy`; a reconnect clears it): with
-  none no `idle` would settle the turn and `turn.started` never arms the watchdog, so it would hold
-  a deploy's drain. A compaction's summary (`summary: true`) claims its prompt but never joins
+  prompt's id, as a live turn is by its prompt (a rewind finds it), before any row of the reply, and
+  a `turn-woken` signal for the session's record. From there it is any turn: the run's idle settles
+  it, a `session.error` fails it, a Stop aborts it, the session's stop closes it, a restart's
+  reconcile settles it, and a user message steers it — never Claude's auto-close of a synthetic
+  turn: this run is live, and the prompt joins it. Its steps are its own. Only with a run behind it
+  — the parent's `busy` since its last `idle` (`parentBusy`; a reconnect clears it): with none no
+  `idle` would settle the turn and `turn.started` never arms the watchdog, so it would hold a
+  deploy's drain. A compaction's summary (`summary: true`) claims its prompt but never joins
   `promptMessageIds` (off the meter): the host's own `/compact` stays turnless (`compact()` holds
   `hostCompacting` up across `summarize`), a woken run that compacts FIRST (its context already
   full) opens the turn at its summary. Never opened for a reply that already ended (a fork copies
   completed messages — fixture 10; a rewind also claims every prompt its fork copied) or output
-  after an interruption (the demux drops it first) — a guard every path a LATER turn settles by
-  now ends (`endInterruptionBefore`): only `completeTurn` did, so a later turn that failed (a rate
+  after an interruption (the demux drops it first) — a guard every path a LATER turn settles by now
+  ends (`endInterruptionBefore`): only `completeTurn` did, so a later turn that failed (a rate
   limit) left the Stop behind and every woken reply after it was dropped. A NEW run ends it too: a
   `busy` once the interrupt is over and the parent has said idle since it began
   (`endInterruptionAtNewRun`, `idleAfterInterrupt`; checked again as the interrupt ends, for a
-  `busy` the stream delivered before the abort answered) — 1.18.32 publishes a cancelled run's
-  idle only after its fiber ended, so nothing of the stopped run follows it (README observation
-  29), and a background answer injected after the abort starts the parent again: that run's reply
-  used to be dropped with the leftovers, its requests shown to nobody's turn; it now gets its woken
-  turn. A `busy` with no idle since ends nothing (the stopped run wrote one at the top of every
-  step), and a user message's part is never dropped (an injected answer is a run's result). The
-  child's end always
-  precedes the answer's prompt (the runner publishes its idle before resolving its run), so neither
-  it nor the answer's result ever rides the woken turn (README observation 27). The replay harness
-  claims the host's prompt ids up front, and models `hostCompacting`, for the same reason
-  `sendTurn` claims first: a blocking `/command` or `summarize` is recorded after its frames. (4)
-  A background run OUTLIVES a turn that fails on its own (a `session.error`, a rate limit), as a
-  Claude background agent outlives its parent's turn: 1.18.32 cancels a background job only
-  through `SessionRunState.cancel` — the `abort` route, which a Stop, the session's stop and a
+  `busy` the stream delivered before the abort answered) — 1.18.32 publishes a cancelled run's idle
+  only after its fiber ended, so nothing of the stopped run follows it (README observation 29), and
+  a background answer injected after the abort starts the parent again: that run's reply used to be
+  dropped with the leftovers, its requests shown to nobody's turn; it now gets its woken turn. A
+  `busy` with no idle since ends nothing (the stopped run wrote one at the top of every step), and
+  once the boundary ends an interruption, one abort error until the parent's next idle is an echo of
+  that abort (`abortEchoExpected`: the run the boundary took for live may be the abort's after all —
+  the natural-idle race — and its `MessageAbortedError` failed the woken turn or read the session
+  `error`), and a user message's part is never dropped (an injected answer is a run's result). The
+  child's end always precedes the answer's prompt (the runner publishes its idle before resolving
+  its run), so neither it nor the answer's result ever rides the woken turn (README observation 27).
+  The replay harness claims the host's prompt ids up front, and models `hostCompacting`, for the
+  same reason `sendTurn` claims first: a blocking `/command` or `summarize` is recorded after its
+  frames. (4) A background run OUTLIVES a turn that fails on its own (a `session.error`, a rate
+  limit), as a Claude background agent outlives its parent's turn: 1.18.32 cancels a background job
+  only through `SessionRunState.cancel` — the `abort` route, which a Stop, the session's stop and a
   failed admission send — so `failActiveTurn` closes only the runs that fail with it
-  (`closeLiveChildAgents` `scope: "foreground"`: a child whose launch answered in the background,
-  or one inside it, lives on) and returns the session to `ready`, as Claude and Grok do after
-  every settled turn — an `error` session is a dead one to the roster (every running row
-  `interrupted`) and refuses commands until a Stop, which would cancel that job. The turn stays
-  `failed` (the activity ladder still ranks it `error`). Closed, the child read "interrupted"
-  while it worked, left the drain's liveness, and lost its answer as its result. (5) A child
+  (`closeLiveChildAgents` `scope: "foreground"`: a child whose launch answered in the background, or
+  one inside it, lives on) and returns the session to `ready`, as Claude and Grok do after every
+  settled turn — an `error` session is a dead one to the roster (every running row `interrupted`)
+  and refuses commands until a Stop, which would cancel that job. The turn stays `failed` (the
+  activity ladder still ranks it `error`). Closed, the child read "interrupted" while it worked,
+  left the drain's liveness, and lost its answer as its result. (5) A child
   session's question rides no turn, and neither does its resolution (`questionTurnId` in
   `normalize.ts`, Codex's and Grok's rule): a turn's end dismisses every question on it in the log
   only (`settleStrandedQuestions`), and a background child outlives the parent's turn, so its card

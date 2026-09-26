@@ -664,6 +664,14 @@ export interface OpenCodeSessionState {
    * begins and when one ends.
    */
   idleAfterInterrupt: boolean;
+  /**
+   * The interruption ended at a new run's `busy` (`endInterruptionAtNewRun`),
+   * and that run may yet be one the abort cancels: the stream can deliver its
+   * `busy` before the abort's own answer, after an idle that was not the
+   * stopped run's. Its `MessageAbortedError` is then an echo of that abort, not
+   * the provider's failure — dropped once, until the parent's next idle.
+   */
+  abortEchoExpected: boolean;
   promptGeneration: number;
   promptAdmission?: OpenCodePromptAdmission;
   pendingIdleReconciliation?: OpenCodeIdleReconciliation;
@@ -749,6 +757,7 @@ export function createSessionState(input: {
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
     idleAfterInterrupt: false,
+    abortEchoExpected: false,
     promptGeneration: 0,
     textPartsByMessageId: new Map(),
     messageRoleById: new Map(),
@@ -781,6 +790,7 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   state.claimedPromptIds.clear();
   state.parentBusy = false;
   endInterruption(state);
+  state.abortEchoExpected = false;
   state.pendingIdleReconciliation = undefined;
   state.lastSessionErrorMessage = undefined;
   state.lastEmittedTitle = undefined;

@@ -802,12 +802,16 @@ a live run says `busy` again at its next iteration. Never opened: a reply that h
 ended — a fork copies a session's messages whole, completed ones included (fixture 10), and a
 rewind claims every prompt its fork copied, so a copy its dead run never completed opens nothing
 either — and anything that follows an interruption, which the demux drops first. That last guard
-lasts until a later turn settles, by ANY path: a later turn that failed (a rate limit) used to
-leave the Stop's id behind for good (`completeTurn` alone cleared it), and every woken reply after
-it was dropped — never written, the thread idle. Or until a NEW run: a `busy` once the interrupt
-is over and the parent has said idle since it began, which only a run started after the abort can
-send (observation 29) — a background answer injected after the Stop starts the parent again, and
-its reply gets its woken turn.
+lasts until a later turn settles, by ANY path: a later turn that failed (a rate limit) used to leave
+the Stop's id behind for good (`completeTurn` alone cleared it), and every woken reply after it was
+dropped — never written, the thread idle. Or until a NEW run: a `busy` once the interrupt is over
+and the parent has said idle since it began, which only a run started after the abort can send
+(observation 29) — a background answer injected after the Stop starts the parent again, and its
+reply gets its woken turn. That run may still be one the abort cancels — an idle the last run wrote
+just before the Stop can pass for the stopped run's, and the stream can deliver the new `busy`
+before the abort's own answer — so the first `MessageAbortedError` after the boundary, until the
+parent's next idle, is taken for that abort's echo and dropped: it used to fail the woken turn, or
+read the session `error`.
 
 A compaction's summary (`summary: true`, fixture 09) answers no prompt of the conversation: its
 prompt is claimed but never joins `promptMessageIds`, so the summary call stays off the meter and

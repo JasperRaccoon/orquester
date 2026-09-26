@@ -525,6 +525,9 @@ function endInterruptionAtNewRun(state: OpenCodeSessionState): void {
   }
   if (state.idleAfterInterrupt && interruptionLingers(state)) {
     endInterruption(state);
+    // That run may yet be one the abort cancels (the natural-idle race): its
+    // abort error, if it comes, is an echo (`abortEchoExpected`).
+    state.abortEchoExpected = true;
   }
 }
 
@@ -856,6 +859,7 @@ function demux(
       }
       if (status.type === "idle") {
         state.parentBusy = false;
+        state.abortEchoExpected = false;
         noteIdleAfterInterrupt(state);
         if (turnId !== undefined) {
           out.signal({ kind: "status-idle", raw });
@@ -866,6 +870,7 @@ function demux(
 
     case "session.idle": {
       state.parentBusy = false;
+      state.abortEchoExpected = false;
       noteIdleAfterInterrupt(state);
       // After an abort this is the ONLY idle signal — no `session.status`
       // follows (fixtures README observation 6).
@@ -891,6 +896,12 @@ function demux(
           return;
         }
         if (state.interruptedTurnId !== undefined || state.reconcileIdleStatus) {
+          return;
+        }
+        if (state.abortEchoExpected) {
+          // The run a new-run boundary took for live was the abort's after
+          // all: its error echoes that abort, once.
+          state.abortEchoExpected = false;
           return;
         }
       }
