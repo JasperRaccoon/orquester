@@ -197,27 +197,38 @@ export async function recordLeftoverWork(path: string, launch: LeftoverLaunch): 
 
 /**
  * The user ended the thread's session: stop everything its remembered
- * launches left running, each by its own marker in its own sessions, then
- * forget them. Never rejects; what could not be read or signalled is still
- * in Settings → System.
+ * launches left running, each by its own marker in its own sessions — all
+ * launches at once, so a close waits one grace window, not one per launch —
+ * then forget them. Never rejects; what could not be read or signalled is
+ * still in Settings → System.
  */
 export async function sweepLeftoverWork(
   path: string,
   options: Omit<StopLeftoversOptions, "launchId" | "sessions"> = {}
 ): Promise<LeftoverSweepResult> {
   return await serialised(path, async () => {
-    const totals = { found: 0, terminated: 0, killed: 0 };
-    for (const launch of await readLeftoverWork(path)) {
-      try {
-        const result = await stopLeftoverProcesses({ ...options, launchId: launch.launchId, sessions: launch.sessions });
-        totals.found += result.found;
-        totals.terminated += result.terminated;
-        totals.killed += result.killed;
-      } catch {
-        // One launch that cannot be swept never keeps the others running.
-      }
-    }
+    // Every launch at once: each sweep may wait out a SIGTERM grace and then a
+    // SIGKILL's, and one after another eight launches kept a closing tab
+    // waiting eight times as long. Their processes are disjoint — each sweep
+    // takes only its own launch's marker — so nothing is signalled twice.
+    const results = await Promise.all(
+      (await readLeftoverWork(path)).map(async (launch) => {
+        try {
+          return await stopLeftoverProcesses({ ...options, launchId: launch.launchId, sessions: launch.sessions });
+        } catch {
+          // One launch that cannot be swept never keeps the others running.
+          return { found: 0, terminated: 0, killed: 0 };
+        }
+      })
+    );
     await rm(path, { force: true }).catch(() => undefined);
-    return totals;
+    return results.reduce(
+      (totals, result) => ({
+        found: totals.found + result.found,
+        terminated: totals.terminated + result.terminated,
+        killed: totals.killed + result.killed
+      }),
+      { found: 0, terminated: 0, killed: 0 }
+    );
   });
 }

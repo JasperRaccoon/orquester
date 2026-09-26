@@ -161,6 +161,63 @@ test("the sweep stops each launch's work by its own marker and sessions — noth
   await assert.rejects(readFile(path, "utf8"), { code: "ENOENT" });
 });
 
+test("a close sweeps every remembered launch at once: one grace window, not one per launch", async () => {
+  const path = await scratch();
+  const launches = 8;
+  for (let index = 0; index < launches; index += 1) {
+    await recordLeftoverWork(path, {
+      launchId: `l${index}`,
+      recordedAt: `t${index}`,
+      sessions: [{ sid: 100 + index, leaderStarttime: index }]
+    });
+  }
+  // Every launch left a process that ignores SIGTERM: each sweep waits out its grace, then SIGKILLs.
+  const table = new Map<number, { environ: string; starttime: number; sid: number }>(
+    Array.from({ length: launches }, (_, index) => [
+      100 + index,
+      { environ: `${AGENT_LAUNCH_ENV_VAR}=l${index}\0`, starttime: index, sid: 100 + index }
+    ])
+  );
+  const signals: Array<[number, NodeJS.Signals]> = [];
+  let now = 0;
+  let waiting = 0;
+  let mostWaitingAtOnce = 0;
+  const graceMs = 2_000;
+  const result = await sweepLeftoverWork(path, {
+    proc: {
+      pids: async () => await Promise.resolve([...table.keys()]),
+      environ: async (pid) => await Promise.resolve(table.get(pid)?.environ ?? null),
+      stat: async (pid) => {
+        const entry = table.get(pid);
+        return await Promise.resolve(
+          entry === undefined ? null : { starttime: entry.starttime, state: "S", ppid: 1, sid: entry.sid }
+        );
+      },
+      children: async () => await Promise.resolve([])
+    },
+    kill: (pid, signal) => {
+      signals.push([pid, signal]);
+      if (signal === "SIGKILL") table.delete(pid);
+    },
+    now: () => now,
+    // One shared clock: every grace window a sweep waits advances it.
+    sleep: async (ms) => {
+      waiting += 1;
+      mostWaitingAtOnce = Math.max(mostWaitingAtOnce, waiting);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      now += ms;
+      waiting -= 1;
+    },
+    graceMs,
+    pollMs: 50,
+    platform: "linux"
+  });
+  assert.deepEqual(result, { found: launches, terminated: launches, killed: launches });
+  assert.equal(mostWaitingAtOnce, launches, "every launch's grace window runs at the same time");
+  assert.ok(now < 2 * graceMs, `the close waited ${now} ms: one grace window, never ${launches} of them`);
+  assert.equal(table.size, 0);
+});
+
 test("a thread with nothing remembered sweeps nothing, and off Linux nothing is read", async () => {
   const path = await scratch();
   assert.deepEqual(await sweepLeftoverWork(path), { found: 0, terminated: 0, killed: 0 });
