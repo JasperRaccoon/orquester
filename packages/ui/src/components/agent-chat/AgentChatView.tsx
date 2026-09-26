@@ -65,6 +65,13 @@ import { chatEscapeSequenceStep, resolveChatEscape } from "./escape-action";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
+import {
+  EMPTY_DRILL_IN_MEMORY,
+  recallDrillIn,
+  rememberDrillIn,
+  type DrillInMemory,
+  type DrillInMemoryEntry
+} from "./roster/drill-in-memory";
 import { AgentRoster } from "./roster/AgentRoster";
 import { EmptyThreadPanel } from "./EmptyThreadPanel";
 
@@ -153,7 +160,10 @@ function errorText(error: unknown, fallback: string): string {
  * *T3: `apps/web/src/components/ChatView.tsx:9941-9988` — `contentInsetEndAdjustment`.*
  *
  * **The drill-in swaps only the main area.** The composer and roster stay
- * mounted, so the parent can be steered while watching a child (§7.6).
+ * mounted, so the parent can be steered while watching a child (§7.6). One
+ * drill-in mount per agent, opened from what this view remembers of that
+ * agent — its disclosures, reading position and follow — in memory only,
+ * never the thread's §7.2 LRU (`roster/drill-in-memory.ts`).
  *
  * **Placement note (deliberate difference from §7.1's wording).** The spec says
  * one `AgentChatView` instance serves every chat tab in a project. Orquester's
@@ -244,9 +254,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
 
   // --- the subagent drill-in (§7.6) ----------------------------------------
   const [drillInAgentId, setDrillInAgentId] = React.useState<string | null>(null);
+  // What each agent's drill-in was left as — its disclosures, reading
+  // position and follow — so re-opening an agent (Back, an auto-return, a
+  // switch to another agent and back) returns to where the reader was. In
+  // memory only, never the thread's §7.2 LRU, bounded to the agents most
+  // recently opened (`drill-in-memory.ts`).
+  const drillInMemory = React.useRef<DrillInMemory>(EMPTY_DRILL_IN_MEMORY);
+  const rememberDrillInAgent = React.useCallback((agentId: string, entry: DrillInMemoryEntry) => {
+    drillInMemory.current = rememberDrillIn(drillInMemory.current, agentId, entry);
+  }, []);
   // A drill-in belongs to one thread; carrying it across a switch would open a
   // stranger's agent. The hold is exactly the window where that could happen.
-  React.useEffect(() => setDrillInAgentId(null), [sessionId]);
+  // Its memory is the thread's too.
+  React.useEffect(() => {
+    setDrillInAgentId(null);
+    drillInMemory.current = EMPTY_DRILL_IN_MEMORY;
+  }, [sessionId]);
   // Auto-return: an agent that SETTLES (finishes, fails, is stopped) while its
   // drill-in is open hands the view back to the thread — the parent is where
   // the result lands. Only a live→settled transition observed here does it,
@@ -747,6 +770,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-950">
           {drillInAgentId ? (
             <AgentDrillIn
+              // One mount per agent: each opens from its own memory.
+              key={drillInAgentId}
+              remembered={recallDrillIn(drillInMemory.current, drillInAgentId)}
+              onRemember={rememberDrillInAgent}
               sessionId={sessionId}
               agentId={drillInAgentId}
               roster={roster.agents}

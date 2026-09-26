@@ -4338,6 +4338,13 @@ is left (its launch prompts and the live placeholders aside), the drill-in says 
 have left this thread's window." under the prompt, never that it "has not reported anything yet"; a
 settled shell says its output has (`timeline/empty-notice.ts`). Paging an agent's older rows from
 the thread index, as the MCP's drill-in does (`apps/daemon/src/mcp/history.ts`), is a follow-up.*
+*Built (2026-09-27): re-opening an agent returns to where the reader was. `AgentChatView` keeps a
+per-agent memory — each agent's disclosures (its closed folds and a shell's closed rows included),
+reading position and follow — in memory only, NEVER the thread's §7.2 LRU (the refusal below
+stands), per thread (a switch drops it) and bounded to the 50 agents most recently opened
+(`roster/drill-in-memory.ts`). The drill-in mounts once per agent, so A → B saves A's and opens B
+from B's own entry; a position left mid-list is restored with follow off (a re-pin would carry the
+list over it), one left at the end, or none, opens at the end, following.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

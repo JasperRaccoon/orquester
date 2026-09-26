@@ -40,6 +40,7 @@ import type {
   RememberedTimelinePosition
 } from "../../lib/agent-chat/contracts";
 import type { FullOutputSource } from "../../lib/agent-chat/full-output";
+import type { DrillInMemoryEntry } from "./roster/drill-in-memory";
 import type { RewindTarget } from "../../lib/agent-chat/rewind.logic";
 
 /**
@@ -414,6 +415,17 @@ export interface AgentDrillInProps {
    */
   errorBanner?: string | null | undefined;
   onDismissErrorBanner?: (() => void) | undefined;
+  /**
+   * What the host remembered of this agent (`roster/drill-in-memory.ts`): the
+   * drill-in opens from it — its disclosures, and a reading position left
+   * mid-list, with follow off. The host keys the component by `agentId`, so
+   * every agent opens from its own entry. Absent: at the end, following.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  remembered?: DrillInMemoryEntry | null | undefined;
+  /** Every change of the agent's disclosures, follow or reading position: the host's memory. */
+  onRemember?: ((agentId: string, entry: DrillInMemoryEntry) => void) | undefined;
 }
 
 export interface ChatStatusLineProps {

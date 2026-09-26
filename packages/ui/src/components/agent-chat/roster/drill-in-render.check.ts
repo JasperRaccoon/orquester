@@ -416,5 +416,40 @@ const shellGone = render({ sessionId: exitedShellSession, agentId: SHELL, roster
 assert.ok(shellGone.includes("Its output has left this thread&#x27;s window."), shellGone);
 assert.ok(!shellGone.includes("No output yet."));
 
+// ---------------------------------------------------------------------------
+// Re-opening an agent returns to where the reader was (S12)
+// ---------------------------------------------------------------------------
+
+const rememberedEntry = {
+  disclosures: {
+    expandedTurnIds: [],
+    expandedGroupIds: [],
+    expandedAgentIds: [],
+    expandedReasoningIds: [],
+    toolOutputOffsets: {}
+  },
+  collapsedTurnIds: ["turn-1"],
+  collapsedShellRowIds: [],
+  position: { rowId: "grep-1", offsetWithinRow: 0, scrollOffset: 120, atEnd: false },
+  follow: false
+};
+const reopenedSession = await seededThread({ items: [answer], roster: [promptedAgent] });
+const reopened = render({
+  sessionId: reopenedSession,
+  agentId: PROMPTED,
+  roster: [promptedAgent],
+  bottomInset: 0,
+  onBack: NOOP,
+  remembered: rememberedEntry
+});
+assert.ok(reopened.includes("Scroll to end"), "left mid-list, it reopens there — not following, the pill on offer");
+assert.match(
+  reopened,
+  /data-timeline-row-kind="turn-fold"[^]*?aria-expanded="false"/,
+  "and the fold the reader closed is closed"
+);
+const fresh2 = render({ sessionId: reopenedSession, agentId: PROMPTED, roster: [promptedAgent], bottomInset: 0, onBack: NOOP });
+assert.ok(!fresh2.includes("Scroll to end"), "never opened before: at its end, following");
+
 resetThreadStores();
 console.log("agent-chat drill-in render checks passed");

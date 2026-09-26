@@ -59,22 +59,15 @@ import { cn } from "../../../lib/cn";
 import type { AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { collapsedTurnsAfter } from "../../../lib/agent-chat/drill-in.logic";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
-import type { AgentDrillInProps } from "../contracts";
+import type { AgentDrillInProps, TimelineScrollPosition } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import { backgroundShellDisclosureIds, backgroundShellRows } from "./background-shell";
 import { drillInTimelineCallbacks } from "./drill-in-callbacks";
+import { drillInOpening } from "./drill-in-memory";
 import { rosterRowIcon } from "./AgentRosterRow";
 import { agentActivityText, rosterRowMetrics } from "./format";
 import { isBackgroundShellRow, rosterRowTicks, rosterRowVisual } from "./roster-rows";
-
-const EMPTY_DISCLOSURES: DisclosureState = {
-  expandedTurnIds: [],
-  expandedGroupIds: [],
-  expandedAgentIds: [],
-  expandedReasoningIds: [],
-  toolOutputOffsets: {}
-};
 
 const EMPTY_ROWS: AgentChatTimelineRow[] = [];
 
@@ -95,27 +88,29 @@ export function AgentDrillIn({
   onOpenFile,
   onOpenAgent,
   errorBanner = null,
-  onDismissErrorBanner
+  onDismissErrorBanner,
+  remembered = null,
+  onRemember
 }: AgentDrillInProps): React.ReactElement {
-  const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
+  // Opened once, from what the host remembered of THIS agent: the host keys
+  // this component by the agent, so A → B mounts B from B's own entry
+  // (`drill-in-memory.ts`) and nothing of A's carries over.
+  const [opening] = React.useState(() => drillInOpening(remembered));
+  const [disclosures, setDisclosures] = React.useState<DisclosureState>(opening.disclosures);
   // Live-follow for the child's own list (§7.3): armed on entry, disarmed by
   // the user's scroll, re-armed by the band at the end or the pill. The
   // parent's flag lives in its slice, and a child's list is not the thread's,
-  // so it is kept here — and another agent opens at its end, following again.
-  // Pinned to `true` with every change dropped, each streamed row pulled a
-  // reader back down and the pill never showed.
-  const [follow, setFollow] = React.useState(true);
-  const [followAgentId, setFollowAgentId] = React.useState(agentId);
-  if (followAgentId !== agentId) {
-    setFollowAgentId(agentId);
-    setFollow(true);
-  }
+  // so it is kept here. Pinned to `true` with every change dropped, each
+  // streamed row pulled a reader back down and the pill never showed. Off
+  // when the agent reopens where the reader left it mid-list, or the first
+  // re-pin would carry the list to its end over the restore.
+  const [follow, setFollow] = React.useState(opening.follow);
   /**
    * Turn folds the user closed. Folds start open — the child's rows are why
    * the view was opened — so what is kept is what was closed, as for a
    * shell's rows below, and a collapse sticks as the agent keeps working.
    */
-  const [collapsedTurnIds, setCollapsedTurnIds] = React.useState<readonly string[]>(EMPTY_ROW_IDS);
+  const [collapsedTurnIds, setCollapsedTurnIds] = React.useState<readonly string[]>(opening.collapsedTurnIds);
   const projectionDisclosures = React.useMemo(
     () => ({ expandedGroupIds: disclosures.expandedGroupIds, collapsedTurnIds }),
     [disclosures.expandedGroupIds, collapsedTurnIds]
@@ -155,8 +150,27 @@ export function AgentDrillIn({
     [background, rows]
   );
   /** Default-open rows the user closed; they stay closed as output keeps coming. */
-  const [collapsedShellRowIds, setCollapsedShellRowIds] =
-    React.useState<readonly string[]>(EMPTY_ROW_IDS);
+  const [collapsedShellRowIds, setCollapsedShellRowIds] = React.useState<readonly string[]>(
+    opening.collapsedShellRowIds
+  );
+
+  // The host's memory of this agent, kept current: every change of what is
+  // open and of the follow, and every published reading position. Memory
+  // only — a drill-in never writes the thread's §7.2 LRU.
+  const position = React.useRef(opening.position);
+  const latest = React.useRef({ disclosures, collapsedTurnIds, collapsedShellRowIds, follow });
+  latest.current = { disclosures, collapsedTurnIds, collapsedShellRowIds, follow };
+  const remember = React.useCallback(() => {
+    onRemember?.(agentId, { ...latest.current, position: position.current });
+  }, [agentId, onRemember]);
+  React.useEffect(remember, [disclosures, collapsedTurnIds, collapsedShellRowIds, follow, remember]);
+  const onScrollPositionChange = React.useCallback(
+    (next: TimelineScrollPosition) => {
+      position.current = next;
+      remember();
+    },
+    [remember]
+  );
 
   const openTurnIds = live.openTurnIds;
   const onDisclosureChange = React.useCallback(
@@ -291,6 +305,10 @@ export function AgentDrillIn({
         rows={rows}
         follow={follow}
         onFollowChange={setFollow}
+        // Where the reader left this agent, restored on mount; published back
+        // into the host's memory, never the thread's LRU.
+        scroll={opening.position}
+        onScrollPositionChange={onScrollPositionChange}
         disclosures={timelineDisclosures}
         onDisclosureChange={onDisclosureChange}
         bottomInset={bottomInset}
