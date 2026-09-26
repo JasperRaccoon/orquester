@@ -35,6 +35,7 @@ import {
   openComposerControl,
   stageComposerAttachment
 } from "./composer/composer-bridge";
+import { timelineSkillNames } from "./composer/composer-menu";
 import { rewindPickerEnabled } from "./composer/RewindControl";
 import { useComposerSending } from "./composer/use-composer-sending";
 import {
@@ -185,6 +186,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const roster = useAgentChatRoster(sessionId);
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
+  // The skills a sent `$mention` re-chips against (§4.6.7): the ones the
+  // composer offers for this thread's cwd — in the thread and in a drill-in.
+  const skills = React.useMemo(() => timelineSkillNames(provider, session.cwd), [provider, session.cwd]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   // §3.4's account chip: a proxy launcher may only pin accounts SEEDED into
   // the model proxy, the same rule the "+" menu's launch chips apply.
@@ -809,6 +813,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 // the overlay stays live over a child.
                 errorBanner={paintOnly ? null : slice.errorBanner}
                 onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
+                skills={skills}
               />
             </DrillInErrorBoundary>
           ) : (
@@ -858,6 +863,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
               roster={roster.agents}
               projectPath={projectPath}
+              skills={skills}
               scroll={paintOnly ? null : scrollPosition}
               onScrollPositionChange={paintOnly ? noop : rememberScrollPosition}
               historyHasOlder={historyHasOlder}

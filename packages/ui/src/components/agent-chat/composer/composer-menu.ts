@@ -18,7 +18,7 @@
  *    command row knows only a name.
  */
 
-import type { Skill, SlashCommand } from "@orquester/api/agent-chat";
+import type { ProviderSnapshot, Skill, SlashCommand } from "@orquester/api/agent-chat";
 
 // ---------------------------------------------------------------------------
 // Items
@@ -79,6 +79,35 @@ function dedupeSkillsByName(skills: readonly Skill[]): Skill[] {
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * The skills a thread works with (§4.6.4): its cwd's overlay where the
+ * overlay lists any, else the provider's machine-level catalogue. Per array
+ * and only when non-empty — an overlay can carry skills and drop commands
+ * (Claude's did), and an empty one is never a blank catalogue. The composer's
+ * `$` and `/` menus read it, and so does the timeline's re-chipping
+ * ({@link timelineSkillNames}), so a sent mention chips in exactly the cases
+ * the composer offered it.
+ */
+export function workspaceSkills(
+  provider: Pick<ProviderSnapshot, "skills" | "workspaceSnapshots"> | null | undefined,
+  cwd: string | null | undefined
+): readonly Skill[] {
+  const overlay = cwd ? provider?.workspaceSnapshots?.find((snapshot) => snapshot.cwd === cwd) : undefined;
+  return overlay?.skills?.length ? overlay.skills : (provider?.skills ?? []);
+}
+
+/**
+ * The skill names a sent message's `$mentions` are re-chipped against
+ * (§4.6.7, `ChatTimelineProps.skills`) — the thread's and a drill-in's alike —
+ * each once.
+ */
+export function timelineSkillNames(
+  provider: Pick<ProviderSnapshot, "skills" | "workspaceSnapshots"> | null | undefined,
+  cwd: string | null | undefined
+): string[] {
+  return [...new Set(workspaceSkills(provider, cwd).map((skill) => skill.name))];
 }
 
 /** `$` always lists skills; `/` lists them only when the setting is on. */

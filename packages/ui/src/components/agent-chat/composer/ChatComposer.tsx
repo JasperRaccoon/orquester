@@ -57,6 +57,7 @@ import {
   buildSlashMenuItems,
   compactCommandAvailable,
   menuItemReplacement,
+  workspaceSkills,
   type ComposerMenuItem
 } from "./composer-menu";
 import {
@@ -789,9 +790,7 @@ export function ChatComposer({
   const slashCommands = workspaceSnapshot?.slashCommands?.length
     ? workspaceSnapshot.slashCommands
     : (provider?.slashCommands ?? []);
-  const skills = workspaceSnapshot?.skills?.length
-    ? workspaceSnapshot.skills
-    : (provider?.skills ?? []);
+  const skills = workspaceSkills(provider, root);
   const models = provider?.models ?? [];
   const selectedModel = resolveSelectedModel(models, modelSelection);
   const selectDescriptors = optionDescriptors(selectedModel).filter(

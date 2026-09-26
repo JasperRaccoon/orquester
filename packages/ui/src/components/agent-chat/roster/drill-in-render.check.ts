@@ -451,5 +451,25 @@ assert.match(
 const fresh2 = render({ sessionId: reopenedSession, agentId: PROMPTED, roster: [promptedAgent], bottomInset: 0, onBack: NOOP });
 assert.ok(!fresh2.includes("Scroll to end"), "never opened before: at its end, following");
 
+// ---------------------------------------------------------------------------
+// Skills chips (§4.6.7): a `$mention` re-chipped from the stored text
+// ---------------------------------------------------------------------------
+
+const mentioning = await seededThread({
+  items: [promptedLaunch({ prompt: "Run $review on the parser change." }, "launch-skill")],
+  roster: [promptedAgent]
+});
+const chipped = render({
+  sessionId: mentioning,
+  agentId: PROMPTED,
+  roster: [promptedAgent],
+  bottomInset: 0,
+  onBack: NOOP,
+  skills: ["review"]
+});
+assert.ok(chipped.includes('title="Skill: review"'), `a known skill's mention is a chip: ${chipped}`);
+const unchipped = render({ sessionId: mentioning, agentId: PROMPTED, roster: [promptedAgent], bottomInset: 0, onBack: NOOP });
+assert.ok(!unchipped.includes('title="Skill: review"'), "no catalogue, no chip");
+
 resetThreadStores();
 console.log("agent-chat drill-in render checks passed");

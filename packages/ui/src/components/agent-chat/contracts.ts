@@ -150,8 +150,9 @@ export interface ChatTimelineProps {
   /**
    * The current per-cwd skill names, so a sent message's `$mentions` are
    * **re-chipped from the stored text** (§4.6.7) — no `isCommand` flag is
-   * persisted, the text is the record. Wire it from the provider snapshot
-   * (`provider.skills.map((skill) => skill.name)`); empty means no chips.
+   * persisted, the text is the record. Wired from the provider snapshot
+   * (`timelineSkillNames`: the thread's cwd's overlay, else the machine-level
+   * catalogue — what the composer offers); empty means no chips.
    *
    * *Added by W12; additive to the foundation's contract.*
    */
@@ -426,6 +427,14 @@ export interface AgentDrillInProps {
   remembered?: DrillInMemoryEntry | null | undefined;
   /** Every change of the agent's disclosures, follow or reading position: the host's memory. */
   onRemember?: ((agentId: string, entry: DrillInMemoryEntry) => void) | undefined;
+  /**
+   * The thread's skill names, so a `$mention` in the child's rows — its
+   * launch prompt above all — re-chips as it does in the thread
+   * (`ChatTimelineProps.skills`). Absent means no chips.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  skills?: readonly string[] | undefined;
 }
 
 export interface ChatStatusLineProps {

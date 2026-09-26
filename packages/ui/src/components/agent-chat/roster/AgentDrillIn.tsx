@@ -90,7 +90,8 @@ export function AgentDrillIn({
   errorBanner = null,
   onDismissErrorBanner,
   remembered = null,
-  onRemember
+  onRemember,
+  skills
 }: AgentDrillInProps): React.ReactElement {
   // Opened once, from what the host remembered of THIS agent: the host keys
   // this component by the agent, so A → B mounts B from B's own entry
@@ -302,6 +303,7 @@ export function AgentDrillIn({
         readOnly
         roster={roster}
         projectPath={projectPath}
+        skills={skills}
         rows={rows}
         follow={follow}
         onFollowChange={setFollow}

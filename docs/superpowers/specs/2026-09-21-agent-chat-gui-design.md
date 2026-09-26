@@ -2258,6 +2258,12 @@ the parent.*
   stored text by the same tokeniser the composer uses. No `isCommand` flag is persisted.
   *T3: `packages/shared/src/composerInlineTokens.ts:100-127` + `apps/web/src/components/ChatView.tsx:735-738` — chips and
   the compaction marker are both derived from the text.*
+  *Built (2026-09-27): the chips render. `AgentChatView` never handed the timeline the catalogue the
+  tokeniser matches against, so no `$mention` was ever chipped, in either view; it now passes the
+  names the composer offers for the thread's cwd — the cwd's overlay where it lists skills, else the
+  machine-level catalogue, one rule the composer reads too (`workspaceSkills` /
+  `timelineSkillNames`, `composer/composer-menu.ts`) — to the thread's timeline and a drill-in's,
+  whose launch prompt re-chips the same way.*
 
 #### 4.6.8 Skills
 
