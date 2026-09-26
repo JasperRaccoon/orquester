@@ -44,8 +44,11 @@ import {
   emitTerminalQuestion,
   hasLiveChildAgents,
   normalizeOpenCodeEvent,
+  openHeldRequest,
+  openPermissionCard,
   type NormalizeContext,
-  type NormalizerSignal
+  type NormalizerSignal,
+  type OpenCodeHeldRequest
 } from "./normalize.ts";
 import {
   asRawEvent,
@@ -724,6 +727,10 @@ export class OpenCodeThreadSession {
         );
         return;
       }
+      case "request-after-interrupt": {
+        void this.judgeHeldRequest(signal.held, signal.raw);
+        return;
+      }
       default: {
         const exhaustive: never = signal;
         void exhaustive;
@@ -1144,27 +1151,131 @@ export class OpenCodeThreadSession {
         requestId: request.id,
         error: error instanceof Error ? error.message : String(error)
       });
-      // Fall back to the dialog. The id stays resolved so a recovered copy of
-      // this ask cannot reopen after the user answers.
+      if (this.closed) {
+        // The stop settled every card it knew of; a card now would outlive it.
+        return;
+      }
+      // Fall back to the dialog, built by exactly the code the supervised path
+      // uses and never answered `once` again — after an interrupt, held for
+      // the server's word on its asker like any request (`openPermissionCard`).
       this.state.autoRepliedRequestIds.delete(request.id);
       this.state.resolvedRequestIds.delete(request.id);
-      const previousMode = this.state.runtimeMode;
-      // Re-run the ask through the normaliser with the supervised branch, so
-      // the card is built by exactly the code the supervised path uses.
-      this.state.runtimeMode = "approval-required";
-      try {
-        const frame: OpenCodeRawEvent = asRawEvent(raw) ?? {
-          type: "permission.asked",
-          properties: request
-        };
-        const result = normalizeOpenCodeEvent(this.state, frame, this.normalizeContext());
+      const result = openPermissionCard(this.state, request, raw, this.normalizeContext());
+      for (const event of result.events) {
+        this.emit(event);
+      }
+      for (const signal of result.signals) {
+        this.handleSignal(signal);
+      }
+    }
+  }
+
+  /**
+   * A request that reached the thread while an interrupt was ending its runs,
+   * or after one while no turn runs (`holdsRequests` in `normalize.ts`). Its
+   * asker may be one the abort ended — its frame reached the stream late — or
+   * one the abort never reached, which waits on it for good unless it is shown.
+   * So once the interrupt in flight is over, the server is asked
+   * (`askerWaits`): a request whose asker still waits is shown as any would be
+   * (`openHeldRequest`); one whose asker is gone writes no card and is
+   * rejected on the wire, which releases what an older server kept listed
+   * (fixtures README observation 11). A request answered elsewhere meanwhile
+   * is dropped from the hold by its terminal frame, and nothing is done here.
+   */
+  private async judgeHeldRequest(held: OpenCodeHeldRequest, raw: unknown): Promise<void> {
+    const requestId = held.request.id;
+    for (let round = 0; ; round += 1) {
+      // The abort in flight is what ends an asker: ask only after it.
+      await this.state.cancellation?.completion.catch(() => undefined);
+      if (this.closed || !this.state.heldRequestIds.has(requestId)) {
+        return;
+      }
+      const waits = await this.askerWaits(held);
+      if (this.closed || !this.state.heldRequestIds.has(requestId)) {
+        return;
+      }
+      // An interrupt that began while the server answered may end it too.
+      if (this.state.cancellation !== undefined && round < 2) {
+        continue;
+      }
+      this.state.heldRequestIds.delete(requestId);
+      if (waits) {
+        const result = openHeldRequest(this.state, held, raw, this.normalizeContext());
         for (const event of result.events) {
           this.emit(event);
         }
-      } finally {
-        this.state.runtimeMode = previousMode;
+        for (const signal of result.signals) {
+          this.handleSignal(signal);
+        }
+        return;
+      }
+      // Nothing waits on it: no card, and its closing frame writes no row.
+      this.state.emittedTerminalRequestIds.add(requestId);
+      this.deps.ctx.logger.info("opencode request after an interrupt: its asker is gone; rejecting it", {
+        threadId: this.state.threadId,
+        requestId,
+        sessionId: held.request.sessionID
+      });
+      await this.rejectOnTheWire(held.type, requestId);
+      return;
+    }
+  }
+
+  /**
+   * Whether a held request's asker still waits on it, on the server's word
+   * alone. Gone when the server no longer lists the request — 1.18.32 drops an
+   * ask whose fiber an abort interrupted (fixtures README observation 29) — or
+   * when the asker's session runs nothing, so nothing can wait on it: an older
+   * server keeps such an ask listed (fixture 06), idle. A read that fails
+   * decides nothing, and the request is shown: a card the user answers — a
+   * reply to a gone request settles locally (`respondToApproval`,
+   * `respondToUserInput`) — never a reject sent on their behalf, which 1.18.32
+   * applies to every other ask of that session too (`Permission.reply`).
+   */
+  private async askerWaits(held: OpenCodeHeldRequest): Promise<boolean> {
+    const [listed, statuses] = await Promise.all([
+      this.client
+        .get<unknown>(
+          held.type === "permission" ? openCodeRoutes.permissions : openCodeRoutes.questions,
+          { timeoutMs: 2_000 }
+        )
+        .then(
+          (rows) => (Array.isArray(rows) ? (rows as unknown[]) : undefined),
+          () => undefined
+        ),
+      this.client
+        .get<SessionStatusMap>(openCodeRoutes.sessionStatus, { timeoutMs: 2_000 })
+        .then(
+          (map) => (isRecord(map) ? map : undefined),
+          () => undefined
+        )
+    ]);
+    if (
+      listed !== undefined &&
+      !listed.some((row) => isRecord(row) && row.id === held.request.id)
+    ) {
+      return false;
+    }
+    if (statuses !== undefined) {
+      // A missing entry IS idle (fixtures README observation 7).
+      const status = statuses[held.request.sessionID];
+      if (status === undefined || status.type === "idle") {
+        return false;
       }
     }
+    return true;
+  }
+
+  /** Release a request nobody will answer: a permission `reject`, a question's reject route. */
+  private async rejectOnTheWire(type: OpenCodeHeldRequest["type"], requestId: string): Promise<void> {
+    await (
+      type === "permission"
+        ? this.client.post<unknown>(openCodeRoutes.permissionReply(requestId), {
+            timeoutMs: 2_000,
+            body: { reply: "reject" }
+          })
+        : this.client.post<unknown>(openCodeRoutes.questionReject(requestId), { timeoutMs: 2_000 })
+    ).catch(() => undefined);
   }
 
   /**
@@ -1404,17 +1515,10 @@ export class OpenCodeThreadSession {
       this.emit(event);
     }
     await forEachLimited([...permissions], 8, async (requestId) => {
-      await this.client
-        .post<unknown>(openCodeRoutes.permissionReply(requestId), {
-          timeoutMs: 2_000,
-          body: { reply: "reject" }
-        })
-        .catch(() => undefined);
+      await this.rejectOnTheWire("permission", requestId);
     });
     await forEachLimited([...questions], 8, async (requestId) => {
-      await this.client
-        .post<unknown>(openCodeRoutes.questionReject(requestId), { timeoutMs: 2_000 })
-        .catch(() => undefined);
+      await this.rejectOnTheWire("question", requestId);
     });
   }
 

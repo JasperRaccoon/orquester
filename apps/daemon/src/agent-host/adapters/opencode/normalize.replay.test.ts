@@ -1899,6 +1899,36 @@ test("output that follows an interruption opens nothing, a woken reply's include
   assert.equal(run.state.activeTurnId, undefined);
 });
 
+test("a request after an interruption waits for the server's word on its asker: no card, one signal; a repeat adds nothing, an answer meanwhile no row", () => {
+  const run = liveSession("ses_parent");
+  run.state.activeTurnId = undefined;
+  run.state.interruptedTurnId = "turn-stopped";
+  run.state.reconcileIdleStatus = true;
+  const asks: OpenCodeRawEvent[] = [
+    {
+      type: "permission.asked",
+      properties: { id: "per_1", sessionID: "ses_parent", permission: "bash", patterns: ["ls"] }
+    },
+    {
+      type: "question.asked",
+      properties: { id: "que_1", sessionID: "ses_parent", questions: [{ question: "Which?", header: "Which", options: [] }] }
+    }
+  ];
+  for (const ask of asks) {
+    const first = normalizeOpenCodeEvent(run.state, ask, run.ctx);
+    assert.deepEqual(first.events, [], `${ask.type}: nothing is shown`);
+    assert.deepEqual(first.signals.map((signal) => signal.kind), ["request-after-interrupt"]);
+    const again = normalizeOpenCodeEvent(run.state, ask, run.ctx);
+    assert.deepEqual([again.events, again.signals], [[], []], `${ask.type}: a repeated frame adds nothing`);
+  }
+  const answered = feed(run, [
+    { type: "permission.replied", properties: { sessionID: "ses_parent", requestID: "per_1", reply: "once" } },
+    { type: "question.rejected", properties: { sessionID: "ses_parent", requestID: "que_1" } }
+  ]).flat();
+  assert.deepEqual(answered, [], "answered elsewhere while held: no card was written, so no row closes one");
+  assert.deepEqual([...run.state.heldRequestIds], []);
+});
+
 // ---------------------------------------------------------------------------
 // A running command's output streams as it grows (fixtures README obs. 28)
 // ---------------------------------------------------------------------------

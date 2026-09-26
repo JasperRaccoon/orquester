@@ -647,6 +647,14 @@ export interface OpenCodeSessionState {
   resolvedRequestIds: Set<string>;
   emittedTerminalRequestIds: Set<string>;
   autoRepliedRequestIds: Set<string>;
+  /**
+   * Requests that reached the thread while an interrupt was ending its runs,
+   * or after one while no turn runs: shown — or answered — only once the
+   * server has said whether their asker still waits (`holdsRequests` in
+   * `normalize.ts`, `judgeHeldRequest` in `session.ts`). A request answered
+   * elsewhere meanwhile leaves the set with no row: it never had a card.
+   */
+  heldRequestIds: Set<string>;
   /** Child-session request ids awaiting an ancestry probe. */
   requestRelationRetries: Set<string>;
 
@@ -695,6 +703,7 @@ export function createSessionState(input: {
     resolvedRequestIds: new Set(),
     emittedTerminalRequestIds: new Set(),
     autoRepliedRequestIds: new Set(),
+    heldRequestIds: new Set(),
     requestRelationRetries: new Set(),
     stopped: false
   };

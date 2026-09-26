@@ -109,7 +109,23 @@ export type NormalizerSignal =
    * woken by a background `task` call's answer — and opened turn `turnId`
    * (`claimReply`); its `turn.started` has already been emitted.
    */
-  | { kind: "turn-woken"; turnId: string };
+  | { kind: "turn-woken"; turnId: string }
+  /**
+   * A request reached the thread while an interrupt was ending its runs, or
+   * after one while no turn runs (`holdsRequests`): nothing was shown or
+   * answered, and nothing will be until the server says whether its asker
+   * still waits (`judgeHeldRequest` in `session.ts`).
+   */
+  | { kind: "request-after-interrupt"; held: OpenCodeHeldRequest; raw: unknown };
+
+/**
+ * A request held for the server's word on its asker. `cardOnly`: full access
+ * already tried to answer it and the server refused (`autoReplyOnce` in
+ * `session.ts`), so if it is shown it is the card, never another `once`.
+ */
+export type OpenCodeHeldRequest =
+  | { type: "permission"; request: OpenCodePermissionRequest; cardOnly?: boolean }
+  | { type: "question"; request: OpenCodeQuestionRequest };
 
 export interface NormalizeResult {
   events: RuntimeEvent[];
@@ -425,9 +441,7 @@ export function normalizeOpenCodeEvent(
   // Parent output that arrives after an interruption must not reopen the turn.
   const suppressInterruptedOutput =
     isParentEvent &&
-    ((state.activeTurnId === undefined &&
-      (state.interruptedTurnId !== undefined || state.reconcileIdleStatus)) ||
-      state.awaitingBusyAfterInterruption) &&
+    interruptionLingers(state) &&
     (raw.type === "message.part.delta" ||
       raw.type === "message.part.updated" ||
       raw.type === "todo.updated" ||
@@ -446,6 +460,20 @@ export function normalizeOpenCodeEvent(
 
   demux(state, event, raw, out);
   return { events: out.events, signals: out.signals };
+}
+
+/**
+ * Whether what reaches the stream may still be an interrupted run's: no turn
+ * has run since a Stop, or the one sent after it has not said `busy` yet. The
+ * parent's output is dropped then, and a request waits for the server's word
+ * on its asker (`holdsRequests`).
+ */
+function interruptionLingers(state: OpenCodeSessionState): boolean {
+  return (
+    (state.activeTurnId === undefined &&
+      (state.interruptedTurnId !== undefined || state.reconcileIdleStatus)) ||
+    state.awaitingBusyAfterInterruption
+  );
 }
 
 /**
@@ -2000,21 +2028,99 @@ function dropMessageOutputMarks(state: OpenCodeSessionState, messageId: string):
   }
 }
 
+/**
+ * Whether a request arriving now waits for the server's word on its asker
+ * before anything is shown or answered: an interrupt is ending the thread's
+ * runs, or one did and no run since has said `busy` (`interruptionLingers`).
+ *
+ * The abort a Stop sends ends every asker it reaches — 1.18.32's
+ * `SessionRunState.cancel` cancels every job the session launched, children's
+ * children included, and interrupts its run, and an interrupted
+ * `Permission.ask` / `Question.ask` drops its request with no event (read from
+ * the source, fixtures README observation 29) — but an ask it ended can still
+ * reach the stream after the Stop, and a run it never reached asks from a
+ * live asker: the prompt a background answer injects after it, which starts
+ * the parent again, or a child whose run it did not cancel. The first must
+ * write no card, and is released on the wire; the second must be shown, or it
+ * waits for good. Only the server can tell them apart.
+ */
+function holdsRequests(state: OpenCodeSessionState): boolean {
+  return state.cancellation !== undefined || interruptionLingers(state);
+}
+
+/** Hold a request for `judgeHeldRequest`; a repeated frame of it adds nothing meanwhile. */
+function holdRequest(
+  state: OpenCodeSessionState,
+  held: OpenCodeHeldRequest,
+  raw: unknown,
+  out: Emitter
+): void {
+  state.resolvedRequestIds.add(held.request.id);
+  state.heldRequestIds.add(held.request.id);
+  out.signal({ kind: "request-after-interrupt", held, raw });
+}
+
+/**
+ * Show a held request whose asker still waits: the card — with full access
+ * the `once` — it would have had, on the turn running now if one does (a
+ * child's question on none, `questionTurnId`). Called by `session.ts` once the
+ * server has answered (`judgeHeldRequest`).
+ */
+export function openHeldRequest(
+  state: OpenCodeSessionState,
+  held: OpenCodeHeldRequest,
+  raw: unknown,
+  ctx: NormalizeContext
+): NormalizeResult {
+  const out = new Emitter(state, ctx);
+  state.resolvedRequestIds.delete(held.request.id);
+  if (held.type === "permission") {
+    openPermission(state, held.request, raw, out, {
+      judged: true,
+      ...(held.cardOnly === true ? { cardOnly: true } : {})
+    });
+  } else {
+    openQuestion(state, held.request, raw, out, { judged: true });
+  }
+  return { events: out.events, signals: out.signals };
+}
+
+/**
+ * The card for an ask full access could not answer (`autoReplyOnce` in
+ * `session.ts`): the supervised path's own, never a second `once` — and,
+ * after an interrupt, held for the server's word like any request.
+ */
+export function openPermissionCard(
+  state: OpenCodeSessionState,
+  request: OpenCodePermissionRequest,
+  raw: unknown,
+  ctx: NormalizeContext
+): NormalizeResult {
+  const out = new Emitter(state, ctx);
+  openPermission(state, request, raw, out, { cardOnly: true });
+  return { events: out.events, signals: out.signals };
+}
+
 function openPermission(
   state: OpenCodeSessionState,
   request: OpenCodePermissionRequest,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  options: { judged?: boolean; cardOnly?: boolean } = {}
 ): void {
   if (state.resolvedRequestIds.has(request.id) || state.pendingPermissions.has(request.id)) {
     return;
   }
-  if (state.activeTurnId === undefined && state.reconcileIdleStatus) {
-    // An ask that arrives while the turn is being torn down belongs to nothing.
-    state.resolvedRequestIds.add(request.id);
+  if (options.judged !== true && holdsRequests(state)) {
+    holdRequest(
+      state,
+      { type: "permission", request, ...(options.cardOnly === true ? { cardOnly: true } : {}) },
+      raw,
+      out
+    );
     return;
   }
-  if (state.runtimeMode === "full-access") {
+  if (state.runtimeMode === "full-access" && options.cardOnly !== true) {
     // §4.3: auto-answer `once`, NEVER `always`. An `always` grant is stored per
     // directory and would silently widen every supervised thread sharing this
     // server (fixtures README observation 10 proves it across sessions).
@@ -2050,13 +2156,14 @@ function openQuestion(
   state: OpenCodeSessionState,
   request: OpenCodeQuestionRequest,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  options: { judged?: boolean } = {}
 ): void {
   if (state.resolvedRequestIds.has(request.id) || state.pendingQuestions.has(request.id)) {
     return;
   }
-  if (state.activeTurnId === undefined && state.reconcileIdleStatus) {
-    state.resolvedRequestIds.add(request.id);
+  if (options.judged !== true && holdsRequests(state)) {
+    holdRequest(state, { type: "question", request }, raw, out);
     return;
   }
   state.pendingQuestions.set(request.id, request);
@@ -2112,8 +2219,9 @@ export function emitTerminalPermission(
   if (state.emittedTerminalRequestIds.has(requestId)) {
     return;
   }
-  if (state.autoRepliedRequestIds.delete(requestId)) {
-    // Full access answered this itself; nothing was ever shown to the user.
+  if (state.autoRepliedRequestIds.delete(requestId) || state.heldRequestIds.delete(requestId)) {
+    // Full access answered this itself, or it was answered while held for the
+    // server's word on its asker: nothing was ever shown to the user.
     state.emittedTerminalRequestIds.add(requestId);
     return;
   }
@@ -2141,6 +2249,11 @@ export function emitTerminalQuestion(
   withdrawn = false
 ): void {
   if (state.emittedTerminalRequestIds.has(requestId)) {
+    return;
+  }
+  if (state.heldRequestIds.delete(requestId)) {
+    // Answered while held for the server's word on its asker: never shown.
+    state.emittedTerminalRequestIds.add(requestId);
     return;
   }
   const request = state.pendingQuestions.get(requestId);
