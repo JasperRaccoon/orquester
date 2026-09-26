@@ -806,6 +806,92 @@ test("a subagent's own shell counts on its own once the subagent's run ends, unt
   assert.equal(agent(s, SHELL).status, "completed");
 });
 
+/** An agent spawned in the background, and a shell its child session started: the orphan tests' start. */
+async function agentWithOwnShell(
+  s: Seam
+): Promise<{ shell: string; notify(update: Record<string, unknown>, sessionId?: string): Promise<void> }> {
+  const notify = async (update: Record<string, unknown>, sessionId = SESSION): Promise<void> =>
+    await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId, update }));
+  await s.startTurn("turn-1");
+  await s.update(spawnStart("call-s1", { prompt: "p", description: "find callers", background: true }));
+  await notify({
+    sessionUpdate: "subagent_spawned",
+    subagent_id: SUB_A,
+    child_session_id: SUB_A,
+    description: "find callers",
+    subagent_type: "general-purpose"
+  });
+  const shell = "call-88e87ad3-152e-4eab-b522-89fc544e8db5-0";
+  await s.feed(
+    s.grok.handleXaiNotification("_x.ai/task_backgrounded", {
+      sessionId: SUB_A,
+      update: { sessionUpdate: "task_backgrounded", tool_call_id: shell, task_id: shell, command: "npm run dev", description: "dev server" }
+    })
+  );
+  return { shell, notify };
+}
+
+const SUB_A_FINISHED = {
+  sessionUpdate: "subagent_finished",
+  subagent_id: SUB_A,
+  child_session_id: SUB_A,
+  status: "completed",
+  output: "started the server",
+  will_wake: true
+};
+
+test("a subagent's own shell RESTING when the subagent ends does not count live: its row keeps its status", async () => {
+  const s = seam();
+  const { shell, notify } = await agentWithOwnShell(s);
+  const listing = (status: string) => ({
+    sessionUpdate: "background_tasks",
+    tasks: [{ task_id: shell, command: "npm run dev", description: "dev server", kind: "bash", status }]
+  });
+  await notify(listing("paused"), SUB_A);
+  await notify(SUB_A_FINISHED);
+  assert.equal(s.liveness.liveness(THREAD), null, "a resting task is not live work, with or without its agent");
+  const restamp = s
+    .state()
+    .activities.filter(
+      (row) => row.activityKind === "task.progress" && (row.payload as { taskId?: string }).taskId === shell
+    )
+    .at(-1);
+  assert.equal((restamp?.payload as { agentId?: string } | undefined)?.agentId, shell, "it names itself from now on");
+  assert.equal((restamp?.payload as { status?: string } | undefined)?.status, "idle", "its own status, never `running`");
+});
+
+test("a subagent's own shell the CLI revived counts on its own once the subagent ends", async () => {
+  const s = seam();
+  const { shell, notify } = await agentWithOwnShell(s);
+  // A Stop closes both (the adapter's own end); the CLI then reports both
+  // still running — the agent's heartbeat, the child's listing.
+  await s.feed(s.grok.stopBackgroundTasks());
+  await notify({
+    sessionUpdate: "subagent_progress",
+    subagent_id: SUB_A,
+    child_session_id: SUB_A,
+    duration_ms: 2096,
+    turn_count: 1,
+    tool_call_count: 1,
+    tokens_used: 1704
+  });
+  await notify(
+    {
+      sessionUpdate: "background_tasks",
+      tasks: [{ task_id: shell, command: "npm run dev", description: "dev server", kind: "bash", status: "running" }]
+    },
+    SUB_A
+  );
+  assert.equal(s.liveness.liveness(THREAD), "working", "the revived agent covers its revived shell");
+  await notify(SUB_A_FINISHED);
+  assert.equal(
+    s.liveness.liveness(THREAD),
+    "monitoring",
+    "the revived shell outlives its agent: its own start row again, never a status the roster would reopen on"
+  );
+  assert.equal(agent(s, shell).status, "interrupted", "the roster keeps the end the adapter wrote, never reopened");
+});
+
 test("19 through the fold: an unpolled background agent works past its turn, ends by subagent_finished, and its wake is a turn", async () => {
   const AGENT = "call-b929f166-b896-45fa-bdb5-4b7129d05044-0";
   const s = captureSeam("19-subagent-background-unpolled.ndjson");

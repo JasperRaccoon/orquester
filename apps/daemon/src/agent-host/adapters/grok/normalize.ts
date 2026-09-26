@@ -2025,9 +2025,13 @@ export class GrokNormalizer {
    * covered by its entry — which the agent's end just removed — so a server
    * the subagent left running stopped holding a deploy's drain. Whether the
    * CLI stops them when their subagent ends is not captured, and not killing
-   * running work outranks a stale row: from here each names itself, re-armed
-   * as live with one progress row, and counts on its own (the watch loop's
-   * TTL) until its own end.
+   * running work outranks a stale row: from here each names itself, and one
+   * row says so — with its own tracked status, so a resting (`idle`) one is
+   * not re-armed, and a running one counts on its own (the watch loop's TTL)
+   * until its own end. One the CLI revived after an end the adapter wrote
+   * gets its own start row again instead ({@link reviveShell}'s rule): a
+   * status would reopen the roster's row, which keeps that end, and a
+   * status-less row re-arms nothing the registry no longer counts.
    */
   private orphanAgentTasks(agentTaskId: string): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
@@ -2037,6 +2041,20 @@ export class GrokNormalizer {
       }
       task.ownerEnded = true;
       const linkage = this.shellLinkage(taskId, task);
+      if (task.revived === true) {
+        events.push(
+          this.event(
+            "task.started",
+            {
+              ...linkage,
+              description: task.description ?? task.command,
+              ...(task.outputFile === undefined ? {} : { outputFile: task.outputFile })
+            },
+            task.turnId
+          )
+        );
+        continue;
+      }
       events.push(
         this.event(
           "task.progress",
@@ -2044,7 +2062,7 @@ export class GrokNormalizer {
             ...linkage,
             description: linkage.title,
             ...(task.lastLine === undefined ? {} : { summary: task.lastLine }),
-            ...(task.revived === true ? {} : { status: "running" })
+            status: task.status
           },
           task.turnId
         )
