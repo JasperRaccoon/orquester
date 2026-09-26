@@ -1555,6 +1555,31 @@ test("a goal ends by the status it leaves active in: completed with its summary,
   ]);
 });
 
+test("a goal a new one replaces ends with its OWN token count, never the new goal's", () => {
+  const grok = normalizer();
+  goalUpdate(grok, {});
+  goalUpdate(grok, { tokens_used: 4200, last_event: "worker_round" });
+  goalUpdate(grok, { tokens_used: 4800 });
+  const replaced = only(
+    goalUpdate(grok, { goal_id: "another-goal", objective: "Something else", tokens_used: 0 }),
+    "task.completed"
+  );
+  assert.deepEqual(
+    replaced.map((event) => [event.payload.taskId, event.payload.summary, event.payload.usage]),
+    [[`goal:${GOAL_ID}`, "Replaced by a new goal", { totalTokens: 4800 }]],
+    "the replaced goal's own latest count"
+  );
+
+  // One that never reported a count carries none rather than the new goal's.
+  const quiet = normalizer();
+  goalUpdate(quiet, { tokens_used: undefined });
+  const second = only(
+    goalUpdate(quiet, { goal_id: "another-goal", objective: "Something else", tokens_used: 900 }),
+    "task.completed"
+  );
+  assert.deepEqual(second.map((event) => event.payload.usage), [undefined]);
+});
+
 test("a loop's deletion by expiry completes it; a report of a loop never seen created starts its row first", () => {
   const grok = normalizer();
   assert.deepEqual(statuses(scheduler(grok, "scheduled_task_fired", { subagent_id: "sub-1" })), [

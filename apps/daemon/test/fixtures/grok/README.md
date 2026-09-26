@@ -1479,8 +1479,9 @@ alone — and ended when it leaves `active`: `budget_limited` → `stopped`, "To
 48386 of 20000 tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its
 result summary. A goal active again after the CLI's own end is a new run of its row (a new launch
 id); after the adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its
-progress notes itself on the ended row; a new goal ends the old one. Not captured: a goal that
-completes, pauses, resumes or fails.
+progress notes itself on the ended row; a new goal ends the old one ("Replaced by a new goal"), with
+the token count the old one last reported itself — the replacing update counts the new goal's. Not
+captured: a goal that completes, pauses, resumes or fails.
 
 ### 54. The host's cancel of a question: the model hears "declined"; a Stop's cancel ends the turn
 

@@ -218,6 +218,11 @@ interface GoalTrack {
   turnId?: string;
   /** What the latest progress row said, bar the token count: a note is written on a change. */
   noted?: string;
+  /**
+   * The latest `tokens_used` its OWN updates reported: a goal a new one
+   * replaces ends with it — the update that replaces it counts the new goal.
+   */
+  tokensUsed?: number;
 }
 
 /**
@@ -2990,7 +2995,7 @@ export class GrokNormalizer {
     const note = goalNote(update);
     if (goal === undefined || goal.goalId !== goalId) {
       if (goal?.live === true) {
-        events.push(this.endGoal(goal, { ...update, status: "replaced" }, raw));
+        events.push(this.endGoal(goal, "replaced", raw));
       }
       goal = { goalId, taskId: `goal:${goalId}`, objective, run: 1, live: true, turnId: this.deps.activeTurnId() };
       this.goal = goal;
@@ -3003,6 +3008,7 @@ export class GrokNormalizer {
       // Live — or closed by the adapter while the CLI still reports it active
       // (whether a Stop's `session/cancel` stops a goal is not captured): its
       // progress notes itself, on the ended row then, and reopens nothing.
+      goal.tokensUsed = countOf(update.tokens_used) ?? goal.tokensUsed;
       if (note.key !== goal.noted) {
         goal.noted = note.key;
         events.push(
@@ -3013,22 +3019,29 @@ export class GrokNormalizer {
     }
     goal.objective = objective;
     goal.noted = note.key;
+    goal.tokensUsed = countOf(update.tokens_used) ?? goal.tokensUsed;
     events.push(this.event("task.started", this.goalLinkage(goal), goal.turnId, raw));
     return events;
   }
 
-  /** The row that ends a goal's run, by the status it left `active` in. */
-  private endGoal(goal: GoalTrack, update: XaiGoalUpdatedUpdate, raw: RuntimeEventRaw): RuntimeEvent {
+  /**
+   * The row that ends a goal's run: by the status its own update left
+   * `active` in, or `replaced` by a new goal — whose update counts the NEW
+   * goal's tokens, so the old one ends with the count it last reported itself.
+   */
+  private endGoal(goal: GoalTrack, end: XaiGoalUpdatedUpdate | "replaced", raw: RuntimeEventRaw): RuntimeEvent {
     goal.live = false;
     goal.endedBy = "cli";
-    const used = countOf(update.tokens_used);
-    const budget = countOf(update.token_budget);
+    const update = end === "replaced" ? undefined : end;
+    const used = countOf(update?.tokens_used) ?? goal.tokensUsed;
+    const budget = countOf(update?.token_budget);
     const text = (value: unknown): string | undefined =>
       typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+    const endStatus = end === "replaced" ? "replaced" : end.status;
     const [status, summary] = ((): ["completed" | "failed" | "stopped", string] => {
-      switch (update.status) {
+      switch (endStatus) {
         case "completed":
-          return ["completed", text(update.result_summary) ?? "Goal completed"];
+          return ["completed", text(update?.result_summary) ?? "Goal completed"];
         case "budget_limited":
           return [
             "stopped",
@@ -3037,15 +3050,15 @@ export class GrokNormalizer {
               : "Token budget reached"
           ];
         case "paused":
-          return ["stopped", text(update.pause_message) ?? "Paused"];
+          return ["stopped", text(update?.pause_message) ?? "Paused"];
         case "cleared":
           return ["stopped", "Cleared"];
         case "replaced":
           return ["stopped", "Replaced by a new goal"];
         case "failed":
-          return ["failed", text(update.pause_message) ?? text(update.result_summary) ?? "Failed"];
+          return ["failed", text(update?.pause_message) ?? text(update?.result_summary) ?? "Failed"];
         default:
-          return ["stopped", capitalized(String(update.status || "ended"))];
+          return ["stopped", capitalized(String(endStatus || "ended"))];
       }
     })();
     return this.event(
@@ -3054,7 +3067,7 @@ export class GrokNormalizer {
         ...this.goalLinkage(goal),
         status,
         summary,
-        ...(used === undefined || update.status === "cleared" ? {} : { usage: { totalTokens: used } })
+        ...(used === undefined || endStatus === "cleared" ? {} : { usage: { totalTokens: used } })
       },
       goal.turnId,
       raw
