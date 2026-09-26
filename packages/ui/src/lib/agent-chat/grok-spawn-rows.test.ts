@@ -11,6 +11,10 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
+import { NOTHING_STREAMS } from "@orquester/api/agent-chat";
+
+import type { AgentChatTimelineRow } from "./contracts";
+import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn } from "./drill-in.logic";
 import { deriveWorkLogEntries } from "./entries.logic";
 import { activity, resetBuilders } from "./test-helpers";
 
@@ -129,6 +133,35 @@ describe("a Grok spawn_subagent call in the parent timeline", () => {
     );
     const entries = deriveWorkLogEntries(rows);
     assert.equal(entries.length, 1, "still one row: the agent's");
+    assert.deepEqual(entries[0]?.agentSpawn?.agentTaskIds, [CALL]);
+  });
+});
+
+describe("the Grok agent's own drill-in (R8)", () => {
+  /** Every entry the drill-in's rows carry, a live row's included. */
+  const entriesOf = (rows: readonly AgentChatTimelineRow[]) =>
+    rows.flatMap((row) =>
+      row.kind === "work" ? row.groupedEntries : row.kind === "work-live" ? [row.entry, ...row.groupedEntries] : []
+    );
+
+  for (const end of ["completed", "failed"] as const) {
+    it(`never lists the agent itself as a spawn row (${end})`, () => {
+      const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+        items: launchRows(end),
+        agentId: CALL,
+        messageStreaming: NOTHING_STREAMS
+      }).stable.result;
+      assert.deepEqual(
+        entriesOf(rows).filter((entry) => entry.agentSpawn?.agentTaskIds.includes(CALL)),
+        [],
+        "the header and the roster already say what the agent is"
+      );
+      assert.ok(!rows.some((row) => row.id === "a2"), "and no bot row labelled with its result");
+    });
+  }
+
+  it("keeps the parent's spawn row whole: only the agent's OWN view drops it", () => {
+    const entries = deriveWorkLogEntries(launchRows("completed"));
     assert.deepEqual(entries[0]?.agentSpawn?.agentTaskIds, [CALL]);
   });
 });

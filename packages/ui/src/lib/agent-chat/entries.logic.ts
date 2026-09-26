@@ -755,7 +755,10 @@ export interface DeriveWorkLogOptions {
    * The drill-in's own agent (§7.6): its rows are agent-internal to the
    * PARENT timeline and must stay out of it, but inside the agent's own view
    * they are the whole point. Without this the drill-in applied the parent's
-   * quiet-timeline filter a second time and showed nothing.
+   * quiet-timeline filter a second time and showed nothing. Its own task rows
+   * (`payload.taskId` naming it — Codex, OpenCode and Grok stamp them with its
+   * id) are the one exception: they are the agent itself, never a spawn row
+   * inside its own view.
    */
   readonly ownerAgentId?: string;
 }
@@ -765,6 +768,15 @@ function ownedByAgent(activity: ThreadActivityItem, agentId: string | undefined)
     return false;
   }
   return activity.agentId === agentId || asRecord(activity.payload)?.agentId === agentId;
+}
+
+/** A task row OF the drill-in's own agent (`payload.taskId`), not of an agent it launched. */
+function isOwnTaskRow(activity: ThreadActivityItem, agentId: string | undefined): boolean {
+  return (
+    agentId !== undefined &&
+    TASK_KINDS.has(activity.activityKind) &&
+    asTrimmedString(asRecord(activity.payload)?.taskId) === agentId
+  );
 }
 
 export function deriveWorkLogEntries(
@@ -838,6 +850,13 @@ export function deriveWorkLogEntries(
       continue;
     }
     if (activity.activityKind === "task.started" && !isAgentTaskStartedActivity(activity)) {
+      continue;
+    }
+    // A drill-in never lists its own agent as a spawn row. Codex, OpenCode
+    // and Grok stamp an agent's own task rows with its id, so they are the
+    // agent's rows too — but they describe the agent itself, which the
+    // drill-in's header and the roster already say (R8).
+    if (isOwnTaskRow(activity, options?.ownerAgentId)) {
       continue;
     }
     if (isNoContentRuntimeWarning(activity)) {
