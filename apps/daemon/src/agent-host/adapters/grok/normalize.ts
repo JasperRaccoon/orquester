@@ -2924,7 +2924,7 @@ export class GrokNormalizer {
           "task.progress",
           {
             ...this.loopLinkage(loop),
-            summary: `${loop.fires === 1 ? "Fired once" : `Fired ${loop.fires} times`} · ${loop.schedule}`
+            summary: loop.fires === 1 ? "Fired once" : `Fired ${loop.fires} times`
           },
           loop.turnId,
           raw
@@ -2936,7 +2936,8 @@ export class GrokNormalizer {
 
   /**
    * Every row of a loop: nobody's work but the thread's, never live work
-   * (`INERT_TASK_TYPES`). Its kind is in its title, as a goal's is.
+   * (`INERT_TASK_TYPES`). The roster folds its type to a `loop` row, chipped
+   * as one; its title is its cadence, then what it does.
    */
   private loopLinkage(loop: LoopTrack): {
     taskId: string;
@@ -2945,11 +2946,12 @@ export class GrokNormalizer {
     description: string;
     toolUseId: string;
   } {
+    const cadence = capitalized(loop.schedule);
     return {
       taskId: loop.taskId,
       taskType: "scheduled",
-      title: `Loop · ${loop.schedule}`,
-      description: loop.prompt.length > 0 ? loop.prompt : `Loop · ${loop.schedule}`,
+      title: loop.prompt.length > 0 ? `${cadence}: ${loop.prompt}` : cadence,
+      description: loop.prompt.length > 0 ? loop.prompt : cadence,
       toolUseId: `loop-run:${loop.taskId}:${loop.run}`
     };
   }
@@ -3012,7 +3014,18 @@ export class GrokNormalizer {
       if (note.key !== goal.noted) {
         goal.noted = note.key;
         events.push(
-          this.event("task.progress", { ...this.goalLinkage(goal), summary: note.summary }, goal.turnId, raw)
+          this.event(
+            "task.progress",
+            {
+              ...this.goalLinkage(goal),
+              summary: note.summary,
+              // Its own count, for its row's metrics: the roster never sums a
+              // goal's tokens with its agents' (they are the same tokens).
+              ...(goal.tokensUsed === undefined ? {} : { usage: { totalTokens: goal.tokensUsed } })
+            },
+            goal.turnId,
+            raw
+          )
         );
       }
       return events;
@@ -3085,9 +3098,9 @@ export class GrokNormalizer {
     return {
       taskId: goal.taskId,
       taskType: "goal",
-      // The row's kind is in its title: the roster draws every background row
-      // with a shell's chrome, and nothing else on it says "goal".
-      title: `Goal · ${goal.objective}`,
+      // The roster folds the type to a `goal` row, chipped as one: the title
+      // is the objective alone.
+      title: goal.objective,
       description: goal.objective,
       toolUseId: `goal-run:${goal.goalId}:${goal.run}`
     };

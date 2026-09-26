@@ -47,7 +47,7 @@
  */
 
 import React from "react";
-import { ArrowLeft, Bot, Terminal } from "lucide-react";
+import { ArrowLeft, Terminal } from "lucide-react";
 import type { ThreadItem } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import type { DisclosureState } from "../../../lib/agent-chat/contracts";
@@ -57,8 +57,9 @@ import type { AgentDrillInProps } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import { backgroundShellDisclosureIds, backgroundShellRows } from "./background-shell";
+import { rosterRowIcon } from "./AgentRosterRow";
 import { agentActivityText, rosterRowMetrics } from "./format";
-import { isBackgroundShellRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { isBackgroundShellRow, rosterRowTicks, rosterRowVisual } from "./roster-rows";
 
 const EMPTY_DISCLOSURES: DisclosureState = {
   expandedTurnIds: [],
@@ -161,8 +162,8 @@ export function AgentDrillIn({
       : { ...disclosures, expandedGroupIds: [...disclosures.expandedGroupIds, ...open] };
   }, [collapsedShellRowIds, disclosures, shellRowIds]);
 
-  const visuals = agent ? rosterStatusVisual(agent.status) : null;
-  const Icon = background ? Terminal : Bot;
+  const visuals = agent ? rosterRowVisual(agent) : null;
+  const Icon = background ? Terminal : rosterRowIcon(agent ?? { kind: "subagent" });
   // The agent's prompt is the task description the provider reported: the
   // live/settled precedence of the roster's own activity line, so a settled
   // child leads with its outcome here too. A shell's description is its title

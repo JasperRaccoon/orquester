@@ -324,6 +324,46 @@ test("a stampless later row never demotes a known agent", () => {
   assert.equal(agent.status, "completed");
 });
 
+test("a scheduled prompt folds to a loop row and an autonomous goal to a goal row, both background", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", { taskId: "loop-1", agentKind: "background", taskType: "scheduled", title: "Every 1 minute: tick" }),
+    activity("task.started", { taskId: "goal:g1", agentKind: "background", taskType: "goal", title: "Ship it" }),
+    activity("task.started", { taskId: "shell-1", agentKind: "background", taskType: "local_bash", title: "Run dev" }),
+    // A later row without its type keeps the row's kind: kinds are sticky.
+    activity("task.progress", { taskId: "loop-1", agentKind: "background", summary: "Fired once" })
+  ]);
+  assert.deepEqual(
+    agents.map((agent) => [agent.id, agent.kind, agent.agentKind]),
+    [
+      ["loop-1", "loop", "background"],
+      ["goal:g1", "goal", "background"],
+      ["shell-1", "subagent", "background"]
+    ]
+  );
+});
+
+test("a loop and a goal drive work and are no work of their own: never counted, never token-summed", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", { taskId: "loop-1", agentKind: "background", taskType: "scheduled" }),
+    activity("task.started", { taskId: "goal:g1", agentKind: "background", taskType: "goal" }),
+    // The goal's count is everything its turns and agents spent: summing it
+    // with theirs would count those tokens twice.
+    activity("task.progress", { taskId: "goal:g1", agentKind: "background", taskType: "goal", usage: { totalTokens: 900 } }),
+    activity("task.progress", agentTask("t1", { usage: { totalTokens: 40 } }))
+  ]);
+  const model = deriveAgentPanelModel({ agents });
+  assert.deepEqual(
+    model.directAgents.map((agent) => agent.id),
+    ["loop-1", "goal:g1", "t1"],
+    "listed all the same"
+  );
+  assert.equal(model.totalTokens, 40);
+  assert.equal(model.runningCount, 1);
+  assert.equal(model.liveCount, 1);
+});
+
 // --- session liveness ------------------------------------------------------
 
 test("a dead session interrupts live rows but preserves idle and settled", () => {

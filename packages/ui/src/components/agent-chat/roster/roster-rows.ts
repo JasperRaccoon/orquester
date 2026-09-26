@@ -29,6 +29,7 @@ import {
   ROSTER_VISIBLE_ROWS,
   deriveRosterDockView,
   isActiveSubagentStatus,
+  isLoopOrGoalRow,
   isTerminalSubagentStatus
 } from "../../../lib/agent-chat/roster.logic";
 import type { ChatTone } from "../primitives/tone";
@@ -85,10 +86,13 @@ export function isFinishedRow(agent: Pick<RuntimeSubagent, "status">): boolean {
  * exemption from the collapse is about a row that outlives its turn, while
  * this is about what the row *is*. A finished shell is still a shell, and it
  * must keep the terminal glyph, the "shell" chip and its exit code while it
- * fades.
+ * fades. A loop and a goal are background too, and never shells: they print
+ * nothing and exit with no code ({@link isLoopOrGoalRow}).
  */
-export function isBackgroundShellRow(agent: Pick<RuntimeSubagent, "agentKind">): boolean {
-  return agent.agentKind === "background";
+export function isBackgroundShellRow(
+  agent: Pick<RuntimeSubagent, "agentKind"> & { kind?: RuntimeSubagent["kind"] }
+): boolean {
+  return agent.agentKind === "background" && !isLoopOrGoalRow(agent);
 }
 
 /** A background task that is still running — the row exempt from both rules. */
@@ -225,6 +229,22 @@ export function rosterStatusVisual(status: RuntimeSubagentStatus): RosterStatusV
       return { tone: "muted", label: "Unknown", pulse: false };
     }
   }
+}
+
+/**
+ * A row's dot and status word, by its kind as well as its status: a live loop
+ * waits between its fires — `Scheduled`, and still, never the breathing
+ * "Working" — and a live goal is `Active`. Once over, every row reads its
+ * status as {@link rosterStatusVisual} says.
+ */
+export function rosterRowVisual(
+  agent: Pick<RuntimeSubagent, "status"> & { kind?: RuntimeSubagent["kind"] }
+): RosterStatusVisual {
+  if (isActiveSubagentStatus(agent.status)) {
+    if (agent.kind === "loop") return { tone: "info", label: "Scheduled", pulse: false };
+    if (agent.kind === "goal") return { tone: "info", label: "Active", pulse: true };
+  }
+  return rosterStatusVisual(agent.status);
 }
 
 /**

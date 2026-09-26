@@ -8,6 +8,7 @@ import {
   isLiveBackgroundRow,
   rosterDisplayOrder,
   rosterRowTicks,
+  rosterRowVisual,
   rosterStatusVisual,
   selectRosterRows
 } from "./roster-rows.ts";
@@ -413,4 +414,76 @@ test("the shell's activity line is its state, and never carries the tool marker"
   );
   assert.equal(agentActivityText({ ...shell, status: "failed", exitCode: 1 }), "Failed · exit 1");
   assert.equal(agentActivityText({ ...shell, status: "interrupted" }), "Stopped");
+});
+
+// ---------------------------------------------------------------------------
+// A loop and a goal are rows of their own kind — never a shell's (§7.6)
+// ---------------------------------------------------------------------------
+
+test("a loop or a goal is no shell row, though it is background — and a live one stays pinned", () => {
+  const loop = agent("loop-1", { kind: "loop", agentKind: "background" });
+  const goal = agent("goal:g1", { kind: "goal", agentKind: "background", status: "interrupted" });
+  assert.equal(isBackgroundShellRow(loop), false);
+  assert.equal(isBackgroundShellRow(goal), false);
+  assert.equal(isLiveBackgroundRow(loop), true, "a live loop outlives its turn: never collapsed, never faded");
+  assert.equal(isLiveBackgroundRow(goal), false);
+});
+
+test("a loop and a goal chip their own kind, whatever role the provider reported", () => {
+  assert.equal(rosterRoleChip(agent("l", { kind: "loop", agentKind: "background", role: "scheduler" })), "loop");
+  assert.equal(rosterRoleChip(agent("g", { kind: "goal", agentKind: "background", title: "goal" })), "goal");
+});
+
+test("a loop's and a goal's metrics line is its own, never a shell's", () => {
+  const loop = agent("l", { kind: "loop", agentKind: "background", model: "grok-4.7" });
+  assert.deepEqual(rosterRowMetrics(loop), ["scheduled prompt"]);
+  assert.deepEqual(rosterRowMetrics({ ...loop, activationCount: 2 }), ["scheduled prompt", "run 2"]);
+  const goal = agent("g", { kind: "goal", agentKind: "background", model: "grok-4.7" });
+  assert.deepEqual(rosterRowMetrics(goal), ["goal", "— tok"], "the token slot holds its place");
+  assert.deepEqual(rosterRowMetrics({ ...goal, usage: { totalTokens: 48_386 } }), ["goal", "48.4k tok"]);
+});
+
+test("a loop's and a goal's activity line: what it last did or that it stands, and once over, how it ended", () => {
+  const loop = agent("l", { kind: "loop", agentKind: "background" });
+  assert.equal(agentActivityText(loop), "Scheduled", "between its fires a loop waits, it does not work");
+  assert.equal(agentActivityText({ ...loop, progress: "Fired 3 times" }), "Fired 3 times");
+  assert.equal(agentActivityText({ ...loop, status: "interrupted", result: "Deleted" }), "Deleted");
+  assert.equal(agentActivityText({ ...loop, status: "interrupted" }), "Stopped");
+
+  const goal = agent("g", { kind: "goal", agentKind: "background" });
+  assert.equal(agentActivityText(goal), "Active");
+  assert.equal(
+    agentActivityText({ ...goal, progress: "Executing · 1 of 3 deliverables · 400 of 20000 tokens" }),
+    "Executing · 1 of 3 deliverables · 400 of 20000 tokens"
+  );
+  assert.equal(
+    agentActivityText({
+      ...goal,
+      status: "interrupted",
+      progress: "Executing · 0 of 20000 tokens",
+      result: "Token budget reached: 48386 of 20000 tokens"
+    }),
+    "Token budget reached: 48386 of 20000 tokens",
+    "a finished goal says why it ended — never a shell's bare 'Stopped'"
+  );
+  assert.equal(agentActivityText({ ...goal, status: "completed", result: "goal.txt holds ok" }), "goal.txt holds ok");
+});
+
+test("a live loop reads as scheduled, not working; a live goal as active", () => {
+  assert.deepEqual(rosterRowVisual(agent("l", { kind: "loop", agentKind: "background" })), {
+    tone: "info",
+    label: "Scheduled",
+    pulse: false
+  });
+  assert.deepEqual(rosterRowVisual(agent("g", { kind: "goal", agentKind: "background" })), {
+    tone: "info",
+    label: "Active",
+    pulse: true
+  });
+  assert.deepEqual(
+    rosterRowVisual(agent("g", { kind: "goal", agentKind: "background", status: "interrupted" })),
+    rosterStatusVisual("interrupted"),
+    "once over, the ordinary status words"
+  );
+  assert.deepEqual(rosterRowVisual(agent("a")), rosterStatusVisual("running"));
 });

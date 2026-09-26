@@ -15,13 +15,23 @@
  */
 
 import React from "react";
-import { Bot, Check, ChevronRight, Terminal } from "lucide-react";
+import { Bot, Check, ChevronRight, Repeat, Target, Terminal } from "lucide-react";
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import type { ChatTone } from "../primitives/tone";
 import { agentActivityText, rosterRoleChip, rosterRowMetrics } from "./format";
-import { isFinishedRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { isFinishedRow, rosterRowTicks, rosterRowVisual, rosterStatusVisual } from "./roster-rows";
+
+/**
+ * The identity glyph: a bot for an agent, and for the two rows that drive work
+ * rather than do it, what they are — a loop repeats, a goal is a target.
+ */
+export function rosterRowIcon(agent: Pick<RuntimeSubagent, "kind">): typeof Bot {
+  if (agent.kind === "loop") return Repeat;
+  if (agent.kind === "goal") return Target;
+  return Bot;
+}
 
 /** The grid every roster row shares. Changing this changes all of them. */
 const ROW_GRID = cn(
@@ -48,7 +58,9 @@ export function AgentRosterRow({
   active = false,
   onOpen
 }: AgentRosterRowProps): React.ReactElement {
-  const visuals = rosterStatusVisual(agent.status);
+  // A live loop stands `Scheduled` and a live goal `Active`: neither is an
+  // agent working.
+  const visuals = rosterRowVisual(agent);
   // A spawn batch that goes idle is just idle — it has no run of its own to
   // resume. *T3: `AgentsPanel.tsx:142-143`.*
   const statusLabel =
@@ -56,6 +68,7 @@ export function AgentRosterRow({
   const activity = agentActivityText(agent);
   const role = rosterRoleChip(agent);
   const metrics = rosterRowMetrics(agent);
+  const Icon = rosterRowIcon(agent);
 
   return (
     <button
@@ -84,7 +97,7 @@ export function AgentRosterRow({
       </span>
 
       <span className="col-start-2 row-start-1 flex min-w-0 items-center gap-1.5">
-        <Bot size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
+        <Icon size={13} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
         <span className="min-w-0 truncate text-sm font-medium text-neutral-200">{agent.title}</span>
         {role ? (
           <span className="max-w-28 shrink-0 truncate rounded-sm border border-neutral-800 px-1 font-mono text-[10px] text-neutral-500">

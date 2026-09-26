@@ -982,9 +982,10 @@ test("29 through the fold: the loop is a background roster row, live until delet
   await s.feedThrough(indexOf(s.events, taskEnd(FIRE)));
   const live = s.state().roster.find((entry) => entry.id === LOOP);
   assert.equal(live?.agentKind, "background", "stamped background: never an agent");
+  assert.equal(live?.kind, "loop", "a loop row, never a shell's");
   assert.equal(live?.status, "running");
-  assert.equal(live?.title, "Loop · every 1 minute");
-  assert.equal(live?.progress, "Fired once · every 1 minute");
+  assert.equal(live?.title, "Every 1 minute: Reply with exactly: tick");
+  assert.equal(live?.progress, "Fired once");
   assert.equal(s.liveness.liveness(THREAD), null, "a loop between its fires is no live work");
   const fire = s.state().roster.find((entry) => entry.id === FIRE);
   assert.equal(fire?.agentKind, "agent");
@@ -1001,8 +1002,10 @@ test("30 through the fold: the goal is a background row, its budget's end its re
   await s.feedThrough(s.events.length);
   const goal = s.state().roster.find((entry) => entry.id === GOAL);
   assert.equal(goal?.agentKind, "background");
+  assert.equal(goal?.kind, "goal", "a goal row, never a shell's");
   assert.equal(goal?.status, "interrupted");
-  assert.equal(goal?.title, "Goal · Create a file named goal.txt containing exactly: ok");
+  assert.equal(goal?.title, "Create a file named goal.txt containing exactly: ok");
   assert.equal(goal?.result, "Token budget reached: 48386 of 20000 tokens");
+  assert.equal(goal?.usage?.totalTokens, 48_386);
   assert.equal(s.liveness.liveness(THREAD), null);
 });

@@ -266,7 +266,11 @@ export function AgentRoster({
                     {countLabels.running ? <> (<span className="text-info-300">{countLabels.running}</span>)</> : null}
                   </>
                 ) : null}
-                {!countLabels.agents && !countLabels.shells ? collapsedRosterLabel(counts) : null}
+                {(countLabels.agents || countLabels.shells) && countLabels.drivers ? " · " : null}
+                {countLabels.drivers}
+                {!countLabels.agents && !countLabels.shells && !countLabels.drivers
+                  ? collapsedRosterLabel(counts)
+                  : null}
               </span>
             </button>
           ) : null}

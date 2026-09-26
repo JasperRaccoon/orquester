@@ -1357,16 +1357,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   of its own, `_x.ai/scheduled_task_created` / `_fired` / `_deleted` (a peer warning per frame
   before they were registered — one per fire of a week-long loop), and `/goal` by `goal_updated` on
   the private channel (an "unmapped" warning every few seconds of a goal run): each loop and the
-  goal is a roster row, typed `scheduled` / `goal` — background, and `INERT_TASK_TYPES` in the
-  liveness registry, so neither holds a deploy's drain; its work does, each fire and each planner
-  being a subagent the CLI spawns itself (an agent row under its own id, whose end wakes the
-  parent). A fire notes itself on the loop's row and a goal's change of phase on the goal's, in
-  place (a token tick alone does not); `scheduled_task_deleted` ends a loop (`stopped`, `completed`
-  on expiry) and a goal leaving `active` ends it (`budget_limited`, `paused`, `cleared` →
-  `stopped` with the reason, `completed` with its result); the session's end closes both, as the
-  loop and the goal live in the CLI's process (whether a Stop's `session/cancel` stops either is
-  not captured: a later fire or goal update notes itself on the ended row, and only the CLI
-  re-creating a loop or resuming a goal it ended itself opens a new run). A genuine `failed`
+  goal is a roster row, typed `scheduled` / `goal`, which the roster folds to a kind of its own,
+  `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what it is, a metrics line of its own
+  ("scheduled prompt"; "goal · 48.4k tok", the count the goal reports), a live loop `Scheduled` and
+  a live goal `Active` rather than "Working", a settled one's line its end reason ("Token budget
+  reached: …"), never a shell's row, and never counted or token-summed as work
+  (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) — background, and
+  `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain; its work does,
+  each fire and each planner being a subagent the CLI spawns itself (an agent row under its own id,
+  whose end wakes the parent). A fire notes itself on the loop's row and a goal's change of phase on
+  the goal's, in place (a token tick alone does not); `scheduled_task_deleted` ends a loop
+  (`stopped`, `completed` on expiry) and a goal leaving `active` ends it (`budget_limited`,
+  `paused`, `cleared` → `stopped` with the reason, `completed` with its result); the session's end
+  closes both, as the loop and the goal live in the CLI's process (whether a Stop's `session/cancel`
+  stops either is not captured: a later fire or goal update notes itself on the ended row, and only
+  the CLI re-creating a loop or resuming a goal it ended itself opens a new run). A genuine `failed`
   status was not triggered: a subagent's model is set only in the account home's `config.toml`,
   never written.
   Noise the captures showed, silenced: a child's `skills-reload` /

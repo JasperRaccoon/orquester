@@ -2173,12 +2173,15 @@ user whether they do.
 *T3: repo-wide grep for `"/goal"` and `"/loop"` over `apps/` and `packages/` returns zero hits.*
 
 *Built: still not host commands — but what they start is shown. Grok's `/loop` is answered by the
-scheduler's own reports (`_x.ai/scheduled_task_created` / `_fired` / `_deleted`) and its `/goal`
-by `goal_updated` (captured 2026-09-26, Grok fixtures 29 and 30). Each loop, and the goal, is a
-roster row typed `scheduled` / `goal`: background, and inert to the liveness registry
-(`INERT_TASK_TYPES` in `@orquester/api`), so a week-long loop cannot hold a deploy's drain between
-its fires. Their work is live on its own rows — every fire and every goal planner is a subagent
-the CLI spawns itself, an agent row whose end wakes the parent.*
+scheduler's own reports (`_x.ai/scheduled_task_created` / `_fired` / `_deleted`) and its `/goal` by
+`goal_updated` (captured 2026-09-26, Grok fixtures 29 and 30). Each loop, and the goal, is a roster
+row typed `scheduled` / `goal`, which the fold gives a kind of its own (`loop` / `goal`): chipped as
+what it is, with its own metrics line and glyph, `Scheduled` / `Active` while live, its end reason
+once over, rendered with the agents and never as a shell, and never counted or token-summed as work.
+Background, and inert to the liveness registry (`INERT_TASK_TYPES` in `@orquester/api`), so a
+week-long loop cannot hold a deploy's drain between its fires. Their work is live on its own rows —
+every fire and every goal planner is a subagent the CLI spawns itself, an agent row whose end wakes
+the parent.*
 
 #### 4.6.7 Composer menu
 

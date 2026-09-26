@@ -102,13 +102,62 @@ export function backgroundShellActivityText(
 }
 
 /**
+ * A row that DRIVES work rather than doing it (§7.6): a provider's scheduled
+ * prompt (`loop`, a Grok `/loop`) or its autonomous goal (`goal`, a Grok
+ * `/goal`). Background, but never a shell: it prints nothing and exits with no
+ * code, and its fires, turns and agents — the work — are rows of their own.
+ */
+export function isLoopOrGoalRow(agent: { kind?: RuntimeSubagent["kind"] }): boolean {
+  return agent.kind === "loop" || agent.kind === "goal";
+}
+
+/**
+ * A loop's or a goal's second line (§7.6). While live, what it last did — a
+ * loop's latest fire, a goal's phase — else that it stands: a loop between its
+ * fires is `Scheduled`, not working; a goal is `Active`. Once over, how it
+ * ended, in the provider's words ("Token budget reached: 48386 of 20000
+ * tokens", "Deleted") — a shell's bare "Stopped" hid exactly that — and the
+ * state word only when there are none.
+ */
+export function loopOrGoalActivityText(
+  row: Pick<RuntimeSubagent, "kind" | "status" | "progress" | "result" | "error">
+): string {
+  const first = (values: ReadonlyArray<string | null>): string | undefined => {
+    for (const value of values) {
+      const text = value?.trim();
+      if (text !== undefined && text.length > 0) return text;
+    }
+    return undefined;
+  };
+  if (isActiveSubagentStatus(row.status)) {
+    return first([row.progress]) ?? (row.kind === "loop" ? "Scheduled" : "Active");
+  }
+  const said = first([row.error, row.result, row.progress]);
+  if (said !== undefined) return said;
+  switch (row.status) {
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "idle":
+      return "Idle";
+    default:
+      return "Stopped";
+  }
+}
+
+/**
  * The row's second line: prefer live `progress`, then the last tool, then
  * result/error **while live**, and reverse that order once settled — unless
- * the row is a background shell, which has its own two-fact line above.
+ * the row is a loop or a goal, or a background shell, which have lines of
+ * their own above.
  *
  * *T3: `AgentsPanel.tsx:120-137`.*
  */
 export function agentActivityText(agent: RuntimeSubagent): string | null {
+  if (isLoopOrGoalRow(agent)) {
+    return loopOrGoalActivityText(agent);
+  }
   if (agent.agentKind === "background") {
     return backgroundShellActivityText(agent);
   }

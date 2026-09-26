@@ -159,12 +159,36 @@ type MutableAgent = {
   -readonly [K in keyof RuntimeSubagent]: RuntimeSubagent[K];
 };
 
+/**
+ * The kind a task type names outright, sticky for its row: a spawn batch, and
+ * the two rows that drive work rather than do it — a provider's scheduled
+ * prompt (`scheduled`, a Grok `/loop`) and its autonomous goal (`goal`).
+ */
+function kindOfTaskType(taskType: unknown): "subagent_batch" | "loop" | "goal" | undefined {
+  switch (taskType) {
+    case "subagent_batch":
+      return "subagent_batch";
+    case "scheduled":
+      return "loop";
+    case "goal":
+      return "goal";
+    default:
+      return undefined;
+  }
+}
+
+/** A row that drives work — a loop or a goal — and is no work of its own. */
+export function isDriverKind(kind: RuntimeSubagent["kind"]): boolean {
+  return kind === "loop" || kind === "goal";
+}
+
 function kindFromPayload(
   payload: Record<string, unknown>,
   agentId: string
 ): RuntimeSubagent["kind"] {
-  if (payload.taskType === "subagent_batch") {
-    return "subagent_batch";
+  const named = kindOfTaskType(payload.taskType);
+  if (named !== undefined) {
+    return named;
   }
   if (asString(payload.taskType) === "local_workflow") {
     return "workflow";
@@ -225,7 +249,8 @@ function createAgent(id: string, payload: Record<string, unknown>, at: string): 
 
 /** Metadata fill from any payload: never downgrades known values to null. */
 function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): void {
-  if (payload.taskType === "subagent_batch") agent.kind = "subagent_batch";
+  const named = kindOfTaskType(payload.taskType);
+  if (named !== undefined) agent.kind = named;
   // Sticky per taskId: a later row with no stamp must not demote a known
   // agent to background, but a row that names it `agent` promotes one.
   if (payload.agentKind === "agent") agent.agentKind = "agent";
@@ -1166,6 +1191,10 @@ export function deriveAgentPanelModel(input: {
     // their usage upstream in some providers. Counting it would report one
     // more agent working than there are, and double-count tokens.
     if (agent.kind === "workflow" && (members.get(agent.id) ?? []).length > 0) continue;
+    // A loop or a goal drives work and is none of its own: its fires, turns
+    // and agents are counted on their own rows, and a goal's token count is
+    // everything they spent — summing it with theirs would count it twice.
+    if (isDriverKind(agent.kind)) continue;
     if (agent.status === "running" || agent.status === "pending") runningCount += 1;
     else if (agent.status === "waiting") waitingCount += 1;
     else if (agent.status === "idle") idleCount += 1;

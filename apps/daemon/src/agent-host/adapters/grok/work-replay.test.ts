@@ -109,10 +109,10 @@ test("29 a loop is a roster row of its own: started when created, re-noted per f
   );
   const [started, fired, deleted] = rows;
   assert.equal(started?.payload.taskType, "scheduled");
-  assert.equal(started?.payload.title, "Loop · every 1 minute");
+  assert.equal(started?.payload.title, "Every 1 minute: Reply with exactly: tick", "its cadence, then what it does");
   assert.equal((started?.payload as { description?: string }).description, "Reply with exactly: tick");
   assert.equal(started?.turnId, "turn-1", "on the turn that created it");
-  assert.equal((fired?.payload as { summary?: string }).summary, "Fired once · every 1 minute", "a fire notes itself, status-less");
+  assert.equal((fired?.payload as { summary?: string }).summary, "Fired once", "a fire notes itself, status-less");
   assert.equal((deleted?.payload as { summary?: string }).summary, "Deleted");
   for (const row of rows) {
     assert.equal(row.turnId, "turn-1", "every row of the loop rides the turn it was created on");
@@ -165,12 +165,17 @@ test("30 a goal is a roster row: started when active, noted on a change of phase
   const [started] = rows;
   assert.equal(started?.type, "task.started");
   assert.equal(started?.payload.taskType, "goal");
-  assert.equal(started?.payload.title, "Goal · Create a file named goal.txt containing exactly: ok");
+  assert.equal(started?.payload.title, "Create a file named goal.txt containing exactly: ok", "the roster's goal kind names it");
   assert.equal(started?.turnId, "turn-1");
   const progress = only(rows, "task.progress");
   assert.ok(progress.length >= 1 && progress.length < 9, "a note per change of phase, not per token tick");
   assert.ok(progress.every((row) => (row.payload as { status?: string }).status === undefined));
   assert.equal(progress[0]?.payload.summary, "Planning · 0 of 20000 tokens");
+  assert.deepEqual(
+    progress.map((row) => (row.payload as { usage?: unknown }).usage),
+    progress.map((row) => ({ totalTokens: Number(/(\d+) of \d+ tokens/.exec(String(row.payload.summary))?.[1]) })),
+    "each note carries the goal's own token count, for its row's metrics"
+  );
   assert.deepEqual(
     ends(run.events, GOAL),
     [["stopped", "Token budget reached: 48386 of 20000 tokens"]],

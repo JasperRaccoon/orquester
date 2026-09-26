@@ -6,6 +6,7 @@ import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
+import { isLoopOrGoalRow } from "../../../lib/agent-chat/roster.logic";
 import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
@@ -166,9 +167,12 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
    * output pane, which is the whole content of this view rather than a detail
    * hidden under a label.
    */
-  const backgroundShell =
-    agentId !== undefined &&
-    (roster ?? []).some((candidate) => candidate.id === agentId && candidate.agentKind === "background");
+  const drilledRow =
+    agentId === undefined ? undefined : (roster ?? []).find((candidate) => candidate.id === agentId);
+  // A loop and a goal are background rows too, and never shells: they print
+  // nothing — their work is rows of its own, which the empty copy points at.
+  const drivesWork = drilledRow !== undefined && isLoopOrGoalRow(drilledRow);
+  const backgroundShell = drilledRow !== undefined && drilledRow.agentKind === "background" && !drivesWork;
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -815,7 +819,11 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
                   ? "No messages yet."
                   : backgroundShell
                     ? "No output yet."
-                    : "This agent has not reported anything yet."}
+                    : drilledRow?.kind === "loop"
+                      ? "Each fire runs as an agent of its own, in the roster."
+                      : drilledRow?.kind === "goal"
+                        ? "A goal's work runs in the thread's own turns and the agents it starts."
+                        : "This agent has not reported anything yet."}
               </div>
             ) : null}
             {/* The footer spacer reserves exactly what the composer overlay hides. */}

@@ -1438,15 +1438,16 @@ methods of their own on the parent's session:
   "SchedulerDelete", success: true, message: "Scheduled task … cancelled."}`, with
   `scheduled_task_deleted {reason: "deleted"}` a millisecond before it.
 
-Before 2026-09-26 the three methods were unregistered: the peer warned "acp: unhandled
-notification" for each — one warning per fire of a loop that may run for seven days. The adapter
-registers them and makes each loop a roster row typed `scheduled` — background, and inert to the
-liveness registry, so it never holds a deploy's drain between its fires; a fire notes itself on it
-in place ("Fired once · every 1 minute"), `scheduled_task_deleted` ends it (`stopped`; `completed`
-on `expired`, read off the docs), and the session's end closes it. The fire itself is the agent
-row the CLI's `subagent_spawned` starts, live while it runs. Not captured: a loop's expiry, a
-`durable` loop across sessions, and whether a Stop's `session/cancel` deletes a loop (a later fire
-notes itself on the row the Stop closed).
+Before 2026-09-26 the three methods were unregistered: the peer warned "acp: unhandled notification"
+for each — one warning per fire of a loop that may run for seven days. The adapter registers them
+and makes each loop a roster row typed `scheduled` (the roster's `loop` kind), titled by its cadence
+and prompt ("Every 1 minute: Reply with exactly: tick") — background, and inert to the liveness
+registry, so it never holds a deploy's drain between its fires; a fire notes itself on it in place
+("Fired once"), `scheduled_task_deleted` ends it (`stopped`; `completed` on `expired`, read off the
+docs), and the session's end closes it. The fire itself is the agent row the CLI's
+`subagent_spawned` starts, live while it runs. Not captured: a loop's expiry, a `durable` loop
+across sessions, and whether a Stop's `session/cancel` deletes a loop (a later fire notes itself on
+the row the Stop closed).
 
 ### 53. `/goal`: `goal_updated`, and a planner the CLI spawns
 
@@ -1472,16 +1473,17 @@ every few seconds while its planner ran:
   "idle", …}` — every id and text emptied — in a turn of its own with no model call.
 
 Before 2026-09-26 every update was an "unmapped" warning — eleven in this short run. The adapter
-makes the goal a roster row typed `goal` (inert to the liveness registry, as a loop is; its turns
-and planner hold the drain on their own): started when a goal turns `active`, a progress note in
-place on each change of phase, planning, last event, deliverables or rounds — never on a token tick
-alone — and ended when it leaves `active`: `budget_limited` → `stopped`, "Token budget reached:
-48386 of 20000 tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its
-result summary. A goal active again after the CLI's own end is a new run of its row (a new launch
-id); after the adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its
-progress notes itself on the ended row; a new goal ends the old one ("Replaced by a new goal"), with
-the token count the old one last reported itself — the replacing update counts the new goal's. Not
-captured: a goal that completes, pauses, resumes or fails.
+makes the goal a roster row typed `goal` (the roster's `goal` kind, titled by its objective; inert
+to the liveness registry, as a loop is; its turns and planner hold the drain on their own): started
+when a goal turns `active`, a progress note in place on each change of phase, planning, last event,
+deliverables or rounds — never on a token tick alone — carrying the goal's own token count, and
+ended when it leaves `active`: `budget_limited` → `stopped`, "Token budget reached: 48386 of 20000
+tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its result summary. A
+goal active again after the CLI's own end is a new run of its row (a new launch id); after the
+adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its progress notes
+itself on the ended row; a new goal ends the old one ("Replaced by a new goal"), with the token
+count the old one last reported itself — the replacing update counts the new goal's. Not captured: a
+goal that completes, pauses, resumes or fails.
 
 ### 54. The host's cancel of a question: the model hears "declined"; a Stop's cancel ends the turn
 

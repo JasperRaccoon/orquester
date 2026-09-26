@@ -489,7 +489,14 @@ export interface SubagentActivityEntry {
 /** *T3: `state/subagentRuntime.ts:59-88`.* */
 export interface RuntimeSubagent {
   id: string;
-  kind: "subagent" | "subagent_batch" | "workflow" | "workflow_agent";
+  /**
+   * `loop` and `goal` are rows that DRIVE work rather than do it: a provider's
+   * scheduled prompt (task type `scheduled`, a Grok `/loop`) and its
+   * autonomous goal (`goal`, a Grok `/goal`). Their fires, turns and agents
+   * are the work, each on rows of its own; these are background rows, never
+   * shells, and never counted as work (`deriveAgentPanelModel`).
+   */
+  kind: "subagent" | "subagent_batch" | "workflow" | "workflow_agent" | "loop" | "goal";
   /** `"background"` rows are listed too (§7.6, differs from T3). */
   agentKind: "agent" | "background";
   title: string;
