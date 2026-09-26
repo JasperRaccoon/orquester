@@ -11,8 +11,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 
-import { MESSAGE_RETENTION_LIMIT, MESSAGE_RETENTION_SLACK } from "@orquester/api/agent-chat";
+import {
+  MESSAGE_RETENTION_LIMIT,
+  MESSAGE_RETENTION_SLACK,
+  SLIM_MAX_STRING_BYTES,
+  TASK_PROMPT_MAX_CHARS
+} from "@orquester/api/agent-chat";
 
+import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createThreadStore } from "../store/index.ts";
 import { createTestHost } from "./testing/index.ts";
@@ -94,6 +100,38 @@ describe("the orchestrator's item reads over the real store", () => {
     // The newest message is still in the fold: no store read.
     assert.equal((await host.orchestrator.readItem(threadId, `m-${count - 1}`))?.kind, "message");
     assert.equal(calls.readItem, 2);
+  });
+
+  it("an agent's launch prompt: the snapshot carries it slimmed and flagged, the item read serves it as stored", async (t) => {
+    const { host } = await realStoreHost(t);
+    const threadId = await host.createThread();
+    // Past the wire's 16 KiB cap, within the host's at-rest bound: the one
+    // range where the drill-in's "load the whole prompt" read has more.
+    const prompt = `Audit the store.\n${"Context line — ✓.\n".repeat(1_100)}`;
+    assert.ok(prompt.length > SLIM_MAX_STRING_BYTES && prompt.length <= TASK_PROMPT_MAX_CHARS);
+    const [start] = runtimeEventToActivities({
+      eventId: "re-start",
+      threadId,
+      createdAt: "2026-09-24T10:00:00.000Z",
+      type: "task.started",
+      payload: { taskId: "agent-1", taskType: "subagent", description: "Audit", prompt }
+    });
+    await host.orchestrator.ingestionSink(threadId, [
+      sinkEvent(threadId, "thread.activity-appended", { activity: start })
+    ]);
+    await host.settle();
+
+    const read = await host.orchestrator.readThread(threadId);
+    assert.ok(read.kind === "snapshot");
+    const wire = read.thread.items.find((item) => item.id === "re-start");
+    const wirePayload = (wire?.kind === "activity" ? wire.payload : null) as Record<string, unknown> | null;
+    assert.ok(wirePayload !== null && typeof wirePayload.prompt === "string");
+    assert.ok(prompt.startsWith((wirePayload.prompt as string).slice(0, -1)), "the wire copy is the prompt's head");
+    assert.ok((wirePayload.prompt as string).length < prompt.length);
+    assert.equal(wirePayload.truncated, true, "the snapshot says the item read has more");
+
+    const stored = await host.orchestrator.readItem(threadId, "re-start");
+    assert.equal(stored?.kind === "activity" ? (stored.payload as Record<string, unknown>).prompt : null, prompt);
   });
 
   it("serves a tool call's output windows from the real store's cache: after the first page, only the log's tail is read", async (t) => {

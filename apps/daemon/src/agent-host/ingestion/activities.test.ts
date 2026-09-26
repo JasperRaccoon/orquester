@@ -5,7 +5,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { TOOL_LIFECYCLE_ITEM_TYPES, type CanonicalItemType } from "@orquester/api/agent-chat";
+import {
+  TASK_PROMPT_MAX_CHARS,
+  TOOL_LIFECYCLE_ITEM_TYPES,
+  type CanonicalItemType
+} from "@orquester/api/agent-chat";
 
 import { cancelledRequestActivity } from "../orchestration/events.ts";
 import {
@@ -392,6 +396,76 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
       }
     });
   }
+
+  it("task.started keeps an agent's launch prompt verbatim — never the 180-character detail cap", () => {
+    // Pages of it, leading and trailing whitespace included: the drill-in shows
+    // the prompt the agent was given, not a preview of it (§7.6).
+    const prompt = `  Read b.txt and report its first word.\n\n${"Context line.\n".repeat(900)}  `;
+    assert.ok(prompt.length > 180 && prompt.length < TASK_PROMPT_MAX_CHARS);
+    const [row] = runtimeEventToActivities(
+      runtimeEvent("task.started", {
+        taskId: "task-1",
+        description: "Read b.txt first word",
+        prompt,
+        ...linkage
+      })
+    );
+    const payload = payloadOf(row!);
+    assert.equal(payload.prompt, prompt);
+    assert.equal("promptTruncated" in payload, false, "a whole prompt is not marked cut");
+    // The description is still the task's name, and still the row's detail.
+    assert.equal(payload.detail, "Read b.txt first word");
+  });
+
+  it("task.started keeps a prompt of exactly TASK_PROMPT_MAX_CHARS whole, and cuts a longer one there", () => {
+    const exact = "p".repeat(TASK_PROMPT_MAX_CHARS);
+    const [whole] = runtimeEventToActivities(
+      runtimeEvent("task.started", { taskId: "task-1", prompt: exact, ...linkage })
+    );
+    assert.equal(payloadOf(whole!).prompt, exact);
+    assert.equal("promptTruncated" in payloadOf(whole!), false);
+
+    const [cut] = runtimeEventToActivities(
+      runtimeEvent("task.started", { taskId: "task-1", prompt: `${exact}and more`, ...linkage })
+    );
+    assert.equal(payloadOf(cut!).prompt, exact, "the head, at the cap, with no marker text inside it");
+    assert.equal(payloadOf(cut!).promptTruncated, true);
+  });
+
+  it("task.started never cuts a prompt through a surrogate pair", () => {
+    // The pair straddles the cap: keeping its high half would store a lone
+    // surrogate, which is no character at all.
+    const prompt = `${"p".repeat(TASK_PROMPT_MAX_CHARS - 1)}😀 after`;
+    const [row] = runtimeEventToActivities(
+      runtimeEvent("task.started", { taskId: "task-1", prompt, ...linkage })
+    );
+    const stored = payloadOf(row!).prompt;
+    assert.equal(stored, "p".repeat(TASK_PROMPT_MAX_CHARS - 1));
+    assert.equal(payloadOf(row!).promptTruncated, true);
+
+    // A pair wholly inside the cap is kept whole.
+    const inside = `${"p".repeat(TASK_PROMPT_MAX_CHARS - 2)}😀 after`;
+    const [kept] = runtimeEventToActivities(
+      runtimeEvent("task.started", { taskId: "task-1", prompt: inside, ...linkage })
+    );
+    assert.equal(payloadOf(kept!).prompt, `${"p".repeat(TASK_PROMPT_MAX_CHARS - 2)}😀`);
+    assert.equal(payloadOf(kept!).promptTruncated, true);
+  });
+
+  it("task.started without a prompt, or with a blank one, has no prompt key", () => {
+    for (const prompt of [undefined, "", "  \n\t "]) {
+      const [row] = runtimeEventToActivities(
+        runtimeEvent("task.started", {
+          taskId: "task-1",
+          ...(prompt !== undefined ? { prompt } : {}),
+          ...linkage
+        })
+      );
+      const payload = payloadOf(row!);
+      assert.equal("prompt" in payload, false, `prompt ${JSON.stringify(prompt)} was written`);
+      assert.equal("promptTruncated" in payload, false);
+    }
+  });
 
   it("task.progress splits activity and usage onto two stable ids", () => {
     const rows = runtimeEventToActivities(

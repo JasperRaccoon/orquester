@@ -178,6 +178,24 @@ test("a compaction summary survives slimming, capped and flagged", () => {
   assert.equal(slim.truncated, true);
 });
 
+test("an agent's launch prompt survives slimming, capped and flagged, beside its at-rest mark", () => {
+  // The drill-in shows it at its top (§7.6). A `task.started` row has no
+  // `data`, so nothing is rebuilt: the prompt is one more top-level string,
+  // capped at 16 KiB like the rest, with `truncated` pointing the row at
+  // `GET …/items/:itemId` for the stored value. `promptTruncated` — the stored
+  // value is itself cut — is not the wire's to change.
+  const short = { taskId: "t1", agentKind: "agent", prompt: "Read b.txt and report its first word." };
+  assert.equal(slimActivityPayload(short), short, "a prompt that fits leaves the row by identity");
+  const huge = "p".repeat(SLIM_MAX_STRING_BYTES + 2_000);
+  const slim = record(
+    slimActivityPayload({ taskId: "t1", agentKind: "agent", prompt: huge, promptTruncated: true })
+  );
+  assert.equal(byteLength(slim.prompt as string), SLIM_MAX_STRING_BYTES + byteLength("…"));
+  assert.equal(slim.truncated, true);
+  assert.equal(slim.promptTruncated, true);
+  assert.equal(slim.taskId, "t1");
+});
+
 /** The cap is stated in BYTES, so the test measures bytes. */
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).length;

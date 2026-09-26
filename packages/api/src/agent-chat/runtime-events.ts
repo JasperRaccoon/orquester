@@ -779,7 +779,34 @@ export interface TaskStartedPayload extends TaskAgentLinkage {
    * ones. Absent when the provider does not say.
    */
   isBackgrounded?: boolean;
+  /**
+   * The prompt THIS launch of the agent was given, verbatim — never a summary,
+   * never the description (which is the task's name). It rides the first
+   * `task.started` of a run; a relaunch's start (a new launch id) carries the
+   * relaunch's own prompt — a resumed Claude agent's message, a Grok
+   * `resume_from`'s, an OpenCode `task_id` re-prompt's, a Codex follow-up's —
+   * when the provider reports one. Absent when it does not, and never on a
+   * shell or a monitor: a shell's command is its description.
+   *
+   * It is what the agent's drill-in shows at its top (spec §7.6, "its prompt
+   * at the top"). Ingestion keeps it on the `task.started` row as
+   * `payload.prompt`, whole up to {@link TASK_PROMPT_MAX_CHARS} and marked
+   * `promptTruncated` past it; the wire slimmer may cut it further (§5.6), and
+   * `GET …/items/:itemId` then serves the stored value.
+   */
+  prompt?: string;
 }
+
+/**
+ * How much of an agent's launch prompt ({@link TaskStartedPayload.prompt}) a
+ * `task.started` row keeps at rest, in UTF-16 code units, cut on a code-point
+ * boundary and marked `promptTruncated: true` when cut. Twice the wire's
+ * per-string cap (`SLIM_MAX_STRING_BYTES`, 16 KiB), so a prompt the wire
+ * cuts is still read whole from the item; bounded because an agent's
+ * start row is never evicted from the fold (it anchors the agent's row), so a
+ * fleet's prompts live in memory for as long as its thread does.
+ */
+export const TASK_PROMPT_MAX_CHARS = 32_000;
 
 export interface TaskProgressPayload extends TaskAgentLinkage {
   taskId: string;
