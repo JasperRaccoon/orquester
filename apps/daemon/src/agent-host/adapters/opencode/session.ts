@@ -200,6 +200,13 @@ export interface OpenCodeThreadSessionDeps {
   emit: (event: RuntimeEvent) => void;
   /** Called exactly once, after `session.exited` has been emitted. */
   onClosed: (threadId: string) => void;
+  /**
+   * The wait between two attempts: the event stream's reconnect, and every
+   * retry below it. `util.ts`'s `delay` — a timer the session's stop ends
+   * early — unless a test hands in its own, so a dropped stream reconnects
+   * without a clock.
+   */
+  delay?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 export interface StartOpenCodeSessionInput {
@@ -484,6 +491,11 @@ export class OpenCodeThreadSession {
     this.deps.emit(event);
   }
 
+  /** Wait `ms` before the next attempt (`OpenCodeThreadSessionDeps.delay`); the stop ends it early. */
+  private async backoff(ms: number): Promise<void> {
+    await (this.deps.delay ?? delay)(ms, this.pumpAbort.signal);
+  }
+
   /**
    * §3.1: every live task is closed with `task.completed {status:"stopped"}` —
    * which the roster folds to `interrupted` (§7.6) — before the turn or the
@@ -589,7 +601,7 @@ export class OpenCodeThreadSession {
       if (this.closed || this.pumpAbort.signal.aborted) {
         break;
       }
-      await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
+      await this.backoff(backoffMs(attempt, 250, 5_000));
       attempt += 1;
     }
   }
@@ -835,7 +847,7 @@ export class OpenCodeThreadSession {
             }
           });
         }
-        await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
+        await this.backoff(backoffMs(attempt, 250, 5_000));
         attempt += 1;
       }
     } finally {
@@ -913,11 +925,11 @@ export class OpenCodeThreadSession {
         // A native command's response only arrives once generation finished,
         // so its receipt — not a submit cap — is what proves admission.
         if (admission.requiresMessageReceipt && !admission.accepted) {
-          await delay(backoffMs(attempt, 250, 2_000), this.pumpAbort.signal);
+          await this.backoff(backoffMs(attempt, 250, 2_000));
           continue;
         }
         if (!admission.accepted) {
-          await delay(backoffMs(attempt, 250, 2_000), this.pumpAbort.signal);
+          await this.backoff(backoffMs(attempt, 250, 2_000));
           continue;
         }
 
@@ -956,7 +968,7 @@ export class OpenCodeThreadSession {
         } else if (status.kind !== "idle") {
           admission.idleStatusConfirmations = 0;
         }
-        await delay(backoffMs(attempt, 250, 2_000), this.pumpAbort.signal);
+        await this.backoff(backoffMs(attempt, 250, 2_000));
       }
       await this.failPromptAdmission(admission);
     } finally {
@@ -1257,7 +1269,7 @@ export class OpenCodeThreadSession {
     }
     // "unknown" — the walk could not complete (a transient read, a session not
     // yet visible). Back off and try again, within the cap.
-    await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
+    await this.backoff(backoffMs(attempt, 250, 5_000));
     if (this.closed) {
       this.ancestryAttempts.delete(key);
       return;

@@ -75,6 +75,8 @@ class FakeOpenCode {
   /** Overrides keyed by `METHOD path-suffix`; one may hold its answer back. */
   readonly overrides = new Map<string, () => Response | Promise<Response>>();
   private controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+  /** Waiting on the session's next `GET /event` (`nextStream`). */
+  private streamWaiters: (() => void)[] = [];
   private nextSession = 0;
 
   readonly fetchImpl: typeof fetch = async (input, init) => {
@@ -99,6 +101,10 @@ class FakeOpenCode {
           this.controller = controller;
         }
       });
+      // The new stream is the one `push` feeds from here on.
+      for (const opened of this.streamWaiters.splice(0)) {
+        opened();
+      }
       return new Response(stream, {
         status: 200,
         headers: { "content-type": "text/event-stream" }
@@ -203,6 +209,18 @@ class FakeOpenCode {
   push(event: unknown): void {
     const chunk = `data: ${JSON.stringify(event)}\n\n`;
     this.controller?.enqueue(new TextEncoder().encode(chunk));
+  }
+
+  /** End the current event stream, as a dropped connection does: the session reconnects. */
+  endStream(): void {
+    this.controller?.close();
+  }
+
+  /** Settles once the session has opened its next event stream. */
+  nextStream(): Promise<void> {
+    return new Promise((resolve) => {
+      this.streamWaiters.push(resolve);
+    });
   }
 
   find(method: string, suffix: string): RecordedRequest | undefined {
@@ -343,10 +361,17 @@ async function startSession(
     resumeCursor?: unknown;
     runtimeMode?: "approval-required" | "full-access";
     cwd?: string;
+    /** The session's wait between attempts; a real timer when absent. */
+    delay?: (ms: number, signal: AbortSignal) => Promise<void>;
   } = {}
 ): Promise<OpenCodeThreadSession> {
   return await OpenCodeThreadSession.start(
-    { ctx: harness.ctx, emit: harness.emit, onClosed: () => undefined },
+    {
+      ctx: harness.ctx,
+      emit: harness.emit,
+      onClosed: () => undefined,
+      ...(options.delay !== undefined ? { delay: options.delay } : {})
+    },
     {
       threadId: "thread-1",
       cwd: options.cwd ?? "/repo",
@@ -2163,6 +2188,78 @@ test("end to end: through the host's real ingestion and fold, the woken reply re
   assert.equal(done.text, "The child found README.md.");
   assert.equal(isMessageStreaming(done, messageStreamingContext(end)), false, "and reads as settled");
   assert.equal(end.turns.length, 1, "one turn, and no other");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// A reconnect clears the run evidence (`parentBusy`)
+// ---------------------------------------------------------------------------
+
+/**
+ * The parent at rest after a run's `busy` — its `idle` not yet seen — then
+ * the stream dropped and the session reconnected. The session's wait between
+ * attempts is the test's own, which returns at once and keeps what it was
+ * asked to wait: the reconnect needs no clock.
+ */
+async function reconnectedAfterBusy(
+  harness: Harness
+): Promise<{ session: OpenCodeThreadSession; sessionId: string; waits: number[] }> {
+  const waits: number[] = [];
+  const session = await startSession(harness, {
+    delay: async (ms) => {
+      waits.push(ms);
+    }
+  });
+  const sessionId = session.sessionId;
+  harness.fake.push({ type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } });
+  await drainedWith(harness, sessionId, "before the gap");
+  const reconnected = harness.fake.nextStream();
+  harness.fake.endStream();
+  await reconnected;
+  assert.deepEqual(waits, [250], "the reconnect waited the backoff's first step, on the injected wait");
+  return { session, sessionId, waits };
+}
+
+test("a reconnect clears a stale busy: a reply the host never started, after the gap, opens no turn", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await reconnectedAfterBusy(harness);
+
+  // The run whose `busy` came before the gap may have ended in it: its reply
+  // to a prompt the server wrote, arriving with no `busy` since, is no
+  // evidence of a run that an `idle` will ever settle.
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins.filter((frame) => frame.type !== "session.status"),
+    ...reply.streams
+  ]);
+  await drainedWith(harness, sessionId, "after the gap");
+  assert.deepEqual(eventsOfType(harness.events, "turn.started"), [], "a busy from before the gap opens nothing");
+  assert.deepEqual([session.session.status, session.session.activeTurnId], ["ready", undefined]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a reconnect keeps what a live run says after it: a busy after the gap still opens the woken turn", async () => {
+  const harness = makeHarness();
+  const { session, sessionId } = await reconnectedAfterBusy(harness);
+
+  const reply = wokenReply({ sessionId, ...FIRST });
+  pushAll(harness.fake, [
+    ...injectedAnswer({ sessionId, promptId: FIRST.promptId, childId: "ses_child", answer: "Found README.md." }),
+    ...reply.begins,
+    ...reply.streams
+  ]);
+  await waitFor(harness, "content.delta");
+  assert.deepEqual(
+    eventsOfType(harness.events, "turn.started").map((event) => event.turnId),
+    [FIRST.promptId],
+    "the run's own busy after the gap is the evidence"
+  );
+  pushAll(harness.fake, [...reply.ends, ...runSettles(sessionId)]);
+  const completed = await waitFor(harness, "turn.completed");
+  assert.deepEqual([completed.turnId, completed.payload.state], [FIRST.promptId, "completed"]);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
