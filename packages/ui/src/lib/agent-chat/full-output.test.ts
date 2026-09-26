@@ -442,3 +442,33 @@ describe("an agent's launch prompt in the viewer (§7.6: 'Load the full prompt')
     assert.equal(fullOutputText(item), JSON.stringify(item.payload, null, 2));
   });
 });
+
+describe("a wire-cut launch prompt never makes its spawn row a 'Load full output' (review M2)", () => {
+  it("a task row is no tool output: the prompt has its own read, the prompt row's", () => {
+    // Over 16 KiB of UTF-8 — about 5.4 K CJK characters is enough — the wire cuts it and stamps `truncated`.
+    const payload = slimActivityPayload({
+      taskId: "agent-1",
+      agentKind: "agent",
+      taskType: "subagent",
+      toolUseId: "call-agent",
+      title: "Audit",
+      prompt: "監".repeat(6_000)
+    }) as Record<string, unknown>;
+    assert.equal(payload.truncated, true, "the wire did cut it");
+    const [spawn] = deriveWorkLogEntries([activity("task.started", payload, { turnId: "t1", tone: "info" })]);
+    assert.ok(spawn?.agentSpawn, "the launch is the batch's spawn row");
+    assert.equal(spawn.truncated, undefined, "no promise of more output on it");
+    assert.equal(fullOutputSourceOf(spawn), null);
+  });
+
+  it("a task's end carries none either", () => {
+    const payload = slimActivityPayload({
+      taskId: "agent-1",
+      agentKind: "agent",
+      status: "completed",
+      summary: "監".repeat(6_000)
+    }) as Record<string, unknown>;
+    const [end] = deriveWorkLogEntries([activity("task.completed", payload, { turnId: "t1", tone: "info" })]);
+    assert.equal(end?.truncated, undefined);
+  });
+});
