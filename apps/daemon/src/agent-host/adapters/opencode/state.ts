@@ -608,6 +608,13 @@ export interface OpenCodeSessionState {
   hostCompacting: boolean;
   activeAgent?: string;
   activeVariant?: string;
+  /**
+   * An interrupt is under way: a Stop from its first settle to its end, a
+   * failed admission's abort. What reaches the thread meanwhile may come from
+   * a run the abort is about to end, so a request is held until it is over
+   * (`holdsRequests` in `normalize.ts`). Set by `session.ts`'s `asInterrupt`.
+   */
+  interrupting: boolean;
   interruptedTurnId?: string;
   reconcileIdleStatus: boolean;
   awaitingBusyAfterInterruption: boolean;
@@ -692,6 +699,7 @@ export function createSessionState(input: {
     claimedPromptIds: new Set(),
     parentBusy: false,
     hostCompacting: false,
+    interrupting: false,
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
     promptGeneration: 0,

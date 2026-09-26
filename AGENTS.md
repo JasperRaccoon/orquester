@@ -1204,9 +1204,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the parent again; a `task_id` extension's child runs on. The adapter marked every request that
   arrived while no turn ran after an interrupt resolved and answered nothing, so a live asker
   waited for good (and so did the next turn, which joins the blocked run). Now one that arrives
-  while the interrupt is in flight, or after it before any run says `busy`
-  (`interruptionLingers`, the windows the parent's output is dropped in), is held
-  (`holdsRequests`) and judged once the abort is over (`judgeHeldRequest`): listed by the server
+  while an interrupt is under way (`asInterrupt`: a Stop from its first step — withdrawing the
+  parked cards comes before the abort — and a failed admission's abort, which now leaves the same
+  lingering state a Stop does), or after it before any run says `busy` (`interruptionLingers`,
+  the windows the parent's output is dropped in), is held (`holdsRequests`) and judged once every
+  interrupt is over (`judgeHeldRequest`, `interruptsSettled`): listed by the server
   and its session busy — the card, as any (a child's question on no turn), or full access's
   `once`; unlisted or its session idle (an older server's orphan) — no card, a reject on the wire,
   and no row when it closes. A read that fails shows the card: a reject would answer for the user,

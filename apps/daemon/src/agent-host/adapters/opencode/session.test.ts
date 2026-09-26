@@ -2489,6 +2489,77 @@ test("a request that arrives once the next turn is sent, before its run says bus
   harness.dispose();
 });
 
+test("an ask that arrives while the Stop withdraws the parked cards is held too: judged after the abort, no card on the stopped turn", async () => {
+  const harness = makeHarness();
+  const session = await sessionWithParkedCards(harness);
+  const sessionId = session.sessionId;
+  // The Stop's first step answers each parked card on the wire: hold the first
+  // answer, and ask meanwhile. Until the abort that follows, the asker waits
+  // (listed, its run busy); the abort ends it.
+  harness.fake.permissionsOpen = [permissionAsk("per_during_settle", sessionId)];
+  harness.fake.statusMap = { [sessionId]: { type: "busy" } };
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, () => {
+    harness.fake.permissionsOpen = [];
+    harness.fake.statusMap = {};
+    return json(true);
+  });
+  const withdrawing = deferred<void>();
+  const withdrawn = deferred<void>();
+  harness.fake.overrides.set("POST /permission/per_1/reply", async () => {
+    withdrawing.resolve();
+    await withdrawn.promise;
+    return json(true);
+  });
+  const stopping = session.interruptTurn();
+  await withdrawing.promise;
+  harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_during_settle", sessionId) });
+  await drainedWith(harness, sessionId, "while the cards are withdrawn");
+  assert.deepEqual(
+    eventsOfType(harness.events, "request.opened").filter((event) => event.requestId === "per_during_settle"),
+    [],
+    "no card while the Stop is under way"
+  );
+  assert.equal(harness.fake.find("GET", "/permission"), undefined, "nor a question to the server before its abort");
+
+  withdrawn.resolve();
+  await stopping;
+  const rejected = await harness.fake.waitForRequest("POST", "/permission/per_during_settle/reply");
+  assert.deepEqual(rejected.body, { reply: "reject" });
+  assert.deepEqual(
+    eventsOfType(harness.events, "request.opened").map((event) => event.requestId),
+    ["per_1"],
+    "the parked card only, never one for the ended asker"
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("after a prompt admission fails and aborts the session, a request is judged as after a Stop: the aborted run's is rejected, a live asker's shown", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness, { delay: async () => undefined });
+  const sessionId = session.sessionId;
+  // Accepted, but its message never shows and the session reads idle: machine
+  // (3) gives up after five attempts, aborts the session and fails the turn.
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "run it", attachments: [], interactionMode: "default" });
+  const failed = await waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId);
+  assert.equal((failed as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "failed");
+  assert.ok(harness.fake.find("POST", `/session/${sessionId}/abort`) !== undefined, "the admission's abort");
+
+  // The aborted run's last ask, late: no longer listed.
+  harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_after_admission", sessionId) });
+  const rejected = await harness.fake.waitForRequest("POST", "/permission/per_after_admission/reply");
+  assert.deepEqual(rejected.body, { reply: "reject" });
+  // A run the abort never reached, asking: listed, its session busy.
+  harness.fake.permissionsOpen = [permissionAsk("per_live", sessionId)];
+  harness.fake.statusMap = { [sessionId]: { type: "busy" } };
+  harness.fake.push({ type: "permission.asked", properties: permissionAsk("per_live", sessionId) });
+  const opened = await waitFor(harness, "request.opened");
+  assert.equal(opened.requestId, "per_live");
+  assert.deepEqual(eventsOfType(harness.events, "request.opened").map((event) => event.requestId), ["per_live"]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("after a Stop, a request the server cannot say anything about is shown: the user answers it, never a reject on their behalf", async () => {
   const harness = makeHarness();
   const { session } = await stoppedAfterLaunching(harness);

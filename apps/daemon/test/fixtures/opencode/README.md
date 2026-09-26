@@ -976,9 +976,11 @@ What still reaches the thread after a Stop:
 The adapter used to mark every request that arrived while no turn ran after an interrupt resolved,
 write nothing and answer nothing: a live asker waited for good, and so did the parent's next turn,
 whose prompt joins the running run (`ensureRunning` awaits it). Now a request that arrives while
-an interrupt is ending the runs, or after one before any run has said `busy` — the windows in
-which the parent's own output is dropped (`interruptionLingers`) — is held (`holdsRequests`) and
-judged once the interrupt in flight is over (`judgeHeldRequest`), on the server's word:
+an interrupt is under way — a Stop from its first step, withdrawing the parked cards, which comes
+before its abort; a failed admission's abort, which is `SessionRunState.cancel` too and now leaves
+the lingering state a Stop does — or after one before any run has said `busy` (the windows in
+which the parent's own output is dropped, `interruptionLingers`) is held (`holdsRequests`) and
+judged once every interrupt is over (`judgeHeldRequest`), on the server's word:
 `GET /permission` (or `/question`) and `GET /session/status`. Its asker is gone when the request
 is no longer listed, or when the asker's session runs nothing — an older server's orphan, listed
 and idle (fixture 06): no card, the request is rejected on the wire, which releases what an older

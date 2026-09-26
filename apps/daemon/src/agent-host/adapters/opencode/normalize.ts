@@ -2030,8 +2030,10 @@ function dropMessageOutputMarks(state: OpenCodeSessionState, messageId: string):
 
 /**
  * Whether a request arriving now waits for the server's word on its asker
- * before anything is shown or answered: an interrupt is ending the thread's
- * runs, or one did and no run since has said `busy` (`interruptionLingers`).
+ * before anything is shown or answered: an interrupt is under way — a Stop
+ * from its first step, the withdrawal of the parked cards, which comes before
+ * its abort; a failed admission's abort (`interrupting`) — or one ended and no
+ * run since has said `busy` (`interruptionLingers`).
  *
  * The abort a Stop sends ends every asker it reaches — 1.18.32's
  * `SessionRunState.cancel` cancels every job the session launched, children's
@@ -2045,7 +2047,7 @@ function dropMessageOutputMarks(state: OpenCodeSessionState, messageId: string):
  * waits for good. Only the server can tell them apart.
  */
 function holdsRequests(state: OpenCodeSessionState): boolean {
-  return state.cancellation !== undefined || interruptionLingers(state);
+  return state.interrupting || state.cancellation !== undefined || interruptionLingers(state);
 }
 
 /** Hold a request for `judgeHeldRequest`; a repeated frame of it adds nothing meanwhile. */

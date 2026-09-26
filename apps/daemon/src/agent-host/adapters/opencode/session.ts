@@ -240,6 +240,8 @@ export class OpenCodeThreadSession {
   /** Resolves once `doStop` runs, so shared-promise listeners can detach. */
   private readonly closed$ = deferred<void>();
   private readonly ancestryAttempts = new Map<string, number>();
+  /** The interrupts under way (`asInterrupt`), each settling when it ends. */
+  private readonly interruptFlights = new Set<Promise<void>>();
   private pumpConnections = 0;
   private closed = false;
   private closing: Promise<void> | undefined;
@@ -497,6 +499,33 @@ export class OpenCodeThreadSession {
   /** Wait `ms` before the next attempt (`OpenCodeThreadSessionDeps.delay`); the stop ends it early. */
   private async backoff(ms: number): Promise<void> {
     await (this.deps.delay ?? delay)(ms, this.pumpAbort.signal);
+  }
+
+  /**
+   * Run `work` as an interrupt (`OpenCodeSessionState.interrupting`): from its
+   * first step to its last, a request is held (`holdsRequests` in
+   * `normalize.ts`), and judged only once every interrupt is over
+   * (`interruptsSettled`) — the abort is what ends an asker, and a Stop's
+   * first step, withdrawing the parked cards, comes before it.
+   */
+  private async asInterrupt<T>(work: () => Promise<T>): Promise<T> {
+    const flight = deferred<void>();
+    this.interruptFlights.add(flight.promise);
+    this.state.interrupting = true;
+    try {
+      return await work();
+    } finally {
+      this.interruptFlights.delete(flight.promise);
+      this.state.interrupting = this.interruptFlights.size > 0;
+      flight.resolve();
+    }
+  }
+
+  /** Settles once no interrupt is in flight — one that begins meanwhile included. */
+  private async interruptsSettled(): Promise<void> {
+    while (this.interruptFlights.size > 0) {
+      await Promise.all([...this.interruptFlights]);
+    }
   }
 
   /**
@@ -1011,27 +1040,36 @@ export class OpenCodeThreadSession {
     }
     const detail =
       "OpenCode accepted the prompt, but Orquester could not confirm its message or session status.";
-    await this.abortSession(1_000).catch(() => undefined);
-    const tokenUsage = takeTurnTokenUsage(this.state, false);
-    this.state.promptAdmission = undefined;
-    this.state.activeTurnId = undefined;
-    this.state.activeAgent = undefined;
-    this.state.activeVariant = undefined;
-    this.endInterruptionBefore(admission.turnId);
-    this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
-    // Every child, a background one too: the abort above is 1.18.32's
-    // `SessionRunState.cancel`, which cancels the session's background jobs
-    // (read from the source) — unlike a turn that fails on its own.
-    this.closeChildAgents(detail);
-    this.emit({
-      ...this.base({ turnId: admission.turnId }),
-      type: "turn.completed",
-      payload: { state: "failed", errorMessage: detail, tokenUsage }
-    });
-    this.emit({
-      ...this.base({ turnId: admission.turnId }),
-      type: "runtime.error",
-      payload: { message: detail, class: "transport_error" }
+    // The abort is an interrupt like a Stop's: a request that reaches the
+    // thread while it runs, or after it before a new run says `busy`, is judged
+    // on the server's word rather than shown to a run it may have ended.
+    await this.asInterrupt(async () => {
+      await this.abortSession(1_000).catch(() => undefined);
+      const tokenUsage = takeTurnTokenUsage(this.state, false);
+      this.state.promptAdmission = undefined;
+      this.state.activeTurnId = undefined;
+      this.state.activeAgent = undefined;
+      this.state.activeVariant = undefined;
+      // What the aborted run still sends is its leftovers, as after a Stop —
+      // which this replaces, if one was still lingering.
+      this.state.interruptedTurnId = admission.turnId;
+      this.state.reconcileIdleStatus = true;
+      this.state.awaitingBusyAfterInterruption = false;
+      this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
+      // Every child, a background one too: the abort above is 1.18.32's
+      // `SessionRunState.cancel`, which cancels the session's background jobs
+      // (read from the source) — unlike a turn that fails on its own.
+      this.closeChildAgents(detail);
+      this.emit({
+        ...this.base({ turnId: admission.turnId }),
+        type: "turn.completed",
+        payload: { state: "failed", errorMessage: detail, tokenUsage }
+      });
+      this.emit({
+        ...this.base({ turnId: admission.turnId }),
+        type: "runtime.error",
+        payload: { message: detail, class: "transport_error" }
+      });
     });
   }
 
@@ -1186,8 +1224,8 @@ export class OpenCodeThreadSession {
   private async judgeHeldRequest(held: OpenCodeHeldRequest, raw: unknown): Promise<void> {
     const requestId = held.request.id;
     for (let round = 0; ; round += 1) {
-      // The abort in flight is what ends an asker: ask only after it.
-      await this.state.cancellation?.completion.catch(() => undefined);
+      // The abort is what ends an asker: ask only once every interrupt is over.
+      await this.interruptsSettled();
       if (this.closed || !this.state.heldRequestIds.has(requestId)) {
         return;
       }
@@ -1196,7 +1234,7 @@ export class OpenCodeThreadSession {
         return;
       }
       // An interrupt that began while the server answered may end it too.
-      if (this.state.cancellation !== undefined && round < 2) {
+      if (this.state.interrupting && round < 2) {
         continue;
       }
       this.state.heldRequestIds.delete(requestId);
@@ -1556,10 +1594,9 @@ export class OpenCodeThreadSession {
       commandMatch === null ? undefined : await this.lookupCommand(commandMatch[1] ?? "");
 
     return await this.promptLock.run(async () => {
-      const pending = this.state.cancellation;
-      if (pending !== undefined) {
-        await pending.completion.catch(() => undefined);
-      }
+      // A Stop under way — from its first step, the withdrawn cards — ends
+      // before a prompt opens a turn it would otherwise abort unannounced.
+      await this.interruptsSettled();
       if (this.closed) {
         throw new Error("OpenCode session is closed.");
       }
@@ -1875,6 +1912,10 @@ export class OpenCodeThreadSession {
    * active one is a no-op, so it cannot kill the next turn (§4.1).
    */
   async interruptTurn(turnId?: string): Promise<void> {
+    // An interrupt already under way — another Stop, a failed admission's
+    // abort — ends what it reaches first; this one then acts on the thread
+    // as it stands, turn-scoped as ever.
+    await this.interruptsSettled();
     const activeTurnId = this.state.activeTurnId;
     if (turnId !== undefined && activeTurnId !== turnId) {
       return;
@@ -1883,63 +1924,62 @@ export class OpenCodeThreadSession {
     if (target !== undefined && this.state.interruptedTurnId === target) {
       return;
     }
-    const existing = this.state.cancellation;
-    if (existing !== undefined) {
-      await existing.completion.catch(() => undefined);
-      return;
-    }
 
-    // Settle first — see settlePendingRequests().
-    await this.settlePendingRequests();
+    // One interrupt from its first step: an ask that reaches the thread while
+    // the parked cards are withdrawn below is judged after the abort too.
+    await this.asInterrupt(async () => {
+      // Settle first — see settlePendingRequests().
+      await this.settlePendingRequests();
 
-    this.cancelIdleReconciliation();
-    if (target !== undefined) {
-      this.state.interruptedTurnId = target;
-    }
-    this.state.reconcileIdleStatus = true;
-    this.state.awaitingBusyAfterInterruption = false;
-    const admission = this.state.promptAdmission;
-    if (admission !== undefined) {
-      admission.cancelled = true;
-    }
-
-    const cancellation = makeCancellation(target);
-    this.state.cancellation = cancellation;
-    try {
-      await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
-      cancellation.acknowledged = true;
-      cancellation.acknowledge();
-      await this.abortDescendants();
-      // §6.2: "`/interrupt` is also the only way to stop background work, and
-      // it stops all of it. It is addressed to the SESSION, not to a turn, so
-      // it is valid with no turn running." The descendant abort above already
-      // killed the children provider-side; closing their roster rows is what
-      // lets `backgroundLiveness` drop to null — without it the client's Stop
-      // button stays on "Stopping…" forever. Runs on EVERY interrupt, with or
-      // without an active turn, and is idempotent.
-      this.closeChildAgents("interrupted");
-      const tokenUsage = takeTurnTokenUsage(this.state, false);
-      if (target !== undefined && this.state.activeTurnId === target) {
-        this.state.activeTurnId = undefined;
-        this.state.activeAgent = undefined;
-        this.state.activeVariant = undefined;
-        this.state.promptAdmission = undefined;
-        this.updateRecord({ status: "ready" }, { activeTurnId: true });
-        this.emit({
-          ...this.base({ turnId: target }),
-          type: "turn.aborted",
-          payload: { reason: "interrupted", tokenUsage }
-        });
+      this.cancelIdleReconciliation();
+      if (target !== undefined) {
+        this.state.interruptedTurnId = target;
       }
-      cancellation.complete();
-    } catch (error) {
-      cancellation.complete(error);
-      throw error;
-    } finally {
-      if (this.state.cancellation === cancellation) {
-        this.state.cancellation = undefined;
+      this.state.reconcileIdleStatus = true;
+      this.state.awaitingBusyAfterInterruption = false;
+      const admission = this.state.promptAdmission;
+      if (admission !== undefined) {
+        admission.cancelled = true;
       }
-    }
+
+      const cancellation = makeCancellation(target);
+      this.state.cancellation = cancellation;
+      try {
+        await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
+        cancellation.acknowledged = true;
+        cancellation.acknowledge();
+        await this.abortDescendants();
+        // §6.2: "`/interrupt` is also the only way to stop background work, and
+        // it stops all of it. It is addressed to the SESSION, not to a turn, so
+        // it is valid with no turn running." The descendant abort above already
+        // killed the children provider-side; closing their roster rows is what
+        // lets `backgroundLiveness` drop to null — without it the client's Stop
+        // button stays on "Stopping…" forever. Runs on EVERY interrupt, with or
+        // without an active turn, and is idempotent.
+        this.closeChildAgents("interrupted");
+        const tokenUsage = takeTurnTokenUsage(this.state, false);
+        if (target !== undefined && this.state.activeTurnId === target) {
+          this.state.activeTurnId = undefined;
+          this.state.activeAgent = undefined;
+          this.state.activeVariant = undefined;
+          this.state.promptAdmission = undefined;
+          this.updateRecord({ status: "ready" }, { activeTurnId: true });
+          this.emit({
+            ...this.base({ turnId: target }),
+            type: "turn.aborted",
+            payload: { reason: "interrupted", tokenUsage }
+          });
+        }
+        cancellation.complete();
+      } catch (error) {
+        cancellation.complete(error);
+        throw error;
+      } finally {
+        if (this.state.cancellation === cancellation) {
+          this.state.cancellation = undefined;
+        }
+      }
+    });
   }
 
   /** `POST /session/<nonexistent>/abort` answers `200 true` — it proves nothing. */

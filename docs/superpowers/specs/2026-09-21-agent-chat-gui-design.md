@@ -1556,11 +1556,11 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   thread after a Stop: the late frame of an ask the abort ended, or the ask of a run it never
   reached (a background answer injected after it starts the parent again; a `task_id` extension's
   child runs on). Such a request was marked resolved and neither shown nor answered, so a live
-  asker waited for good. It is now held while the interrupt is in flight and until a run says
-  `busy` again, then judged on the server's lists and session status: a live asker's is shown as
-  any request is, a gone asker's is rejected on the wire and writes nothing, and a read that fails
-  shows the card (`adapters/opencode/normalize.ts`, `session.ts`; fixtures README observation
-  29).*
+  asker waited for good. It is now held while an interrupt is under way — a Stop from its first
+  step, before its abort; a failed admission's abort — and until a run says `busy` again, then
+  judged on the server's lists and session status: a live asker's is shown as any request is, a
+  gone asker's is rejected on the wire and writes nothing, and a read that fails shows the card
+  (`adapters/opencode/normalize.ts`, `session.ts`; fixtures README observation 29).*
 - **Child-session event routing.** Parent-session events pass; **child-session events pass only if
   they are permission or question events**, behind an ancestry-resolution retry loop (250 ms→5 s
   backoff; asked-events retry forever, terminal events give up after 5). This is the whole reason
