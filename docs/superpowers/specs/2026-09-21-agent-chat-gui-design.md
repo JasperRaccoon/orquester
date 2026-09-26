@@ -3602,8 +3602,9 @@ fresh-data layout pass and the initial end pin — not a wall-clock window, whic
 (a turn streaming into a thread opened half a second ago jumps instead of gliding) and too short
 (a slow first fold lands after it expires and glides down in front of the user). The latch is
 matched on the identity, so one armed for the thread just left cannot affect the one arrived at,
-and the subagent drill-in counts as its own identity because it mounts a second timeline for the
-same session id while the parent's is still mounted (§7.6).
+and the subagent drill-in counts as its own identity because its timeline is a second list under
+the same session id (§7.6): the thread's timeline unmounts while a child is open, and the identity
+keeps a list opened under one session id from reading as the same list.
 *T3: `apps/web/src/components/chat/MessagesTimeline.tsx:1287` — `initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}`, with `positionedThreadKey` initialised at `:548-551` so no restore scroll runs in that case; `:389-395` — `TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH`, "thread switches and layout settles keep the instant variant so nothing visibly travels"; `:555-567, :618-631` — `settlingListIdentity` and its two-frame `requestAnimationFrame` clear; `:1294-1304` — `isWorking && !prefersReducedMotion && settlingListIdentity === null` picks the smooth variant.*
 *Built: the rules are pure and live in `packages/ui/src/components/agent-chat/timeline/follow.ts`
 (`shouldAnimateFollow`, `armSettleLatch`/`tickSettleLatch`/`isSettling`,
@@ -4366,13 +4367,21 @@ The thread's own boundary wrapped everything and kept the open agent, so a crash
 composer, the roster and Back, and on a touch device only closing the tab recovered; its "Try again"
 now also leaves an open drill-in.*
 
-**The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
-there are *two* live timelines under one session id, one of them hidden behind the other. Anything
-keyed on the session id alone therefore cannot tell them apart: a `window` keyboard listener gated
-only on "am I the visible tab?" fires twice, and a per-thread write (the §7.2 scroll LRU) would
-record the child's position against the parent's thread. Both need a second discriminator — the
-drill-in refuses the write outright, and the timeline's `mod+J` additionally requires the listener's
-own scroller to have a layout box. Several surfaces could trip on this, not just those two.
+**The drill-in shares the parent's `sessionId`**, and does not remount the parent's thread — its
+slice, composer and roster stay mounted. Anything keyed on the session id alone therefore cannot
+tell the child's timeline from the thread's: a per-thread write (the §7.2 scroll LRU) would record
+the child's position against the parent's thread, and a list identity keyed on the session alone
+would read another list as the same one. Both need a second discriminator — the drill-in refuses
+the write outright, and the list identity carries the agent id (`timelineListIdentity`).
+*Built (2026-09-27): the thread's own `ChatTimeline` is UNMOUNTED while a child is open, not hidden
+behind it — the main area is one or the other (`AgentChatView`), as it has been since the first
+shell commit; the text above once said two live timelines, one hidden. Back mounts the thread's
+timeline again, which restores its reading position from the §7.2 LRU (a row anchor, else the
+pixel offset) and its disclosures from the store; a child's own state lives in the drill-in's
+per-agent memory. So only one timeline per session id is ever mounted; the second discriminators
+stay as defence and say why — the LRU refusal is load-bearing whatever is mounted, the agent id in
+the identity keeps the settle latch and the enter flags per list, and `mod+J`'s layout-box check
+still stops a timeline with no box from taking the chord.*
 *T3: `apps/web/src/components/AgentsPanel.tsx:139-140` — `/** Flat, non-interactive agent status line. No unfold. */`; `:550-567` — every row renders, with no "+N more" and no removal of finished rows; only the fold's silent 100-row cap bounds it; `:313-317` — a workflow section "keeps that shape as it settles so completion never yanks rows out from under the user"; `apps/web/src/components/chat/MessagesTimeline.tsx:4654-4660` — the closest T3 equivalent of a drill-in, an "Open Agents panel ›" link into a right-panel surface. differs on three counts: T3's roster is a right-panel surface rather than a dock under the composer; its rows are not clickable and there is no per-agent timeline, no `agentId` filter and no breadcrumb; and it neither collapses nor removes settled rows. Our collapse-past-five, fade-on-turn-end and the live-background exemption from both are new, so they must not fight the "never reshuffle what stays visible" rule above, and the drill-in is new surface with no precedent to lean on*
 
 *Built: "its items filtered by `agentId`" holds because a call's rows are stamped as one. Claude's

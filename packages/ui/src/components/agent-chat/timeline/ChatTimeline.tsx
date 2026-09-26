@@ -723,9 +723,12 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
    * **It acts only for the visible tab.** Every chat tab stays mounted
    * (`MainView` shows and hides), so a naive `window` listener would fire once
    * per open thread. `isActiveChatTab` is the shell's answer to "am I the one
-   * on screen?", and the layout check behind it covers the drill-in, which
-   * mounts a second timeline for the *same* session id while the parent's is
-   * still mounted — only the one with a layout box may take the chord.
+   * on screen?", and the layout check behind it is a second discriminator: a
+   * timeline with no layout box never takes the chord. The drill-in's timeline
+   * shares its thread's session id, but the thread's own is UNMOUNTED while a
+   * child is open (not hidden, §7.6) — the check stays as defence, so a
+   * surface that did keep a hidden timeline under one session id could not
+   * take the chord twice.
    */
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
