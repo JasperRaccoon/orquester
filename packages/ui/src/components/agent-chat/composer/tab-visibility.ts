@@ -45,7 +45,10 @@ export function isChatTabListenerActive(
  * (`AgentChatView`) owns Escape everywhere *outside* this thread's composer
  * shell — it leaves an open drill-in, else interrupts. The composer owns it
  * *inside* the shell, because the textarea has to give an open token menu
- * first refusal before the turn is stopped.
+ * first refusal before the turn is stopped. Both follow one precedence: an
+ * open drill-in is left before a turn is interrupted, wherever focus is — so
+ * with a child open the composer claims even an idle Escape, to leave it
+ * (`composerEscapeAction` says which).
  *
  * The two rules are complements by construction: the shell bails when
  * `target.closest('[data-agent-chat-composer-shell=…]')` matches, and this
@@ -71,12 +74,15 @@ export function composerOwnsEscape(input: {
   /** The target is the textarea, which handles Escape on its own. */
   isTextarea: boolean;
   isTurnActive: boolean;
+  /** A subagent's drill-in is open on this tab (§7.6). */
+  drillInOpen: boolean;
   /** A layer that closes on Escape is up: the key is that layer's. */
   layerOpen: boolean;
 }): boolean {
   if (input.defaultPrevented) return false;
   if (input.layerOpen) return false;
-  if (!input.isTurnActive) return false;
+  // Nothing to leave and nothing to stop: an idle Escape on a chip is nobody's.
+  if (!input.isTurnActive && !input.drillInOpen) return false;
   // The textarea's own handler runs first and owns the menu-vs-interrupt call.
   if (input.isTextarea) return false;
   return input.insideComposerShell;
@@ -125,22 +131,40 @@ export function shellOwnsEscape(input: {
  *   over. The case that bit: the context meter's panel opens on hover, so it
  *   can be up with the caret in the textarea, and one Escape stopped the turn
  *   AND closed the panel.
+ * - `"leave-drill-in"` — a subagent's view is open (§7.6): back to the
+ *   thread, not a stopped agent and not half of Esc Esc. It is the shell's own
+ *   precedence (`resolveChatEscape`: the drill-in wins over the interrupt),
+ *   which this side used to miss — the composer never knew a child was open,
+ *   so typing a steer while watching one and pressing Escape to go back
+ *   stopped the parent's turn instead. Stop stays one click away on the
+ *   composer's own button.
  * - `"interrupt"` — a turn is running.
  * - `"rewind-press"` — idle: one half of Esc Esc (§5.5).
+ *
+ * The composer's `window` arm, once it owns an Escape (`composerOwnsEscape`),
+ * asks the same question for its two actions: leave, else interrupt.
  */
-export type ComposerEscapeAction = "close-menu" | "yield-to-layer" | "interrupt" | "rewind-press";
+export type ComposerEscapeAction =
+  | "close-menu"
+  | "yield-to-layer"
+  | "leave-drill-in"
+  | "interrupt"
+  | "rewind-press";
 
 export interface ComposerEscapeInput {
   /** The token menu is showing (`showMenu`). */
   menuOpen: boolean;
   /** Another layer is up: `anotherLayerOwnsTheKeyboard()`. */
   layerOpen: boolean;
+  /** A subagent's drill-in is open on this tab (§7.6). */
+  drillInOpen: boolean;
   isTurnActive: boolean;
 }
 
 export function composerEscapeAction(input: ComposerEscapeInput): ComposerEscapeAction {
   if (input.menuOpen) return "close-menu";
   if (input.layerOpen) return "yield-to-layer";
+  if (input.drillInOpen) return "leave-drill-in";
   if (input.isTurnActive) return "interrupt";
   return "rewind-press";
 }

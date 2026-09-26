@@ -121,6 +121,24 @@ test("while a layer is up, neither owner claims Escape — it is the layer's", (
   }
 });
 
+test("with a subagent's view open, some owner takes every Escape outside the textarea", () => {
+  // The shell leaves the drill-in for an Escape outside the composer; inside
+  // it, the composer's arm must — idle or not. It claimed only a running
+  // turn's Escape, and stopped the parent's turn with it: with focus on a
+  // composer chip, Escape interrupted the parent while the child stayed open,
+  // or did nothing at all when idle.
+  for (const shape of everyEscapeShape()) {
+    if (!shape.drillInOpen || shape.defaultPrevented || shape.layerOpen || shape.isTextarea) {
+      continue;
+    }
+    assert.equal(
+      composerOwnsEscape(shape) || shellOwnsEscape(shape),
+      true,
+      `nobody claimed ${JSON.stringify(shape)}`
+    );
+  }
+});
+
 test("the composer owns Escape inside its shell, the shell owns it outside", () => {
   const live = { defaultPrevented: false, isTurnActive: true, drillInOpen: false, layerOpen: false };
   assert.equal(
@@ -142,6 +160,7 @@ test("the textarea keeps Escape to itself — the token menu gets first refusal"
       insideComposerShell: true,
       isTextarea: true,
       isTurnActive: true,
+      drillInOpen: false,
       layerOpen: false
     }),
     false
@@ -182,6 +201,7 @@ test("Escape with no turn running never interrupts from the composer", () => {
       insideComposerShell: true,
       isTextarea: false,
       isTurnActive: false,
+      drillInOpen: false,
       layerOpen: false
     }),
     false
@@ -206,6 +226,7 @@ test("Escape with no turn running never interrupts from the composer", () => {
 const idleTextarea: ComposerEscapeInput = {
   menuOpen: false,
   layerOpen: false,
+  drillInOpen: false,
   isTurnActive: false
 };
 
@@ -230,28 +251,58 @@ test("an open layer takes the textarea's Escape: no interrupt, and no half of Es
   assert.equal(composerEscapeAction({ ...idleTextarea, layerOpen: true }), "yield-to-layer");
 });
 
+test("with a subagent's view open, the textarea's Escape leaves it — never an interrupt", () => {
+  // The drill-in wins over the interrupt (`resolveChatEscape`): a user who is
+  // watching a child and presses Escape means "take me back", wherever the
+  // caret is. The textarea used to stop the parent's turn instead — and when
+  // idle, start Esc Esc under the child.
+  assert.equal(
+    composerEscapeAction({ ...idleTextarea, drillInOpen: true, isTurnActive: true }),
+    "leave-drill-in"
+  );
+  assert.equal(composerEscapeAction({ ...idleTextarea, drillInOpen: true }), "leave-drill-in");
+});
+
+test("with a subagent's view open, a menu or a layer still takes its Escape first", () => {
+  // Leaving the child is the next Escape's.
+  assert.equal(
+    composerEscapeAction({ ...idleTextarea, drillInOpen: true, menuOpen: true }),
+    "close-menu"
+  );
+  assert.equal(
+    composerEscapeAction({ ...idleTextarea, drillInOpen: true, layerOpen: true }),
+    "yield-to-layer"
+  );
+});
+
 test("with nothing open, Escape stops a running turn, and an idle one is half of Esc Esc", () => {
   assert.equal(composerEscapeAction({ ...idleTextarea, isTurnActive: true }), "interrupt");
   assert.equal(composerEscapeAction(idleTextarea), "rewind-press");
 });
 
-test("every combination resolves by the one precedence: menu, layer, turn, idle", () => {
-  // [menuOpen, layerOpen, isTurnActive] → the action, each worked out by hand.
-  const table: Array<[boolean, boolean, boolean, ComposerEscapeAction]> = [
-    [false, false, false, "rewind-press"],
-    [false, false, true, "interrupt"],
-    [false, true, false, "yield-to-layer"],
-    [false, true, true, "yield-to-layer"],
-    [true, false, false, "close-menu"],
-    [true, false, true, "close-menu"],
-    [true, true, false, "close-menu"],
-    [true, true, true, "close-menu"]
+test("every combination resolves by the one precedence: menu, layer, drill-in, turn, idle", () => {
+  // [menuOpen, layerOpen, drillInOpen, isTurnActive] → the action, each
+  // worked out by hand.
+  const table: Array<[boolean, boolean, boolean, boolean, ComposerEscapeAction]> = [
+    [false, false, false, false, "rewind-press"],
+    [false, false, false, true, "interrupt"],
+    [false, false, true, false, "leave-drill-in"],
+    [false, false, true, true, "leave-drill-in"],
+    [false, true, false, false, "yield-to-layer"],
+    [false, true, false, true, "yield-to-layer"],
+    [false, true, true, false, "yield-to-layer"],
+    [false, true, true, true, "yield-to-layer"],
+    [true, false, false, false, "close-menu"],
+    [true, false, false, true, "close-menu"],
+    [true, false, true, false, "close-menu"],
+    [true, false, true, true, "close-menu"],
+    [true, true, false, false, "close-menu"],
+    [true, true, false, true, "close-menu"],
+    [true, true, true, false, "close-menu"],
+    [true, true, true, true, "close-menu"]
   ];
-  for (const [menuOpen, layerOpen, isTurnActive, want] of table) {
-    assert.equal(
-      composerEscapeAction({ menuOpen, layerOpen, isTurnActive }),
-      want,
-      JSON.stringify({ menuOpen, layerOpen, isTurnActive })
-    );
+  for (const [menuOpen, layerOpen, drillInOpen, isTurnActive, want] of table) {
+    const input = { menuOpen, layerOpen, drillInOpen, isTurnActive };
+    assert.equal(composerEscapeAction(input), want, JSON.stringify(input));
   }
 });

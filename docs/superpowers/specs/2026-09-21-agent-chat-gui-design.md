@@ -4300,6 +4300,16 @@ session's own frames reach the client under its own `sessionId` (captured 2026-0
 agent's drill-in holds its thinking, its words, its tool calls and its own background shells (the
 Grok fixtures README, observation 38).*
 
+*Built: **"Escape back to main" holds wherever focus is, the composer included.** With a child open,
+Escape leaves it before it would interrupt the turn: the shell's resolver has always ranked it so
+(`resolveChatEscape`), but it stands down inside the composer, and the composer did not know a child
+was open. So a user who typed a steer while watching a child and pressed Escape to go back stopped
+the parent's turn instead (or, idle, got the Esc-Esc hint). The shell now hands the composer
+`onLeaveDrillIn` while a child is open, and both composer arms rank it the same way
+(`composerEscapeAction`, `composer/tab-visibility.ts`): a token menu or an open layer still takes
+its own Escape first, and interrupting from the composer while watching a child is the Stop button
+or one more Escape.*
+
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything
 keyed on the session id alone therefore cannot tell them apart: a `window` keyboard listener gated

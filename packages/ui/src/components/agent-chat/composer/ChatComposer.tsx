@@ -176,6 +176,13 @@ export interface ChatComposerExtraProps {
    * without it one chord acts on every open thread at once (Q2-1).
    */
   active?: boolean;
+  /**
+   * Leaves the subagent drill-in (§7.6) — passed exactly while one is open.
+   * Escape in the composer then goes back to the thread before it would stop
+   * the turn, as it does everywhere else in the tab (`composerEscapeAction`);
+   * the shell owns the drill-in, and this composer is its direct child.
+   */
+  onLeaveDrillIn?: (() => void) | undefined;
 }
 
 /**
@@ -224,7 +231,8 @@ export function ChatComposer({
   onDraftAttachmentCountChange,
   threadHasContent = true,
   searchRoot,
-  active
+  active,
+  onLeaveDrillIn
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
@@ -1446,9 +1454,11 @@ export function ChatComposer({
        *
        * So the scopes are disjoint and target-based: the shell
        * (`resolveChatEscape`) owns every Escape whose target is OUTSIDE this
-       * composer shell — that is the one that leaves a drill-in — and this arm
-       * owns the inside, minus the textarea, whose own handler gives an open
-       * token menu first refusal. `scroll-to-end` stays the timeline's.
+       * composer shell, and this arm owns the inside, minus the textarea,
+       * whose own handler gives an open token menu first refusal. All three
+       * leave an open drill-in before they would stop the turn — this arm
+       * claims an idle Escape for that too. `scroll-to-end` stays the
+       * timeline's.
        *
        * Neither owns it while a layer is up (`anotherLayerOwnsTheKeyboard`):
        * this arm runs before any layer's own listener, so under an open
@@ -1466,6 +1476,7 @@ export function ChatComposer({
         const insideComposerShell =
           target instanceof Node && shellRef.current?.contains(target) === true;
         const layerOpen = anotherLayerOwnsTheKeyboard();
+        const drillInOpen = onLeaveDrillIn !== undefined;
         // An Escape a layer takes is nobody's first press. The textarea resets
         // its own count when it sees one, but a composer popover stops the key
         // in the capture phase — the textarea never sees that one.
@@ -1476,12 +1487,23 @@ export function ChatComposer({
             insideComposerShell,
             isTextarea: target === textareaRef.current,
             isTurnActive,
+            drillInOpen,
             layerOpen
           })
         ) {
           return;
         }
         event.preventDefault();
+        // It left the drill-in or stopped the turn: nobody's first press.
+        escapeSequence.reset();
+        // The token menu is the textarea's, never this arm's.
+        if (
+          composerEscapeAction({ menuOpen: false, layerOpen, drillInOpen, isTurnActive }) ===
+          "leave-drill-in"
+        ) {
+          onLeaveDrillIn?.();
+          return;
+        }
         interrupt();
         return;
       }
@@ -1495,7 +1517,7 @@ export function ChatComposer({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [actions, active, interrupt, isTurnActive, openControl, queue]);
+  }, [actions, active, interrupt, isTurnActive, onLeaveDrillIn, openControl, queue]);
 
   const onTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isPasteAsTextShortcut(event, isApplePlatform())) bypassPasteRef.current = true;
@@ -1531,13 +1553,15 @@ export function ChatComposer({
     }
 
     if (event.key === "Escape") {
-      // Which of these it is — the menu's, an open layer's, the turn's or
-      // half of Esc Esc — is `composerEscapeAction`'s call, pure and tested
-      // beside the ownership rules; this keeps what touches the event.
+      // Which of these it is — the menu's, an open layer's, the drill-in's,
+      // the turn's or half of Esc Esc — is `composerEscapeAction`'s call, pure
+      // and tested beside the ownership rules; this keeps what touches the
+      // event.
       switch (
         composerEscapeAction({
           menuOpen: showMenu,
           layerOpen: anotherLayerOwnsTheKeyboard(),
+          drillInOpen: onLeaveDrillIn !== undefined,
           isTurnActive
         })
       ) {
@@ -1554,6 +1578,12 @@ export function ChatComposer({
           // The layer's own listener closes it after this handler; touching
           // the event here would be acting under it. Nobody's first press.
           escapeSequence.reset();
+          return;
+        case "leave-drill-in":
+          // Back to the thread; the caret stays here. Nobody's first press.
+          event.preventDefault();
+          escapeSequence.reset();
+          onLeaveDrillIn?.();
           return;
         case "interrupt":
           event.preventDefault();

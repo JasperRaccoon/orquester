@@ -123,8 +123,10 @@ export function chatEscapeSequenceStep(
 /**
  * The drill-in wins over the interrupt: leaving a child view is the narrower,
  * reversible action, and a user watching a subagent who presses Escape means
- * "take me back", not "stop the agent". The rewind comes last: it is only ever
- * what an idle Escape does, and only the second of two.
+ * "take me back", not "stop the agent". The composer keeps the same order
+ * inside its shell (`composerEscapeAction`), so where the caret sits never
+ * changes what Escape does. The rewind comes last: it is only ever what an
+ * idle Escape does, and only the second of two.
  */
 export function resolveChatEscape(input: ChatEscapeInput): ChatEscapeAction {
   if (input.key !== "Escape" || input.defaultPrevented) {
