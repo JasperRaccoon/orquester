@@ -914,8 +914,9 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   parent's `running` `task` part under its `callID`; a live part naming a settled child under a call
   never seen for it is the relaunch; a frame of any call seen before, or a call on a live child,
   emits no task row (`linkChildFromTaskPart`) — a child's own `task` parts name ITS subagents the
-  same way, and a child no part names starts under `opencode-child:<session id>`; and a child a Stop
-  closed that the server confirms still runs is relaunched by the adapter itself under
+  same way, and a child no part has named yet starts under `opencode-child:<session id>` — that
+  start alone: once a part names its call, every row names it; and a child a Stop closed that the
+  server confirms still runs is relaunched by the adapter itself under
   `opencode-revive:<callID>:<n>`, after a seed naming the first run's launch where its start named
   none (see "OpenCode: a subagent's answer arrives after its run ended", point 7). Codex starts
   under `codex-launch:<item id>` at `subAgentActivity started` and again under `codex-run:<turn id>`
@@ -1245,14 +1246,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `opencode-revive:<callID>:<n>` (`launchId`, which every row of the reopened run names; `toolUseId`
   stays the provider's call, whose part still gives the run its answer). A grandchild is launched by
   its child's own `task` part, which names it as a parent's part names a child — its launch, and its
-  answer; a child no part names starts under `opencode-child:<session id>`; and a run whose start
-  named no launch (a log from before) gets a seed naming its first run's before the relaunch, since
-  the roster reopens only on a changed launch. The roster reopens the row — running, the Stop's end
-  and summary cleared — liveness counts it, it is back in the live set (a later Stop or the exit
-  closes it `stopped`), and its own idle and answer end it `completed` with its result, once. For
-  the roster to read it running the session must read live after a Stop: `turn.aborted` folds to
-  `stopped`, a dead session to the roster (every running row `interrupted`) and one the host refuses
-  the next Stop on, so the Stop now returns it to `ready` (`session.state.changed`,
+  answer; a child no part has named yet starts under `opencode-child:<session id>`, its start alone
+  — rows name the call once a part names it, so the timeline hides the call behind the agent; and a
+  run whose start named no launch (a log from before) gets a seed naming its first run's before the
+  relaunch, since the roster reopens only on a changed launch. The roster reopens the row — running,
+  the Stop's end and summary cleared — liveness counts it, it is back in the live set (a later Stop
+  or the exit closes it `stopped`), and its own idle and answer end it `completed` with its result,
+  once. For the roster to read it running the session must read live after a Stop: `turn.aborted`
+  folds to `stopped`, a dead session to the roster (every running row `interrupted`) and one the
+  host refuses the next Stop on, so the Stop now returns it to `ready` (`session.state.changed`,
   `turn:interrupted`), as Claude's and Grok's do after every settled turn. One exception: a failed
   admission leaves the session `error` — a transport doubt, kept as ruled — which the roster reads
   as dead too, so a child relaunched after one reads `interrupted` there until the session reads

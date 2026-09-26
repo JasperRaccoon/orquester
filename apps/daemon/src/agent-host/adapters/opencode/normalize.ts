@@ -1054,18 +1054,20 @@ function emitTaskStarted(
   }
   agent.started = true;
   // Every agent's FIRST start names a launch (the relaunch contract): a child
-  // no `task` part this thread reads has named yet gets a stable one of its
-  // own, or the roster could never reopen its row.
-  if (agent.launchId === undefined && agent.toolUseId === undefined) {
-    agent.launchId = `opencode-child:${agent.sessionId}`;
-  }
+  // no `task` part this thread reads has named yet starts under a stable one
+  // of its own, or the roster could never reopen its row. Only the start: a
+  // part read later names the provider's call, and every row from then on
+  // names it — the timeline hides a launching call only behind an agent row
+  // that names it.
   const linkage = childLinkage(agent);
-  agent.startLaunchId = linkage.toolUseId;
+  const toolUseId = linkage.toolUseId ?? `opencode-child:${agent.sessionId}`;
+  agent.startLaunchId = toolUseId;
   out.push({
     ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
     type: "task.started",
     payload: {
       ...linkage,
+      toolUseId,
       taskId: agent.sessionId,
       description: agent.description
     }
@@ -1300,14 +1302,17 @@ export function settleChildSurvival(
   if (agent.startLaunchId === undefined) {
     // The run started with no launch named — a log from before every start
     // named one — and the roster reopens a row only on a CHANGED launch: a
-    // seed naming the first run's own comes first, which it reads as a late
-    // delivery (the shape `legacyLaunchStarts` writes on a first load).
-    agent.launchId = `opencode-child:${agent.sessionId}`;
+    // seed naming the first run's own comes first — its call when a part has
+    // named it since, else the child's own launch id — which the roster reads
+    // as a late delivery (the shape `legacyLaunchStarts` writes on a first
+    // load).
+    const linkage = childLinkage(agent);
     out.push({
       ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
       type: "task.started",
       payload: {
-        ...childLinkage(agent),
+        ...linkage,
+        toolUseId: linkage.toolUseId ?? `opencode-child:${agent.sessionId}`,
         taskId: agent.sessionId,
         description: agent.description
       }

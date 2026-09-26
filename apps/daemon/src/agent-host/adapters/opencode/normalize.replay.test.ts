@@ -1633,6 +1633,65 @@ test("a child no task part names still starts under a launch id of its own: `ope
   );
 });
 
+test("a child whose own frames beat its launching part names the provider's call on every row once the part is read, and a relaunch still reopens it", async () => {
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  // Fixture 12's launch in the background, its `running` frame lost in a
+  // reconnect gap: the child's `session.created`, then its own `busy` — no
+  // part has named it yet — then the part's `completed` frame, which does.
+  const [pending, created, completed] = childFixtureFrames([140, 141, 180], BACKGROUND_RENAMES);
+  assert.ok(pending && created && completed);
+  const before = feed(run, [pending, created, ...childFixtureFrames([148], BACKGROUND_RENAMES)]).flat();
+  assert.deepEqual(
+    eventsOfType(before, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-child:ses_background_child"],
+    "its first start names a launch of its own"
+  );
+  const named = feed(run, [inBackground(completed)]).flat();
+  assert.deepEqual(taskRows(named), [], "a call answered in the background ends nothing");
+  // Its work, its idle, and its answer, injected into the parent.
+  const after = [
+    ...feed(run, childFixtureFrames([156, 157, 158, 159, 160], BACKGROUND_RENAMES)).flat(),
+    ...feed(run, childFixtureFrames([177, 178, 179], BACKGROUND_RENAMES)).flat(),
+    ...feed(run, injectedResult("ses_background_child", "Found README.md.")).flat()
+  ];
+  const rows = after.filter((event) => event.type.startsWith("task."));
+  assert.ok(rows.length > 0);
+  assert.deepEqual(
+    [...new Set(rows.map((event) => (event.payload as { toolUseId?: string }).toolUseId))],
+    ["call_background"],
+    "once the call is known, every row names it: the timeline hides the launching call behind the agent"
+  );
+
+  // The start's own launch is what a relaunch changes: a Stop closes the run,
+  // and the server's word that it runs reopens it under a new launch id.
+  const live: RuntimeEvent = {
+    eventId: "evt-live",
+    threadId: "thread-1",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    providerRefs: { providerTurnId: "ses_parent" },
+    type: "session.state.changed",
+    payload: { state: "ready" }
+  };
+  const relaunchRun = replayChildParent();
+  relaunchRun.state.activeTurnId = "turn-background";
+  const launched = feed(relaunchRun, [pending, created, ...childFixtureFrames([148], BACKGROUND_RENAMES), inBackground(completed)]).flat();
+  const stopped = closeLiveChildAgents(relaunchRun.state, relaunchRun.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    relaunchRun.state,
+    childFixtureFrames([148], BACKGROUND_RENAMES)[0]!,
+    relaunchRun.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  const relaunched = settleChildSurvival(relaunchRun.state, "ses_background_child", reported.checkId, true, relaunchRun.ctx);
+  assert.deepEqual(
+    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-revive:call_background:1"]
+  );
+  const { roster } = await throughHost([live, ...launched, ...stopped, ...relaunched]);
+  assert.equal(roster.find((row) => row.id === "ses_background_child")?.status, "running", "reopened");
+});
+
 test("a revival whose run started with no launch id (an older log) seeds one first, so the roster reopens: running, then completed", async () => {
   const run = liveSession("ses_parent");
   // What a host from before every start named a launch left: a grandchild's

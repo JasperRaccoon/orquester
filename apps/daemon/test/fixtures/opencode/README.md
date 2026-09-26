@@ -709,6 +709,10 @@ What the normaliser makes of it (`linkChildFromTaskPart`):
   its `task.started` carries the `callID` — the id the roster fold compares to tell a
   relaunch from a late delivery (AGENTS.md, "Agent rows must survive resumes and
   retention").
+- A child whose own frames come first — the part's `running` frame lost in a reconnect gap —
+  starts under `opencode-child:<session id>`, on that start alone: once a part names its
+  `callID`, every row names the call, since the timeline hides a launching call only behind
+  an agent row that names it.
 - A live part naming a **settled** child under a `callID` never seen for it is a relaunch: a
   new `task.started` naming it, before any row of the new run; the child's own
   `session.idle` ends it, and the part's own end then gives that run its result
@@ -1006,12 +1010,12 @@ after them. Busy — confirmed — the child is RELAUNCHED under the relaunch co
 `task.started` naming a new launch id, `opencode-revive:<callID>:<n>`, which every row of the
 reopened run names while the provider's call stays the one its part is matched by. A grandchild is
 relaunched the same way: its launch is its child's own `task` call. A run whose start named no
-launch (a log from before every start named one) gets a seed first, naming its first run's
-(`opencode-child:<session id>`): the roster reopens only on a changed launch, and reads the seed as
-a late delivery. The roster reopens the row, running, with the Stop's end and summary cleared; the
-liveness registry counts it; the adapter's live set holds it again, so a later Stop or the exit
-closes it `stopped`; and its own idle and answer end it `completed` with its result, once. The
-roster reads it running only while the thread's session reads live, so the Stop now returns the
+launch (a log from before every start named one) gets a seed first, naming its first run's (its
+call, else `opencode-child:<session id>`): the roster reopens only on a changed launch, and reads
+the seed as a late delivery. The roster reopens the row, running, with the Stop's end and summary
+cleared; the liveness registry counts it; the adapter's live set holds it again, so a later Stop or
+the exit closes it `stopped`; and its own idle and answer end it `completed` with its result, once.
+The roster reads it running only while the thread's session reads live, so the Stop now returns the
 session to `ready` after its `turn.aborted` (which folds to `stopped`, a dead session to the roster
 and one the host refuses a later Stop on), as Claude's and Grok's do after every settled turn. The
 one exception is a failed admission: its session reads `error` (a transport doubt, kept), which the
