@@ -32,8 +32,10 @@ import { MINIMUM_OPENCODE_VERSION } from "../semver.ts";
  *                   test can act once the pool is waiting on it
  *   `die`         — exits 3 before printing anything
  *   `noisy`       — prints the `OPENCODE_SERVER_PASSWORD` warning FIRST
- *   `slow`        — like `ok`, but the readiness line is delayed by
- *                   `MOCK_READY_DELAY_MS` (a cold `opencode serve` start)
+ *   `slow`        — like `ok`, but a cold `opencode serve` start: bound, it
+ *                   says on stderr that it is not ready, with its pid, and
+ *                   prints the readiness line only on `SIGUSR2` — so the test
+ *                   decides when the start ends, not a clock
  *
  * `MOCK_PROVIDER_STATUS` makes `GET /provider` answer that status instead of a
  * catalogue, which is how a catalogue failure is told apart from a start
@@ -44,7 +46,6 @@ import { createServer } from "node:http";
 
 const mode = process.env.MOCK_MODE ?? "ok";
 const version = process.env.MOCK_VERSION ?? "${MINIMUM_OPENCODE_VERSION}";
-const readyDelayMs = Number(process.env.MOCK_READY_DELAY_MS ?? "0");
 const providerStatus = Number(process.env.MOCK_PROVIDER_STATUS ?? "200");
 const password = process.env.OPENCODE_SERVER_PASSWORD;
 const portArg = process.argv.find((a) => a.startsWith("--port="));
@@ -103,9 +104,11 @@ if (mode === "silent") {
       process.stdout.write("opencode server listening on http://" + host + ":" + server.address().port + "\\n");
     };
     // A cold start: the port is bound but the CLI has not said so yet, which
-    // is exactly the window the host used to spend its whole budget in.
-    if (mode === "slow" && readyDelayMs > 0) {
-      setTimeout(announce, readyDelayMs);
+    // is exactly the window the host used to spend its whole budget in. It
+    // ends when the test says so.
+    if (mode === "slow") {
+      process.on("SIGUSR2", announce);
+      process.stderr.write("mock peer: bound, not ready (pid " + process.pid + ")\\n");
     } else {
       announce();
     }
