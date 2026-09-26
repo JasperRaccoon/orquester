@@ -1010,11 +1010,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   `cancelledRequestActivity`, through ingestion's `withdrawn` rule), on the stamp the card was
   opened with — a child's before the rows its end writes, the parent's own after its turn's end, so
   a question the host dismissed at that end keeps the dismissal as its one row
-  (`repeatsHostClosure`) — and nothing is answered on the wire (`CodexRequestWithdrawn`). Whether the server still holds such a request is read, not captured:
-  the 0.155.1 binary's "client request resolved because the turn state was changed" reads as the
-  server resolving a thread's pending requests itself at its turn's end, but "client request"
-  could also name a client→server request (codex fixtures README observations 5 and 20). Writing
-  no answer is safe either way — the server resolved the request, or the turn that asked is over.
+  (`repeatsHostClosure`) — and nothing is answered on the wire (`CodexRequestWithdrawn`). Whether
+  the server still holds such a request is read, not captured: the 0.155.1 binary's "client
+  request resolved because the turn state was changed" reads as the server resolving a thread's
+  pending requests itself at its turn's end, but "client request" could also name a
+  client→server request (codex fixtures README observations 5 and 20). Writing no answer is safe
+  either way — the server resolved the request, or the turn that asked is over.
   Left open, the card blocked the composer ("Answer the request above first.") and the MCP's
   `send_message` until the user answered a request nothing waited on, or pressed Stop. A card
   answered first is settled once, by its answer. A child's MCP progress is its heartbeat
