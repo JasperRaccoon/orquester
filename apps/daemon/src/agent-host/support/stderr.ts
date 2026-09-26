@@ -92,22 +92,40 @@ export interface RedactOptions {
 }
 
 /**
- * A home path in its percent-encoded spelling, either hex case, or nothing when
+ * A home path in its percent-encoded spelling, either hex case, or `null` when
  * it encodes to itself. Grok keys its session dirs by the URL-encoded cwd
  * (`~/.grok/sessions/%2Fvar%2Flib%2F…/`) and its task snapshots name files
  * there, so collapsing the plain spelling alone let the home through (the
  * Grok fixtures README, redaction).
+ *
+ * Compiled once per dir: the redactor runs on every string of every raw frame
+ * of every adapter, and compiling per call more than tripled its cost.
  */
-function encodedHomePattern(dir: string): RegExp | undefined {
-  const encoded = encodeURIComponent(dir);
-  if (encoded === dir) {
-    return undefined;
+function encodedHomePattern(dir: string): RegExp | null {
+  const cached = encodedHomePatterns.get(dir);
+  if (cached !== undefined) {
+    return cached;
   }
-  const source = encoded
-    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/%([0-9A-F]{2})/g, (_match, hex: string) => `%(?:${hex}|${hex.toLowerCase()})`);
-  return new RegExp(source, "g");
+  const encoded = encodeURIComponent(dir);
+  const pattern =
+    encoded === dir
+      ? null
+      : new RegExp(
+          encoded
+            .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            .replace(/%([0-9A-F]{2})/g, (_match, hex: string) => `%(?:${hex}|${hex.toLowerCase()})`),
+          "g"
+        );
+  if (encodedHomePatterns.size >= ENCODED_HOME_PATTERNS_MAX) {
+    encodedHomePatterns.clear();
+  }
+  encodedHomePatterns.set(dir, pattern);
+  return pattern;
 }
+
+/** Home dirs are a handful per host (the daemon's, each account's); bounded all the same. */
+const ENCODED_HOME_PATTERNS_MAX = 64;
+const encodedHomePatterns = new Map<string, RegExp | null>();
 
 /**
  * Mask credential-shaped text and collapse home paths — each in its plain and
@@ -124,9 +142,12 @@ export function redactStderr(value: string, options: RedactOptions = {}): string
     .sort((a, b) => b.length - a.length);
   for (const dir of homes) {
     out = out.split(dir).join("~");
-    const encoded = encodedHomePattern(dir);
-    if (encoded !== undefined) {
-      out = out.replace(encoded, "~");
+    // Only a value holding a `%` can hold the encoded spelling.
+    if (out.includes("%")) {
+      const encoded = encodedHomePattern(dir);
+      if (encoded !== null) {
+        out = out.replace(encoded, "~");
+      }
     }
   }
 
