@@ -99,10 +99,8 @@ test("E9: the registry honours a probe's own ceiling", async () => {
   const probe: ProviderProbe = {
     id: "opencode",
     timeoutMs: 60,
-    refresh: async (): Promise<ProviderSnapshot> => {
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
-      throw new Error("unreachable: the deadline should have fired");
-    }
+    // A probe that never answers: only the ceiling can end the refresh.
+    refresh: (): Promise<ProviderSnapshot> => new Promise<ProviderSnapshot>(() => undefined)
   };
   const registry = createProviderSnapshotRegistry({
     probes: [probe],

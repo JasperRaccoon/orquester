@@ -27,7 +27,9 @@ import { MINIMUM_OPENCODE_VERSION } from "../semver.ts";
  *   `ok`          — ready line, then a healthy server on the requested port
  *   `old`         — healthy, but a version below the §4.1 minimum
  *   `unhealthy`   — `{healthy:false}`
- *   `silent`      — binds nothing and prints nothing (handshake deadline)
+ *   `silent`      — binds nothing and never prints the readiness line
+ *                   (handshake deadline); it says it is up on stderr, so a
+ *                   test can act once the pool is waiting on it
  *   `die`         — exits 3 before printing anything
  *   `noisy`       — prints the `OPENCODE_SERVER_PASSWORD` warning FIRST
  *   `slow`        — like `ok`, but the readiness line is delayed by
@@ -66,6 +68,7 @@ if (mode === "die") {
   process.exit(3);
 }
 if (mode === "silent") {
+  process.stderr.write("mock peer: up, never ready\\n");
   setInterval(() => {}, 1000);
 } else {
   const server = createServer((req, res) => {

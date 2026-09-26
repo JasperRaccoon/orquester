@@ -3145,9 +3145,36 @@ function probeCount(harness: Harness, sessionId: string): number {
   ).length;
 }
 
-/** The chain is driven by real backoff timers, so these tests watch the clock. */
-async function settle(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * The session's wait between attempts as these tests drive it: it keeps what
+ * it was asked to wait, and answers at once — or, `held`, only when the
+ * session's stop aborts it, as `util.ts`'s `delay` does. `asked(n)` settles
+ * once the n-th wait has been asked for. No clock is involved.
+ */
+function recordedDelay(options: { held?: boolean } = {}): {
+  delay: (ms: number, signal: AbortSignal) => Promise<void>;
+  waits: number[];
+  asked: (count: number) => Promise<void>;
+} {
+  const waits: number[] = [];
+  let waiters: { count: number; resolve: () => void }[] = [];
+  const delay = (ms: number, signal: AbortSignal): Promise<void> => {
+    waits.push(ms);
+    waiters = waiters.filter((waiter) => {
+      if (waits.length < waiter.count) {
+        return true;
+      }
+      waiter.resolve();
+      return false;
+    });
+    if (options.held !== true || signal.aborted) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+  };
+  const asked = (count: number): Promise<void> =>
+    waits.length >= count ? Promise.resolve() : new Promise((resolve) => waiters.push({ count, resolve }));
+  return { delay, waits, asked };
 }
 
 /**
@@ -3173,7 +3200,8 @@ function failReadsOf(harness: Harness, sessionId: string): void {
 
 test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", async () => {
   const harness = makeHarness();
-  const session = await startSession(harness);
+  const backoff = recordedDelay();
+  const session = await startSession(harness, { delay: backoff.delay });
   // A session that exists on this shared server and has no parent: the walk
   // completes at a root that is not ours, which is a definitive answer.
   harness.fake.sessions.set("ses_cotenant", { id: "ses_cotenant", directory: "/repo" });
@@ -3187,9 +3215,11 @@ test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", asyn
       patterns: ["echo hi"]
     }
   });
-  await settle(400);
+  await harness.fake.waitForRequest("GET", "/session/ses_cotenant");
+  await nextTurn();
 
   assert.equal(probeCount(harness, "ses_cotenant"), 1, "a walked foreign root is not retried");
+  assert.deepEqual(backoff.waits, [], "nor waited on to retry");
   // And it never became this thread's card.
   assert.deepEqual(eventsOfType(harness.events, "request.opened"), []);
   await session.stop({ reason: "test", hostInitiated: true });
@@ -3199,23 +3229,25 @@ test("Q1 #21: a co-tenant thread's ask is probed ONCE, not polled forever", asyn
 test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async () => {
   const harness = makeHarness();
   failReadsOf(harness, "ses_unreadable");
-  const session = await startSession(harness);
+  const backoff = recordedDelay();
+  const session = await startSession(harness, { delay: backoff.delay });
 
-  // A non-`asked` request frame takes the SHORT cap, so the whole chain — with
-  // its 250 ms to 4 s backoff — finishes inside this test rather than in 25 s.
+  // A non-`asked` request frame takes the SHORT cap: five probes, each unknown
+  // answer backing off `250 ms · 2^n` before the next.
   harness.fake.push({
     type: "permission.replied",
     properties: { requestID: "per_unreadable", sessionID: "ses_unreadable", reply: "once" }
   });
-  await settle(9_000);
+  await backoff.asked(5);
+  await nextTurn();
 
-  const probes = probeCount(harness, "ses_unreadable");
-  assert.ok(probes > 1, `the unknown outcome is retried (saw ${probes})`);
-  assert.ok(probes <= 5, `the chain is capped (saw ${probes})`);
+  assert.equal(probeCount(harness, "ses_unreadable"), 5, "the unknown outcome is retried, up to the cap");
+  assert.deepEqual(backoff.waits, [250, 500, 1_000, 2_000, 4_000]);
 
-  // Capped means STOPPED, not merely slowed: nothing more arrives afterwards.
-  await settle(1_500);
-  assert.equal(probeCount(harness, "ses_unreadable"), probes);
+  // Capped means STOPPED, not merely slowed: nothing more follows the last wait.
+  await nextTurn();
+  assert.equal(probeCount(harness, "ses_unreadable"), 5);
+  assert.equal(backoff.waits.length, 5);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
@@ -3223,23 +3255,25 @@ test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async 
 test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async () => {
   const harness = makeHarness();
   failReadsOf(harness, "ses_gone");
-  const session = await startSession(harness);
+  // The chain waits to retry until the stop ends the wait.
+  const backoff = recordedDelay({ held: true });
+  const session = await startSession(harness, { delay: backoff.delay });
 
   harness.fake.push({
     type: "permission.asked",
     properties: { id: "per_gone", sessionID: "ses_gone", permission: "bash", patterns: ["x"] }
   });
-  await settle(300);
-  const beforeClose = probeCount(harness, "ses_gone");
-  assert.ok(beforeClose >= 1);
+  await backoff.asked(1);
+  assert.equal(probeCount(harness, "ses_gone"), 1, "one probe, unknown: the chain waits to retry");
 
   await session.stop({ reason: "test", hostInitiated: true });
-  await settle(1_500);
+  await nextTurn();
   assert.equal(
     probeCount(harness, "ses_gone"),
-    beforeClose,
+    1,
     "a closed session must not keep polling the provider"
   );
+  assert.deepEqual(backoff.waits, [250]);
   harness.dispose();
 });
 
