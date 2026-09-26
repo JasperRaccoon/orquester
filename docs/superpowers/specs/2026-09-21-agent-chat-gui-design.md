@@ -350,11 +350,12 @@ open. T3 never has that window, and its three mechanisms are adopted whole
    Claude's bundled family aliases (`FALLBACK_CLAUDE_MODELS` — `default`,
    `opus`, `sonnet`, `haiku`, `fable`) and Grok's four (`FALLBACK_GROK_MODELS`,
    the catalogue its CLI advertised on the newest capture, `grok-4.7` the
-   default), so those launchers work on a cold host. Codex and OpenCode read their catalogues off a live server
-   and answer `[]`; their row exists (the provider is listed, not missing) and
-   layers two and three close their window. **Never `status:"error"`** — that
-   would make §7.7's toast fire for a provider nobody has looked at. A pending
-   row is never persisted and never hydrated.
+   default), so those launchers work on a cold host. Codex and OpenCode read
+   their catalogues off a live server and answer `[]`; their row exists (the
+   provider is listed, not missing) and layers two and three close their
+   window. **Never `status:"error"`** — that would make §7.7's toast fire for a
+   provider nobody has looked at. A pending row is never persisted and never
+   hydrated.
    *T3: `makeManagedServerProvider.ts:69-73`; `Layers/ClaudeProvider.ts:595-640`.*
 2. ***The disk cache is correlated, not merely keyed.** The cache file is v2:
    each row is `{identity, snapshot}` where identity is `{adapterId,
@@ -1697,19 +1698,19 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `tool_call_update` — `Monitor`, `BackgroundTaskStarted`, `TaskOutput`, `KillTask` — and are
   emitted **even after the turn ends**.
   *T3: `apps/server/src/provider/acp/XAiBackgroundTasks.ts:61-155`; `apps/server/src/provider/Layers/GrokAdapter.ts:1343-1366`*
-  *Built: captured on 2026-09-25 (the Grok fixtures README, observations 37–47, fixtures 15–23),
-  and more than T3 reads. A shell's start comes from `_x.ai/task_backgrounded`, the
-  `background_tasks` snapshot and the `BackgroundTaskStarted` discriminant, joined on the task id; a
-  monitor's from the same frame (it carries `monitor_description`) and the `Monitor` answer T3 reads
-  (`{type, taskId, timeoutMs, persistent}`), typed `monitor`, its lines (`_x.ai/monitor_event`) its
-  progress and its last line its end's summary; either's end from `_x.ai/task_completed` — the CLI's own end report, its final
-  `task_snapshot` with the exit code, `signal` and `explicitly_killed` — or the snapshot or a
-  `TaskOutput`/`KillTask` answer (`{task_id, outcome: "killed", message}`). A snapshot entry of a
-  tracked task emits a row only when its status, title or output file changed, and then one: the CLI
-  restates every task of a session on each change, and a `task.updated` is an appended row. A task
-  whose end the CLI reported is remembered, so a snapshot still listing it never starts it again,
-  while one the adapter closed itself (Stop, exit) — shell or subagent — counts live again on any CLI
-  report that it still runs (a listing, a start frame, a poll, a heartbeat): a Stop's
+  *Built: captured on 2026-09-25 (the Grok fixtures README, observations 37–47, fixtures 15–23), and
+  more than T3 reads. A shell's start comes from `_x.ai/task_backgrounded`, the `background_tasks`
+  snapshot and the `BackgroundTaskStarted` discriminant, joined on the task id; a monitor's from the
+  same frame (it carries `monitor_description`) and the `Monitor` answer T3 reads (`{type, taskId,
+  timeoutMs, persistent}`), typed `monitor`, its lines (`_x.ai/monitor_event`) its progress and its
+  last line its end's summary; either's end from `_x.ai/task_completed` — the CLI's own end report,
+  its final `task_snapshot` with the exit code, `signal` and `explicitly_killed` — or the snapshot
+  or a `TaskOutput`/`KillTask` answer (`{task_id, outcome: "killed", message}`). A snapshot entry of
+  a tracked task emits a row only when its status, title or output file changed, and then one: the
+  CLI restates every task of a session on each change, and a `task.updated` is an appended row. A
+  task whose end the CLI reported is remembered, so a snapshot still listing it never starts it
+  again, while one the adapter closed itself (Stop, exit) — shell or subagent — counts live again on
+  any CLI report that it still runs (a listing, a start frame, a poll, a heartbeat): a Stop's
   `session/cancel` cancels a background subagent but leaves a background shell running. A task
   counts as live at all only because a row whose `agentId` is its own `taskId` is its own, not an
   agent's internal work (`orchestration/liveness.ts`). A subagent starts at its `spawn_subagent`
@@ -1731,15 +1732,18 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `session/prompt` of the client's to answer it and no `prompt_complete`.
   *Built: the session gives each a turn of its own, as Claude's woken parent gets a synthetic one:
   such a prompt is the `runningPromptId` the parent's `_x.ai/queue/changed` never listed in
-  `entries` (every client prompt is listed first); its turn opens as it is announced — or, when
-  the CLI announces it before the previous turn's RPC result, right after that turn settles — and
-  its `turn_completed` settles it, with that frame's usage; the frames that named it while it
-  waited (its prompt hook) are held by prompt id and replayed into it. A user message during it
-  steers it: cancel, then prompt under the same turn id; a cancel while it still waits ends it, and
-  no turn opens. A monitor's wake opens by re-arming the monitors its `runningText` carries lines
-  of, which the liveness registry's turn-boundary sweep would otherwise drop at the wake's end
-  (`adapters/grok/session.ts`, `onQueueChanged`, `onPrivateUpdate`, `prompt-queue.ts`; the Grok
-  fixtures README, observations 40–41).*
+  `entries` (every client prompt is listed first); its turn opens as it is announced — or, when the
+  CLI announces it before the previous turn's RPC result, right after that turn settles — and its
+  `turn_completed` settles it, with that frame's usage. While it waits, the first parent frame
+  naming it starts a hold and every frame after it queues behind, handed back in arrival order when
+  its turn opens; a held `turn_completed` is its end. Nothing held is dropped: when it cannot get a
+  turn (a cancel ends it while it runs, our own prompt runs, a stop, an exit) or can wait no longer
+  (256 frames, a request the user must answer), what is held joins the open turn, in order. A user
+  message during its turn steers it: cancel, then prompt under the same turn id. A monitor's wake
+  opens by re-arming the monitors its `runningText` carries lines of, which the liveness registry's
+  turn-boundary sweep would otherwise drop at the wake's end (`adapters/grok/prompt-queue.ts`,
+  `GrokWakes` — which the capture-replay driver runs too; `session.ts`, `onQueueChanged`,
+  `onPrivateUpdate`; the Grok fixtures README, observations 40–41).*
 - **Interrupt** marks the turn id as interrupted **synchronously, before taking the thread lock**,
   so late notifications and a late prompt result are dropped; then settles pending approvals and
   user-inputs as cancelled (the ACP spec requires a cancel to answer every pending permission

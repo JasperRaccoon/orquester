@@ -87,9 +87,9 @@ Applied at record time and again on export:
 - **every `env` value of every MCP server definition → `<redacted>`** — see observation 1; those
   frames carry the host's real credentials
 - `Bearer <x>` → `Bearer <redacted-token>` — the adapter's own stderr rule (`support/stderr.ts`),
-  added for the 2026-09-25 export, where it only ever hid the `resource_metadata` parameter of an MCP
-  server's `WWW-Authenticate` challenge on stderr (observation 46). The older files hold no
-  `Bearer`, and re-export byte-identically.
+  added for the 2026-09-25 export, where it only ever hid the `resource_metadata` parameter of an
+  MCP server's `WWW-Authenticate` challenge on stderr (observation 46). The older files hold no
+  `Bearer`: the rule changed none of them.
 
 ### Elision
 
@@ -1087,15 +1087,23 @@ listed (every capture, 15–23). And the CLI runs its queue in order: in 20 the 
 arrived during the user's turn, and its prompt was announced at t=12029 — 15 ms BEFORE the user's
 prompt's RPC result (t=12044), right after its `turn_completed`.
 
-The session gives each such prompt a turn of its own (`onQueueChanged`, `onPrivateUpdate`): opened
-as announced — or right after a turn still settling — and settled by that prompt's
-`turn_completed`, with its usage. Dropped before, the woken reply never reached the timeline. What
-names a wake still waiting for its turn is the wake's: in 20 its `hook_run_started {prompt_id:
-"notifications-…"}` came at t=12030, before the user's prompt's RPC result, and the session holds
-such frames by the prompt id they carry and replays them into the wake's turn once it opens. A
-cancel while a wake waits ends that wake — the CLI runs one prompt at a time, so the waiting wake is
-the prompt running — and no turn opens for it (no capture has a Stop in that 15 ms window; the
-adapter follows 05 and 23, where a cancel ends the running prompt).
+The session gives each such prompt a turn of its own (`prompt-queue.ts`'s `GrokWakes`, which the
+capture-replay driver runs too; `onQueueChanged`, `onPrivateUpdate`): opened as announced — or right
+after a turn still open — and settled by that prompt's `turn_completed`, with its usage. Dropped
+before, the woken reply never reached the timeline. What names a wake still waiting for its turn is
+the wake's: in 20 its `hook_run_started {prompt_id: "notifications-…"}` came at t=12030, before the
+user's prompt's RPC result. The first such frame starts a hold, and every frame after it — of any
+session, naming anything or nothing — waits behind it until the wake's turn opens, then comes back
+in arrival order: a woken parent's spawn call names its prompt, the `subagent_spawned` after it
+names none (only `parent_prompt_id`, 16), and handled first it would start a second agent. A held
+`turn_completed` is the wake's end. Nothing held is ever dropped. Past 256 frames, or when a request
+the user must answer arrives, they join the open turn in order and the wake keeps a turn for what it
+streams after. A cancel while a wake still runs ends it — the CLI runs one prompt at a time, so the
+waiting wake is the prompt running — and its frames join the open turn, with no turn of its own (no
+capture has a Stop in that window; the adapter follows 05 and 23, where a cancel ends the running
+prompt); a wake that already finished keeps its reply and its turn. Our own prompt running — a
+steer, or a prompt sent after a wake started during the `set_model` round trip — ends every wait,
+the frames joining our turn in order, and a stop or an exit flushes them into the open turn.
 
 ### 41. Monitors
 
@@ -1191,8 +1199,9 @@ child session, so they never stream into the first run's.
   (retitled `[bg] sleep 20 && echo bg-done (call-88e)`). The child then polled it with
   `timeout_ms: 15000` and got `completed`, and `task_completed` arrived in the child's session.
   The adapter makes that shell the subagent's own (`agentId` = the agent), and when the agent ends
-  with it still running, re-stamps it with itself: from then on it counts on its own until its own
-  end.
+  first, re-stamps it with itself under its own tracked status (a resting one is not re-armed; one
+  the CLI revived gets its own start row again): from then on a running one counts on its own until
+  its own end.
 
 ### 46. Noise a subagent brings
 
@@ -1230,9 +1239,10 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   `BackgroundTaskStarted` / `Monitor`, report by `monitor_event`, polls and listings, and end by
   `task_completed`, a finished poll or a kill (a monitor's summary its last line); a subagent's own
   are its agent's until the agent ends, then their own.
-- **The CLI's own prompts** get turns of their own, with the frames that named them while they
-  waited; a monitor's wake re-arms the monitors it carries lines of; a cancel while a wake waits
-  ends it, and no turn opens for it.
+- **The CLI's own prompts** get turns of their own; the frames that wait for one wait in order,
+  behind the first one naming it, and are never dropped — when a wait ends another way, they join
+  the open turn (`prompt-queue.ts`, `GrokWakes`); a monitor's wake re-arms the monitors it carries
+  lines of; a cancel while a wake still runs ends it, and no turn opens for it.
 - **An hour, not forever**: every agent row carries `livenessTtlMs` (60 min), re-armed by each row
   naming it — the heartbeat among them.
 - **Stop, the session's stop and the exit** close the calls first, then the tasks; an end the
