@@ -1253,7 +1253,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   summary}}`, each `{task_id, command, status, exit_code, started, ended, duration_secs, output, …}`
   (a running entry's `output` is advice to the model, not output), and `KillTask {Result: {task_id,
   outcome: "killed", message}}`; `explicitly_killed` / `kill_result_delivered` are snapshot fields,
-  never a kill answer's, and `already_exited` is read as the outcome's other value (not captured). A
+  never a kill answer's. The other outcome, `already_exited` (captured 2026-09-26, fixture 27:
+  "Task had already completed" / "Subagent already completed", no status, no exit code), means the
+  kill found the task done: its end was reported first and the answer adds nothing, and a run whose
+  end the adapter never saw reads `completed` — never `stopped`, nobody stopped it (`killEnd`). A
   monitor (fixture 20) starts from `_x.ai/task_backgrounded` (it carries `monitor_description`) or
   its call's `Monitor` answer (`{type, taskId, timeoutMs, persistent}`, T3's reader), is typed
   `monitor` (the registry's monitoring bucket), reports each line by `_x.ai/monitor_event` (a
@@ -1343,7 +1346,30 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   tab) reaches the CLI as its own cancel, `{outcome: "cancelled"}`: the host flags it
   (`respondToUserInput`'s host-only `options.cancel`, which the other adapters ignore), because its
   `{}` is also a user's skip — passed on as an answer, it told the CLI the user had answered,
-  nothing. Noise the captures showed, silenced: a child's `skills-reload` /
+  nothing. (11) **What the 2026-09-26 captures settled** (fixtures 25–30, observations 49–53).
+  Supervised, the spawn call itself asks first (`x.ai/tool` kind `task`, "Yes, send once" or
+  decline), and a subagent's own tool asks on the PARENT's session, naming the child's call: the
+  parent's card, on the parent's open turn, no owner — Codex's collab rule — while the call itself
+  is the agent's own row. A run that ends short is `subagent_finished {status: "cancelled", error}`
+  every way it does — a kill, a Stop, a declined tool, the runtime's turn cap ("max turns reached
+  (limit: 1)"); the CLI never said `failed`, so the run reads `stopped` and its `error` is the row's
+  reason (a bare "Stopped" before). The scheduler (`/loop`, `scheduler_create`) reports by methods
+  of its own, `_x.ai/scheduled_task_created` / `_fired` / `_deleted` (a peer warning per frame
+  before they were registered — one per fire of a week-long loop), and `/goal` by `goal_updated` on
+  the private channel (an "unmapped" warning every few seconds of a goal run): each loop and the
+  goal is a roster row, typed `scheduled` / `goal` — background, and `INERT_TASK_TYPES` in the
+  liveness registry, so neither holds a deploy's drain; its work does, each fire and each planner
+  being a subagent the CLI spawns itself (an agent row under its own id, whose end wakes the
+  parent). A fire notes itself on the loop's row and a goal's change of phase on the goal's, in
+  place (a token tick alone does not); `scheduled_task_deleted` ends a loop (`stopped`, `completed`
+  on expiry) and a goal leaving `active` ends it (`budget_limited`, `paused`, `cleared` →
+  `stopped` with the reason, `completed` with its result); the session's end closes both, as the
+  loop and the goal live in the CLI's process (whether a Stop's `session/cancel` stops either is
+  not captured: a later fire or goal update notes itself on the ended row, and only the CLI
+  re-creating a loop or resuming a goal it ended itself opens a new run). A genuine `failed`
+  status was not triggered: a subagent's model is set only in the account home's `config.toml`,
+  never written.
+  Noise the captures showed, silenced: a child's `skills-reload` /
   `workflows-reload` replies to requests the CLI sent itself are not warnings (the ACP peer drops a
   reply to nothing that carries an id the adapter names, `agentOwnReplyIds`); an MCP server's
   failure is said once until it recovers (the CLI re-handshakes the thread's servers at every

@@ -95,6 +95,9 @@ export const GROK_REGISTERED_METHODS: readonly string[] = [
   XAI_EXTENSION_NOTIFICATIONS.task_backgrounded,
   XAI_EXTENSION_NOTIFICATIONS.task_completed,
   XAI_EXTENSION_NOTIFICATIONS.monitor_event,
+  XAI_EXTENSION_NOTIFICATIONS.scheduled_task_created,
+  XAI_EXTENSION_NOTIFICATIONS.scheduled_task_fired,
+  XAI_EXTENSION_NOTIFICATIONS.scheduled_task_deleted,
   XAI_EXTENSION_NOTIFICATIONS.prompt_complete,
   XAI_EXTENSION_NOTIFICATIONS.queue_changed,
   XAI_EXTENSION_NOTIFICATIONS.settings_update,
@@ -542,11 +545,16 @@ export class GrokSession {
     }
 
     // Background work reported by methods of their own: a task started, a
-    // shell's or monitor's end (fixtures 16, 18, 20), a monitor's line.
+    // shell's or monitor's end (fixtures 16, 18, 20), a monitor's line, the
+    // scheduler's loops (fixture 29) — each registered, where an unregistered
+    // one was a peer warning per frame, one per fire of a week-long loop.
     for (const method of [
       XAI_EXTENSION_NOTIFICATIONS.task_backgrounded,
       XAI_EXTENSION_NOTIFICATIONS.task_completed,
-      XAI_EXTENSION_NOTIFICATIONS.monitor_event
+      XAI_EXTENSION_NOTIFICATIONS.monitor_event,
+      XAI_EXTENSION_NOTIFICATIONS.scheduled_task_created,
+      XAI_EXTENSION_NOTIFICATIONS.scheduled_task_fired,
+      XAI_EXTENSION_NOTIFICATIONS.scheduled_task_deleted
     ]) {
       peer.registerExtensionNotification(method, (params) => this.onBackgroundFrame(method, params));
     }

@@ -970,3 +970,39 @@ test("23 through the fold: a Stop that cuts a foreground agent ends it interrupt
   const turn = s.state().turns.at(-1);
   assert.equal(turn?.state, "interrupted");
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-26: a loop and a goal through ingestion and the fold (fixtures 29, 30)
+// ---------------------------------------------------------------------------
+
+test("29 through the fold: the loop is a background roster row, live until deleted; its fire an agent of its own", async () => {
+  const LOOP = "01a0de9b-e17c-7fa0-83dc-a436461e59b5";
+  const FIRE = "01a0de9b-e17d-7391-93f1-ba66a305252f";
+  const s = captureSeam("29-loop-scheduled-task.ndjson");
+  await s.feedThrough(indexOf(s.events, taskEnd(FIRE)));
+  const live = s.state().roster.find((entry) => entry.id === LOOP);
+  assert.equal(live?.agentKind, "background", "stamped background: never an agent");
+  assert.equal(live?.status, "running");
+  assert.equal(live?.title, "Loop · every 1 minute");
+  assert.equal(live?.progress, "Fired once · every 1 minute");
+  assert.equal(s.liveness.liveness(THREAD), null, "a loop between its fires is no live work");
+  const fire = s.state().roster.find((entry) => entry.id === FIRE);
+  assert.equal(fire?.agentKind, "agent");
+  assert.equal(fire?.status, "completed");
+  await s.feedThrough(s.events.length);
+  const ended = s.state().roster.find((entry) => entry.id === LOOP);
+  assert.equal(ended?.status, "interrupted", "deleted: stopped");
+  assert.equal(ended?.result, "Deleted");
+});
+
+test("30 through the fold: the goal is a background row, its budget's end its result", async () => {
+  const GOAL = "goal:18745eb4-3b61-4f0c-9a5e-4dc7dd2087ed";
+  const s = captureSeam("30-goal.ndjson");
+  await s.feedThrough(s.events.length);
+  const goal = s.state().roster.find((entry) => entry.id === GOAL);
+  assert.equal(goal?.agentKind, "background");
+  assert.equal(goal?.status, "interrupted");
+  assert.equal(goal?.title, "Goal · Create a file named goal.txt containing exactly: ok");
+  assert.equal(goal?.result, "Token budget reached: 48386 of 20000 tokens");
+  assert.equal(s.liveness.liveness(THREAD), null);
+});

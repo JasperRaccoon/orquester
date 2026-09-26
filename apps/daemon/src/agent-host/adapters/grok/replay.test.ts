@@ -394,6 +394,9 @@ test("the emitted types stay inside the documented union", () => {
     "thread.metadata.updated",
     "thread.state.changed",
     "thread.token-usage.updated",
+    // Fixture 30's goal run is the first capture whose model wrote a todo
+    // list (`todo_write`): the plan row it has always mapped to.
+    "turn.plan.updated",
     "turn.proposed.completed"
   ];
   assert.deepEqual([...seen].sort(), expected);

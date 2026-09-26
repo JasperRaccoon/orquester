@@ -279,6 +279,10 @@ test("classifyTaskAgentKind is a denylist, and nesting flips it", () => {
   assert.equal(classifyTaskAgentKind({ taskType: "local_agent" }), "agent", "drifted names pass");
   assert.equal(classifyTaskAgentKind({ taskType: "shell" }), "background");
   assert.equal(classifyTaskAgentKind({ taskType: "plan" }), "background");
+  // A provider's scheduled prompt and its autonomous goal run nothing of their
+  // own: their fires, turns and subagents are the work (Grok fixtures 29, 30).
+  assert.equal(classifyTaskAgentKind({ taskType: "scheduled" }), "background");
+  assert.equal(classifyTaskAgentKind({ taskType: "goal" }), "background");
   // Launched from inside a subagent: background unless itself agent-flavoured.
   assert.equal(classifyTaskAgentKind({ taskType: "shell", agentId: "a1" }), "background");
   assert.equal(classifyTaskAgentKind({ taskType: "subagent", agentId: "a1" }), "agent");

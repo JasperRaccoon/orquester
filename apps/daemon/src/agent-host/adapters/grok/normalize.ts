@@ -43,6 +43,7 @@ import type {
 import type {
   XaiAskUserQuestionParams,
   XaiBackgroundTask,
+  XaiGoalUpdatedUpdate,
   XaiSessionUpdate,
   XaiSubagentFinishedUpdate,
   XaiSubagentProgressUpdate,
@@ -169,6 +170,54 @@ interface BackgroundTrack {
    * own (a watch loop's TTL) rather than as covered by an agent no longer live.
    */
   ownerEnded?: boolean;
+}
+
+/**
+ * One scheduled prompt — a `/loop`, a `scheduler_create` — by its scheduler
+ * task id (fixture 29, observation 52). It runs nothing of its own: each fire
+ * is a background subagent the CLI spawns itself, an agent row under its own
+ * id, whose end wakes the parent. So its row is typed `scheduled`, which the
+ * liveness registry never counts (`INERT_TASK_TYPES`): a week-long loop
+ * must not hold a deploy's drain between its fires. It ends when the CLI
+ * deletes it, and with the process it lives in.
+ */
+interface LoopTrack {
+  readonly taskId: string;
+  /** The CLI's `human_schedule`: `"every 1 minute"`. */
+  schedule: string;
+  /** The prompt's first line. */
+  prompt: string;
+  fires: number;
+  /** Its run: the CLI re-creating an ended loop is a new run, a new launch id. */
+  run: number;
+  /** The turn it was created on: every row of the loop rides it, as a shell's do. */
+  readonly turnId?: string;
+  live: boolean;
+}
+
+/**
+ * The session's autonomous goal (`/goal`, fixture 30, observation 53), one at
+ * a time. Its work is the turns, wakes and subagents it drives, each live on
+ * its own rows; its row — typed `goal`, never live work either — is where its
+ * phase, its token budget and how it ended show. A goal that runs again after
+ * an end (`/goal resume`) is a relaunch: a new launch id (`run`), which the
+ * roster reads as a new run of the same row.
+ */
+interface GoalTrack {
+  readonly goalId: string;
+  readonly taskId: string;
+  objective: string;
+  run: number;
+  live: boolean;
+  /**
+   * Who wrote the latest run's end, while it is not live: the CLI (the goal
+   * left `active`) or the adapter (the session's teardown, a Stop). Only a
+   * goal the CLI ended is resumed by its next `active` report.
+   */
+  endedBy?: TaskEndSource;
+  turnId?: string;
+  /** What the latest progress row said, bar the token count: a note is written on a change. */
+  noted?: string;
 }
 
 /**
@@ -383,11 +432,14 @@ function pollLifecycle(
  * successfully" — which is T3's shape. `explicitly_killed` and
  * `kill_result_delivered`, which the 1.0.34 strings list beside it, are
  * `TaskSnapshot` fields: they ride `_x.ai/task_completed`
- * ({@link GrokNormalizer.taskCompleted}), never a kill answer. The binary's
- * other kill word, `already_exited` — the tool "reports success if the task
- * was killed or had already exited" — is read as that `outcome`'s other value
- * (not captured): the task ended, with the answer's own terminal status when
- * it carries one, else `stopped`.
+ * ({@link GrokNormalizer.taskCompleted}), never a kill answer. The other
+ * kill word, `already_exited` — captured too (fixture 27): `{task_id, outcome:
+ * "already_exited", message: "Task had already completed"}` for a shell,
+ * "Subagent already completed" for a subagent, no status and no exit code —
+ * means nobody stopped the task: the kill found it done. The CLI had reported
+ * that end first, so the answer ends nothing then (a run already ended gets no
+ * second end); for a run whose end the adapter never saw, it is `completed`,
+ * or the answer's own terminal status when it carries one.
  */
 function killEnd(
   result: Record<string, unknown>
@@ -399,7 +451,7 @@ function killEnd(
     return undefined;
   }
   const lifecycle = pollLifecycle(result["status"], result["exit_code"]);
-  return lifecycle === undefined || lifecycle === "running" ? "stopped" : lifecycle;
+  return lifecycle === undefined || lifecycle === "running" ? "completed" : lifecycle;
 }
 
 /**
@@ -444,8 +496,14 @@ function subagentUsage(
 
 /**
  * A `subagent_finished` status as a run's end. Captured: `completed` (with
- * `output`) and `cancelled` (with `error`, no `output` — a kill, a Stop's
- * `session/cancel`, a cut foreground call). The rest follows the poll
+ * `output`) and `cancelled` (with `error`, no `output`) — every way a run
+ * ends short: a kill, a Stop's `session/cancel` and a cut foreground call
+ * ("Subagent was cancelled", fixtures 18, 21, 23), a tool of the child's the
+ * user declined ("Subagent turn was cancelled: user rejected permission — …",
+ * fixture 26) and the runtime's own turn cap ("max turns reached (limit: 1)",
+ * fixture 28). The CLI never said `failed` in any capture; `cancelled` is
+ * read as `stopped`, and its `error` is the row's reason
+ * ({@link GrokNormalizer.subagentFinished}). The rest follows the poll
  * vocabulary; a status nobody knows ends the run failed when it carries an
  * `error`, else completed.
  */
@@ -507,6 +565,52 @@ function textArgument(
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+/** How many loops the normaliser remembers, the live never forgotten. */
+const LOOPS_REMEMBERED = 256;
+
+/** A text's first non-empty line, trimmed; `undefined` for none. */
+function firstLineOf(text: string | undefined): string | undefined {
+  return text?.split("\n").map((part) => part.trim()).find((part) => part.length > 0);
+}
+
+function capitalized(text: string): string {
+  return text.length === 0 ? text : `${text[0]!.toUpperCase()}${text.slice(1).replace(/_/g, " ")}`;
+}
+
+/** A non-negative whole count, or `undefined`. */
+function countOf(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+}
+
+/**
+ * What a goal's progress row says, and the key a new note is written on: the
+ * phase (planning first), its deliverables and rounds, its last event — never
+ * the token count alone, which ticks every few seconds (fixture 30).
+ */
+function goalNote(update: XaiGoalUpdatedUpdate): { key: string; summary: string } {
+  const planning = update.planning === true;
+  const phase = typeof update.phase === "string" && update.phase.length > 0 ? update.phase : "active";
+  const done = countOf(update.completed_deliverables);
+  const total = countOf(update.total_deliverables);
+  const used = countOf(update.tokens_used) ?? 0;
+  const budget = countOf(update.token_budget);
+  const parts = [
+    planning ? "Planning" : capitalized(phase),
+    ...(total !== undefined && total > 0 ? [`${done ?? 0} of ${total} deliverables`] : []),
+    budget === undefined ? `${used} tokens` : `${used} of ${budget} tokens`
+  ];
+  const key = [
+    planning,
+    phase,
+    update.last_event ?? "",
+    done ?? "",
+    total ?? "",
+    countOf(update.total_worker_rounds) ?? "",
+    countOf(update.total_verify_rounds) ?? ""
+  ].join("\u0000");
+  return { key, summary: parts.join(" · ") };
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -551,7 +655,11 @@ const KNOWN_XAI_UPDATES = new Set([
   "monitor_event",
   "subagent_spawned",
   "subagent_progress",
-  "subagent_finished"
+  "subagent_finished",
+  "scheduled_task_created",
+  "scheduled_task_fired",
+  "scheduled_task_deleted",
+  "goal_updated"
 ]);
 
 export class GrokNormalizer {
@@ -586,6 +694,10 @@ export class GrokNormalizer {
    * registry as a watch loop, and ended it a second time when it dropped out.
    */
   private readonly endedTasks = new Map<string, EndedTask>();
+  /** Scheduled prompts, by scheduler task id; see {@link scheduledTask}. */
+  private readonly loops = new Map<string, LoopTrack>();
+  /** The session's goal; see {@link goalUpdated}. */
+  private goal: GoalTrack | undefined;
   /** Roster agents, by task id; see {@link subagentFromToolCall}. */
   private readonly subagents = new Map<string, SubagentTrack>();
   /** `spawn_subagent` calls, by call id. */
@@ -1722,7 +1834,10 @@ export class GrokNormalizer {
     const status = finishedStatus(update.status, update.error);
     const answer = subagentAnswerText(typeof update.output === "string" ? update.output : undefined);
     const error = typeof update.error === "string" && update.error.trim().length > 0 ? update.error.trim() : undefined;
-    const summary = status === "completed" ? answer : status === "failed" ? (error ?? answer) : undefined;
+    // A run that ended short says why in `error` — a declined tool, a turn
+    // cap, a kill — and a `stopped` row without it read as a bare "Stopped"
+    // (fixtures 26, 28): the reason is its summary, as a failure's is.
+    const summary = status === "completed" ? answer : (error ?? answer);
     const usage = subagentUsage(update.tokens_used, update.tool_calls, update.duration_ms);
     return this.closeSubagent(track, status, "cli", summary, raw, usage);
   }
@@ -2278,6 +2393,12 @@ export class GrokNormalizer {
         return this.subagentProgress(update as unknown as XaiSubagentProgressUpdate, raw);
       case "subagent_finished":
         return this.subagentFinished(update as unknown as XaiSubagentFinishedUpdate, raw);
+      case "scheduled_task_created":
+      case "scheduled_task_fired":
+      case "scheduled_task_deleted":
+        return this.scheduledTask(update as unknown as Record<string, unknown>, raw);
+      case "goal_updated":
+        return this.goalUpdated(update as unknown as XaiGoalUpdatedUpdate, raw);
       default: {
         const name = (update as { sessionUpdate: string }).sessionUpdate;
         if (KNOWN_XAI_UPDATES.has(name)) {
@@ -2328,9 +2449,15 @@ export class GrokNormalizer {
         return this.taskCompleted(update as unknown as Record<string, unknown>, raw);
       case "monitor_event":
         return this.monitorEvent(update as unknown as Record<string, unknown>, raw);
+      case "scheduled_task_created":
+      case "scheduled_task_fired":
+      case "scheduled_task_deleted":
+        // Not captured from a child: a fire's own subagent is told it may
+        // delete its loop, and the scheduler knows it by its task id alone.
+        return this.scheduledTask(update as unknown as Record<string, unknown>, raw);
       default: {
         const name = (update as { sessionUpdate: string }).sessionUpdate;
-        if (KNOWN_XAI_UPDATES.has(name)) {
+        if (KNOWN_XAI_UPDATES.has(name) && name !== "goal_updated") {
           return [];
         }
         return [
@@ -2710,6 +2837,249 @@ export class GrokNormalizer {
     ];
   }
 
+  // ------------------------------------------------------- loops and goals
+
+  /**
+   * `_x.ai/scheduled_task_created` / `_fired` / `_deleted` — the scheduler's
+   * own reports of one scheduled prompt (`/loop`, `scheduler_create`), methods
+   * of their own, keyed by its task id (fixture 29, observation 52). Before
+   * they were mapped, each was a peer warning: one per fire of a week-long
+   * loop. Created: the loop's row starts, typed `scheduled`, titled by its
+   * schedule. Fired: the fire notes itself on that row, status-less and in
+   * place — the fire itself is the background subagent the CLI spawns right
+   * after, an agent row of its own. Deleted: the row ends, `stopped` for a
+   * `scheduler_delete` (`reason: "deleted"`), `completed` for one that ran its
+   * course (`expired`: loops expire after seven days, read off the docs, not
+   * captured). A report naming a loop this process never saw created starts
+   * its row first; a loop already ended ends nothing again — a fire after the
+   * adapter's own end (a Stop that left the process up; whether a Stop's
+   * `session/cancel` deletes a loop is not captured) notes itself on the
+   * ended row, and only the CLI re-creating it opens a new run.
+   */
+  private scheduledTask(update: Record<string, unknown>, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const taskId = textArgument(update, "task_id");
+    if (taskId === undefined) {
+      return [];
+    }
+    const kind = update["sessionUpdate"];
+    const schedule = textArgument(update, "human_schedule");
+    const prompt = firstLineOf(textArgument(update, "prompt"));
+    let loop = this.loops.get(taskId);
+    if (kind === "scheduled_task_deleted") {
+      if (loop === undefined || !loop.live) {
+        return [];
+      }
+      loop.live = false;
+      const reason = textArgument(update, "reason");
+      return [
+        this.event(
+          "task.completed",
+          {
+            ...this.loopLinkage(loop),
+            status: reason === "expired" ? "completed" : "stopped",
+            summary: reason === undefined ? "Deleted" : capitalized(reason)
+          },
+          loop.turnId,
+          raw
+        )
+      ];
+    }
+    const events: RuntimeEvent[] = [];
+    if (loop === undefined) {
+      loop = {
+        taskId,
+        schedule: schedule ?? "on a schedule",
+        prompt: prompt ?? "",
+        fires: 0,
+        run: 1,
+        turnId: this.deps.activeTurnId(),
+        live: true
+      };
+      this.loops.set(taskId, loop);
+      evictOldest(this.loops, LOOPS_REMEMBERED, (value) => !value.live);
+      events.push(this.event("task.started", this.loopLinkage(loop), loop.turnId, raw));
+    } else if (kind === "scheduled_task_created") {
+      // The CLI re-created a loop it knows (`scheduler_create` naming its id):
+      // new words on a live one, a new run of an ended one.
+      loop.schedule = schedule ?? loop.schedule;
+      loop.prompt = prompt ?? loop.prompt;
+      if (loop.live) {
+        events.push(this.event("task.updated", this.loopLinkage(loop), loop.turnId, raw));
+      } else {
+        loop.live = true;
+        loop.run += 1;
+        loop.fires = 0;
+        events.push(this.event("task.started", this.loopLinkage(loop), loop.turnId, raw));
+      }
+    }
+    if (kind === "scheduled_task_fired") {
+      loop.fires += 1;
+      events.push(
+        this.event(
+          "task.progress",
+          {
+            ...this.loopLinkage(loop),
+            summary: `${loop.fires === 1 ? "Fired once" : `Fired ${loop.fires} times`} · ${loop.schedule}`
+          },
+          loop.turnId,
+          raw
+        )
+      );
+    }
+    return events;
+  }
+
+  /**
+   * Every row of a loop: nobody's work but the thread's, never live work
+   * (`INERT_TASK_TYPES`). Its kind is in its title, as a goal's is.
+   */
+  private loopLinkage(loop: LoopTrack): {
+    taskId: string;
+    taskType: "scheduled";
+    title: string;
+    description: string;
+    toolUseId: string;
+  } {
+    return {
+      taskId: loop.taskId,
+      taskType: "scheduled",
+      title: `Loop · ${loop.schedule}`,
+      description: loop.prompt.length > 0 ? loop.prompt : `Loop · ${loop.schedule}`,
+      toolUseId: `loop-run:${loop.taskId}:${loop.run}`
+    };
+  }
+
+  /**
+   * `goal_updated` (fixture 30, observation 53): the session's autonomous goal,
+   * restated whole at every change and every few seconds while its planner or
+   * worker runs — eleven warnings in one short run before it was mapped. Its
+   * row starts when a goal turns `active`, typed `goal` and titled by its
+   * objective; a change of phase, of planning, of its last event or of its
+   * deliverables and rounds notes itself on the row (status-less, in place),
+   * a tick of the token count alone does not. It ends when the goal leaves
+   * `active`: `completed` (its result summary), else `stopped` — out of token
+   * budget (`budget_limited`, captured), `paused`, `cleared` (every id and text
+   * emptied, captured) — or `failed`. A goal active again after the CLI's own
+   * end (`/goal resume`) is a new run of the same row; after the adapter's
+   * (a Stop), its progress notes itself on the ended row. A new goal ends the
+   * old one.
+   */
+  private goalUpdated(update: XaiGoalUpdatedUpdate, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const goalId = typeof update.goal_id === "string" ? update.goal_id.trim() : "";
+    const status = typeof update.status === "string" ? update.status.trim() : "";
+    let goal = this.goal;
+    if (status !== "active") {
+      if (goal === undefined || (goalId.length > 0 && goal.goalId !== goalId)) {
+        return [];
+      }
+      if (!goal.live) {
+        // The CLI's end of a goal the adapter closed itself: no second row,
+        // but its own word from now on — its next `active` is a resume.
+        goal.endedBy = "cli";
+        return [];
+      }
+      return [this.endGoal(goal, update, raw)];
+    }
+    if (goalId.length === 0) {
+      return [];
+    }
+    const events: RuntimeEvent[] = [];
+    const objective = typeof update.objective === "string" && update.objective.trim().length > 0
+      ? update.objective.trim()
+      : "Goal";
+    const note = goalNote(update);
+    if (goal === undefined || goal.goalId !== goalId) {
+      if (goal?.live === true) {
+        events.push(this.endGoal(goal, { ...update, status: "replaced" }, raw));
+      }
+      goal = { goalId, taskId: `goal:${goalId}`, objective, run: 1, live: true, turnId: this.deps.activeTurnId() };
+      this.goal = goal;
+    } else if (!goal.live && goal.endedBy === "cli") {
+      goal.run += 1;
+      goal.live = true;
+      goal.endedBy = undefined;
+      goal.turnId = this.deps.activeTurnId() ?? goal.turnId;
+    } else {
+      // Live — or closed by the adapter while the CLI still reports it active
+      // (whether a Stop's `session/cancel` stops a goal is not captured): its
+      // progress notes itself, on the ended row then, and reopens nothing.
+      if (note.key !== goal.noted) {
+        goal.noted = note.key;
+        events.push(
+          this.event("task.progress", { ...this.goalLinkage(goal), summary: note.summary }, goal.turnId, raw)
+        );
+      }
+      return events;
+    }
+    goal.objective = objective;
+    goal.noted = note.key;
+    events.push(this.event("task.started", this.goalLinkage(goal), goal.turnId, raw));
+    return events;
+  }
+
+  /** The row that ends a goal's run, by the status it left `active` in. */
+  private endGoal(goal: GoalTrack, update: XaiGoalUpdatedUpdate, raw: RuntimeEventRaw): RuntimeEvent {
+    goal.live = false;
+    goal.endedBy = "cli";
+    const used = countOf(update.tokens_used);
+    const budget = countOf(update.token_budget);
+    const text = (value: unknown): string | undefined =>
+      typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+    const [status, summary] = ((): ["completed" | "failed" | "stopped", string] => {
+      switch (update.status) {
+        case "completed":
+          return ["completed", text(update.result_summary) ?? "Goal completed"];
+        case "budget_limited":
+          return [
+            "stopped",
+            used !== undefined && budget !== undefined
+              ? `Token budget reached: ${used} of ${budget} tokens`
+              : "Token budget reached"
+          ];
+        case "paused":
+          return ["stopped", text(update.pause_message) ?? "Paused"];
+        case "cleared":
+          return ["stopped", "Cleared"];
+        case "replaced":
+          return ["stopped", "Replaced by a new goal"];
+        case "failed":
+          return ["failed", text(update.pause_message) ?? text(update.result_summary) ?? "Failed"];
+        default:
+          return ["stopped", capitalized(String(update.status || "ended"))];
+      }
+    })();
+    return this.event(
+      "task.completed",
+      {
+        ...this.goalLinkage(goal),
+        status,
+        summary,
+        ...(used === undefined || update.status === "cleared" ? {} : { usage: { totalTokens: used } })
+      },
+      goal.turnId,
+      raw
+    );
+  }
+
+  /** Every row of a goal: never live work (`INERT_TASK_TYPES`); a run is a launch id. */
+  private goalLinkage(goal: GoalTrack): {
+    taskId: string;
+    taskType: "goal";
+    title: string;
+    description: string;
+    toolUseId: string;
+  } {
+    return {
+      taskId: goal.taskId,
+      taskType: "goal",
+      // The row's kind is in its title: the roster draws every background row
+      // with a shell's chrome, and nothing else on it says "goal".
+      title: `Goal · ${goal.objective}`,
+      description: goal.objective,
+      toolUseId: `goal-run:${goal.goalId}:${goal.run}`
+    };
+  }
+
   /**
    * The monitors a wake carries lines of, re-armed as its turn opens. A
    * monitor's line arrives just BEFORE the wake it causes (fixture 20: a line,
@@ -3031,6 +3401,24 @@ export class GrokNormalizer {
     for (const [taskId, track] of [...this.tasks.entries()]) {
       this.endShell(taskId, "adapter");
       events.push(this.event("task.completed", { ...this.shellLinkage(taskId, track), status: "stopped" }, track.turnId));
+    }
+    // A loop and a goal live in the CLI's process: its exit ends them (a loop
+    // made `durable` would be the CLI's to bring back, not captured). After a
+    // Stop that leaves the process up — whether its `session/cancel` stops
+    // either is not captured — the CLI's later reports note themselves on the
+    // ended rows (a fire, a goal's progress), and only the CLI re-creating a
+    // loop or resuming a goal it ended itself opens a new run
+    // ({@link scheduledTask}, {@link goalUpdated}).
+    for (const loop of this.loops.values()) {
+      if (loop.live) {
+        loop.live = false;
+        events.push(this.event("task.completed", { ...this.loopLinkage(loop), status: "stopped" }, loop.turnId));
+      }
+    }
+    if (this.goal?.live === true) {
+      this.goal.live = false;
+      this.goal.endedBy = "adapter";
+      events.push(this.event("task.completed", { ...this.goalLinkage(this.goal), status: "stopped" }, this.goal.turnId));
     }
     for (const track of this.subagents.values()) {
       if (!track.live) {

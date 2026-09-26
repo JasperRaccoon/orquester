@@ -39,7 +39,7 @@ had only read off the binary and T3's reader.
 | Extra env | `22-subagent-await-budget.ndjson` only: `GROK_SUBAGENT_AWAIT_BUDGET_MS=4000` (the binary's foreground await budget, set low so a 12 s child outlives it) |
 | Harness | the same out-of-repo scripts, plus `acp-clean.mjs` (the launch env above), one scenario script per file, `leftovers.sh` (every process carrying the capture's `ORQUESTER_SESSION_ID` marker, killed after each run) and `export-2026-09-25.mjs` |
 
-### The 2026-09-26 captures (24–)
+### The 2026-09-26 captures (24–30)
 
 What a background shell and the CLI's other children do when it ends, and the cases 2026-09-25
 left uncaptured.
@@ -51,7 +51,10 @@ left uncaptured.
 | Model | `grok-4.7`, the CLI's default; `--reasoning-effort low` |
 | Working directory | a fresh throwaway `git init` sandbox, `~/tmp/agent-chat-fixtures/grok/sandbox-2026-09-26` (`add.js`, `README.md`, one commit, `.grok/config.toml` with `[features] support_permission = true`) |
 | Launch | exactly the adapter's since 2026-09-26: its own process group (`detached`, as `spawnProviderChild` spawns it), a stop signalling the group, and the 2026-09-25 launch env plus `ORQUESTER_AGENT_LAUNCH`, one value per run (observation 48) |
+| argv | `--reasoning-effort low agent --always-approve stdio` (full-access) for 24 and 27–30; `--reasoning-effort low --permission-mode default agent stdio` (the adapter's supervised argv) for 25 and 26, every request answered by the harness |
+| Sandbox extras | `.grok/agents/one-turn.md` (`maxTurns: 1`), a project agent definition, for 28 |
 | Harness | the same out-of-repo scripts, plus `acp-2026-09-26.mjs` (that launch, and a sweep after every run of every process still carrying the run's marker — SIGTERM, then SIGKILL — listing each one's `ppid`/`pgid`/`sid` first) and `export-2026-09-26.mjs` (the same export rules, its dedupe map seeded from the committed set) |
+| Cost | eight runs — the seven committed and the override attempt of observation 50 — $3.78 by their own `turn_completed` `costUsdTicks` (a few turns report none, so somewhat more) |
 
 ### Sandbox configuration that shaped the captures
 
@@ -121,7 +124,7 @@ Two mechanical reductions, each marked in-band by a `note` frame that states exa
 removed. Nothing else is altered.
 
 1. A run of more than 30 consecutive `agent_thought_chunk` / `agent_message_chunk` frames keeps
-   the first 25 and last 5; the rest are replaced by one note. In 15–23 a run is one session's:
+   the first 25 and last 5; the rest are replaced by one note. In 15–30 a run is one session's:
    a subagent's child session streams under its own `sessionId` (observation 38), interleaved with
    the parent's, and one run never merges the two.
 2. A notification payload ≥ 4 KiB that is identical (ignoring `sessionId` and `_meta`) to one
@@ -129,8 +132,8 @@ removed. Nothing else is altered.
    holds it verbatim. This is almost entirely `available_commands_update`, which is ~33 KiB and
    repeats 2–4 times per run; every *distinct* payload survives verbatim exactly once across the
    set. Without it files 01–14 were 3.3 MiB; with it they are 1.4 MiB. The 2026-09-25 files
-   (15–23) add 1.9 MiB with it applied, so the set is 3.3 MiB of NDJSON (3.4 MiB on disk with
-   `12-cli-text/` and this README).
+   (15–23) add 1.9 MiB with it applied and the 2026-09-26 files (24–30) 1.7 MiB, so the set is
+   4.9 MiB of NDJSON (5.0 MiB on disk with `12-cli-text/` and this README).
 
 ## The files
 
@@ -167,6 +170,12 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `22-subagent-await-budget.ndjson` | (2026-09-25 argv), `GROK_SUBAGENT_AWAIT_BUDGET_MS=4000` | a foreground spawn of a 12 s command | A foreground run moved to the background, and its later end and wake (observation 45). |
 | `23-stop-cuts-foreground-subagent.ndjson` | (2026-09-25 argv) | a foreground spawn; `session/cancel` mid-turn | A Stop cutting a foreground call cancels its child (observation 44). |
 | `24-background-shell-outlives-cli.ndjson` | `--reasoning-effort low agent --always-approve stdio`, the 2026-09-26 launch | one background `sleep 45`; the processes carrying the launch marker listed while the CLI runs, the CLI stopped the adapter's way, listed again, swept | Every child of the CLI's own lives in a session of its own and inherits its environment: the shell and two MCP servers outlived a clean SIGTERM, reparented to init (observation 48; the `/proc` facts are the harness's `note` frames). |
+| `25-subagent-child-approval.ndjson` | `--reasoning-effort low --permission-mode default agent stdio` (supervised), the 2026-09-26 launch | turn 1: a foreground spawn whose child writes a file — the spawn's approval and the child's write both answered allow-once; turn 2: a second spawn, its own approval answered reject-once | The spawn itself asks when supervised; a subagent's own tool asks on the PARENT's session; a declined spawn fails its call (observation 49). |
+| `26-subagent-child-write-rejected.ndjson` | the same supervised argv | a foreground spawn allowed, its child's write answered reject-once | The child's turn ends `cancelled`; `subagent_finished {cancelled, error}`; the spawn call fails `tool_execution_failed` (observations 49, 50). |
+| `27-kill-already-exited.ndjson` | `--reasoning-effort low agent --always-approve stdio`, the 2026-09-26 launch | a background shell and a background subagent, waited on until both finished, then both killed | `KillTask {outcome: "already_exited"}` for a shell and for a subagent (observation 51). |
+| `28-subagent-max-turns.ndjson` | the same full-access argv; the sandbox holds `.grok/agents/one-turn.md` (`maxTurns: 1`) | a foreground spawn of that type, given a tool call and an answer to do | The runtime's turn cap ends a run `cancelled` with its own `error` (observation 50). |
+| `29-loop-scheduled-task.ndjson` | the same full-access argv | `/loop 60s Reply with exactly: tick`, its first fire watched, then `scheduler_list` and `scheduler_delete` | The scheduler's `_x.ai/scheduled_task_*`, the fire's subagent the CLI spawns itself, its wake (observation 52). |
+| `30-goal.ndjson` | the same full-access argv | `/goal Create a file named goal.txt containing exactly: ok --budget 20000`, watched to its end, then `/goal clear` | `goal_updated`: `active` → `budget_limited` → `cleared`; the goal's planner, a subagent the CLI spawns itself (observation 53). |
 
 ---
 
@@ -743,8 +752,10 @@ Plus these standalone notifications: `_x.ai/models/update`, `_x.ai/settings/upda
 (observation 37) — while `task_completed` and `monitor_event` arrive as methods of their own,
 `_x.ai/task_completed` and `_x.ai/monitor_event`, each `{sessionId, update: {sessionUpdate, …}}`
 (observations 39, 41). A subagent's child session speaks on this channel too, under its own id
-(observation 38). `scheduled_task_*`, `goal_updated` and the rest are still not captured; an
-unmapped `sessionUpdate` stays a `runtime.warning`.
+(observation 38). *Captured on 2026-09-26:* `goal_updated` on this channel (observation 53), and the
+scheduler's `scheduled_task_created` / `_fired` / `_deleted` — methods of their own again,
+`_x.ai/scheduled_task_*` (observation 52). Every other `sessionUpdate` nobody has captured stays a
+`runtime.warning`.
 
 T3 registers three of these (`ask_user_question`, `exit_plan_mode`, `prompt_complete`) and drops the
 rest. Several are genuinely useful — `turn_completed` (usage), `background_tasks` (roster),
@@ -1183,8 +1194,8 @@ child ends its turn `cancelled` and `subagent_finished {status: "cancelled"}` fo
 23 ms; a killed shell's `task_completed` (observation 39: `explicitly_killed: true`, `signal:
 "killed"`) PRECEDES the answer by 21 ms, and its listing then says `failed`. A poll afterwards
 answers `cancelled` for both. `explicitly_killed` and `kill_result_delivered`, which the binary's
-strings list beside `KillTaskResult`, are snapshot fields; its other kill word, `already_exited`, is
-not captured.
+strings list beside `KillTaskResult`, are snapshot fields; its other kill word, `already_exited`,
+was captured on 2026-09-26 (observation 51).
 
 ### 43. `resume_from`, and the blocks around a subagent's answer
 
@@ -1284,11 +1295,11 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   naming it — the heartbeat among them.
 - **Stop, the session's stop and the exit** close the calls first, then the tasks; an end the
   adapter wrote itself is revived by any CLI report that the task still runs.
-- **Unmapped**, still `runtime.warning`s: every `sessionUpdate` nobody has captured
-  (`scheduled_task_*`, `goal_updated`, …). Not captured at all: a subagent that fails
-  (`subagent_finished` with a failure status), a `KillTask` `outcome` other than `killed`, an
-  approval raised INSIDE a child session (every 2026-09-25 capture ran `--always-approve`), and a
-  subagent spawned by the CLI itself (a `/loop` fire) — which the adapter starts under its own id.
+- **Unmapped**, still `runtime.warning`s: every `sessionUpdate` nobody has captured. Not captured
+  on 2026-09-25, and since (observations 49–53): an approval raised INSIDE a child session, a run
+  that ends short without a kill (a declined tool, a turn cap — `cancelled` still; a `failed`
+  status was never seen), a `KillTask` `outcome` of `already_exited`, a subagent spawned by the CLI
+  itself (a `/loop` fire, a goal's planner), `scheduled_task_*` and `goal_updated`.
 
 ### 48. The CLI's children live in sessions of their own — and inherit its environment
 
@@ -1319,6 +1330,145 @@ then SIGKILL past a 2 s grace to whatever a fresh scan still finds, each pid che
 and owns them, observation 44). The daemon's Settings → System lists and kills a process carrying
 any launch's marker as its own, so what a crashed host left behind is not out of reach. Linux-only:
 elsewhere nothing is read or signalled.
+
+### 49. An approval inside a subagent's child session asks on the PARENT's session
+
+Fixtures 25 and 26, supervised (`--permission-mode default`, `support_permission = true`):
+
+- **The spawn itself asks first.** `session/request_permission` for the `spawn_subagent` call —
+  `toolCall.kind: "other"`, `_meta["x.ai/tool"]: {name: "spawn_subagent", kind: "task"}`, the
+  call's `rawInput` (`{variant: "Task", prompt, description, subagent_type, run_in_background}`)
+  and two options only: `allow-once` ("Yes, send once") and `reject-once` — no `allow_always`.
+  Declined (25, turn 2), the call fails ("User rejected…") and the parent's turn ends `cancelled`,
+  no subagent spawned.
+- **A subagent's own tool asks on the parent's session.** The child's `write` (its `tool_call`
+  under the child's `sessionId`) is followed by a `session/request_permission` whose `sessionId`
+  is the PARENT's and whose `toolCall.toolCallId` is the child's call, with a `write`'s three
+  options. The child's `pending_interaction` / `interaction_resolved` bracket it, in the child's
+  session. Allowed (25), the child writes and finishes `completed`. Declined (26), the child's call
+  fails ("User rejected the execution for tool `write`"), its `permission_denied` hook runs, its
+  turn ends `cancelled`, and `subagent_finished {status: "cancelled", error: "Subagent turn was
+  cancelled: user rejected permission — User rejected the execution for tool \`write\`",
+  tool_calls: 0, tokens_used: 0}` follows; the parent's spawn call then fails with `rawOutput:
+  {error: "tool_execution_failed", message: …}`, and the parent's turn goes on.
+
+The adapter keeps a child's card the parent's, as Codex's collab children's are: no owner, on the
+parent's turn open as the request arrives (the foreground spawn's), answered as any card — while
+the child's call is the agent's own row (`session-replay.test.ts`, 25 replayed).
+
+### 50. A run that ends short is `cancelled`, with an `error` that says why
+
+Every non-completed `subagent_finished` of every capture is `status: "cancelled"` with an `error`:
+a kill and a Stop ("Subagent was cancelled", 18, 21, 23), a tool the user declined (26, above),
+and the runtime's own turn cap — fixture 28, a project agent definition (`.grok/agents/one-turn.md`,
+`maxTurns: 1`, the sandbox's own) given a tool call and an answer to do: its first model turn ran
+the command, then `turn_completed {stop_reason: "cancelled"}` in the child and `subagent_finished
+{status: "cancelled", error: "max turns reached (limit: 1)", tool_calls: 1, turns: 1}`; the spawn
+call failed `tool_execution_failed` with the same message, and the parent's own `last_turn_summary`
+called it "Subagent failed: max turns reached (limit 1)".
+
+The adapter reads `cancelled` as `stopped`, as before, and carries the `error` as the end's summary
+(the roster row's result): a stopped row used to say nothing of why.
+
+**Not captured: `status: "failed"`.** Tried on 2026-09-26: routing the `general-purpose` type to a
+custom model on an endpoint nothing listens on (`[model.unreachable]` + `[subagents.models]`),
+through the harness's own `GROK_CONFIG_PATH` overlay. The CLI ignored both — the overlay accepts
+only `models`, `features`, a narrowed `toolset` and `shell_environment_policy`, a project
+`.grok/config.toml` only MCP servers, plugins and permission rules (the CLI's config docs), and
+the run's two subagents ran on the parent's `grok-4.7` and completed (not kept as a fixture).
+`[model.*]` and `[subagents.models]` load only from the account home's `config.toml` — a symlink
+to the daemon user's own, which is never written. The binary names `StopFailure` reasons
+(`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`) and
+"background subagent failed after start"; none was reachable without it.
+
+### 51. `already_exited`: a kill of work that had already finished
+
+Fixture 27: a background `echo quick-done` and a background subagent ("Reply with exactly: ok"),
+waited on (`get_command_or_subagent_output` with `timeout_ms 60000`: `MultiResult {mode:
+"wait_all", …, summary: "2/2 tasks completed (wait_all)"}`), then each killed:
+
+```json
+{"type":"KillTask","Result":{"task_id":"01a0de98-e27e-…","outcome":"already_exited","message":"Task had already completed"}}
+{"type":"KillTask","Result":{"task_id":"01a0de98-e8fe-…","outcome":"already_exited","message":"Subagent already completed"}}
+```
+
+No status, no exit code; the calls are retitled `kill 01a0de98 (already_exited)`. Both ends had
+been reported first (`_x.ai/task_completed`, `subagent_finished`), so the answers add no row. For a
+run whose end the adapter never saw, `already_exited` now reads `completed` — the kill found it
+done; it used to read `stopped`, a stop nobody made.
+
+### 52. The scheduler: `/loop`, its fires, its deletion
+
+Fixture 29. `/loop 60s Reply with exactly: tick`, sent as a prompt: the model read the CLI's
+bundled `long-running-background-tasks` skill, then called `scheduler_create {interval: "60s",
+prompt: <the prompt, with a standing instruction appended>, fire_immediately: true}`, answered
+`{type: "SchedulerCreate", id, humanSchedule: "every 1 minute", updated: false}`. Around that call,
+methods of their own on the parent's session:
+
+```json
+{"method":"_x.ai/scheduled_task_created","params":{"sessionId":"01a0de9b-699d-…","update":{
+ "sessionUpdate":"scheduled_task_created","task_id":"01a0de9b-e17c-…","prompt":"Reply with exactly: tick\n\n…",
+ "human_schedule":"every 1 minute","next_fire_at":"2026-09-26T16:45:52.892176827+00:00"},
+ "_meta":{"eventId":"…","agentTimestampMs":1790441152892,"x.ai/schedulerGeneration":"01a0de9b-69ea-…","x.ai/schedulerRevision":1}}}
+{"method":"_x.ai/scheduled_task_fired","params":{…,"update":{"sessionUpdate":"scheduled_task_fired","task_id":"01a0de9b-e17c-…",
+ …,"next_fire_at":"2026-09-26T16:46:52.893265665+00:00","subagent_id":"01a0de9b-e17d-…"}}}
+{"method":"_x.ai/scheduled_task_deleted","params":{…,"update":{"sessionUpdate":"scheduled_task_deleted","task_id":"01a0de9b-e17c-…","reason":"deleted"}}}
+```
+
+- **A fire is a subagent the CLI spawns itself.** 10 ms after `scheduled_task_fired`,
+  `subagent_spawned` names the fire's `subagent_id` — no spawn call, no `parent_prompt_id`,
+  `description: "loop: Reply with exactly: tick (every 1 minute)"`; its child session runs a prompt
+  of the CLI's own ("Scheduled task … Run the task below …"), and `subagent_finished {completed,
+  output: "tick", will_wake: true}` woke the parent (`subagent-completed-<id>`) once the `/loop`
+  turn had settled.
+- `scheduler_list` answered `{type: "SchedulerList", tasks: [{id, prompt, intervalHuman,
+  nextFireAt, createdAt, recurring}]}`; `scheduler_delete {id}` answered `{type:
+  "SchedulerDelete", success: true, message: "Scheduled task … cancelled."}`, with
+  `scheduled_task_deleted {reason: "deleted"}` a millisecond before it.
+
+Before 2026-09-26 the three methods were unregistered: the peer warned "acp: unhandled
+notification" for each — one warning per fire of a loop that may run for seven days. The adapter
+registers them and makes each loop a roster row typed `scheduled` — background, and inert to the
+liveness registry, so it never holds a deploy's drain between its fires; a fire notes itself on it
+in place ("Fired once · every 1 minute"), `scheduled_task_deleted` ends it (`stopped`; `completed`
+on `expired`, read off the docs), and the session's end closes it. The fire itself is the agent
+row the CLI's `subagent_spawned` starts, live while it runs. Not captured: a loop's expiry, a
+`durable` loop across sessions, and whether a Stop's `session/cancel` deletes a loop (a later fire
+notes itself on the row the Stop closed).
+
+### 53. `/goal`: `goal_updated`, and a planner the CLI spawns
+
+Fixture 30. `/goal Create a file named goal.txt containing exactly: ok --budget 20000`, as a prompt.
+On the parent's `_x.ai/session_notification`, `goal_updated`, restated whole at every change and
+every few seconds while its planner ran:
+
+```json
+{"sessionUpdate":"goal_updated","goal_id":"18745eb4-…","objective":"Create a file named goal.txt containing exactly: ok",
+ "status":"active","phase":"executing","token_budget":20000,"tokens_used":0,"elapsed_ms":0,"total_deliverables":0,
+ "completed_deliverables":0,"total_worker_rounds":0,"total_verify_rounds":0,"token_baseline":1475,
+ "finished_subagent_tokens":0,"last_event":"goal_created","last_event_timestamp":"…","planning":true}
+```
+
+- The goal's planner is a subagent the CLI spawns itself (`description: "goal plan writer"`,
+  `parent_prompt_id` the `/goal` prompt): 34 s, five tool calls, `completed` ("Done"); the updates
+  meanwhile carried `live_subagent_tokens`, `live_context_pct`, `live_turn_count`,
+  `live_tool_call_count`.
+- The parent worked the goal inside the `/goal` prompt's own turn (90 s: reads, `todo_write`, a
+  command, an edit) until `goal_updated {status: "budget_limited", phase: "idle", tokens_used:
+  48386, last_event: "budget_exceeded"}` ended it; the turn then settled.
+- `/goal clear` answered `goal_updated {goal_id: "", objective: "", status: "cleared", phase:
+  "idle", …}` — every id and text emptied — in a turn of its own with no model call.
+
+Before 2026-09-26 every update was an "unmapped" warning — eleven in this short run. The adapter
+makes the goal a roster row typed `goal` (inert to the liveness registry, as a loop is; its turns
+and planner hold the drain on their own): started when a goal turns `active`, a progress note in
+place on each change of phase, planning, last event, deliverables or rounds — never on a token tick
+alone — and ended when it leaves `active`: `budget_limited` → `stopped`, "Token budget reached:
+48386 of 20000 tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its
+result summary. A goal active again after the CLI's own end is a new run of its row (a new launch
+id); after the adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its
+progress notes itself on the ended row; a new goal ends the old one. Not captured: a goal that
+completes, pauses, resumes or fails.
 
 ## Reproducing
 

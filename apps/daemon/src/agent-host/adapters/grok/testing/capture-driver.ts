@@ -36,7 +36,10 @@ export const XAI_ROUTED_METHODS: ReadonlySet<string> = new Set<string>([
   ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.session_update),
   ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.task_backgrounded),
   ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.task_completed),
-  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.monitor_event)
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.monitor_event),
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.scheduled_task_created),
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.scheduled_task_fired),
+  ...xaiMethodSpellings(XAI_EXTENSION_NOTIFICATIONS.scheduled_task_deleted)
 ]);
 
 /**
