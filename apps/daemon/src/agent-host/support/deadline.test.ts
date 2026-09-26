@@ -100,6 +100,35 @@ test("a thunk is only invoked once, and lazily", async () => {
   assert.equal(calls, 1);
 });
 
+test("an injected timer carries the window: armed with it, cleared when the work settles, and its firing expires the wait", async () => {
+  const armed: { ms: number; fire: () => void; cleared: boolean }[] = [];
+  const timers = {
+    set: (fire: () => void, ms: number): unknown => armed.push({ ms, fire, cleared: false }) - 1,
+    clear: (handle: unknown): void => {
+      armed[handle as number]!.cleared = true;
+    }
+  };
+  // The work first: the window is cleared, and firing it later changes nothing.
+  assert.equal(await withDeadline(Promise.resolve(7), { label: "probe", timeoutMs: 60, timers }), 7);
+  assert.deepEqual(armed.map((timer) => [timer.ms, timer.cleared]), [[60, true]]);
+  armed[0]!.fire();
+
+  // The window first: firing it expires the wait, as elapsed time would.
+  let killed = false;
+  const waiting = withDeadline(new Promise<never>(() => {}), {
+    label: "probe",
+    timeoutMs: 45_000,
+    timers,
+    onTimeout: () => {
+      killed = true;
+    }
+  });
+  assert.equal(armed[1]!.ms, 45_000);
+  armed[1]!.fire();
+  await assert.rejects(waiting, /probe timed out after 45000ms/);
+  assert.equal(killed, true);
+});
+
 test("the documented windows are the ones the spec states", () => {
   assert.equal(AGENT_HOST_DEADLINES.sessionOpenMs, 90_000);
   assert.equal(AGENT_HOST_DEADLINES.cancelMs, 15_000);

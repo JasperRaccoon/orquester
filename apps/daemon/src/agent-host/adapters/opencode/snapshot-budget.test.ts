@@ -17,8 +17,10 @@
  * used to be spent in — until the test signals it.
  *
  * Nothing here waits on a clock: the ceiling arithmetic is checked as
- * arithmetic, and the behaviour against a peer whose start ends when the test
- * says so.
+ * arithmetic, the registry's ceiling on the registry's own timer, injected and
+ * fired by the test, and the behaviour against a peer whose start ends when
+ * the test says so. (A degraded probe's time is bounded from above — it must
+ * not spend the budget — but nothing waits for that bound.)
  */
 
 import assert from "node:assert/strict";
@@ -98,7 +100,8 @@ test("E9: only OpenCode gets the longer leash", () => {
 test("E9: the registry honours a probe's own ceiling", async () => {
   // The seam the ceiling rides on. A probe that declares 60 ms is cut at 60 ms
   // rather than at the 10 s default, which is the same mechanism that lets
-  // OpenCode declare 45 s.
+  // OpenCode declare 45 s. The registry's own timer, injected, is the clock:
+  // the test sees which ceiling is armed, and fires it.
   const stateDir = mkdtempSync(join(tmpdir(), "orq-snapshot-budget-"));
   const probe: ProviderProbe = {
     id: "opencode",
@@ -106,6 +109,7 @@ test("E9: the registry honours a probe's own ceiling", async () => {
     // A probe that never answers: only the ceiling can end the refresh.
     refresh: (): Promise<ProviderSnapshot> => new Promise<ProviderSnapshot>(() => undefined)
   };
+  const armed: { ms: number; fire: () => void }[] = [];
   const registry = createProviderSnapshotRegistry({
     probes: [probe],
     stateDir,
@@ -114,12 +118,20 @@ test("E9: the registry honours a probe's own ceiling", async () => {
       info: () => undefined,
       warn: () => undefined,
       error: () => undefined
-    }
+    },
+    setTimer: (fire, ms) => armed.push({ ms, fire }) - 1,
+    clearTimer: () => undefined
   });
   try {
-    const started = Date.now();
-    await assert.rejects(registry.refresh("opencode"), /timed out after 60ms/);
-    assert.ok(Date.now() - started < 2_000, "the probe's own ceiling, not the default");
+    const refreshing = registry.refresh("opencode");
+    await nextTurn();
+    assert.deepEqual(
+      armed.map((timer) => timer.ms),
+      [60],
+      "the probe's own ceiling, not the default"
+    );
+    armed[0]!.fire();
+    await assert.rejects(refreshing, /timed out after 60ms/);
   } finally {
     registry.stop?.();
     rmSync(stateDir, { recursive: true, force: true });
