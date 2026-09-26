@@ -4345,6 +4345,14 @@ stands), per thread (a switch drops it) and bounded to the 50 agents most recent
 (`roster/drill-in-memory.ts`). The drill-in mounts once per agent, so A → B saves A's and opens B
 from B's own entry; a position left mid-list is restored with follow off (a re-pin would carry the
 list over it), one left at the end, or none, opens at the end, following.*
+*Built (2026-09-27): the view leaves a drill-in on its own in two cases (`drill-in-navigation.ts`).
+An agent that settles while its drill-in is open hands the view back to the thread, where its result
+lands — judged per agent (only an agent seen at work in this opening of its drill-in, then settling;
+one opened already finished stays open, where one "was live" flag for the whole view once bounced a
+reader who opened a finished agent from a running one's view) and only while the reader follows the
+child's end: a reader who scrolled up stays, and the header's status chip says it finished. And a
+palette search hit, which only the thread's timeline takes, closes an open drill-in so that timeline
+takes it at once — it used to wait, unmounted, and fire minutes later on Back.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

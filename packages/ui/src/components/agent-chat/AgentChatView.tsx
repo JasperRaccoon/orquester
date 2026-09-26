@@ -1,12 +1,7 @@
 import React from "react";
 import { flushSync } from "react-dom";
 
-import {
-  DEFAULT_RUNTIME_MODE,
-  SETTLED_TURN_STATES,
-  startedTurns,
-  TERMINAL_SUBAGENT_STATUSES
-} from "@orquester/api/agent-chat";
+import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, startedTurns } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -62,6 +57,12 @@ import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-acti
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
 import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
 import { chatEscapeSequenceStep, resolveChatEscape } from "./escape-action";
+import {
+  NO_DRILL_IN_WATCH,
+  nextDrillInReturn,
+  revealClosesDrillIn,
+  type DrillInWatch
+} from "./drill-in-navigation";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
@@ -272,27 +273,39 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   }, [sessionId]);
   // Auto-return: an agent that SETTLES (finishes, fails, is stopped) while its
   // drill-in is open hands the view back to the thread — the parent is where
-  // the result lands. Only a live→settled transition observed here does it,
-  // so deliberately opening an already-finished agent stays open.
+  // the result lands. Per agent: only an agent seen at work in this opening
+  // of its drill-in does it, so an agent opened already finished stays open,
+  // and only while the reader follows its end — a reader who scrolled up is
+  // reading, and stays (`nextDrillInReturn`). The follow flag is the one the
+  // drill-in reported into its memory.
   const drilledStatus = drillInAgentId
     ? (roster.agents.find((agent) => agent.id === drillInAgentId)?.status ?? null)
     : null;
-  const drilledWasLive = React.useRef(false);
+  const drillInWatch = React.useRef<DrillInWatch>(NO_DRILL_IN_WATCH);
   React.useEffect(() => {
-    if (drillInAgentId === null || drilledStatus === null) {
-      drilledWasLive.current = false;
-      return;
-    }
-    const settled = TERMINAL_SUBAGENT_STATUSES.has(drilledStatus);
-    if (!settled) {
-      drilledWasLive.current = true;
-      return;
-    }
-    if (drilledWasLive.current) {
-      drilledWasLive.current = false;
+    const following =
+      drillInAgentId === null ? true : (recallDrillIn(drillInMemory.current, drillInAgentId)?.follow ?? true);
+    const next = nextDrillInReturn(drillInWatch.current, {
+      agentId: drillInAgentId,
+      status: drilledStatus,
+      following
+    });
+    drillInWatch.current = next.watch;
+    if (next.returnToMain) {
       setDrillInAgentId(null);
     }
   }, [drillInAgentId, drilledStatus]);
+  // A palette search hit lands in the thread's timeline, which is not mounted
+  // while a child is open: a NEW reveal closes the drill-in, and the thread's
+  // timeline takes it at once instead of minutes later on Back.
+  const revealNonce = reveal?.nonce ?? null;
+  const seenRevealNonce = React.useRef(revealNonce);
+  React.useEffect(() => {
+    if (revealClosesDrillIn(seenRevealNonce.current, revealNonce)) {
+      setDrillInAgentId(null);
+    }
+    seenRevealNonce.current = revealNonce;
+  }, [revealNonce]);
   // The child's rows and its roster row come from `useAgentChatDrillIn`, which
   // AgentDrillIn calls itself: one projection of the agent off this thread's
   // slice, and the one its timeline renders.
