@@ -13,6 +13,7 @@ import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue 
 import { drillInEmptyNotice, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { LoadOlderRow } from "./rows/LoadOlderRow";
+import { nextRowEnterState, rowEnters, type RowEnterState } from "./row-enter";
 
 import {
   findFirstVisibleIndex,
@@ -217,7 +218,10 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   const working = React.useMemo(() => timelineIsWorking(rows), [rows]);
 
   const reducedMotion = usePrefersReducedMotion();
-  const enterFlag = useRowEnterFlags(rows, sessionId);
+  // The drill-in counts as its own list (session and agent): another agent's
+  // rows are a list just opened, not rows that arrived.
+  const listIdentity = timelineListIdentity(sessionId, agentId);
+  const enterFlag = useRowEnterFlags(rows, listIdentity);
 
   // -------------------------------------------------------------------------
   // Disclosure plumbing
@@ -504,7 +508,6 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
    *
    * *T3: `MessagesTimeline.tsx:555-567, :618-631` (`settlingListIdentity`).*
    */
-  const listIdentity = timelineListIdentity(sessionId, agentId);
   const settleRef = React.useRef<TimelineSettleLatch>(armSettleLatch(listIdentity));
   const settleFrames = React.useRef<number[]>([]);
 
@@ -850,49 +853,14 @@ export function threadPlanReader(sessionId: string): AgentChatActions["readFullP
 }
 
 /**
- * Decides, once per row id, whether that row animates in.
- *
- * The first render of a thread is a page of history and must not replay a
- * hundred fades; every row that appears *after* it did just arrive and should
- * rise. The answer is memoised per id and never revisited, so the flag is a
- * stable prop and cannot break `TimelineRow`'s memo.
+ * Decides, once per row id, whether that row animates in (`row-enter.ts`):
+ * rows that arrive rise; a list's first rows — a thread's first snapshot,
+ * another agent's drill-in — do not.
  */
-function useRowEnterFlags(
-  rows: readonly { id: string }[],
-  sessionId: string
-): (id: string) => boolean {
-  const state = React.useRef<{ session: string; flags: Map<string, boolean>; primed: boolean }>({
-    session: sessionId,
-    flags: new Map(),
-    primed: false
-  });
-  if (state.current.session !== sessionId) {
-    state.current = { session: sessionId, flags: new Map(), primed: false };
-  }
-  const current = state.current;
-  // A row that arrives ABOVE every row already on screen is older history — a
-  // "Load older turns" page landing — not news: it never rises in. Rows after
-  // the first known one keep the rule above.
-  let firstKnownIndex = -1;
-  for (let index = 0; index < rows.length; index += 1) {
-    if (current.flags.has(rows[index]!.id)) {
-      firstKnownIndex = index;
-      break;
-    }
-  }
-  rows.forEach((row, index) => {
-    if (!current.flags.has(row.id)) current.flags.set(row.id, current.primed && index > firstKnownIndex);
-  });
-  current.primed = true;
-  // Drop ids that have left, so a long-lived tab does not accumulate a flag per
-  // row it ever showed.
-  if (current.flags.size > rows.length * 2 + 64) {
-    const live = new Set(rows.map((row) => row.id));
-    for (const id of [...current.flags.keys()]) {
-      if (!live.has(id)) current.flags.delete(id);
-    }
-  }
-  return React.useCallback((id: string) => state.current.flags.get(id) === true, []);
+function useRowEnterFlags(rows: readonly { id: string }[], listIdentity: string): (id: string) => boolean {
+  const state = React.useRef<RowEnterState | null>(null);
+  state.current = nextRowEnterState(state.current, rows, listIdentity);
+  return React.useCallback((id: string) => state.current !== null && rowEnters(state.current, id), []);
 }
 
 function usePrefersReducedMotion(): boolean {

@@ -3610,6 +3610,12 @@ same session id while the parent's is still mounted (§7.6).
 `timelineListIdentity`); `ChatTimeline` holds the latch in a ref, because the decision is read at
 call time inside a scroll handler and re-rendering the whole timeline twice per switch to publish
 a boolean nothing paints would be strictly worse.*
+*Built (2026-09-27): a row that ARRIVES plays a one-shot rise; a list the user just opened does
+not. The rule is per list — `timelineListIdentity`, session and agent, so the drill-in switching from
+one agent to another is a new list whose rows do not all rise — and it is primed by the list's first
+NON-EMPTY render, because a cold thread renders empty and its first snapshot lands a render later
+and used to rise in whole. A row landing above every row on screen is older history and never
+rises (`timeline/row-enter.ts`).*
 
 Row kinds and behaviour:
 
