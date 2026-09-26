@@ -211,14 +211,19 @@ test("a silent peer hits the handshake deadline and the child is killed", async 
     idleCloseMs: 10,
     // The real window is 30 s (`AGENT_HOST_DEADLINES.handshakeMs`); the test
     // asserts the mechanism, not the number, so the pool is given a signal it
-    // can abort instead.
+    // can abort instead — once the peer says it is up, so the pool is waiting
+    // on its readiness line, never on a clock.
+    onStderr: (_projectDir, line) => {
+      if (line.text.includes("never ready")) {
+        controller.abort();
+      }
+    },
     serverPassword: null
   });
-  const abortSoon = setTimeout(() => controller.abort(), 250);
   try {
     await assert.rejects(pool.acquire(peer.dir));
+    assert.equal(controller.signal.aborted, true, "the peer came up and was waited on, never ready");
   } finally {
-    clearTimeout(abortSoon);
     await pool.stopAll();
     peer.cleanup();
   }

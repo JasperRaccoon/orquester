@@ -43,9 +43,14 @@ import {
   emitTerminalPermission,
   emitTerminalQuestion,
   hasLiveChildAgents,
+  endInterruptionIfNewRun,
   normalizeOpenCodeEvent,
+  openHeldRequest,
+  openPermissionCard,
+  settleChildSurvival,
   type NormalizeContext,
-  type NormalizerSignal
+  type NormalizerSignal,
+  type OpenCodeHeldRequest
 } from "./normalize.ts";
 import {
   asRawEvent,
@@ -75,6 +80,7 @@ import { readSseFrames } from "./sse.ts";
 import {
   claimPrompt,
   createSessionState,
+  endInterruption,
   openTurn,
   repointSession,
   takeTurnTokenUsage,
@@ -200,6 +206,13 @@ export interface OpenCodeThreadSessionDeps {
   emit: (event: RuntimeEvent) => void;
   /** Called exactly once, after `session.exited` has been emitted. */
   onClosed: (threadId: string) => void;
+  /**
+   * The wait between two attempts: the event stream's reconnect, and every
+   * retry below it. `util.ts`'s `delay` — a timer the session's stop ends
+   * early — unless a test hands in its own, so a dropped stream reconnects
+   * without a clock.
+   */
+  delay?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 export interface StartOpenCodeSessionInput {
@@ -230,6 +243,14 @@ export class OpenCodeThreadSession {
   /** Resolves once `doStop` runs, so shared-promise listeners can detach. */
   private readonly closed$ = deferred<void>();
   private readonly ancestryAttempts = new Map<string, number>();
+  /** The interrupts under way (`asInterrupt`), each settling when it ends. */
+  private readonly interruptFlights = new Set<Promise<void>>();
+  /**
+   * How many interrupts have begun. A judge compares it across its reads: one
+   * that began — and maybe already ended — while the server answered may have
+   * ended what was asked about, so that answer is stale.
+   */
+  private interruptsBegun = 0;
   private pumpConnections = 0;
   private closed = false;
   private closing: Promise<void> | undefined;
@@ -484,6 +505,46 @@ export class OpenCodeThreadSession {
     this.deps.emit(event);
   }
 
+  /** Wait `ms` before the next attempt (`OpenCodeThreadSessionDeps.delay`); the stop ends it early. */
+  private async backoff(ms: number): Promise<void> {
+    await (this.deps.delay ?? delay)(ms, this.pumpAbort.signal);
+  }
+
+  /**
+   * Run `work` as an interrupt (`OpenCodeSessionState.interrupting`): from its
+   * first step to its last, a request is held (`holdsRequests` in
+   * `normalize.ts`), and judged only once every interrupt is over
+   * (`interruptsSettled`) — the abort is what ends an asker, and a Stop's
+   * first step, withdrawing the parked cards, comes before it.
+   */
+  private async asInterrupt<T>(work: () => Promise<T>): Promise<T> {
+    const flight = deferred<void>();
+    this.interruptFlights.add(flight.promise);
+    this.interruptsBegun += 1;
+    this.state.interrupting = true;
+    // Only an idle from here on says the run this interrupts is over.
+    this.state.idleAfterInterrupt = false;
+    try {
+      return await work();
+    } finally {
+      this.interruptFlights.delete(flight.promise);
+      this.state.interrupting = this.interruptFlights.size > 0;
+      if (!this.state.interrupting) {
+        // A new run said `busy` while this was under way, after the stopped
+        // run's idle: its leftovers are over now.
+        endInterruptionIfNewRun(this.state);
+      }
+      flight.resolve();
+    }
+  }
+
+  /** Settles once no interrupt is in flight — one that begins meanwhile included. */
+  private async interruptsSettled(): Promise<void> {
+    while (this.interruptFlights.size > 0) {
+      await Promise.all([...this.interruptFlights]);
+    }
+  }
+
   /**
    * §3.1: every live task is closed with `task.completed {status:"stopped"}` —
    * which the roster folds to `interrupted` (§7.6) — before the turn or the
@@ -589,7 +650,7 @@ export class OpenCodeThreadSession {
       if (this.closed || this.pumpAbort.signal.aborted) {
         break;
       }
-      await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
+      await this.backoff(backoffMs(attempt, 250, 5_000));
       attempt += 1;
     }
   }
@@ -710,6 +771,14 @@ export class OpenCodeThreadSession {
           { status: "running", activeTurnId: signal.turnId },
           { lastError: true }
         );
+        return;
+      }
+      case "request-after-interrupt": {
+        void this.judgeHeldRequest(signal.held, signal.raw);
+        return;
+      }
+      case "child-reports-run": {
+        void this.judgeChildSurvival(signal.childId, signal.checkId);
         return;
       }
       default: {
@@ -835,7 +904,7 @@ export class OpenCodeThreadSession {
             }
           });
         }
-        await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
+        await this.backoff(backoffMs(attempt, 250, 5_000));
         attempt += 1;
       }
     } finally {
@@ -913,11 +982,11 @@ export class OpenCodeThreadSession {
         // A native command's response only arrives once generation finished,
         // so its receipt — not a submit cap — is what proves admission.
         if (admission.requiresMessageReceipt && !admission.accepted) {
-          await delay(backoffMs(attempt, 250, 2_000), this.pumpAbort.signal);
+          await this.backoff(backoffMs(attempt, 250, 2_000));
           continue;
         }
         if (!admission.accepted) {
-          await delay(backoffMs(attempt, 250, 2_000), this.pumpAbort.signal);
+          await this.backoff(backoffMs(attempt, 250, 2_000));
           continue;
         }
 
@@ -956,7 +1025,7 @@ export class OpenCodeThreadSession {
         } else if (status.kind !== "idle") {
           admission.idleStatusConfirmations = 0;
         }
-        await delay(backoffMs(attempt, 250, 2_000), this.pumpAbort.signal);
+        await this.backoff(backoffMs(attempt, 250, 2_000));
       }
       await this.failPromptAdmission(admission);
     } finally {
@@ -992,27 +1061,36 @@ export class OpenCodeThreadSession {
     }
     const detail =
       "OpenCode accepted the prompt, but Orquester could not confirm its message or session status.";
-    await this.abortSession(1_000).catch(() => undefined);
-    const tokenUsage = takeTurnTokenUsage(this.state, false);
-    this.state.promptAdmission = undefined;
-    this.state.activeTurnId = undefined;
-    this.state.activeAgent = undefined;
-    this.state.activeVariant = undefined;
-    this.endInterruptionBefore(admission.turnId);
-    this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
-    // Every child, a background one too: the abort above is 1.18.32's
-    // `SessionRunState.cancel`, which cancels the session's background jobs
-    // (read from the source) — unlike a turn that fails on its own.
-    this.closeChildAgents(detail);
-    this.emit({
-      ...this.base({ turnId: admission.turnId }),
-      type: "turn.completed",
-      payload: { state: "failed", errorMessage: detail, tokenUsage }
-    });
-    this.emit({
-      ...this.base({ turnId: admission.turnId }),
-      type: "runtime.error",
-      payload: { message: detail, class: "transport_error" }
+    // The abort is an interrupt like a Stop's: a request that reaches the
+    // thread while it runs, or after it before a new run says `busy`, is judged
+    // on the server's word rather than shown to a run it may have ended.
+    await this.asInterrupt(async () => {
+      await this.abortSession(1_000).catch(() => undefined);
+      const tokenUsage = takeTurnTokenUsage(this.state, false);
+      this.state.promptAdmission = undefined;
+      this.state.activeTurnId = undefined;
+      this.state.activeAgent = undefined;
+      this.state.activeVariant = undefined;
+      // What the aborted run still sends is its leftovers, as after a Stop —
+      // which this replaces, if one was still lingering.
+      this.state.interruptedTurnId = admission.turnId;
+      this.state.reconcileIdleStatus = true;
+      this.state.awaitingBusyAfterInterruption = false;
+      this.updateRecord({ status: "error", lastError: detail }, { activeTurnId: true });
+      // Every child, a background one too: the abort above is 1.18.32's
+      // `SessionRunState.cancel`, which cancels the session's background jobs
+      // (read from the source) — unlike a turn that fails on its own.
+      this.closeChildAgents(detail);
+      this.emit({
+        ...this.base({ turnId: admission.turnId }),
+        type: "turn.completed",
+        payload: { state: "failed", errorMessage: detail, tokenUsage }
+      });
+      this.emit({
+        ...this.base({ turnId: admission.turnId }),
+        type: "runtime.error",
+        payload: { message: detail, class: "transport_error" }
+      });
     });
   }
 
@@ -1107,9 +1185,7 @@ export class OpenCodeThreadSession {
     if (this.state.interruptedTurnId === turnId) {
       return;
     }
-    this.state.interruptedTurnId = undefined;
-    this.state.awaitingBusyAfterInterruption = false;
-    this.state.reconcileIdleStatus = false;
+    endInterruption(this.state);
   }
 
   // -- requests -----------------------------------------------------------
@@ -1132,27 +1208,164 @@ export class OpenCodeThreadSession {
         requestId: request.id,
         error: error instanceof Error ? error.message : String(error)
       });
-      // Fall back to the dialog. The id stays resolved so a recovered copy of
-      // this ask cannot reopen after the user answers.
+      if (this.closed) {
+        // The stop settled every card it knew of; a card now would outlive it.
+        return;
+      }
+      // Fall back to the dialog, built by exactly the code the supervised path
+      // uses and never answered `once` again — after an interrupt, held for
+      // the server's word on its asker like any request (`openPermissionCard`).
       this.state.autoRepliedRequestIds.delete(request.id);
       this.state.resolvedRequestIds.delete(request.id);
-      const previousMode = this.state.runtimeMode;
-      // Re-run the ask through the normaliser with the supervised branch, so
-      // the card is built by exactly the code the supervised path uses.
-      this.state.runtimeMode = "approval-required";
-      try {
-        const frame: OpenCodeRawEvent = asRawEvent(raw) ?? {
-          type: "permission.asked",
-          properties: request
-        };
-        const result = normalizeOpenCodeEvent(this.state, frame, this.normalizeContext());
+      const result = openPermissionCard(this.state, request, raw, this.normalizeContext());
+      for (const event of result.events) {
+        this.emit(event);
+      }
+      for (const signal of result.signals) {
+        this.handleSignal(signal);
+      }
+    }
+  }
+
+  /**
+   * A request that reached the thread while an interrupt was ending its runs,
+   * or after one before any run has said `busy` (`holdsRequests` in
+   * `normalize.ts`). Its asker may be one the abort ended — its frame reached
+   * the stream late — or one the abort never reached, which waits on it for
+   * good unless it is shown. So once the interrupt in flight is over, the
+   * server is asked (`askerWaits`): a request whose asker still waits is shown
+   * as any would be (`openHeldRequest`); one whose asker is gone writes no
+   * card and is rejected on the wire, which releases what an older server
+   * kept listed (fixtures README observation 11). A request answered
+   * elsewhere meanwhile is dropped from the hold by its terminal frame, and
+   * nothing is done here.
+   */
+  private async judgeHeldRequest(held: OpenCodeHeldRequest, raw: unknown): Promise<void> {
+    const requestId = held.request.id;
+    for (let round = 0; ; round += 1) {
+      // The abort is what ends an asker: ask only once every interrupt is over.
+      await this.interruptsSettled();
+      if (this.closed || !this.state.heldRequestIds.has(requestId)) {
+        return;
+      }
+      const interruptsBefore = this.interruptsBegun;
+      const waits = await this.askerWaits(held);
+      if (this.closed || !this.state.heldRequestIds.has(requestId)) {
+        return;
+      }
+      // An interrupt that began while the server answered — under way still,
+      // or already over — may have ended the asker: that answer is stale.
+      if (this.interruptsBegun !== interruptsBefore && round < 2) {
+        continue;
+      }
+      this.state.heldRequestIds.delete(requestId);
+      if (waits) {
+        const result = openHeldRequest(this.state, held, raw, this.normalizeContext());
         for (const event of result.events) {
           this.emit(event);
         }
-      } finally {
-        this.state.runtimeMode = previousMode;
+        for (const signal of result.signals) {
+          this.handleSignal(signal);
+        }
+        return;
       }
+      // Nothing waits on it: no card, and its closing frame writes no row.
+      this.state.emittedTerminalRequestIds.add(requestId);
+      this.deps.ctx.logger.info("opencode request after an interrupt: its asker is gone; rejecting it", {
+        threadId: this.state.threadId,
+        requestId,
+        sessionId: held.request.sessionID
+      });
+      await this.rejectOnTheWire(held.type, requestId);
+      return;
     }
+  }
+
+  /**
+   * Whether a held request's asker still waits on it, on the server's word
+   * alone. Gone when the server no longer lists the request — 1.18.32 drops an
+   * ask whose fiber an abort interrupted (fixtures README observation 29) — or
+   * when the asker's session runs nothing, so nothing can wait on it: an older
+   * server keeps such an ask listed (fixture 06), idle. A read that fails
+   * decides nothing, and the request is shown: a card the user answers — a
+   * reply to a gone request settles locally (`respondToApproval`,
+   * `respondToUserInput`) — never a reject sent on their behalf, which 1.18.32
+   * applies to every other ask of that session too (`Permission.reply`).
+   */
+  private async askerWaits(held: OpenCodeHeldRequest): Promise<boolean> {
+    const [listed, statuses] = await Promise.all([
+      this.client
+        .get<unknown>(
+          held.type === "permission" ? openCodeRoutes.permissions : openCodeRoutes.questions,
+          { timeoutMs: 2_000 }
+        )
+        .then(
+          (rows) => (Array.isArray(rows) ? (rows as unknown[]) : undefined),
+          () => undefined
+        ),
+      this.readSessionStatuses()
+    ]);
+    if (
+      listed !== undefined &&
+      !listed.some((row) => isRecord(row) && row.id === held.request.id)
+    ) {
+      return false;
+    }
+    return statuses === undefined || runsIn(statuses, held.request.sessionID);
+  }
+
+  /**
+   * A child whose run the adapter ended reported that it goes on
+   * (`reportChildRun` in `normalize.ts`). Once every interrupt is over — the
+   * abort is what ends a child — the server says whether its session still
+   * runs, and check `checkId` settles it (`settleChildSurvival`): a survivor
+   * is relaunched. A read that fails relaunches it too: never let a deploy
+   * kill running work.
+   */
+  private async judgeChildSurvival(childId: string, checkId: number): Promise<void> {
+    for (let round = 0; ; round += 1) {
+      await this.interruptsSettled();
+      if (this.closed) {
+        return;
+      }
+      const interruptsBefore = this.interruptsBegun;
+      const statuses = await this.readSessionStatuses();
+      if (this.closed) {
+        return;
+      }
+      // A Stop that began while the server answered may have ended the child:
+      // that answer is stale.
+      if (this.interruptsBegun !== interruptsBefore && round < 2) {
+        continue;
+      }
+      const running = statuses === undefined || runsIn(statuses, childId);
+      for (const event of settleChildSurvival(this.state, childId, checkId, running, this.normalizeContext())) {
+        this.emit(event);
+      }
+      return;
+    }
+  }
+
+  /** `GET /session/status`, or `undefined` when the server cannot say. */
+  private async readSessionStatuses(): Promise<SessionStatusMap | undefined> {
+    return await this.client
+      .get<SessionStatusMap>(openCodeRoutes.sessionStatus, { timeoutMs: 2_000 })
+      .then(
+        (map) => (isRecord(map) ? map : undefined),
+        () => undefined
+      );
+  }
+
+  /** Release a request nobody will answer: a permission `reject`, a question's reject route. */
+  private async rejectOnTheWire(type: OpenCodeHeldRequest["type"], requestId: string): Promise<void> {
+    await (
+      type === "permission"
+        ? this.client.post<unknown>(openCodeRoutes.permissionReply(requestId), {
+            timeoutMs: 2_000,
+            body: { reply: "reject" }
+          })
+        : this.client.post<unknown>(openCodeRoutes.questionReject(requestId), { timeoutMs: 2_000 })
+    ).catch(() => undefined);
   }
 
   /**
@@ -1257,7 +1470,7 @@ export class OpenCodeThreadSession {
     }
     // "unknown" — the walk could not complete (a transient read, a session not
     // yet visible). Back off and try again, within the cap.
-    await delay(backoffMs(attempt, 250, 5_000), this.pumpAbort.signal);
+    await this.backoff(backoffMs(attempt, 250, 5_000));
     if (this.closed) {
       this.ancestryAttempts.delete(key);
       return;
@@ -1392,17 +1605,10 @@ export class OpenCodeThreadSession {
       this.emit(event);
     }
     await forEachLimited([...permissions], 8, async (requestId) => {
-      await this.client
-        .post<unknown>(openCodeRoutes.permissionReply(requestId), {
-          timeoutMs: 2_000,
-          body: { reply: "reject" }
-        })
-        .catch(() => undefined);
+      await this.rejectOnTheWire("permission", requestId);
     });
     await forEachLimited([...questions], 8, async (requestId) => {
-      await this.client
-        .post<unknown>(openCodeRoutes.questionReject(requestId), { timeoutMs: 2_000 })
-        .catch(() => undefined);
+      await this.rejectOnTheWire("question", requestId);
     });
   }
 
@@ -1439,10 +1645,9 @@ export class OpenCodeThreadSession {
       commandMatch === null ? undefined : await this.lookupCommand(commandMatch[1] ?? "");
 
     return await this.promptLock.run(async () => {
-      const pending = this.state.cancellation;
-      if (pending !== undefined) {
-        await pending.completion.catch(() => undefined);
-      }
+      // A Stop under way — from its first step, the withdrawn cards — ends
+      // before a prompt opens a turn it would otherwise abort unannounced.
+      await this.interruptsSettled();
       if (this.closed) {
         throw new Error("OpenCode session is closed.");
       }
@@ -1758,6 +1963,10 @@ export class OpenCodeThreadSession {
    * active one is a no-op, so it cannot kill the next turn (§4.1).
    */
   async interruptTurn(turnId?: string): Promise<void> {
+    // An interrupt already under way — another Stop, a failed admission's
+    // abort — ends what it reaches first; this one then acts on the thread
+    // as it stands, turn-scoped as ever.
+    await this.interruptsSettled();
     const activeTurnId = this.state.activeTurnId;
     if (turnId !== undefined && activeTurnId !== turnId) {
       return;
@@ -1766,63 +1975,73 @@ export class OpenCodeThreadSession {
     if (target !== undefined && this.state.interruptedTurnId === target) {
       return;
     }
-    const existing = this.state.cancellation;
-    if (existing !== undefined) {
-      await existing.completion.catch(() => undefined);
-      return;
-    }
 
-    // Settle first — see settlePendingRequests().
-    await this.settlePendingRequests();
+    // One interrupt from its first step: an ask that reaches the thread while
+    // the parked cards are withdrawn below is judged after the abort too.
+    await this.asInterrupt(async () => {
+      // Settle first — see settlePendingRequests().
+      await this.settlePendingRequests();
 
-    this.cancelIdleReconciliation();
-    if (target !== undefined) {
-      this.state.interruptedTurnId = target;
-    }
-    this.state.reconcileIdleStatus = true;
-    this.state.awaitingBusyAfterInterruption = false;
-    const admission = this.state.promptAdmission;
-    if (admission !== undefined) {
-      admission.cancelled = true;
-    }
-
-    const cancellation = makeCancellation(target);
-    this.state.cancellation = cancellation;
-    try {
-      await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
-      cancellation.acknowledged = true;
-      cancellation.acknowledge();
-      await this.abortDescendants();
-      // §6.2: "`/interrupt` is also the only way to stop background work, and
-      // it stops all of it. It is addressed to the SESSION, not to a turn, so
-      // it is valid with no turn running." The descendant abort above already
-      // killed the children provider-side; closing their roster rows is what
-      // lets `backgroundLiveness` drop to null — without it the client's Stop
-      // button stays on "Stopping…" forever. Runs on EVERY interrupt, with or
-      // without an active turn, and is idempotent.
-      this.closeChildAgents("interrupted");
-      const tokenUsage = takeTurnTokenUsage(this.state, false);
-      if (target !== undefined && this.state.activeTurnId === target) {
-        this.state.activeTurnId = undefined;
-        this.state.activeAgent = undefined;
-        this.state.activeVariant = undefined;
-        this.state.promptAdmission = undefined;
-        this.updateRecord({ status: "ready" }, { activeTurnId: true });
-        this.emit({
-          ...this.base({ turnId: target }),
-          type: "turn.aborted",
-          payload: { reason: "interrupted", tokenUsage }
-        });
+      this.cancelIdleReconciliation();
+      if (target !== undefined) {
+        this.state.interruptedTurnId = target;
       }
-      cancellation.complete();
-    } catch (error) {
-      cancellation.complete(error);
-      throw error;
-    } finally {
-      if (this.state.cancellation === cancellation) {
-        this.state.cancellation = undefined;
+      this.state.reconcileIdleStatus = true;
+      this.state.awaitingBusyAfterInterruption = false;
+      const admission = this.state.promptAdmission;
+      if (admission !== undefined) {
+        admission.cancelled = true;
       }
-    }
+
+      const cancellation = makeCancellation(target);
+      this.state.cancellation = cancellation;
+      try {
+        await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
+        cancellation.acknowledged = true;
+        cancellation.acknowledge();
+        await this.abortDescendants();
+        // §6.2: "`/interrupt` is also the only way to stop background work, and
+        // it stops all of it. It is addressed to the SESSION, not to a turn, so
+        // it is valid with no turn running." The descendant abort above already
+        // killed the children provider-side; closing their roster rows is what
+        // lets `backgroundLiveness` drop to null — without it the client's Stop
+        // button stays on "Stopping…" forever. Runs on EVERY interrupt, with or
+        // without an active turn, and is idempotent.
+        this.closeChildAgents("interrupted");
+        const tokenUsage = takeTurnTokenUsage(this.state, false);
+        if (target !== undefined && this.state.activeTurnId === target) {
+          this.state.activeTurnId = undefined;
+          this.state.activeAgent = undefined;
+          this.state.activeVariant = undefined;
+          this.state.promptAdmission = undefined;
+          this.updateRecord({ status: "ready" }, { activeTurnId: true });
+          this.emit({
+            ...this.base({ turnId: target }),
+            type: "turn.aborted",
+            payload: { reason: "interrupted", tokenUsage }
+          });
+          // The Stop ended a turn, not the session: OpenCode's lives on, and
+          // so may a run the abort never reached. `turn.aborted` alone reads
+          // `stopped` — a session the roster reads as dead (every running row
+          // `interrupted`, a child relaunched on the server's word included)
+          // and the host refuses a later Stop on — so it goes back to
+          // `ready`, as Claude's and Grok's do after every settled turn.
+          this.emit({
+            ...this.base({ turnId: target }),
+            type: "session.state.changed",
+            payload: { state: "ready", reason: "turn:interrupted" }
+          });
+        }
+        cancellation.complete();
+      } catch (error) {
+        cancellation.complete(error);
+        throw error;
+      } finally {
+        if (this.state.cancellation === cancellation) {
+          this.state.cancellation = undefined;
+        }
+      }
+    });
   }
 
   /** `POST /session/<nonexistent>/abort` answers `200 true` — it proves nothing. */
@@ -2150,6 +2369,15 @@ export class OpenCodeThreadSession {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Whether `sessionId` runs, by `GET /session/status`: an idle session is simply
+ * absent from the map (fixtures README observation 7); `busy` and `retry` run.
+ */
+function runsIn(statuses: SessionStatusMap, sessionId: string): boolean {
+  const status = statuses[sessionId];
+  return status !== undefined && status.type !== "idle";
+}
 
 function addRelated(state: OpenCodeSessionState, sessionId: string): void {
   state.relatedSessionIds.add(sessionId);

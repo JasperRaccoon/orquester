@@ -909,35 +909,40 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   ends with the adapter's usual end row, and no stale end of an earlier run follows; and the
   adapter's own live set reopens, so Stop and exit close the new run `stopped`. A status-only
   reopen is not enough: an appended `task.updated {running}` is an ordinary row of the agent's
-  window, and once retention drops it the roster reads the old end mid-run. OpenCode — a `task`
-  call with `task_id` re-prompts the existing child, no `session.created` — starts every run from
-  the parent's `running` `task` part under its `callID`; a live part naming a settled child under a
-  call never seen for it is the relaunch; a frame of any call seen before, or a call on a live
-  child, emits no task row (`linkChildFromTaskPart`). Codex starts under `codex-launch:<item id>`
-  at `subAgentActivity started` and again under `codex-run:<turn id>` at a child's own
-  `turn/started` after a settled run, or for a child this session never saw launched
-  (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no end, and
-  `interacted` carries no status — neither is evidence about the run in progress. Grok starts an
-  agent at its `spawn_subagent` call's first frame under the call's id, and a `resume_from` launch
-  starts the SAME task again under the new call — the resume's own, NEW subagent id joined to it by
-  `subagent_spawned.resumed_from` (`launchSubagent`, `subagentSpawned`; see "Grok: shells are live
-  work"). An agent first launched by a host older than the relaunch fix (2026-09-24) has no launch
-  id on its first start, so a relaunch from a terminal state could not reopen it; rather than weaken
-  the late-delivery guard in the fold, a thread's first load in a host lifetime gives each settled
-  one — OpenCode and Codex threads only (the head's adapter): Claude always launched with an id, and
-  Grok surfaced no agents before it did so with ids — one appended `task.started` naming
-  `legacy-launch:<taskId>` (`legacyLaunchStarts`
-  in `leftover-work.ts`, `recordLegacyLaunches`, after the leftover closings so an agent they stop
-  counts as settled). It rides the agent's first start's turn (a rewind keeps or drops the two
-  together) and owner, carries its newest row's linkage like a closer, and its row's
-  `createdAt`/`updatedAt` are the roster's own `updatedAt` for the agent (the event is stamped with
-  the load's time), so the roster reads exactly as before — a row stamped with the load's time
-  would rank every legacy agent newest among the settled rows and let the 100-row cap drop the
-  agents that really are — and only the launch id moves; it is that agent's anchor, merged into its
-  spawn row, never a row of its own. An `idle` agent gets none (any start reopens it, and this one
-  would), an active one is the closings' to settle first, and one with no start in the window gets
-  none (a start would create it in the roster, running, once retention dropped its other rows).
-  Once per agent: the next load finds a launch id and names nothing.
+  window, and once retention drops it the roster reads the old end mid-run. OpenCode — a `task` call
+  with `task_id` re-prompts the existing child, no `session.created` — starts every run from the
+  parent's `running` `task` part under its `callID`; a live part naming a settled child under a call
+  never seen for it is the relaunch; a frame of any call seen before, or a call on a live child,
+  emits no task row (`linkChildFromTaskPart`) — a child's own `task` parts name ITS subagents the
+  same way, and a child no part has named yet starts under `opencode-child:<session id>` — that
+  start alone: once a part names its call, every row names it; and a child a Stop closed that the
+  server confirms still runs is relaunched by the adapter itself under
+  `opencode-revive:<callID>:<n>`, after a seed naming the first run's launch where its start named
+  none (see "OpenCode: a subagent's answer arrives after its run ended", point 7). Codex starts
+  under `codex-launch:<item id>` at `subAgentActivity started` and again under `codex-run:<turn id>`
+  at a child's own `turn/started` after a settled run, or for a child this session never saw
+  launched (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no
+  end, and `interacted` carries no status — neither is evidence about the run in progress. Grok
+  starts an agent at its `spawn_subagent` call's first frame under the call's id, and a
+  `resume_from` launch starts the SAME task again under the new call — the resume's own, NEW
+  subagent id joined to it by `subagent_spawned.resumed_from` (`launchSubagent`, `subagentSpawned`;
+  see "Grok: shells are live work"). An agent first launched by a host older than the relaunch fix
+  (2026-09-24) has no launch id on its first start, so a relaunch from a terminal state could not
+  reopen it; rather than weaken the late-delivery guard in the fold, a thread's first load in a host
+  lifetime gives each settled one — OpenCode and Codex threads only (the head's adapter): Claude
+  always launched with an id, and Grok surfaced no agents before it did so with ids — one appended
+  `task.started` naming `legacy-launch:<taskId>` (`legacyLaunchStarts` in `leftover-work.ts`,
+  `recordLegacyLaunches`, after the leftover closings so an agent they stop counts as settled). It
+  rides the agent's first start's turn (a rewind keeps or drops the two together) and owner, carries
+  its newest row's linkage like a closer, and its row's `createdAt`/`updatedAt` are the roster's own
+  `updatedAt` for the agent (the event is stamped with the load's time), so the roster reads exactly
+  as before — a row stamped with the load's time would rank every legacy agent newest among the
+  settled rows and let the 100-row cap drop the agents that really are — and only the launch id
+  moves; it is that agent's anchor, merged into its spawn row, never a row of its own. An `idle`
+  agent gets none (any start reopens it, and this one would), an active one is the closings' to
+  settle first, and one with no start in the window gets none (a start would create it in the
+  roster, running, once retention dropped its other rows). Once per agent: the next load finds a
+  launch id and names nothing.
   (2) `task_progress.description` is the agent's live activity, never its name: the normaliser
   fills a task's description from progress only when it has none. (3) Retention has two windows
   (`fold.ts`): the parent's last 500 rows, from which an agent's `task.started`/`task.completed`
@@ -1162,41 +1167,105 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   sending it) or one a turn already claimed is that turn's; a reply to any other prompt is claimed
   by the turn running when it begins (the server answers a prompt that arrives mid-run in the same
   run, `ensureRunning`), and while none runs it opens the WOKEN turn — `turn.started` named by the
-  prompt's id, as a live turn is by its prompt (a rewind finds it), before any row of the reply,
-  and a `turn-woken` signal for the session's record. From there it is any turn: the run's idle
-  settles it, a `session.error` fails it, a Stop aborts it, the session's stop closes it, a
-  restart's reconcile settles it, and a user message steers it — never Claude's auto-close of a
-  synthetic turn: this run is live, and the prompt joins it. Its steps are its own. Only with a run
-  behind it — the parent's `busy` since its last `idle` (`parentBusy`; a reconnect clears it): with
-  none no `idle` would settle the turn and `turn.started` never arms the watchdog, so it would hold
-  a deploy's drain. A compaction's summary (`summary: true`) claims its prompt but never joins
+  prompt's id, as a live turn is by its prompt (a rewind finds it), before any row of the reply, and
+  a `turn-woken` signal for the session's record. From there it is any turn: the run's idle settles
+  it, a `session.error` fails it, a Stop aborts it, the session's stop closes it, a restart's
+  reconcile settles it, and a user message steers it — never Claude's auto-close of a synthetic
+  turn: this run is live, and the prompt joins it. Its steps are its own. Only with a run behind it
+  — the parent's `busy` since its last `idle` (`parentBusy`; a reconnect clears it): with none no
+  `idle` would settle the turn and `turn.started` never arms the watchdog, so it would hold a
+  deploy's drain. A compaction's summary (`summary: true`) claims its prompt but never joins
   `promptMessageIds` (off the meter): the host's own `/compact` stays turnless (`compact()` holds
   `hostCompacting` up across `summarize`), a woken run that compacts FIRST (its context already
   full) opens the turn at its summary. Never opened for a reply that already ended (a fork copies
   completed messages — fixture 10; a rewind also claims every prompt its fork copied) or output
-  after an interruption (the demux drops it first) — a guard every path a LATER turn settles by
-  now ends (`endInterruptionBefore`): only `completeTurn` did, so a later turn that failed (a rate
-  limit) left the Stop behind and every woken reply after it was dropped. The child's end always
-  precedes the answer's prompt (the runner publishes its idle before resolving its run), so neither
-  it nor the answer's result ever rides the woken turn (README observation 27). The replay harness
-  claims the host's prompt ids up front, and models `hostCompacting`, for the same reason
-  `sendTurn` claims first: a blocking `/command` or `summarize` is recorded after its frames. (4)
-  A background run OUTLIVES a turn that fails on its own (a `session.error`, a rate limit), as a
-  Claude background agent outlives its parent's turn: 1.18.32 cancels a background job only
-  through `SessionRunState.cancel` — the `abort` route, which a Stop, the session's stop and a
-  failed admission send — so `failActiveTurn` closes only the runs that fail with it
-  (`closeLiveChildAgents` `scope: "foreground"`: a child whose launch answered in the background,
-  or one inside it, lives on) and returns the session to `ready`, as Claude and Grok do after
-  every settled turn — an `error` session is a dead one to the roster (every running row
-  `interrupted`) and refuses commands until a Stop, which would cancel that job. The turn stays
-  `failed` (the activity ladder still ranks it `error`). Closed, the child read "interrupted"
-  while it worked, left the drain's liveness, and lost its answer as its result. (5) A child
+  after an interruption (the demux drops it first) — a guard every path a LATER turn settles by now
+  ends (`endInterruptionBefore`): only `completeTurn` did, so a later turn that failed (a rate
+  limit) left the Stop behind and every woken reply after it was dropped. A NEW run ends it too: a
+  `busy` once the interrupt is over and the parent has said idle since it began
+  (`endInterruptionAtNewRun`, `idleAfterInterrupt`; checked again as the interrupt ends, for a
+  `busy` the stream delivered before the abort answered) — 1.18.32 publishes a cancelled run's idle
+  only after its fiber ended, so nothing of the stopped run follows it (README observation 29), and
+  a background answer injected after the abort starts the parent again: that run's reply used to be
+  dropped with the leftovers, its requests shown to nobody's turn; it now gets its woken turn. A
+  `busy` with no idle since ends nothing (the stopped run wrote one at the top of every step), and
+  once the boundary ends an interruption at a run the provider started (no host turn active), one
+  abort error until the parent's next idle is an echo of that abort (`abortEchoExpected`: that run
+  may be the abort's after all — the natural-idle race — and its `MessageAbortedError` failed the
+  woken turn or read the session `error`). A host turn's run never is: `sendTurn` prompts only once
+  every interrupt is over, so once its prompt is taken and the stopped run's idle has come, an abort
+  error fails it, whether its `busy` ended the interruption or the interruption's residue outlived
+  that `busy` (the prompt's answer first, fixture 10's order: `hostTurnSinceInterruption`); both
+  used to take the turn's own abort for the Stop's echo, for the whole turn. A user message's part
+  is never dropped (an injected answer is a run's result). The child's end always precedes the
+  answer's prompt (the runner publishes its idle before resolving its run), so neither it nor the
+  answer's result ever rides the woken turn (README observation 27). The replay harness claims the
+  host's prompt ids up front, and models `hostCompacting`, for the same reason `sendTurn` claims
+  first: a blocking `/command` or `summarize` is recorded after its frames. (4) A background run
+  OUTLIVES a turn that fails on its own (a `session.error`, a rate limit), as a Claude background
+  agent outlives its parent's turn: 1.18.32 cancels a background job only through
+  `SessionRunState.cancel` — the `abort` route, which a Stop, the session's stop and a failed
+  admission send — so `failActiveTurn` closes only the runs that fail with it
+  (`closeLiveChildAgents` `scope: "foreground"`: a child whose launch answered in the background, or
+  one inside it, lives on) and returns the session to `ready`, as Claude and Grok do after every
+  settled turn — an `error` session is a dead one to the roster (every running row `interrupted`)
+  and refuses commands until a Stop, which would cancel that job. The turn stays `failed` (the
+  activity ladder still ranks it `error`). Closed, the child read "interrupted" while it worked,
+  left the drain's liveness, and lost its answer as its result. (5) A child
   session's question rides no turn, and neither does its resolution (`questionTurnId` in
   `normalize.ts`, Codex's and Grok's rule): a turn's end dismisses every question on it in the log
   only (`settleStrandedQuestions`), and a background child outlives the parent's turn, so its card
   was swept at the parent's turn end while the child still waited on the answer. A resolution on a
   turn its question does not ride would reopen the card after a rewind of that turn. The parent's
-  own questions, and every approval, ride the parent's open turn.
+  own questions, and every approval, ride the parent's open turn. (6) A request that reaches the
+  thread after a Stop waits for the server's word on its asker (README observation 29, read from the
+  source). The abort ends every run and job it reaches, and an ask it interrupts drops out of `GET
+  /permission`/`GET /question` with no event, but that ask's frame can still arrive late — and a run
+  it never reached asks from a live asker: a background answer injected after it starts the parent
+  again; a `task_id` extension's child runs on. The adapter marked every request that arrived while
+  no turn ran after an interrupt resolved and answered nothing, so a live asker waited for good (and
+  so did the next turn, which joins the blocked run). Now one that arrives while an interrupt is
+  under way (`asInterrupt`: a Stop from its first step — withdrawing the parked cards comes before
+  the abort — and a failed admission's abort, which now leaves the same lingering state a Stop
+  does), or after it before any run says `busy` (`interruptionLingers`, the windows the parent's
+  output is dropped in), is held (`holdsRequests`) and judged once every interrupt is over
+  (`judgeHeldRequest`, `interruptsSettled`): asked again if another interrupt began while the server
+  answered (`interruptsBegun`) — a Stop that starts and ends during the reads makes their answer
+  stale; listed by the server and its session busy — the card, as any (a child's question on no
+  turn), or full access's `once`; unlisted or its session idle (an older server's orphan) — no card,
+  a reject on the wire, and no row when it closes. A read that fails shows the card: a reject would
+  answer for the user, and 1.18.32's `Permission.reply` rejects every other ask of that session with
+  it. (7) A child the adapter closed itself (a Stop, a failed admission's abort, a failed turn:
+  `closeLiveChildAgents` marks `endedByAdapter`, as does its launching call's abort cleanup
+  (`interrupted: true`, the parent's word on its call) — which, like the child's own abort error,
+  ends the run `stopped`, never `failed`) that runs on — a `task_id` extension's child, a job
+  started after the abort listed the jobs — read "interrupted" and held no drain while it worked. An
+  end the adapter wrote is not the provider's word: a report of a live run (the child's `busy`, a
+  delta, a text part with no end, a running call, a reply not completed) asks the server once the
+  interrupts are over (`reportChildRun`, `judgeChildSurvival`, `settleChildSurvival`). Busy —
+  confirmed — the child is RELAUNCHED under the relaunch contract ("Agent rows must survive resumes
+  and retention", rule (1)): a new `task.started` naming a NEW launch id,
+  `opencode-revive:<callID>:<n>` (`launchId`, which every row of the reopened run names; `toolUseId`
+  stays the provider's call, whose part still gives the run its answer). A grandchild is launched by
+  its child's own `task` part, which names it as a parent's part names a child — its launch, and its
+  answer; a child no part has named yet starts under `opencode-child:<session id>`, its start alone
+  — rows name the call once a part names it, so the timeline hides the call behind the agent; a call
+  resuming it (`task_id`) is never taken for its launch, and relaunches it once it settled; and a
+  run whose start named no launch (a log from before) gets a seed naming its first run's before the
+  relaunch, since the roster reopens only on a changed launch. The roster reopens the row — running,
+  the Stop's end and summary cleared — liveness counts it, it is back in the live set (a later Stop
+  or the exit closes it `stopped`), and its own idle and answer end it `completed` with its result,
+  once. For the roster to read it running the session must read live after a Stop: `turn.aborted`
+  folds to `stopped`, a dead session to the roster (every running row `interrupted`) and one the
+  host refuses the next Stop on, so the Stop now returns it to `ready` (`session.state.changed`,
+  `turn:interrupted`), as Claude's and Grok's do after every settled turn. One exception: a failed
+  admission leaves the session `error` — a transport doubt, kept as ruled — which the roster reads
+  as dead too, so a child relaunched after one reads `interrupted` there until the session reads
+  live again, while liveness counts it all the same. Idle — the report was a cancelled run's last
+  frames: nothing, and only a `busy` asks again. The child's own idle voids a check in flight; a
+  read that fails relaunches it too (the drain outranks a duplicate row). The Grok adapter keeps its
+  adapter-written end on a revival (a late delivery, status-less rows): its reports are the CLI's
+  own listings and frames, not confirmed by a status read like this one.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

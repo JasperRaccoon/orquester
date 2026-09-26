@@ -13,12 +13,14 @@
  * catalogue, with the host's ceiling for this one probe covering both
  * ({@link OPENCODE_SNAPSHOT_TIMEOUT_MS}). These tests drive the real adapter
  * against the scripted mock peer in `testing/peer.ts`, whose `slow` mode binds
- * its port and *then* delays the readiness line — exactly the window the budget
- * used to be spent in.
+ * its port and *then* holds the readiness line — exactly the window the budget
+ * used to be spent in — until the test signals it.
  *
- * Nothing here asserts on a 10 s wall clock: the ceiling arithmetic is checked
- * as arithmetic, and the behaviour is checked against a peer that is slow by
- * hundreds of milliseconds, not by seconds.
+ * Nothing here waits on a clock: the ceiling arithmetic is checked as
+ * arithmetic, the registry's ceiling on the registry's own timer, injected and
+ * fired by the test, and the behaviour against a peer whose start ends when
+ * the test says so. (A degraded probe's time is bounded from above — it must
+ * not spend the budget — but nothing waits for that bound.)
  */
 
 import assert from "node:assert/strict";
@@ -39,12 +41,16 @@ import { SNAPSHOT_TIMEOUTS_MS } from "../index.ts";
 import { OPENCODE_SNAPSHOT_TIMEOUT_MS, createOpenCodeAdapter } from "./index.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 
-function peerCtx(peer: Peer, env: Record<string, string>): AdapterContext {
+function peerCtx(
+  peer: Peer,
+  env: Record<string, string>,
+  onWarn: (message: string, fields?: unknown) => void = () => undefined
+): AdapterContext {
   return {
     logger: {
       debug: () => undefined,
       info: () => undefined,
-      warn: () => undefined,
+      warn: onWarn,
       error: () => undefined
     },
     clock: { now: () => new Date(0), nowIso: () => "2026-09-21T00:00:00.000Z" },
@@ -94,16 +100,16 @@ test("E9: only OpenCode gets the longer leash", () => {
 test("E9: the registry honours a probe's own ceiling", async () => {
   // The seam the ceiling rides on. A probe that declares 60 ms is cut at 60 ms
   // rather than at the 10 s default, which is the same mechanism that lets
-  // OpenCode declare 45 s.
+  // OpenCode declare 45 s. The registry's own timer, injected, is the clock:
+  // the test sees which ceiling is armed, and fires it.
   const stateDir = mkdtempSync(join(tmpdir(), "orq-snapshot-budget-"));
   const probe: ProviderProbe = {
     id: "opencode",
     timeoutMs: 60,
-    refresh: async (): Promise<ProviderSnapshot> => {
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
-      throw new Error("unreachable: the deadline should have fired");
-    }
+    // A probe that never answers: only the ceiling can end the refresh.
+    refresh: (): Promise<ProviderSnapshot> => new Promise<ProviderSnapshot>(() => undefined)
   };
+  const armed: { ms: number; fire: () => void }[] = [];
   const registry = createProviderSnapshotRegistry({
     probes: [probe],
     stateDir,
@@ -112,12 +118,20 @@ test("E9: the registry honours a probe's own ceiling", async () => {
       info: () => undefined,
       warn: () => undefined,
       error: () => undefined
-    }
+    },
+    setTimer: (fire, ms) => armed.push({ ms, fire }) - 1,
+    clearTimer: () => undefined
   });
   try {
-    const started = Date.now();
-    await assert.rejects(registry.refresh("opencode"), /timed out after 60ms/);
-    assert.ok(Date.now() - started < 2_000, "the probe's own ceiling, not the default");
+    const refreshing = registry.refresh("opencode");
+    await nextTurn();
+    assert.deepEqual(
+      armed.map((timer) => timer.ms),
+      [60],
+      "the probe's own ceiling, not the default"
+    );
+    armed[0]!.fire();
+    await assert.rejects(refreshing, /timed out after 60ms/);
   } finally {
     registry.stop?.();
     rmSync(stateDir, { recursive: true, force: true });
@@ -128,20 +142,63 @@ test("E9: the registry honours a probe's own ceiling", async () => {
 // The behaviour, against a slow-starting peer
 // ---------------------------------------------------------------------------
 
+/**
+ * The slow peers a test's adapter starts, as they say on stderr (which the
+ * pool logs as a warning) that they are bound and not ready: `bound(n)`
+ * settles with the n-th one's pid, which `ready` signals to announce.
+ */
+function slowPeers(): {
+  onWarn: (message: string, fields?: unknown) => void;
+  bound: (index: number) => Promise<number>;
+  ready: (pid: number) => void;
+  pids: number[];
+} {
+  const pids: number[] = [];
+  let waiters: { index: number; resolve: (pid: number) => void }[] = [];
+  const onWarn = (_message: string, fields?: unknown): void => {
+    const line = (fields as { line?: unknown } | undefined)?.line;
+    const match = typeof line === "string" ? /bound, not ready \(pid (\d+)\)/.exec(line) : null;
+    if (match === null) {
+      return;
+    }
+    pids.push(Number(match[1]));
+    waiters = waiters.filter((waiter) => {
+      if (pids.length <= waiter.index) {
+        return true;
+      }
+      waiter.resolve(pids[waiter.index]!);
+      return false;
+    });
+  };
+  const bound = (index: number): Promise<number> =>
+    pids.length > index
+      ? Promise.resolve(pids[index]!)
+      : new Promise((resolve) => waiters.push({ index, resolve }));
+  return { onWarn, bound, ready: (pid) => void process.kill(pid, "SIGUSR2"), pids };
+}
+
+/** One turn of the event loop: whatever was queued has run. */
+function nextTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 test("E9: a COLD probe waits for the server to report ready, then reads the catalogue", async () => {
   const peer = makePeer();
-  const delayMs = 600;
-  const adapter = await createOpenCodeAdapter(
-    peerCtx(peer, { MOCK_MODE: "slow", MOCK_READY_DELAY_MS: String(delayMs) })
-  );
+  const peers = slowPeers();
+  const adapter = await createOpenCodeAdapter(peerCtx(peer, { MOCK_MODE: "slow" }, peers.onWarn));
   try {
-    const started = Date.now();
-    const snapshot = await adapter.refreshSnapshot({ cwd: peer.dir });
-    const elapsed = Date.now() - started;
-
-    // It waited for the readiness line instead of giving up on the start...
-    assert.ok(elapsed >= delayMs, `probe returned in ${elapsed}ms, before the peer was ready`);
-    // ...and then actually read the catalogue off the server it started.
+    let settled = false;
+    const probe = adapter.refreshSnapshot({ cwd: peer.dir }).finally(() => {
+      settled = true;
+    });
+    // The server is up, its port bound, and it has not said it is ready.
+    const pid = await peers.bound(0);
+    await nextTurn();
+    // It waits for the readiness line instead of giving up on the start...
+    assert.equal(settled, false, "the probe returned before the peer was ready");
+    peers.ready(pid);
+    const snapshot = await probe;
+    // ...and then actually reads the catalogue off the server it started.
     assert.equal(snapshot.status, "ready");
     assert.deepEqual(
       snapshot.models.map((model) => model.slug),
@@ -157,19 +214,24 @@ test("E9: a COLD probe waits for the server to report ready, then reads the cata
 
 test("E9: the second probe is warm — the start cost is paid once per project", async () => {
   const peer = makePeer();
-  const delayMs = 600;
-  const adapter = await createOpenCodeAdapter(
-    peerCtx(peer, { MOCK_MODE: "slow", MOCK_READY_DELAY_MS: String(delayMs) })
-  );
+  const peers = slowPeers();
+  const adapter = await createOpenCodeAdapter(peerCtx(peer, { MOCK_MODE: "slow" }, peers.onWarn));
   try {
-    await adapter.refreshSnapshot({ cwd: peer.dir });
-    const started = Date.now();
+    const cold = adapter.refreshSnapshot({ cwd: peer.dir });
+    peers.ready(await peers.bound(0));
+    await cold;
     // A different spelling of the same project: it must ride the warm server,
-    // not start a second one (R4 #6 — the probe keys the pool like a session).
-    const snapshot = await adapter.refreshSnapshot({ cwd: join(peer.dir, ".", "") });
-    const elapsed = Date.now() - started;
-    assert.ok(elapsed < delayMs, `warm probe took ${elapsed}ms — it started another server`);
-    assert.equal(snapshot.status, "ready");
+    // not start a second one (R4 #6 — the probe keys the pool like a session),
+    // which would wait on a readiness line nobody signals.
+    const warm = adapter.refreshSnapshot({ cwd: join(peer.dir, ".", "") });
+    const anotherStart = peers.bound(1).then((pid) => {
+      peers.ready(pid);
+      return "started another server" as const;
+    });
+    const first = await Promise.race([warm.then(() => "warm" as const), anotherStart]);
+    assert.equal(first, "warm");
+    assert.equal(peers.pids.length, 1, "one server for the project");
+    assert.equal((await warm).status, "ready");
   } finally {
     await adapter.stopAll();
     peer.cleanup();

@@ -533,6 +533,47 @@ export interface OpenCodeChildAgent {
    * (`closeLiveChildAgents`). Cleared by a relaunch.
    */
   answersInBackground?: boolean;
+  /**
+   * The run's end was the adapter's judgement, not the child's own word: its
+   * own close (`closeLiveChildAgents`: a Stop, a failed admission's abort, a
+   * failed turn) or its launching call cut by an abort (`metadata.interrupted`
+   * on the `task` part — the parent's word on its call, which a job the abort
+   * did not reach outlives). A report that the run goes on may relaunch it
+   * (`reportChildRun`). Cleared by that relaunch and by the provider's.
+   */
+  endedByAdapter?: boolean;
+  /**
+   * The server is being asked whether a run the adapter ended still runs
+   * (`pending`), or said it does not (`notRunning`: its last frames, reaching
+   * the stream late, ask nothing more — only a `busy` asks again). The child's
+   * own idle clears it, voiding a check still in flight; each check is
+   * numbered (`survivalCheckId`), so one that answers after a newer began is
+   * void too.
+   */
+  survivalCheck?: "pending" | "notRunning";
+  survivalCheckId?: number;
+  /**
+   * The launch id the adapter gives the run's rows in place of the provider's
+   * call: `opencode-revive:<callID>:<n>` for the `n`th relaunch (`revivals`)
+   * of a run the adapter ended itself, on the server's word that it runs
+   * (`settleChildSurvival`) — a changed `toolUseId` on `task.started` is what
+   * reopens the roster's terminal row. `toolUseId` stays the provider's
+   * launching call, which a `task` part still names. Cleared by a provider
+   * relaunch, whose rows name its own new call. (A child no `task` part has
+   * named yet starts under `opencode-child:<session id>` — every agent's
+   * FIRST start names a launch, the relaunch contract — on that start alone:
+   * a part read later names the call, and every row from then on names it.)
+   */
+  launchId?: string;
+  revivals?: number;
+  /**
+   * The launch the run's start row named, as the adapter wrote it — the
+   * provider's call, a relaunch's id, or `opencode-child:<session id>` for a
+   * child no part had named yet. Every start this adapter writes names one; a
+   * run whose start named none (a log from before) gets a seed first when it
+   * is relaunched, or the roster could not reopen it (`settleChildSurvival`).
+   */
+  startLaunchId?: string;
 }
 
 /**
@@ -608,9 +649,35 @@ export interface OpenCodeSessionState {
   hostCompacting: boolean;
   activeAgent?: string;
   activeVariant?: string;
+  /**
+   * An interrupt is under way: a Stop from its first settle to its end, a
+   * failed admission's abort. What reaches the thread meanwhile may come from
+   * a run the abort is about to end, so a request is held until it is over
+   * (`holdsRequests` in `normalize.ts`). Set by `session.ts`'s `asInterrupt`.
+   */
+  interrupting: boolean;
   interruptedTurnId?: string;
   reconcileIdleStatus: boolean;
   awaitingBusyAfterInterruption: boolean;
+  /**
+   * The parent has said idle since the latest interrupt began: the run it
+   * interrupted is over — 1.18.32 publishes a cancelled run's idle only once
+   * its fiber has ended, after everything that run wrote — so a `busy` from
+   * here on is a new run's, and ends the interruption
+   * (`endInterruptionAtNewRun` in `normalize.ts`). Reset when an interrupt
+   * begins and when one ends.
+   */
+  idleAfterInterrupt: boolean;
+  /**
+   * The interruption ended at the `busy` of a run the provider started — no
+   * host turn active (`endInterruptionAtNewRun`) — and that run may yet be one
+   * the abort cancels: the stream can deliver its `busy` before the abort's
+   * own answer, after an idle that was not the stopped run's. Its
+   * `MessageAbortedError` is then an echo of that abort, not the provider's
+   * failure — dropped once, until the parent's next idle. A host turn's `busy`
+   * never arms it: that run began after the abort (`sendTurn` waits for it).
+   */
+  abortEchoExpected: boolean;
   promptGeneration: number;
   promptAdmission?: OpenCodePromptAdmission;
   pendingIdleReconciliation?: OpenCodeIdleReconciliation;
@@ -647,6 +714,14 @@ export interface OpenCodeSessionState {
   resolvedRequestIds: Set<string>;
   emittedTerminalRequestIds: Set<string>;
   autoRepliedRequestIds: Set<string>;
+  /**
+   * Requests that reached the thread while an interrupt was ending its runs,
+   * or after one before any run has said `busy`: shown — or answered — only
+   * once the server has said whether their asker still waits (`holdsRequests`
+   * in `normalize.ts`, `judgeHeldRequest` in `session.ts`). A request answered
+   * elsewhere meanwhile leaves the set with no row: it never had a card.
+   */
+  heldRequestIds: Set<string>;
   /** Child-session request ids awaiting an ancestry probe. */
   requestRelationRetries: Set<string>;
 
@@ -684,8 +759,11 @@ export function createSessionState(input: {
     claimedPromptIds: new Set(),
     parentBusy: false,
     hostCompacting: false,
+    interrupting: false,
     reconcileIdleStatus: false,
     awaitingBusyAfterInterruption: false,
+    idleAfterInterrupt: false,
+    abortEchoExpected: false,
     promptGeneration: 0,
     textPartsByMessageId: new Map(),
     messageRoleById: new Map(),
@@ -695,6 +773,7 @@ export function createSessionState(input: {
     resolvedRequestIds: new Set(),
     emittedTerminalRequestIds: new Set(),
     autoRepliedRequestIds: new Set(),
+    heldRequestIds: new Set(),
     requestRelationRetries: new Set(),
     stopped: false
   };
@@ -716,12 +795,25 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
   // source is the fork's.
   state.claimedPromptIds.clear();
   state.parentBusy = false;
-  state.interruptedTurnId = undefined;
-  state.reconcileIdleStatus = false;
-  state.awaitingBusyAfterInterruption = false;
+  endInterruption(state);
+  state.abortEchoExpected = false;
   state.pendingIdleReconciliation = undefined;
   state.lastSessionErrorMessage = undefined;
   state.lastEmittedTitle = undefined;
+}
+
+/**
+ * An interrupt and its leftovers are over — a later turn settled
+ * (`endInterruptionBefore` in `session.ts`), a new run said `busy` after the
+ * stopped run's idle (`endInterruptionAtNewRun` in `normalize.ts`), or the
+ * thread moved to a fork: nothing the stream sends is dropped or held for it
+ * any more.
+ */
+export function endInterruption(state: OpenCodeSessionState): void {
+  state.interruptedTurnId = undefined;
+  state.reconcileIdleStatus = false;
+  state.awaitingBusyAfterInterruption = false;
+  state.idleAfterInterrupt = false;
 }
 
 /**

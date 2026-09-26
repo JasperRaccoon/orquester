@@ -64,6 +64,7 @@ import {
   addRelatedSession,
   advanceOutputMark,
   claimPrompt,
+  endInterruption,
   finalOutputRemainder,
   isCutFinalOutput,
   mergeOpenCodeAssistantText,
@@ -109,7 +110,29 @@ export type NormalizerSignal =
    * woken by a background `task` call's answer — and opened turn `turnId`
    * (`claimReply`); its `turn.started` has already been emitted.
    */
-  | { kind: "turn-woken"; turnId: string };
+  | { kind: "turn-woken"; turnId: string }
+  /**
+   * A request reached the thread while an interrupt was ending its runs, or
+   * after one before any run has said `busy` (`holdsRequests`): nothing was
+   * shown or answered, and nothing will be until the server says whether its
+   * asker still waits (`judgeHeldRequest` in `session.ts`).
+   */
+  | { kind: "request-after-interrupt"; held: OpenCodeHeldRequest; raw: unknown }
+  /**
+   * A child whose run the adapter ended itself reports that the run goes on
+   * (`reportChildRun`): the server says whether it still runs, and check
+   * `checkId` settles it (`judgeChildSurvival` in `session.ts`).
+   */
+  | { kind: "child-reports-run"; childId: string; checkId: number };
+
+/**
+ * A request held for the server's word on its asker. `cardOnly`: full access
+ * already tried to answer it and the server refused (`autoReplyOnce` in
+ * `session.ts`), so if it is shown it is the card, never another `once`.
+ */
+export type OpenCodeHeldRequest =
+  | { type: "permission"; request: OpenCodePermissionRequest; cardOnly?: boolean }
+  | { type: "question"; request: OpenCodeQuestionRequest };
 
 export interface NormalizeResult {
   events: RuntimeEvent[];
@@ -423,13 +446,13 @@ export function normalizeOpenCodeEvent(
   }
 
   // Parent output that arrives after an interruption must not reopen the turn.
+  // A user message's parts are no output: the one an injected answer carries
+  // is a background run's result (`takeBackgroundResult`).
   const suppressInterruptedOutput =
     isParentEvent &&
-    ((state.activeTurnId === undefined &&
-      (state.interruptedTurnId !== undefined || state.reconcileIdleStatus)) ||
-      state.awaitingBusyAfterInterruption) &&
+    interruptionLingers(state) &&
     (raw.type === "message.part.delta" ||
-      raw.type === "message.part.updated" ||
+      (raw.type === "message.part.updated" && !isUserMessagePart(state, raw)) ||
       raw.type === "todo.updated" ||
       (raw.type === "message.updated" &&
         isRecord(raw.properties) &&
@@ -446,6 +469,104 @@ export function normalizeOpenCodeEvent(
 
   demux(state, event, raw, out);
   return { events: out.events, signals: out.signals };
+}
+
+/**
+ * Whether what reaches the stream may still be an interrupted run's: no turn
+ * has run since a Stop, or the one sent after it has not said `busy` yet — and
+ * no new run has said it after the stopped run's idle
+ * (`endInterruptionAtNewRun`). The parent's output is dropped then, and a
+ * request waits for the server's word on its asker (`holdsRequests`).
+ */
+function interruptionLingers(state: OpenCodeSessionState): boolean {
+  return (
+    (state.activeTurnId === undefined &&
+      (state.interruptedTurnId !== undefined || state.reconcileIdleStatus)) ||
+    state.awaitingBusyAfterInterruption
+  );
+}
+
+/**
+ * A host turn sent since the interruption is running: its prompt taken (no
+ * longer `awaitingBusyAfterInterruption`), and the stopped run's idle come
+ * (`idleAfterInterrupt`). That run's abort error precedes its idle, and the
+ * turn's run began after the abort did — `sendTurn` prompts only once every
+ * interrupt is over — so an abort error now is the provider's word on the
+ * turn, not the Stop's echo. The interruption's residue (`interruptedTurnId`,
+ * `reconcileIdleStatus`) outlives the turn's `busy` whenever the prompt's
+ * answer came first (fixture 10's order), until the turn settles.
+ */
+function hostTurnSinceInterruption(state: OpenCodeSessionState): boolean {
+  return (
+    state.activeTurnId !== undefined &&
+    state.activeTurnId !== state.interruptedTurnId &&
+    !state.awaitingBusyAfterInterruption &&
+    state.idleAfterInterrupt
+  );
+}
+
+/** A `message.part.updated` whose message is a known user message: no output. */
+function isUserMessagePart(state: OpenCodeSessionState, raw: OpenCodeRawEvent): boolean {
+  const part = isRecord(raw.properties) ? raw.properties.part : undefined;
+  return (
+    isRecord(part) &&
+    typeof part.messageID === "string" &&
+    state.messageRoleById.get(part.messageID) === "user"
+  );
+}
+
+/**
+ * The parent said idle while an interrupt was under way or lingering: the run
+ * it interrupted is over (`idleAfterInterrupt`). 1.18.32 cancels a run by
+ * interrupting its fiber — `SessionProcessor.halt` publishes the abort's error
+ * and an idle, the cleanup closes its parts and its reply — and publishes the
+ * runner's own idle only once that fiber has ended (read from the source), so
+ * nothing the stopped run wrote follows its idle on the stream.
+ */
+function noteIdleAfterInterrupt(state: OpenCodeSessionState): void {
+  if (state.interrupting || state.cancellation !== undefined || interruptionLingers(state)) {
+    state.idleAfterInterrupt = true;
+  }
+}
+
+/**
+ * A `busy` once no interrupt is under way and the parent has said idle since
+ * the latest began is a NEW run's — a background answer injected after the
+ * abort starts the parent again — and ends the interruption (`endInterruption`):
+ * what the stream sends from here is that run's, whose reply opens its woken
+ * turn as any (`claimReply`), and whose requests are shown as any. A `busy`
+ * with no idle since is no evidence: the stopped run wrote one at the top of
+ * every step, and the stream may deliver it after the abort answered.
+ *
+ * A run the PROVIDER started may yet be one the abort cancels (the
+ * natural-idle race), so its abort error, if it comes, is an echo
+ * (`abortEchoExpected`). A host turn's run never is: `sendTurn` prompts only
+ * once every interrupt is over, so that run starts after the abort did and
+ * the abort's echo reaches the stream before its `busy` — an abort error
+ * during it is the provider's word, and fails it.
+ */
+function endInterruptionAtNewRun(state: OpenCodeSessionState): void {
+  if (state.interrupting || state.cancellation !== undefined) {
+    return;
+  }
+  if (state.idleAfterInterrupt && interruptionLingers(state)) {
+    const providerRun = state.activeTurnId === undefined;
+    endInterruption(state);
+    if (providerRun) {
+      state.abortEchoExpected = true;
+    }
+  }
+}
+
+/**
+ * An interrupt has just ended (`asInterrupt` in `session.ts`): a new run whose
+ * `busy` the stream delivered while it was under way, after the stopped run's
+ * idle, ends the interruption now — its reply may come next.
+ */
+export function endInterruptionIfNewRun(state: OpenCodeSessionState): void {
+  if (state.parentBusy) {
+    endInterruptionAtNewRun(state);
+  }
 }
 
 /**
@@ -744,8 +865,10 @@ function demux(
       const status = event.properties.status;
       if (status.type === "busy" || status.type === "retry") {
         // A run is going, whoever started it: the evidence a reply the host
-        // never started needs before it opens a turn (`claimReply`).
+        // never started needs before it opens a turn (`claimReply`) — and,
+        // after a Stop's idle, the end of the Stop's leftovers.
         state.parentBusy = true;
+        endInterruptionAtNewRun(state);
         if (turnId !== undefined) {
           out.signal({ kind: "status-busy" });
         }
@@ -763,6 +886,8 @@ function demux(
       }
       if (status.type === "idle") {
         state.parentBusy = false;
+        state.abortEchoExpected = false;
+        noteIdleAfterInterrupt(state);
         if (turnId !== undefined) {
           out.signal({ kind: "status-idle", raw });
         }
@@ -772,6 +897,8 @@ function demux(
 
     case "session.idle": {
       state.parentBusy = false;
+      state.abortEchoExpected = false;
+      noteIdleAfterInterrupt(state);
       // After an abort this is the ONLY idle signal — no `session.status`
       // follows (fixtures README observation 6).
       if (state.activeTurnId !== undefined) {
@@ -795,7 +922,16 @@ function demux(
           out.signal({ kind: "abort-acknowledged" });
           return;
         }
-        if (state.interruptedTurnId !== undefined || state.reconcileIdleStatus) {
+        if (
+          (state.interruptedTurnId !== undefined || state.reconcileIdleStatus) &&
+          !hostTurnSinceInterruption(state)
+        ) {
+          return;
+        }
+        if (state.abortEchoExpected) {
+          // The run a new-run boundary took for live was the abort's after
+          // all: its error echoes that abort, once.
+          state.abortEchoExpected = false;
           return;
         }
       }
@@ -841,13 +977,15 @@ function demux(
  * `classifyTaskAgentKind` resolve it to `"agent"`.
  */
 function childLinkage(agent: OpenCodeChildAgent): TaskAgentLinkage {
+  // The run's launch: the provider's call, or the adapter's own relaunch id.
+  const toolUseId = agent.launchId ?? agent.toolUseId;
   return {
     taskType: "subagent",
     agentId: agent.sessionId,
     ...(agent.title !== undefined ? { title: agent.title } : {}),
     ...(agent.role !== undefined ? { role: agent.role } : {}),
     ...(agent.model !== undefined ? { model: agent.model } : {}),
-    ...(agent.toolUseId !== undefined ? { toolUseId: agent.toolUseId } : {}),
+    ...(toolUseId !== undefined ? { toolUseId } : {}),
     ...(agent.parentAgentId !== undefined ? { parentAgentId: agent.parentAgentId } : {})
   };
 }
@@ -915,11 +1053,21 @@ function emitTaskStarted(
     return;
   }
   agent.started = true;
+  // Every agent's FIRST start names a launch (the relaunch contract): a child
+  // no `task` part this thread reads has named yet starts under a stable one
+  // of its own, or the roster could never reopen its row. Only the start: a
+  // part read later names the provider's call, and every row from then on
+  // names it — the timeline hides a launching call only behind an agent row
+  // that names it.
+  const linkage = childLinkage(agent);
+  const toolUseId = linkage.toolUseId ?? `opencode-child:${agent.sessionId}`;
+  agent.startLaunchId = toolUseId;
   out.push({
     ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
     type: "task.started",
     payload: {
-      ...childLinkage(agent),
+      ...linkage,
+      toolUseId,
       taskId: agent.sessionId,
       description: agent.description
     }
@@ -1058,8 +1206,133 @@ export function closeLiveChildAgents(
   for (const agent of state.childAgents.values()) {
     if (!agent.completed && (scope === "all" || !outlivesFailedTurn(state, agent))) {
       emitTaskCompleted(state, agent, "stopped", undefined, out, reason);
+      // The adapter's word, not the provider's: a run the abort never reached
+      // may report it goes on (`reportChildRun`).
+      agent.endedByAdapter = true;
+      agent.survivalCheck = undefined;
     }
   }
+  return out.events;
+}
+
+/**
+ * A child whose run the adapter ended itself reports that the run goes on —
+ * its session says `busy`, or a frame of a live run arrives (`status` and
+ * `activity`). An end the adapter wrote is not the provider's word (Grok's
+ * rule too), and a deploy must never kill running work. But a run the
+ * abort DID cancel sends such frames too, late — its last ones, published
+ * before its cancel — and only the server can tell the two apart once the
+ * abort is over (README observation 29). So the report asks it
+ * (`judgeChildSurvival` in `session.ts`, then {@link settleChildSurvival}),
+ * once per question: while a check is pending nothing more asks, and after the
+ * server said "not running" only a `busy` asks again — the leftovers of a
+ * cancelled run are many frames, a new run's `busy` is one.
+ */
+function reportChildRun(
+  agent: OpenCodeChildAgent,
+  kind: "status" | "activity",
+  out: Emitter
+): void {
+  if (agent.endedByAdapter !== true || agent.survivalCheck === "pending") {
+    return;
+  }
+  if (agent.survivalCheck === "notRunning" && kind === "activity") {
+    return;
+  }
+  agent.survivalCheck = "pending";
+  agent.survivalCheckId = (agent.survivalCheckId ?? 0) + 1;
+  out.signal({ kind: "child-reports-run", childId: agent.sessionId, checkId: agent.survivalCheckId });
+}
+
+/**
+ * The child said idle: whatever ran is over, and a check still in flight is
+ * void — a revival now would outlive the run it answers for
+ * ({@link settleChildSurvival} acts only on a check still `pending`). What
+ * reports after this idle is a new run's, and asks afresh, under a new id.
+ */
+function noteChildIdle(agent: OpenCodeChildAgent): void {
+  if (agent.endedByAdapter === true) {
+    agent.survivalCheck = undefined;
+  }
+}
+
+/**
+ * The server's word on a child whose run the adapter ended ({@link
+ * reportChildRun}). Running — confirmed, unlike a Grok report (the Grok
+ * adapter keeps its own end on a revival) — the child is RELAUNCHED under the
+ * relaunch contract (AGENTS.md, "Agent rows must survive resumes and
+ * retention", rule 1): a new `task.started` naming a NEW launch id,
+ * `opencode-revive:<callID>:<n>` (`launchId`), before any row of the reopened
+ * run. The roster reopens its row, clearing the adapter's end and its summary;
+ * the liveness registry counts it again. The child is back in the adapter's
+ * live set, so a Stop or the exit closes it `stopped` again. Its own idle and
+ * answer end it as they end any run, once — with its result, which, for a run
+ * the provider still runs as the same job, still answers in the background if
+ * its launch did. (After a failed admission the session reads `error`, which
+ * the roster takes for dead: the reopened row reads `interrupted` there until
+ * the session reads live, while liveness counts it.) Not running: that report
+ * was a cancelled run's last frames.
+ * A check the child's own idle made void writes nothing. `running` is also the
+ * answer when the server cannot say: a duplicate row costs less than a deploy
+ * killing running work.
+ */
+export function settleChildSurvival(
+  state: OpenCodeSessionState,
+  childId: string,
+  checkId: number,
+  running: boolean,
+  ctx: NormalizeContext
+): RuntimeEvent[] {
+  const agent = state.childAgents.get(childId);
+  if (
+    agent === undefined ||
+    agent.endedByAdapter !== true ||
+    agent.survivalCheck !== "pending" ||
+    agent.survivalCheckId !== checkId
+  ) {
+    return [];
+  }
+  if (!running) {
+    agent.survivalCheck = "notRunning";
+    return [];
+  }
+  agent.survivalCheck = undefined;
+  agent.endedByAdapter = false;
+  const out = new Emitter(state, ctx);
+  if (agent.startLaunchId === undefined) {
+    // The run started with no launch named — a log from before every start
+    // named one — and the roster reopens a row only on a CHANGED launch: a
+    // seed naming the first run's own comes first — its call when a part has
+    // named it since, else the child's own launch id — which the roster reads
+    // as a late delivery (the shape `legacyLaunchStarts` writes on a first
+    // load).
+    const linkage = childLinkage(agent);
+    out.push({
+      ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
+      type: "task.started",
+      payload: {
+        ...linkage,
+        toolUseId: linkage.toolUseId ?? `opencode-child:${agent.sessionId}`,
+        taskId: agent.sessionId,
+        description: agent.description
+      }
+    });
+  }
+  agent.revivals = (agent.revivals ?? 0) + 1;
+  agent.launchId = `opencode-revive:${agent.toolUseId ?? agent.sessionId}:${agent.revivals}`;
+  agent.startLaunchId = agent.launchId;
+  agent.completed = false;
+  agent.lastStatus = undefined;
+  agent.resultPending = false;
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
+    type: "task.started",
+    payload: {
+      ...childLinkage(agent),
+      taskId: agent.sessionId,
+      description: agent.description
+    }
+  });
   return out.events;
 }
 
@@ -1127,16 +1400,24 @@ function linkChildFromTaskPart(
   }
   addRelatedSession(state, childId);
 
-  // A call that is not the one this child's run was launched by. A live part
-  // of a call never seen before, on a SETTLED child, is a relaunch: the run
-  // reopens under the new call, and the tail below emits its start — whose
+  // A call that is not the one this child's run was launched by: another
+  // call than its known launch — or, for a child no part named before its own
+  // frames started it, a call naming it as the task to RESUME (`task_id`),
+  // since the call that launches a child creates it and names none. A live
+  // part of a call never seen before, on a SETTLED child, is a relaunch: the
+  // run reopens under the new call, and the tail below emits its start — whose
   // changed `toolUseId` is what reopens a terminal roster row — before any row
   // of the new run. Anything else is not this run's — a stale frame of an
   // earlier call, or a second call on a child that is still working, which
   // 1.18.32 hands to the running job and answers at once — and emits no task
-  // row, so it can never end the run.
+  // row, so it can never end the run, nor is it ever taken for its launch.
   const known = state.childAgents.get(childId);
-  if (known !== undefined && known.toolUseId !== undefined && known.toolUseId !== part.callID) {
+  const notItsLaunch =
+    known !== undefined &&
+    (known.toolUseId !== undefined
+      ? known.toolUseId !== part.callID
+      : resumedTaskId(part) === childId);
+  if (known !== undefined && notItsLaunch) {
     const live = part.state.status === "pending" || part.state.status === "running";
     const settled = known.completed || known.lastStatus === "idle";
     const earlier = known.seenCallIds?.has(part.callID) === true;
@@ -1151,6 +1432,11 @@ function linkChildFromTaskPart(
     known.resultPending = false;
     known.pendingResult = undefined;
     known.answersInBackground = false;
+    // A new run, which the roster reopens for: nothing of the last one's end,
+    // and its rows name its own call.
+    known.endedByAdapter = false;
+    known.survivalCheck = undefined;
+    known.launchId = undefined;
   }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;
@@ -1183,15 +1469,26 @@ function linkChildFromTaskPart(
     }
     const text =
       part.state.status === "completed" ? taskResultText(part.state.output) : part.state.error;
+    // A call an abort cut (`metadata.interrupted`: 1.18.32's cleanup closes
+    // every open call "Tool execution aborted") stopped the run, it did not
+    // fail it. And that is the parent's word on its call, not the child's on
+    // its run — a job the abort did not reach runs on — so it is an end like
+    // the adapter's own close, which a report that the run goes on may undo
+    // (`reportChildRun`), whichever of the two came first.
+    const cut = part.state.status === "error" && metadata?.interrupted === true;
     if (!agent.completed) {
       emitTaskCompleted(
         state,
         agent,
-        part.state.status === "completed" ? "completed" : "failed",
+        part.state.status === "completed" ? "completed" : cut ? "stopped" : "failed",
         raw,
         out,
         text
       );
+      if (cut) {
+        agent.endedByAdapter = true;
+        agent.survivalCheck = undefined;
+      }
       return;
     }
     // The child's own idle ended the run first (fixture 12, lines 179-180):
@@ -1203,6 +1500,12 @@ function linkChildFromTaskPart(
     return;
   }
   emitTaskProgress(state, agent, raw, out, { status: "running" });
+}
+
+/** The child a `task` call resumes (its `task_id`), or nothing for a launch. */
+function resumedTaskId(part: Extract<OpenCodePart, { type: "tool" }>): string | undefined {
+  const input = isRecord(part.state.input) ? part.state.input : undefined;
+  return typeof input?.task_id === "string" ? input.task_id : undefined;
 }
 
 /**
@@ -1387,13 +1690,13 @@ function demuxChild(
     case "session.status": {
       const agent = ensureChildAgent(state, childSessionId);
       const status = event.properties.status;
-      emitTaskStatus(
-        state,
-        agent,
-        status.type === "busy" || status.type === "retry" ? "running" : "idle",
-        raw,
-        out
-      );
+      const running = status.type === "busy" || status.type === "retry";
+      if (running) {
+        reportChildRun(agent, "status", out);
+      } else {
+        noteChildIdle(agent);
+      }
+      emitTaskStatus(state, agent, running ? "running" : "idle", raw, out);
       return;
     }
 
@@ -1404,6 +1707,7 @@ function demuxChild(
       // a background run's answer comes as a prompt to the parent instead
       // (`takeBackgroundResult`), and one that came first rides this end.
       const agent = ensureChildAgent(state, childSessionId);
+      noteChildIdle(agent);
       if (!agent.completed) {
         const result = agent.pendingResult;
         agent.pendingResult = undefined;
@@ -1415,13 +1719,17 @@ function demuxChild(
 
     case "session.error": {
       const agent = ensureChildAgent(state, childSessionId);
+      const error = event.properties.error;
+      // An abort stops a run, it does not fail it — a Stop's abort reaching
+      // the child before the adapter's own close (`closeLiveChildAgents`)
+      // included: the roster reads `interrupted`, as after that close.
       emitTaskCompleted(
         state,
         agent,
-        "failed",
+        isAbortError(error) ? "stopped" : "failed",
         raw,
         out,
-        sessionErrorMessage(event.properties.error)
+        sessionErrorMessage(error)
       );
       return;
     }
@@ -1434,6 +1742,10 @@ function demuxChild(
         return;
       }
       const agent = ensureChildAgent(state, childSessionId);
+      // A reply still being written: a frame of a live run.
+      if (!messageEnded(raw, info)) {
+        reportChildRun(agent, "activity", out);
+      }
       for (const part of state.textPartsByMessageId.get(info.id)?.values() ?? []) {
         emitTextDelta(part, turnId, raw, out, agent.sessionId);
       }
@@ -1467,6 +1779,8 @@ function demuxChild(
       ) {
         return;
       }
+      // Text being written: a frame of a live run.
+      reportChildRun(ensureChildAgent(state, childSessionId), "activity", out);
       const nextText = (existing.emittedText ?? existing.text) + event.properties.delta;
       existing.emittedText = nextText;
       existing.text = nextText;
@@ -1492,7 +1806,12 @@ function demuxChild(
       // A child's `step-finish` tokens belong to the child, never to the
       // parent turn's accumulator — they are a different session's spend.
       if ((part.type === "text" || part.type === "reasoning") && role !== "user") {
-        const stored = retainTextPart(state, part as Extract<OpenCodePart, { type: "text" | "reasoning" }>);
+        const textPart = part as Extract<OpenCodePart, { type: "text" | "reasoning" }>;
+        if (role === "assistant" && textPart.time?.end === undefined) {
+          // A part still being written — a cleanup's closing copy carries its end.
+          reportChildRun(ensureChildAgent(state, childSessionId), "activity", out);
+        }
+        const stored = retainTextPart(state, textPart);
         if (role === "assistant") {
           emitTextDelta(stored, turnId, raw, out, childSessionId);
         }
@@ -1506,9 +1825,19 @@ function demuxChild(
       if (part.type === "tool") {
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
         const agent = ensureChildAgent(state, childSessionId);
+        if (tool.state.status === "running" || tool.state.status === "pending") {
+          // A call under way — an aborted one's closing frame is an `error`.
+          reportChildRun(agent, "activity", out);
+        }
         // Output first: a completion closes the call's output buffer.
         emitCommandOutput(state, tool, turnId, raw, out, childSessionId);
         emitToolItem(tool, turnId, raw, out, childSessionId);
+        if (tool.tool === "task") {
+          // A child launching a subagent of its own: the call names the
+          // grandchild as the parent's parts name a child — its launch, its
+          // relaunches and its answer (`linkChildFromTaskPart`).
+          linkChildFromTaskPart(state, tool, raw, out);
+        }
         if (tool.state.status === "running" || tool.state.status === "pending") {
           emitTaskProgress(state, agent, raw, out, {
             lastToolName: tool.tool,
@@ -1560,6 +1889,12 @@ function demuxChild(
 // ---------------------------------------------------------------------------
 // Helpers the demux leans on
 // ---------------------------------------------------------------------------
+
+/** A message frame saying its message is over: completed, or ended by an error (an abort's). */
+function messageEnded(raw: OpenCodeRawEvent, info: { time?: { completed?: number } }): boolean {
+  const record = isRecord(raw.properties) && isRecord(raw.properties.info) ? raw.properties.info : undefined;
+  return info.time?.completed !== undefined || record?.error !== undefined;
+}
 
 function retainTextPart(
   state: OpenCodeSessionState,
@@ -2000,21 +2335,101 @@ function dropMessageOutputMarks(state: OpenCodeSessionState, messageId: string):
   }
 }
 
+/**
+ * Whether a request arriving now waits for the server's word on its asker
+ * before anything is shown or answered: an interrupt is under way — a Stop
+ * from its first step, the withdrawal of the parked cards, which comes before
+ * its abort; a failed admission's abort (`interrupting`) — or one ended and no
+ * run since has said `busy` (`interruptionLingers`).
+ *
+ * The abort a Stop sends ends every asker it reaches — 1.18.32's
+ * `SessionRunState.cancel` cancels every job the session launched, children's
+ * children included, and interrupts its run, and an interrupted
+ * `Permission.ask` / `Question.ask` drops its request with no event (read from
+ * the source, fixtures README observation 29) — but an ask it ended can still
+ * reach the stream after the Stop, and a run it never reached asks from a
+ * live asker: the prompt a background answer injects after it, which starts
+ * the parent again, or a child whose run it did not cancel. The first must
+ * write no card, and is released on the wire; the second must be shown, or it
+ * waits for good. Only the server can tell them apart.
+ */
+function holdsRequests(state: OpenCodeSessionState): boolean {
+  return state.interrupting || state.cancellation !== undefined || interruptionLingers(state);
+}
+
+/** Hold a request for `judgeHeldRequest`; a repeated frame of it adds nothing meanwhile. */
+function holdRequest(
+  state: OpenCodeSessionState,
+  held: OpenCodeHeldRequest,
+  raw: unknown,
+  out: Emitter
+): void {
+  state.resolvedRequestIds.add(held.request.id);
+  state.heldRequestIds.add(held.request.id);
+  out.signal({ kind: "request-after-interrupt", held, raw });
+}
+
+/**
+ * Show a held request whose asker still waits: the card — with full access
+ * the `once` — it would have had, on the turn running now if one does (a
+ * child's question on none, `questionTurnId`). Called by `session.ts` once the
+ * server has answered (`judgeHeldRequest`).
+ */
+export function openHeldRequest(
+  state: OpenCodeSessionState,
+  held: OpenCodeHeldRequest,
+  raw: unknown,
+  ctx: NormalizeContext
+): NormalizeResult {
+  const out = new Emitter(state, ctx);
+  state.resolvedRequestIds.delete(held.request.id);
+  if (held.type === "permission") {
+    openPermission(state, held.request, raw, out, {
+      judged: true,
+      ...(held.cardOnly === true ? { cardOnly: true } : {})
+    });
+  } else {
+    openQuestion(state, held.request, raw, out, { judged: true });
+  }
+  return { events: out.events, signals: out.signals };
+}
+
+/**
+ * The card for an ask full access could not answer (`autoReplyOnce` in
+ * `session.ts`): the supervised path's own, never a second `once` — and,
+ * after an interrupt, held for the server's word like any request.
+ */
+export function openPermissionCard(
+  state: OpenCodeSessionState,
+  request: OpenCodePermissionRequest,
+  raw: unknown,
+  ctx: NormalizeContext
+): NormalizeResult {
+  const out = new Emitter(state, ctx);
+  openPermission(state, request, raw, out, { cardOnly: true });
+  return { events: out.events, signals: out.signals };
+}
+
 function openPermission(
   state: OpenCodeSessionState,
   request: OpenCodePermissionRequest,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  options: { judged?: boolean; cardOnly?: boolean } = {}
 ): void {
   if (state.resolvedRequestIds.has(request.id) || state.pendingPermissions.has(request.id)) {
     return;
   }
-  if (state.activeTurnId === undefined && state.reconcileIdleStatus) {
-    // An ask that arrives while the turn is being torn down belongs to nothing.
-    state.resolvedRequestIds.add(request.id);
+  if (options.judged !== true && holdsRequests(state)) {
+    holdRequest(
+      state,
+      { type: "permission", request, ...(options.cardOnly === true ? { cardOnly: true } : {}) },
+      raw,
+      out
+    );
     return;
   }
-  if (state.runtimeMode === "full-access") {
+  if (state.runtimeMode === "full-access" && options.cardOnly !== true) {
     // §4.3: auto-answer `once`, NEVER `always`. An `always` grant is stored per
     // directory and would silently widen every supervised thread sharing this
     // server (fixtures README observation 10 proves it across sessions).
@@ -2050,13 +2465,14 @@ function openQuestion(
   state: OpenCodeSessionState,
   request: OpenCodeQuestionRequest,
   raw: unknown,
-  out: Emitter
+  out: Emitter,
+  options: { judged?: boolean } = {}
 ): void {
   if (state.resolvedRequestIds.has(request.id) || state.pendingQuestions.has(request.id)) {
     return;
   }
-  if (state.activeTurnId === undefined && state.reconcileIdleStatus) {
-    state.resolvedRequestIds.add(request.id);
+  if (options.judged !== true && holdsRequests(state)) {
+    holdRequest(state, { type: "question", request }, raw, out);
     return;
   }
   state.pendingQuestions.set(request.id, request);
@@ -2112,8 +2528,9 @@ export function emitTerminalPermission(
   if (state.emittedTerminalRequestIds.has(requestId)) {
     return;
   }
-  if (state.autoRepliedRequestIds.delete(requestId)) {
-    // Full access answered this itself; nothing was ever shown to the user.
+  if (state.autoRepliedRequestIds.delete(requestId) || state.heldRequestIds.delete(requestId)) {
+    // Full access answered this itself, or it was answered while held for the
+    // server's word on its asker: nothing was ever shown to the user.
     state.emittedTerminalRequestIds.add(requestId);
     return;
   }
@@ -2141,6 +2558,11 @@ export function emitTerminalQuestion(
   withdrawn = false
 ): void {
   if (state.emittedTerminalRequestIds.has(requestId)) {
+    return;
+  }
+  if (state.heldRequestIds.delete(requestId)) {
+    // Answered while held for the server's word on its asker: never shown.
+    state.emittedTerminalRequestIds.add(requestId);
     return;
   }
   const request = state.pendingQuestions.get(requestId);
