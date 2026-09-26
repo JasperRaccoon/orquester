@@ -366,3 +366,131 @@ describe("interacted is no evidence of a run", () => {
     assert.equal(registry.liveness("thread-1"), null);
   });
 });
+
+/**
+ * A collab tool call of `threadId` (the parent's by default), typed against
+ * the bindings: `prompt` is "Prompt text sent as part of the collab tool call,
+ * when available", and `receiverThreadIds` names the agents it addresses — for
+ * a spawn, "the newly spawned agent" (`ThreadItem.ts`).
+ */
+function collabCall(
+  normaliser: CodexNormaliser,
+  phase: "started" | "completed",
+  call: {
+    id: string;
+    tool: CodexProtocol.v2.CollabAgentTool;
+    receivers: string[];
+    prompt: string | null;
+    threadId?: string;
+  }
+): RuntimeEventDraft[] {
+  const threadId = call.threadId ?? PARENT;
+  const item: CodexProtocol.v2.ThreadItem = {
+    type: "collabAgentToolCall",
+    id: call.id,
+    tool: call.tool,
+    status: phase === "started" ? "inProgress" : "completed",
+    senderThreadId: threadId,
+    receiverThreadIds: call.receivers,
+    prompt: call.prompt,
+    model: null,
+    reasoningEffort: null,
+    agentsStates: {}
+  };
+  if (phase === "started") {
+    const params: CodexProtocol.v2.ItemStartedNotification = {
+      item,
+      threadId,
+      turnId: "parent-turn",
+      startedAtMs: 0
+    };
+    return normaliser.notification("item/started", params);
+  }
+  const params: CodexProtocol.v2.ItemCompletedNotification = {
+    item,
+    threadId,
+    turnId: "parent-turn",
+    completedAtMs: 0
+  };
+  return normaliser.notification("item/completed", params);
+}
+
+describe("a child's start carries the prompt its collab call gave it (§7.6)", () => {
+  const SPAWN = "Survey packages/ui and list every store.";
+
+  it("a spawn naming the child as its receiver: the launch record's start carries the spawn's prompt", () => {
+    const normaliser = make();
+    collabCall(normaliser, "started", { id: "call-spawn", tool: "spawnAgent", receivers: [], prompt: SPAWN });
+    collabCall(normaliser, "completed", { id: "call-spawn", tool: "spawnAgent", receivers: [CHILD], prompt: SPAWN });
+    assert.equal(startOf(launch(normaliser)).payload.prompt, SPAWN);
+  });
+
+  it("a spawn that is the launch record's own call — the same item id — before it names a receiver", () => {
+    const normaliser = make();
+    collabCall(normaliser, "started", { id: LAUNCH_ITEM, tool: "spawnAgent", receivers: [], prompt: SPAWN });
+    assert.equal(startOf(launch(normaliser)).payload.prompt, SPAWN);
+  });
+
+  it("a follow-up re-engaging a settled child: the relaunch carries ITS prompt, once, and never the launch's", () => {
+    const normaliser = make();
+    collabCall(normaliser, "completed", { id: "call-spawn", tool: "spawnAgent", receivers: [CHILD], prompt: SPAWN });
+    assert.equal(startOf(launch(normaliser)).payload.prompt, SPAWN);
+    turnStarted(normaliser, "child-turn-1");
+    turnCompleted(normaliser, "child-turn-1");
+
+    const followUp = "Now list the hooks too.";
+    collabCall(normaliser, "started", { id: "call-followup", tool: "followupTask", receivers: [CHILD], prompt: followUp });
+    const relaunch = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(relaunch.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal(relaunch.payload.prompt, followUp);
+
+    // The call's own completion, and a later run nothing prompted: no prompt.
+    collabCall(normaliser, "completed", { id: "call-followup", tool: "followupTask", receivers: [CHILD], prompt: followUp });
+    turnCompleted(normaliser, "child-turn-2");
+    collabCall(normaliser, "completed", { id: "call-followup", tool: "followupTask", receivers: [CHILD], prompt: followUp });
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-3"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-3");
+    assert.equal("prompt" in unprompted.payload, false);
+  });
+
+  it("input sent to a child mid-run joins that run: no later start carries it", () => {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    collabCall(normaliser, "started", { id: "call-input", tool: "sendInput", receivers: [CHILD], prompt: "Also check tests." });
+    turnCompleted(normaliser, "child-turn-1");
+    assert.equal("prompt" in startOf(turnStarted(normaliser, "child-turn-2")).payload, false);
+  });
+
+  it("a call that starts no work — a wait, a message — gives no start its text", () => {
+    const normaliser = make();
+    collabCall(normaliser, "completed", { id: "call-wait", tool: "wait", receivers: [CHILD], prompt: null });
+    collabCall(normaliser, "completed", { id: "call-message", tool: "sendMessage", receivers: [CHILD], prompt: "FYI." });
+    assert.equal("prompt" in startOf(launch(normaliser)).payload, false);
+  });
+
+  it("a child this session never saw launched: its first turn's start carries the call that addressed it", () => {
+    const normaliser = make();
+    collabCall(normaliser, "completed", { id: "call-spawn", tool: "spawnAgent", receivers: [CHILD], prompt: SPAWN });
+    const start = startOf(turnStarted(normaliser, "child-turn-1"));
+    assert.equal(start.payload.toolUseId, "codex-run:child-turn-1");
+    assert.equal(start.payload.prompt, SPAWN);
+  });
+
+  it("a grandchild: a child's own spawn gives the grandchild's first start its prompt", () => {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    const GRANDCHILD = "grandchild-thread";
+    collabCall(normaliser, "completed", {
+      id: "call-inner",
+      tool: "spawnAgent",
+      receivers: [GRANDCHILD],
+      prompt: "Read one file.",
+      threadId: CHILD
+    });
+    const start = startOf(turnStarted(normaliser, "grandchild-turn-1", GRANDCHILD));
+    assert.equal(start.payload.taskId, GRANDCHILD);
+    assert.equal(start.payload.prompt, "Read one file.");
+  });
+});

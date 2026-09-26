@@ -794,3 +794,36 @@ a few bytes. This is read from the generated bindings (`_generated/protocol/v2/`
   character boundary, and the item carries `truncated: true`, so the MCP's `read_tool_output` reads
   the call's streamed join (when it streamed) instead of answering the head as the whole output.
   The row's `detail` is still the output cut to ingestion's 180-character preview.
+
+## 21. What a child was asked: the collab call's `prompt` — read from the bindings, not captured
+
+**Not captured.** No file in this set spawns a collab child (observation 19). An agent's drill-in
+shows the prompt its run was given at its top (spec §7.6); this is where a Codex run's comes from,
+read from the generated bindings (`_generated/protocol/v2/ThreadItem.ts`, 0.154.0):
+
+- `collabAgentToolCall {id, tool, senderThreadId, receiverThreadIds, prompt, model,
+  reasoningEffort, agentsStates}` — `prompt` is "Prompt text sent as part of the collab tool call,
+  when available", and `receiverThreadIds` names the agents the call addresses: "In case of spawn
+  operation, this corresponds to the newly spawned agent". The parent's own row for the call shows
+  the prompt as its `detail`, cut to ingestion's 180-character preview.
+- The launch record, `subAgentActivity {id, kind, agentThreadId, agentPath}`, carries no prompt.
+
+So the normaliser (`noteCollabPrompt`, `takeChildPrompt` in `normalise.ts`) remembers the prompt of
+a call that starts work — `spawnAgent`, `sendInput`, `followupTask`; a `sendMessage` "does not
+trigger a new turn" and a `wait` asks nothing — by each receiver it names, and a spawn's also by its
+own call id. The child's next start takes it, once: the launch record's start
+(`codex-launch:<item id>`) by the child's id, else by the record's own id; a relaunch's start
+(`codex-run:<turn id>`) by the child's id. A call is prompted once — its later frames record
+nothing — and never for a child mid-run: input to a running child joins that run, which already has
+its start. The launch's own first turn drops a prompt still waiting, since the launch record wrote
+the run's start already and a start is never rewritten. The child's own first `userMessage` item on
+its thread would repeat the prompt, but it comes after the start and stays a roster tick.
+
+Where the join does NOT land, the start carries no prompt — and it may be most of the time. T3's
+own capture of a two-child fan-out (codex-cli **0.145.0**, `codexMultiAgentWire.json` in T3's tree,
+not committed here) shows each spawn only as `subAgentActivity started` — whose `id` is the spawn
+call's own (`call_…`), the one the record-id join reads — and one `collabAgentToolCall`, a `wait`
+with `receiverThreadIds: []` and `prompt: null`; T3's integration test has to script a call with
+receivers because "the live capture didn't include" one. If 0.154/0.155 behave the same, a spawn's
+prompt never reaches the parent's stream and no join is possible there. A capture of
+`spawn_agent` → `wait_agent` → `followup_task` (the one observation 19 asks for) would settle it.
