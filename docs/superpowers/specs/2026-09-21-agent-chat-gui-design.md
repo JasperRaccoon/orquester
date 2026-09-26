@@ -189,18 +189,20 @@ whole process group is signalled, not just the direct child.
 (`support/spawn.ts`) — which the Grok CLI defeats: it starts each child of its own, its background
 shells and the MCP servers it boots alike, in a session of its own, so the group signal reaches the
 CLI alone and they outlive it, reparented to init (Grok fixtures README observation 48, verified
-live on 2026-09-26). Its launch env therefore carries a marker, `ORQUESTER_AGENT_LAUNCH`, one value
-per launch, which every descendant inherits, and a sweep stops what carries it inside a session one
-of the CLI's children led, recorded while the CLI lived (never a process that daemonized away):
-SIGTERM, then SIGKILL past the grace, each pid checked against its `/proc` starttime before each
-signal (`support/leftover-processes.ts`, `GrokSession.stopLeftovers`). Its own helpers — the MCP
-servers, its children as its session opened (the README's observation 55) — go at every end of the
-session: a restart, the host's teardown (a drain-restart's included), the CLI's own exit, an open
-that failed, the user's stop. The work its agent started — shells, the dev servers they run — goes
-only when the USER ends the session (the session stop command or a closed tab:
-`stopSession(…, {endedByUser: true})`) and on an open that failed; a deploy must never kill running
-work, so at a drain-restart, a restart or a crash it runs on as a marked orphan, which the kill
-guard's note below lets Settings → System list and kill. Linux-only; a no-op elsewhere.*
+live on 2026-09-26). Every provider launch's env therefore carries a marker,
+`ORQUESTER_AGENT_LAUNCH`, one value per launch (`buildProviderEnv`'s `launchId`), which every
+descendant inherits — for Claude, Codex and OpenCode a marker only, which the kill guard reads — and
+for Grok a sweep stops what carries it inside a session one of the CLI's children led, recorded
+while the CLI lived (never a process that daemonized away): SIGTERM, then SIGKILL past the grace,
+each pid checked against its `/proc` starttime before each signal (`support/leftover-processes.ts`,
+`GrokSession.stopLeftovers`). Its own helpers — the MCP servers, its children as its session opened
+(the README's observation 55) — go at every end of the session: a restart, the host's teardown (a
+drain-restart's included), the CLI's own exit, an open that failed, the user's stop. The work its
+agent started — shells, the dev servers they run — goes only when the USER ends the session (the
+session stop command or a closed tab: `stopSession(…, {endedByUser: true})`) and on an open that
+failed; a deploy must never kill running work, so at a drain-restart, a restart or a crash it runs
+on as a marked orphan, which the kill guard's note below lets Settings → System list and kill.
+Linux-only; a no-op elsewhere.*
 
 **No restart backoff, by construction.** A child that exits is not respawned. The thread's
 session becomes `stopped`/`error` and the next `sendTurn` starts a fresh one from the persisted
@@ -4642,7 +4644,8 @@ and are skipped otherwise, so the suite never needs an account or a network.
   set and every end of the session stops them; the work its agent started stops when the user ends
   the session, and until then Settings → System lists and kills it, as it does anything a crashed
   host left behind (§3.1's supervision and kill-guard notes). Claude, Codex and OpenCode launches
-  carry no marker yet.*
+  carry the marker too, and nothing sweeps them: an MCP server one of them leaves behind is listed
+  and killable in Settings → System once init adopts it, never stopped by the host.*
 
 
 - **Old host code after deploy** until drain; a protocol version bump forces the drain-restart

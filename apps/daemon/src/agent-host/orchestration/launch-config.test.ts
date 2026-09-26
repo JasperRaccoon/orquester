@@ -92,7 +92,8 @@ describe("the cliproxy launch environment (§3.1)", () => {
     sessionPath: "/usr/bin",
     tmpDir: "/var/lib/orquester/tmp",
     homeDir: "/var/lib/orquester",
-    sessionId: "t1"
+    sessionId: "t1",
+    launchId: "launch-1"
   };
 
   it("strips the proxy token WITHOUT the allowance — the bug this guards", () => {

@@ -22,6 +22,8 @@
 
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
+import { AGENT_LAUNCH_ENV_VAR } from "./leftover-processes.ts";
+
 /** The env variable each adapter binds its managed account home through. */
 export const ACCOUNT_HOME_ENV_VAR: Record<AgentAdapterId, string> = {
   /**
@@ -76,6 +78,16 @@ export interface BuildProviderEnvInput {
   /** The chat session id. Stamped so a child can name its own tab. */
   sessionId: string;
   /**
+   * This launch's marker, stamped as {@link AGENT_LAUNCH_ENV_VAR}: one random
+   * value per provider launch — never the injectable `uuid()` — which every
+   * process the provider starts inherits. It is how Settings → System finds
+   * what a provider CLI left running once no root reaches it (a Claude chat's
+   * background shells outlive its CLI, as a Grok chat's do), and how the Grok
+   * adapter finds what to sweep. Only Grok sweeps; for every other adapter it
+   * is a marker and nothing more.
+   */
+  launchId: string;
+  /**
    * Keep an ambient credential that this adapter would normally strip. The
    * ONLY legitimate caller is the cliproxy launcher path, where
    * `ANTHROPIC_AUTH_TOKEN` *is* the selected identity.
@@ -99,6 +111,7 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
     accountHomeDir,
     extraEnv,
     sessionId,
+    launchId,
     allowCredentialVars
   } = input;
 
@@ -129,10 +142,12 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
     env[key] = value;
   }
 
-  // Last, so nothing in extraEnv can shadow the account binding.
+  // Last, so nothing in extraEnv can shadow the account binding or the
+  // launch's marker.
   if (accountHomeDir !== undefined && accountHomeDir.length > 0) {
     env[ACCOUNT_HOME_ENV_VAR[adapter]] = accountHomeDir;
   }
+  env[AGENT_LAUNCH_ENV_VAR] = launchId;
 
   return env;
 }

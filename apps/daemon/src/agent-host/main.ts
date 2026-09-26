@@ -18,7 +18,7 @@
  * changed source into it is a correctness bug.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readCodeStamp } from "./support/code-stamp.ts";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -365,6 +365,12 @@ export async function startAgentHost(
         ...(accountHomeDir !== undefined ? { accountHomeDir } : {}),
         extraEnv: { ...extraEnv, ...launch?.launchEnv },
         sessionId: threadId,
+        // One marker per launch — every call builds one child's env — and
+        // never the injectable `uuid()`, whose deterministic test ids two
+        // hosts could share. Every adapter's provider and what it starts carry
+        // it, so Settings → System can reach what outlives the provider; only
+        // the Grok adapter sweeps by it (it stamps its own value over this one).
+        launchId: randomUUID(),
         // For a cliproxy launcher the proxy token IS the selected identity, so
         // it is the one ambient credential that may survive the denylist —
         // without this, `claudex`/`claudemix` launch with no credential at all.

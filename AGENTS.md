@@ -1429,7 +1429,21 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   target (`launchedOrphans` in `system-status.ts`), what it started coming with it as its
   descendants — so the work a session end left running, and whatever a crashed host never swept, is
   in reach. A marked process whose parent still runs outside every root is that parent's, never a
-  root: no marker makes it ours. Only Grok launches carry the marker today.
+  root: no marker makes it ours. Every adapter's launches carry the marker (next bullet); only
+  Grok's sweep by it.
+- **Every provider launch carries a launch marker; only the Grok adapter sweeps by it.** The host's
+  `buildEnv` (`agent-host/main.ts`) stamps `ORQUESTER_AGENT_LAUNCH` on every provider child's
+  environment through `buildProviderEnv`'s required `launchId` — one `randomUUID()` per call, and
+  every adapter builds one env per launch: the Claude CLI the SDK spawns for a thread, each Codex
+  `app-server`, each OpenCode `serve` (one per project), each Grok CLI (whose session stamps its own
+  value over it), and the probes — set last, so no launcher env shadows it. Every process a provider
+  starts inherits it, so Settings → System reaches what outlives its provider (a Claude chat's
+  background shells run on under init after its CLI is gone — `bun run dev`, `stripe listen`, `vite`
+  on the owner's host on 2026-09-26) exactly as it reaches a Grok chat's: listed under the chat its
+  `ORQUESTER_SESSION_ID` names, killable, never swept. For Claude, Codex and OpenCode it is a marker
+  and nothing more — no adapter but Grok's records sessions or sweeps; a sweep for another adapter
+  would need its own evidence of what its children are and its own ruling on when the user's work
+  may be stopped (the Grok bullet above).
 - **The context meter is per adapter and never a subagent's or a thread's cumulative total.**
   `thread.token-usage.updated` is ingested verbatim into a `context-window.updated` activity and
   the client takes the **latest one whole** — last-writer-wins, never merged — so every emission

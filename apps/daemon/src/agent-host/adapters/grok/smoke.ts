@@ -91,7 +91,8 @@ async function main(): Promise<void> {
         homeDir: process.env["HOME"] ?? SCRATCH,
         accountHomeDir: input.home.path,
         ...(input.extraEnv === undefined ? {} : { extraEnv: input.extraEnv }),
-        sessionId: "smoke"
+        sessionId: "smoke",
+        launchId: randomUUID()
       }),
     resolveBin: async () => await Promise.resolve(binary),
     sessionPath: () => process.env["PATH"] ?? "",
