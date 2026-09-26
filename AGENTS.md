@@ -1188,18 +1188,23 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   a background answer injected after the abort starts the parent again: that run's reply used to be
   dropped with the leftovers, its requests shown to nobody's turn; it now gets its woken turn. A
   `busy` with no idle since ends nothing (the stopped run wrote one at the top of every step), and
-  once the boundary ends an interruption, one abort error until the parent's next idle is an echo of
-  that abort (`abortEchoExpected`: the run the boundary took for live may be the abort's after all —
-  the natural-idle race — and its `MessageAbortedError` failed the woken turn or read the session
-  `error`), and a user message's part is never dropped (an injected answer is a run's result). The
-  child's end always precedes the answer's prompt (the runner publishes its idle before resolving
-  its run), so neither it nor the answer's result ever rides the woken turn (README observation 27).
-  The replay harness claims the host's prompt ids up front, and models `hostCompacting`, for the
-  same reason `sendTurn` claims first: a blocking `/command` or `summarize` is recorded after its
-  frames. (4) A background run OUTLIVES a turn that fails on its own (a `session.error`, a rate
-  limit), as a Claude background agent outlives its parent's turn: 1.18.32 cancels a background job
-  only through `SessionRunState.cancel` — the `abort` route, which a Stop, the session's stop and a
-  failed admission send — so `failActiveTurn` closes only the runs that fail with it
+  once the boundary ends an interruption at a run the provider started (no host turn active), one
+  abort error until the parent's next idle is an echo of that abort (`abortEchoExpected`: that run
+  may be the abort's after all — the natural-idle race — and its `MessageAbortedError` failed the
+  woken turn or read the session `error`). A host turn's run never is: `sendTurn` prompts only once
+  every interrupt is over, so once its prompt is taken and the stopped run's idle has come, an abort
+  error fails it, whether its `busy` ended the interruption or the interruption's residue outlived
+  that `busy` (the prompt's answer first, fixture 10's order: `hostTurnSinceInterruption`); both
+  used to take the turn's own abort for the Stop's echo, for the whole turn. A user message's part
+  is never dropped (an injected answer is a run's result). The child's end always precedes the
+  answer's prompt (the runner publishes its idle before resolving its run), so neither it nor the
+  answer's result ever rides the woken turn (README observation 27). The replay harness claims the
+  host's prompt ids up front, and models `hostCompacting`, for the same reason `sendTurn` claims
+  first: a blocking `/command` or `summarize` is recorded after its frames. (4) A background run
+  OUTLIVES a turn that fails on its own (a `session.error`, a rate limit), as a Claude background
+  agent outlives its parent's turn: 1.18.32 cancels a background job only through
+  `SessionRunState.cancel` — the `abort` route, which a Stop, the session's stop and a failed
+  admission send — so `failActiveTurn` closes only the runs that fail with it
   (`closeLiveChildAgents` `scope: "foreground"`: a child whose launch answered in the background, or
   one inside it, lives on) and returns the session to `ready`, as Claude and Grok do after every
   settled turn — an `error` session is a dead one to the roster (every running row `interrupted`)

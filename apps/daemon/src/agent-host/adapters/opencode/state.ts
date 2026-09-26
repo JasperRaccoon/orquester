@@ -665,11 +665,13 @@ export interface OpenCodeSessionState {
    */
   idleAfterInterrupt: boolean;
   /**
-   * The interruption ended at a new run's `busy` (`endInterruptionAtNewRun`),
-   * and that run may yet be one the abort cancels: the stream can deliver its
-   * `busy` before the abort's own answer, after an idle that was not the
-   * stopped run's. Its `MessageAbortedError` is then an echo of that abort, not
-   * the provider's failure — dropped once, until the parent's next idle.
+   * The interruption ended at the `busy` of a run the provider started — no
+   * host turn active (`endInterruptionAtNewRun`) — and that run may yet be one
+   * the abort cancels: the stream can deliver its `busy` before the abort's
+   * own answer, after an idle that was not the stopped run's. Its
+   * `MessageAbortedError` is then an echo of that abort, not the provider's
+   * failure — dropped once, until the parent's next idle. A host turn's `busy`
+   * never arms it: that run began after the abort (`sendTurn` waits for it).
    */
   abortEchoExpected: boolean;
   promptGeneration: number;

@@ -486,6 +486,25 @@ function interruptionLingers(state: OpenCodeSessionState): boolean {
   );
 }
 
+/**
+ * A host turn sent since the interruption is running: its prompt taken (no
+ * longer `awaitingBusyAfterInterruption`), and the stopped run's idle come
+ * (`idleAfterInterrupt`). That run's abort error precedes its idle, and the
+ * turn's run began after the abort did — `sendTurn` prompts only once every
+ * interrupt is over — so an abort error now is the provider's word on the
+ * turn, not the Stop's echo. The interruption's residue (`interruptedTurnId`,
+ * `reconcileIdleStatus`) outlives the turn's `busy` whenever the prompt's
+ * answer came first (fixture 10's order), until the turn settles.
+ */
+function hostTurnSinceInterruption(state: OpenCodeSessionState): boolean {
+  return (
+    state.activeTurnId !== undefined &&
+    state.activeTurnId !== state.interruptedTurnId &&
+    !state.awaitingBusyAfterInterruption &&
+    state.idleAfterInterrupt
+  );
+}
+
 /** A `message.part.updated` whose message is a known user message: no output. */
 function isUserMessagePart(state: OpenCodeSessionState, raw: OpenCodeRawEvent): boolean {
   const part = isRecord(raw.properties) ? raw.properties.part : undefined;
@@ -518,16 +537,24 @@ function noteIdleAfterInterrupt(state: OpenCodeSessionState): void {
  * turn as any (`claimReply`), and whose requests are shown as any. A `busy`
  * with no idle since is no evidence: the stopped run wrote one at the top of
  * every step, and the stream may deliver it after the abort answered.
+ *
+ * A run the PROVIDER started may yet be one the abort cancels (the
+ * natural-idle race), so its abort error, if it comes, is an echo
+ * (`abortEchoExpected`). A host turn's run never is: `sendTurn` prompts only
+ * once every interrupt is over, so that run starts after the abort did and
+ * the abort's echo reaches the stream before its `busy` — an abort error
+ * during it is the provider's word, and fails it.
  */
 function endInterruptionAtNewRun(state: OpenCodeSessionState): void {
   if (state.interrupting || state.cancellation !== undefined) {
     return;
   }
   if (state.idleAfterInterrupt && interruptionLingers(state)) {
+    const providerRun = state.activeTurnId === undefined;
     endInterruption(state);
-    // That run may yet be one the abort cancels (the natural-idle race): its
-    // abort error, if it comes, is an echo (`abortEchoExpected`).
-    state.abortEchoExpected = true;
+    if (providerRun) {
+      state.abortEchoExpected = true;
+    }
   }
 }
 
@@ -895,7 +922,10 @@ function demux(
           out.signal({ kind: "abort-acknowledged" });
           return;
         }
-        if (state.interruptedTurnId !== undefined || state.reconcileIdleStatus) {
+        if (
+          (state.interruptedTurnId !== undefined || state.reconcileIdleStatus) &&
+          !hostTurnSinceInterruption(state)
+        ) {
           return;
         }
         if (state.abortEchoExpected) {

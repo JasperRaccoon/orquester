@@ -811,7 +811,12 @@ reply gets its woken turn. That run may still be one the abort cancels — an id
 just before the Stop can pass for the stopped run's, and the stream can deliver the new `busy`
 before the abort's own answer — so the first `MessageAbortedError` after the boundary, until the
 parent's next idle, is taken for that abort's echo and dropped: it used to fail the woken turn, or
-read the session `error`.
+read the session `error`. Only a run the provider started, though: the user's next message is
+prompted only once the abort has answered, so its run began after the abort did, and the stopped
+run's abort error comes before that run's own idle. Once that idle has come and the prompt is taken,
+an abort error fails the host's turn — whether its `busy` ended the interruption (the busy before
+the prompt's answer) or the interruption's residue outlived that `busy` (the answer first, as
+fixture 10 has it, the busy 30 ms after it); both used to drop it, for the whole turn.
 
 A compaction's summary (`summary: true`, fixture 09) answers no prompt of the conversation: its
 prompt is claimed but never joins `promptMessageIds`, so the summary call stays off the meter and
