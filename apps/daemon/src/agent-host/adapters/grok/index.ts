@@ -141,6 +141,12 @@ class GrokAdapter implements AgentAdapter {
 
   private readonly context: AdapterContext;
   private readonly sessions = new Map<string, GrokSession>();
+  /**
+   * The leftover sweeps of sessions that already left the map — a CLI that
+   * exited on its own — so the host's teardown still waits for them
+   * (`GrokSession.stopLeftovers`).
+   */
+  private readonly sweeps = new Set<Promise<void>>();
   private readonly queue: RuntimeEvent[] = [];
   private waiter: ((value: void) => void) | null = null;
   private closed = false;
@@ -270,6 +276,9 @@ class GrokAdapter implements AgentAdapter {
         if (this.sessions.get(threadId) === session) {
           this.sessions.delete(threadId);
         }
+        const sweep = session.stopLeftovers();
+        this.sweeps.add(sweep);
+        void sweep.then(() => this.sweeps.delete(sweep));
       },
       homeDirs: [input.home.path, env["HOME"]].filter(
         (value): value is string => typeof value === "string" && value.length > 1
@@ -459,7 +468,7 @@ class GrokAdapter implements AgentAdapter {
   async stopAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.all(sessions.map(async (session) => await session.stop()));
+    await Promise.all([...sessions.map(async (session) => await session.stop()), ...this.sweeps]);
   }
 
   // ------------------------------------------------------------- snapshot

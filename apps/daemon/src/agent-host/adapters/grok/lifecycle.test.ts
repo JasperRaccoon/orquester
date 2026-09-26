@@ -13,6 +13,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -43,6 +45,8 @@ interface Rig {
   dispose(): Promise<void>;
   disposed: boolean;
   cwd: string;
+  /** `GROK_RIG_MARK` in this rig's launch env: finds its own processes in `/proc`. */
+  mark: string;
 }
 
 /**
@@ -56,6 +60,7 @@ async function rig(
   options: { scenario?: string; version?: string; bin?: string | null; env?: Record<string, string> } = {}
 ): Promise<Rig> {
   const cwd = await mkdtemp(join(tmpdir(), "grok-lifecycle-"));
+  const mark = randomUUID();
   const events: RuntimeEvent[] = [];
   const waiters: Array<{ predicate: (event: RuntimeEvent) => boolean; resolve: (event: RuntimeEvent) => void }> = [];
 
@@ -77,6 +82,7 @@ async function rig(
       HOME: cwd,
       TMPDIR: cwd,
       GROK_MOCK_SCENARIO: options.scenario ?? "happy",
+      GROK_RIG_MARK: mark,
       ...(options.version === undefined ? {} : { GROK_MOCK_VERSION: options.version }),
       ...options.env
     }),
@@ -131,7 +137,8 @@ async function rig(
       controller.abort();
       await adapter.stopAll();
     },
-    cwd
+    cwd,
+    mark
   };
   openRigs.push(built);
   return built;
@@ -1264,6 +1271,139 @@ test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => 
   await r.dispose();
 });
 
+
+// ---------------------------------------------------------------------------
+// What the CLI leaves behind (AGENTS.md, "A running state never outlives its
+// process"; Grok fixtures README observation 48)
+// ---------------------------------------------------------------------------
+//
+// The real CLI starts its background shells and MCP servers in sessions of
+// their own, so a stop's group signal reaches the CLI alone and they outlive
+// it, reparented to init. The mock's `leftover` scenarios detach a `sleep` the
+// same way and name its pid; the session's end must stop it — found by the
+// launch marker it inherited, never by the parent chain it lost.
+
+/** Whether `pid` is a live (non-zombie) process. */
+function isRunning(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "latin1");
+    const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+    return state !== "Z" && state !== "X";
+  } catch {
+    return false;
+  }
+}
+
+/** Every live process whose environment carries `name=value`. */
+function processesWith(name: string, value: string): number[] {
+  const found: number[] = [];
+  for (const entry of readdirSync("/proc")) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 1) continue;
+    try {
+      if (readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(`${name}=${value}`) && isRunning(pid)) {
+        found.push(pid);
+      }
+    } catch {
+      // Gone, or not ours to read.
+    }
+  }
+  return found;
+}
+
+/** The leftover's pid and the launch marker the mock saw, off its `bg:<pid>;launch:<id>;` chunk. */
+function leftoverOf(events: readonly RuntimeEvent[], turnId: string): { pid: number; launch: string } {
+  const match = /bg:(\d+);launch:([^;]+);/.exec(turnText(events, turnId));
+  assert.ok(match, "the mock names its leftover");
+  return { pid: Number(match[1]), launch: match[2]! };
+}
+
+/** Kill a leftover a failed assertion left alive, so it cannot outlive the suite. */
+function reap(pids: readonly number[]): void {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+test("stopSession stops what the CLI left running outside its process group", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "the turn's end");
+  await r.drain();
+  const leftover = leftoverOf(r.events, turnId);
+  try {
+    assert.ok(leftover.launch.length > 0 && leftover.launch !== "none", "the launch env carries the marker");
+    assert.equal(isRunning(leftover.pid), true);
+    await r.adapter.stopSession("t1");
+    assert.equal(isRunning(leftover.pid), false, "the session's end stopped it, though no group signal reached it");
+  } finally {
+    reap([leftover.pid]);
+    await r.dispose();
+  }
+});
+
+test("a CLI that exits on its own leaves nothing running: its leftovers are stopped", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover-exit" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "session.exited", "session.exited");
+  await r.drain();
+  const leftover = leftoverOf(r.events, turnId);
+  try {
+    // `stopAll` is the host's teardown: it waits for a sweep still in flight.
+    await r.adapter.stopAll();
+    assert.equal(isRunning(leftover.pid), false);
+  } finally {
+    reap([leftover.pid]);
+    await r.dispose();
+  }
+});
+
+test("a session's end stops its own launch's leftovers and nobody else's", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig({ scenario: "leftover" });
+  await start(r, { threadId: "t1" });
+  await start(r, { threadId: "t2" });
+  const first = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  const second = await r.adapter.sendTurn({ threadId: "t2", input: "go", attachments: [], interactionMode: "default" });
+  for (const turnId of [first.turnId, second.turnId]) {
+    await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "a turn's end");
+  }
+  await r.drain();
+  const mine = leftoverOf(r.events, first.turnId);
+  const theirs = leftoverOf(r.events, second.turnId);
+  try {
+    assert.notEqual(mine.launch, theirs.launch, "one marker value per launch");
+    await r.adapter.stopSession("t1");
+    assert.equal(isRunning(mine.pid), false);
+    assert.equal(isRunning(theirs.pid), true, "another launch's leftover is not this session's to stop");
+    await r.adapter.stopSession("t2");
+    assert.equal(isRunning(theirs.pid), false);
+  } finally {
+    reap([mine.pid, theirs.pid]);
+    await r.dispose();
+  }
+});
+
+test("a session that fails to open stops its CLI: nothing of the launch is left running", { skip: process.platform !== "linux" }, async () => {
+  const r = await rig();
+  // `session/load` of a session the CLI does not know answers an error (fixture 13).
+  await assert.rejects(
+    async () => await start(r, { resumeCursor: { schemaVersion: 1, sessionId: "01a0c19e-0000-7000-8000-000000000000" } }),
+    /Path not found/
+  );
+  const left = processesWith("GROK_RIG_MARK", r.mark);
+  try {
+    assert.deepEqual(left, [], "the CLI of a failed open was left running, holding its pipes");
+  } finally {
+    reap(left);
+    await r.dispose();
+  }
+});
 
 test("teardown: no provider child outlives the suite", async () => {
   const leaked = openRigs.filter((entry) => !entry.disposed);

@@ -39,6 +39,20 @@ had only read off the binary and T3's reader.
 | Extra env | `22-subagent-await-budget.ndjson` only: `GROK_SUBAGENT_AWAIT_BUDGET_MS=4000` (the binary's foreground await budget, set low so a 12 s child outlives it) |
 | Harness | the same out-of-repo scripts, plus `acp-clean.mjs` (the launch env above), one scenario script per file, `leftovers.sh` (every process carrying the capture's `ORQUESTER_SESSION_ID` marker, killed after each run) and `export-2026-09-25.mjs` |
 
+### The 2026-09-26 captures (24–)
+
+What a background shell and the CLI's other children do when it ends, and the cases 2026-09-25
+left uncaptured.
+
+| | |
+|---|---|
+| CLI | `grok 1.0.34 (3736acbc8658) [stable]` — the same build |
+| Capture date | 2026-09-26 |
+| Model | `grok-4.7`, the CLI's default; `--reasoning-effort low` |
+| Working directory | a fresh throwaway `git init` sandbox, `~/tmp/agent-chat-fixtures/grok/sandbox-2026-09-26` (`add.js`, `README.md`, one commit, `.grok/config.toml` with `[features] support_permission = true`) |
+| Launch | exactly the adapter's since 2026-09-26: its own process group (`detached`, as `spawnProviderChild` spawns it), a stop signalling the group, and the 2026-09-25 launch env plus `ORQUESTER_AGENT_LAUNCH`, one value per run (observation 48) |
+| Harness | the same out-of-repo scripts, plus `acp-2026-09-26.mjs` (that launch, and a sweep after every run of every process still carrying the run's marker — SIGTERM, then SIGKILL — listing each one's `ppid`/`pgid`/`sid` first) and `export-2026-09-26.mjs` (the same export rules, its dedupe map seeded from the committed set) |
+
 ### Sandbox configuration that shaped the captures
 
 The sandbox carries a project config layer at `<cwd>/.grok/config.toml`:
@@ -152,6 +166,7 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `21-stop-with-background-work.ndjson` | (2026-09-25 argv) | a background shell and subagent; `session/cancel` with no prompt in flight; a poll of both | What a session-scoped Stop does to each (observation 44). |
 | `22-subagent-await-budget.ndjson` | (2026-09-25 argv), `GROK_SUBAGENT_AWAIT_BUDGET_MS=4000` | a foreground spawn of a 12 s command | A foreground run moved to the background, and its later end and wake (observation 45). |
 | `23-stop-cuts-foreground-subagent.ndjson` | (2026-09-25 argv) | a foreground spawn; `session/cancel` mid-turn | A Stop cutting a foreground call cancels its child (observation 44). |
+| `24-background-shell-outlives-cli.ndjson` | `--reasoning-effort low agent --always-approve stdio`, the 2026-09-26 launch | one background `sleep 45`; the processes carrying the launch marker listed while the CLI runs, the CLI stopped the adapter's way, listed again, swept | Every child of the CLI's own lives in a session of its own and inherits its environment: the shell and two MCP servers outlived a clean SIGTERM, reparented to init (observation 48; the `/proc` facts are the harness's `note` frames). |
 
 ---
 
@@ -1197,8 +1212,9 @@ child session, so they never stream into the first run's.
   background subagent (its turn ends `cancelled`, `subagent_finished {status: "cancelled"}` 53 ms
   after the cancel) and leaves the background shell running: a poll 12 s later answered `running`.
   The shell even outlived the CLI: after the harness's SIGTERM, `sleep 91` was still running,
-  reparented to init, and had to be killed by hand. The adapter's own end for it stays revivable
-  by any later CLI report that it runs (a listing, a poll, a start frame).
+  reparented to init, and had to be killed by hand — as every child of the CLI does (observation
+  48), which the adapter now stops at the session's end. While the CLI lives, the adapter's own end
+  for it stays revivable by any later CLI report that it runs (a listing, a poll, a start frame).
 - A turn-scoped Stop that cuts a foreground spawn (23): the cancel ends the parent's turn
   (`MidTurnAbort`), the child's turn ends `cancelled`, `subagent_finished {status: "cancelled"}`
   arrives 42 ms later, and the spawn call gets no terminal frame at all (as fixture 05's `write`).
@@ -1274,6 +1290,36 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   approval raised INSIDE a child session (every 2026-09-25 capture ran `--always-approve`), and a
   subagent spawned by the CLI itself (a `/loop` fire) — which the adapter starts under its own id.
 
+### 48. The CLI's children live in sessions of their own — and inherit its environment
+
+*Verified live on 2026-09-26* (fixture 24; the `/proc` listings are its harness `note` frames):
+the CLI launched as the adapter launches it — leading a process group of its own, with the
+adapter's explicit environment plus a per-launch marker, `ORQUESTER_AGENT_LAUNCH` — and asked for
+one `run_terminal_command` with `background: true` (`sleep 45`).
+
+- While it ran, eleven processes carried the marker: the CLI; the four MCP servers it boots from
+  the host's configuration though `session/new` names none (observation 30) — `agent-browser`,
+  `centur`, `serena` (with its TypeScript language server, two `tsserver`s and a
+  `typingsInstaller` under it) and `jira-cloud`; and the background shell, a `bash -O extglob -c …`
+  with its `sleep 45`. **Every child of the CLI's own led a session of its own** (`pgid = sid =
+  pid`) — the MCP servers and the shell alike; the `sleep` shared its shell's.
+- So a signal to the CLI's process group reaches the CLI alone. After the adapter's stop — SIGTERM
+  to the group; the CLI exited 143 in 127 ms, as in observation 24 — four processes still carried
+  the marker, every one reparented to init (`ppid 1`): `serena`, `jira-cloud`, the `bash` and its
+  `sleep`. `agent-browser` and `centur` ended with the CLI, on their stdin's end. Observation 44's
+  `sleep 91`, found running after the harness's SIGTERM, was the same thing: whatever the CLI
+  starts outlives it, MCP servers included — one set leaked per session.
+
+The adapter stops them at every end of a session (`GrokSession.stopLeftovers`,
+`support/leftover-processes.ts`): each launch's environment carries its own marker value, and a
+stop — the user's, a closed tab, a restart, the host's teardown, a drain-restart's included — as
+well as the CLI's own exit or an open that failed sends SIGTERM to every process still carrying it,
+then SIGKILL past a 2 s grace to whatever a fresh scan still finds, each pid checked against its
+`/proc` starttime before every signal. A Stop's `session/cancel` kills nothing (the CLI lives on
+and owns them, observation 44). The daemon's Settings → System lists and kills a process carrying
+any launch's marker as its own, so what a crashed host left behind is not out of reach. Linux-only:
+elsewhere nothing is read or signalled.
+
 ## Reproducing
 
 The harness is deliberately not committed. To re-capture:
@@ -1299,6 +1345,8 @@ The 2026-09-25 runs (15–23) added three things the older ones did not need:
   the host's MCP servers are the CLI's children, so every process whose environment carries the
   run's `ORQUESTER_SESSION_ID` marker is listed and killed once the child has exited
   (`leftovers.sh`) — never a process by name, since the host runs its own `grok` and `serena`s.
+  Since 2026-09-26 the harness uses the adapter's own marker, `ORQUESTER_AGENT_LAUNCH`, one value
+  per run (`acp-2026-09-26.mjs`), and launches the CLI as the adapter does, leading its own group.
 - **Short, explicit prompts** naming the tools and arguments (`background: true`, `resume_from`,
   `timeout_ms 0`), `--reasoning-effort low`, sub-30 s `sleep`s, and a stop as soon as the scenario
   is on the wire: the nine runs cost about three dollars of the account's credits by their own

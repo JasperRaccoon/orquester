@@ -15,6 +15,7 @@
  * under a bare `node`, not through tsx.
  */
 
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const scenario = process.env.GROK_MOCK_SCENARIO ?? "happy";
@@ -651,6 +652,36 @@ async function runPrompt(id, params) {
     sendTogether([chunkFrame("two;", promptId), turnCompletedFrame(promptId)]);
     notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
     result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "leftover" || scenario === "leftover-exit") {
+    // A background command detached the way the real CLI detaches its
+    // shells and MCP servers — a session of its own — so the group signal of
+    // a stop never reaches it and it outlives this process, reparented to
+    // init (Grok fixtures README observation 48). It inherits the launch
+    // environment, marker included; the chunk names it and the launch.
+    const leftover = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+    leftover.unref();
+    notify("_x.ai/task_backgrounded", {
+      sessionId,
+      update: {
+        sessionUpdate: "task_backgrounded",
+        tool_call_id: "call-bg-1",
+        task_id: "task-bg-1",
+        command: "sleep 300",
+        description: "leftover"
+      }
+    });
+    sendTogether([
+      chunkFrame(`bg:${leftover.pid};launch:${process.env.ORQUESTER_AGENT_LAUNCH ?? "none"};`, promptId),
+      turnCompletedFrame(promptId)
+    ]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    if (scenario === "leftover-exit") {
+      setTimeout(() => process.exit(143), 20);
+    }
     return;
   }
 

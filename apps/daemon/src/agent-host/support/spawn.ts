@@ -34,8 +34,11 @@ export interface SpawnProviderChildOptions {
    * provider CLI starts MCP servers of its own, and signalling only the direct
    * child leaves them running and reparented to init — one orphaned server per
    * chat session, for the life of the box (E20). A group leader's `kill(-pid)`
-   * takes them with it. Pass `false` only for a child that must outlive the
-   * signal, and say why. Ignored on Windows, which has no process groups.
+   * takes them with it — unless the child starts them in sessions of their
+   * own, as the Grok CLI does its shells and MCP servers: those are found by
+   * the launch marker they inherit instead (`leftover-processes.ts`). Pass
+   * `false` only for a child that must outlive the signal, and say why.
+   * Ignored on Windows, which has no process groups.
    */
   detached?: boolean;
   /** Overrides {@link DEFAULT_KILL_GRACE_MS} for this child. */

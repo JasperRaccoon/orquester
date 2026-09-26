@@ -22,7 +22,10 @@ import type {
   RuntimeMode
 } from "@orquester/api/agent-chat";
 
+import { randomUUID } from "node:crypto";
+
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
+import { AGENT_LAUNCH_ENV_VAR, stopLeftoverProcesses } from "../../support/leftover-processes.ts";
 import type { ChildExitReason } from "../../support/spawn.ts";
 import { exitOutcome } from "../../support/spawn.ts";
 import type { ClassifiedStderrLine } from "../../support/stderr.ts";
@@ -242,6 +245,16 @@ export class GrokSession {
   private lastError: string | undefined;
   private stopped = false;
   private hostInitiatedStop = false;
+  /**
+   * This launch's value of {@link AGENT_LAUNCH_ENV_VAR}, on the CLI's launch
+   * env and so on everything it starts: how its leftovers are found once it
+   * is gone ({@link stopLeftovers}). Random, never the injectable `uuid()`:
+   * it names real processes, and a deterministic test id shared by two test
+   * files running at once would let one stop the other's.
+   */
+  private readonly launchId = randomUUID();
+  /** The sweep of what this launch left running, once started — the exit and a stop share it. */
+  private leftovers: Promise<void> | null = null;
   /** The self-resolved-approvals advisory is said once per session. */
   private selfResolveAdvised = false;
   /** `<server>\u0000<status>` of every MCP failure already reported, until the server is ready again. */
@@ -397,7 +410,8 @@ export class GrokSession {
       env: {
         ...this.options.env,
         ...GROK_EXTRA_ENV,
-        ...(overlay === null ? {} : { [GROK_CONFIG_PATH_ENV]: overlay })
+        ...(overlay === null ? {} : { [GROK_CONFIG_PATH_ENV]: overlay }),
+        [AGENT_LAUNCH_ENV_VAR]: this.launchId
       },
       cwd: this.options.cwd,
       clientInfo: this.options.clientInfo,
@@ -412,25 +426,27 @@ export class GrokSession {
     this.connection = connection;
     this.registerHandlers(connection);
 
+    const cursor = parseGrokResumeCursor(this.options.resumeCursor);
     let initialize: InitializeResponse;
+    let setup: NewSessionResponse | LoadSessionResponse;
     try {
       initialize = await connection.handshake();
+      // Read on EVERY handshake, never cached per host: the CLI auto-updates
+      // and can change version between two spawns of one thread.
+      this.agentVersion = agentVersionOf(initialize._meta) ?? null;
+      if (!meetsMinimumGrokVersion(this.agentVersion)) {
+        throw new Error(versionGateMessage(this.agentVersion));
+      }
+      setup = cursor === null ? await this.openNewSession() : await this.loadSession(cursor.sessionId);
     } catch (error) {
+      // Whatever failed, the CLI goes with it: a `session/new` or
+      // `session/load` that failed (a cursor the CLI no longer knows answers
+      // "Path not found", fixture 13) used to leave it running, holding its
+      // pipes, outside the adapter's map — nothing would ever stop it. Its
+      // exit then sweeps what it had started ({@link onExit}).
       await connection.stop();
       throw error;
     }
-
-    // Read on EVERY handshake, never cached per host: the CLI auto-updates
-    // and can change version between two spawns of one thread.
-    this.agentVersion = agentVersionOf(initialize._meta) ?? null;
-    if (!meetsMinimumGrokVersion(this.agentVersion)) {
-      const message = versionGateMessage(this.agentVersion);
-      await connection.stop();
-      throw new Error(message);
-    }
-
-    const cursor = parseGrokResumeCursor(this.options.resumeCursor);
-    const setup = cursor === null ? await this.openNewSession() : await this.loadSession(cursor.sessionId);
 
     const modelState = modelStateOf(initialize._meta) ?? (setup as { models?: unknown }).models;
     this.currentModelId = currentModelIdOf(modelState);
@@ -1441,15 +1457,56 @@ export class GrokSession {
 
   private onExit(reason: ChildExitReason, stderrTail: string): void {
     if (this.stopped && this.hostInitiatedStop) {
-      // Already settled by `stop()`.
+      // Already settled by `stop()`, which awaits this same sweep.
       this.emitExited(reason, stderrTail, true);
+      void this.stopLeftovers();
       this.options.onClosed?.(this.threadId);
       return;
     }
     this.stopped = true;
     this.settleEverythingForExit(reason, stderrTail);
     this.emitExited(reason, stderrTail, false);
+    // The rows above closed every task `stopped`; this makes it so. Started
+    // before `onClosed`, so the adapter's teardown can wait for it.
+    void this.stopLeftovers();
     this.options.onClosed?.(this.threadId);
+  }
+
+  /**
+   * Stop every process this launch left running, once the CLI is gone — at
+   * every end of the session: a stop (the user's, a closed tab, a restart
+   * for an account or a model, the host's teardown — a drain-restart's
+   * included) and the CLI's own exit (a crash, an open that failed).
+   *
+   * The CLI starts its background shells and MCP servers in sessions of
+   * their own (Grok fixtures README observation 48), so the group signal of
+   * `connection.stop()` reaches the CLI alone and they are reparented to init
+   * when it goes: a dev server would run on, unmanaged, while the log said
+   * its task stopped, and two MCP servers leaked with every session. They
+   * carry this launch's marker ({@link launchId}), and nothing else does
+   * (`support/leftover-processes.ts`: SIGTERM, SIGKILL past the grace, never a
+   * recycled pid; Linux-only, a no-op elsewhere). A drain-restart waited for
+   * live work first, within its bound — the liveness TTL a shell's watch loop
+   * or an agent's hour gets — and the Claude CLI does the same to its own
+   * background shells when its session winds down ("print wind-down: killing
+   * background shell … after …ms grace", 2.1.280). Idempotent; never rejects.
+   */
+  stopLeftovers(): Promise<void> {
+    if (this.connection === null) {
+      // Never launched: nothing carries the marker.
+      return Promise.resolve();
+    }
+    this.leftovers ??= stopLeftoverProcesses({ launchId: this.launchId }).then(
+      (result) => {
+        if (result.found > 0) {
+          this.options.logger.debug("grok: stopped what the agent left running", { ...result });
+        }
+      },
+      (error: unknown) => {
+        this.options.logger.warn("grok: could not stop what the agent left running", error);
+      }
+    );
+    return this.leftovers;
   }
 
   /**
@@ -1510,9 +1567,10 @@ export class GrokSession {
     );
   }
 
-  /** Host-initiated stop. Idempotent. */
+  /** Host-initiated stop. Idempotent — a session that already ended still waits for its sweep. */
   async stop(): Promise<void> {
     if (this.stopped) {
+      await this.leftovers;
       return;
     }
     // Kept, as at an exit: held frames join the open turn before it settles.
@@ -1535,6 +1593,8 @@ export class GrokSession {
       this.activeTurn = null;
     }
     await this.connection?.stop();
+    // The CLI is gone; what it started outside its process group is not.
+    await this.stopLeftovers();
   }
 
   // --------------------------------------------------------------- helpers
