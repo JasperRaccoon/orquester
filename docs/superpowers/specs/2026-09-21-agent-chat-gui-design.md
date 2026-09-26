@@ -4303,7 +4303,9 @@ tail live (an active group's shimmer, a live spawn row, the thinking placeholder
 is live), a working row at its head timed from its start, and the smooth follow glides. A run is a
 position, not a turn, because an agent's rows ride whatever parent turn was live when each started,
 or none (`agentRunStartIndex` in `rows.logic.ts`, `drill-in.logic.ts`). A settled agent, and a run
-before the current one, fold as before.*
+before the current one, fold as before; a drill-in's folds start open and a collapse sticks — the
+drill-in keeps the turns the user closed (`collapsedTurnsAfter`) rather than reopening every fold on
+each projection, which left the chevron dead.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

@@ -29,7 +29,6 @@
 
 import type { MessageStreamingContext, RuntimeSubagent, ThreadItem } from "@orquester/api/agent-chat";
 
-import type { DisclosureState } from "./contracts";
 import {
   deriveTimelineEntriesFromItems,
   EMPTY_TIMELINE_PROJECTION,
@@ -49,6 +48,18 @@ import {
 /** What the drill-in reads off the agent's roster row. */
 export type DrillInAgentRow = Pick<RuntimeSubagent, "startedAt"> & { kind?: RuntimeSubagent["kind"] };
 
+/** What the drill-in's projection reads of its own disclosure state. */
+export interface AgentDrillInDisclosures {
+  readonly expandedGroupIds: readonly string[];
+  /**
+   * The turns whose fold the user closed. Folds start OPEN — the child's rows
+   * are the reason the view was opened, and a fold keyed on the parent's
+   * turns would hide them behind one more click — so the drill-in keeps what
+   * was closed, as it keeps a shell's collapsed rows, and a collapse sticks.
+   */
+  readonly collapsedTurnIds?: readonly string[];
+}
+
 export interface AgentDrillInInput {
   /** The thread's items — the parent's slice, never a second stream. */
   readonly items: readonly ThreadItem[];
@@ -64,12 +75,8 @@ export interface AgentDrillInInput {
    * a row the roster dropped — the run starts at the agent's latest launch.
    */
   readonly agent?: DrillInAgentRow | null;
-  /**
-   * The drill-in's own disclosure state. Group toggles honour it; turn folds
-   * start OPEN — the child's rows are the reason the view was opened, and a
-   * fold keyed on the parent's turns would hide them behind one more click.
-   */
-  readonly disclosures?: Pick<DisclosureState, "expandedGroupIds" | "expandedTurnIds"> | null;
+  /** The drill-in's own disclosure state ({@link AgentDrillInDisclosures}). */
+  readonly disclosures?: AgentDrillInDisclosures | null;
 }
 
 /** One drill-in's projection, held across renders. */
@@ -78,14 +85,43 @@ export interface AgentDrillInProjection {
   readonly timeline: ThreadTimelineProjection;
   readonly rows: TimelineRowsProjection | null;
   readonly stable: StableRowsState;
+  /**
+   * The turns whose fold is open: every turn the agent's rows ride but the
+   * collapsed ones. The timeline's toggle patches this list whole, so the
+   * drill-in hands it over as its `expandedTurnIds` and reads a patch back
+   * with {@link collapsedTurnsAfter}. Held while its members stay the same.
+   */
+  readonly openTurnIds: readonly string[];
 }
 
 export const EMPTY_AGENT_DRILL_IN: AgentDrillInProjection = {
   agentId: null,
   timeline: EMPTY_TIMELINE_PROJECTION,
   rows: null,
-  stable: EMPTY_STABLE_ROWS
+  stable: EMPTY_STABLE_ROWS,
+  openTurnIds: []
 };
+
+/**
+ * The turns a drill-in holds closed after the timeline patched its open list
+ * (`open`, as the projection handed it over) with `patched`: a turn that was
+ * open and is missing from the patch was just closed, and a closed one the
+ * patch names was opened again.
+ */
+export function collapsedTurnsAfter(
+  collapsed: readonly string[],
+  open: readonly string[],
+  patched: readonly string[]
+): string[] {
+  const patch = new Set(patched);
+  const next = collapsed.filter((turnId) => !patch.has(turnId));
+  for (const turnId of open) {
+    if (!patch.has(turnId) && !next.includes(turnId)) {
+      next.push(turnId);
+    }
+  }
+  return next;
+}
 
 /**
  * Whether the drilled agent is at work: the session is live and the roster
@@ -152,7 +188,9 @@ export function projectAgentDrillIn(
     // The agent's own rows are agent-internal to the parent, not to itself.
     { ownerAgentId: agentId }
   );
-  const expandedTurnIds = new Set<string>(input.disclosures?.expandedTurnIds ?? []);
+  // Every fold starts open; the ones the user closed stay closed.
+  const collapsedTurnIds = new Set(input.disclosures?.collapsedTurnIds ?? []);
+  const expandedTurnIds = new Set<string>();
   for (const entry of timeline.entries) {
     const turnId =
       entry.kind === "message"
@@ -160,7 +198,7 @@ export function projectAgentDrillIn(
         : entry.kind === "work"
           ? entry.entry.turnId
           : null;
-    if (typeof turnId === "string" && turnId.length > 0) {
+    if (typeof turnId === "string" && turnId.length > 0 && !collapsedTurnIds.has(turnId)) {
       expandedTurnIds.add(turnId);
     }
   }
@@ -170,13 +208,14 @@ export function projectAgentDrillIn(
   // while its members stay the same: a fresh pair per projection sent every
   // streamed token down a full rebuild instead of the streamed-text fast path.
   const heldInput = held?.rows?.input;
+  const openTurns = keepHeldSet(heldInput?.expandedTurnIds, expandedTurnIds);
   const rows = deriveTimelineRowsWithState(
     {
       timelineEntries: timeline.entries,
       isWorking: live,
       activeTurnStartedAt: runStartedAt,
       ...(live ? { agentRunStartIndex: agentRunStart(timeline.entries, runStartedAt) } : {}),
-      expandedTurnIds: keepHeldSet(heldInput?.expandedTurnIds, expandedTurnIds),
+      expandedTurnIds: openTurns,
       expandedWorkGroupIds: keepHeldSet(
         heldInput?.expandedWorkGroupIds,
         new Set(input.disclosures?.expandedGroupIds ?? [])
@@ -195,7 +234,11 @@ export function projectAgentDrillIn(
     held?.rows ?? null
   );
   const stable = computeStableRows(rows.rows, held?.stable ?? EMPTY_STABLE_ROWS);
-  return { agentId, timeline, rows, stable };
+  // The same list while the set is held: the drill-in hands it to the
+  // timeline's context, which every row reads.
+  const openTurnIds =
+    held !== null && openTurns === heldInput?.expandedTurnIds ? held.openTurnIds : [...openTurns];
+  return { agentId, timeline, rows, stable, openTurnIds };
 }
 
 /** `held` when it has exactly `next`'s members, else `next`. */

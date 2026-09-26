@@ -41,10 +41,14 @@ import type {
   UseAgentChatRoster,
   UseAgentChatStatus,
   UseAgentChatThread,
-  UseProviderSnapshot,
-  DisclosureState
+  UseProviderSnapshot
 } from "./contracts";
-import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn, type AgentDrillInProjection } from "./drill-in.logic";
+import {
+  EMPTY_AGENT_DRILL_IN,
+  projectAgentDrillIn,
+  type AgentDrillInDisclosures,
+  type AgentDrillInProjection
+} from "./drill-in.logic";
 import { loadProviders, providerForRefId, providersStore } from "./providers";
 import { isBackgroundShellRow } from "./roster.logic";
 import { resolveActivityLabel } from "./status.logic";
@@ -218,14 +222,17 @@ export function turnStartedAt(
   return latestTurn.startedAt;
 }
 
+const NO_TURNS: readonly string[] = [];
+
 /** What {@link useAgentChatDrillIn} is asked for beyond the agent. */
 export interface AgentChatDrillInOptions {
   /**
    * The drill-in's own disclosure state. Group toggles honour it; turn folds
    * start OPEN — the child's rows are the reason the view was opened, and a
-   * fold keyed on the parent's turns would hide them behind one more click.
+   * fold keyed on the parent's turns would hide them behind one more click —
+   * and the ones the user closed stay closed (`collapsedTurnIds`).
    */
-  disclosures?: Pick<DisclosureState, "expandedGroupIds" | "expandedTurnIds"> | null;
+  disclosures?: AgentDrillInDisclosures | null;
   /** The agent's roster row, where the host already holds it; the thread's own otherwise. */
   agent?: RuntimeSubagent | null;
 }
@@ -242,6 +249,11 @@ export interface AgentChatDrillInView {
   rows: AgentChatTimelineRow[] | null;
   /** The thread's items: the parent's slice, never a second stream. */
   items: readonly ThreadItem[];
+  /**
+   * The turns whose fold is open (`AgentDrillInProjection.openTurnIds`): the
+   * timeline's `expandedTurnIds`, whose patch `collapsedTurnsAfter` reads back.
+   */
+  openTurnIds: readonly string[];
 }
 
 /**
@@ -276,11 +288,11 @@ export function useAgentChatDrillIn(
 
   return useMemo(() => {
     if (agentId === null) {
-      return { rows: [], agent: null, items: entries };
+      return { rows: [], agent: null, items: entries, openTurnIds: NO_TURNS };
     }
     const agent = agentOverride ?? roster.find((candidate) => candidate.id === agentId) ?? null;
     if (agent !== null && isBackgroundShellRow(agent)) {
-      return { rows: null, agent, items: entries };
+      return { rows: null, agent, items: entries, openTurnIds: NO_TURNS };
     }
     projection.current = projectAgentDrillIn(projection.current, {
       items: entries,
@@ -290,7 +302,12 @@ export function useAgentChatDrillIn(
       agent,
       disclosures
     });
-    return { rows: projection.current.stable.result, agent, items: entries };
+    return {
+      rows: projection.current.stable.result,
+      agent,
+      items: entries,
+      openTurnIds: projection.current.openTurnIds
+    };
   }, [agentId, agentOverride, entries, roster, messageStreaming, disclosures]);
 }
 

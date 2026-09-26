@@ -12,7 +12,12 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "./contracts";
-import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn, type AgentDrillInProjection } from "./drill-in.logic";
+import {
+  collapsedTurnsAfter,
+  EMPTY_AGENT_DRILL_IN,
+  projectAgentDrillIn,
+  type AgentDrillInProjection
+} from "./drill-in.logic";
 import { deriveTimelineEntriesFromItems, EMPTY_TIMELINE_PROJECTION } from "./entries.logic";
 import {
   deriveTimelineRows,
@@ -640,6 +645,52 @@ describe("a live agent reads live (§7.6): its current run is the running respon
   });
 });
 
+describe("a drill-in's turn folds start open, and a collapse sticks (R4, S11)", () => {
+  const items: ThreadItem[] = [
+    activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: "call-0", title: "ls", command: "ls", status: "completed" },
+      { id: "ls", agentId: "a1", turnId: "t1", createdAt: stamp(1) }
+    ),
+    message("assistant", "Listed.", { id: "said", agentId: "a1", turnId: "t1", createdAt: stamp(2) })
+  ];
+  const settled = messageStreamingContext({
+    head: head({ session: { status: "ready", activeTurnId: null } }),
+    roster: [{ id: "a1", status: "completed" }]
+  });
+  const project = (collapsedTurnIds?: readonly string[]) =>
+    projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items,
+      agentId: "a1",
+      messageStreaming: settled,
+      disclosures: { expandedGroupIds: [], ...(collapsedTurnIds ? { collapsedTurnIds } : {}) }
+    });
+  const fold = (projection: AgentDrillInProjection) =>
+    projection.stable.result.find((row): row is Extract<AgentChatTimelineRow, { kind: "turn-fold" }> => row.kind === "turn-fold");
+
+  it("starts open: the child's rows are the reason the view was opened", () => {
+    const open = project();
+    assert.equal(fold(open)?.expanded, true);
+    assert.ok(open.stable.result.some((row) => row.id === "ls"), "its work shows");
+    assert.deepEqual([...open.openTurnIds], ["t1"], "and the fold's turn is among the open ones");
+  });
+
+  it("a turn the user collapsed stays collapsed: its fold closes and its work hides", () => {
+    const collapsed = project(["t1"]);
+    assert.equal(fold(collapsed)?.expanded, false, "the chevron works");
+    assert.ok(!collapsed.stable.result.some((row) => row.id === "ls"), "the fold hides what it holds");
+    assert.deepEqual([...collapsed.openTurnIds], []);
+  });
+
+  it("a toggle's patch becomes the collapsed list: closing adds the turn, opening removes it", () => {
+    // The timeline patches the WHOLE open list; the drill-in keeps what the user closed.
+    assert.deepEqual(collapsedTurnsAfter([], ["t1", "t2"], ["t2"]), ["t1"]);
+    assert.deepEqual(collapsedTurnsAfter(["t1"], ["t2"], ["t2", "t1"]), []);
+    assert.deepEqual(collapsedTurnsAfter(["t1"], ["t2"], []), ["t1", "t2"]);
+    assert.deepEqual(collapsedTurnsAfter(["t1"], ["t2"], ["t2"]), ["t1"], "an unrelated patch keeps it");
+  });
+});
+
 describe("a drill-in holds its disclosure sets only while their members stay the same", () => {
   it("expanding one group in place of another re-derives the rows", () => {
     // Two activity groups, one per turn, each opened by a thought of the agent's.
@@ -664,7 +715,7 @@ describe("a drill-in holds its disclosure sets only while their members stay the
         items,
         agentId: "a1",
         messageStreaming: NOTHING_STREAMS,
-        disclosures: { expandedGroupIds, expandedTurnIds: [] }
+        disclosures: { expandedGroupIds }
       });
 
     const first = project(EMPTY_AGENT_DRILL_IN, ["activity-group:th0"]);

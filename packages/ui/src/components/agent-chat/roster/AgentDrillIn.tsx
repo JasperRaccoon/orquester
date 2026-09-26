@@ -54,6 +54,7 @@ import React from "react";
 import { ArrowLeft, Terminal } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import type { AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
+import { collapsedTurnsAfter } from "../../../lib/agent-chat/drill-in.logic";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
 import type { AgentDrillInProps } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
@@ -101,7 +102,20 @@ export function AgentDrillIn({
     setFollowAgentId(agentId);
     setFollow(true);
   }
-  const live = useAgentChatDrillIn(sessionId, agentId, { disclosures, agent: agentOverride });
+  /**
+   * Turn folds the user closed. Folds start open — the child's rows are why
+   * the view was opened — so what is kept is what was closed, as for a
+   * shell's rows below, and a collapse sticks as the agent keeps working.
+   */
+  const [collapsedTurnIds, setCollapsedTurnIds] = React.useState<readonly string[]>(EMPTY_ROW_IDS);
+  const projectionDisclosures = React.useMemo(
+    () => ({ expandedGroupIds: disclosures.expandedGroupIds, collapsedTurnIds }),
+    [disclosures.expandedGroupIds, collapsedTurnIds]
+  );
+  const live = useAgentChatDrillIn(sessionId, agentId, {
+    disclosures: projectionDisclosures,
+    agent: agentOverride
+  });
   const agent = live.agent;
   const background = agent !== null && isBackgroundShellRow(agent);
 
@@ -136,28 +150,40 @@ export function AgentDrillIn({
   const [collapsedShellRowIds, setCollapsedShellRowIds] =
     React.useState<readonly string[]>(EMPTY_ROW_IDS);
 
+  const openTurnIds = live.openTurnIds;
   const onDisclosureChange = React.useCallback(
     (patch: Partial<DisclosureState>) => {
-      const groups = patch.expandedGroupIds;
+      const { expandedTurnIds: turns, ...rest } = patch;
+      if (turns !== undefined) {
+        // The timeline patches the WHOLE open list it was handed: the fold it
+        // is missing was just closed, and a closed one it names was reopened.
+        setCollapsedTurnIds((current) => collapsedTurnsAfter(current, openTurnIds, turns));
+      }
+      const groups = rest.expandedGroupIds;
       if (groups !== undefined && shellRowIds.length > 0) {
         // The timeline patches the WHOLE list, so a default-open id missing
         // from it is one the user just collapsed — and one that reappears was
         // re-opened.
         setCollapsedShellRowIds(shellRowIds.filter((id) => !groups.includes(id)));
       }
-      setDisclosures((current) => ({ ...current, ...patch }));
+      if (Object.keys(rest).length > 0) {
+        setDisclosures((current) => ({ ...current, ...rest }));
+      }
     },
-    [shellRowIds]
+    [openTurnIds, shellRowIds]
   );
 
   const timelineDisclosures = React.useMemo<DisclosureState>(() => {
     const open = shellRowIds.filter(
       (id) => !collapsedShellRowIds.includes(id) && !disclosures.expandedGroupIds.includes(id)
     );
-    return open.length === 0
-      ? disclosures
-      : { ...disclosures, expandedGroupIds: [...disclosures.expandedGroupIds, ...open] };
-  }, [collapsedShellRowIds, disclosures, shellRowIds]);
+    return {
+      ...disclosures,
+      // The folds open now: the projection's, which every toggle patches.
+      expandedTurnIds: openTurnIds as string[],
+      ...(open.length === 0 ? {} : { expandedGroupIds: [...disclosures.expandedGroupIds, ...open] })
+    };
+  }, [collapsedShellRowIds, disclosures, openTurnIds, shellRowIds]);
 
   const visuals = agent ? rosterRowVisual(agent) : null;
   const Icon = background ? Terminal : rosterRowIcon(agent ?? { kind: "subagent" });
