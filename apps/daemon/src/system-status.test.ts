@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
+import { withDeadline } from "./agent-host/support/deadline.ts";
 import { AGENT_LAUNCH_ENV_VAR } from "./agent-host/support/leftover-processes.ts";
 import type { SystemStatusOptions } from "./system-status.ts";
 import {
@@ -44,22 +46,39 @@ function unmarkedEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-/** Wait (bounded) until `pid` is no longer a running process — a zombie is gone. */
-async function waitGone(pid: number, withinMs = 5_000): Promise<boolean> {
-  const deadline = Date.now() + withinMs;
-  for (;;) {
-    let running = false;
-    try {
-      const stat = await readFile(`/proc/${pid}/stat`, "latin1");
-      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
-      running = state !== "Z" && state !== "X";
-    } catch {
-      running = false;
-    }
-    if (!running) return true;
-    if (Date.now() >= deadline) return false;
-    await setTimeoutPromise(10);
-  }
+/**
+ * Run `script` under a `sh` that exits at once, orphaning what it started in
+ * the background — which must announce its pids as ONE line on stdout. Resolves
+ * once that line arrived AND the shell exited (so the orphans are init's, no
+ * longer this process's); `gone` settles when every process still holding the
+ * announcing pipe — the orphan and whatever inherited its stdout — has exited.
+ * Nothing polls: both are events of the pipe and the shell.
+ */
+async function orphaned(
+  script: string,
+  env: NodeJS.ProcessEnv
+): Promise<{ pids: number[]; gone: Promise<void> }> {
+  const shell = spawn("sh", ["-c", script], { env, stdio: ["ignore", "pipe", "ignore"] });
+  shell.stdout.setEncoding("utf8");
+  const gone = once(shell.stdout, "close").then(() => undefined);
+  const announced = new Promise<string>((resolve, reject) => {
+    let buffer = "";
+    shell.stdout.on("data", (chunk: string) => {
+      buffer += chunk;
+      const end = buffer.indexOf("\n");
+      if (end !== -1) resolve(buffer.slice(0, end));
+    });
+    void gone.then(() => reject(new Error("the orphan exited before it announced its pids")));
+  });
+  const [line] = await Promise.all([announced, once(shell, "exit")]);
+  const pids = line.trim().split(/\s+/).map(Number);
+  assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 1), `announced: ${line}`);
+  return { pids, gone };
+}
+
+/** `gone`, bounded: a process that survives fails the test instead of hanging it. */
+async function allGone(gone: Promise<void>, label: string): Promise<void> {
+  await withDeadline(gone, { label, timeoutMs: 5_000 });
 }
 
 test("parseCpuSample sums the aggregate line and counts iowait as idle", () => {
@@ -443,28 +462,15 @@ test("a process carrying the agent host's launch marker is managed even as an or
     return;
   }
   // What a provider CLI leaves behind when it dies with the host: a shell in a
-  // session of its own, with a child, reparented away from every root — only
-  // its environment still says whose it is.
+  // session of its own, with two children, reparented away from every root —
+  // only its environment still says whose it is.
   const env = { ...unmarkedEnv(), [AGENT_LAUNCH_ENV_VAR]: randomUUID(), ORQUESTER_SESSION_ID: "chat-1" };
-  const { stdout } = await exec(
-    "sh",
-    ["-c", "setsid sh -c 'sleep 30 & sleep 30' </dev/null >/dev/null 2>&1 & echo $!"],
-    { env }
+  const { pids, gone } = await orphaned(
+    `setsid sh -c 'sleep 30 & a=$!; sleep 30 & b=$!; echo "$$ $a $b"; wait' &`,
+    env
   );
-  const orphan = Number(stdout.trim());
-  assert.ok(Number.isInteger(orphan) && orphan > 1);
-  let children: number[] = [];
+  const [orphan, ...children] = pids as [number, ...number[]];
   try {
-    // The inner shell forks its two sleeps a beat after `sh` printed the pid.
-    const deadline = Date.now() + 5_000;
-    while (children.length < 2 && Date.now() < deadline) {
-      try {
-        children = (await exec("pgrep", ["-P", String(orphan)])).stdout.trim().split("\n").map(Number);
-      } catch {
-        children = [];
-      }
-      if (children.length < 2) await setTimeoutPromise(10);
-    }
     assert.equal(children.length, 2, "the orphan started its two sleeps");
     const status = service({ listSessionIds: () => new Set(["chat-1"]) });
     const listed = (await status.processes()).processes;
@@ -482,13 +488,11 @@ test("a process carrying the agent host's launch marker is managed even as an or
     // `killed` counts signals actually sent: the shell may exit on its own once
     // its foreground sleep dies, so only the two sleeps are guaranteed.
     assert.ok(result.ok === true && result.killed >= 2, "the orphan's subtree is signalled");
-    for (const pid of [orphan, ...children]) {
-      assert.equal(await waitGone(pid), true, `pid ${pid} survived the kill`);
-    }
+    await allGone(gone, "the orphan and its two sleeps exiting after the kill");
   } finally {
-    for (const pid of [orphan, ...children]) {
+    for (const pid of pids) {
       try {
-        if (pid > 1) process.kill(pid, "SIGKILL");
+        process.kill(pid, "SIGKILL");
       } catch {
         // Already gone.
       }
