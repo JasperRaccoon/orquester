@@ -11,7 +11,7 @@
 import type { RuntimeEvent, RuntimeEventRaw } from "@orquester/api/agent-chat";
 
 import type { XaiGoalUpdatedUpdate } from "./acp/_generated/xai.ts";
-import type { TaskEndSource } from "./normalize.ts";
+import type { TaskEndSource } from "./background-tasks.ts";
 import { event, evictOldest, textArgument, type GrokNormalizerState } from "./normalizer-state.ts";
 
 /**
