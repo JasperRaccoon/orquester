@@ -1310,8 +1310,8 @@ export class OpenCodeThreadSession {
    * (`reportChildRun` in `normalize.ts`). Once every interrupt is over — the
    * abort is what ends a child — the server says whether its session still
    * runs, and check `checkId` settles it (`settleChildSurvival`): a survivor
-   * counts live again. A read that fails counts it live too: never let a
-   * deploy kill running work.
+   * is relaunched. A read that fails relaunches it too: never let a deploy
+   * kill running work.
    */
   private async judgeChildSurvival(childId: string, checkId: number): Promise<void> {
     await this.interruptsSettled();
@@ -2001,6 +2001,17 @@ export class OpenCodeThreadSession {
             ...this.base({ turnId: target }),
             type: "turn.aborted",
             payload: { reason: "interrupted", tokenUsage }
+          });
+          // The Stop ended a turn, not the session: OpenCode's lives on, and
+          // so may a run the abort never reached. `turn.aborted` alone reads
+          // `stopped` — a session the roster reads as dead (every running row
+          // `interrupted`, a child relaunched on the server's word included)
+          // and the host refuses a later Stop on — so it goes back to
+          // `ready`, as Claude's and Grok's do after every settled turn.
+          this.emit({
+            ...this.base({ turnId: target }),
+            type: "session.state.changed",
+            payload: { state: "ready", reason: "turn:interrupted" }
           });
         }
         cancellation.complete();

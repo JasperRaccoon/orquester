@@ -536,8 +536,8 @@ export interface OpenCodeChildAgent {
   /**
    * The run's end was the adapter's own (`closeLiveChildAgents`: a Stop, a
    * failed admission's abort, a failed turn), not the provider's word: a
-   * report that the run goes on may count it live again
-   * (`reportChildRun`). Cleared by a revival and by a relaunch.
+   * report that the run goes on may relaunch it (`reportChildRun`). Cleared
+   * by that relaunch and by the provider's.
    */
   endedByAdapter?: boolean;
   /**
@@ -551,12 +551,17 @@ export interface OpenCodeChildAgent {
   survivalCheck?: "pending" | "notRunning";
   survivalCheckId?: number;
   /**
-   * Live again after an end the adapter wrote itself, on the server's word
-   * (`settleChildSurvival`): the roster keeps that end, so no row of this run
-   * names a status — which would reopen the row or flip it to `idle`. Cleared
-   * by a relaunch, which starts a run the roster reopens for.
+   * The launch id the run's rows name when the ADAPTER reopened it —
+   * `opencode-revive:<callID>:<n>`, the `n`th relaunch of the child
+   * (`revivals`) after an end the adapter wrote itself, on the server's word
+   * that it runs (`settleChildSurvival`). The relaunch contract: a changed
+   * `toolUseId` on `task.started` is what reopens the roster's terminal row.
+   * `toolUseId` stays the provider's launching call, which the parent's
+   * `task` part still names. Cleared by a provider relaunch, whose rows name
+   * its own new call.
    */
-  revived?: boolean;
+  launchId?: string;
+  revivals?: number;
 }
 
 /**

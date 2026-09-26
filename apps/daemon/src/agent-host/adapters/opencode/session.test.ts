@@ -2106,44 +2106,65 @@ function livenessOf(harness: Harness): ReturnType<typeof createLivenessRegistry>
   return liveness;
 }
 
-test("a child that survives the Stop counts live again: its own start re-emitted — the roster keeps the Stop's end — and its own idle and answer end it, once", async () => {
+/** A running call of the child's, as a `bash` part reports it. */
+function childCall(childId: string): unknown {
+  return {
+    type: "message.part.updated",
+    properties: {
+      sessionID: childId,
+      part: {
+        id: "prt_child_tool",
+        messageID: "msg_child_reply",
+        sessionID: childId,
+        type: "tool",
+        tool: "bash",
+        callID: "call_child_ls",
+        state: { status: "running", title: "ls", input: { command: "ls" }, metadata: { output: "" }, time: { start: 1 } }
+      }
+    }
+  };
+}
+
+test("a child that survives the Stop is relaunched on the server's word: the roster reads it running, then completed with its own answer", async () => {
   const harness = makeHarness();
   // The abort never reaches it (a `task_id` extension's run, a job started
   // after the abort listed the jobs): the server still runs it after.
   harness.fake.statusMap = { ses_bg: { type: "busy" } };
   const { session, sessionId } = await stoppedWithChild(harness);
   assert.equal(livenessOf(harness).liveness("thread-1"), null, "closed, it held no drain");
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  assert.equal(host.fold().roster.find((row) => row.id === "ses_bg")?.status, "interrupted", "the Stop's own end");
+  assert.equal(
+    host.fold().head?.session.status,
+    "ready",
+    "the Stop ended a turn, not the session: live, so the roster can read a run in it and the host takes the next Stop"
+  );
 
+  let fed = harness.events.length;
   const revival = nextStartOf(harness, "ses_bg");
   pushAll(harness.fake, childStreams("ses_bg", "a.ts, README.md"));
   const revived = await revival;
-  assert.equal(revived.payload.toolUseId, "call_bg", "its own start, naming its own launch");
-  assert.equal(session.hasLiveSubagents(), true);
+  assert.equal(
+    revived.payload.toolUseId,
+    "opencode-revive:call_bg:1",
+    "a NEW launch id: the relaunch contract, which reopens the roster's row"
+  );
+  assert.equal(session.hasLiveSubagents(), true, "back in the adapter's live set: a Stop or the exit closes it");
   assert.equal(livenessOf(harness).liveness("thread-1"), "working", "it holds a deploy's drain again");
-  const host = createHostIngestion();
-  await host.ingest(harness.events);
-  const afterRevival = host.fold().roster.find((row) => row.id === "ses_bg");
-  assert.equal(afterRevival?.status, "interrupted", "a late delivery to the roster: the Stop's end stays");
+  await host.ingest(harness.events.slice(fed));
+  const running = host.fold().roster.find((row) => row.id === "ses_bg");
+  assert.deepEqual(
+    [running?.status, running?.result],
+    ["running", null],
+    "running again, and nothing of the Stop's end — its summary included — on the reopened run"
+  );
 
   // Its run calls a tool, ends, and its answer reaches the parent (the Stop's
   // leftovers still linger there: no new run has said busy).
-  const fed = harness.events.length;
+  fed = harness.events.length;
   pushAll(harness.fake, [
-    {
-      type: "message.part.updated",
-      properties: {
-        sessionID: "ses_bg",
-        part: {
-          id: "prt_child_tool",
-          messageID: "msg_child_reply",
-          sessionID: "ses_bg",
-          type: "tool",
-          tool: "bash",
-          callID: "call_child_ls",
-          state: { status: "running", title: "ls", input: { command: "ls" }, metadata: { output: "" }, time: { start: 1 } }
-        }
-      }
-    },
+    childCall("ses_bg"),
     ...runSettles("ses_bg"),
     ...injectedAnswer({ sessionId, promptId: "msg_answer", childId: "ses_bg", answer: "Found README.md.", description: "list files" })
   ]);
@@ -2151,26 +2172,53 @@ test("a child that survives the Stop counts live again: its own start re-emitted
     const completed = event as Extract<RuntimeEvent, { type: "task.completed" }>;
     return completed.payload.taskId === "ses_bg" && completed.payload.summary === "Found README.md.";
   });
-  assert.deepEqual(taskEnds(harness.events.slice(fed)), ["ses_bg:completed", "ses_bg:completed:Found README.md."]);
-  const statuses = harness.events
-    .slice(fed)
-    .filter((event) => event.type === "task.updated" || event.type === "task.progress")
-    .map((event) => ("status" in event.payload ? event.payload.status : undefined));
-  assert.ok(statuses.length > 0, "its call reported progress");
-  assert.deepEqual(
-    statuses.filter((status) => status !== undefined),
-    [],
-    "a revived run's rows name no status, which would reopen or flip the roster's row"
-  );
+  assert.deepEqual(taskEnds(harness.events.slice(fed)), ["ses_bg:completed", "ses_bg:completed:Found README.md."], "one end, one result");
+  for (const event of harness.events.slice(fed).filter((event) => event.type.startsWith("task."))) {
+    assert.equal(
+      (event.payload as { toolUseId?: string }).toolUseId,
+      "opencode-revive:call_bg:1",
+      `${event.type} names the reopened run's launch`
+    );
+  }
   assert.equal(livenessOf(harness).liveness("thread-1"), null, "its own end drops it");
   await host.ingest(harness.events.slice(fed));
   const end = host.fold().roster.find((row) => row.id === "ses_bg");
-  assert.deepEqual(
-    [end?.status, end?.result],
-    ["interrupted", "interrupted"],
-    "the roster keeps the Stop's end whole — its first terminal write wins; the answer is the log's result row"
-  );
+  assert.deepEqual([end?.status, end?.result], ["completed", "Found README.md."]);
   await session.stop({ reason: "test", hostInitiated: true });
+  assert.deepEqual(taskEnds(harness.events).filter((row) => row.endsWith(":stopped:test")), [], "a finished run is not closed again");
+  harness.dispose();
+});
+
+test("a second Stop closes a relaunched child, and a confirmed report relaunches it again under its next id", async () => {
+  const harness = makeHarness();
+  harness.fake.statusMap = { ses_bg: { type: "busy" } };
+  const { session } = await stoppedWithChild(harness);
+  const first = nextStartOf(harness, "ses_bg");
+  pushAll(harness.fake, childStreams("ses_bg", "a.ts"));
+  assert.equal((await first).payload.toolUseId, "opencode-revive:call_bg:1");
+
+  // The second Stop reaches nothing either: the server still runs it.
+  const fed = harness.events.length;
+  await session.interruptTurn();
+  assert.deepEqual(taskEnds(harness.events.slice(fed)), ["ses_bg:stopped:interrupted"], "the relaunched run is in the live set: the Stop closes it");
+  assert.equal(livenessOf(harness).liveness("thread-1"), null);
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  const ingested = harness.events.length;
+  assert.equal(host.fold().roster.find((row) => row.id === "ses_bg")?.status, "interrupted");
+
+  const second = nextStartOf(harness, "ses_bg");
+  pushAll(harness.fake, [childCall("ses_bg")]);
+  assert.equal((await second).payload.toolUseId, "opencode-revive:call_bg:2", "each relaunch its own id");
+  await host.ingest(harness.events.slice(ingested));
+  assert.equal(host.fold().roster.find((row) => row.id === "ses_bg")?.status, "running");
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working");
+  await session.stop({ reason: "tab closed", hostInitiated: true });
+  assert.deepEqual(
+    taskEnds(harness.events).filter((row) => row.startsWith("ses_bg:stopped")),
+    ["ses_bg:stopped:interrupted", "ses_bg:stopped:interrupted", "ses_bg:stopped:tab closed"],
+    "and the exit closes the run in progress, as any"
+  );
   harness.dispose();
 });
 

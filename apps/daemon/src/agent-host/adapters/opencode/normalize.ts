@@ -936,13 +936,15 @@ function demux(
  * `classifyTaskAgentKind` resolve it to `"agent"`.
  */
 function childLinkage(agent: OpenCodeChildAgent): TaskAgentLinkage {
+  // The run's launch: the provider's call, or the adapter's own relaunch id.
+  const toolUseId = agent.launchId ?? agent.toolUseId;
   return {
     taskType: "subagent",
     agentId: agent.sessionId,
     ...(agent.title !== undefined ? { title: agent.title } : {}),
     ...(agent.role !== undefined ? { role: agent.role } : {}),
     ...(agent.model !== undefined ? { model: agent.model } : {}),
-    ...(agent.toolUseId !== undefined ? { toolUseId: agent.toolUseId } : {}),
+    ...(toolUseId !== undefined ? { toolUseId } : {}),
     ...(agent.parentAgentId !== undefined ? { parentAgentId: agent.parentAgentId } : {})
   };
 }
@@ -1041,17 +1043,12 @@ function emitTaskProgress(
       description: agent.description,
       ...(extra.summary !== undefined ? { summary: extra.summary } : {}),
       ...(extra.lastToolName !== undefined ? { lastToolName: extra.lastToolName } : {}),
-      // A revived run's rows name no status: the roster keeps the adapter's end.
-      ...(extra.status !== undefined && agent.revived !== true ? { status: extra.status } : {})
+      ...(extra.status !== undefined ? { status: extra.status } : {})
     }
   });
 }
 
-/**
- * A non-terminal status patch; repeated identical statuses are dropped, and a
- * revived run writes none — `running` would reopen the roster's row, `idle`
- * flip it off the adapter's end (`roster.ts`, `applyStatus`).
- */
+/** A non-terminal status patch; repeated identical statuses are dropped. */
 function emitTaskStatus(
   state: OpenCodeSessionState,
   agent: OpenCodeChildAgent,
@@ -1059,7 +1056,7 @@ function emitTaskStatus(
   raw: unknown,
   out: Emitter
 ): void {
-  if (agent.completed || agent.revived === true || agent.lastStatus === status) {
+  if (agent.completed || agent.lastStatus === status) {
     return;
   }
   emitTaskStarted(state, agent, raw, out);
@@ -1170,8 +1167,8 @@ export function closeLiveChildAgents(
 /**
  * A child whose run the adapter ended itself reports that the run goes on —
  * its session says `busy`, or a frame of a live run arrives (`status` and
- * `activity`). The Grok adapter's rule: an end the adapter wrote is not the
- * provider's word, and a deploy must never kill running work. But a run the
+ * `activity`). An end the adapter wrote is not the provider's word (Grok's
+ * rule too), and a deploy must never kill running work. But a run the
  * abort DID cancel sends such frames too, late — its last ones, published
  * before its cancel — and only the server can tell the two apart once the
  * abort is over (README observation 29). So the report asks it
@@ -1210,14 +1207,20 @@ function noteChildIdle(agent: OpenCodeChildAgent): void {
 
 /**
  * The server's word on a child whose run the adapter ended ({@link
- * reportChildRun}): `running` counts it live again — its own start row
- * re-emitted, naming its own launch, which the roster reads as a late delivery
- * (it keeps the adapter's end) and the liveness registry as live work; its
- * rows from here name no status (`revived`), and its own idle and answer end
- * it, once, as they end any run. Not running: that report was a cancelled
- * run's last frames. A check the child's own idle made void writes nothing.
- * `running` is also the answer when the server cannot say: a duplicate row
- * costs less than a deploy killing running work.
+ * reportChildRun}). Running — confirmed, unlike a Grok report (the Grok
+ * adapter keeps its own end on a revival) — the child is RELAUNCHED under the
+ * relaunch contract (AGENTS.md, "Agent rows must survive resumes and
+ * retention", rule 1): a new `task.started` naming a NEW launch id,
+ * `opencode-revive:<callID>:<n>` (`launchId`), before any row of the reopened
+ * run. The roster reopens its row, clearing the adapter's end and its summary;
+ * the liveness registry counts it again. The child is back in the adapter's
+ * live set, so a Stop or the exit closes it `stopped` again. Its own idle and
+ * answer end it as they end any run, once — with its result, which, for a run
+ * the provider still runs as the same job, still answers in the background if
+ * its launch did. Not running: that report was a cancelled run's last frames.
+ * A check the child's own idle made void writes nothing. `running` is also the
+ * answer when the server cannot say: a duplicate row costs less than a deploy
+ * killing running work.
  */
 export function settleChildSurvival(
   state: OpenCodeSessionState,
@@ -1241,9 +1244,11 @@ export function settleChildSurvival(
   }
   agent.survivalCheck = undefined;
   agent.endedByAdapter = false;
-  agent.revived = true;
+  agent.revivals = (agent.revivals ?? 0) + 1;
+  agent.launchId = `opencode-revive:${agent.toolUseId ?? agent.sessionId}:${agent.revivals}`;
   agent.completed = false;
   agent.lastStatus = undefined;
+  agent.resultPending = false;
   const out = new Emitter(state, ctx);
   out.push({
     ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
@@ -1345,10 +1350,11 @@ function linkChildFromTaskPart(
     known.resultPending = false;
     known.pendingResult = undefined;
     known.answersInBackground = false;
-    // A new run, which the roster reopens for: nothing of the last one's end.
+    // A new run, which the roster reopens for: nothing of the last one's end,
+    // and its rows name its own call.
     known.endedByAdapter = false;
     known.survivalCheck = undefined;
-    known.revived = false;
+    known.launchId = undefined;
   }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;

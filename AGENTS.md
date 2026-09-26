@@ -913,7 +913,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   call with `task_id` re-prompts the existing child, no `session.created` — starts every run from
   the parent's `running` `task` part under its `callID`; a live part naming a settled child under a
   call never seen for it is the relaunch; a frame of any call seen before, or a call on a live
-  child, emits no task row (`linkChildFromTaskPart`). Codex starts under `codex-launch:<item id>`
+  child, emits no task row (`linkChildFromTaskPart`); and a child a Stop closed that the server
+  confirms still runs is relaunched by the adapter itself under `opencode-revive:<callID>:<n>` (see
+  "OpenCode: a subagent's answer arrives after its run ended", point 7). Codex starts under
+  `codex-launch:<item id>`
   at `subAgentActivity started` and again under `codex-run:<turn id>` at a child's own
   `turn/started` after a settled run, or for a child this session never saw launched
   (`childAgentEvent`); an end record arriving during a turn a relaunch opened writes no end, and
@@ -1224,16 +1227,24 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   and 1.18.32's `Permission.reply` rejects every other ask of that session with it. (7) A child the
   adapter closed itself (a Stop, a failed admission's abort, a failed turn: `closeLiveChildAgents`
   marks `endedByAdapter`) that runs on — a `task_id` extension's child, a job started after the
-  abort listed the jobs — read "interrupted" and held no drain while it worked. The Grok rule now
-  applies: an end the adapter wrote is not the provider's word. A report of a live run (the child's
-  `busy`, a delta, a text part with no end, a running call, a reply not completed) asks the server
-  once the interrupts are over (`reportChildRun`, `judgeChildSurvival`, `settleChildSurvival`):
-  busy — its own start re-emitted, naming its own launch, which the roster reads as a late
-  delivery (it keeps the Stop's end, result included: first write wins) and liveness as live work;
-  its rows from there name no status (`revived`: `running` would reopen the row, `idle` flip it),
-  and its own idle and answer end it, once. Idle — the report was a cancelled run's last frames:
-  nothing, and only a `busy` asks again. The child's own idle voids a check in flight; a read that
-  fails revives (the drain outranks a duplicate row).
+  abort listed the jobs — read "interrupted" and held no drain while it worked. An end the adapter
+  wrote is not the provider's word: a report of a live run (the child's `busy`, a delta, a text part
+  with no end, a running call, a reply not completed) asks the server once the interrupts are over
+  (`reportChildRun`, `judgeChildSurvival`, `settleChildSurvival`). Busy — confirmed — the child is
+  RELAUNCHED under the relaunch contract ("Agent rows must survive resumes and retention", rule
+  (1)): a new `task.started` naming a NEW launch id, `opencode-revive:<callID>:<n>` (`launchId`,
+  which every row of the reopened run names; `toolUseId` stays the provider's call, whose part still
+  gives the run its answer). The roster reopens the row — running, the Stop's end and summary
+  cleared — liveness counts it, it is back in the live set (a later Stop or the exit closes it
+  `stopped`), and its own idle and answer end it `completed` with its result, once. For the roster
+  to read it running the session must read live after a Stop: `turn.aborted` folds to `stopped`, a
+  dead session to the roster (every running row `interrupted`) and one the host refuses the next
+  Stop on, so the Stop now returns it to `ready` (`session.state.changed`, `turn:interrupted`), as
+  Claude's and Grok's do after every settled turn. Idle — the report was a cancelled run's last
+  frames: nothing, and only a `busy` asks again. The child's own idle voids a check in flight; a
+  read that fails relaunches it too (the drain outranks a duplicate row). The Grok adapter keeps its
+  adapter-written end on a revival (a late delivery, status-less rows): its reports are the CLI's
+  own listings and frames, not confirmed by a status read like this one.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

@@ -987,18 +987,25 @@ What still reaches the thread after a Stop:
   for each, bounded) reaches the children it lists in time, and no others.
 
 **A child that runs on.** The Stop closes every child `stopped` on the adapter's own word
-(`closeLiveChildAgents`), so one that survived read "interrupted" and held no drain while it
-worked. The Grok adapter's rule applies — an end the adapter wrote is not the provider's word: a
-frame of a live run from such a child (its `busy`, a delta, a text part with no end, a running
-call, a reply not completed) asks the server once every interrupt is over whether its session runs
-(`GET /session/status`). A cancelled child sends such frames too, late — its last ones, published
-before its cancel — and only the server tells the two apart; each cancelled child's own idle comes
-after them. Busy, it counts live again: its own start row re-emitted, naming its own launch, which
-the roster reads as a late delivery (it keeps the Stop's end, and its first-written result) and the
-liveness registry as live work; its rows from there name no status, which would reopen the
-roster's row or flip it to idle; its own idle and answer end it, once. Not running, the frames were
-leftovers: nothing is written, and only a `busy` asks again. Its idle voids a check in flight. A
-read that fails counts it live: the drain outranks a duplicate row.
+(`closeLiveChildAgents`), so one that survived read "interrupted" and held no drain while it worked.
+An end the adapter wrote is not the provider's word: a frame of a live run from such a child (its
+`busy`, a delta, a text part with no end, a running call, a reply not completed) asks the server,
+once every interrupt is over, whether its session runs (`GET /session/status`). A cancelled child
+sends such frames too, late — its last ones, published before its cancel — and only the server
+tells the two apart; each cancelled child's own idle comes after them. Busy — confirmed — the child
+is RELAUNCHED under the relaunch contract: a new `task.started` naming a new launch id,
+`opencode-revive:<callID>:<n>`, which every row of the reopened run names while the provider's call
+stays the one its part is matched by. The roster reopens the row, running, with the Stop's end and
+summary cleared; the liveness registry counts it; the adapter's live set holds it again, so a later
+Stop or the exit closes it `stopped`; and its own idle and answer end it `completed` with its
+result, once. The roster reads it running only while the thread's session reads live, so the Stop
+now returns the session to `ready` after its `turn.aborted` (which folds to `stopped`, a dead
+session to the roster and one the host refuses a later Stop on), as Claude's and Grok's do after
+every settled turn. Not running, the frames were leftovers: nothing is written, and only a `busy`
+asks again. Its idle voids a check in flight. A read that fails relaunches it: the drain outranks a
+duplicate row. The Grok adapter keeps its adapter-written end on a revival (a late delivery with
+status-less rows): its reports are the CLI's own listings and frames, not confirmed by a status
+read like this one.
 
 The adapter used to mark every request that arrived while no turn ran after an interrupt resolved,
 write nothing and answer nothing: a live asker waited for good, and so did the parent's next turn,

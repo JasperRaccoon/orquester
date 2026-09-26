@@ -40,6 +40,7 @@ import { joinToolOutput } from "../../store/tool-output.ts";
 import {
   closeLiveChildAgents,
   normalizeOpenCodeEvent,
+  settleChildSurvival,
   taskResultText,
   type NormalizeContext,
   type NormalizerSignal
@@ -61,7 +62,13 @@ import {
   suffixPrefixOverlap,
   type OpenCodeSessionState
 } from "./state.ts";
-import { compactionContinues, compactionPrompt, compactionSummary, wokenReply } from "./testing/woken.ts";
+import {
+  childLaunch,
+  compactionContinues,
+  compactionPrompt,
+  compactionSummary,
+  wokenReply
+} from "./testing/woken.ts";
 
 const FIXTURE_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -1536,6 +1543,77 @@ test("a background run's answer injected while a Stop's leftovers are still drop
   assert.deepEqual(
     eventsOfType(result, "task.completed").map((event) => [event.payload.taskId, event.payload.summary]),
     [["ses_background_child", "Found it."]]
+  );
+});
+
+test("a child relaunched on the server's word still takes its own call's answer: the parent's part ends the reopened run, naming its new launch", () => {
+  const run = liveSession("ses_parent");
+  feed(run, childLaunch({ sessionId: "ses_parent", childId: "ses_fg", callId: "call_fg", description: "read the code", background: false }));
+  closeLiveChildAgents(run.state, run.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    run.state,
+    { type: "session.status", properties: { sessionID: "ses_fg", status: { type: "busy" } } },
+    run.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  const relaunched = settleChildSurvival(run.state, "ses_fg", reported.checkId, true, run.ctx);
+  assert.deepEqual(
+    eventsOfType(relaunched, "task.started").map((event) => event.payload.toolUseId),
+    ["opencode-revive:call_fg:1"]
+  );
+  // Its answer rides the call it was launched by, which the provider still names.
+  const answered = feed(run, [
+    {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_parent",
+        part: {
+          id: "prt_call_fg",
+          messageID: "msg_launch_call_fg",
+          sessionID: "ses_parent",
+          type: "tool",
+          tool: "task",
+          callID: "call_fg",
+          state: {
+            status: "completed",
+            title: "read the code",
+            input: { subagent_type: "explore", description: "read the code", prompt: "read the code" },
+            metadata: { parentSessionId: "ses_parent", sessionId: "ses_fg" },
+            output: '<task id="ses_fg" state="completed">\n<task_result>\nIt is fine.\n</task_result>\n</task>',
+            time: { start: 1, end: 2 }
+          }
+        }
+      }
+    }
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(answered, "task.completed").map((event) => [event.payload.status, event.payload.summary, event.payload.toolUseId]),
+    [["completed", "It is fine.", "opencode-revive:call_fg:1"]]
+  );
+});
+
+test("after an adapter relaunch, a provider relaunch names its own new call", () => {
+  const run = liveSession("ses_parent");
+  feed(run, childLaunch({ sessionId: "ses_parent", childId: "ses_bg", callId: "call_bg", description: "list files", background: true }));
+  closeLiveChildAgents(run.state, run.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(
+    run.state,
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "busy" } } },
+    run.ctx
+  ).signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  settleChildSurvival(run.state, "ses_bg", reported.checkId, true, run.ctx);
+  // The relaunched run ends by its own idle; then the model resumes the child
+  // with `task_id`, under a call of its own.
+  feed(run, [
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: "ses_bg" } }
+  ]);
+  const resumed = feed(run, childLaunch({ sessionId: "ses_parent", childId: "ses_bg", callId: "call_resume", description: "list files", background: true }).slice(1)).flat();
+  assert.deepEqual(
+    eventsOfType(resumed, "task.started").map((event) => event.payload.toolUseId),
+    ["call_resume"],
+    "its own call: a changed id the roster reopens for, not the adapter's last relaunch id"
   );
 });
 
