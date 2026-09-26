@@ -494,13 +494,29 @@ async function runPrompt(id, params) {
     return;
   }
 
-  if (scenario === "wake-held" || scenario === "wake-finished-stop") {
+  if (scenario === "wake-finished-steer" && promptSeq === 2) {
+    // The steer's own prompt, run at once: the CLI is idle, the wake over.
+    sendTogether([
+      {
+        jsonrpc: "2.0",
+        method: "_x.ai/queue/changed",
+        params: { sessionId, entries: [], runningPromptId: promptId, runningKind: "prompt" }
+      },
+      chunkFrame("steered;", promptId),
+      turnCompletedFrame(promptId)
+    ]);
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });
+    result(id, { stopReason: "end_turn", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "wake-held" || scenario === "wake-finished-stop" || scenario === "wake-finished-steer") {
     // The CLI finished our prompt and ran one of its own to its end — a
     // background agent's, `GROK_MOCK_WAKE_CHUNKS` chunks and its
     // `turn_completed` — before our RPC result went out: fixture 20's window,
     // as long as a steer or a `set_model` round trip can make it.
-    // `wake-held` answers our prompt right after; `wake-finished-stop` only
-    // once the client cancels (a Stop after the wake finished).
+    // `wake-held` answers our prompt right after; the other two only once the
+    // client cancels (a Stop, or a steer, after the wake finished).
     const count = Number(process.env.GROK_MOCK_WAKE_CHUNKS ?? "300");
     sendTogether([
       chunkFrame("ours;", promptId),
@@ -510,7 +526,7 @@ async function runPrompt(id, params) {
       turnCompletedFrame(WAKE_ID),
       readMarkerFrame()
     ]);
-    if (scenario === "wake-finished-stop") {
+    if (scenario !== "wake-held") {
       await waitFor(() => cancelled);
     }
     notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "end_turn" });

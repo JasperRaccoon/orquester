@@ -973,6 +973,20 @@ test("a Stop after the waiting wake finished keeps its reply, on a turn of its o
   await r.dispose();
 });
 
+test("a steer after the waiting wake finished keeps its reply: it joins the turn the steer continues, before ours", async () => {
+  const r = await rig({ scenario: "wake-finished-steer", env: { GROK_MOCK_WAKE_CHUNKS: "50" } });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor(READ_MARKER, "every frame of the finished wake read");
+  const steered = await r.adapter.sendTurn({ threadId: "t1", input: "go on", attachments: [], interactionMode: "default" });
+  assert.equal(steered.turnId, turnId);
+  await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "the steered turn's end");
+  await r.drain();
+  assert.equal(turnText(r.events, turnId), `ours;${wakeChunks(50)}steered;`, "nothing the wake said is lost");
+  assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
+  await r.dispose();
+});
+
 test("a steer while the CLI has its own prompt queued keeps that prompt's reply, in the order the CLI ran it", async () => {
   const r = await rig({ scenario: "wake-queued-steer" });
   await start(r);
