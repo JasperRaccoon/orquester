@@ -1062,6 +1062,9 @@ function emitTaskStarted(
   const linkage = childLinkage(agent);
   const toolUseId = linkage.toolUseId ?? `opencode-child:${agent.sessionId}`;
   agent.startLaunchId = toolUseId;
+  // The run's prompt rides its start alone; no later row repeats it.
+  const prompt = agent.prompt;
+  agent.prompt = undefined;
   out.push({
     ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
     type: "task.started",
@@ -1069,7 +1072,8 @@ function emitTaskStarted(
       ...linkage,
       toolUseId,
       taskId: agent.sessionId,
-      description: agent.description
+      description: agent.description,
+      ...(prompt !== undefined ? { prompt } : {})
     }
   });
 }
@@ -1437,6 +1441,7 @@ function linkChildFromTaskPart(
     known.endedByAdapter = false;
     known.survivalCheck = undefined;
     known.launchId = undefined;
+    known.prompt = undefined;
   }
 
   const input = isRecord(part.state.input) ? part.state.input : undefined;
@@ -1457,6 +1462,14 @@ function linkChildFromTaskPart(
     ...(parentSessionId !== state.openCodeSessionId ? { parentAgentId: parentSessionId } : {})
   });
   rememberCall(agent, part.callID);
+  // What this part asked the run to do (fixture 12, line 142: the child's own
+  // first user message, line 145, repeats it and stays dropped), for the run's
+  // start alone: the `pending` frame's input is empty, and a run that already
+  // started — before any part named it — keeps its start as written.
+  const prompt = typeof input?.prompt === "string" ? input.prompt : undefined;
+  if (!agent.started && prompt !== undefined && prompt.trim().length > 0) {
+    agent.prompt = prompt;
+  }
 
   if (part.state.status === "completed" || part.state.status === "error") {
     // A call run in the BACKGROUND (`metadata.background: true`) completes at
