@@ -14,6 +14,7 @@ import type { RuntimeEvent, RuntimeEventRaw, RuntimeTaskStatus } from "@orqueste
 
 import type { ToolCallStatus } from "./acp/_generated/schema.ts";
 import type { XaiBackgroundTask, XaiTaskSnapshot } from "./acp/_generated/xai.ts";
+import type { GrokNormalizer } from "./normalize.ts";
 import {
   ACP_RAW_SOURCE,
   asRecord,
@@ -29,9 +30,10 @@ import {
   subagentLinkage,
   subagentNamed,
   subagentOfBackgroundTask,
-  subagentReport
+  subagentReport,
+  type subagentProgress
 } from "./subagents.ts";
-import { isTerminalToolStatus } from "./tool-calls.ts";
+import { isTerminalToolStatus, type FINISHED_CALLS_REMEMBERED } from "./tool-calls.ts";
 
 /**
  * Where a background task was started: `session` is the ACP session whose
@@ -366,7 +368,7 @@ export function orphanAgentTasks(state: GrokNormalizerState, agentTaskId: string
  * first ({@link taskCompleted}) — or in a poll or kill answer
  * ({@link taskAnswers}). A task nobody hears from again is bounded by
  * §3.1's liveness TTL; the adapter's duty is to stop claiming it is live
- * once the session ends, which {@link stopBackgroundTasks} does.
+ * once the session ends, which {@link GrokNormalizer.stopBackgroundTasks} does.
  *
  * An entry whose id a `spawn_subagent` launch reported is that subagent: its
  * end, or its dropping out once listed, is the agent's end. Not seen in any

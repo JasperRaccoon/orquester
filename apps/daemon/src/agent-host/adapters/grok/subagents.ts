@@ -28,8 +28,11 @@ import {
   orphanAgentTasks,
   pollLifecycle,
   rememberEndedTask,
+  type backgroundFromToolCall,
+  type foldBackgroundTasks,
   type TaskEndSource
 } from "./background-tasks.ts";
+import type { GrokNormalizer } from "./normalize.ts";
 import { asRecord, event, evictOldest, textArgument, type GrokNormalizerState } from "./normalizer-state.ts";
 import { closeChildSegments } from "./segments.ts";
 import { failTool, isTerminalToolStatus } from "./tool-calls.ts";
@@ -246,9 +249,9 @@ function uuidsIn(value: unknown): string[] {
  * A `spawn_subagent` call → a roster agent (§7.6). Captured (fixtures
  * 15–23): the call, then `subagent_spawned` naming the run's id and child
  * session ({@link subagentSpawned}), the child's own frames under that
- * session ({@link childSessionUpdate}), `subagent_progress` heartbeats
- * ({@link subagentProgress}) and `subagent_finished` — the run's end, every
- * way it ends ({@link subagentFinished}).
+ * session ({@link GrokNormalizer.childSessionUpdate}), `subagent_progress`
+ * heartbeats ({@link subagentProgress}) and `subagent_finished` — the run's
+ * end, every way it ends ({@link subagentFinished}).
  *
  * - The call's first frame STARTS the agent: `task.started`, agent-kind
  *   (`taskType: "subagent"`), stamped with its own id like every Grok task,
@@ -264,11 +267,12 @@ function uuidsIn(value: unknown): string[] {
  *   await budget to the background (fixture 22: "Subagent took longer than
  *   the foreground budget and was moved to the background…"). A foreground
  *   call its turn cut is NOT one of these: the CLI cancels the child with
- *   the turn (fixture 23; {@link endTurn}). Such a run ends by
- *   `subagent_finished`, a poll or kill answer ({@link
- *   backgroundFromToolCall}, T3's reader), Stop, the session's stop or the
- *   process's exit ({@link stopBackgroundTasks}); its liveness lapses an
- *   hour after the latest row naming it ({@link GROK_AGENT_LIVENESS_TTL_MS}).
+ *   the turn (fixture 23; {@link GrokNormalizer.endTurn}). Such a run ends
+ *   by `subagent_finished`, a poll or kill answer
+ *   ({@link backgroundFromToolCall}, T3's reader), Stop, the session's stop
+ *   or the process's exit ({@link GrokNormalizer.stopBackgroundTasks}); its
+ *   liveness lapses an hour after the latest row naming it
+ *   ({@link GROK_AGENT_LIVENESS_TTL_MS}).
  * - `resume_from` re-launches a completed subagent. The relaunch contract
  *   (AGENTS.md, "Agent rows must survive resumes and retention", rule 1):
  *   the SAME task starts again under the NEW call, before any row of the
@@ -466,7 +470,7 @@ function backgroundSubagent(state: GrokNormalizerState, track: SubagentTrack, ra
  * A spawn no launch explains — the CLI's own (a `/loop` fire runs "in a
  * detached background subagent", its docs say; not captured) — is an agent
  * of its own, under its subagent id. From here the child session's frames
- * are that agent's own rows ({@link childSessionUpdate}).
+ * are that agent's own rows ({@link GrokNormalizer.childSessionUpdate}).
  */
 export function subagentSpawned(
   state: GrokNormalizerState,
@@ -700,10 +704,11 @@ function rememberEndedSubagent(state: GrokNormalizerState, track: SubagentTrack,
 }
 
 /**
- * A CLI report naming a subagent run that is not live — {@link shellReport}'s
- * rule: after an end the adapter wrote itself, a report that it still runs
- * counts it live again ({@link reviveSubagent}) and a report of its end is
- * the CLI's, with no row; after the CLI's own end, nothing.
+ * A CLI report naming a subagent run that is not live — `shellReport`'s rule
+ * (`background-tasks.ts`): after an end the adapter wrote itself, a report
+ * that it still runs counts it live again ({@link reviveSubagent}) and a
+ * report of its end is the CLI's, with no row; after the CLI's own end,
+ * nothing.
  */
 export function subagentReport(
   state: GrokNormalizerState,

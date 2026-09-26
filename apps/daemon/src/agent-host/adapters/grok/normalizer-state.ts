@@ -12,11 +12,12 @@
 
 import type { RuntimeEvent, RuntimeEventRaw, RuntimeEventRawSource } from "@orquester/api/agent-chat";
 
-import type { BackgroundTrack, EndedTask } from "./background-tasks.ts";
-import type { GoalTrack, LoopTrack } from "./loops-goals.ts";
+import type { BackgroundTrack, ENDED_TASKS_REMEMBERED, EndedTask } from "./background-tasks.ts";
+import type { GoalTrack, goalUpdated, LoopTrack, scheduledTask } from "./loops-goals.ts";
+import type { GrokNormalizer } from "./normalize.ts";
 import type { PlanPathHost } from "./plan.ts";
-import type { ChildSession, SubagentLaunch, SubagentTrack } from "./subagents.ts";
-import type { FinishedCall, ToolTrack } from "./tool-calls.ts";
+import type { ChildSession, subagentFromToolCall, SubagentLaunch, SubagentTrack } from "./subagents.ts";
+import type { FINISHED_CALLS_REMEMBERED, FinishedCall, ToolTrack } from "./tool-calls.ts";
 
 export const ACP_RAW_SOURCE: RuntimeEventRawSource = "acp.jsonrpc";
 export const XAI_RAW_SOURCE: RuntimeEventRawSource = "acp.grok.extension";
@@ -61,10 +62,11 @@ export interface GrokNormalizerState {
   /**
    * Background task ids (lower-cased) whose end was written — a shell's, and
    * every id that named an ended subagent run — and who wrote it, bounded by
-   * {@link ENDED_TASKS_REMEMBERED}; see {@link shellReport}. A snapshot entry's
-   * status may be terminal, so a finished shell can still be listed, and that
-   * listing started it again under its id, put it back in the liveness
-   * registry as a watch loop, and ended it a second time when it dropped out.
+   * {@link ENDED_TASKS_REMEMBERED}; see `shellReport` (`background-tasks.ts`).
+   * A snapshot entry's status may be terminal, so a finished shell can still
+   * be listed, and that listing started it again under its id, put it back in
+   * the liveness registry as a watch loop, and ended it a second time when it
+   * dropped out.
    */
   readonly endedTasks: Map<string, EndedTask>;
   /** Scheduled prompts, by scheduler task id; see {@link scheduledTask}. */
@@ -86,8 +88,8 @@ export interface GrokNormalizerState {
   readonly children: Map<string, ChildSession>;
   /**
    * The turn the latest subagent launch ran in (`TurnTokenUsage.hasSubagents`).
-   * A turn id, not a per-turn flag: a steer re-runs {@link beginTurn} inside
-   * the same turn.
+   * A turn id, not a per-turn flag: a steer re-runs
+   * {@link GrokNormalizer.beginTurn} inside the same turn.
    */
   lastSubagentTurnId: string | undefined;
 
@@ -95,9 +97,9 @@ export interface GrokNormalizerState {
   lastProposedPlan: { markdown: string; turnId: string | undefined } | undefined;
 
   /**
-   * The ACP session's id — never a subagent's (see {@link learnSubagentIds}).
-   * The session learns it only from `session/new`'s answer, after the
-   * normaliser exists: {@link bindSession}.
+   * The ACP session's id — never a subagent's: see `learnSubagentIds`
+   * (`subagents.ts`). The session learns it only from `session/new`'s answer,
+   * after the normaliser exists: {@link GrokNormalizer.bindSession}.
    */
   sessionId: string;
 }

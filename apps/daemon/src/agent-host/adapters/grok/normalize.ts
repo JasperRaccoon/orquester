@@ -90,7 +90,8 @@ import {
   subagentFinished,
   subagentProgress,
   subagentSpawned,
-  type ChildSession
+  type ChildSession,
+  type GROK_AGENT_LIVENESS_TTL_MS
 } from "./subagents.ts";
 import { failTool, toolCall } from "./tool-calls.ts";
 import { parseResponseCompletedUsage, parseXaiUsage, turnTokenUsage } from "./usage.ts";
@@ -820,7 +821,8 @@ export class GrokNormalizer {
    * session-scoped Stop's `session/cancel` cancelling a background subagent
    * (`subagent_finished {status: "cancelled"}`, which then adds no row) while
    * a background shell runs on — and on past the CLI's own exit — so a later
-   * report that a task still runs counts it live again ({@link shellReport}).
+   * report that a task still runs counts it live again: see `shellReport`
+   * (`background-tasks.ts`).
    */
   stopBackgroundTasks(leftRunning?: string): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];

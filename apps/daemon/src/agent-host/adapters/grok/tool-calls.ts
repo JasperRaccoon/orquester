@@ -14,6 +14,7 @@ import type { RuntimeEvent, RuntimeEventRaw, RuntimeItemStatus } from "@orqueste
 
 import type { SessionNotification, SessionUpdate, ToolCallStatus } from "./acp/_generated/schema.ts";
 import { backgroundFromToolCall, PARENT_SCOPE } from "./background-tasks.ts";
+import type { GrokNormalizer } from "./normalize.ts";
 import {
   ACP_RAW_SOURCE,
   event,
