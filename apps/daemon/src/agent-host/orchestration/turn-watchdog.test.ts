@@ -7,7 +7,7 @@ import { TURN_LIVENESS_WINDOWS } from "../support/deadline.ts";
 import { createTurnWatchdog } from "./turn-watchdog.ts";
 import { createTestClock, createTestTimers } from "./testing/fakes.ts";
 
-function harness() {
+function harness(options: { waitingOnUser?: () => boolean } = {}) {
   const clock = createTestClock(0);
   const timers = createTestTimers();
   const stalled: Array<{ turnId: string; elapsedMs: number }> = [];
@@ -16,7 +16,8 @@ function harness() {
     clock,
     setTimer: (fn, ms) => timers.setTimer(fn, ms),
     clearTimer: (handle) => timers.clearTimer(handle),
-    onStalled: ({ turnId, elapsedMs }) => stalled.push({ turnId, elapsedMs })
+    onStalled: ({ turnId, elapsedMs }) => stalled.push({ turnId, elapsedMs }),
+    ...(options.waitingOnUser !== undefined ? { waitingOnUser: options.waitingOnUser } : {})
   });
   const at = (ms: number): void => {
     clock.set(ms);
@@ -95,6 +96,35 @@ describe("turn liveness watchdog (§3.1)", () => {
     clock.set(TURN_LIVENESS_WINDOWS.idleMs);
     timers.runDue(TURN_LIVENESS_WINDOWS.idleMs);
     assert.deepEqual(stalled, []);
+  });
+
+  it("never stalls a turn while the thread holds a card waiting on the user — even one an earlier turn raised", () => {
+    // A question that outlives the turn that asked it (a subagent's own, a
+    // waiting wake's: they ride no turn) is gone from the per-turn pause when
+    // that turn ends. A turn the provider starts later must not be cancelled
+    // for sitting quiet while the user still holds that card.
+    let waiting = true;
+    const { watchdog, at, stalled } = harness({ waitingOnUser: () => waiting });
+    watchdog.observe(event("turn.started", { turnId: "turn-w" }));
+    watchdog.observe(event("content.delta", { turnId: "turn-w" }));
+    assert.equal(watchdog.paused, false, "the turn's own pause holds nothing");
+    at(TURN_LIVENESS_WINDOWS.idleMs);
+    at(TURN_LIVENESS_WINDOWS.idleMs * 2);
+    assert.equal(stalled.length, 0, "a card waiting on the user is never a stall");
+
+    // The card closes and the turn stays quiet: the next look cancels it.
+    waiting = false;
+    at(TURN_LIVENESS_WINDOWS.idleMs * 3);
+    assert.equal(stalled.length, 1);
+    assert.equal(stalled[0]?.turnId, "turn-w");
+  });
+
+  it("with no card waiting on the user, a quiet turn stalls on its first window", () => {
+    const { watchdog, at, stalled } = harness({ waitingOnUser: () => false });
+    watchdog.observe(event("turn.started", { turnId: "turn-1" }));
+    watchdog.observe(event("content.delta", { turnId: "turn-1" }));
+    at(TURN_LIVENESS_WINDOWS.idleMs);
+    assert.equal(stalled.length, 1);
   });
 
   it("stops on turn completion and on session exit", () => {

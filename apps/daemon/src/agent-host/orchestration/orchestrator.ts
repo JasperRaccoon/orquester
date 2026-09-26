@@ -1659,6 +1659,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       clock,
       setTimer,
       clearTimer,
+      // A card the user holds is never a stall — an earlier turn's included
+      // (a question whose asker outlived its turn rides none, and the
+      // watchdog's own per-turn pause forgets it when that turn ends). Only a
+      // card that blocks the provider: a message-mode question parks nothing,
+      // an ordinary message answers it, so it pauses no later turn.
+      waitingOnUser: () => {
+        const pending = runtime.state.pending;
+        return (
+          (pending?.approvals.length ?? 0) > 0 ||
+          (pending?.userInputs ?? []).some((question) => question.responseMode !== "message")
+        );
+      },
       onStalled: ({ threadId, turnId, elapsedMs, windowMs }) => {
         const message = stalledTurnMessage(elapsedMs, windowMs);
         void runEffect(runtime, async () => {

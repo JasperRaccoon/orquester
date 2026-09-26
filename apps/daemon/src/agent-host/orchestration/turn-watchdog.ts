@@ -20,6 +20,11 @@
  * - it is **paused entirely** while an approval or user-input request is
  *   pending — a turn waiting on a human is not a stalled turn, and a watchdog
  *   that ignored that would cancel every request the user left open over lunch.
+ *   Its own pause knows only this turn's cards; a card an EARLIER turn raised
+ *   and the user still holds (one whose asker outlived that turn: a subagent's
+ *   own question, a waiting wake's — they ride no turn) is asked of the host
+ *   (`waitingOnUser`) when the window runs out, and while one is held the
+ *   watchdog looks again a window later instead of cancelling.
  */
 
 import { isToolLifecycleItemType, type RuntimeEvent } from "@orquester/api/agent-chat";
@@ -36,6 +41,14 @@ export interface TurnWatchdogOptions {
   activeToolMs?: number;
   /** Cancel the provider turn and settle it as failed with this message. */
   onStalled: (input: { threadId: string; turnId: string; elapsedMs: number; windowMs: number }) => void;
+  /**
+   * Whether the thread holds a card waiting on the user right now — any card,
+   * not only this turn's (the host reads its fold). Asked when the window runs
+   * out: a turn is never stalled while the user holds a card, so the watchdog
+   * looks again a window later, and a card closed since (answered, or settled
+   * by the host itself) leaves the turn watched as before.
+   */
+  waitingOnUser?: () => boolean;
 }
 
 export interface TurnWatchdog {
@@ -74,32 +87,39 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
       return;
     }
     const elapsed = options.clock.now().getTime() - lastActivityAt;
-    const remaining = Math.max(0, windowMs() - elapsed);
-    handle = options.setTimer(() => {
-      handle = null;
-      // Re-check the pause immediately before cancelling: a request may have
-      // opened while the timer was sleeping.
-      if (turnId === null || paused()) {
-        arm();
-        return;
-      }
-      const now = options.clock.now().getTime();
-      const sinceActivity = now - lastActivityAt;
-      if (sinceActivity < windowMs()) {
-        arm();
-        return;
-      }
-      const stalledTurnId = turnId;
-      turnId = null;
-      observedProgress = false;
-      openTools.clear();
-      options.onStalled({
-        threadId: options.threadId,
-        turnId: stalledTurnId,
-        elapsedMs: sinceActivity,
-        windowMs: windowMs()
-      });
-    }, remaining);
+    handle = options.setTimer(expire, Math.max(0, windowMs() - elapsed));
+  };
+
+  const expire = (): void => {
+    handle = null;
+    // Re-check the pause immediately before cancelling: a request may have
+    // opened while the timer was sleeping.
+    if (turnId === null || paused()) {
+      arm();
+      return;
+    }
+    const now = options.clock.now().getTime();
+    const sinceActivity = now - lastActivityAt;
+    if (sinceActivity < windowMs()) {
+      arm();
+      return;
+    }
+    if (options.waitingOnUser?.() === true) {
+      // A card the user still holds — an earlier turn's, which this turn's own
+      // pause no longer knows — is never a stall: look again a window later.
+      handle = options.setTimer(expire, windowMs());
+      return;
+    }
+    const stalledTurnId = turnId;
+    turnId = null;
+    observedProgress = false;
+    openTools.clear();
+    options.onStalled({
+      threadId: options.threadId,
+      turnId: stalledTurnId,
+      elapsedMs: sinceActivity,
+      windowMs: windowMs()
+    });
   };
 
   const touch = (): void => {
