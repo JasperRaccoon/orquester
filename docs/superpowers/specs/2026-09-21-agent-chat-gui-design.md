@@ -4316,6 +4316,21 @@ the child's thread, so it renders in the child's drill-in as one call with its o
 never in the parent's timeline (`adapters/codex/normalise.ts` `childItemEvents`; codex fixtures
 README observation 20).*
 
+*Built (the daemon half of "its prompt at the top"): an agent's `task.started` carries the prompt
+that launch was given — `TaskStartedPayload.prompt`, verbatim, on the first start of a run, a
+relaunch's own on its start — and ingestion keeps it as the row's `payload.prompt`, never through
+the 180-character detail cap: whole up to `TASK_PROMPT_MAX_CHARS` (32 000 UTF-16 units, exported
+from `@orquester/api`), past it cut on a code-point boundary and marked `promptTruncated`. The wire
+cuts it further at 16 KiB like any string (§5.6, `truncated`), and `GET …/items/:itemId` serves the
+stored value; the thread index does not index it. Claude reads `task_started.prompt`, else the
+launching `Agent` call's `input.prompt`; OpenCode the launching `task` part's `input.prompt` (a
+`task_id` resume's own on its relaunch); Grok the `spawn_subagent` call's `prompt` argument (a
+`resume_from` call's own); Codex a collab call's `prompt` joined to the child by
+`receiverThreadIds` or by the launch record's call id — uncaptured, and absent whenever the call is
+not read before the start. Absent too on a shell or monitor, on a start written before any launch
+named the run (OpenCode's `opencode-child:`, an agent Grok's CLI spawned itself), on a revival, and
+on every log from before (the fixtures READMEs: Claude 4, OpenCode 19, Grok 47, Codex 21).*
+
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind
 "N more" breaks T3's "a workflow section keeps that shape as it settles" rule that the paragraph
