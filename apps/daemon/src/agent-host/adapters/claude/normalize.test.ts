@@ -245,6 +245,24 @@ describe("claude normaliser — fixture replay", () => {
     assert.ok(allOf(events, "turn.completed").some((e) => e.payload.tokenUsage?.hasSubagents));
   });
 
+  it("07: the subagent's start carries the prompt its launch was given; the shell's carries none", () => {
+    // The prompt as the capture holds it: `task_started.prompt` (line 38).
+    const taskStarted = readClaudeFixture("07-subagent-task.ndjson")
+      .map((line) => line.data as Record<string, unknown>)
+      .find((data) => data.subtype === "task_started" && data.task_type === "local_agent");
+    const prompt = taskStarted?.prompt;
+    assert.ok(typeof prompt === "string" && prompt.startsWith("Read the file b.txt"));
+
+    const { events } = replayClaudeFixture("07-subagent-task.ndjson");
+    const started = allOf(events, "task.started");
+    const agent = started.find((event) => event.payload.taskType === "local_agent");
+    assert.equal(agent?.payload.prompt, prompt, "verbatim, whole");
+    assert.equal(agent?.payload.description, "Read b.txt first word", "the name stays the name");
+    const shell = started.find((event) => event.payload.taskType === "local_bash");
+    assert.ok(shell);
+    assert.equal("prompt" in shell.payload, false, "a shell's command is its description");
+  });
+
   it("07: the subagent's Bash output carries its task; the parent's background launch carries none", () => {
     const { events } = replayClaudeFixture("07-subagent-task.ndjson");
     const agent = allOf(events, "task.started").find(
@@ -772,6 +790,96 @@ describe("claude normaliser — a RESUMED subagent keeps its old parent_tool_use
     });
     const completed = done.find((event) => event.type === "item.completed" && event.itemId === "toolu_child");
     assert.equal(completed?.agentId, "task-r", "later frames resolve through the remembered alias");
+  });
+});
+
+describe("claude normaliser — an agent's start carries the prompt its launch was given", () => {
+  function taskStarted(extra: Record<string, unknown>): Record<string, unknown> {
+    return {
+      type: "system",
+      subtype: "task_started",
+      task_id: "task-r",
+      task_type: "local_agent",
+      description: "Audit the store",
+      uuid: "u-start",
+      session_id: "s",
+      ...extra
+    };
+  }
+  const startsOf = (events: readonly RuntimeEvent[]) => allOf(events, "task.started");
+
+  it("a resumed agent's start — same task, a new launching call — carries the resume's own prompt", () => {
+    const { feed } = feedable();
+    const [first] = startsOf(feed(taskStarted({ tool_use_id: "toolu_first", prompt: "Audit the store." })));
+    assert.equal(first?.payload.prompt, "Audit the store.");
+    feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "task-r",
+      tool_use_id: "toolu_first",
+      status: "completed",
+      summary: "Done.",
+      uuid: "u-note",
+      session_id: "s"
+    });
+    // The resume: the SAME task id under a NEW call (fixtures README obs. 4),
+    // with a message of its own.
+    const [resumed] = startsOf(
+      feed(
+        taskStarted({
+          tool_use_id: "toolu_second",
+          is_backgrounded: true,
+          prompt: "Now check the tests too."
+        })
+      )
+    );
+    assert.equal(resumed?.payload.toolUseId, "toolu_second");
+    assert.equal(resumed?.payload.prompt, "Now check the tests too.");
+    // A resume that names no prompt carries none — never the earlier launch's.
+    const [silent] = startsOf(feed(taskStarted({ tool_use_id: "toolu_third", is_backgrounded: true })));
+    assert.equal(silent?.payload.toolUseId, "toolu_third");
+    assert.equal("prompt" in (silent?.payload ?? {}), false);
+  });
+
+  it("a start whose frame names no prompt takes the one its own launching Agent call carried", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    feed({
+      type: "stream_event",
+      uuid: "u-stream",
+      session_id: "s",
+      parent_tool_use_id: null,
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_call",
+          name: "Agent",
+          input: { description: "Audit the store", prompt: "From the call's input." }
+        }
+      }
+    });
+    const [start] = startsOf(feed(taskStarted({ tool_use_id: "toolu_call" })));
+    assert.equal(start?.payload.prompt, "From the call's input.");
+  });
+
+  it("a shell's start never carries a prompt, whatever its frame or its call named", () => {
+    const { feed } = feedable();
+    const [shell] = startsOf(
+      feed(
+        taskStarted({
+          task_id: "bsh",
+          tool_use_id: "toolu_bash",
+          task_type: "local_bash",
+          is_backgrounded: true,
+          description: "Start the dev server",
+          prompt: "pnpm dev"
+        })
+      )
+    );
+    assert.ok(shell);
+    assert.equal("prompt" in shell.payload, false);
   });
 });
 
