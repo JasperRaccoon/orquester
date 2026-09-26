@@ -619,6 +619,27 @@ test("a resume the CLI refuses leaves the running agent running", () => {
   );
 });
 
+test("a resume that opens no run carries no prompt: the agent was never given it", () => {
+  const grok = normalizer();
+  const [launched] = only(
+    grok.handleSessionUpdate(spawnStart("call-bg", { prompt: "Run the test suite.", description: "run tests", background: true })),
+    "task.started"
+  );
+  assert.equal(launched?.payload.prompt, "Run the test suite.", "the launch that opens the run carries its prompt");
+  grok.handleSessionUpdate(spawnEnd("call-bg", "completed", "Subagent started.", textAnswer(SUB_B)));
+
+  // Resumed while it still runs: the CLI refuses ("must be completed"), so no
+  // run opens, and a prompt on this start would head the running run in the
+  // drill-in with words its agent never received.
+  const refusedStart = startedBy(grok, "call-s2", {
+    prompt: "Continue, and also fix the flaky test.",
+    resume_from: SUB_B
+  });
+  assert.equal(refusedStart.payload.taskId, "call-bg");
+  assert.equal("prompt" in refusedStart.payload, false);
+  endedBy(grok, spawnEnd("call-s2", "failed", "The source subagent is still running."));
+});
+
 test("a resume_from naming an id no launch reported starts a row of its own, under that id", () => {
   const grok = normalizer();
   const started = startedBy(grok, "call-s9", { prompt: "Continue.", resume_from: SUB_A });

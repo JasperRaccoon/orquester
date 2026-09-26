@@ -321,8 +321,11 @@ function launchSubagent(
   const background = input?.["background"] === true;
   // What THIS launch asked the agent to do, verbatim — its `prompt`
   // argument, a resume's own on a resume (fixtures 15, 17) — for the top of
-  // the agent's drill-in (§7.6). It rides the run's start alone; the child's
-  // `user_message_chunk` repeats it after the start.
+  // the agent's drill-in (§7.6). It rides the start of the run it opens
+  // alone; the child's `user_message_chunk` repeats it after the start. A
+  // launch that opens no run — a `resume_from` of an agent still live, which
+  // the CLI refuses ("must be completed") — carries none: its words would
+  // head the running run with a prompt its agent never received.
   const rawPrompt = input?.["prompt"];
   const prompt =
     typeof rawPrompt === "string" && rawPrompt.trim().length > 0 ? rawPrompt : undefined;
@@ -386,7 +389,7 @@ function launchSubagent(
         ...subagentLinkage(track),
         description: track.description,
         isBackgrounded: background,
-        ...(prompt === undefined ? {} : { prompt })
+        ...(prompt === undefined || !opensRun ? {} : { prompt })
       },
       undefined,
       raw
