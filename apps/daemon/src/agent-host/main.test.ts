@@ -57,7 +57,10 @@ describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
 
       const host = await startAgentHost({
         appdir,
-        env: { ...process.env, ORQUESTER_APPDIR: appdir, TMPDIR: join(appdir, "tmp") },
+        // No provider CLI on this host's PATH: the boot refresh must not probe
+        // the machine's real ones — their probes outlived the test and wrote
+        // their temp dirs back into the removed appdir.
+        env: { HOME: appdir, PATH: "/usr/bin:/bin", ORQUESTER_APPDIR: appdir, TMPDIR: join(appdir, "tmp") },
         logger: quietLogger()
       });
       try {
