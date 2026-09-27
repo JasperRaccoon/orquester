@@ -102,9 +102,11 @@ const RUN_PROMPTING_COLLAB_TOOLS: ReadonlySet<CodexProtocol.v2.CollabAgentTool> 
 ]);
 
 /**
- * How many spawn prompts, and ids of calls whose prompt a start carried, the
- * normaliser remembers: a start takes its prompt within a few frames of the
- * call, so this only stops the maps growing with the session.
+ * How many spawn prompts, and spent calls ({@link CodexNormaliser.spentCalls}:
+ * a run took the call's prompt, or the call failed, was interrupted or was
+ * abandoned), the normaliser remembers: a start takes its prompt within a
+ * few frames of the call, and a late frame of a spent call follows it
+ * closely, so this only stops the maps growing with the session.
  */
 const COLLAB_PROMPT_MEMORY = 256;
 
@@ -163,14 +165,17 @@ export class CodexNormaliser {
    * the id a launch record (`subAgentActivity`) carries before any receiver
    * is named. {@link takeChildPrompt} gives it to one start. Not captured
    * (fixtures README observation 21): a prompt reaches a start only when its
-   * call is read first.
+   * call is read first. A call is keyed as its item is: the parent's by its
+   * own id, a child's by its namespaced one ({@link childItemId}).
    */
   private readonly childPrompts = new Map<string, { callId: string; prompt: string }>();
   private readonly spawnPrompts = new Map<string, string>();
   /**
-   * Calls whose prompt is spent: a run took it, the call failed or was
-   * interrupted, or a Stop or the exit abandoned it while it waited
-   * ({@link forgetAgents}). A later frame of one records nothing.
+   * Calls whose prompt is spent: a run took it; the call ended `failed` or
+   * `interrupted`; a turn's end closed it with no end of its own
+   * ({@link abandonCall}); or a Stop with no turn running, or the exit,
+   * abandoned it while it waited ({@link forgetAgents}). A later frame of one
+   * records nothing. Collab calls only.
    */
   private readonly spentCalls = new Set<string>();
   /**
@@ -250,9 +255,13 @@ export class CodexNormaliser {
    * one starts is a new run.
    *
    * The prompts collab calls left waiting go too, and their calls are spent:
-   * a call the Stop abandoned prompted no run, so neither what it left nor
-   * its own end arriving after the Stop is the prompt of the child's next
-   * run — which no call may have prompted at all.
+   * the child's next run may be one no call prompted, and after this teardown
+   * nothing tells a delivered prompt from an abandoned one, so neither what a
+   * call left nor its own end arriving later is that run's prompt — an
+   * absence, the safe side. Only this teardown's callers reach it: a Stop
+   * with no turn running, a dead transport, the exit. The Stop of a RUNNING
+   * turn does not; its turn's end closes the calls it abandons instead
+   * ({@link closeOpenItems}, {@link abandonCall}).
    */
   forgetAgents(): void {
     for (const child of this.launchedChildren.keys()) {
@@ -318,6 +327,12 @@ export class CodexNormaliser {
    * turn's items; `undefined` closes everything (the child is gone, or a Stop
    * ended the background work) — a collab child's calls too, which a parent's
    * settling turn never closes: the child's own turn ends them.
+   *
+   * A collab call closed here had no end of its own, so whether it delivered
+   * its prompt is unknown: what it left waiting is dropped
+   * ({@link abandonCall}). This is how the Stop of a RUNNING turn —
+   * `turn/interrupt`, whose abandoned items get no `item/completed` — keeps a
+   * call it cut from prompting the child's next run.
    */
   closeOpenItems(
     status: "completed" | "failed",
@@ -332,6 +347,9 @@ export class CodexNormaliser {
       }
       this.openItems.delete(itemId);
       this.openItemTurns.delete(itemId);
+      if (itemType === "collab_agent_tool_call") {
+        this.abandonCall(itemId);
+      }
       events.push({
         type: "item.completed",
         payload: { itemType, status },
@@ -353,7 +371,8 @@ export class CodexNormaliser {
   /**
    * Close a collab child's calls `match` picks and forget them: the child's end
    * of each, on the child's agent id and the parent turn the call rides, as
-   * {@link closeOpenItems} closes the parent's own.
+   * {@link closeOpenItems} closes the parent's own — a collab call among them
+   * (a child prompting an agent of its own) abandoned the same way.
    */
   private closeChildItems(
     status: "completed" | "failed",
@@ -366,6 +385,9 @@ export class CodexNormaliser {
         continue;
       }
       this.openChildItems.delete(itemId);
+      if (open.itemType === "collab_agent_tool_call") {
+        this.abandonCall(itemId);
+      }
       events.push({
         type: "item.completed",
         payload: { itemType: open.itemType, status, agentId: open.childThreadId },
@@ -978,7 +1000,7 @@ export class CodexNormaliser {
     }
 
     if (item.type === "collabAgentToolCall") {
-      this.noteCollabPrompt(item);
+      this.noteCollabPrompt(item, item.id);
     }
 
     if (item.type === "subAgentActivity") {
@@ -990,30 +1012,39 @@ export class CodexNormaliser {
 
   /**
    * Remember what a collab call asked a child to do, for the start of the run
-   * it prompts ({@link takeChildPrompt}). Only a call that starts work
-   * ({@link RUN_PROMPTING_COLLAB_TOOLS}), only once per call, and never for a
-   * child mid-run: input to a running child joins that run, which already has
-   * its start, and must not become a LATER run's prompt. A call that failed
-   * or was interrupted delivered nothing a run could start from: what it left
-   * waiting is dropped, so the child's next run no call prompted never takes
-   * it.
+   * it prompts ({@link takeChildPrompt}). `callKey` is the call as its item
+   * is keyed: the parent's own id, a child's namespaced one. Only a call that
+   * starts work ({@link RUN_PROMPTING_COLLAB_TOOLS}), only once per call, and
+   * never for a child mid-run: input to a running child joins that run, which
+   * already has its start, and must not become a LATER run's prompt.
+   *
+   * A call that ends `failed` or `interrupted` did not complete, so whether
+   * it delivered its prompt is unknown: every prompt it left waiting is
+   * dropped — another receiver's too, when one receiver's run already took
+   * its own — and the call is spent. `interrupted` needs its own clause
+   * because the server can end a call so by itself, with no Stop and no
+   * turn's end to drop anything; that end frame names the prompt and the
+   * receivers again, and would otherwise record them for the child's next
+   * run, which no call may have prompted.
    */
-  private noteCollabPrompt(item: Extract<CodexThreadItem, { type: "collabAgentToolCall" }>): void {
-    if (!RUN_PROMPTING_COLLAB_TOOLS.has(item.tool) || this.spentCalls.has(item.id)) {
+  private noteCollabPrompt(
+    item: Extract<CodexThreadItem, { type: "collabAgentToolCall" }>,
+    callKey: string
+  ): void {
+    if (!RUN_PROMPTING_COLLAB_TOOLS.has(item.tool)) {
       return;
     }
     if (item.status === "failed" || item.status === "interrupted") {
-      this.dropCallPrompts(item.id);
-      this.rememberSpentCall(item.id);
+      this.abandonCall(callKey);
       return;
     }
     const prompt = item.prompt;
-    if (prompt === null || prompt.trim().length === 0) {
+    if (this.spentCalls.has(callKey) || prompt === null || prompt.trim().length === 0) {
       return;
     }
     if (item.tool === "spawnAgent") {
-      this.spawnPrompts.delete(item.id);
-      this.spawnPrompts.set(item.id, prompt);
+      this.spawnPrompts.delete(callKey);
+      this.spawnPrompts.set(callKey, prompt);
       while (this.spawnPrompts.size > COLLAB_PROMPT_MEMORY) {
         const oldest = this.spawnPrompts.keys().next();
         if (oldest.done === true) break;
@@ -1022,7 +1053,7 @@ export class CodexNormaliser {
     }
     for (const receiver of item.receiverThreadIds) {
       if (!this.childTurns.has(receiver)) {
-        this.childPrompts.set(receiver, { callId: item.id, prompt });
+        this.childPrompts.set(receiver, { callId: callKey, prompt });
       }
     }
   }
@@ -1046,6 +1077,18 @@ export class CodexNormaliser {
     this.spawnPrompts.delete(callId);
     this.rememberSpentCall(callId);
     return prompt;
+  }
+
+  /**
+   * A collab call that will prompt no run: it ended `failed` or `interrupted`
+   * ({@link noteCollabPrompt}), or a turn's end closed it with no end of its
+   * own ({@link closeOpenItems}, {@link closeChildItems}) — the Stop of a
+   * running turn among them. What it left waiting is dropped and the call is
+   * spent, so an end of its own arriving later records nothing either.
+   */
+  private abandonCall(callKey: string): void {
+    this.dropCallPrompts(callKey);
+    this.rememberSpentCall(callKey);
   }
 
   /** Drop every prompt `callId` left waiting: its spawn's, and each receiver's. */
@@ -1239,8 +1282,9 @@ export class CodexNormaliser {
         const classified = classifyItem(item);
         if (item.type === "collabAgentToolCall") {
           // A child spawning or prompting an agent of its own: the grandchild's
-          // start carries it, as the parent's calls give theirs.
-          this.noteCollabPrompt(item);
+          // start carries it, as the parent's calls give theirs. Keyed as its
+          // item is, so the child's turn's end can abandon it by that key.
+          this.noteCollabPrompt(item, childItemId(childThreadId, item.id));
         }
         return [
           ...this.childItemEvents(

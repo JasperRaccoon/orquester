@@ -4330,12 +4330,14 @@ index does not index it. Claude reads `task_started.prompt`, else the launching 
 relaunch); Grok the `spawn_subagent` call's `prompt` argument (a `resume_from` that reopens a
 settled agent carries its own); Codex a collab call's `prompt` joined to the child by
 `receiverThreadIds` or by the launch record's call id — uncaptured, and absent whenever the call is
-not read before the start, or failed, was interrupted or was abandoned by a Stop. Absent too on a
-start that opens no run (a Grok `resume_from` naming an agent still live, which the CLI refuses: the
-agent never received it, and it would head the running run), on a shell or monitor, on a start
-written before any launch named the run (OpenCode's `opencode-child:`, an agent Grok's CLI spawned
-itself), on a revival, and on every log from before (the fixtures READMEs: Claude 4, OpenCode 19,
-Grok 47, Codex 21).*
+not read before the start or will prompt no run: it ended `failed` or `interrupted`, its turn ended
+with it still open (the Stop of a running turn, whose abandoned items get no end of their own, among
+them), or a Stop with no turn running, or the exit, dropped every prompt still waiting. Absent too
+on a start that opens no run (a Grok `resume_from` naming an agent still live, which the CLI
+refuses: the agent never received it, and it would head the running run), on a shell or monitor, on
+a start written before any launch named the run (OpenCode's `opencode-child:`, an agent Grok's CLI
+spawned itself), on a revival, and on every log from before (the fixtures READMEs: Claude 4,
+OpenCode 19, Grok 47, Codex 21).*
 
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind
