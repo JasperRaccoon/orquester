@@ -926,3 +926,45 @@ describe("a subagent's own messages in its drill-in (§7.6)", () => {
     assert.deepEqual(parentMessages, ["go", "parent answer"]);
   });
 });
+
+describe("an OpenCode child's own drill-in lists no spawn row for itself (item 4, review N2)", () => {
+  /**
+   * OpenCode stamps a child session's task rows with the child itself
+   * (`childLinkage`: `agentId: sessionId`, `taskId: sessionId`), under its
+   * launching `task` part's call — as the child's run writes them.
+   */
+  const CHILD = "ses_child";
+  const linkage = { taskType: "subagent", agentKind: "agent", agentId: CHILD, title: "explore", toolUseId: "call_task" };
+  const rows = [
+    activity("task.started", { taskId: CHILD, description: "explore", ...linkage }, { agentId: CHILD, turnId: "t1", tone: "info" }),
+    activity(
+      "task.progress",
+      { taskId: CHILD, summary: "Reading src", lastToolName: "read", ...linkage },
+      { agentId: CHILD, turnId: "t1", tone: "info" }
+    ),
+    activity(
+      "tool.completed",
+      { itemType: "file_change", toolUseId: "prt_read", title: "read", status: "completed", agentId: CHILD },
+      { agentId: CHILD, turnId: "t1" }
+    ),
+    activity(
+      "task.completed",
+      { taskId: CHILD, status: "completed", summary: "Found it", detail: "Found it", ...linkage },
+      { agentId: CHILD, turnId: "t1", tone: "info" }
+    )
+  ];
+
+  it("the child's drill-in: its own call, and no bot row for itself", () => {
+    const entries = deriveWorkLogEntries(rows, { ownerAgentId: CHILD });
+    assert.deepEqual(
+      entries.filter((entry) => entry.agentSpawn?.agentTaskIds.includes(CHILD)),
+      [],
+      "the header and the roster already say what the agent is"
+    );
+    assert.deepEqual(entries.map((entry) => entry.toolCallId), ["prt_read"]);
+  });
+
+  it("the parent's timeline keeps the child's spawn row", () => {
+    assert.ok(deriveWorkLogEntries(rows).some((entry) => entry.agentSpawn?.agentTaskIds.includes(CHILD)));
+  });
+});
