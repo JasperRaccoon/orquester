@@ -127,11 +127,14 @@ interface ToolInFlight {
    * started between parent turns. Every event of the call rides it, never the
    * turn active when the event is emitted: a background subagent's result
    * lands after the parent's turn has ended, and a call whose rows carry two
-   * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`). The
-   * one late assignment: a parent call streamed while no turn was open adopts
-   * the next turn to open (`beginTurn`) — the woken parent's synthetic turn,
-   * or a user turn sent in that window — and says so with one update on it
-   * (`adoptedToolEvent`).
+   * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`). A
+   * woken parent's first message is held and replayed into the turn that
+   * opens next (`preTurnStream`), so its calls start on that turn. The one
+   * late assignment left: a parent call registered while no turn was open
+   * outside a held message — the tail of a message an interrupt's turn end
+   * left streaming — adopts the next turn to open (`beginTurn`: a synthetic
+   * turn, or a user turn sent in that window) and says so with one update on
+   * it (`adoptedToolEvent`).
    */
   turnId?: string;
 }

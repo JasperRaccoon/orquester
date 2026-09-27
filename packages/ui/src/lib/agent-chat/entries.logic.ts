@@ -547,11 +547,13 @@ function inheritedChunkOwner(
  * it closes (`open-work.ts`), and the call then reads as running again.
  *
  * Still dropped: an unkeyed start, which nothing ties to its call; and a start
- * with neither a turn nor an owner. A Claude PARENT call can start before the
- * synthetic turn its own message opens: what it emits before that turn opens
- * — its start and any early input update — stays turnless. The turn adopts
- * the call as it opens, with one update on it (the Claude normaliser's
- * `adoptedToolEvent`), which is the running call's live row. A rewind of that
+ * with neither a turn nor an owner. A Claude PARENT call registered while no
+ * turn was open outside a held message — the tail of a message an interrupt's
+ * turn end left streaming, and every woken call in a log written before the
+ * held opening message — emits its start and any early input update
+ * turnless. The turn adopts the call as it opens, with one update on it (the
+ * Claude normaliser's `adoptedToolEvent`), which is the running call's live
+ * row. A rewind of that
  * turn leaves the turnless rows as all there is of the call, and none reads
  * as running: the start is dropped here (superseded by the update, else as
  * turnless and ownerless — a start that does not anchor its call,
