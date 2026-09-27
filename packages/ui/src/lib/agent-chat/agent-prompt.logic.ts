@@ -13,12 +13,14 @@
  * Each launch that carries one becomes a user-role message in the drill-in's
  * items, at the launch's place: to the agent the prompt IS its user turn, so
  * it heads the run it started exactly as a user's message heads a turn in the
- * thread — the rows derivation times the run's fold from it, and a live run's
- * working row follows it. The launch is found by `payload.taskId` whoever owns
- * its row: Claude's is the PARENT's (it stamps a launch with its owner), the
- * other adapters stamp it with the agent. The message is the same object for
- * the same launch row, so the streaming fast paths hold, and a registry marks
- * it so the timeline renders it as the prompt it is ({@link agentPromptOf}).
+ * thread — a live run's working row follows it, and the fold of the rows
+ * right after it is timed from it (only those: the first row after it,
+ * turnless or not, ends its reach, `deriveTurnFolds`). The launch is found by
+ * `payload.taskId` whoever owns its row: Claude's is the PARENT's (it stamps a
+ * launch with its owner), the other adapters stamp it with the agent. The
+ * message is the same object for the same launch row, so the streaming fast
+ * paths hold, and a registry marks it so the timeline renders it as the
+ * prompt it is ({@link agentPromptOf}).
  *
  * No React import.
  */

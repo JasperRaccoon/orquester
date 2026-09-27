@@ -484,6 +484,15 @@ function deriveTurnFolds(input: {
   }
   const groups = new Map<string, TurnGroup>();
   let pendingUserBoundary: string | null = null;
+  // A drill-in's launch prompt heads only the rows right after it: the first
+  // entry after it — turnless or not — ends its reach. An agent's first rows
+  // often ride no turn (a background agent writes after its parent's turn
+  // ended), and a boundary carried past them timed a LATER turn's fold from
+  // the launch ("Worked for 16m 49s" for 10 s of work). A thread's own prompt
+  // keeps its boundary across turnless rows: a woken or synthetic turn can
+  // have some between its prompt and the turn, and the thread's `turns` time
+  // every settled one anyway.
+  let promptReach = false;
   // First row per id wins, as `startedTurns` numbers them.
   const turnRows = new Map<string, Turn>();
   for (const turn of input.turns) {
@@ -495,10 +504,16 @@ function deriveTurnFolds(input: {
   for (const [position, entry] of input.entries.entries()) {
     if (entry.kind === "message" && entry.message.role === "user") {
       pendingUserBoundary = entry.message.createdAt;
+      promptReach = agentPromptOf(entry.message) !== null;
       continue;
     }
+    const endsPromptReach = promptReach;
+    promptReach = false;
     const turnId = timelineEntryTurnId(entry);
     if (!turnId || entry.kind === "proposed-plan") {
+      if (endsPromptReach) {
+        pendingUserBoundary = null;
+      }
       continue;
     }
     let group = groups.get(turnId);
@@ -513,6 +528,9 @@ function deriveTurnFolds(input: {
       };
       pendingUserBoundary = null;
       groups.set(turnId, group);
+    } else if (endsPromptReach) {
+      // Its turn began before the prompt: the prompt heads none of it.
+      pendingUserBoundary = null;
     }
     group.entries.push(entry);
     group.lastAt = position;

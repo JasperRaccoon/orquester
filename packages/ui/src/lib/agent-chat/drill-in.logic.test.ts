@@ -791,6 +791,120 @@ describe("its prompt at the top (§7.6): each launch's prompt heads the run it s
   });
 });
 
+describe("a launch prompt times only the rows right after it (content review I1)", () => {
+  /** The launch: a PARENT row on the parent's launch turn, carrying the prompt. */
+  const launch = (id: string, at: number, prompt: string, toolUseId: string, turnId: string | null = "t1"): ThreadItem =>
+    activity(
+      "task.started",
+      { taskId: "a1", agentKind: "agent", taskType: "subagent", title: "Survey", toolUseId, prompt },
+      { id, turnId, tone: "info", createdAt: stamp(at) }
+    );
+  const done = (id: string, at: number, turnId: string | null): ThreadItem =>
+    activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: `call-${id}`, title: "ls", command: "ls", status: "completed" },
+      { id, agentId: "a1", turnId, createdAt: stamp(at) }
+    );
+  const said = (id: string, at: number, turnId: string | null): ThreadItem =>
+    message("assistant", `Said ${id}.`, { id, agentId: "a1", turnId, createdAt: stamp(at) });
+  const settled = messageStreamingContext({
+    head: head({ session: { status: "ready", activeTurnId: null } }),
+    roster: [{ id: "a1", status: "completed" }]
+  });
+  const labels = (items: ThreadItem[], messageStreaming = settled, startedAt: number | null = null) =>
+    foldLabels(
+      projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+        items,
+        agentId: "a1",
+        messageStreaming,
+        ...(startedAt !== null ? { agent: { startedAt: stamp(startedAt) } } : {})
+      }).stable.result
+    );
+
+  it("a background agent whose first rows rode no turn: a later turn's fold is its own rows' span", () => {
+    // Launched at 1 s; the parent's launch turn ended before the agent wrote a row, so its first rows are
+    // turnless (5–100 s); a later parent turn carries the rest (1 000–1 010 s).
+    const items = [
+      launch("start", 1, "Survey the repo.", "call-agent"),
+      done("early", 5, null),
+      said("early-words", 100, null),
+      done("late", 1_000, "t2"),
+      said("late-words", 1_010, "t2")
+    ];
+    assert.deepEqual(labels(items), ["Worked for 10s"], "timed from 1 000 s, never from the launch at 1 s");
+  });
+
+  it("a relaunch followed by a turnless row: the next turn's fold is its own rows' span", () => {
+    const items = [
+      launch("start", 1, "Survey the repo.", "call-agent"),
+      done("first", 2, "t1"),
+      said("first-words", 3, "t1"),
+      launch("again", 100, "Now the tests.", "call-again", "t2"),
+      done("between", 150, null),
+      done("t3-call", 3_000, "t3"),
+      said("t3-words", 3_005, "t3")
+    ];
+    assert.deepEqual(labels(items), ["Worked for 2.0s", "Worked for 5.0s"]);
+  });
+
+  it("and so while the agent is live on a third run: the earlier runs' folds keep their own spans", () => {
+    const live = messageStreamingContext({
+      head: head({ session: { status: "ready", activeTurnId: null } }),
+      roster: [{ id: "a1", status: "running" }]
+    });
+    const items = [
+      launch("start", 1, "Survey the repo.", "call-agent"),
+      done("first", 2, "t1"),
+      said("first-words", 3, "t1"),
+      launch("again", 100, "Now the tests.", "call-again", "t2"),
+      done("between", 150, null),
+      done("t3-call", 3_000, "t3"),
+      said("t3-words", 3_005, "t3"),
+      launch("third", 4_000, "Now the docs.", "call-third", "t4"),
+      activity(
+        "tool.started",
+        { itemType: "command_execution", toolUseId: "call-run", title: "grep", command: "grep", status: "inProgress" },
+        { id: "run", agentId: "a1", turnId: "t4", createdAt: stamp(4_001) }
+      )
+    ];
+    assert.deepEqual(labels(items, live, 4_000), ["Worked for 2.0s", "Worked for 5.0s"]);
+  });
+
+  it("rows right after the prompt, on its launch turn: their fold is timed from the prompt", () => {
+    const items = [launch("start", 1, "Survey the repo.", "call-agent"), done("first", 2, "t1"), said("words", 10, "t1")];
+    assert.deepEqual(labels(items), ["Worked for 9.0s"]);
+  });
+
+  it("the thread's own timeline is unchanged: its prompt still times a turn whose first rows rode none", () => {
+    // A woken or synthetic turn can have turnless rows between its prompt and the turn (the thread's `turns`
+    // time a settled one; with none, the prompt does).
+    const entries = deriveTimelineEntriesFromItems(
+      [
+        message("user", "Look around", { id: "u1", createdAt: stamp(1) }),
+        activity(
+          "tool.completed",
+          { itemType: "command_execution", toolUseId: "call-x", title: "pwd", command: "pwd", status: "completed" },
+          { id: "early", createdAt: stamp(5) }
+        ),
+        activity(
+          "tool.completed",
+          { itemType: "command_execution", toolUseId: "call-y", title: "ls", command: "ls", status: "completed" },
+          { id: "late", turnId: "t1", createdAt: stamp(1_000) }
+        ),
+        message("assistant", "Done.", { id: "answer", turnId: "t1", createdAt: stamp(1_010) })
+      ],
+      EMPTY_TIMELINE_PROJECTION
+    ).entries;
+    const rows = deriveTimelineRows({
+      timelineEntries: entries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      supportsConversationRollback: false
+    });
+    assert.deepEqual(foldLabels(rows), ["Worked for 16m 49s"], "from the prompt at 1 s, as before");
+  });
+});
+
 describe("a drill-in holds its disclosure sets only while their members stay the same", () => {
   it("expanding one group in place of another re-derives the rows", () => {
     // Two activity groups, one per turn, each opened by a thought of the agent's.
