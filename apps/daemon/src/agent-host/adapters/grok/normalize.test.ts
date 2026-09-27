@@ -1617,6 +1617,24 @@ test("the session's end closes a live loop and goal; a later fire notes itself, 
   assert.equal(resumed[0]?.payload.toolUseId, `goal-run:${GOAL_ID}:launch-1:2`);
 });
 
+test("an end the user did not choose says why on a live loop's and goal's closing rows; the user's end and a Stop say nothing", () => {
+  // A deploy, a restart or the CLI's exit ends a `/loop` and a `/goal` — they
+  // live in the CLI — and a bare "Stopped" read as if the user had pressed it.
+  for (const note of ["Ended when the agent host stopped.", "Ended when the session restarted.", undefined]) {
+    const grok = normalizer();
+    scheduler(grok, "scheduled_task_created");
+    goalUpdate(grok, {});
+    const closed = only(grok.stopBackgroundTasks(note === undefined ? {} : { ended: note }), "task.completed");
+    assert.deepEqual(
+      closed.map((event) => [event.payload.taskId, event.payload.status, event.payload.summary]),
+      [
+        [LOOP_ID, "stopped", note],
+        [`goal:${GOAL_ID}`, "stopped", note]
+      ]
+    );
+  }
+});
+
 test("a goal ends by the status it leaves active in: completed with its summary, cleared stopped, a new goal replacing it", () => {
   const grok = normalizer();
   goalUpdate(grok, {});

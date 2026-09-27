@@ -418,6 +418,32 @@ test("29 replayed: the scheduler's reports reach the normaliser — a loop row, 
   }
 });
 
+test("29 replayed: a loop the host's teardown ends says why — it lived in the CLI the teardown stopped", async () => {
+  const LOOP = "01a0de9b-e17c-7fa0-83dc-a436461e59b5";
+  const r = await replayRig("29-loop-scheduled-task.ndjson");
+  try {
+    await start(r);
+    await send(r, "/loop 60s Reply with exactly: tick");
+    await r.waitFor(isTurnCompleted, "the /loop turn");
+    // A deploy's drain-restart: the host's teardown, never the user's end.
+    await r.adapter.stopAll();
+    await r.waitFor(
+      (event) => event.type === "task.completed" && event.payload.taskId === LOOP,
+      "the loop's end, at the teardown"
+    );
+    const end = r.events.find(
+      (event) => event.type === "task.completed" && event.payload.taskId === LOOP
+    ) as Extract<RuntimeEvent, { type: "task.completed" }>;
+    assert.deepEqual(
+      [end.payload.status, end.payload.summary],
+      ["stopped", "Ended when the agent host stopped."],
+      "never a bare Stopped the user did not press"
+    );
+  } finally {
+    await r.dispose();
+  }
+});
+
 test("31 replayed: the host's cancel of a question is the CLI's own; a Stop's order ends the turn interrupted", async () => {
   const r = await replayRig("31-question-cancelled.ndjson");
   try {

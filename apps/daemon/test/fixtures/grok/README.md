@@ -1486,7 +1486,9 @@ and makes each loop a roster row typed `scheduled` (the roster's `loop` kind), t
 and prompt ("Every 1 minute: Reply with exactly: tick") — background, and inert to the liveness
 registry, so it never holds a deploy's drain between its fires; a fire notes itself on it in place
 ("Fired once"), `scheduled_task_deleted` ends it (`stopped`; `completed` on `expired`, read off the
-docs), and the session's end closes it. The fire itself is the agent row the CLI's
+docs), and the session's end closes it — a deploy's, a restart's or the CLI's exit saying so ("Ended
+when the agent host stopped.", "… the session restarted.", "… the agent process exited."), where a
+bare "Stopped" read as the user's doing. The fire itself is the agent row the CLI's
 `subagent_spawned` starts, live while it runs. Not captured: a loop's expiry, a `durable` loop
 across sessions, and whether a Stop's `session/cancel` deletes a loop (a later fire notes itself on
 the row the Stop closed).
@@ -1527,7 +1529,8 @@ to the liveness registry, as a loop is; its turns and planner hold the drain on 
 when a goal turns `active`, a progress note in place on each change of phase, planning, last event,
 deliverables or rounds — never on a token tick alone — carrying the goal's own token count, and
 ended when it leaves `active`: `budget_limited` → `stopped`, "Token budget reached: 48386 of 20000
-tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its result summary. A
+tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its result summary; the
+session's end closes it as it closes a loop, saying why (observation 52). A
 goal active again after the CLI's own end is a new run of its row (a new launch id); after the
 adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its progress notes
 itself on the ended row; a new goal ends the old one ("Replaced by a new goal"), with the token

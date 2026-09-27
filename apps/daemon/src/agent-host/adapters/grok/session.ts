@@ -194,6 +194,21 @@ export interface GrokSessionOptions {
 export type GrokSessionEndCause = "restart" | "host";
 
 /**
+ * The line a live `/loop`'s or `/goal`'s closing row says when an end the
+ * user did not choose takes it — they live in the CLI, which such an end
+ * stops — where a bare "Stopped" read as the user's doing.
+ */
+export function endedNote(cause: GrokSessionEndCause | "exit"): string {
+  const when =
+    cause === "restart"
+      ? "the session restarted"
+      : cause === "host"
+        ? "the agent host stopped"
+        : "the agent process exited";
+  return `Ended when ${when}.`;
+}
+
+/**
  * The helpers' grace at the host's teardown — SIGTERM, then SIGKILL this long
  * after — where every other end gives them `spawn.ts`'s 2 s. The host's
  * process entry exits 3 s after a SIGTERM whatever its stop is still doing
@@ -1732,7 +1747,11 @@ export class GrokSession {
     this.emitAll(this.normalizer.failOpenTools("The agent process exited."));
     // Its work runs on past it — unless the user was ending the session, whose
     // stop sweeps it ({@link stop}).
-    this.emitAll(this.normalizer.stopBackgroundTasks(this.endingByUser ? undefined : leftRunningNote("exit")));
+    this.emitAll(
+      this.normalizer.stopBackgroundTasks(
+        this.endingByUser ? {} : { leftRunning: leftRunningNote("exit"), ended: endedNote("exit") }
+      )
+    );
 
     if (turn !== null && !turn.settled) {
       const outcome = exitOutcome(reason, this.hostInitiatedStop);
@@ -1963,7 +1982,11 @@ export class GrokSession {
     await this.settlePendingAsCancelled();
     this.emitAll(this.normalizer.failOpenTools("The session was stopped."));
     this.emitAll(
-      this.normalizer.stopBackgroundTasks(endedByUser ? undefined : leftRunningNote(options.cause ?? "restart"))
+      this.normalizer.stopBackgroundTasks(
+        endedByUser
+          ? {}
+          : { leftRunning: leftRunningNote(options.cause ?? "restart"), ended: endedNote(options.cause ?? "restart") }
+      )
     );
     const turn = this.activeTurn;
     if (turn !== null && !turn.settled) {

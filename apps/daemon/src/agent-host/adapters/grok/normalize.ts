@@ -816,7 +816,9 @@ export class GrokNormalizer {
    * outlives this end — a deploy, a restart or a crash ends the session
    * without the user, and only the user's end sweeps the work
    * (`GrokSession.stop`): a subagent, a loop and a goal live in the CLI and
-   * end with it.
+   * end with it. `ended` is said on a live loop's and goal's row at such an
+   * end — "Ended when the agent host stopped", say — which a bare "Stopped"
+   * read as the user's doing; the user's end and a Stop say nothing.
    *
    * These are the adapter's own ends, not the CLI's: fixture 21 shows a
    * session-scoped Stop's `session/cancel` cancelling a background subagent
@@ -825,7 +827,8 @@ export class GrokNormalizer {
    * report that a task still runs counts it live again: see `shellReport`
    * (`background-tasks.ts`).
    */
-  stopBackgroundTasks(leftRunning?: string): RuntimeEvent[] {
+  stopBackgroundTasks(notes: { leftRunning?: string; ended?: string } = {}): RuntimeEvent[] {
+    const { leftRunning, ended } = notes;
     const events: RuntimeEvent[] = [];
     // Shells and monitors first: a subagent's own ones are closed with the
     // rest, so its end below leaves none to count on its own.
@@ -854,17 +857,22 @@ export class GrokNormalizer {
     // ended rows (a fire, a goal's progress), and only the CLI re-creating a
     // loop or resuming a goal it ended itself opens a new run
     // ({@link scheduledTask}, {@link goalUpdated}).
+    const why = ended === undefined ? {} : { summary: ended };
     for (const loop of this.state.loops.values()) {
       if (loop.live) {
         loop.live = false;
-        events.push(this.event("task.completed", { ...loopLinkage(loop), status: "stopped" }, loop.turnId));
+        events.push(this.event("task.completed", { ...loopLinkage(loop), status: "stopped", ...why }, loop.turnId));
       }
     }
     if (this.state.goal?.live === true) {
       this.state.goal.live = false;
       this.state.goal.endedBy = "adapter";
       events.push(
-        this.event("task.completed", { ...goalLinkage(this.state.goal), status: "stopped" }, this.state.goal.turnId)
+        this.event(
+          "task.completed",
+          { ...goalLinkage(this.state.goal), status: "stopped", ...why },
+          this.state.goal.turnId
+        )
       );
     }
     for (const track of this.state.subagents.values()) {
