@@ -382,6 +382,8 @@ function collabCall(
     receivers: string[];
     prompt: string | null;
     threadId?: string;
+    /** The call's status on this frame: `inProgress` started, `completed` completed, unless named. */
+    status?: CodexProtocol.v2.CollabAgentToolCallStatus;
   }
 ): RuntimeEventDraft[] {
   const threadId = call.threadId ?? PARENT;
@@ -389,7 +391,7 @@ function collabCall(
     type: "collabAgentToolCall",
     id: call.id,
     tool: call.tool,
-    status: phase === "started" ? "inProgress" : "completed",
+    status: call.status ?? (phase === "started" ? "inProgress" : "completed"),
     senderThreadId: threadId,
     receiverThreadIds: call.receivers,
     prompt: call.prompt,
@@ -492,5 +494,37 @@ describe("a child's start carries the prompt its collab call gave it (§7.6)", (
     const start = startOf(turnStarted(normaliser, "grandchild-turn-1", GRANDCHILD));
     assert.equal(start.payload.taskId, GRANDCHILD);
     assert.equal(start.payload.prompt, "Read one file.");
+  });
+
+  /** Launched, one run settled by its own turn: the child's next turn is a relaunch. */
+  function settledChild(): CodexNormaliser {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    turnCompleted(normaliser, "child-turn-1");
+    return normaliser;
+  }
+
+  it("a call that fails prompts nothing: the child's next run, which no call prompted, carries no prompt", () => {
+    const normaliser = settledChild();
+    const call = { id: "call-failed", tool: "followupTask" as const, receivers: [CHILD], prompt: "Delete the old fixtures." };
+    collabCall(normaliser, "started", call);
+    collabCall(normaliser, "completed", { ...call, status: "failed" });
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal("prompt" in unprompted.payload, false);
+  });
+
+  it("a call a Stop abandoned prompts nothing — not even when its own end arrives after the Stop", () => {
+    const normaliser = settledChild();
+    const call = { id: "call-abandoned", tool: "followupTask" as const, receivers: [CHILD], prompt: "Refactor the store." };
+    collabCall(normaliser, "started", call);
+    // Stop (`CodexSession.stopBackgroundWork` → `forgetAgents`), then the
+    // call's own end as the interrupt settles it.
+    normaliser.forgetAgents();
+    collabCall(normaliser, "completed", { ...call, status: "interrupted" });
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal("prompt" in unprompted.payload, false);
   });
 });

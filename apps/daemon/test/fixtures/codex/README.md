@@ -815,8 +815,12 @@ own call id. The child's next start takes it, once: the launch record's start
 (`codex-launch:<item id>`) by the child's id, else by the record's own id; a relaunch's start
 (`codex-run:<turn id>`) by the child's id. A call is prompted once — its later frames record
 nothing — and never for a child mid-run: input to a running child joins that run, which already has
-its start. The launch's own first turn drops a prompt still waiting, since the launch record wrote
-the run's start already and a start is never rewritten. The child's own first `userMessage` item on
+its start. A call that ends `failed` or `interrupted` prompts nothing: what it left waiting is
+dropped. A Stop or the exit (`forgetAgents`) drops every prompt still waiting and spends its call, so
+the call's own end arriving after the Stop records nothing either: the child's next run may be one
+no call prompted, and a stale prompt there would be the wrong task. The launch's own first turn
+drops a prompt still waiting, since the launch record wrote the run's start already and a start is
+never rewritten. The child's own first `userMessage` item on
 its thread would repeat the prompt, but it comes after the start and stays a roster tick.
 
 Where the join does NOT land, the start carries no prompt — and it may be most of the time. T3's

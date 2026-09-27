@@ -167,8 +167,12 @@ export class CodexNormaliser {
    */
   private readonly childPrompts = new Map<string, { callId: string; prompt: string }>();
   private readonly spawnPrompts = new Map<string, string>();
-  /** Calls whose prompt a run already took: a later frame of one records nothing. */
-  private readonly promptedCalls = new Set<string>();
+  /**
+   * Calls whose prompt is spent: a run took it, the call failed or was
+   * interrupted, or a Stop or the exit abandoned it while it waited
+   * ({@link forgetAgents}). A later frame of one records nothing.
+   */
+  private readonly spentCalls = new Set<string>();
   /**
    * Turns already settled by `turn/completed`. `turn/start`'s response can
    * arrive AFTER the completion notification for the same turn — re-activating
@@ -244,6 +248,11 @@ export class CodexNormaliser {
    * `stopped` beside it, so every child this session knows has a settled run
    * behind it, whether or not an end of its own ever follows: the next turn
    * one starts is a new run.
+   *
+   * The prompts collab calls left waiting go too, and their calls are spent:
+   * a call the Stop abandoned prompted no run, so neither what it left nor
+   * its own end arriving after the Stop is the prompt of the child's next
+   * run — which no call may have prompted at all.
    */
   forgetAgents(): void {
     for (const child of this.launchedChildren.keys()) {
@@ -255,6 +264,14 @@ export class CodexNormaliser {
     this.knownAgentPaths.clear();
     this.childTurns.clear();
     this.relaunchedTurns.clear();
+    for (const callId of this.spawnPrompts.keys()) {
+      this.rememberSpentCall(callId);
+    }
+    for (const { callId } of this.childPrompts.values()) {
+      this.rememberSpentCall(callId);
+    }
+    this.spawnPrompts.clear();
+    this.childPrompts.clear();
   }
 
   /**
@@ -976,16 +993,22 @@ export class CodexNormaliser {
    * it prompts ({@link takeChildPrompt}). Only a call that starts work
    * ({@link RUN_PROMPTING_COLLAB_TOOLS}), only once per call, and never for a
    * child mid-run: input to a running child joins that run, which already has
-   * its start, and must not become a LATER run's prompt.
+   * its start, and must not become a LATER run's prompt. A call that failed
+   * or was interrupted delivered nothing a run could start from: what it left
+   * waiting is dropped, so the child's next run no call prompted never takes
+   * it.
    */
   private noteCollabPrompt(item: Extract<CodexThreadItem, { type: "collabAgentToolCall" }>): void {
+    if (!RUN_PROMPTING_COLLAB_TOOLS.has(item.tool) || this.spentCalls.has(item.id)) {
+      return;
+    }
+    if (item.status === "failed" || item.status === "interrupted") {
+      this.dropCallPrompts(item.id);
+      this.rememberSpentCall(item.id);
+      return;
+    }
     const prompt = item.prompt;
-    if (
-      !RUN_PROMPTING_COLLAB_TOOLS.has(item.tool) ||
-      prompt === null ||
-      prompt.trim().length === 0 ||
-      this.promptedCalls.has(item.id)
-    ) {
+    if (prompt === null || prompt.trim().length === 0) {
       return;
     }
     if (item.tool === "spawnAgent") {
@@ -1008,7 +1031,8 @@ export class CodexNormaliser {
    * The prompt waiting for `childThreadId`'s next start, taken so no other
    * start carries it: the one a call addressed to the child, else — for a
    * launch record — its own call's spawn prompt. The call is remembered as
-   * prompted, so its later frames record nothing.
+   * spent, so its later frames record nothing. Another receiver the same
+   * call addressed keeps its own entry, for its own start.
    */
   private takeChildPrompt(childThreadId: string, launchCallId?: string): string | undefined {
     const addressed = this.childPrompts.get(childThreadId);
@@ -1020,13 +1044,29 @@ export class CodexNormaliser {
       return undefined;
     }
     this.spawnPrompts.delete(callId);
-    this.promptedCalls.add(callId);
-    while (this.promptedCalls.size > COLLAB_PROMPT_MEMORY) {
-      const oldest = this.promptedCalls.values().next();
-      if (oldest.done === true) break;
-      this.promptedCalls.delete(oldest.value);
-    }
+    this.rememberSpentCall(callId);
     return prompt;
+  }
+
+  /** Drop every prompt `callId` left waiting: its spawn's, and each receiver's. */
+  private dropCallPrompts(callId: string): void {
+    this.spawnPrompts.delete(callId);
+    for (const [receiver, waiting] of this.childPrompts) {
+      if (waiting.callId === callId) {
+        this.childPrompts.delete(receiver);
+      }
+    }
+  }
+
+  /** Oldest first out, so the memory stays within {@link COLLAB_PROMPT_MEMORY}. */
+  private rememberSpentCall(callId: string): void {
+    this.spentCalls.delete(callId);
+    this.spentCalls.add(callId);
+    while (this.spentCalls.size > COLLAB_PROMPT_MEMORY) {
+      const oldest = this.spentCalls.values().next();
+      if (oldest.done === true) break;
+      this.spentCalls.delete(oldest.value);
+    }
   }
 
   /**
