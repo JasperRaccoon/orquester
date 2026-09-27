@@ -89,7 +89,8 @@ Frames are verbatim apart from the redaction and elision below.
 
 ### Redaction
 
-Applied at record time and again on export:
+Applied at record time and again on export — the last two rules only by the 2026-09-27 rewrite of
+the committed files (see the note below the list):
 
 - absolute home paths → `~`
 - the same home **percent-encoded** (`%2Fvar%2Flib%2F…`, either hex case) → `~`: the CLI keys its

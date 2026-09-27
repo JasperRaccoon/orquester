@@ -114,7 +114,7 @@ const ALLOWED: ReadonlyMap<string, string> = new Map([
   ["Basic b3BlbmNvZGU6d3Jvbmc=", 'the same probe\'s wrong credential: base64("opencode:wrong")'],
   [
     '"apiKey":"public"',
-    "OpenCode Zen's public key for its free models, in the server's own `/provider` answer (opencode 01)"
+    "OpenCode Zen's public key for its free models, verbatim in `/provider` (opencode 01; opencode README)"
   ]
 ]);
 
