@@ -15,7 +15,9 @@
  *   and the capture's end is its exit: whatever still waits joins the open
  *   turn.
  * - A harness `note` is handed to `atNote`, which is how a test plays the
- *   user's part at the recorded moment (a Stop, say).
+ *   user's part at the recorded moment (a Stop, say); `endAtNote` ends the
+ *   drive there, when the recorded rest answered a move the test did not
+ *   make.
  *
  * Test-only code, kept beside the mock peer: nothing under `src/` imports it
  * but tests.
@@ -75,6 +77,13 @@ export function driveCapture(
   file: string,
   options: {
     atNote?: (note: string, control: DriverControl) => RuntimeEvent[];
+    /**
+     * End the drive at the first harness note this accepts, once `atNote`
+     * handled it: what the capture recorded after it is what the CLI did
+     * after the HARNESS's move, not after the test's own (a Stop in place of
+     * an answer, say). The capture's end follows, as ever.
+     */
+    endAtNote?: (note: string) => boolean;
     contextWindow?: number;
   } = {}
 ): DrivenCapture {
@@ -97,7 +106,8 @@ export function driveCapture(
       planHost: {
         platform: "linux",
         env: { GROK_HOME: "~/daemon/agent-accounts/grok/<account-id>/home" }
-      }
+      },
+      launchNonce: "capture"
     },
     "pending"
   );
@@ -165,6 +175,9 @@ export function driveCapture(
     now = Math.max(now, entry.t);
     if (entry.dir === "note") {
       events.push(...(options.atNote?.(String(entry.frame), control) ?? []));
+      if (options.endAtNote?.(String(entry.frame)) === true) {
+        break;
+      }
       continue;
     }
     const frame = entry.frame as JsonRpcFrame;

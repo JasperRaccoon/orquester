@@ -264,6 +264,19 @@ export interface AgentAdapter {
    */
   stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void>;
   /**
+   * The user is ending the thread's live session — the session stop command
+   * or a closed tab (`stopSessionInternal`) — and the host is about to answer
+   * its open cards with a cancel, which can end the provider before
+   * `stopSession(…, {endedByUser: true})` runs (and a provider that is gone
+   * gets no `stopSession` at all). Called FIRST, before any card is answered,
+   * so an adapter that must read what its provider started while it lives,
+   * or mark the end as the user's, does so now (Grok: its task sessions,
+   * recorded and remembered for the end's sweep; an exit in between closes
+   * its work stopped, not "Left running…"). Optional; never the host's
+   * teardown or a restart.
+   */
+  prepareUserEnd?(threadId: string): Promise<void>;
+  /**
    * The user ended the thread's session — the session stop command, a closed
    * tab — so stop what EARLIER launches of the thread left running that only
    * a user's end may stop, live session or not (Grok: the work its agent
@@ -273,7 +286,17 @@ export interface AgentAdapter {
    * an adapter that leaves no such work has nothing to sweep.
    */
   sweepEndedSession?(threadId: string): Promise<void>;
-  /** The host's teardown: never the user ending a session (see {@link stopSession}). */
+  /**
+   * The host's teardown: never the user ending a session (see {@link
+   * stopSession}). Called twice by it — by the adapter's own listener on the
+   * host's abort signal, then by `main.ts`'s `stop()` — so no call may
+   * resolve before the stops an earlier call started have written their rows
+   * and done their work (Grok's and Codex's took the session map, OpenCode's
+   * server pool its servers, and returned at once on the second call), and
+   * the event stream must end only after those rows: `stop()` then lets the
+   * consumer read the stream to its end (bounded), stops the orchestrator,
+   * and the process exits.
+   */
   stopAll(): Promise<void>;
 
   /**

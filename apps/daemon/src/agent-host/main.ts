@@ -83,6 +83,16 @@ import { buildProviderEnv } from "./support/env.ts";
  */
 const CLIPROXY_CREDENTIAL_ENV_VAR = "ANTHROPIC_AUTH_TOKEN";
 
+/**
+ * How long a host teardown lets the consumers read what the adapters'
+ * teardown queued, once every `stopAll()` resolved (`stop()` below). Reading
+ * a closed stream to its end takes a few milliseconds per row; the bound only
+ * matters for a stream that never ends. It is the one wait on the consumers:
+ * `stop()` awaits them nowhere else, so a stream that never ends holds the
+ * stop for this long and no longer.
+ */
+const TEARDOWN_CONSUME_MS = 1_000;
+
 // ---------------------------------------------------------------------------
 // Small host-local helpers
 // ---------------------------------------------------------------------------
@@ -660,6 +670,21 @@ export async function startAgentHost(
         logger.warn(`agent-host: ${adapter.id} stopAll failed`, error);
       });
     }
+    // Every adapter ends its event stream once its sessions are stopped, and
+    // a stop writes its last rows at its very end — Codex's whole teardown
+    // (the turn's settle, each live task's `stopped`, the `session.exited`)
+    // lands when its child exits. The orchestrator's stop below ends
+    // consumption at once, so a row still queued then never reached the log:
+    // each consumer reads its stream to the end first. Bounded — a stream
+    // that never ends must not hold the stop.
+    let consumed: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled(consumers),
+      new Promise<void>((resolve) => {
+        consumed = setTimeout(resolve, TEARDOWN_CONSUME_MS);
+      })
+    ]);
+    clearTimeout(consumed);
     await host.stop().catch((error: unknown) => {
       logger.warn("agent-host: orchestrator stop failed", error);
     });
@@ -678,7 +703,14 @@ export async function startAgentHost(
     // `unref`'d, so this is about a deterministic stop rather than about the
     // process exiting — a sweep must not start while the log writers close.
     store.close();
-    await Promise.allSettled(consumers);
+    // The provider cache's last write, queued before `snapshots.stop()`, lands
+    // before the stop resolves; the stopped registry queues none after it.
+    await snapshots.flush();
+    // The consumers are not awaited again: each ended within the bounded read
+    // above — every adapter ends its stream after its teardown — or its stream
+    // never ends, and then the orchestrator's stop drops whatever it would
+    // still deliver. Waiting on it here held `stop()` for good (final review
+    // A r1, m3).
   };
 
   const ready = (async (): Promise<void> => {

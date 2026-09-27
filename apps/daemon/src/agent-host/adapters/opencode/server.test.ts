@@ -471,6 +471,22 @@ test("trimToLastLines keeps short text untouched and never returns a partial hea
   assert.ok(["cccc\n", "bbbb\ncccc\n"].includes(trimmed), `got ${JSON.stringify(trimmed)}`);
 });
 
+test("a second stopAll waits for the first's kills: the host's two teardown calls both return only once the servers are gone", async () => {
+  // The host calls the adapter's `stopAll()` twice (its abort listener, then
+  // its own `stop()`); the pool's second call used to find the entries
+  // cleared and return while the first call's kill was still in its grace.
+  const peer = makePeer();
+  const controller = new AbortController();
+  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
+  const handle = await pool.acquire(peer.dir);
+  const first = pool.stopAll();
+  await pool.stopAll();
+  assert.equal(handle.hasExited(), true, "the second call resolved only once the server was gone");
+  await first;
+  controller.abort();
+  peer.cleanup();
+});
+
 test("stopAll kills every server, refcount notwithstanding", async () => {
   const peer = makePeer();
   const controller = new AbortController();

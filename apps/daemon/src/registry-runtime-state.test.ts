@@ -1,9 +1,28 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { RegistryService } from "./registry.ts";
+
+/**
+ * This file's process resolves only what it is given. `RegistryService`
+ * resolves every catalog entry against the process's PATH and HOME, and
+ * `init()` runs each agent it finds with `--version` in the background: left
+ * alone, this file ran the machine's real claude, codex, opencode and grok on
+ * every run, and the real opencode left an `opencode/` directory in TMPDIR.
+ * So HOME is a scratch dir and PATH holds one stub, `claude` — the
+ * claudex/claudemix rows' bin, so "disabled at rest" is tested with a bin
+ * that resolves — which prints a version and does nothing else. Each test
+ * file runs in a process of its own, so no other file sees this.
+ */
+const sandbox = mkdtempSync(join(tmpdir(), "orquester-registry-sandbox-"));
+mkdirSync(join(sandbox, "bin"));
+writeFileSync(join(sandbox, "bin", "claude"), "#!/bin/sh\necho 0.0.0-stub\n", { mode: 0o755 });
+process.env.HOME = sandbox;
+process.env.PATH = join(sandbox, "bin");
+after(() => rmSync(sandbox, { recursive: true, force: true }));
 
 /**
  * Build a RegistryService with one agent entry whose bin resolves (process.execPath),
@@ -94,6 +113,7 @@ test("the real claudex def stays disabled at rest (enabledAtRest:false) with no 
   await registry.init();
   try {
     const before = registry.get("claudex");
+    assert.equal(before?.resolvedBin, join(sandbox, "bin", "claude"), "its bin resolves: the sandbox's stub");
     assert.equal(before?.enabled, false); // enabledAtRest:false keeps it off regardless of bin
   } finally {
     await rm(root, { recursive: true, force: true });

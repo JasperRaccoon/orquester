@@ -431,7 +431,10 @@ test("a head carrying the §3.3 continuation marker round-trips", () => {
   const state = foldThread(richLog());
   const marked: ThreadFoldState = {
     ...state,
-    head: { ...state.head!, continueAfterRestart: { turnId: "T-2", prepared: true } }
+    head: {
+      ...state.head!,
+      continueAfterRestart: { turnId: "T-2", prepared: true, markedAt: "2026-09-27T08:00:00.000Z" }
+    }
   };
   assert.deepEqual(throughDisk(marked), marked);
 });
@@ -619,6 +622,7 @@ test("a field of the wrong shape anywhere in the state is rejected", () => {
     ["a session without activeTurnId", (copy) => delete copy.head.session.activeTurnId],
     ["a model selection without a model", (copy) => (copy.head.modelSelection.model = 1)],
     ["a malformed continuation marker", (copy) => (copy.head.continueAfterRestart = { prepared: true })],
+    ["a continuation stamp that is not a string", (copy) => (copy.head.continueAfterRestart = { turnId: "T-2", markedAt: 7 })],
     ["a head folded to another seq than the state", (copy) => (copy.head.seq = copy.seq + 1)]
   ];
   for (const [label, corrupt] of corruptions) {

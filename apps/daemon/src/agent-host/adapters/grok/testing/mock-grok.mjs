@@ -216,6 +216,19 @@ function handle(frame) {
   }
   if (method === "session/new") {
     startHelper();
+    if (scenario === "leftover-open-hang") {
+      // A session that never opens: the helper is started — the stderr line
+      // says so, a test's cue — and `session/new` is never answered.
+      process.stderr.write("mock: helper started\n");
+      return;
+    }
+    if (scenario === "leftover-open-crash") {
+      // The CLI's word that its MCP servers are booting, as the real CLI
+      // sends it before `session/new` answers (fixture 31: `init_progress`
+      // 70 ms before the answer) — then nothing: the test kills this CLI.
+      notify("_x.ai/mcp/init_progress", { total: 1, connected: 0, sessionId });
+      return;
+    }
     result(id, { sessionId, models: initializeResult._meta.modelState });
     // The real CLI pushes the full 69-command catalog once a session exists.
     notify("session/update", {
@@ -1079,10 +1092,16 @@ async function wakeUntilCancelled() {
 /**
  * The `leftover` scenarios' helper — an MCP server's stand-in: a session of
  * its own, started before `session/new` (or `session/load`) answers, as the
- * real CLI's MCP servers are (fixture 31).
+ * real CLI's MCP servers are (fixture 31). `GROK_MOCK_HELPER_IGNORES_TERM=1`
+ * makes it one that ignores SIGTERM (an ignored signal stays ignored across
+ * `exec`), so only the sweep's SIGKILL ends it.
  */
 function startHelper() {
   if (!scenario.startsWith("leftover")) {
+    return;
+  }
+  if (process.env.GROK_MOCK_HELPER_IGNORES_TERM === "1") {
+    spawn("sh", ["-c", "trap '' TERM; exec sleep 301"], { detached: true, stdio: "ignore" }).unref();
     return;
   }
   spawn("sleep", ["301"], { detached: true, stdio: "ignore" }).unref();

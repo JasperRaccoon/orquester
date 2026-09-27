@@ -54,7 +54,8 @@ function normalizer(turn: TurnCursor = { current: "turn-1" }): GrokNormalizer {
         return `u${counter}`;
       },
       activeTurnId: () => turn.current,
-      planHost: { platform: "linux", env: { GROK_HOME: "~/home" } }
+      planHost: { platform: "linux", env: { GROK_HOME: "~/home" } },
+      launchNonce: "launch-1"
     },
     SESSION
   );
@@ -495,16 +496,29 @@ test("a foreground spawn_subagent is a roster agent, started with its call, sett
   assert.equal(turnUsage(settled)?.hasSubagents, true, "the turn ran a subagent");
 });
 
-test("a failed spawn settles its agent failed, with the reason", () => {
+test("a spawn the CLI refused before any child ran ends its agent stopped, with the CLI's reason", () => {
+  // No `subagent_spawned` joined the launch: the user declined its card
+  // (fixture 25, turn 2) or the CLI refused it — the run never started, so it
+  // ends short, as a run the user cut short does (observation 50).
   const grok = normalizer();
   startedBy(grok, "call-s1", { prompt: "p", description: "nested", subagent_type: "explore" });
-  const failed = endedBy(
+  const ended = endedBy(
     grok,
     spawnEnd("call-s1", "failed", "max_depth_exceeded: a subagent cannot spawn subagents")
   );
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0]!.payload.status, "stopped");
+  assert.equal(ended[0]!.payload.summary, "max_depth_exceeded: a subagent cannot spawn subagents");
+});
+
+test("a failed spawn whose child ran settles its agent failed, with the reason", () => {
+  const grok = normalizer();
+  startedBy(grok, "call-s1", { prompt: "p", description: "nested", subagent_type: "explore" });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "nested"));
+  const failed = endedBy(grok, spawnEnd("call-s1", "failed", "tool_execution_failed: the child crashed"));
   assert.equal(failed.length, 1);
   assert.equal(failed[0]!.payload.status, "failed");
-  assert.match(failed[0]!.payload.summary ?? "", /max_depth_exceeded/);
+  assert.match(failed[0]!.payload.summary ?? "", /the child crashed/);
 });
 
 test("a background spawn outlives its call and its turn; Stop or exit closes it", () => {
@@ -556,11 +570,57 @@ test("a foreground spawn its turn cut is not sent to the background: the CLI's c
   assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing left live");
 });
 
+test("a Stop that cuts a spawn no subagent_spawned joined ends its agent stopped: it never started", () => {
+  // Supervised, the CLI asks before it spawns (fixture 25): a Stop while that
+  // card is pending cuts the call, and no child exists to be cancelled — no
+  // `subagent_finished` can come. Left live, the roster read it running and
+  // liveness held a deploy's drain for its hour.
+  const grok = normalizer();
+  startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  const cut = grok.cutTurnCalls("Stopped.");
+  assert.deepEqual(
+    only(cut, "item.completed").map((event) => [event.itemId, (event.payload as { detail?: string }).detail]),
+    [["call-s1", "Stopped."]],
+    "the call is cut, as every cut call is"
+  );
+  const ends = only(cut, "task.completed");
+  assert.deepEqual(statuses(ends), [["task.completed", "call-s1", "stopped"]]);
+  assert.equal(ends[0]!.payload.summary, "Stopped before it started.");
+  assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing left live");
+});
+
+test("a Stop that cuts a spawn whose child was spawned leaves its end to the CLI", () => {
+  // Fixture 23: the CLI cancels the child with the turn, and says so.
+  const grok = normalizer();
+  startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
+  assert.deepEqual(only(grok.cutTurnCalls("Stopped."), "task.completed"), [], "a child exists: its end is the CLI's");
+  const cancelled = grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled"));
+  assert.deepEqual(statuses(taskRows(cancelled)), [["task.completed", "call-s1", "stopped"]]);
+});
+
+test("a spawn the CLI reports after the Stop cut it joins its launch: one agent, never a second", () => {
+  // Unsupervised, the CLI spawns at once and `subagent_spawned` follows in
+  // milliseconds: a Stop inside that window ends the launch "before it
+  // started", and the late report must not start an agent of its own.
+  const grok = normalizer();
+  const rows: RuntimeEvent[] = [];
+  rows.push(...grok.handleSessionUpdate(spawnStart("call-s1", { prompt: "p", description: "find callers" })));
+  rows.push(...grok.cutTurnCalls("Stopped."));
+  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers")));
+  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled")));
+  assert.deepEqual(statuses(taskRows(rows)), [
+    ["task.started", "call-s1", undefined],
+    ["task.completed", "call-s1", "stopped"]
+  ]);
+});
+
 test("a foreground spawn its turn cut with no CLI end stays live until Stop", () => {
   // An older CLI without `subagent_finished`, or one that never sends it:
   // Stop, the session's stop or the exit ends the run.
   const grok = normalizer();
   startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
   grok.endTurn();
   const late = grok.handleSessionUpdate(spawnEnd("call-s1", "failed", "cancelled"));
   assert.deepEqual(
@@ -1552,9 +1612,27 @@ test("the session's end closes a live loop and goal; a later fire notes itself, 
 
   // Re-created by the CLI, and resumed after the CLI's own end: new runs.
   const again = only(scheduler(grok, "scheduled_task_created"), "task.started");
-  assert.equal(again[0]?.payload.toolUseId, `loop-run:${LOOP_ID}:2`);
+  assert.equal(again[0]?.payload.toolUseId, `loop-run:${LOOP_ID}:launch-1:2`);
   const resumed = only(goalUpdate(grok, {}), "task.started");
-  assert.equal(resumed[0]?.payload.toolUseId, `goal-run:${GOAL_ID}:2`);
+  assert.equal(resumed[0]?.payload.toolUseId, `goal-run:${GOAL_ID}:launch-1:2`);
+});
+
+test("an end the user did not choose says why on a live loop's and goal's closing rows; the user's end and a Stop say nothing", () => {
+  // A deploy, a restart or the CLI's exit ends a `/loop` and a `/goal` — they
+  // live in the CLI — and a bare "Stopped" read as if the user had pressed it.
+  for (const note of ["Ended when the agent host stopped.", "Ended when the session restarted.", undefined]) {
+    const grok = normalizer();
+    scheduler(grok, "scheduled_task_created");
+    goalUpdate(grok, {});
+    const closed = only(grok.stopBackgroundTasks(note === undefined ? {} : { ended: note }), "task.completed");
+    assert.deepEqual(
+      closed.map((event) => [event.payload.taskId, event.payload.status, event.payload.summary]),
+      [
+        [LOOP_ID, "stopped", note],
+        [`goal:${GOAL_ID}`, "stopped", note]
+      ]
+    );
+  }
 });
 
 test("a goal ends by the status it leaves active in: completed with its summary, cleared stopped, a new goal replacing it", () => {

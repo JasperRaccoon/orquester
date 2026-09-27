@@ -45,7 +45,8 @@ function replay(
       planHost: {
         platform: "linux",
         env: { GROK_HOME: "~/daemon/agent-accounts/grok/<account-id>/home" }
-      }
+      },
+      launchNonce: "replay"
     },
     "session-1"
   );

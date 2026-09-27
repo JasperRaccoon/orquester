@@ -170,7 +170,10 @@ describe("the provider session binding (§3.3, §4.1)", () => {
     const next = createTestHost({ store, continuationEnabled: () => true });
     const marked = await next.orchestrator.markThreadsForContinuation();
     assert.deepEqual(marked, [threadId]);
-    assert.deepEqual(headOf(store, threadId).continueAfterRestart, { turnId: "turn-1" });
+    assert.deepEqual(headOf(store, threadId).continueAfterRestart, {
+      turnId: "turn-1",
+      markedAt: next.clock.nowIso()
+    });
     await next.stop();
   });
 

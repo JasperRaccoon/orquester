@@ -72,6 +72,24 @@ export const createCodexAdapter: AdapterFactory = async (
     }
   });
   const sessions = new Map<string, CodexSession>();
+  /**
+   * Every session stop in flight — a restart's, a replaced session's, the
+   * host's teardown's — so `stopAll` waits for all of them. The host's
+   * teardown calls it twice: the abort listener below takes the session map
+   * and starts every stop, and `main.ts`'s own call, right after, used to find
+   * the map empty and close the event stream at once — every row the stops
+   * wrote after that (the turn's settle, each live task's `stopped`, the
+   * `session.exited`) was dropped at the closed queue (final review A, I1).
+   */
+  const stopping = new Set<Promise<void>>();
+  const track = (stop: Promise<void>): Promise<void> => {
+    stopping.add(stop);
+    const forget = (): void => {
+      stopping.delete(stop);
+    };
+    void stop.then(forget, forget);
+    return stop;
+  };
 
   let cachedSnapshot: ProviderSnapshot | null = null;
   let cachedSnapshotAt = 0;
@@ -257,7 +275,7 @@ export const createCodexAdapter: AdapterFactory = async (
     // starting, so a resume cursor is never advanced by two processes (§3.1).
     const existing = sessions.get(input.threadId);
     if (existing !== undefined) {
-      await existing.stop();
+      await track(existing.stop());
       sessions.delete(input.threadId);
     }
     await assertVersionSupported();
@@ -387,14 +405,26 @@ export const createCodexAdapter: AdapterFactory = async (
         return;
       }
       sessions.delete(threadId);
-      await session.stop();
+      await track(session.stop());
     },
 
+    /**
+     * Stop every session, wait for EVERY stop in flight — this call's, an
+     * earlier call's, a restart's — and only then end the stream, so no row a
+     * stop writes is pushed at a closed queue. A stop that fails is ignored,
+     * as before: the stream still ends.
+     */
     async stopAll(): Promise<void> {
       const live = [...sessions.values()];
       sessions.clear();
-      await Promise.all(live.map((session) => session.stop().catch(() => {})));
-      events.close();
+      for (const session of live) {
+        void track(session.stop());
+      }
+      try {
+        await Promise.allSettled([...stopping]);
+      } finally {
+        events.close();
+      }
     },
 
     refreshSnapshot(input?: { cwd?: string }): Promise<ProviderSnapshot> {

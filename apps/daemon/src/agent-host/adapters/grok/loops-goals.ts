@@ -12,7 +12,13 @@ import type { RuntimeEvent, RuntimeEventRaw } from "@orquester/api/agent-chat";
 
 import type { XaiGoalUpdatedUpdate } from "./acp/_generated/xai.ts";
 import type { TaskEndSource } from "./background-tasks.ts";
-import { event, evictOldest, textArgument, type GrokNormalizerState } from "./normalizer-state.ts";
+import {
+  event,
+  evictOldest,
+  textArgument,
+  type GrokNormalizerDeps,
+  type GrokNormalizerState
+} from "./normalizer-state.ts";
 
 /**
  * One scheduled prompt — a `/loop`, a `scheduler_create` — by its scheduler
@@ -32,6 +38,11 @@ export interface LoopTrack {
   fires: number;
   /** Its run: the CLI re-creating an ended loop is a new run, a new launch id. */
   run: number;
+  /**
+   * The launch that numbers its runs ({@link GrokNormalizerDeps.launchNonce}):
+   * every launch counts from 1, so a run's launch id names the launch too.
+   */
+  readonly launch: string;
   /** The turn it was created on: every row of the loop rides it, as a shell's do. */
   readonly turnId?: string;
   live: boolean;
@@ -50,6 +61,8 @@ export interface GoalTrack {
   readonly taskId: string;
   objective: string;
   run: number;
+  /** The launch that numbers its runs, as a loop's ({@link LoopTrack.launch}). */
+  readonly launch: string;
   live: boolean;
   /**
    * Who wrote the latest run's end, while it is not live: the CLI (the goal
@@ -171,6 +184,7 @@ export function scheduledTask(
       prompt: prompt ?? "",
       fires: 0,
       run: 1,
+      launch: state.deps.launchNonce,
       turnId: state.deps.activeTurnId(),
       live: true
     };
@@ -227,7 +241,7 @@ export function loopLinkage(loop: LoopTrack): {
     taskType: "scheduled",
     title: loop.prompt.length > 0 ? `${cadence}: ${loop.prompt}` : cadence,
     description: loop.prompt.length > 0 ? loop.prompt : cadence,
-    toolUseId: `loop-run:${loop.taskId}:${loop.run}`
+    toolUseId: `loop-run:${loop.taskId}:${loop.launch}:${loop.run}`
   };
 }
 
@@ -278,7 +292,15 @@ export function goalUpdated(
     if (goal?.live === true) {
       events.push(endGoal(state, goal, "replaced", raw));
     }
-    goal = { goalId, taskId: `goal:${goalId}`, objective, run: 1, live: true, turnId: state.deps.activeTurnId() };
+    goal = {
+      goalId,
+      taskId: `goal:${goalId}`,
+      objective,
+      run: 1,
+      launch: state.deps.launchNonce,
+      live: true,
+      turnId: state.deps.activeTurnId()
+    };
     state.goal = goal;
   } else if (!goal.live && goal.endedBy === "cli") {
     goal.run += 1;
@@ -373,7 +395,7 @@ function endGoal(
   );
 }
 
-/** Every row of a goal: never live work (`INERT_TASK_TYPES`); a run is a launch id. */
+/** Every row of a goal: never live work (`INERT_TASK_TYPES`); a run is a launch id, the launch's own. */
 export function goalLinkage(goal: GoalTrack): {
   taskId: string;
   taskType: "goal";
@@ -388,6 +410,6 @@ export function goalLinkage(goal: GoalTrack): {
     // is the objective alone.
     title: goal.objective,
     description: goal.objective,
-    toolUseId: `goal-run:${goal.goalId}:${goal.run}`
+    toolUseId: `goal-run:${goal.goalId}:${goal.launch}:${goal.run}`
   };
 }

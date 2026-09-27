@@ -70,6 +70,15 @@ export interface ThreadSessionState {
 export interface ContinueAfterRestart {
   turnId: string;
   prepared?: boolean;
+  /**
+   * When this host's code wrote the marker (ISO). Only a stamped marker may
+   * continue a turn the host's own teardown settled (§3.3): a marker an older
+   * host left on such a turn — one its reconcile never folded — carries none,
+   * keeps the rule it was written under (continued only while the head still
+   * reads running) and is otherwise cleared. Optional, so an older host's
+   * `meta.json` still parses; an older host ignores it.
+   */
+  markedAt?: string;
 }
 
 /**

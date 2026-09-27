@@ -194,6 +194,34 @@ export interface GrokSessionOptions {
 export type GrokSessionEndCause = "restart" | "host";
 
 /**
+ * The line a live `/loop`'s or `/goal`'s closing row says when an end the
+ * user did not choose takes it — they live in the CLI, which such an end
+ * stops — where a bare "Stopped" read as the user's doing.
+ */
+export function endedNote(cause: GrokSessionEndCause | "exit"): string {
+  const when =
+    cause === "restart"
+      ? "the session restarted"
+      : cause === "host"
+        ? "the agent host stopped"
+        : "the agent process exited";
+  return `Ended when ${when}.`;
+}
+
+/**
+ * The helpers' grace at the host's teardown — SIGTERM, then SIGKILL this long
+ * after — where every other end gives them `spawn.ts`'s 2 s. The host's
+ * process entry exits 3 s after a SIGTERM whatever its stop is still doing
+ * (`main.ts`), and the sweep starts only once the CLI is gone (the captured
+ * CLI exits on SIGTERM at once, fixture 14): with 2 s, a helper that ignores
+ * SIGTERM was killed some 2.4 s into the stop, a hair inside the backstop;
+ * with this, about 1.2 s (`host-teardown.test.ts`). A CLI that ignores
+ * SIGTERM itself spends its own 2 s grace first, and the backstop can then
+ * cut the helpers' SIGKILL — see {@link GrokSession.stopLeftovers}.
+ */
+export const HOST_TEARDOWN_SWEEP_GRACE_MS = 1_000;
+
+/**
  * The line a shell's or a monitor's closing row says when its process
  * outlives the end — never a bare "stopped" for work that runs on.
  */
@@ -291,10 +319,12 @@ export class GrokSession {
    */
   private readonly launchId = randomUUID();
   /**
-   * The sessions of the CLI's own per-session HELPERS — its children the
-   * moment its session opened, which are its MCP servers (fixture 31: all
-   * four existed as `session/new` answered, none of the user's work had run)
-   * — recorded while it lived ({@link recordSessions}). Swept at every end.
+   * The sessions of the CLI's own per-session HELPERS — its children while
+   * its session opens, which are its MCP servers (fixture 31: all four
+   * existed as `session/new` answered, none of the user's work had run) —
+   * recorded while it lived: as it reports them booting, once the open
+   * answered, and at any end before the session was announced ({@link
+   * recordSessions}). Swept at every end.
    */
   private readonly helperSessions = new Map<number, RecordedSession>();
   /**
@@ -306,6 +336,8 @@ export class GrokSession {
   private readonly taskSessions = new Map<number, RecordedSession>();
   /** The sweep of the helpers this launch left running, once started — the exit and a stop share it. */
   private leftovers: Promise<void> | null = null;
+  /** The helpers' SIGTERM grace, when not `spawn.ts`'s: the host's teardown ({@link HOST_TEARDOWN_SWEEP_GRACE_MS}). */
+  private sweepGraceMs: number | undefined;
   /**
    * The sweep of the user's work, once started. Its own, never the helpers':
    * a CLI that exits in the middle of the user's stop starts the helpers'
@@ -317,6 +349,12 @@ export class GrokSession {
   private endingByUser = false;
   /** Recordings of the user's work as the CLI reports it, one at a time ({@link recordTaskWork}). */
   private taskRecording: Promise<void> = Promise.resolve();
+  /**
+   * Recordings of the CLI's helpers while its session opens, off its own
+   * reports of its MCP servers booting, one at a time
+   * ({@link recordHelpersWhileOpening}); the helpers' sweep waits for them.
+   */
+  private helperRecording: Promise<void> = Promise.resolve();
   /**
    * `session.started` went out. Until then the session has no life of its own
    * to report: an open that fails is reported by `start()`'s rejection, which
@@ -370,7 +408,8 @@ export class GrokSession {
         stamp: options.stamp,
         uuid: options.uuid,
         activeTurnId: () => this.activeTurn?.turnId,
-        planHost: this.planHost()
+        planHost: this.planHost(),
+        launchNonce: this.launchId.slice(0, 8)
       },
       "pending"
     );
@@ -653,12 +692,20 @@ export class GrokSession {
     for (const method of [
       XAI_EXTENSION_NOTIFICATIONS.settings_update,
       XAI_EXTENSION_NOTIFICATIONS.announcements_update,
-      XAI_EXTENSION_NOTIFICATIONS.sessions_changed,
+      XAI_EXTENSION_NOTIFICATIONS.sessions_changed
+    ]) {
+      peer.registerExtensionNotification(method, () => {});
+    }
+    // Never surfaced either, but the CLI's own word that its MCP servers are
+    // booting: while the session opens, its children are recorded as helpers.
+    for (const method of [
       XAI_EXTENSION_NOTIFICATIONS.mcp_init_progress,
       XAI_EXTENSION_NOTIFICATIONS.mcp_initialized,
       XAI_EXTENSION_NOTIFICATIONS.mcp_servers_updated
     ]) {
-      peer.registerExtensionNotification(method, () => {});
+      peer.registerExtensionNotification(method, () => {
+        this.recordHelpersWhileOpening();
+      });
     }
 
     peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.models_update, (params) => {
@@ -671,6 +718,7 @@ export class GrokSession {
     });
 
     peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.mcp_server_status, (params) => {
+      this.recordHelpersWhileOpening();
       const record = params as { status?: unknown; name?: unknown; sessionId?: unknown };
       const status = record.status;
       // One warning per server and failure until it reports ready again: the
@@ -1580,10 +1628,24 @@ export class GrokSession {
     this.stopped = true;
     this.settleEverythingForExit(reason, stderrTail);
     this.emitExited(reason, stderrTail, false);
-    // The rows above closed every task `stopped`; this makes it so. Started
-    // before `onClosed`, so the adapter's teardown can wait for it.
-    void this.stopLeftovers();
+    // The rows above closed every task `stopped`; this makes it so — the
+    // helpers, and the user's work when the user is ending the session (an
+    // exit on the cancel of its card, {@link prepareUserEnd}). Started before
+    // `onClosed`, so the adapter's teardown can wait for it.
+    void this.sweepLeftovers();
     this.options.onClosed?.(this.threadId);
+  }
+
+  /**
+   * Every sweep this end calls for: the helpers' ({@link stopLeftovers}),
+   * and the user's work when the user is ending the session ({@link
+   * stopTaskLeftovers}). What the adapter's teardown waits for once the CLI
+   * is gone. Never rejects.
+   */
+  sweepLeftovers(): Promise<void> {
+    return Promise.all([this.stopLeftovers(), this.endingByUser ? this.stopTaskLeftovers() : undefined]).then(
+      () => undefined
+    );
   }
 
   /**
@@ -1603,12 +1665,19 @@ export class GrokSession {
    *   EVERY end — a restart (account, permission mode, cwd), the host's
    *   teardown (a drain-restart's included), the CLI's own exit (a crash, an
    *   open that failed), the user's stop. They are pure per-session leaks:
-   *   two survived every session until 2026-09-26.
+   *   two survived every session until 2026-09-26. The host's teardown waits
+   *   for this sweep (`GrokAdapter.stopAll`), and gives them a 1 s grace
+   *   ({@link HOST_TEARDOWN_SWEEP_GRACE_MS}): the host's process entry exits
+   *   3 s after a SIGTERM whatever the stop is doing, so a CLI that ignores
+   *   SIGTERM itself — its own 2 s grace first — can see a helper that ignores
+   *   it too outlive the backstop, a marked orphan Settings → System lists.
    * - **The user's work** ({@link taskSessions}: the shells the agent ran, the
    *   dev servers they started) ONLY when the user ends the session — the
    *   session stop command or a closed tab — by a sweep of its own
    *   ({@link stopTaskLeftovers}); this one sweeps the helpers alone, and an
-   *   exit in the middle of the user's stop starts it. A deploy's drain waits
+   *   exit in the middle of the user's end — after {@link prepareUserEnd},
+   *   which the host calls before it answers the session's cards — starts
+   *   both ({@link sweepLeftovers}). A deploy's drain waits
    *   for live work only within its bound (a watch loop's TTL, an agent's
    *   hour), and a dev server started in a Grok chat must survive every deploy
    *   after it; so must a thread's restart, and at a crash nobody ended
@@ -1617,28 +1686,56 @@ export class GrokSession {
    *   outlive their session too: the SDK closes the Claude CLI's stdin and
    *   SIGTERMs it 2 s later, before the CLI's own wind-down would stop them.
    *
-   * An open that failed records every child as a helper: nothing of the
-   * user's has run yet. This sweeps the helpers; idempotent; never rejects.
+   * Before the session is announced every child is a helper — an open that
+   * failed, and any end while the session opens (the CLI's death, the host's
+   * teardown, a stop): nothing of the user's has run yet. They are recorded
+   * as the CLI reports its MCP servers booting ({@link
+   * recordHelpersWhileOpening}), so a CLI that dies AFTER its first MCP
+   * report leaves unswept none of the helpers it had started by then —
+   * whether every server's process exists by that first report is not
+   * captured, and one that dies before any report still leaves its helpers
+   * recorded nowhere — and the sweep waits for a recording in flight.
+   *
+   * A sweep that finds nothing recorded is not kept, so a later call sweeps
+   * what a recording landed since. That is defensive: every recording of the
+   * CLI's children starts before its exit's sweep, which awaits it, or finds
+   * nothing (a dead CLI has no children left to read), so no path today
+   * records after an empty sweep; it keeps a future one from being answered
+   * by a cached no-op.
+   *
+   * This sweeps the helpers; idempotent once it found any; never rejects.
    */
   stopLeftovers(): Promise<void> {
     if (this.connection === null) {
       // Never launched: nothing carries the marker.
       return Promise.resolve();
     }
-    this.leftovers ??= stopLeftoverProcesses({
-      launchId: this.launchId,
-      sessions: [...this.helperSessions.values()]
-    }).then(
-      (result) => {
+    if (this.leftovers !== null) {
+      return this.leftovers;
+    }
+    const sweep: Promise<void> = this.helperRecording.then(async () => {
+      const sessions = [...this.helperSessions.values()];
+      if (sessions.length === 0) {
+        if (this.leftovers === sweep) {
+          this.leftovers = null;
+        }
+        return;
+      }
+      try {
+        const result = await stopLeftoverProcesses({
+          launchId: this.launchId,
+          sessions,
+          ...(this.sweepGraceMs === undefined ? {} : { graceMs: this.sweepGraceMs })
+        });
         if (result.found > 0) {
           this.options.logger.debug("grok: stopped what the agent left running", { ...result });
         }
-      },
-      (error: unknown) => {
+      } catch (error) {
         this.options.logger.warn("grok: could not stop what the agent left running", error);
       }
-    );
-    return this.leftovers;
+    });
+    this.leftovers = sweep;
+    return sweep;
   }
 
   /**
@@ -1660,7 +1757,11 @@ export class GrokSession {
     this.emitAll(this.normalizer.failOpenTools("The agent process exited."));
     // Its work runs on past it — unless the user was ending the session, whose
     // stop sweeps it ({@link stop}).
-    this.emitAll(this.normalizer.stopBackgroundTasks(this.endingByUser ? undefined : leftRunningNote("exit")));
+    this.emitAll(
+      this.normalizer.stopBackgroundTasks(
+        this.endingByUser ? {} : { leftRunning: leftRunningNote("exit"), ended: endedNote("exit") }
+      )
+    );
 
     if (turn !== null && !turn.settled) {
       const outcome = exitOutcome(reason, this.hostInitiatedStop);
@@ -1738,11 +1839,13 @@ export class GrokSession {
 
   /**
    * Record the sessions the CLI's children lead, while it lives: as its
-   * helpers' ({@link helperSessions}) when its session opens, as its work's
-   * ({@link taskSessions}) when the user ends it — a session already a
-   * helper's stays one. The sweep takes only processes in a recorded session.
-   * Best-effort: a read that fails records nothing, and nothing is then swept
-   * for it.
+   * helpers' ({@link helperSessions}) while its session opens — as it reports
+   * its MCP servers booting, once `session/new` answered, and at any end
+   * before it was announced — as its work's ({@link taskSessions}) as it
+   * reports the work and when its session ends after that — a session already
+   * a helper's stays one. The sweep takes only processes in a recorded
+   * session. Best-effort: a read that fails records nothing, and nothing is
+   * then swept for it.
    */
   private async recordSessions(kind: "helpers" | "tasks"): Promise<boolean> {
     const pid = this.connection?.pid;
@@ -1780,6 +1883,39 @@ export class GrokSession {
       .catch(() => undefined);
   }
 
+  /**
+   * The CLI reported its MCP servers booting (`_x.ai/mcp/servers_updated`
+   * and `init_progress` before `session/new` answers; `server_status` and
+   * `initialized` after it, fixture 31): while its session is still opening,
+   * record its children as helpers now — the recording after `session/new`
+   * answered comes too late for a CLI that dies first (fixture 31:
+   * `init_progress {connected: 0}` 70 ms before that answer). Whether every
+   * MCP server's process exists by the first report is not captured: each
+   * later report records again, adding what it finds. Only before the
+   * session is announced, when nothing of the user's can have run: after it,
+   * a child may be the user's work, which only the user's end may stop. One
+   * recording at a time; never rejects.
+   */
+  private recordHelpersWhileOpening(): void {
+    if (this.announced || this.stopped) {
+      return;
+    }
+    this.helperRecording = this.helperRecording
+      .then(async () => {
+        if (this.announced) {
+          return;
+        }
+        const before = this.helperSessions.size;
+        await this.recordSessions("helpers");
+        if (this.helperSessions.size > before) {
+          this.options.logger.debug("grok: recorded the agent's helpers while its session opened", {
+            sessions: this.helperSessions.size
+          });
+        }
+      })
+      .catch(() => undefined);
+  }
+
   /** Remember this launch's task sessions for a later user end. Never rejects. */
   private async persistTaskSessions(): Promise<void> {
     if (this.taskSessions.size === 0 || this.options.persistTaskSessions === undefined) {
@@ -1789,6 +1925,28 @@ export class GrokSession {
       await this.options.persistTaskSessions(this.launchId, [...this.taskSessions.values()]);
     } catch (error) {
       this.options.logger.warn("grok: could not remember the work the agent left running", error);
+    }
+  }
+
+  /**
+   * The user is ending this session, and the host is about to answer its
+   * cards (`stopSessionInternal` calls this FIRST): a card's cancel can end
+   * the CLI before {@link stop} runs, and a CLI that is gone gets no stop at
+   * all. So now, while it lives: record the sessions its children lead as its
+   * work (as helpers while it opens) and remember them for the end's sweep,
+   * and mark the end as the user's — an exit in between closes its work
+   * `stopped`, with no "Left running…", and sweeps it ({@link onExit}); the
+   * sessions remembered are the thread's `sweepEndedSession`'s too. Never
+   * rejects.
+   */
+  async prepareUserEnd(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    this.endingByUser = true;
+    await this.taskRecording;
+    if (await this.recordSessions(this.announced ? "tasks" : "helpers")) {
+      await this.persistTaskSessions();
     }
   }
 
@@ -1803,22 +1961,31 @@ export class GrokSession {
    */
   async stop(options: { endedByUser?: boolean; cause?: GrokSessionEndCause } = {}): Promise<void> {
     if (this.stopped) {
-      await this.leftovers;
+      await this.stopLeftovers();
       return;
     }
     const endedByUser = options.endedByUser === true;
     this.endingByUser = endedByUser;
+    if (options.cause === "host") {
+      // Under the SIGTERM path's backstop: a shorter grace for the helpers.
+      this.sweepGraceMs = HOST_TEARDOWN_SWEEP_GRACE_MS;
+    }
     // FIRST — before the host path is armed and before anything reaches the
     // CLI (the card's cancel below can end it): every child's session, while
     // the CLI still lives, after any recording already in flight. Once it is
     // gone its children are init's, and only their sessions tie them to it.
+    // The user's end has recorded them once already, before the host
+    // answered the cards ({@link prepareUserEnd}): this adds what came since.
     await this.taskRecording;
-    await this.recordSessions("tasks");
+    // While the session opens nothing of the user's has run: every child is a
+    // helper, the failed-open rule — recorded as work, a host teardown during
+    // the open left the MCP servers running and remembered them as the user's.
+    await this.recordSessions(this.announced ? "tasks" : "helpers");
     if (this.stopped) {
       // It ended while they were read, and its exit settled the session
       // ({@link onExit}). The user's work is still the user's to stop — and
       // anyone else's end leaves it running, remembered for the user's.
-      await Promise.all([this.leftovers, endedByUser ? this.stopTaskLeftovers() : this.persistTaskSessions()]);
+      await Promise.all([this.stopLeftovers(), endedByUser ? this.stopTaskLeftovers() : this.persistTaskSessions()]);
       return;
     }
     // Kept, as at an exit: held frames join the open turn before it settles.
@@ -1828,7 +1995,11 @@ export class GrokSession {
     await this.settlePendingAsCancelled();
     this.emitAll(this.normalizer.failOpenTools("The session was stopped."));
     this.emitAll(
-      this.normalizer.stopBackgroundTasks(endedByUser ? undefined : leftRunningNote(options.cause ?? "restart"))
+      this.normalizer.stopBackgroundTasks(
+        endedByUser
+          ? {}
+          : { leftRunning: leftRunningNote(options.cause ?? "restart"), ended: endedNote(options.cause ?? "restart") }
+      )
     );
     const turn = this.activeTurn;
     if (turn !== null && !turn.settled) {

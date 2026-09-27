@@ -1312,7 +1312,10 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   child session; `subagent_progress` re-arms it; `subagent_finished` ends it, once, with its clean
   answer and counters. The call's `SubagentCompleted`, a poll or a kill answer end it only if that
   never came. A background launch and a run past its await budget go on without their call; a Stop
-  never sends a foreground run to the background.
+  never sends a foreground run to the background. A launch no `subagent_spawned` joined never had a
+  child: its call failing (a declined card, a refusal) ends its agent `stopped` with the CLI's text,
+  and a Stop cutting it ends it `stopped`, "Stopped before it started." (observation 49); only a
+  run that started fails.
 - **Its child session's frames** are its own rows and touch nothing of the parent's.
 - **A resume** starts the same task again under the new call; its new id joins through
   `resumed_from`, and its child session's words are messages of their own.
@@ -1323,7 +1326,12 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   child's live `user_message_chunk` (observation 38; fixture 15, line 98) repeats it after the start
   and stays dropped. None rides a start that opens no run: a `resume_from` naming an agent still
   live, which the CLI refuses ("must be completed"), still writes a start, but the agent never
-  received its prompt, and there it would head the running run. None rides a revival's start (the
+  received its prompt, and there it would head the running run. A start that opens a run the CLI
+  then refuses keeps the request it carried: supervised, the spawn asks after its first frame
+  (observation 49), so a declined spawn's start already names its prompt, and a start cannot be
+  withdrawn once emitted — the run ends `stopped` with the CLI's refusal ("User rejected the
+  execution for tool `spawn_subagent`", fixture 25 turn 2), and its drill-in reads the prompt as
+  the request that was declined, never as one an agent received. None rides a revival's start (the
   same run, re-emitted), an agent the CLI spawned itself with no call (a `/loop` fire, a goal's
   planner: its start is `subagent_spawned`, and the prompt reaches the client only afterwards, as
   the child's first `user_message_chunk`), a shell, a monitor, or a loop's or goal's own row —
@@ -1370,22 +1378,26 @@ What the adapter does about it (`GrokSession.stopLeftovers`, `support/leftover-p
 each launch's environment carries its own marker value, and a sweep takes only the processes
 carrying it inside a session one of the CLI's children led — recorded while the CLI lived, so a
 process that daemonized into a session of its own (agent-browser's daemon, an SSH ControlMaster)
-is spared — with SIGTERM, then SIGKILL past a 2 s grace to whatever a fresh scan still finds, each
-pid checked against its `/proc` starttime before every signal. Two kinds, two rules:
+is spared — with SIGTERM, then SIGKILL past a 2 s grace (1 s at the host's teardown, inside the
+SIGTERM path's 3 s backstop) to whatever a fresh scan still finds, each pid checked against its
+`/proc` starttime before every signal. Two kinds, two rules:
 
 - **The CLI's own helpers** — its children the moment `session/new` or `session/load` answered,
   its MCP servers (observation 55) — are swept at every end of the session: a restart of a thread
   that goes on, the host's teardown (a drain-restart's included), the CLI's own exit (a crash, an
-  open that failed) and the user's stop.
+  open that failed) and the user's stop. The host's teardown waits for the sweep: until 2026-09-27
+  the second of its two `stopAll()` calls returned at once, and the process exited before the
+  sweep signalled anything and before the closing rows were written (`host-teardown.test.ts`).
 - **The work its agent started** — its shells and whatever they run — only when the USER ends the
   session (the session stop command, a closed tab), and on an open that failed. A deploy must never
   kill running work: a dev server started in a Grok chat outlives a drain-restart, a restart and a
   crash as a marked orphan, which the daemon's Settings → System lists and kills as its own (any
   process carrying a launch's marker); its task's closing row says so ("Left running when … — stop
   it from Settings → System.", marked `leftRunning`: the one summary a stopped shell's roster row
-  shows), and its sessions — recorded as the CLI reports the work and again at the end — are
-  remembered in the thread's `leftover-work.json`, which the user's next end of the session sweeps,
-  whatever launch left them.
+  shows) — at a deploy, a restart and the CLI's exit; a HOST that crashed writes no row, and the
+  next host's first load closes the task with the generic "Task stopped" — and its sessions —
+  recorded as the CLI reports the work and again at the end — are remembered in the thread's
+  `leftover-work.json`, which the user's next end of the session sweeps, whatever launch left them.
 
 A Stop's `session/cancel` kills nothing (the CLI lives on and owns them, observation 44).
 Linux-only: elsewhere nothing is read or signalled.
@@ -1415,6 +1427,19 @@ The adapter keeps a child's card the parent's, as Codex's collab children's are:
 parent's turn open as the request arrives (the foreground spawn's), answered as any card — while
 the child's call is the agent's own row (`session-replay.test.ts`, 25 replayed).
 
+Since the spawn asks BEFORE any child exists, a Stop while its card is pending (not captured: the
+harness answered every card) cuts a call that no `subagent_spawned` joined and no
+`subagent_finished` can end — the CLI cancels nothing, and a cut call gets no terminal frame
+(fixtures 05, 23, 31). The agent the adapter started at the call's first frame is ended there,
+`stopped`, "Stopped before it started." (`cutUnspawnedLaunch`; `fold-seam.test.ts` drives 25's
+frames up to turn 2's card, then the Stop): left live, the roster read it running and liveness held
+a deploy's drain for its hour. A launch a spawn joined still waits for the CLI's end (fixture 23),
+and a `subagent_spawned` that trails the cut (unsupervised, the CLI spawns at once) joins the ended
+launch, never a second agent. That leaves one narrow window, known and kept: when the report trails
+the Stop by the 7–20 ms of observation 37, the child did start — its frames join the ended agent's
+drill-in, while its row keeps "Stopped before it started." (the CLI's own `cancelled` end then adds
+no row, the adapter's end standing).
+
 ### 50. A run that ends short is `cancelled`, with an `error` that says why
 
 Every non-completed `subagent_finished` of every capture is `status: "cancelled"` with an `error`:
@@ -1427,7 +1452,11 @@ call failed `tool_execution_failed` with the same message, and the parent's own 
 called it "Subagent failed: max turns reached (limit 1)".
 
 The adapter reads `cancelled` as `stopped`, as before, and carries the `error` as the end's summary
-(the roster row's result): a stopped row used to say nothing of why.
+(the roster row's result): a stopped row used to say nothing of why. A spawn declined before any
+child existed (fixture 25, turn 2: its own card, observation 49) has no `subagent_finished` at all:
+its call fails with the CLI's text ("User rejected the execution for tool `spawn_subagent`"), and
+the adapter ends that agent `stopped` with it, as a run the user cut short — never `failed`
+(observation 47).
 
 **Not captured: `status: "failed"`.** Tried on 2026-09-26: routing the `general-purpose` type to a
 custom model on an endpoint nothing listens on (`[model.unreachable]` + `[subagents.models]`),
@@ -1491,10 +1520,19 @@ and makes each loop a roster row typed `scheduled` (the roster's `loop` kind), t
 and prompt ("Every 1 minute: Reply with exactly: tick") — background, and inert to the liveness
 registry, so it never holds a deploy's drain between its fires; a fire notes itself on it in place
 ("Fired once"), `scheduled_task_deleted` ends it (`stopped`; `completed` on `expired`, read off the
-docs), and the session's end closes it. The fire itself is the agent row the CLI's
+docs), and the session's end closes it — a deploy's, a restart's or the CLI's exit saying so ("Ended
+when the agent host stopped.", "… the session restarted.", "… the agent process exited."), where a
+bare "Stopped" read as the user's doing. The fire itself is the agent row the CLI's
 `subagent_spawned` starts, live while it runs. Not captured: a loop's expiry, a `durable` loop
 across sessions, and whether a Stop's `session/cancel` deletes a loop (a later fire notes itself on
 the row the Stop closed).
+
+A run's launch id is `loop-run:<task id>:<launch>:<run>`, `<launch>` the session's own nonce (the
+first 8 hex digits of its launch id): every launch builds its normaliser afresh and numbers runs
+from 1, so a loop a LATER launch reports again — a `durable` loop the CLI restores on
+`session/load`, uncaptured, so PLAUSIBLE — opens a run the roster reopens its row for. Without the
+launch it reused the id of the run a deploy had ended, and the roster read the new start as a late
+delivery of that run: the row stayed ended while the loop fired (final review A, M4).
 
 ### 53. `/goal`: `goal_updated`, and a planner the CLI spawns
 
@@ -1525,12 +1563,15 @@ to the liveness registry, as a loop is; its turns and planner hold the drain on 
 when a goal turns `active`, a progress note in place on each change of phase, planning, last event,
 deliverables or rounds — never on a token tick alone — carrying the goal's own token count, and
 ended when it leaves `active`: `budget_limited` → `stopped`, "Token budget reached: 48386 of 20000
-tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its result summary. A
+tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its result summary; the
+session's end closes it as it closes a loop, saying why (observation 52). A
 goal active again after the CLI's own end is a new run of its row (a new launch id); after the
 adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its progress notes
 itself on the ended row; a new goal ends the old one ("Replaced by a new goal"), with the token
 count the old one last reported itself — the replacing update counts the new goal's. Not captured: a
-goal that completes, pauses, resumes or fails.
+goal that completes, pauses, resumes or fails. A goal run's launch id carries the launch as a loop
+run's does (`goal-run:<goal id>:<launch>:<run>`, observation 52): a goal a later launch reports
+active again (PLAUSIBLE, uncaptured: a CLI restoring its goal on `session/load`) reopens its row.
 
 ### 54. The host's cancel of a question: the model hears "declined"; a Stop's cancel ends the turn
 
@@ -1582,6 +1623,21 @@ server the CLI started after its session opened — none was seen — would be w
 running at a deploy (as before 2026-09-26), never killed early. After the adapter's SIGTERM of the
 CLI's group, `serena` ran on under init this time (in 24 `jira-cloud` did too; the others end on
 their stdin's end) — a helper, swept by its recorded session.
+
+The CLI says so before its open answers, too: `_x.ai/mcp/servers_updated` (t=489) and
+`init_progress {total: 5, connected: 0}` (t=645) precede the `session/new` answer (t=717). While
+the session is not announced, every such report — and `initialized`, `server_status` — records the
+CLI's children as helpers (`GrokSession.recordHelpersWhileOpening`), so a CLI that dies after its
+first MCP report leaves unswept none of the helpers it had started by then: the recording after the
+answer came too late for it, and its exit then swept nothing. Whether every server's process exists
+by the first report is not captured (the harness listed the children only once the open answered):
+each later report records again, adding what it finds; a CLI that dies before any report still
+leaves its helpers recorded nowhere. Of those reports only `servers_updated` (t=489 ms) and the
+first `init_progress` (t=645) came before the answer: `init_progress` went on after it (t=724 to
+3558), and `server_status` (t=763 and later) and `mcp_initialized` (t=3563) came only after it — and
+a report that arrives once the session is announced records nothing, since the user's work may be
+running by then. Any end before the session is announced — the CLI's death, the host's teardown, a
+stop — records the children as helpers too, never as the user's work: nothing of the user's has run.
 
 ### 56. agent-browser's daemon leaves its MCP server's session — the helper sweep spares the shared browser
 

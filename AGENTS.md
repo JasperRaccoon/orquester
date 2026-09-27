@@ -442,32 +442,50 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   the moment it answers healthy (the respawn cap still holds) — `error` used to be terminal until
   the daemon restarted. A manual `POST /api/agent-host/stop` still restarts at once, by design.
 - **Boot folds only orphaned threads.** The §3.3 reconcile decides "orphaned" from `meta.json`
-  alone (`isOrphanedHead`: `starting`/`running`, an `activeTurnId`, or `ready` with a prepared
-  `continueAfterRestart`; `commit` rewrites the head on every session transition for exactly this
-  reader), read with `loadHead(id, { seedRuntime: false })`, which never opens `events.ndjson`,
-  and folds nothing else before the gate. Every other thread goes into
-  `bootSettlePending`: §3.4's stale-`pending`-turn settle, which the reconcile used to run on every
-  idle thread at boot, runs on the thread's **first load**, inside `loadRuntime` before the runtime
-  is published — and so does the closing of the requests, calls and tasks its last process left
-  open and the naming of its legacy agents' launches (`repairLeftovers`, see "A running state never
-  outlives its process" and "Agent rows must survive resumes and retention"), which an orphan gets in
-  the reconcile itself — so no read, stream snapshot or command can see the thread unsettled — and
-  never at boot. A head that cannot be read is folded, as before. Measured before, on the owner's VPS
-  (2026-09-23): 16 s of folding for 78 MB of logs, all of it on the readiness path — an 18 s
-  "connecting" window on every host replacement; the reconcile now costs one `meta.json` read per
-  thread plus the orphans' own folds. The deploy handover's `/stop` (`markThreadsForContinuation`)
-  applies the same rule: it folds only a thread this host serves, one with a live provider session,
-  or one whose `meta.json` says a turn is running in an opted-in project with a cursor — folding
-  every log there made a healthy host take a minute to acknowledge its stop. The boot sweep is
-  `sweepStartup` (fired unawaited just before the gate): stale partial uploads and the raw-log
-  ceiling, no history read at all. The deep attachment-reference sweep (`sweepNow`) runs on the
-  store's 6 h schedule, reads references off the snapshot + tail (`foldForSweep`) and skips a thread
-  with no stored attachment outright; a host restarted more often than that collects orphaned
-  completed attachments late — disk, never correctness. The folds on the load, history, sweep and
-  item-read paths yield to the loop every 500 events (`applyEventsChunked`; the store's
-  `foldForward`), and decoding a log yields every 8 ms (`DECODE_SLICE_MS`: `readLog`,
-  `decodeWindow`): a multi-second fold or parse starved the 15 s health probe (5 s timeout), and
-  two consecutive misses restart a healthy host.
+  alone (`isOrphanedHead`: `starting`/`running`, an `activeTurnId`, `ready` with a prepared
+  `continueAfterRestart`, or an unprepared marker on a settled head, below; `commit` rewrites the
+  head on every session transition for exactly this reader), read with
+  `loadHead(id, { seedRuntime: false })`, which never opens `events.ndjson`, and folds nothing else
+  before the gate. **The deploy handover's marker survives the teardown's rows:** `/stop` marks a
+  running turn (`markThreadsForContinuation`), and the host's teardown then writes what it did to it
+  — every adapter's rows reach the log since the Grok fix wave — so the head reads `stopped` with no
+  active turn, which the next host used to take for a settled thread: nothing continued, the marker
+  left for good (final review A r1). Such a head is a candidate (`meta.json` cannot see the turns)
+  that the full path decides (`continuesSettledTurn`): the marked turn must be the thread's LATEST
+  (positional) and settled `interrupted`, and the marker STAMPED (`markedAt`, which this code writes
+  on every marker it sets; the config schema lists it, since a zod object drops a key it does not
+  know), and is then continued as an orphan whose turn is already settled — no second settle, no
+  error row, and a marker the thread cannot use (a closed tab, no cursor) is simply dropped. An
+  older host's unstamped marker keeps the rule it was written under — continued only while the head
+  still reads running — and on a settled head is cleared, never continued: a manual stop during a
+  Claude or OpenCode turn could leave one on a thread nobody touched since, and continuing it would
+  replay a turn of any age (final review A r2). A marker that names anything else is stale and
+  dropped too, as it is
+  whenever the thread moves on (`dropContinuationMarker`: the user's end, a new turn's effect before
+  its session is ensured, any other turn's `turn.started`), and with no active turn an unprepared
+  marker matches only that settled turn: a crash while a new turn's session starts never continues
+  the old one. Every other thread goes into `bootSettlePending`: §3.4's stale-`pending`-turn settle,
+  which the reconcile used to run on every idle thread at boot, runs on the thread's **first load**,
+  inside `loadRuntime` before the runtime is published — and so does the closing of the requests,
+  calls and tasks its last process left open and the naming of its legacy agents' launches
+  (`repairLeftovers`, see "A running state never outlives its process" and "Agent rows must survive
+  resumes and retention"), which an orphan gets in the reconcile itself — so no read, stream
+  snapshot or command can see the thread unsettled — and never at boot. A head that cannot be read
+  is folded, as before. Measured before, on the owner's VPS (2026-09-23): 16 s of folding for 78 MB
+  of logs, all of it on the readiness path — an 18 s "connecting" window on every host replacement;
+  the reconcile now costs one `meta.json` read per thread plus the orphans' own folds. The deploy
+  handover's `/stop` (`markThreadsForContinuation`) applies the same rule: it folds only a thread
+  this host serves, one with a live provider session, or one whose `meta.json` says a turn is
+  running in an opted-in project with a cursor — folding every log there made a healthy host take a
+  minute to acknowledge its stop. The boot sweep is `sweepStartup` (fired unawaited just before the
+  gate): stale partial uploads and the raw-log ceiling, no history read at all. The deep
+  attachment-reference sweep (`sweepNow`) runs on the store's 6 h schedule, reads references off the
+  snapshot + tail (`foldForSweep`) and skips a thread with no stored attachment outright; a host
+  restarted more often than that collects orphaned completed attachments late — disk, never
+  correctness. The folds on the load, history, sweep and item-read paths yield to the loop every 500
+  events (`applyEventsChunked`; the store's `foldForward`), and decoding a log yields every 8 ms
+  (`DECODE_SLICE_MS`: `readLog`, `decodeWindow`): a multi-second fold or parse starved the 15 s
+  health probe (5 s timeout), and two consecutive misses restart a healthy host.
 - **The fold snapshot, the thread index and the tool-output cache are caches, never authorities.** `events.ndjson` stays
   the record; any doubt — another version, a seq or byte offset that does not line up, a file that
   does not parse — is resolved by discarding the cache and re-deriving from the log, never the
@@ -1468,40 +1486,58 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   steer's cancel ("Cancelled: a new message was sent.") — left open, each read in progress in the
   MCP transcript, took an open-work retention slot and got the next host's "Stopped when the agent
   host restarted." A subagent's own calls are not the prompt's: a cut foreground child's close with
-  its run at `subagent_finished`, a background child's outlive the turn. A question the HOST cancels
-  (a Stop, the session's stop, a closed tab) reaches the CLI as its own cancel,
-  `{outcome: "cancelled"}`: the host flags it (`respondToUserInput`'s host-only `options.cancel`,
-  which the other adapters ignore), because its `{}` is also a user's skip — passed on as an answer,
-  it told the CLI the user had answered, nothing. (11) **What the 2026-09-26 captures settled**
-  (fixtures 25–30, observations 49–53).
-  Supervised, the spawn call itself asks first (`x.ai/tool` kind `task`, "Yes, send once" or
-  decline), and a subagent's own tool asks on the PARENT's session, naming the child's call: the
-  parent's card, on the parent's open turn, no owner — Codex's collab rule — while the call itself
-  is the agent's own row. A run that ends short is `subagent_finished {status: "cancelled", error}`
-  every way it does — a kill, a Stop, a declined tool, the runtime's turn cap ("max turns reached
-  (limit: 1)"); the CLI never said `failed`, so the run reads `stopped` and its `error` is the row's
-  reason (a bare "Stopped" before). The scheduler (`/loop`, `scheduler_create`) reports by methods
-  of its own, `_x.ai/scheduled_task_created` / `_fired` / `_deleted` (a peer warning per frame
-  before they were registered — one per fire of a week-long loop), and `/goal` by `goal_updated` on
-  the private channel (an "unmapped" warning every few seconds of a goal run): each loop and the
-  goal is a roster row, typed `scheduled` / `goal`, which the roster folds to a kind of its own,
-  `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what it is, a metrics line of its own
-  ("scheduled prompt"; "goal · 48.4k tok", the count the goal reports), a live loop `Scheduled` and
-  a live goal `Active` rather than "Working", a settled one's line its end reason ("Token budget
-  reached: …"), never a shell's row, and never counted or token-summed as work
-  (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) — background, and
-  `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain (its work does,
-  each fire and each planner being a subagent the CLI spawns itself: an agent row under its own id,
-  whose end wakes the parent), and the open tab's own liveness skips both
+  its run at `subagent_finished`, a background child's outlive the turn. A cut spawn whose launch no
+  `subagent_spawned` joined — supervised, the CLI asks before it spawns (observation 49), so a Stop
+  that withdrew the spawn's own card — has no child to cancel and no `subagent_finished` to come:
+  its agent, started at the call's first frame, ends there, `stopped`, "Stopped before it started."
+  (`cutUnspawnedLaunch`; left live it read running and held a deploy's drain for its hour), and a
+  late `subagent_spawned` still joins that launch, never a second agent — one narrow, known window:
+  unsupervised, when that report trails the Stop by the 7–20 ms of observation 37, the child did
+  start, and its frames join the ended agent's drill-in while its row keeps "Stopped before it
+  started." (the CLI's own `cancelled` end then adds no row). A question the HOST cancels (a Stop,
+  the session's stop, a closed tab) reaches the CLI as its own cancel, `{outcome:
+  "cancelled"}`: the host flags it (`respondToUserInput`'s host-only `options.cancel`, which the
+  other adapters ignore), because its `{}` is also a user's skip — passed on as an answer, it told
+  the CLI the user had answered, nothing. (11) **What the 2026-09-26 captures settled** (fixtures
+  25–30, observations 49–53). Supervised, the spawn call itself asks first (`x.ai/tool` kind `task`,
+  "Yes, send once" or decline), and a subagent's own tool asks on the PARENT's session, naming the
+  child's call: the parent's card, on the parent's open turn, no owner — Codex's collab rule — while
+  the call itself is the agent's own row. A run that ends short is `subagent_finished {status:
+  "cancelled", error}` every way it does — a kill, a Stop, a declined tool, the runtime's turn cap
+  ("max turns reached (limit: 1)"); the CLI never said `failed`, so the run reads `stopped` and its
+  `error` is the row's reason (a bare "Stopped" before). A spawn the user declined never runs: its
+  call fails ("User rejected the execution for tool `spawn_subagent`", fixture 25 turn 2) with no
+  `subagent_spawned` joined to it, so its agent ends `stopped` with that text — never a failed agent
+  that never existed — and its start, emitted before the card, keeps the prompt that was declined (a
+  start cannot be withdrawn); only a run that started fails. The scheduler (`/loop`,
+  `scheduler_create`) reports by methods of its own, `_x.ai/scheduled_task_created` / `_fired` /
+  `_deleted` (a peer warning per frame before they were registered — one per fire of a week-long
+  loop), and `/goal` by `goal_updated` on the private channel (an "unmapped" warning every few
+  seconds of a goal run): each loop and the goal is a roster row, typed `scheduled` / `goal`, which
+  the roster folds to a kind of its own, `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what
+  it is, a metrics line of its own ("scheduled prompt"; "goal · 48.4k tok", the count the goal
+  reports), a live loop `Scheduled` and a live goal `Active` rather than "Working", a settled one's
+  line its end reason ("Token budget reached: …"), never a shell's row, and never counted or
+  token-summed as work (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) —
+  background, and `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain
+  (its work does, each fire and each planner being a subagent the CLI spawns itself: an agent row
+  under its own id, whose end wakes the parent), and the open tab's own liveness skips both
   (`deriveBackgroundLiveness` in the store), agreeing with the host, the tab strip, the Attention
   Center, pushes and the account-switch gate that a thread with only a loop or a goal live is idle.
   A fire notes itself on the loop's row and a goal's change of phase on the goal's, in place (a
   token tick alone does not); `scheduled_task_deleted` ends a loop (`stopped`, `completed` on
   expiry) and a goal leaving `active` ends it (`budget_limited`, `paused`, `cleared` → `stopped`
   with the reason, `completed` with its result); the session's end closes both, as the loop and the
-  goal live in the CLI's process (whether a Stop's `session/cancel` stops either is not captured: a
-  later fire or goal update notes itself on the ended row, and only the CLI re-creating a loop or
-  resuming a goal it ended itself opens a new run). A genuine `failed` status was not triggered: a
+  goal live in the CLI's process — an end the user did not choose saying so on the row ("Ended when
+  the agent host stopped / the session restarted / the agent process exited.", `endedNote`; a bare
+  "Stopped" read as the user's doing), the user's end and a Stop saying nothing (whether a Stop's
+  `session/cancel` stops either is not captured: a later fire or goal update notes itself on the
+  ended row, and only the CLI re-creating a loop or resuming a goal it ended itself opens a new
+  run). A run's launch id names the launch that numbered it (`loop-run:<task>:<launch>:<run>`,
+  `goal-run:<goal>:<launch>:<run>`, `<launch>` the first 8 hex digits of the session's launch id):
+  every launch counts runs from 1, and a loop or goal a later launch reports again (a CLI restoring
+  them on `session/load` — PLAUSIBLE, uncaptured) reused the ended run's id, which the roster read
+  as a late delivery, the row staying ended. A genuine `failed` status was not triggered: a
   subagent's model is set only in the account home's `config.toml`, never written. Noise the
   captures showed, silenced: a child's `skills-reload` / `workflows-reload` replies to requests the
   CLI sent itself are not warnings (the ACP peer drops a reply to nothing that carries an id the
@@ -1529,30 +1565,55 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   scan still finds, each pid identified by its `/proc` starttime on both sides of the environment
   read and again before each signal, a live session leader against the one recorded — the kill
   guard's rule: never a recycled pid; a zombie is gone. Two kinds, two rules. **The CLI's own
-  helpers** — its children the moment `session/new` / `session/load` answered, which are its MCP
-  servers (fixture 31: all four existed then, none of the user's work had run) — are swept at EVERY
-  end: a restart of a thread that goes on (an account, permission-mode or cwd change — Grok switches
-  models in-session), the host's teardown (a drain-restart's included), the CLI's own exit (a crash,
-  an open that failed), the user's stop. **The work its agent started** — its shells, the dev
-  servers they run — is swept ONLY when the user ends the session: the session stop command or a
-  closed tab (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`; the MCP's
-  `stop_session` and `close_session` are that command and that close) — recorded FIRST in that stop,
-  before anything reaches the CLI, and swept by a sweep of their own (`stopTaskLeftovers`), so a CLI
-  exiting in the middle of the stop (on its card's cancel, say) cannot hand the stop a helpers-only
-  sweep — and on an open that failed, where nothing of the user's has run. Never at a deploy's
-  teardown or a restart: the drain waits for live work only within its bound (a watch loop's TTL, an
-  agent's hour), and a dev server started in a Grok chat must survive every deploy that comes after
-  it. Never at a crash either (no user ended anything). There it runs on as a marked orphan, listed
-  and killable in Settings → System, and never silently: its task's closing row says so — "Left
-  running when the agent host stopped / the session restarted / the agent process exited — stop it
-  from Settings → System." (`leftRunningNote`), marked `leftRunning` on the row and the roster entry
-  — the one summary a stopped shell's row shows in place of a bare "Stopped"; any other completion
-  summary (the CLI's stop sentence, a killed shell's output line) never replaces it. Nor is it
-  forgotten: each launch's task sessions — recorded as the CLI reports the work (a shell's, a
-  monitor's `task.started`: nothing can be read off a CLI that crashed) and again at every end,
-  while it lives — are kept in the thread's `leftover-work.json` (SID, leader starttime, launch id;
-  the last 8 launches; 0600, atomic, written only while the thread's directory exists (a late record
-  must not raise a deleted thread), the adapter's own file, never `binding.json`;
+  helpers** — its children while its session opens, which are its MCP servers (fixture 31: all four
+  existed as `session/new` answered, none of the user's work had run), recorded as the CLI reports
+  them booting (`_x.ai/mcp/servers_updated` and `init_progress` arrive before `session/new` answers,
+  `server_status` after it: a CLI that dies after its first MCP report leaves unswept none of the
+  helpers it had started by then — whether every server's process exists by that first report is not
+  captured, and one that dies before any report still leaves them recorded nowhere), once the open
+  answered, and at any end before the session was announced (every child a helper then, never the
+  user's work: a host teardown during the open used to record them as work and leave them running) —
+  are swept at EVERY end: a restart of a thread that goes on (an account, permission-mode or cwd
+  change — Grok switches models in-session), the host's teardown (a drain-restart's included), the
+  CLI's own exit (a crash, an open that failed), the user's stop. The host's teardown waits for
+  them: both of its `stopAll()` calls — the adapter's abort listener's, then `main.ts`'s — wait for
+  every stop in flight, and `stop()` lets the consumers read what the stops queued before the
+  orchestrator stops consuming (`host-teardown.test.ts`; the second call used to return at once, and
+  the process exited with the sweep unsent and the closing rows unwritten — Codex's stream, too,
+  closed before its teardown rows). There the helpers' grace is 1 s
+  (`HOST_TEARDOWN_SWEEP_GRACE_MS`), well inside the SIGTERM path's 3 s backstop; a CLI that ignores
+  SIGTERM itself spends its own 2 s first, and the backstop can then cut the helpers' SIGKILL — a
+  helper that ignored SIGTERM too runs on, a marked orphan Settings → System lists (a deploy's
+  `/stop` has no such backstop). **The work its agent started** — its shells, the dev servers they
+  run — is swept ONLY when the user ends the session: the session stop command or a closed tab
+  (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`; the MCP's `stop_session` and
+  `close_session` are that command and that close) — recorded FIRST, before anything reaches the
+  CLI: the orchestrator calls the adapter's `prepareUserEnd` before it answers the session's cards
+  with its cancels (a cancel can end the CLI, and a CLI already gone gets no `stopSession`), which
+  records them while the CLI lives, remembers them in `leftover-work.json` and marks the end as the
+  user's; the stop that follows records again as it begins. They are swept by a sweep of their own
+  (`stopTaskLeftovers`), so a CLI exiting in the middle of the end (on its card's cancel, say)
+  cannot hand it a helpers-only sweep: its exit, marked the user's end, sweeps them itself and
+  closes them `stopped` with no "Left running…", and the thread's `sweepEndedSession` finds them too
+  (until 2026-09-27 the cards were answered first, and such an exit read as a crash) — and on an
+  open that failed, where nothing of the user's has run. Never at a deploy's teardown or a restart:
+  the drain waits for live work only within its bound (a watch loop's TTL, an agent's hour), and a
+  dev server started in a Grok chat must survive every deploy that comes after it. Never at a crash
+  either (no user ended anything). There it runs on as a marked orphan, listed and killable in
+  Settings → System, and — at a deploy's or a restart's end, and at the CLI's own exit — never
+  silently: its task's closing row says so — "Left running when the agent host stopped / the session
+  restarted / the agent process exited — stop it from Settings → System." (`leftRunningNote`),
+  marked `leftRunning` on the row and the roster entry — the one summary a stopped shell's row shows
+  in place of a bare "Stopped"; any other completion summary (the CLI's stop sentence, a killed
+  shell's output line) never replaces it. A HOST that crashed (an OOM, a SIGKILL) ran no teardown
+  and wrote no such row: the next host's first load closes the task with the generic `stopped` row
+  of `leftoverWorkClosings` ("Task stopped", `orchestration/leftover-work.ts`), which cannot tell
+  work that runs on from work that died — the process is still listed and killable in Settings →
+  System. Nor is it forgotten: each launch's task sessions — recorded as the CLI reports the work (a
+  shell's, a monitor's `task.started`: nothing can be read off a CLI that crashed) and again at
+  every end, while it lives — are kept in the thread's `leftover-work.json` (SID, leader starttime,
+  launch id; the last 8 launches; 0600, atomic, written only while the thread's directory exists (a
+  late record must not raise a deleted thread), the adapter's own file, never `binding.json`;
   `support/leftover-work.ts`), so a LATER user end — the session stop command or a closed tab, live
   session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession` either way — sweeps
   what every earlier launch left, with the same identity checks. A Claude chat's background shells

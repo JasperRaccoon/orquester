@@ -197,13 +197,18 @@ while the CLI lived (never a process that daemonized away): SIGTERM, then SIGKIL
 each pid checked against its `/proc` starttime before each signal (`support/leftover-processes.ts`,
 `GrokSession.stopLeftovers`). Its own helpers — the MCP servers, its children as its session opened
 (the README's observation 55) — go at every end of the session: a restart, the host's teardown (a
-drain-restart's included), the CLI's own exit, an open that failed, the user's stop. The work its
-agent started — shells, the dev servers they run — goes only when the USER ends the session (the
-session stop command or a closed tab: `stopSession(…, {endedByUser: true})`) and on an open that
-failed; a deploy must never kill running work, so at a drain-restart, a restart or a crash it runs
-on as a marked orphan, which the kill guard's note below lets Settings → System list and kill, its
-task's closing row saying so ("Left running when … — stop it from Settings → System."), and its
-sessions remembered in the thread's `leftover-work.json` (0600, the last 8 launches), which the
+drain-restart's included), the CLI's own exit, an open that failed, the user's stop. The host's
+teardown waits for them: both of its `stopAll()` calls wait for every stop in flight, and its
+consumers read what the stops queued before the orchestrator stops (`host-teardown.test.ts`); the
+helpers get a 1 s grace there, inside the SIGTERM path's 3 s backstop. The work its agent started —
+shells, the dev servers they run — goes only when the USER ends the session (the session stop
+command or a closed tab: `prepareUserEnd` before the host answers the session's cards, which records
+it while the CLI lives, then `stopSession(…, {endedByUser: true})`) and on an open that failed; a
+deploy must never kill running work, so at a drain-restart, a restart or a crash it runs on as a
+marked orphan, which the kill guard's note below lets Settings → System list and kill, its task's
+closing row saying so ("Left running when … — stop it from Settings → System."; a host that crashed
+writes none, and the next host's first load closes the task with the generic "Task stopped"), and
+its sessions remembered in the thread's `leftover-work.json` (0600, the last 8 launches), which the
 user's next end of the session sweeps, live session or not (`AgentAdapter.sweepEndedSession`).
 Linux-only; a no-op elsewhere.*
 
@@ -463,6 +468,24 @@ continue this thread after the server restart. Send a new message to
 continue."` — the user is told the thread could not be picked up, not that it
 was never eligible. Both clear the marker and leave the cursor alone, so the
 thread is still resumable by hand.*
+
+*Built: **the intentional stop's marker survives the teardown's rows** (final review A r1). The
+marker `/stop` writes for a running turn is followed by the host's own teardown, which writes what
+it did to that turn — settled `interrupted`, the session `stopped` — since every adapter's teardown
+rows reach the log (the Grok fix wave). Such a head no longer claims a live process, so the input
+above also takes a head with an unprepared marker on a settled session: `meta.json` cannot see the
+turns, so it is a candidate, and the full path continues it only when the marked turn is the
+thread's latest and settled `interrupted` and the marker is stamped (`markedAt`, which every marker
+this code writes carries) — as an orphan whose turn is already settled, with no second settle and no
+error row (a thread it cannot continue, a closed tab or no cursor, only loses the marker). A marker
+an older host wrote carries no stamp: it keeps the rule it was written under (continued only while
+the head still reads running), and on a settled head it is cleared, never continued — a manual stop
+during a Claude or OpenCode turn could leave one on a thread nobody touched since, and it must not
+replay a turn of any age (final review A r2). Any other marker is stale and cleared, and every
+marker is cleared as the thread moves
+on — the user ends its session, a new turn starts — so none can continue an old turn later; with no
+active turn only a prepared marker or that settled turn matches (`continuesSettledTurn`,
+`dropContinuationMarker` in `orchestrator.ts`).*
 
 *Built: **the turn is settled at the time its process last wrote, not at the restart.** The fold
 settles a turn at its settling `thread.session-set`'s `occurredAt` (§5.1), and a settle stamped
@@ -1863,14 +1886,17 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   and `subagent_finished` is its end, every way it ends, with its clean `output` — the call's
   `SubagentCompleted` answer and the poll and kill answers end it only when that never came. A
   background launch and a foreground run past its await budget go on without their call; a
-  foreground call a Stop cuts does not — the CLI cancels its child. The child session's own frames
-  reach the client under its own `sessionId`: its thinking, words, tool calls and background shells
-  become the agent's own rows (§7.6's drill-in) — a shell still running when the agent ends then
-  counts on its own — and its context size, usage, catalog, title, hooks and plan mode never touch
-  the parent's. `resume_from` spawns a new subagent id naming its source (`resumed_from`) and starts
-  the same task again under the new call, its new child session's words messages of their own
-  (`adapters/grok/subagents.ts` `subagentSpawned`, `normalize.ts` `childSessionUpdate`,
-  `background-tasks.ts` `taskCompleted`).*
+  foreground call a Stop cuts does not — the CLI cancels its child. A launch no `subagent_spawned`
+  joined never had a child (supervised, the spawn asks first): a Stop that cuts it ends its agent
+  `stopped`, "Stopped before it started." (`cutUnspawnedLaunch`), and its call failing — a declined
+  card, a refusal — ends it `stopped` with the CLI's text, never `failed` (final review A, I2 and
+  M1). The child session's own frames reach the client under its own `sessionId`: its thinking,
+  words, tool calls and background shells become the agent's own rows (§7.6's drill-in) — a shell
+  still running when the agent ends then counts on its own — and its context size, usage, catalog,
+  title, hooks and plan mode never touch the parent's. `resume_from` spawns a new subagent id naming
+  its source (`resumed_from`) and starts the same task again under the new call, its new child
+  session's words messages of their own (`adapters/grok/subagents.ts` `subagentSpawned`,
+  `normalize.ts` `childSessionUpdate`, `background-tasks.ts` `taskCompleted`).*
 - **Prompts the CLI starts itself.** Not in T3. A background subagent's end, a monitor's line and
   a monitor's end wake the agent: the CLI runs a prompt of its own (`subagent-completed-<id>`,
   `notifications-<uuid>`, `task-completed-<id>`) and streams the parent's reply under it, with no
@@ -2436,7 +2462,7 @@ type ThreadHead = {
   session: { status: "idle"|"starting"|"ready"|"running"|"stopped"|"error"; resumeCursor?: unknown;
              providerThreadId?: string; activeTurnId: string|null; lastError?: string };
   turnCount: number; seq: number;
-  continueAfterRestart?: { turnId: string; prepared?: boolean };   // §3.3: a turn id, never a flag
+  continueAfterRestart?: { turnId: string; prepared?: boolean; markedAt?: string };   // §3.3: a turn id, never a flag; markedAt: §3.3's Built note
   createdAt: string; updatedAt: string;
 };
 ```
@@ -4518,10 +4544,12 @@ not read before the start or will prompt no run: it ended `failed` or `interrupt
 with it still open (the Stop of a running turn, whose abandoned items get no end of their own, among
 them), or a Stop with no turn running, or the exit, dropped every prompt still waiting. Absent too
 on a start that opens no run (a Grok `resume_from` naming an agent still live, which the CLI
-refuses: the agent never received it, and it would head the running run), on a shell or monitor, on
-a start written before any launch named the run (OpenCode's `opencode-child:`, an agent Grok's CLI
-spawned itself), on a revival, and on every log from before (the fixtures READMEs: Claude 4,
-OpenCode 19, Grok 47, Codex 21).*
+refuses: the agent never received it, and it would head the running run) — while a start that opens
+a run the CLI then refuses keeps what it carried, a Grok spawn whose own card the user declined
+(fixture 25, turn 2): emitted before the card, a start cannot be withdrawn, and the run ends
+`stopped` with the refusal — on a shell or monitor, on a start written before any launch named the
+run (OpenCode's `opencode-child:`, an agent Grok's CLI spawned itself), on a revival, and on every
+log from before (the fixtures READMEs: Claude 4, OpenCode 19, Grok 47, Codex 21).*
 
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind

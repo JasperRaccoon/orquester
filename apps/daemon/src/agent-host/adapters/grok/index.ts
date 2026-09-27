@@ -150,6 +150,16 @@ class GrokAdapter implements AgentAdapter {
    * (`GrokSession.stopLeftovers`).
    */
   private readonly sweeps = new Set<Promise<void>>();
+  /**
+   * Every session stop in flight — a restart's, a replaced session's, the
+   * host's teardown's — so {@link stopAll} waits for all of them, not only
+   * for the ones its own call started. The host's teardown calls it twice:
+   * this adapter's abort listener takes the session map and starts every
+   * stop, and `main.ts`'s own call, right after, used to find the map empty
+   * and return at once — the process then exited with the helper sweep and
+   * the closing rows still in flight (final review A, I1).
+   */
+  private readonly stopping = new Set<Promise<void>>();
   private readonly queue: RuntimeEvent[] = [];
   private waiter: ((value: void) => void) | null = null;
   private closed = false;
@@ -238,7 +248,7 @@ class GrokAdapter implements AgentAdapter {
     if (existing !== undefined) {
       // One live session per thread: a cursor must never be advanced by two
       // processes (§3.1).
-      await existing.stop();
+      await this.track(existing.stop());
       this.sessions.delete(input.threadId);
     }
 
@@ -285,7 +295,7 @@ class GrokAdapter implements AgentAdapter {
         if (this.sessions.get(threadId) === session) {
           this.sessions.delete(threadId);
         }
-        const sweep = session.stopLeftovers();
+        const sweep = session.sweepLeftovers();
         this.sweeps.add(sweep);
         void sweep.then(() => this.sweeps.delete(sweep));
       },
@@ -473,15 +483,50 @@ class GrokAdapter implements AgentAdapter {
     this.sessions.delete(threadId);
     // Anything but the user's end — an account, permission-mode or cwd
     // restart, a stale session — is a restart of a thread that goes on.
-    await session.stop({ ...options, cause: "restart" });
+    await this.track(session.stop({ ...options, cause: "restart" }));
   }
 
+  /**
+   * Stop every session and wait for EVERY stop in flight — this call's, an
+   * earlier call's, a restart's — and every sweep a session's own exit
+   * started. Every call waits for the same set, so the second of the host's
+   * two calls cannot return before the first one's stops have swept and
+   * written their rows. A failed stop fails the call only once the others
+   * are done.
+   */
   async stopAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    // The host's teardown — a deploy's drain-restart included — is never the
-    // user ending a session: the work each left running is remembered.
-    await Promise.all([...sessions.map(async (session) => await session.stop({ cause: "host" })), ...this.sweeps]);
+    for (const session of sessions) {
+      // The host's teardown — a deploy's drain-restart included — is never the
+      // user ending a session: the work each left running is remembered.
+      void this.track(session.stop({ cause: "host" }));
+    }
+    const results = await Promise.allSettled([...this.stopping, ...this.sweeps]);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure !== undefined) {
+      throw failure.reason;
+    }
+  }
+
+  /** Keep `stop` in {@link stopping} until it settles, and hand it back. */
+  private track(stop: Promise<void>): Promise<void> {
+    this.stopping.add(stop);
+    const forget = (): void => {
+      this.stopping.delete(stop);
+    };
+    void stop.then(forget, forget);
+    return stop;
+  }
+
+  /**
+   * The user is ending the thread's session, and the host is about to answer
+   * its cards (`AgentAdapter.prepareUserEnd`): the live session records its
+   * work while the CLI lives and marks the end as the user's
+   * (`GrokSession.prepareUserEnd`).
+   */
+  async prepareUserEnd(threadId: string): Promise<void> {
+    await this.sessions.get(threadId)?.prepareUserEnd();
   }
 
   /**

@@ -42,6 +42,8 @@ interface Seam {
   /** A turn the session starts: `turn.started`, and the normaliser's own reset. */
   startTurn(turnId: string): Promise<void>;
   state(): ReturnType<typeof fold>;
+  /** A later launch's normaliser — every launch builds its own — fed through this seam. */
+  launch(launchNonce: string): GrokNormalizer;
 }
 
 /** `livenessClock` drives the registry's TTLs by hand (no sleeps). */
@@ -60,19 +62,22 @@ function seam(livenessClock?: ReturnType<typeof createTestClock>): Seam {
   });
   let turnId: string | undefined;
   let counter = 0;
-  const grok = new GrokNormalizer(
-    {
-      threadId: THREAD,
-      stamp: () => {
-        counter += 1;
-        return { eventId: `g${counter}`, createdAt: new Date(T0 + counter).toISOString() };
+  const normalizerFor = (launchNonce: string): GrokNormalizer =>
+    new GrokNormalizer(
+      {
+        threadId: THREAD,
+        stamp: () => {
+          counter += 1;
+          return { eventId: `g${counter}`, createdAt: new Date(T0 + counter).toISOString() };
+        },
+        uuid: () => `u${(counter += 1)}`,
+        activeTurnId: () => turnId,
+        planHost: { platform: "linux", env: { GROK_HOME: "~/home" } },
+        launchNonce
       },
-      uuid: () => `u${(counter += 1)}`,
-      activeTurnId: () => turnId,
-      planHost: { platform: "linux", env: { GROK_HOME: "~/home" } }
-    },
-    SESSION
-  );
+      SESSION
+    );
+  const grok = normalizerFor("launch-1");
   const feed = async (events: readonly RuntimeEvent[]): Promise<void> => {
     for (const event of events) {
       await ingestion.ingest(event);
@@ -92,7 +97,8 @@ function seam(livenessClock?: ReturnType<typeof createTestClock>): Seam {
       grok.beginTurn();
       await feed([grok.event("turn.started", {}, id)]);
     },
-    state: () => fold(sink.events())
+    state: () => fold(sink.events()),
+    launch: normalizerFor
   };
 }
 
@@ -671,6 +677,85 @@ test("21 through the fold: after a Stop, the shell the CLI kept running holds mo
   const roster = s.state().roster;
   assert.equal(roster.find((entry) => entry.id === SHELL_21)?.status, "interrupted");
   assert.equal(roster.find((entry) => entry.id === "call-7b249d13-32d3-4f24-a3ad-b582665c9c5a-1")?.status, "interrupted");
+});
+
+test("25 through the fold: a Stop while the spawn's own card is pending ends the agent that never started", async () => {
+  // Turn 2 of fixture 25 asks before it spawns; the test presses Stop where
+  // the harness answered the card — the capture's rest is what a REJECT
+  // did, so the drive ends there. No child ever existed: no
+  // `subagent_spawned` joined the launch, no `subagent_finished` can come.
+  const SPAWN_2 = "call-d288c474-db56-4180-813b-74576843d412-1";
+  const cardNote = (note: string): boolean =>
+    note.includes(`for tool call ${SPAWN_2}`) && note.includes("session/request_permission");
+  // The session is live throughout, as the adapter says it is: it opened
+  // ready, and a Stop returns it to ready (the roster reads a dead session's
+  // running rows as interrupted, which would hide the phantom).
+  const ready = (control: { grok: GrokNormalizer }): RuntimeEvent[] => [
+    control.grok.event("session.state.changed", { state: "ready" })
+  ];
+  const s = captureSeam("25-subagent-child-approval.ndjson", {
+    atNote: (note, control) =>
+      note.startsWith("spawn:")
+        ? [control.grok.event("session.started", {}), ...ready(control)]
+        : cardNote(note)
+          ? [...control.interrupt(), ...ready(control)]
+          : [],
+    endAtNote: cardNote
+  });
+  await s.feedThrough(s.events.length);
+  const agent = s.state().roster.find((entry) => entry.id === SPAWN_2);
+  assert.ok(agent, "the launch is a roster agent");
+  assert.notEqual(agent.status, "running", "never read running for a run that never started");
+  assert.equal(s.liveness.liveness(THREAD), null, "nor holds a deploy's drain for its hour");
+  const end = s.events.find(taskEnd(SPAWN_2)) as Extract<RuntimeEvent, { type: "task.completed" }> | undefined;
+  assert.deepEqual([end?.payload.status, end?.payload.summary], ["stopped", "Stopped before it started."]);
+});
+
+test("a loop and a goal a later launch reports again reopen their rows: each launch numbers its own runs", async () => {
+  // PLAUSIBLE, not captured: a CLI restoring a durable loop or its goal on
+  // `session/load` reports them to a new launch, whose normaliser numbers
+  // their runs from 1 again. Without the launch in their launch ids those
+  // were the ids of the runs a deploy had ended, and the roster read each new
+  // start as a late delivery of an ended run: the rows stayed ended.
+  const LOOP = "01a0de9b-e17c-7fa0-83dc-a436461e59b5";
+  const GOAL = "18745eb4-3b61-4f0c-9a5e-4dc7dd2087ed";
+  const loopReport = (grok: GrokNormalizer, sessionUpdate: string): RuntimeEvent[] =>
+    grok.handleXaiNotification(`_x.ai/${sessionUpdate}`, {
+      sessionId: SESSION,
+      update: { sessionUpdate, task_id: LOOP, prompt: "Reply with exactly: tick", human_schedule: "every 1 minute" }
+    });
+  const goalReport = (grok: GrokNormalizer): RuntimeEvent[] =>
+    grok.handleXaiNotification("_x.ai/session_notification", {
+      sessionId: SESSION,
+      update: {
+        sessionUpdate: "goal_updated",
+        goal_id: GOAL,
+        objective: "Create goal.txt",
+        status: "active",
+        phase: "executing",
+        token_budget: 20000,
+        tokens_used: 0
+      }
+    });
+  // A live session, as the adapter says: a dead one reads every running row interrupted.
+  const live = (grok: GrokNormalizer): RuntimeEvent[] => [
+    grok.event("session.started", {}),
+    grok.event("session.state.changed", { state: "ready" })
+  ];
+  const s = seam();
+  await s.feed(live(s.grok));
+  await s.feed([...loopReport(s.grok, "scheduled_task_created"), ...goalReport(s.grok)]);
+  // A deploy: the session's end closes both.
+  await s.feed(s.grok.stopBackgroundTasks());
+  const ended = s.state().roster;
+  assert.notEqual(ended.find((entry) => entry.id === LOOP)?.status, "running");
+  // The next launch hears the loop fire and the goal active.
+  const next = s.launch("launch-2");
+  await s.feed(live(next));
+  await s.feed([...loopReport(next, "scheduled_task_fired"), ...goalReport(next)]);
+  const roster = s.state().roster;
+  assert.equal(roster.find((entry) => entry.id === LOOP)?.status, "running", "the loop is live again");
+  assert.equal(roster.find((entry) => entry.id === `goal:${GOAL}`)?.status, "running", "and so is the goal");
 });
 
 // ---------------------------------------------------------------------------

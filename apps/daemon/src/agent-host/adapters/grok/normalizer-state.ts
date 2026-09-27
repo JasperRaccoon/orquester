@@ -38,6 +38,15 @@ export interface GrokNormalizerDeps {
   /** The turn a live frame belongs to, or undefined between turns. */
   activeTurnId(): string | undefined;
   readonly planHost: PlanPathHost;
+  /**
+   * This launch's nonce — the session passes the first 8 hex digits of its
+   * launch id. Loop and goal runs are numbered by the normaliser, which every
+   * launch builds afresh, so their launch ids carry it: a loop or a goal a
+   * later launch reports again (a CLI restoring them on `session/load`) opens
+   * a run the roster reopens its row for, never a late delivery of the run a
+   * deploy ended (`loops-goals.ts`).
+   */
+  readonly launchNonce: string;
 }
 
 /**
