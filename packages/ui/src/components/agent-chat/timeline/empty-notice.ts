@@ -8,13 +8,15 @@
  * anything, a Codex child's words and thoughts are no rows at all, an agent's
  * own task rows are hidden in its view. So the copy is three tiers:
  *
- *  - a LIVE agent with no rows of its own has not reported anything yet (its
- *    live rows sit under the line);
- *  - a settled one's rows have LEFT the window only with evidence of both
- *    halves — the thread's window has dropped rows (`retentionDropped`,
+ *  - its rows have LEFT the window only with evidence of both halves — the
+ *    thread's window has dropped rows (`retentionDropped`,
  *    `windowHasDropped`) and the agent did real tool work, which leaves rows
- *    ({@link didToolWork});
- *  - otherwise a neutral line that is true whatever happened.
+ *    ({@link didToolWork}) — whether it is live or settled: a fleet agent
+ *    still at work can lose every row to the cross-agent ceiling, and "not
+ *    reported anything yet" was then untrue (fix round 2's amended ruling);
+ *  - otherwise a LIVE agent has not reported anything yet (its live rows sit
+ *    under the line);
+ *  - and a settled one reads a neutral line that is true whatever happened.
  *
  * A background shell follows the same rule in a shell's words. (Paging an
  * agent's older rows from the thread index, as the MCP's drill-in does, is a
@@ -102,22 +104,23 @@ export function drillInEmptyNotice(input: {
         : "A goal's work runs in the thread's own turns and the agents it starts."
     );
   }
+  // Its rows left only with both kinds of evidence, live or settled.
+  const left = agent !== undefined && retentionDropped && didToolWork(agent);
   // Live by its roster status (`pending`, `running`, `waiting`), which the
   // roster fold already settles when the session dies — the notion the
   // drill-in's live rows follow too.
   const live = agent !== undefined && ACTIVE_SUBAGENT_STATUSES.has(agent.status);
-  const left = agent !== undefined && retentionDropped && didToolWork(agent);
   if (agent?.agentKind === "background") {
     // A shell prints output, it does not "report".
-    if (live) {
-      return notice("No output yet.");
+    if (left) {
+      return notice("Its output has left this thread's window.");
     }
-    return notice(left ? "Its output has left this thread's window." : "No output from this shell is in this thread.");
+    return notice(live ? "No output yet." : "No output from this shell is in this thread.");
   }
-  if (live) {
-    return notice("This agent has not reported anything yet.");
+  if (left) {
+    return notice("Its earlier rows have left this thread's window.");
   }
-  return notice(left ? "Its earlier rows have left this thread's window." : "This agent reported nothing to show here.");
+  return notice(live ? "This agent has not reported anything yet." : "This agent reported nothing to show here.");
 }
 
 /** The notice's key among the rows: no row id takes this shape. */

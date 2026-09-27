@@ -4397,16 +4397,18 @@ agent's share of it (its own window keeps 200 rows, the cross-agent ceiling 2 00
 also have no rows because it never had any: stopped or declined before it did anything, a Codex child
 whose words and thoughts are no rows, an agent whose only rows are its own hidden task rows. So an
 empty drill-in (its launch prompts and the live placeholders aside) says one of three things, under
-the prompt (`timeline/empty-notice.ts`): a live agent "has not reported anything yet"; a settled one's
-"earlier rows have left this thread's window" only with evidence of both halves — the thread's window
-has dropped rows (the store's `retentionDropped`: the snapshot's `history.hasOlder`, or the client
-fold's `evicted` since) and the agent did real tool work (a tool's name as its last tool, never a
-Codex word or thought tick, or a tool-use count above zero); otherwise "This agent reported nothing to
-show here.", which is true whatever happened. A shell follows the same rule: "No output yet." while it
-runs, "Its output has left this thread's window." with the evidence, else "No output from this shell
-is in this thread." (a Grok shell a subagent owned never had rows of its own). Paging an agent's older
-rows from the thread index, as the MCP's drill-in does (`apps/daemon/src/mcp/history.ts`), is a
-follow-up.*
+the prompt (`timeline/empty-notice.ts`): its "earlier rows have left this thread's window" only with
+evidence of both halves — the thread's window has dropped rows (the store's `retentionDropped`: the
+snapshot's `history.hasOlder`, or the client fold's `evicted` since) and the agent did real tool work
+(a tool's name as its last tool, never a Codex word or thought tick, or a tool-use count above zero) —
+whether it is live or settled (amended in fix round 2: a fleet agent still at work can lose every row
+to the cross-agent ceiling, and "not reported anything yet" was then untrue); otherwise a live agent
+"has not reported anything yet", and a settled one reads "This agent reported nothing to show here.",
+which is true whatever happened. A shell follows the same rule: "Its output has left this thread's
+window." with the evidence, else "No output yet." while it runs and "No output from this shell is in
+this thread." once it has not (a Grok shell a subagent owned never had rows of its own). Paging an
+agent's older rows from the thread index, as the MCP's drill-in does (`apps/daemon/src/mcp/history.ts`),
+is a follow-up.*
 *Built (2026-09-27): re-opening an agent returns to where the reader was. `AgentChatView` keeps a
 per-agent memory — each agent's disclosures (its closed folds and a shell's closed rows included),
 reading position and follow — in memory only, NEVER the thread's §7.2 LRU (the refusal below

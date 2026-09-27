@@ -449,16 +449,21 @@ const promptOnly = drill(
 assert.ok(promptOnly.includes(LEFT), "a prompt alone is not the agent's work: the notice still shows");
 assert.ok(promptOnly.indexOf("Survey the fleet.") < promptOnly.indexOf(LEFT), "under the prompt");
 
-// A live agent with no rows has not reported anything yet — above its working rows — whatever it did.
-for (const live of [
-  rosterRow(EVICTED, { title: "Survey the fleet", lastToolName: "Bash", usage: { totalTokens: 9_000 } }),
-  rosterRow(EVICTED, { title: "Explain", lastToolName: "reasoning" })
-]) {
+// A live agent with no rows: its rows LEFT with both kinds of evidence (fix round 2's amended tier 1), else it
+// has not reported anything yet — either way above its working rows.
+for (const [live, copy, not] of [
+  [rosterRow(EVICTED, { title: "Survey the fleet", lastToolName: "Bash", usage: { totalTokens: 9_000 } }), LEFT, NOTHING_YET],
+  [rosterRow(EVICTED, { title: "Explain", lastToolName: "reasoning" }), NOTHING_YET, LEFT]
+] as const) {
   const view = drill(await seededThread({ items: [], roster: [live], ...EVICTED_WINDOW }), live);
-  assert.ok(view.includes(NOTHING_YET) && !view.includes(LEFT), view);
-  assert.ok(view.indexOf(NOTHING_YET) < view.indexOf('data-timeline-row-kind="working"'), "above its working row");
+  assert.ok(view.includes(copy) && !view.includes(not), `${live.title}: ${view}`);
+  assert.ok(view.indexOf(copy) < view.indexOf('data-timeline-row-kind="working"'), "above its working row");
   assert.ok(view.includes('data-timeline-row-kind="thinking"'));
 }
+// The same agent in a window that dropped nothing has not reported anything yet.
+const liveKept = rosterRow(EVICTED, { title: "Survey the fleet", lastToolName: "Bash", usage: { totalTokens: 9_000 } });
+const liveKeptView = drill(await seededThread({ items: [], roster: [liveKept] }), liveKept);
+assert.ok(liveKeptView.includes(NOTHING_YET) && !liveKeptView.includes(LEFT), liveKeptView);
 
 // A settled shell with no rows of its own — a Grok shell a subagent owned never had any.
 const exitedShell = rosterRow(SHELL, { agentKind: "background", title: "run the suite", status: "completed", exitCode: 0 });

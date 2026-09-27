@@ -1,9 +1,9 @@
 /**
- * What an empty drill-in says (§7.6, the controller's three tiers): a live
- * agent has not reported anything yet; a settled one's rows have LEFT the
- * window only with evidence that it had rows and the window dropped some;
- * otherwise a neutral line that is true whatever happened. A shell follows the
- * same rule.
+ * What an empty drill-in says (§7.6, the controller's three tiers, as amended
+ * in fix round 2): an agent's rows have LEFT the window only with evidence
+ * that it had rows and the window dropped some — live or settled; otherwise a
+ * live agent has not reported anything yet, and a settled one reads a neutral
+ * line that is true whatever happened. A shell follows the same rule.
  */
 
 import assert from "node:assert/strict";
@@ -63,10 +63,26 @@ const SHELL_NONE = "No output from this shell is in this thread.";
 const text = (input: Parameters<typeof drillInEmptyNotice>[0]) => drillInEmptyNotice(input)?.text ?? null;
 
 describe("drillInEmptyNotice: the three tiers", () => {
-  it("a live agent with no rows has not reported anything yet — whatever its roster row says", () => {
+  it("a live agent with no rows has not reported anything yet — without the evidence that its rows left", () => {
     const live = row({ status: "running", lastToolName: "Bash", usage: { totalTokens: 9_000 } });
-    assert.equal(text({ rows: LIVE_ROWS, agent: live, retentionDropped: true }), NOT_YET);
+    assert.equal(text({ rows: LIVE_ROWS, agent: live, retentionDropped: false }), NOT_YET, "the window dropped nothing");
+    assert.equal(
+      text({ rows: LIVE_ROWS, agent: row({ status: "running" }), retentionDropped: true }),
+      NOT_YET,
+      "no tool work: nothing of its own to drop"
+    );
     assert.equal(drillInEmptyNotice({ rows: LIVE_ROWS, agent: live, retentionDropped: false })?.at, 0, "above its working row");
+  });
+
+  it("a live agent whose rows the window dropped says so: both kinds of evidence, as for a settled one (fix round 2)", () => {
+    const live = row({ status: "running", lastToolName: "Bash", usage: { totalTokens: 9_000 } });
+    assert.equal(text({ rows: LIVE_ROWS, agent: live, retentionDropped: true }), LEFT);
+    assert.equal(
+      text({ rows: LIVE_ROWS, agent: row({ status: "waiting", usage: { totalTokens: 1, toolUses: 2 } }), retentionDropped: true }),
+      LEFT,
+      "a tool-use count is evidence too"
+    );
+    assert.equal(drillInEmptyNotice({ rows: LIVE_ROWS, agent: live, retentionDropped: true })?.at, 0, "still above its working row");
   });
 
   it("a live Codex child that has only reasoned: not yet (its thoughts are no rows)", () => {
@@ -103,6 +119,12 @@ describe("drillInEmptyNotice: the three tiers", () => {
   it("a shell follows the same rule", () => {
     const shell = (overrides: Partial<RuntimeSubagent> = {}) => row({ agentKind: "background", title: "npm run dev", ...overrides });
     assert.equal(text({ rows: [], agent: shell({ status: "running" }), retentionDropped: true }), "No output yet.");
+    assert.equal(text({ rows: [], agent: shell({ status: "running", lastToolName: "Bash" }), retentionDropped: false }), "No output yet.");
+    assert.equal(
+      text({ rows: [], agent: shell({ status: "running", lastToolName: "Bash" }), retentionDropped: true }),
+      SHELL_LEFT,
+      "a live shell with both kinds of evidence: its output left (fix round 2)"
+    );
     // A Grok shell owned by a subagent never had rows of its own; nothing says one left.
     assert.equal(text({ rows: [], agent: shell({ exitCode: 0, result: "ready" }), retentionDropped: true }), SHELL_NONE);
     assert.equal(text({ rows: [], agent: shell({ exitCode: 0 }), retentionDropped: false }), SHELL_NONE);
