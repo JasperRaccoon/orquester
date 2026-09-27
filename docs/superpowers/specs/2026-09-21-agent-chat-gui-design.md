@@ -4357,7 +4357,9 @@ reading position and follow — in memory only, NEVER the thread's §7.2 LRU (th
 stands), per thread (a switch drops it) and bounded to the 50 agents most recently opened
 (`roster/drill-in-memory.ts`). The drill-in mounts once per agent, so A → B saves A's and opens B
 from B's own entry; a position left mid-list is restored with follow off (a re-pin would carry the
-list over it), one left at the end, or none, opens at the end, following.*
+list over it), one left at the end, or none, opens at the end, following — and so does an entry
+whose follow is armed, whatever position it holds: the pill and mod+J re-arm follow with a scroll
+whose own event the timeline ignores, so no at-end position is published after them.*
 *Built (2026-09-27): the view leaves a drill-in on its own in two cases (`drill-in-navigation.ts`).
 An agent that settles while its drill-in is open hands the view back to the thread, where its result
 lands — judged per agent (only an agent seen at work in this opening of its drill-in, then settling;

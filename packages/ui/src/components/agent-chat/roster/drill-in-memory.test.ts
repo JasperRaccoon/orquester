@@ -57,6 +57,16 @@ describe("the drill-in's per-agent memory", () => {
     assert.deepEqual(opened.disclosures.expandedGroupIds, ["group-1"], "its disclosures still come back");
   });
 
+  it("a reader who re-armed follow (the pill, mod+J) comes back to the end, whatever position was published before", () => {
+    // The re-pin's own scroll falls in the timeline's ignore window, so no at-end position is ever published
+    // after it: the entry holds the reader's last mid-list position beside a follow that is armed again.
+    const reArmed = entry({ follow: true });
+    const opened = openDrillIn(rememberDrillIn(EMPTY_DRILL_IN_MEMORY, "a1", reArmed), "a1");
+    assert.equal(opened.position, null, "following means at the end: the stale mid-list position is not restored");
+    assert.equal(opened.follow, true);
+    assert.deepEqual(opened.disclosures.expandedGroupIds, ["group-1"], "its disclosures still come back");
+  });
+
   it("A → B saves A's and restores B's, and each keeps its own", () => {
     let memory = rememberDrillIn(EMPTY_DRILL_IN_MEMORY, "a", entry({ collapsedTurnIds: ["ta"] }));
     memory = rememberDrillIn(memory, "b", entry({ collapsedTurnIds: ["tb"] }));

@@ -88,6 +88,14 @@ export interface DrillInOpening {
  * position when they left it mid-list — with follow OFF, or the first re-pin
  * would carry the list to its end over the restore. An agent never opened, or
  * left at its end, opens at its end, following: the content grew since.
+ *
+ * "At its end" is the entry's FOLLOW flag first: a list that follows is at its
+ * end by construction, whatever position was last published. The pill and
+ * mod+J re-arm follow with a scroll to the end whose own scroll event falls in
+ * the timeline's ignore window, so no at-end position is ever published after
+ * it — the entry keeps the reader's last mid-list position beside a follow
+ * armed again, and restoring that position reopened the agent where the
+ * reader had been before they caught up.
  */
 export function openDrillIn(memory: DrillInMemory, agentId: string): DrillInOpening {
   return drillInOpening(recallDrillIn(memory, agentId));
@@ -95,12 +103,13 @@ export function openDrillIn(memory: DrillInMemory, agentId: string): DrillInOpen
 
 /** {@link openDrillIn} for an entry already recalled (or none). */
 export function drillInOpening(entry: DrillInMemoryEntry | null): DrillInOpening {
-  const midList = entry?.position !== null && entry?.position !== undefined && !entry.position.atEnd;
+  const position =
+    entry !== null && !entry.follow && entry.position !== null && !entry.position.atEnd ? entry.position : null;
   return {
     disclosures: entry?.disclosures ?? NO_DISCLOSURES,
     collapsedTurnIds: entry?.collapsedTurnIds ?? NO_IDS,
     collapsedShellRowIds: entry?.collapsedShellRowIds ?? NO_IDS,
-    position: midList ? entry.position : null,
-    follow: !midList
+    position,
+    follow: position === null
   };
 }
