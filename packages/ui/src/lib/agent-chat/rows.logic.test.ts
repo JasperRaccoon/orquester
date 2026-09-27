@@ -22,6 +22,7 @@ import {
   omitSupersededLifecycleMarkers,
   workEntryDisplayIndicatesToolFailure
 } from "./presentation.logic";
+import { drillInWindow } from "./agent-prompt.logic";
 import {
   computeStableRows,
   deriveTimelineRows,
@@ -31,6 +32,8 @@ import {
   formatWorkDuration,
   isGroupingEntry,
   isRowUnchanged,
+  timelineFoldKeys,
+  timelineFoldKeysWithState,
   type TimelineRowsInput,
   type TimelineRowsProjection
 } from "./rows.logic";
@@ -1504,5 +1507,118 @@ describe("a fold its rows time moves with the last row its clock reads (the stre
       ["t0", "Worked for 2.0s"],
       ["t1", "Worked for 25s"]
     ]);
+  });
+});
+
+describe("a drill-in's fold keys are held while every one of them holds (content review Minor 1)", () => {
+  /**
+   * An agent's items as its drill-in reads them — launch prompts at their places — through the entries
+   * layer, on from the frame before as the drill-in derives them (so a streamed token keeps every other
+   * entry object).
+   */
+  const entriesOf = (items: readonly ThreadItem[], previous: ThreadTimelineProjection | null) =>
+    deriveTimelineEntriesFromItems(drillInWindow(items, "a1").items, previous, { ownerAgentId: "a1" });
+  const launch = (id: string, at: number, turnId: string | null): ThreadItem =>
+    activity(
+      "task.started",
+      { taskId: "a1", agentKind: "agent", title: "Survey", toolUseId: `call-${id}`, prompt: `Prompt ${id}` },
+      { id, turnId, tone: "info", createdAt: stamp(at) }
+    );
+  const done = (id: string, at: number, turnId: string | null): ThreadItem =>
+    activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: `call-${id}`, title: id, command: id, status: "completed" },
+      { id, agentId: "a1", turnId, createdAt: stamp(at) }
+    );
+  const said = (id: string, at: number, turnId: string | null, role: "assistant" | "reasoning", streaming = false) =>
+    message(role, `Text ${id}`, { id, agentId: "a1", turnId, streaming, createdAt: stamp(at) });
+
+  it("a streamed token keeps the keys it held; a real change derives the keys the entries have", () => {
+    const thought = said("think", 6, "t1", "reasoning", true);
+    const items: ThreadItem[] = [launch("L1", 1, "t1"), done("ls", 2, "t1"), launch("L2", 4, "t1"), done("cat", 5, "t1"), thought];
+    const first = entriesOf(items, null);
+    const held = timelineFoldKeysWithState(first.entries, null);
+    assert.deepEqual(held.keys, [null, "t1@agent-prompt:L1", null, "t1@agent-prompt:L2", "t1@agent-prompt:L2"]);
+
+    const token = entriesOf([...items.slice(0, -1), { ...thought, text: "Text think, grown", updatedAt: stamp(9) }], first);
+    const afterToken = timelineFoldKeysWithState(token.entries, held);
+    assert.equal(afterToken.keys, held.keys, "the same keys: a token moves none of them");
+
+    const restamped = entriesOf([...items.slice(0, -1), { ...thought, turnId: "t2" }], first);
+    const afterRestamp = timelineFoldKeysWithState(restamped.entries, held);
+    assert.notEqual(afterRestamp.keys, held.keys);
+    assert.deepEqual(afterRestamp.keys, timelineFoldKeys(restamped.entries), "the thought's key moved to t2");
+  });
+
+  it("whatever a frame changes, held keys are exactly the keys the entries have (randomised)", () => {
+    // A small seeded generator: the same frames on every run.
+    let seed = 7;
+    const random = (below: number): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % below;
+    };
+    const turns = [null, "t1", "t2", "t3"] as const;
+    const base = (): ThreadItem[] => {
+      const items: ThreadItem[] = [];
+      for (let at = 1; at <= 24; at += 1) {
+        const turnId = turns[random(turns.length)]!;
+        const pick = random(5);
+        if (pick === 0) {
+          items.push(launch(`L${at}`, at * 10, turnId));
+        } else if (pick <= 2) {
+          items.push(done(`c${at}`, at * 10, turnId));
+        } else {
+          items.push(said(`m${at}`, at * 10, turnId, pick === 3 ? "assistant" : "reasoning", true));
+        }
+      }
+      return items;
+    };
+    /** One frame's change to one item: text streamed, a turn re-stamped, a role, a copy, a new launch, a removal. */
+    const change = (items: readonly ThreadItem[]): ThreadItem[] => {
+      const next = items.slice();
+      const at = random(next.length);
+      const item = next[at]!;
+      switch (random(6)) {
+        case 0:
+          if (item.kind === "message") {
+            next[at] = { ...item, text: `${item.text}+`, updatedAt: stamp(1000 + random(100)) };
+          }
+          break;
+        case 1:
+          next[at] = { ...item, turnId: turns[random(turns.length)]! };
+          break;
+        case 2:
+          if (item.kind === "message") {
+            next[at] = { ...item, role: item.role === "assistant" ? "reasoning" : "assistant" };
+          }
+          break;
+        case 3:
+          next[at] = { ...item };
+          break;
+        case 4:
+          next.splice(at, 0, launch(`L-new-${random(1_000_000)}`, Number(item.createdAt.slice(17, 19)) + 0.5, turns[random(turns.length)]!));
+          break;
+        default:
+          next.splice(at, 1);
+      }
+      return next;
+    };
+    let reused = 0;
+    for (let run = 0; run < 40; run += 1) {
+      let items = base();
+      let projection = entriesOf(items, null);
+      let keys = timelineFoldKeysWithState(projection.entries, null);
+      for (let frame = 0; frame < 30; frame += 1) {
+        items = change(items);
+        projection = entriesOf(items, projection);
+        const next = timelineFoldKeysWithState(projection.entries, keys);
+        assert.deepEqual(next.keys, timelineFoldKeys(projection.entries), `run ${run}, frame ${frame}`);
+        if (next.keys === keys.keys) {
+          reused += 1;
+        }
+        keys = next;
+      }
+    }
+    assert.ok(reused > 100, `the held keys were kept where they hold (${reused} frames)`);
   });
 });

@@ -332,6 +332,72 @@ export function timelineFoldKeys(entries: readonly TimelineEntry[]): (string | n
   });
 }
 
+/** Each entry's fold key ({@link timelineFoldKeys}), with the entries they were read off. */
+export interface TimelineFoldKeys {
+  readonly entries: readonly TimelineEntry[];
+  readonly keys: readonly (string | null)[];
+}
+
+export const EMPTY_TIMELINE_FOLD_KEYS: TimelineFoldKeys = { entries: [], keys: [] };
+
+/**
+ * `entries`' fold keys, reusing `previous`'s when every one of them holds.
+ * A key after a launch prompt is a string built per turn-bearing entry, so
+ * deriving them on every streamed token cost a prompted agent's drill-in a
+ * third of its time per token (content review Minor 1). The held keys are
+ * kept exactly when each position keeps its key ({@link keepsFoldKeys}) —
+ * what the streamed-text path produces, and nothing a real change does.
+ */
+export function timelineFoldKeysWithState(
+  entries: readonly TimelineEntry[],
+  previous: TimelineFoldKeys | null
+): TimelineFoldKeys {
+  if (previous !== null) {
+    if (previous.entries === entries) {
+      return previous;
+    }
+    if (keepsFoldKeys(previous.entries, entries)) {
+      return { entries, keys: previous.keys };
+    }
+  }
+  return { entries, keys: timelineFoldKeys(entries) };
+}
+
+/**
+ * Whether `next` has `previous`'s fold keys, position by position. A key is
+ * read off a position's turn ({@link timelineEntryTurnId}) and the last launch
+ * prompt above it (its message id), so it holds wherever the entry is the
+ * same object, or a message with the same id, role and turn that is a prompt
+ * on neither side — the only change the streamed-text path makes
+ * (`isStreamingMessageTextUpdate`: a streaming answer or thought, whose text
+ * and last write moved). Anything else — a length, a work row, a plan, a turn
+ * or a prompt that moved — derives them again.
+ */
+function keepsFoldKeys(previous: readonly TimelineEntry[], next: readonly TimelineEntry[]): boolean {
+  if (previous.length !== next.length) {
+    return false;
+  }
+  for (let index = 0; index < next.length; index += 1) {
+    const before = previous[index]!;
+    const after = next[index]!;
+    if (before === after) {
+      continue;
+    }
+    if (
+      before.kind !== "message" ||
+      after.kind !== "message" ||
+      before.message.id !== after.message.id ||
+      before.message.role !== after.message.role ||
+      before.message.turnId !== after.message.turnId ||
+      agentPromptOf(before.message) !== null ||
+      agentPromptOf(after.message) !== null
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * The session's running turn is authoritative when the latest turn briefly
  * lags behind it; folding must not flicker through that window.
@@ -869,12 +935,13 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
 
 /**
  * The rows, whether any of them is a live activity row (`hasActivityRow`),
- * and the clocks of the folds they time by their rows (`foldClocks`).
+ * and the clocks of the folds they time by their rows, by the positions they
+ * read (`foldClocksAt`).
  */
 function deriveRowsDetailed(input: TimelineRowsInput): {
   rows: AgentChatTimelineRow[];
   hasActivityRow: boolean;
-  foldClocks: ReadonlyMap<string, TurnFoldClock>;
+  foldClocksAt: ReadonlyMap<number, FoldClockAt>;
 } {
   const entries = input.timelineEntries;
   const header = input.activeTurnHeader ?? "here";
@@ -936,7 +1003,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     isStreaming
   });
   const collapsedEntryIds = new Set<string>();
-  const foldClocks = new Map<string, TurnFoldClock>();
+  const foldClocksAt = new Map<number, FoldClockAt>();
   for (const fold of foldsByAnchorEntryId.values()) {
     if (!input.expandedTurnIds?.has(fold.turnId)) {
       for (const entryId of fold.hiddenEntryIds) {
@@ -944,7 +1011,13 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       }
     }
     if (fold.clock !== null) {
-      foldClocks.set(fold.turnId, fold.clock);
+      // Each position a clock reads is one of its own fold's rows, so no two
+      // folds ever share one.
+      const at: FoldClockAt = { foldKey: fold.turnId, clock: fold.clock };
+      foldClocksAt.set(fold.clock.lastAt, at);
+      if (fold.clock.terminalAt !== null) {
+        foldClocksAt.set(fold.clock.terminalAt, at);
+      }
     }
   }
 
@@ -1418,7 +1491,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       isNext: index === 0
     });
   });
-  return { rows: withMeta, hasActivityRow, foldClocks };
+  return { rows: withMeta, hasActivityRow, foldClocksAt };
 }
 
 /**
@@ -1543,12 +1616,19 @@ export interface TimelineRowsProjection {
    */
   readonly hasActivityRow: boolean;
   /**
-   * The clocks of the folds these rows time by their rows, by fold key (the
-   * turn id, and in a drill-in the prompt above its run — `timelineFoldKeys`):
-   * what the streamed-text fast path re-reads a fold's label by. Streamed
-   * text never changes which folds there are, nor where their rows sit.
+   * The clocks of the folds these rows time by their rows, by each position a
+   * clock reads (its last row's, and its terminal answer's): what the
+   * streamed-text fast path re-reads a fold's label by, one lookup per
+   * streamed message. Streamed text never changes which folds there are, nor
+   * where their rows sit.
    */
-  readonly foldClocks: ReadonlyMap<string, TurnFoldClock>;
+  readonly foldClocksAt: ReadonlyMap<number, FoldClockAt>;
+}
+
+/** A fold's clock, and the fold it times: its key ({@link timelineFoldKeys}), which its row's `turnId` carries. */
+export interface FoldClockAt {
+  readonly foldKey: string;
+  readonly clock: TurnFoldClock;
 }
 
 function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): boolean {
@@ -1599,7 +1679,7 @@ function replaceStreamingMessageRows(
     return null;
   }
   const replacements = new Map<ThreadMessageItem, ThreadMessageItem>();
-  // The folds whose clock reads a message a token moved, by turn id.
+  // The folds whose clock reads a message a token moved, by fold key.
   let movedFolds: Map<string, TurnFoldClock> | null = null;
   for (const [index, entry] of input.timelineEntries.entries()) {
     const previousEntry = previous.input.timelineEntries[index]!;
@@ -1636,13 +1716,13 @@ function replaceStreamingMessageRows(
     }
     replacements.set(previousEntry.message, entry.message);
     if (turnId !== null) {
-      // The fold whose clock reads this position, by position: a fold's key
-      // is its turn — and, in a drill-in, the prompt above its run.
-      // `terminalAt` never matches today: a streaming answer's turn has no fold, a settled one rebuilt above.
-      for (const [foldKey, clock] of previous.foldClocks) {
-        if (clock.lastAt === index || clock.terminalAt === index) {
-          (movedFolds ??= new Map()).set(foldKey, clock);
-        }
+      // The fold whose clock reads this position, found by the position — a
+      // fold's key is its turn and, in a drill-in, the prompt above its run.
+      // Its terminal answer never matches today: a streaming answer's turn
+      // has no fold, and a settled one rebuilt above.
+      const moved = previous.foldClocksAt.get(index);
+      if (moved !== undefined) {
+        (movedFolds ??= new Map()).set(moved.foldKey, moved.clock);
       }
     }
   }
@@ -1650,8 +1730,8 @@ function replaceStreamingMessageRows(
     return previous.rows;
   }
   let labels: Map<string, string> | null = null;
-  for (const [turnId, clock] of movedFolds ?? []) {
-    (labels ??= new Map()).set(turnId, foldClockLabel(clock, input.timelineEntries));
+  for (const [foldKey, clock] of movedFolds ?? []) {
+    (labels ??= new Map()).set(foldKey, foldClockLabel(clock, input.timelineEntries));
   }
   return previous.rows.map((row) => {
     if (row.kind === "turn-fold") {
@@ -1687,7 +1767,7 @@ export function deriveTimelineRowsWithState(
 ): TimelineRowsProjection {
   const streamed = previous === null ? null : replaceStreamingMessageRows(input, previous);
   if (streamed !== null && previous !== null) {
-    return { input, rows: streamed, hasActivityRow: previous.hasActivityRow, foldClocks: previous.foldClocks };
+    return { input, rows: streamed, hasActivityRow: previous.hasActivityRow, foldClocksAt: previous.foldClocksAt };
   }
   return { input, ...deriveRowsDetailed(input) };
 }

@@ -44,8 +44,10 @@ import {
   computeStableRows,
   deriveTimelineRowsWithState,
   EMPTY_STABLE_ROWS,
-  timelineFoldKeys,
+  EMPTY_TIMELINE_FOLD_KEYS,
+  timelineFoldKeysWithState,
   type StableRowsState,
+  type TimelineFoldKeys,
   type TimelineRowsProjection
 } from "./rows.logic";
 
@@ -97,14 +99,22 @@ export interface AgentDrillInProjection {
    * with {@link collapsedTurnsAfter}. Held while its members stay the same.
    */
   readonly openTurnIds: readonly string[];
+  /** The timeline entries' fold keys, held while every one of them holds (`timelineFoldKeysWithState`). */
+  readonly foldKeys: TimelineFoldKeys;
+  /** The collapsed folds the open ones were derived with: the disclosures' own list. */
+  readonly collapsedTurnIds: readonly string[];
 }
+
+const NO_COLLAPSED_TURNS: readonly string[] = [];
 
 export const EMPTY_AGENT_DRILL_IN: AgentDrillInProjection = {
   agentId: null,
   timeline: EMPTY_TIMELINE_PROJECTION,
   rows: null,
   stable: EMPTY_STABLE_ROWS,
-  openTurnIds: []
+  openTurnIds: [],
+  foldKeys: EMPTY_TIMELINE_FOLD_KEYS,
+  collapsedTurnIds: NO_COLLAPSED_TURNS
 };
 
 /**
@@ -183,21 +193,24 @@ export function projectAgentDrillIn(
   // Every fold starts open; the ones the user closed stay closed. A fold is
   // keyed by its turn — and, after a launch prompt, by that prompt too, so a
   // relaunch inside the turn its previous run rode folds on its own
-  // (`timelineFoldKeys`).
-  const collapsedTurnIds = new Set(input.disclosures?.collapsedTurnIds ?? []);
-  const expandedTurnIds = new Set<string>();
-  for (const foldKey of timelineFoldKeys(timeline.entries)) {
-    if (foldKey !== null && foldKey.length > 0 && !collapsedTurnIds.has(foldKey)) {
-      expandedTurnIds.add(foldKey);
-    }
-  }
+  // (`timelineFoldKeys`). The keys are held while every one of them holds, and
+  // the open set while its keys and the collapsed list are the ones it was
+  // derived with: a streamed token re-derives neither.
+  const foldKeys = timelineFoldKeysWithState(timeline.entries, held?.foldKeys ?? null);
+  const collapsedTurnIds = input.disclosures?.collapsedTurnIds ?? NO_COLLAPSED_TURNS;
   const live = isDrillInAgentLive(agentId, input.agent, input.messageStreaming);
   const runStartedAt = live ? (input.agent?.startedAt ?? window.latestLaunchAt) : null;
   // The rows derivation compares these sets by identity, so the pair is held
   // while its members stay the same: a fresh pair per projection sent every
   // streamed token down a full rebuild instead of the streamed-text fast path.
   const heldInput = held?.rows?.input;
-  const openTurns = keepHeldSet(heldInput?.expandedTurnIds, expandedTurnIds);
+  const openTurns =
+    held !== null &&
+    heldInput?.expandedTurnIds !== undefined &&
+    foldKeys.keys === held.foldKeys.keys &&
+    collapsedTurnIds === held.collapsedTurnIds
+      ? heldInput.expandedTurnIds
+      : keepHeldSet(heldInput?.expandedTurnIds, openFolds(foldKeys.keys, collapsedTurnIds));
   const rows = deriveTimelineRowsWithState(
     {
       timelineEntries: timeline.entries,
@@ -227,7 +240,19 @@ export function projectAgentDrillIn(
   // timeline's context, which every row reads.
   const openTurnIds =
     held !== null && openTurns === heldInput?.expandedTurnIds ? held.openTurnIds : [...openTurns];
-  return { agentId, timeline, rows, stable, openTurnIds };
+  return { agentId, timeline, rows, stable, openTurnIds, foldKeys, collapsedTurnIds };
+}
+
+/** Every fold key the entries have, but the collapsed ones. */
+function openFolds(foldKeys: readonly (string | null)[], collapsed: readonly string[]): Set<string> {
+  const closed = new Set(collapsed);
+  const open = new Set<string>();
+  for (const foldKey of foldKeys) {
+    if (foldKey !== null && foldKey.length > 0 && !closed.has(foldKey)) {
+      open.add(foldKey);
+    }
+  }
+  return open;
 }
 
 /** `held` when it has exactly `next`'s members, else `next`. */
