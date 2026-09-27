@@ -87,6 +87,7 @@ import {
 } from "./segments.ts";
 import {
   closeSubagent,
+  cutUnspawnedLaunch,
   subagentFinished,
   subagentProgress,
   subagentSpawned,
@@ -909,13 +910,19 @@ export class GrokNormalizer {
    * launch is no open call: its call answers at once and the WORK runs on. A
    * subagent's own calls are not the prompt's either: a cut foreground
    * child's close with its run when `subagent_finished` comes
-   * ({@link closeSubagent}), a background child's outlive the turn.
+   * ({@link closeSubagent}), a background child's outlive the turn. A cut
+   * spawn no `subagent_spawned` joined — supervised, its own card was
+   * pending — never had a child: its agent ends here, `stopped`
+   * ({@link cutUnspawnedLaunch}).
    */
   cutTurnCalls(reason: string): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     for (const [toolCallId, track] of [...this.state.tools.entries()]) {
       if (track.owned === undefined) {
         events.push(...failTool(this.state, toolCallId, track, reason));
+        // A spawn cut before the CLI spawned its child: its agent never
+        // started, and nothing will ever end it but this.
+        events.push(...cutUnspawnedLaunch(this.state, toolCallId));
       }
     }
     return events;

@@ -1433,27 +1433,31 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   steer's cancel ("Cancelled: a new message was sent.") — left open, each read in progress in the
   MCP transcript, took an open-work retention slot and got the next host's "Stopped when the agent
   host restarted." A subagent's own calls are not the prompt's: a cut foreground child's close with
-  its run at `subagent_finished`, a background child's outlive the turn. A question the HOST cancels
-  (a Stop, the session's stop, a closed tab) reaches the CLI as its own cancel,
-  `{outcome: "cancelled"}`: the host flags it (`respondToUserInput`'s host-only `options.cancel`,
-  which the other adapters ignore), because its `{}` is also a user's skip — passed on as an answer,
-  it told the CLI the user had answered, nothing. (11) **What the 2026-09-26 captures settled**
-  (fixtures 25–30, observations 49–53).
-  Supervised, the spawn call itself asks first (`x.ai/tool` kind `task`, "Yes, send once" or
-  decline), and a subagent's own tool asks on the PARENT's session, naming the child's call: the
-  parent's card, on the parent's open turn, no owner — Codex's collab rule — while the call itself
-  is the agent's own row. A run that ends short is `subagent_finished {status: "cancelled", error}`
-  every way it does — a kill, a Stop, a declined tool, the runtime's turn cap ("max turns reached
-  (limit: 1)"); the CLI never said `failed`, so the run reads `stopped` and its `error` is the row's
-  reason (a bare "Stopped" before). The scheduler (`/loop`, `scheduler_create`) reports by methods
-  of its own, `_x.ai/scheduled_task_created` / `_fired` / `_deleted` (a peer warning per frame
-  before they were registered — one per fire of a week-long loop), and `/goal` by `goal_updated` on
-  the private channel (an "unmapped" warning every few seconds of a goal run): each loop and the
-  goal is a roster row, typed `scheduled` / `goal`, which the roster folds to a kind of its own,
-  `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what it is, a metrics line of its own
-  ("scheduled prompt"; "goal · 48.4k tok", the count the goal reports), a live loop `Scheduled` and
-  a live goal `Active` rather than "Working", a settled one's line its end reason ("Token budget
-  reached: …"), never a shell's row, and never counted or token-summed as work
+  its run at `subagent_finished`, a background child's outlive the turn. A cut spawn whose launch no
+  `subagent_spawned` joined — supervised, the CLI asks before it spawns (observation 49), so a Stop
+  that withdrew the spawn's own card — has no child to cancel and no `subagent_finished` to come:
+  its agent, started at the call's first frame, ends there, `stopped`, "Stopped before it started."
+  (`cutUnspawnedLaunch`; left live it read running and held a deploy's drain for its hour), and a
+  late `subagent_spawned` still joins that launch, never a second agent. A question the HOST cancels
+  (a Stop, the session's stop, a closed tab) reaches the CLI as its own cancel, `{outcome:
+  "cancelled"}`: the host flags it (`respondToUserInput`'s host-only `options.cancel`, which the
+  other adapters ignore), because its `{}` is also a user's skip — passed on as an answer, it told
+  the CLI the user had answered, nothing. (11) **What the 2026-09-26 captures settled** (fixtures
+  25–30, observations 49–53). Supervised, the spawn call itself asks first (`x.ai/tool` kind `task`,
+  "Yes, send once" or decline), and a subagent's own tool asks on the PARENT's session, naming the
+  child's call: the parent's card, on the parent's open turn, no owner — Codex's collab rule — while
+  the call itself is the agent's own row. A run that ends short is `subagent_finished {status:
+  "cancelled", error}` every way it does — a kill, a Stop, a declined tool, the runtime's turn cap
+  ("max turns reached (limit: 1)"); the CLI never said `failed`, so the run reads `stopped` and its
+  `error` is the row's reason (a bare "Stopped" before). The scheduler (`/loop`, `scheduler_create`)
+  reports by methods of its own, `_x.ai/scheduled_task_created` / `_fired` / `_deleted` (a peer
+  warning per frame before they were registered — one per fire of a week-long loop), and `/goal` by
+  `goal_updated` on the private channel (an "unmapped" warning every few seconds of a goal run):
+  each loop and the goal is a roster row, typed `scheduled` / `goal`, which the roster folds to a
+  kind of its own, `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what it is, a metrics line
+  of its own ("scheduled prompt"; "goal · 48.4k tok", the count the goal reports), a live loop
+  `Scheduled` and a live goal `Active` rather than "Working", a settled one's line its end reason
+  ("Token budget reached: …"), never a shell's row, and never counted or token-summed as work
   (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) — background, and
   `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain (its work does,
   each fire and each planner being a subagent the CLI spawns itself: an agent row under its own id,

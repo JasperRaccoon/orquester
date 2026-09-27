@@ -1392,6 +1392,16 @@ The adapter keeps a child's card the parent's, as Codex's collab children's are:
 parent's turn open as the request arrives (the foreground spawn's), answered as any card — while
 the child's call is the agent's own row (`session-replay.test.ts`, 25 replayed).
 
+Since the spawn asks BEFORE any child exists, a Stop while its card is pending (not captured: the
+harness answered every card) cuts a call that no `subagent_spawned` joined and no
+`subagent_finished` can end — the CLI cancels nothing, and a cut call gets no terminal frame
+(fixtures 05, 23, 31). The agent the adapter started at the call's first frame is ended there,
+`stopped`, "Stopped before it started." (`cutUnspawnedLaunch`; `fold-seam.test.ts` drives 25's
+frames up to turn 2's card, then the Stop): left live, the roster read it running and liveness held
+a deploy's drain for its hour. A launch a spawn joined still waits for the CLI's end (fixture 23),
+and a `subagent_spawned` that trails the cut (unsupervised, the CLI spawns at once) joins the ended
+launch, never a second agent.
+
 ### 50. A run that ends short is `cancelled`, with an `error` that says why
 
 Every non-completed `subagent_finished` of every capture is `status: "cancelled"` with an `error`:

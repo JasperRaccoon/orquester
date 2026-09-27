@@ -556,6 +556,51 @@ test("a foreground spawn its turn cut is not sent to the background: the CLI's c
   assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing left live");
 });
 
+test("a Stop that cuts a spawn no subagent_spawned joined ends its agent stopped: it never started", () => {
+  // Supervised, the CLI asks before it spawns (fixture 25): a Stop while that
+  // card is pending cuts the call, and no child exists to be cancelled — no
+  // `subagent_finished` can come. Left live, the roster read it running and
+  // liveness held a deploy's drain for its hour.
+  const grok = normalizer();
+  startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  const cut = grok.cutTurnCalls("Stopped.");
+  assert.deepEqual(
+    only(cut, "item.completed").map((event) => [event.itemId, (event.payload as { detail?: string }).detail]),
+    [["call-s1", "Stopped."]],
+    "the call is cut, as every cut call is"
+  );
+  const ends = only(cut, "task.completed");
+  assert.deepEqual(statuses(ends), [["task.completed", "call-s1", "stopped"]]);
+  assert.equal(ends[0]!.payload.summary, "Stopped before it started.");
+  assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing left live");
+});
+
+test("a Stop that cuts a spawn whose child was spawned leaves its end to the CLI", () => {
+  // Fixture 23: the CLI cancels the child with the turn, and says so.
+  const grok = normalizer();
+  startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
+  assert.deepEqual(only(grok.cutTurnCalls("Stopped."), "task.completed"), [], "a child exists: its end is the CLI's");
+  const cancelled = grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled"));
+  assert.deepEqual(statuses(taskRows(cancelled)), [["task.completed", "call-s1", "stopped"]]);
+});
+
+test("a spawn the CLI reports after the Stop cut it joins its launch: one agent, never a second", () => {
+  // Unsupervised, the CLI spawns at once and `subagent_spawned` follows in
+  // milliseconds: a Stop inside that window ends the launch "before it
+  // started", and the late report must not start an agent of its own.
+  const grok = normalizer();
+  const rows: RuntimeEvent[] = [];
+  rows.push(...grok.handleSessionUpdate(spawnStart("call-s1", { prompt: "p", description: "find callers" })));
+  rows.push(...grok.cutTurnCalls("Stopped."));
+  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers")));
+  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled")));
+  assert.deepEqual(statuses(taskRows(rows)), [
+    ["task.started", "call-s1", undefined],
+    ["task.completed", "call-s1", "stopped"]
+  ]);
+});
+
 test("a foreground spawn its turn cut with no CLI end stays live until Stop", () => {
   // An older CLI without `subagent_finished`, or one that never sends it:
   // Stop, the session's stop or the exit ends the run.

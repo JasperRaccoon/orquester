@@ -117,6 +117,14 @@ export interface SubagentLaunch {
   settled: boolean;
   /** A `subagent_spawned` has named this launch's child (see {@link subagentSpawned}). */
   joined: boolean;
+  /**
+   * A Stop cut the call before any `subagent_spawned` named its child, and
+   * ended its agent (see {@link cutUnspawnedLaunch}) — the one ended launch a
+   * late `subagent_spawned` still joins: unsupervised, the CLI spawns at once,
+   * and its report can trail the cut by milliseconds. Joined, the child's
+   * frames and its end are that agent's, never a second agent's.
+   */
+  cutBeforeSpawn: boolean;
 }
 
 /**
@@ -375,7 +383,8 @@ function launchSubagent(
     inputIds: new Set(uuidsIn(input)),
     detached: false,
     settled: false,
-    joined: false
+    joined: false,
+    cutBeforeSpawn: false
   };
   state.subagentLaunches.set(toolCallId, launch);
   evictOldest(state.subagentLaunches, SUBAGENTS_REMEMBERED);
@@ -442,6 +451,34 @@ function settleSubagentLaunch(
   }
   launch.detached = true;
   return track.live ? backgroundSubagent(state, track, raw) : [];
+}
+
+/** The summary of an agent a Stop ended before the CLI spawned it ({@link cutUnspawnedLaunch}). */
+export const SUBAGENT_NEVER_STARTED = "Stopped before it started.";
+
+/**
+ * A cut `spawn_subagent` call (`GrokNormalizer.cutTurnCalls`) whose launch no
+ * `subagent_spawned` joined: the run it opened never started. Supervised, the
+ * CLI asks before it spawns (fixture 25, observation 49), so a Stop while
+ * that card is pending cuts the call with no child in existence — nothing
+ * the CLI cancels, no `subagent_finished` to come — and the agent, started at
+ * the call's first frame, read running on the roster and held a deploy's
+ * drain for its hour. It ends here, `stopped`, by the adapter's word. A
+ * launch a spawn joined keeps waiting for the CLI's end (fixture 23:
+ * `subagent_finished {cancelled}` 42 ms after the cancel).
+ */
+export function cutUnspawnedLaunch(state: GrokNormalizerState, toolCallId: string): RuntimeEvent[] {
+  const launch = state.subagentLaunches.get(toolCallId);
+  if (launch === undefined || launch.joined || launch.settled || launch.detached || !launch.opensRun) {
+    return [];
+  }
+  const track = state.subagents.get(launch.taskId);
+  if (track === undefined || !track.live || track.owner !== toolCallId) {
+    return [];
+  }
+  launch.settled = true;
+  launch.cutBeforeSpawn = true;
+  return closeSubagent(state, track, "stopped", "adapter", SUBAGENT_NEVER_STARTED);
 }
 
 /**
@@ -524,11 +561,15 @@ export function subagentSpawned(
   return events;
 }
 
-/** The oldest live launch no `subagent_spawned` has named yet — a matching description first. */
+/**
+ * The oldest live launch no `subagent_spawned` has named yet — a matching
+ * description first — or one a Stop cut before it could ({@link
+ * SubagentLaunch.cutBeforeSpawn}).
+ */
 function unjoinedLaunch(state: GrokNormalizerState, description: string | undefined): SubagentLaunch | undefined {
   let oldest: SubagentLaunch | undefined;
   for (const launch of state.subagentLaunches.values()) {
-    if (launch.joined || state.subagents.get(launch.taskId)?.live !== true) {
+    if (launch.joined || (state.subagents.get(launch.taskId)?.live !== true && !launch.cutBeforeSpawn)) {
       continue;
     }
     if (description !== undefined && launch.description === description) {

@@ -673,6 +673,38 @@ test("21 through the fold: after a Stop, the shell the CLI kept running holds mo
   assert.equal(roster.find((entry) => entry.id === "call-7b249d13-32d3-4f24-a3ad-b582665c9c5a-1")?.status, "interrupted");
 });
 
+test("25 through the fold: a Stop while the spawn's own card is pending ends the agent that never started", async () => {
+  // Turn 2 of fixture 25 asks before it spawns; the test presses Stop where
+  // the harness answered the card — the capture's rest is what a REJECT
+  // did, so the drive ends there. No child ever existed: no
+  // `subagent_spawned` joined the launch, no `subagent_finished` can come.
+  const SPAWN_2 = "call-d288c474-db56-4180-813b-74576843d412-1";
+  const cardNote = (note: string): boolean =>
+    note.includes(`for tool call ${SPAWN_2}`) && note.includes("session/request_permission");
+  // The session is live throughout, as the adapter says it is: it opened
+  // ready, and a Stop returns it to ready (the roster reads a dead session's
+  // running rows as interrupted, which would hide the phantom).
+  const ready = (control: { grok: GrokNormalizer }): RuntimeEvent[] => [
+    control.grok.event("session.state.changed", { state: "ready" })
+  ];
+  const s = captureSeam("25-subagent-child-approval.ndjson", {
+    atNote: (note, control) =>
+      note.startsWith("spawn:")
+        ? [control.grok.event("session.started", {}), ...ready(control)]
+        : cardNote(note)
+          ? [...control.interrupt(), ...ready(control)]
+          : [],
+    endAtNote: cardNote
+  });
+  await s.feedThrough(s.events.length);
+  const agent = s.state().roster.find((entry) => entry.id === SPAWN_2);
+  assert.ok(agent, "the launch is a roster agent");
+  assert.notEqual(agent.status, "running", "never read running for a run that never started");
+  assert.equal(s.liveness.liveness(THREAD), null, "nor holds a deploy's drain for its hour");
+  const end = s.events.find(taskEnd(SPAWN_2)) as Extract<RuntimeEvent, { type: "task.completed" }> | undefined;
+  assert.deepEqual([end?.payload.status, end?.payload.summary], ["stopped", "Stopped before it started."]);
+});
+
 // ---------------------------------------------------------------------------
 // A resumed run's words are its own; a monitor through its wakes; more captures through the fold
 // ---------------------------------------------------------------------------
