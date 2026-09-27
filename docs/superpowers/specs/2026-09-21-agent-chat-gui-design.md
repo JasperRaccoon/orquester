@@ -1865,14 +1865,17 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   and `subagent_finished` is its end, every way it ends, with its clean `output` — the call's
   `SubagentCompleted` answer and the poll and kill answers end it only when that never came. A
   background launch and a foreground run past its await budget go on without their call; a
-  foreground call a Stop cuts does not — the CLI cancels its child. The child session's own frames
-  reach the client under its own `sessionId`: its thinking, words, tool calls and background shells
-  become the agent's own rows (§7.6's drill-in) — a shell still running when the agent ends then
-  counts on its own — and its context size, usage, catalog, title, hooks and plan mode never touch
-  the parent's. `resume_from` spawns a new subagent id naming its source (`resumed_from`) and starts
-  the same task again under the new call, its new child session's words messages of their own
-  (`adapters/grok/subagents.ts` `subagentSpawned`, `normalize.ts` `childSessionUpdate`,
-  `background-tasks.ts` `taskCompleted`).*
+  foreground call a Stop cuts does not — the CLI cancels its child. A launch no `subagent_spawned`
+  joined never had a child (supervised, the spawn asks first): a Stop that cuts it ends its agent
+  `stopped`, "Stopped before it started." (`cutUnspawnedLaunch`), and its call failing — a declined
+  card, a refusal — ends it `stopped` with the CLI's text, never `failed` (final review A, I2 and
+  M1). The child session's own frames reach the client under its own `sessionId`: its thinking,
+  words, tool calls and background shells become the agent's own rows (§7.6's drill-in) — a shell
+  still running when the agent ends then counts on its own — and its context size, usage, catalog,
+  title, hooks and plan mode never touch the parent's. `resume_from` spawns a new subagent id naming
+  its source (`resumed_from`) and starts the same task again under the new call, its new child
+  session's words messages of their own (`adapters/grok/subagents.ts` `subagentSpawned`,
+  `normalize.ts` `childSessionUpdate`, `background-tasks.ts` `taskCompleted`).*
 - **Prompts the CLI starts itself.** Not in T3. A background subagent's end, a monitor's line and
   a monitor's end wake the agent: the CLI runs a prompt of its own (`subagent-completed-<id>`,
   `notifications-<uuid>`, `task-completed-<id>`) and streams the parent's reply under it, with no
@@ -4503,10 +4506,12 @@ not read before the start or will prompt no run: it ended `failed` or `interrupt
 with it still open (the Stop of a running turn, whose abandoned items get no end of their own, among
 them), or a Stop with no turn running, or the exit, dropped every prompt still waiting. Absent too
 on a start that opens no run (a Grok `resume_from` naming an agent still live, which the CLI
-refuses: the agent never received it, and it would head the running run), on a shell or monitor, on
-a start written before any launch named the run (OpenCode's `opencode-child:`, an agent Grok's CLI
-spawned itself), on a revival, and on every log from before (the fixtures READMEs: Claude 4,
-OpenCode 19, Grok 47, Codex 21).*
+refuses: the agent never received it, and it would head the running run) — while a start that opens
+a run the CLI then refuses keeps what it carried, a Grok spawn whose own card the user declined
+(fixture 25, turn 2): emitted before the card, a start cannot be withdrawn, and the run ends
+`stopped` with the refusal — on a shell or monitor, on a start written before any launch named the
+run (OpenCode's `opencode-child:`, an agent Grok's CLI spawned itself), on a revival, and on every
+log from before (the fixtures READMEs: Claude 4, OpenCode 19, Grok 47, Codex 21).*
 
 *Built: the five-row rule applies to **ungrouped** rows only. A workflow group — a spawn batch
 rendered as one section — keeps its whole membership, because collapsing half a batch behind

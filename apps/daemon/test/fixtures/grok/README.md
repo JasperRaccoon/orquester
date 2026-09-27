@@ -1423,7 +1423,11 @@ call failed `tool_execution_failed` with the same message, and the parent's own 
 called it "Subagent failed: max turns reached (limit 1)".
 
 The adapter reads `cancelled` as `stopped`, as before, and carries the `error` as the end's summary
-(the roster row's result): a stopped row used to say nothing of why.
+(the roster row's result): a stopped row used to say nothing of why. A spawn declined before any
+child existed (fixture 25, turn 2: its own card, observation 49) has no `subagent_finished` at all:
+its call fails with the CLI's text ("User rejected the execution for tool `spawn_subagent`"), and
+the adapter ends that agent `stopped` with it, as a run the user cut short — never `failed`
+(observation 47).
 
 **Not captured: `status: "failed"`.** Tried on 2026-09-26: routing the `general-purpose` type to a
 custom model on an endpoint nothing listens on (`[model.unreachable]` + `[subagents.models]`),
