@@ -800,9 +800,7 @@ export class OpenCodeThreadSession {
     // A Stop of this turn failed before the stream said the run was over, and
     // now it has: the turn ends as that Stop would have ended it.
     if (this.state.failedStopTurnId === turnId) {
-      this.state.failedStopTurnId = undefined;
-      this.settleStop(turnId);
-      void this.abortDescendants();
+      this.endFailedStopTurn(turnId);
       return;
     }
     const admission = this.state.promptAdmission;
@@ -1099,6 +1097,14 @@ export class OpenCodeThreadSession {
 
   private completeTurn(turnId: string, generation: number, raw: unknown): void {
     if (this.state.activeTurnId !== turnId || this.state.promptGeneration !== generation) {
+      return;
+    }
+    // The run of a turn whose Stop failed is over — the server's status said
+    // so (Machine 2 after a reconnect, the admission's recovery): the turn
+    // ends as that Stop would have ended it, as when its idle says so
+    // (`onIdle`).
+    if (this.state.failedStopTurnId === turnId) {
+      this.endFailedStopTurn(turnId);
       return;
     }
     const usage = this.state.turnTokenUsage;
@@ -1972,8 +1978,9 @@ export class OpenCodeThreadSession {
    * turn is still running on our books, and a retry is how the user stops it.
    * An abort whose request fails AFTER the stream said so — the run's idle
    * came while it was pending (`deferredIdle`) — ends the turn as any Stop
-   * does (`settleStop`), and so does that idle when it comes after the failure
-   * (`onIdle`). A steer into that turn takes it back instead (`sendTurn`).
+   * does (`settleStop`), and so does the run's end when it comes after the
+   * failure: its idle, or the server's status (`endFailedStopTurn`). A steer
+   * into that turn takes it back instead (`sendTurn`).
    */
   async interruptTurn(turnId?: string): Promise<void> {
     // An interrupt already under way — another Stop, a failed admission's
@@ -2040,6 +2047,29 @@ export class OpenCodeThreadSession {
         }
       }
     });
+  }
+
+  /**
+   * The run of a turn whose Stop failed is over — its idle came, or the
+   * server's status says so (Machine 2): the turn ends as that Stop would have
+   * ended it (`settleStop`), then its children are aborted on the server, as
+   * the Stop would have. And that end is the idle after the interrupt
+   * (`idleAfterInterrupt`): nothing of that run follows it, so the next
+   * `busy` is a new run's (`endInterruptionAtNewRun`). An idle frame counts
+   * only while the interruption lingers or an interrupt is under way
+   * (`noteIdleAfterInterrupt`), and this one came while the stopped turn was
+   * still the thread's: a lone `session.idle` (1.18.5's abort shape) or a
+   * reconnect's status poll is the only word there is, and left uncounted it
+   * kept the next woken run dropped and took the next turn's own abort for
+   * the Stop's echo. A turn the user took back by a steer is no longer the
+   * failed Stop's (`sendTurn`), and ends as any turn does.
+   */
+  private endFailedStopTurn(turnId: string): void {
+    this.state.failedStopTurnId = undefined;
+    this.cancelIdleReconciliation();
+    this.settleStop(turnId);
+    this.state.idleAfterInterrupt = true;
+    void this.abortDescendants();
   }
 
   /**

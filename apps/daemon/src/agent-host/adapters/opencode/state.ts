@@ -703,8 +703,9 @@ export interface OpenCodeSessionState {
    * The turn a Stop failed to end: its `POST …/abort` failed before the
    * stream said the run was over, so the turn is still the thread's. A Stop
    * of the turn already interrupted is otherwise nothing (`interruptTurn`);
-   * this one may be tried again — and the run's idle, when it comes, ends the
-   * turn as the Stop would have (`onIdle`). A steer into the turn takes it
+   * this one may be tried again — and the run's end, when the stream or the
+   * server says so (its idle; Machine 2's status poll), ends the turn as the
+   * Stop would have (`endFailedStopTurn`). A steer into the turn takes it
    * back, which ends the interruption (`sendTurn`). Cleared when an interrupt
    * begins, when the turn so ends and when the interruption ends.
    */

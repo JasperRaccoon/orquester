@@ -1297,11 +1297,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   drops it, whichever of the host's `thread.reverted` and these rows lands first. After it the
   source session, then its tree (`abortDescendants`), is aborted on the server, their frames — the
   aborts' own — already a foreign session's. (9) A Stop whose `POST …/abort` failed still ends the
-  turn once the stream says the run is over — `turn.aborted`, the session back to `ready`, as the
-  Stop ends it — whether the run's idle came while the request was pending (`deferredIdle`) or after
-  it failed (`failedStopTurnId`). Until then the turn is still the thread's, and the next Stop of it
-  asks the server again; a steer into it is the user taking it back — the failed Stop is over, the
-  run's end completes the turn as any, and its children run on. A second Stop used to find the turn
+  turn once the stream or the server says the run is over — `turn.aborted`, the session back to
+  `ready`, as the Stop ends it — whether the run's idle came while the request was pending
+  (`deferredIdle`) or after it failed (`failedStopTurnId`: two idle frames, or 1.18.5's lone
+  `session.idle`), or a reconnect's status poll said so (Machine 2; `endFailedStopTurn`). That end
+  counts as the idle after the interrupt (`idleAfterInterrupt`), so the next `busy` is a new run's:
+  uncounted, a lone idle or the poll kept the next woken run dropped and took the next turn's own
+  abort for the Stop's echo. Until then the turn is still the thread's, and the next Stop of it asks
+  the server again; a steer into it is the user taking it back — the failed Stop is over, the run's
+  end completes the turn as any, and its children run on. A second Stop used to find the turn
   already interrupted and do nothing, and an idle that came while the abort was pending was parked
   where nothing read it: the turn stayed active — the thread reading working, every deploy's drain
   held — and no Stop could end it.
