@@ -1,12 +1,15 @@
 /**
  * The drill-in body of a **background shell** (§7.6).
  *
- * A shell's output arrives as ordinary tool-lifecycle activities attributed to
- * the shell itself (`agentId === <taskId>`): one `command_execution` item —
- * `tool.started` → `tool.updated`* → `tool.completed` under a single
- * `toolUseId` — plus `tool.output` chunks as it prints. This module turns that
- * stream into the ONE timeline row the drill-in renders, and it exists as its
- * own projection rather than reusing the shared one for two reasons:
+ * A Claude shell's output arrives as ordinary tool-lifecycle activities
+ * attributed to the shell itself (`agentId === <taskId>`): one
+ * `command_execution` item — `tool.started` → `tool.updated`* →
+ * `tool.completed` under a single `toolUseId` — plus `tool.output` chunks as
+ * it prints. A Grok shell has no command item: its rows are its own TASK rows
+ * (a start, a monitor's lines, an end with its last output line), which fold
+ * into one command row too (`shellTaskEntry`). This module turns either stream
+ * into the ONE timeline row the drill-in renders, and it exists as its own
+ * projection rather than reusing the shared one for two reasons:
  *
  *  - **The shared derivation hides these rows on purpose.** §7.2's
  *    quiet-timeline rule (`isAgentInternalActivity`) drops every activity
@@ -35,6 +38,14 @@ const LIFECYCLE_KINDS: ReadonlySet<string> = new Set([
   "tool.started",
   "tool.updated",
   "tool.completed"
+]);
+
+/** A task's own rows: its start, its progress and patches, its end. */
+const TASK_KINDS: ReadonlySet<string> = new Set([
+  "task.started",
+  "task.progress",
+  "task.updated",
+  "task.completed"
 ]);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -66,6 +77,36 @@ function mergeLifecycleFrames(previous: WorkLogEntry, next: WorkLogEntry): WorkL
   return { ...previous, ...next, id: previous.id, createdAt: previous.createdAt };
 }
 
+/**
+ * A shell's own task row as its command: a Grok shell has no command item —
+ * the shell stamps its task rows with itself (the Grok adapter's
+ * `shellLinkage`), a start naming it, progress (a monitor's lines), patches,
+ * and an end carrying its last output line and its exit code. They are its one
+ * command row, never rows of their own: the title heads the row (the roster's,
+ * `displayLabel`), the latest summary is its output, the latest status the
+ * row's. Its exit code is the header's (the status chip, the metrics line).
+ */
+function shellTaskEntry(
+  previous: WorkLogEntry | undefined,
+  next: WorkLogEntry,
+  payload: Record<string, unknown> | null
+): WorkLogEntry {
+  const summary =
+    typeof payload?.summary === "string" && payload.summary.trim().length > 0 ? payload.summary : undefined;
+  const title = next.toolTitle ?? previous?.toolTitle;
+  const detail = summary ?? previous?.detail;
+  const status = next.toolLifecycleStatus ?? previous?.toolLifecycleStatus;
+  // The first row's identity: the row's disclosure key must not move.
+  const entry: WorkLogEntry = { ...(previous ?? next), itemType: "command_execution" };
+  entry.label = title ?? previous?.label ?? next.label;
+  if (title !== undefined) entry.toolTitle = title;
+  // Only a summary is output: a start's detail is its description, the title.
+  if (detail !== undefined) entry.detail = detail;
+  else delete entry.detail;
+  if (status !== undefined) entry.toolLifecycleStatus = status;
+  return entry;
+}
+
 /** The shell's items → the entries one `work` row carries, in arrival order. */
 export function backgroundShellEntries(
   items: readonly ThreadItem[],
@@ -73,12 +114,24 @@ export function backgroundShellEntries(
 ): WorkLogEntry[] {
   const entries: WorkLogEntry[] = [];
   const lifecycleRowByCallId = new Map<string, number>();
+  let taskEntryAt: number | undefined;
 
   for (const item of itemsForAgent(items, agentId)) {
     if (item.kind !== "activity") continue;
     const activity = item as ThreadActivityItem;
     const payload = asRecord(activity.payload);
     const base = workLogEntryFromActivity(activity);
+
+    if (TASK_KINDS.has(activity.activityKind) && payload?.taskId === agentId) {
+      // The shell's own task rows (a Grok shell's): its one command row.
+      if (taskEntryAt === undefined) {
+        taskEntryAt = entries.length;
+        entries.push(shellTaskEntry(undefined, base, payload));
+      } else {
+        entries[taskEntryAt] = shellTaskEntry(entries[taskEntryAt], base, payload);
+      }
+      continue;
+    }
 
     if (activity.activityKind === "tool.output") {
       // The chunk's text rides `delta`; the shared record reads `detail`, and

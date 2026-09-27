@@ -234,6 +234,30 @@ assert.ok(exited.includes('data-shell-output="true"'), "an exited shell's output
 assert.ok(exited.includes("PASS src/a.test.ts"), "without a click: the rendered row is the one seeded open");
 assert.ok(!exited.includes('data-timeline-row-kind="turn-fold"'));
 
+// A Grok shell: its own task rows, a start and an end, are its ONE command row.
+const GROK_SHELL = "grok-sh1";
+const grokShellRow = (activityKind: string, payload: Record<string, unknown>, id: string) =>
+  wireActivity(
+    activityKind,
+    { taskId: GROK_SHELL, taskType: "shell", agentKind: "background", agentId: GROK_SHELL, title: "npm run dev", ...payload },
+    { agentId: GROK_SHELL, id, tone: "info" }
+  );
+const grokShell = rosterRow(GROK_SHELL, { agentKind: "background", title: "npm run dev", status: "completed", exitCode: 0 });
+const grokShellSession = await seededThread({
+  items: [
+    grokShellRow("task.started", { detail: "npm run dev" }, "gsh-start"),
+    grokShellRow("task.completed", { status: "completed", summary: "ready in 300ms", detail: "ready in 300ms", exitCode: 0 }, "gsh-end")
+  ],
+  roster: [grokShell]
+});
+const grokShellView = render({ sessionId: grokShellSession, agentId: GROK_SHELL, roster: [grokShell], bottomInset: 0, onBack: NOOP });
+assert.equal(
+  (grokShellView.match(/data-activity-id=/g) ?? []).length,
+  1,
+  `one command row, never its two task rows: ${grokShellView}`
+);
+assert.ok(grokShellView.includes('data-shell-output="true"') && grokShellView.includes("ready in 300ms"), "its last line is its output");
+
 // ---------------------------------------------------------------------------
 // A live agent reads live: its running call, its working row
 // ---------------------------------------------------------------------------
