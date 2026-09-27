@@ -4350,8 +4350,9 @@ timed from it — only those: the first row after a prompt, turnless or not, end
 agent's first rows often ride no turn and a boundary carried past them timed a later turn's fold from
 the launch (`lib/agent-chat/agent-prompt.logic.ts`, `deriveTurnFolds`; the thread's own timeline has no
 launch prompts, and its folds and boundaries are as before). A long
-prompt clamps behind "Show full prompt"; one the wire cut (the item's `truncated`) reads whole in the
-parent's viewer ("Load the full prompt", `GET …/items/:itemId`, as "Load the full summary" does) and
+prompt clamps behind "Show full prompt"; one the wire cut (the item's `truncated`) offers that same
+ONE affordance, which reads the whole prompt in the parent's viewer — titled "Prompt", the item read
+(`GET …/items/:itemId`) as "Load the full summary" does — rather than unclamping the cut text, and
 offers no Copy of the cut text; one ingestion cut at rest (`promptTruncated`) says only its start was
 kept. No prompt on the launch — an older log, a provider that reports none, a shell — no row: the
 client never invents one. The block under the breadcrumb is no longer the "prompt": it keeps the

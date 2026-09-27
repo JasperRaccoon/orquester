@@ -334,8 +334,9 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   // through `streamedOutput`: it reads the call's join, never the start's item
   // (the GUI spec's §6.3 note on `GET …/items/:itemId/output`). Nor a task
   // row's: a launch's cut is its prompt, which the drill-in's prompt row reads
-  // whole ("Load the full prompt"), and no task row is a tool's output — the
-  // spawn row it merges into would have offered its payload as JSON.
+  // whole ("Show full prompt", in a viewer titled "Prompt"), and no task row
+  // is a tool's output — the spawn row it merges into would have offered its
+  // payload as JSON.
   if (payload?.truncated === true && activity.activityKind !== "tool.started" && !isTaskActivity) {
     entry.truncated = true;
   }

@@ -374,7 +374,12 @@ assert.ok(long.includes("Show full prompt"), "a long prompt collapses past a few
 const wireCut = await promptedDrillIn([
   promptedLaunch({ prompt: `${"x".repeat(20_000)}` }, "launch-wire")
 ]);
-assert.ok(wireCut.includes("Load the full prompt"), "a prompt the wire cut reads whole with the item read");
+assert.equal(
+  (wireCut.match(/Show full prompt/g) ?? []).length,
+  1,
+  `a prompt the wire cut offers ONE way to read it whole — the item read, in the viewer: ${wireCut}`
+);
+assert.ok(!wireCut.includes("Load the full prompt"), "never a second, near-identical affordance");
 assert.ok(!wireCut.includes("Copy prompt"), "and hands over no cut text as if it were whole");
 assert.ok(prompted.includes("Copy prompt"), "a whole prompt copies");
 

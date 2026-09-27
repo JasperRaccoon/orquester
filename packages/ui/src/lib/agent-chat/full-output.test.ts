@@ -15,6 +15,7 @@ import {
   fullOutputNotes,
   fullOutputSourceOf,
   fullOutputText,
+  fullOutputViewerCopy,
   readFullOutput,
   type FullOutputReads
 } from "./full-output";
@@ -422,7 +423,7 @@ describe("the viewer's reads, one at a time", () => {
   });
 });
 
-describe("an agent's launch prompt in the viewer (§7.6: 'Load the full prompt')", () => {
+describe("an agent's launch prompt in the viewer (§7.6: a wire-cut prompt's 'Show full prompt')", () => {
   const start = (extra: Record<string, unknown>) =>
     activity("task.started", { taskId: "a1", agentKind: "agent", title: "Find callers", ...extra }, { turnId: "t1" });
 
@@ -470,5 +471,31 @@ describe("a wire-cut launch prompt never makes its spawn row a 'Load full output
     }) as Record<string, unknown>;
     const [end] = deriveWorkLogEntries([activity("task.completed", payload, { turnId: "t1", tone: "info" })]);
     assert.equal(end?.truncated, undefined);
+  });
+});
+
+describe("the viewer's copy follows what it reads (review N1)", () => {
+  it("a launch prompt's viewer is titled for a prompt", () => {
+    assert.deepEqual(fullOutputViewerCopy("prompt"), {
+      title: "Prompt",
+      missing: "That prompt is no longer available."
+    });
+  });
+
+  it("an output's, as before", () => {
+    for (const source of [undefined, "item", "streamed"] as const) {
+      assert.deepEqual(fullOutputViewerCopy(source), {
+        title: "Full output",
+        missing: "That output is no longer available."
+      });
+    }
+  });
+
+  it("a prompt is read as its item", async () => {
+    const item = activity("task.started", { taskId: "a1", prompt: "The whole prompt." }, { turnId: "t1" });
+    const read = reads({ item: async () => ({ item }) as unknown as ThreadItemResponse });
+    const output = await readFullOutput(read, item.id, "prompt");
+    assert.deepEqual(read.asked, [`item ${item.id}`]);
+    assert.equal(output.kind === "item" ? fullOutputText(output.item) : null, "The whole prompt.");
   });
 });

@@ -39,9 +39,19 @@ import type { WorkLogEntry } from "./contracts";
 
 /**
  * Where a row's whole output is read: its item, or — first — its call's
- * streamed output, joined by the host.
+ * streamed output, joined by the host. `prompt` reads an agent's launch
+ * prompt (a drill-in's prompt row): its item, shown as the prompt it holds
+ * (`fullOutputText`), in a viewer titled for a prompt
+ * ({@link fullOutputViewerCopy}).
  */
-export type FullOutputSource = "item" | "streamed";
+export type FullOutputSource = "item" | "streamed" | "prompt";
+
+/** What the viewer calls what it reads, and says when the read finds nothing. */
+export function fullOutputViewerCopy(source: FullOutputSource | undefined): { title: string; missing: string } {
+  return source === "prompt"
+    ? { title: "Prompt", missing: "That prompt is no longer available." }
+    : { title: "Full output", missing: "That output is no longer available." };
+}
 
 /**
  * The read a row's "Load full output" makes, or `null` where it offers none:

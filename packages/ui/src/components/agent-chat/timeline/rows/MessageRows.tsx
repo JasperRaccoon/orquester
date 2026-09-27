@@ -169,18 +169,29 @@ function RewindToHereButton({
 
 /**
  * The text of a bubble, clamped past a few lines with a mask fade and a toggle
- * that names what it reveals (`shouldClampUserMessage`).
+ * that names what it reveals (`shouldClampUserMessage`). With `onShowFull` the
+ * text it holds is not the whole of it (a prompt the wire cut): it stays
+ * clamped, and the one toggle reads the whole elsewhere instead of unclamping
+ * a cut text as if it were whole.
  */
-function ClampedBubbleText({ text, showLabel }: { text: string; showLabel: string }): React.ReactElement {
+function ClampedBubbleText({
+  text,
+  showLabel,
+  onShowFull
+}: {
+  text: string;
+  showLabel: string;
+  onShowFull?: (() => void) | undefined;
+}): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false);
-  const clampable = shouldClampUserMessage(text);
+  const clampable = onShowFull !== undefined || shouldClampUserMessage(text);
+  const clamped = clampable && (onShowFull !== undefined || !expanded);
   return (
     <>
       <div
         className={cn(
           "whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]",
-          clampable &&
-            !expanded &&
+          clamped &&
             "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-1.75rem),transparent)]"
         )}
       >
@@ -189,10 +200,10 @@ function ClampedBubbleText({ text, showLabel }: { text: string; showLabel: strin
       {clampable ? (
         <button
           type="button"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={onShowFull ?? (() => setExpanded((value) => !value))}
           className="mt-1.5 rounded text-xs text-neutral-400 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
         >
-          {expanded ? "Show less" : showLabel}
+          {!clamped ? "Show less" : showLabel}
         </button>
       ) : null}
     </>
@@ -262,10 +273,11 @@ export const UserMessageRow = React.memo(function UserMessageRow({
  * In the user's bubble, because to the agent it IS its user turn — what it was
  * asked, verbatim — with a caption that says whose words these are not. Read-
  * only like the whole drill-in: no rewind. A long prompt clamps behind "Show
- * full prompt"; one the wire cut (§5.6) reads whole in the parent's viewer,
- * as the compaction summary's "Load the full summary" does, and offers no
- * Copy of the cut text; one ingestion cut at rest says only its start was
- * kept — no read holds the rest.
+ * full prompt". One the wire cut (§5.6) offers that same ONE affordance, which
+ * reads the whole prompt in the parent's viewer (titled "Prompt"; the item
+ * read, as the compaction summary's "Load the full summary" does) rather than
+ * unclamping the cut text, and offers no Copy of the cut text; one ingestion
+ * cut at rest says only its start was kept — no read holds the rest.
  */
 export const AgentPromptRow = React.memo(function AgentPromptRow({
   row,
@@ -281,18 +293,15 @@ export const AgentPromptRow = React.memo(function AgentPromptRow({
       <span className="pe-1 text-[11px] text-neutral-500">Prompt</span>
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
         <AuthorHeading>Prompt</AuthorHeading>
-        <ClampedBubbleText text={text} showLabel="Show full prompt" />
+        <ClampedBubbleText
+          text={text}
+          showLabel="Show full prompt"
+          // Cut on the wire: its one "Show full prompt" reads the whole prompt
+          // in the parent's viewer, never unclamps the cut text.
+          onShowFull={prompt.truncated ? () => ctx.onLoadFullOutput(prompt.itemId, "prompt") : undefined}
+        />
         {prompt.cutAtRest ? (
           <p className="mt-1.5 text-xs text-neutral-400">Only the start of this prompt was kept.</p>
-        ) : null}
-        {prompt.truncated ? (
-          <button
-            type="button"
-            onClick={() => ctx.onLoadFullOutput(prompt.itemId)}
-            className="mt-1.5 block rounded text-xs text-neutral-400 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
-          >
-            Load the full prompt
-          </button>
         ) : null}
       </div>
       <div className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs">

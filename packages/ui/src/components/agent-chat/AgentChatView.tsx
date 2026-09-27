@@ -49,6 +49,7 @@ import {
   createViewerReads,
   fullOutputNotes,
   fullOutputText,
+  fullOutputViewerCopy,
   readFullOutput,
   type FullOutputSource
 } from "../../lib/agent-chat/full-output";
@@ -710,7 +711,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const loadFullOutput = React.useCallback(
     (itemId: string, source?: FullOutputSource) => {
       const signal = viewerReads.begin();
-      setViewer({ kind: "output", title: "Full output", loading: true });
+      // A drill-in's launch prompt reads the same way, titled for a prompt.
+      const copy = fullOutputViewerCopy(source);
+      setViewer({ kind: "output", title: copy.title, loading: true });
       void readFullOutput(
         {
           item: (id) => api.agentChatItem(sessionId, id),
@@ -723,7 +726,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           if (signal.aborted) return;
           setViewer({
             kind: "output",
-            title: "Full output",
+            title: copy.title,
             loading: false,
             text: output.kind === "item" ? fullOutputText(output.item) : output.text,
             notes: fullOutputNotes(output)
@@ -733,9 +736,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           if (signal.aborted) return;
           setViewer({
             kind: "output",
-            title: "Full output",
+            title: copy.title,
             loading: false,
-            error: errorText(error, "That output is no longer available.")
+            error: errorText(error, copy.missing)
           });
         });
     },
