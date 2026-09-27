@@ -4386,7 +4386,9 @@ prompt clamps behind "Show full prompt"; one the wire cut (the item's `truncated
 ONE affordance, which reads the whole prompt in the parent's viewer — titled "Prompt", the item read
 (`GET …/items/:itemId`) as "Load the full summary" does — rather than unclamping the cut text, and
 offers no Copy of the cut text; one ingestion cut at rest (`promptTruncated`) says only its start was
-kept. No prompt on the launch — an older log, a provider that reports none, a shell — no row: the
+kept, naming the cap — "stored up to 32,000 characters", `TASK_PROMPT_MAX_CHARS`, an upper bound in
+characters since the cap counts UTF-16 units — in its row and in the viewer alike
+(`PROMPT_CUT_AT_REST_NOTE`); the rest is on no read of the start row. No prompt on the launch — an older log, a provider that reports none, a shell — no row: the
 client never invents one. The block under the breadcrumb is no longer the "prompt": it keeps the
 roster's live activity / outcome line at one fixed line with the whole of it as its tooltip, so its
 wrapping never moves the rows below.*

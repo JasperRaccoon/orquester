@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import {
   slimActivityPayload,
+  TASK_PROMPT_MAX_CHARS,
   type ThreadActivityItem,
   type ThreadItemOutputResponse,
   type ThreadItemResponse
@@ -433,9 +434,16 @@ describe("an agent's launch prompt in the viewer (§7.6: a wire-cut prompt's 'Sh
     assert.deepEqual(fullOutputNotes({ kind: "item", item: start({ prompt: whole }) }), []);
   });
 
-  it("says when only the prompt's start was ever kept", () => {
+  it("says when only the prompt's start was ever kept, and names the cap it was cut at", () => {
     const item = start({ prompt: "The start of it", promptTruncated: true });
-    assert.deepEqual(fullOutputNotes({ kind: "item", item }), ["Only the start of this prompt was kept."]);
+    const notes = fullOutputNotes({ kind: "item", item });
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]!, /^Only the start of this prompt was kept/);
+    // `TASK_PROMPT_MAX_CHARS` counts UTF-16 units, cut on a code point: an upper bound in characters.
+    assert.ok(
+      notes[0]!.includes(`up to ${TASK_PROMPT_MAX_CHARS.toLocaleString("en-US")} characters`),
+      `the note names ingestion's cap at rest: ${notes[0]}`
+    );
   });
 
   it("a start with no prompt is its payload, as before", () => {

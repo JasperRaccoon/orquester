@@ -35,6 +35,7 @@ import {
   type ThreadItemResponse
 } from "@orquester/api/agent-chat";
 
+import { PROMPT_CUT_AT_REST_NOTE } from "./agent-prompt.logic";
 import type { WorkLogEntry } from "./contracts";
 
 /**
@@ -224,14 +225,15 @@ const CAP_LABEL = `${THREAD_ITEM_OUTPUT_MAX_BYTES / (1024 * 1024)} MiB`;
  * load's closer copied from an update — which
  * part, and how much, the viewer cannot tell, so the note says neither. An
  * item needs no note, but an agent's launch prompt ingestion cut at rest:
- * only its start was ever kept, and the viewer says so.
+ * only its start was ever kept, and the viewer says so as its row does,
+ * naming the cap (`PROMPT_CUT_AT_REST_NOTE`).
  */
 export function fullOutputNotes(output: FullOutput): string[] {
   const notes: string[] = [];
   if (output.kind === "item") {
-    // A prompt ingestion cut at rest: no read holds the rest.
+    // A prompt ingestion cut at rest: no read of its start row holds the rest.
     if (launchPrompt(output.item)?.cutAtRest === true) {
-      notes.push("Only the start of this prompt was kept.");
+      notes.push(PROMPT_CUT_AT_REST_NOTE);
     }
     return notes;
   }

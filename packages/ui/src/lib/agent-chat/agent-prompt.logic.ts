@@ -26,6 +26,7 @@
  */
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
+import { TASK_PROMPT_MAX_CHARS } from "@orquester/api/agent-chat";
 
 import { agentItemFilter } from "./entries.logic";
 
@@ -35,9 +36,21 @@ export interface AgentPrompt {
   readonly itemId: string;
   /** The wire cut it (§5.6): the whole of it is one item read away. */
   readonly truncated: boolean;
-  /** Ingestion cut it at rest: only its start was ever kept. */
+  /** Ingestion cut it at rest: only its start was ever kept ({@link PROMPT_CUT_AT_REST_NOTE}). */
   readonly cutAtRest: boolean;
 }
+
+/**
+ * What a prompt ingestion cut at rest says of itself, in its row and in the
+ * viewer alike: only its start was kept, and the cap it was cut at,
+ * `TASK_PROMPT_MAX_CHARS`. The cap counts UTF-16 units and cuts on a code
+ * point — a character outside the Basic Multilingual Plane counts two — so in
+ * characters it is an upper bound: "up to". The rest is on no read of the
+ * start row; where the launching call kept its whole input, that call's
+ * completion row holds it (the cap's own doc names each provider's field),
+ * which this client does not read.
+ */
+export const PROMPT_CUT_AT_REST_NOTE = `Only the start of this prompt was kept: a prompt is stored up to ${TASK_PROMPT_MAX_CHARS.toLocaleString("en-US")} characters.`;
 
 /** The prompt messages this module made, and what each one says of its prompt. */
 const promptByMessage = new WeakMap<ThreadMessageItem, AgentPrompt>();

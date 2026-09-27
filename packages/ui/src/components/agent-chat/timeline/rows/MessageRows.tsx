@@ -5,7 +5,7 @@ import type { AttachmentRef } from "@orquester/api";
 
 import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
-import type { AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
+import { PROMPT_CUT_AT_REST_NOTE, type AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import { ComposerPopover } from "../../composer/ComposerPopover";
 import {
@@ -277,7 +277,9 @@ export const UserMessageRow = React.memo(function UserMessageRow({
  * reads the whole prompt in the parent's viewer (titled "Prompt"; the item
  * read, as the compaction summary's "Load the full summary" does) rather than
  * unclamping the cut text, and offers no Copy of the cut text; one ingestion
- * cut at rest says only its start was kept — no read holds the rest.
+ * cut at rest says only its start was kept, up to the cap it was cut at
+ * (`PROMPT_CUT_AT_REST_NOTE`, naming `TASK_PROMPT_MAX_CHARS`) — no read of its
+ * start row holds the rest.
  */
 export const AgentPromptRow = React.memo(function AgentPromptRow({
   row,
@@ -301,7 +303,7 @@ export const AgentPromptRow = React.memo(function AgentPromptRow({
           onShowFull={prompt.truncated ? () => ctx.onLoadFullOutput(prompt.itemId, "prompt") : undefined}
         />
         {prompt.cutAtRest ? (
-          <p className="mt-1.5 text-xs text-neutral-400">Only the start of this prompt was kept.</p>
+          <p className="mt-1.5 text-xs text-neutral-400">{PROMPT_CUT_AT_REST_NOTE}</p>
         ) : null}
       </div>
       <div className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs">

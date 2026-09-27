@@ -19,6 +19,7 @@ import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   slimActivityPayload,
+  TASK_PROMPT_MAX_CHARS,
   type AgentChatStreamFrame,
   type RuntimeSubagent,
   type ThreadActivityItem,
@@ -386,7 +387,11 @@ assert.ok(prompted.includes("Copy prompt"), "a whole prompt copies");
 const restCut = await promptedDrillIn([
   promptedLaunch({ prompt: "The start of a very long prompt", promptTruncated: true }, "launch-rest")
 ]);
-assert.ok(restCut.includes("Only the start of this prompt was kept."), "a prompt cut at rest says so");
+assert.ok(restCut.includes("Only the start of this prompt was kept"), "a prompt cut at rest says so");
+assert.ok(
+  restCut.includes(`up to ${TASK_PROMPT_MAX_CHARS.toLocaleString("en-US")} characters`),
+  `and names the cap it was cut at (TASK_PROMPT_MAX_CHARS): ${restCut}`
+);
 
 const unprompted = await promptedDrillIn([promptedLaunch({}, "launch-none"), answer]);
 assert.ok(!unprompted.includes('data-agent-prompt="true"'), "no prompt on the launch, no prompt row");
