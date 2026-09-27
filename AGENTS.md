@@ -1541,40 +1541,45 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   run. Never at a deploy's teardown or a restart: the drain waits for live work only within its
   bound (a watch loop's TTL, an agent's hour), and a dev server started in a Grok chat must survive
   every deploy that comes after it. Never at a crash either (no user ended anything). There it runs
-  on as a marked orphan, listed and killable in Settings → System, and never silently: its task's
-  closing row says so — "Left running when the agent host stopped / the session restarted / the
-  agent process exited — stop it from Settings → System." (`leftRunningNote`), marked `leftRunning`
-  on the row and the roster entry — the one summary a stopped shell's row shows in place of a bare
-  "Stopped"; any other completion summary (the CLI's stop sentence, a killed shell's output line)
-  never replaces it. Nor is it forgotten: each launch's task sessions — recorded as the CLI reports
-  the work (a shell's, a monitor's `task.started`: nothing can be read off a CLI that crashed) and
-  again at every end, while it lives — are kept in the thread's `leftover-work.json` (SID, leader
-  starttime, launch id; the last 8 launches; 0600, atomic, written only while the thread's directory
-  exists (a late record must not raise a deleted thread), the adapter's own file, never
-  `binding.json`; `support/leftover-work.ts`), so a LATER user end — the session stop command or a
-  closed tab, live session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession`
-  either way — sweeps what every earlier launch left, with the same identity checks. A Claude chat's
-  background shells outlive their session the same way — the SDK closes the Claude CLI's stdin and
-  SIGTERMs it 2 s later, before the CLI's own 5 s wind-down would stop them, and they run on under
-  init (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
-  2026-09-26). An open that fails stops its CLI now too: a `session/load` the CLI refused (a cursor
-  it no longer knows) left it running outside the adapter's map, holding its pipes. It adds no row
-  of its own either: the start's rejection is its whole report, which the host writes — an exit row
-  besides it read as a crash of a session that never ran (`GrokSession.announced`) — and a CLI that
-  ends after `session/new` answered but before the session is announced (on the open's
-  `session/set_model`, say) fails the open with its exit rather than being announced ready, dead. A
-  work process whose shell had exited before the stop is in no recorded session and stays running; a
-  process that scrubs its environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills
-  nothing: its `session/cancel` leaves the CLI — which owns them — running (fixture 21). Linux-only
-  (`/proc`); elsewhere the sweep reads and signals nothing. **Settings → System reads the same
-  marker**: a process of the daemon's own uid that no root reaches, whose parent is init (or gone)
-  and that carries any launch's marker is a root of its own — listed under the chat its
-  `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in `system-status.ts`),
-  what it started coming with it as its descendants — so the work a session end left running, and
-  whatever a crashed host never swept, is in reach. A marked process whose parent still runs outside
-  every root is that parent's, never a root: no marker makes it ours — nor is one a subreaper
-  adopted (`systemd --user`, a container's non-pid-1 init; the kill-guard gotcha). Every adapter's
-  launches carry the marker (next bullet); only Grok's sweep by it.
+  on as a marked orphan, listed and killable in Settings → System, and — at a deploy's or a
+  restart's end, and at the CLI's own exit — never silently: its task's closing row says so — "Left
+  running when the agent host stopped / the session restarted / the agent process exited — stop it
+  from Settings → System." (`leftRunningNote`), marked `leftRunning` on the row and the roster entry
+  — the one summary a stopped shell's row shows in place of a bare "Stopped"; any other completion
+  summary (the CLI's stop sentence, a killed shell's output line) never replaces it. A HOST that
+  crashed (an OOM, a SIGKILL) ran no teardown and wrote no such row: the next host's first load
+  closes the task with the generic `stopped` row of `leftoverWorkClosings` ("Task stopped",
+  `orchestration/leftover-work.ts`), which cannot tell work that runs on from work that died — the
+  process is still listed and killable in Settings → System. Nor is it forgotten: each launch's task
+  sessions — recorded as the CLI reports the work (a shell's, a monitor's `task.started`: nothing
+  can be read off a CLI that crashed) and again at every end, while it lives — are kept in the
+  thread's `leftover-work.json` (SID, leader starttime, launch id; the last 8 launches; 0600,
+  atomic, written only while the thread's directory exists (a late record must not raise a deleted
+  thread), the adapter's own file, never `binding.json`; `support/leftover-work.ts`), so a LATER
+  user end — the session stop command or a closed tab, live session or not: `stopSessionInternal`
+  calls `AgentAdapter.sweepEndedSession` either way — sweeps what every earlier launch left, with
+  the same identity checks. A Claude chat's background shells outlive their session the same way —
+  the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s later, before the CLI's own 5 s
+  wind-down would stop them, and they run on under init (`bun run dev`, `stripe listen`, `vite` of
+  closed Claude chats, live on the owner's host on 2026-09-26). An open that fails stops its CLI now
+  too: a `session/load` the CLI refused (a cursor it no longer knows) left it running outside the
+  adapter's map, holding its pipes. It adds no row of its own either: the start's rejection is its
+  whole report, which the host writes — an exit row besides it read as a crash of a session that
+  never ran (`GrokSession.announced`) — and a CLI that ends after `session/new` answered but before
+  the session is announced (on the open's `session/set_model`, say) fails the open with its exit
+  rather than being announced ready, dead. A work process whose shell had exited before the stop is
+  in no recorded session and stays running; a process that scrubs its environment (`env -i`,
+  `sudo`'s `env_reset`) escapes. A Stop kills nothing: its `session/cancel` leaves the CLI — which
+  owns them — running (fixture 21). Linux-only (`/proc`); elsewhere the sweep reads and signals
+  nothing. **Settings → System reads the same marker**: a process of the daemon's own uid that no
+  root reaches, whose parent is init (or gone) and that carries any launch's marker is a root of its
+  own — listed under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill target
+  (`launchedOrphans` in `system-status.ts`), what it started coming with it as its descendants — so
+  the work a session end left running, and whatever a crashed host never swept, is in reach. A
+  marked process whose parent still runs outside every root is that parent's, never a root: no
+  marker makes it ours — nor is one a subreaper adopted (`systemd --user`, a container's non-pid-1
+  init; the kill-guard gotcha). Every adapter's launches carry the marker (next bullet); only Grok's
+  sweep by it.
 - **Every provider launch carries a launch marker; only the Grok adapter sweeps by it.** The host's
   `buildEnv` (`agent-host/main.ts`) stamps `ORQUESTER_AGENT_LAUNCH` on every provider child's
   environment through `buildProviderEnv`'s required `launchId` — one `randomUUID()` per call, and

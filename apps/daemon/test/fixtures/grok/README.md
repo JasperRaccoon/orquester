@@ -1368,9 +1368,10 @@ SIGTERM path's 3 s backstop) to whatever a fresh scan still finds, each pid chec
   crash as a marked orphan, which the daemon's Settings → System lists and kills as its own (any
   process carrying a launch's marker); its task's closing row says so ("Left running when … — stop
   it from Settings → System.", marked `leftRunning`: the one summary a stopped shell's roster row
-  shows), and its sessions — recorded as the CLI reports the work and again at the end — are
-  remembered in the thread's `leftover-work.json`, which the user's next end of the session sweeps,
-  whatever launch left them.
+  shows) — at a deploy, a restart and the CLI's exit; a HOST that crashed writes no row, and the
+  next host's first load closes the task with the generic "Task stopped" — and its sessions —
+  recorded as the CLI reports the work and again at the end — are remembered in the thread's
+  `leftover-work.json`, which the user's next end of the session sweeps, whatever launch left them.
 
 A Stop's `session/cancel` kills nothing (the CLI lives on and owns them, observation 44).
 Linux-only: elsewhere nothing is read or signalled.
