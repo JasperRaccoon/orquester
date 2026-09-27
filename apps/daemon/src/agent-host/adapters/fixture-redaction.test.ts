@@ -7,8 +7,8 @@
  * joined the way its protocol streams it, and the joined text is scanned beside every line. A home
  * path the Claude CLI streamed as `/var/l` + `ib/orquester/…` passed the per-line redaction in
  * eight captures, one of them spelling a managed account's id, while the same captures' complete
- * frames held `~` (2026-09-27). A byte array — Grok's `rawOutput.output` — is scanned decoded, for
- * the same reason.
+ * frames held `~` (2026-09-27). A byte array — a Grok tool's `rawOutput.output` or `stdout` — is
+ * scanned decoded, for the same reason: one in Grok's `07` spelled the home past every text rule.
  *
  * Host-independent: it reads the committed fixtures and nothing else of this host, and every rule
  * is a shape. What a README documents as a placeholder or a deliberate fake is allowed by the
