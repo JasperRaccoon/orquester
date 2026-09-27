@@ -1,5 +1,6 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
+import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 
 export interface ContextMenuItem {
@@ -19,8 +20,13 @@ export interface ContextMenuProps {
 
 const WIDTH = 192;
 
-/** Cursor-anchored menu rendered in a portal; closes on outside click/Escape/scroll. */
+/**
+ * Cursor-anchored menu rendered in a portal; closes on outside click/Escape/scroll.
+ * Mounted only while open, so it is an open layer for its whole life
+ * (`useOpenLayer`): its Escape is its own.
+ */
 export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
+  useOpenLayer(true);
   useEffect(() => {
     const close = () => onClose();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();

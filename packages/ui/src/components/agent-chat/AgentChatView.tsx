@@ -58,7 +58,12 @@ import { isDefaultThreadTitle } from "../../lib/session-kind";
 import { isActiveChatTab, releaseActiveChatTab } from "../../lib/agent-chat-active-tab";
 import { anotherLayerOwnsTheKeyboard } from "../attention/GlobalShortcutListener";
 import { deriveThreadTitleSeed } from "../../lib/agent-chat/title.logic";
-import { chatEscapeSequenceStep, resolveChatEscape } from "./escape-action";
+import {
+  chatEscapeSequenceStep,
+  chatEscapeTargetGate,
+  resolveChatEscape,
+  type EscapeTargetLike
+} from "./escape-action";
 import {
   NO_DRILL_IN_WATCH,
   nextDrillInReturn,
@@ -543,6 +548,19 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // Every rule lives in `resolveChatEscape`, which is pure and tested; this
   // keeps only the three lines that touch the event.
   //
+  // **An open layer comes first.** Being first on `window` also puts this
+  // ahead of every layer's own Escape listener — this thread's output viewer
+  // and context meter, a composer popover, any modal, sheet or menu — and it
+  // stops the event when it acts, so it must stand down while one is up or the
+  // layer never sees its key: the first Escape under the viewer used to stop
+  // the turn, or leave the drill-in behind it. `anotherLayerOwnsTheKeyboard()`
+  // is the one set (`lib/open-layers.ts`); the composer's arms read it too.
+  // A held Escape is one press — its auto-repeat does nothing at all — so a
+  // hold whose first keydown a layer took cannot go on to stop the turn. And
+  // an Escape typed into a field that is not this chat's (the tab strip's
+  // rename box, the sidebar's name field) is that field's: being first here
+  // used to mean the rename never cancelled and the turn stopped instead.
+  //
   // **The idle Escape is the CLI's double press** (§5.5): with nothing to
   // leave and nothing to stop, two Escapes in a row outside the composer open
   // the composer's rewind picker — the textarea counts its own Escapes the
@@ -561,24 +579,21 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     // A tab coming back into view starts a fresh count.
     sequence?.reset();
     const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as Element | null;
       const state = escapeState.current;
-      const inside = (selector: string): boolean =>
-        typeof target?.closest === "function" && target.closest(selector) !== null;
       const gate = {
         key: event.key,
         defaultPrevented: event.defaultPrevented,
         isActiveTab: isActiveChatTab(sessionId),
         blockingLayerOpen: anotherLayerOwnsTheKeyboard(),
-        insideComposer: inside(`[data-agent-chat-composer-shell="${CSS.escape(sessionId)}"]`),
+        // Where it landed: this thread's composer, or a field that is not this
+        // chat's — the rename box in the tab strip, a terminal, another grid
+        // cell's composer — whose key it is.
+        ...chatEscapeTargetGate(event.target as EscapeTargetLike | null, sessionId),
         drillInOpen: state.drillInAgentId !== null,
-        turnActive: state.turnActive
+        turnActive: state.turnActive,
+        repeat: event.repeat
       };
-      const step = chatEscapeSequenceStep({
-        ...gate,
-        repeat: event.repeat,
-        insideFloatingLayer: inside("[data-chat-composer-floating-layer]")
-      });
+      const step = chatEscapeSequenceStep(gate);
       if (step === "reset") {
         sequence?.reset();
       }
@@ -609,6 +624,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [active, sessionId, actions]);
+  // The composer keeps the same precedence inside its shell, where this
+  // listener stands down: with a child open, its Escape leaves the drill-in
+  // before it would stop the parent's turn (`composerEscapeAction`). It gets
+  // `closeDrillIn` — Back's own door, so the agent's memory is left as Back
+  // leaves it — only while a child is open: that is how it knows one is.
 
   // §3.4's account chip. The HEAD is the authority — the host records the
   // switch there first — with the tab summary as the fallback for a thread
@@ -979,6 +999,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 rewindTargets={rewindTargets}
                 onRewind={paintOnly ? noop : rewindToTarget}
                 active={active}
+                // Escape in the composer leaves an open drill-in first (§7.6).
+                onLeaveDrillIn={drillInAgentId !== null ? closeDrillIn : undefined}
                 actions={composerActions}
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to

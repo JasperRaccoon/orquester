@@ -67,7 +67,12 @@ import {
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
-import { composerOwnsEscape, isChatTabListenerActive } from "./tab-visibility";
+import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
+import {
+  composerEscapeAction,
+  composerOwnsEscape,
+  isChatTabListenerActive
+} from "./tab-visibility";
 import {
   findComposerShortcutTarget,
   resolveChatShortcut,
@@ -172,6 +177,13 @@ export interface ChatComposerExtraProps {
    * without it one chord acts on every open thread at once (Q2-1).
    */
   active?: boolean;
+  /**
+   * Leaves the subagent drill-in (§7.6) — passed exactly while one is open.
+   * Escape in the composer then goes back to the thread before it would stop
+   * the turn, as it does everywhere else in the tab (`composerEscapeAction`);
+   * the shell owns the drill-in, and this composer is its direct child.
+   */
+  onLeaveDrillIn?: (() => void) | undefined;
 }
 
 /**
@@ -220,7 +232,8 @@ export function ChatComposer({
   onDraftAttachmentCountChange,
   threadHasContent = true,
   searchRoot,
-  active
+  active,
+  onLeaveDrillIn
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
@@ -1440,9 +1453,16 @@ export function ChatComposer({
        *
        * So the scopes are disjoint and target-based: the shell
        * (`resolveChatEscape`) owns every Escape whose target is OUTSIDE this
-       * composer shell — that is the one that leaves a drill-in — and this arm
-       * owns the inside, minus the textarea, whose own handler gives an open
-       * token menu first refusal. `scroll-to-end` stays the timeline's.
+       * composer shell, and this arm owns the inside, minus the textarea,
+       * whose own handler gives an open token menu first refusal. All three
+       * leave an open drill-in before they would stop the turn — this arm
+       * claims an idle Escape for that too. `scroll-to-end` stays the
+       * timeline's.
+       *
+       * Neither owns it while a layer is up (`anotherLayerOwnsTheKeyboard`):
+       * this arm runs before any layer's own listener, so under an open
+       * composer popover — whose trigger keeps focus inside this shell — one
+       * Escape stopped the turn and closed the popover too.
        */
       if (shortcut.kind === "interrupt") {
         // V1 §10.1: the shell registers a second window Escape listener. It
@@ -1454,17 +1474,41 @@ export function ChatComposer({
         const target = event.target;
         const insideComposerShell =
           target instanceof Node && shellRef.current?.contains(target) === true;
+        const layerOpen = anotherLayerOwnsTheKeyboard();
+        const drillInOpen = onLeaveDrillIn !== undefined;
+        // An Escape a layer takes is nobody's first press. The textarea resets
+        // its own count when it sees one, but a composer popover stops the key
+        // in the capture phase — the textarea never sees that one.
+        if (layerOpen) escapeSequence.reset();
         if (
           !composerOwnsEscape({
             defaultPrevented: event.defaultPrevented,
             insideComposerShell,
             isTextarea: target === textareaRef.current,
-            isTurnActive
+            isTurnActive,
+            drillInOpen,
+            layerOpen
           })
         ) {
           return;
         }
         event.preventDefault();
+        // It left the drill-in or stopped the turn: nobody's first press.
+        escapeSequence.reset();
+        // The token menu is the textarea's, never this arm's, and the table
+        // never answers a held key's repeat.
+        if (
+          composerEscapeAction({
+            repeat: false,
+            menuOpen: false,
+            layerOpen,
+            drillInOpen,
+            isTurnActive
+          }) === "leave-drill-in"
+        ) {
+          onLeaveDrillIn?.();
+          return;
+        }
         interrupt();
         return;
       }
@@ -1478,7 +1522,7 @@ export function ChatComposer({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [actions, active, interrupt, isTurnActive, openControl, queue]);
+  }, [actions, active, interrupt, isTurnActive, onLeaveDrillIn, openControl, queue]);
 
   const onTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (isPasteAsTextShortcut(event, isApplePlatform())) bypassPasteRef.current = true;
@@ -1511,31 +1555,57 @@ export function ChatComposer({
           return;
         }
       }
-      if (event.key === "Escape") {
-        // The menu takes Escape before the turn does: closing a menu the user
-        // just opened must not also stop the agent — nor count as the first
-        // half of a rewind.
-        event.preventDefault();
-        event.stopPropagation();
-        setMenuDismissed(true);
-        escapeSequence.reset();
-        return;
-      }
     }
 
-    if (event.key === "Escape" && isTurnActive) {
-      event.preventDefault();
-      // This Escape stopped the turn; it is nobody's first press.
-      escapeSequence.reset();
-      interrupt();
-      return;
-    }
     if (event.key === "Escape") {
-      // Idle, no menu: the CLI's double Escape opens the rewind picker. A
-      // held key's auto-repeat is one press, not two.
-      event.preventDefault();
-      if (!event.repeat) pressRewindEscape();
-      return;
+      // Which of these it is — a held key's repeat, the menu's, an open
+      // layer's, the drill-in's, the turn's or half of Esc Esc — is
+      // `composerEscapeAction`'s call, pure and tested beside the ownership
+      // rules; this keeps what touches the event.
+      switch (
+        composerEscapeAction({
+          repeat: event.repeat,
+          menuOpen: showMenu,
+          layerOpen: anotherLayerOwnsTheKeyboard(),
+          drillInOpen: onLeaveDrillIn !== undefined,
+          isTurnActive
+        })
+      ) {
+        case "hold":
+          // A held key is one press, and its first keydown already acted.
+          return;
+        case "close-menu":
+          // The menu takes Escape before the turn does: closing a menu the
+          // user just opened must not also stop the agent — nor count as the
+          // first half of a rewind.
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuDismissed(true);
+          escapeSequence.reset();
+          return;
+        case "yield-to-layer":
+          // The layer's own listener closes it after this handler; touching
+          // the event here would be acting under it. Nobody's first press.
+          escapeSequence.reset();
+          return;
+        case "leave-drill-in":
+          // Back to the thread; the caret stays here. Nobody's first press.
+          event.preventDefault();
+          escapeSequence.reset();
+          onLeaveDrillIn?.();
+          return;
+        case "interrupt":
+          event.preventDefault();
+          // This Escape stopped the turn; it is nobody's first press.
+          escapeSequence.reset();
+          interrupt();
+          return;
+        case "rewind-press":
+          // Idle, no menu: the CLI's double Escape opens the rewind picker.
+          event.preventDefault();
+          pressRewindEscape();
+          return;
+      }
     }
     if (event.key !== "Enter") return;
 

@@ -834,9 +834,9 @@ It is how a shell's or a monitor's end now reaches the roster, and the registry'
 bound only for a task the CLI stops reporting on.
 
 **Every task row of a shell names the shell itself as its `agentId`**
-(`adapters/grok/normalize.ts`). The liveness registry read a stamped non-agent task as a subagent's
-own work — covered by its owner — and dropped it, so this capture's `sleep 25` never counted as live
-at all. It does now: an `agentId` equal to the row's own `taskId` names no owner
+(`adapters/grok/background-tasks.ts`). The liveness registry read a stamped non-agent task as a
+subagent's own work — covered by its owner — and dropped it, so this capture's `sleep 25` never
+counted as live at all. It does now: an `agentId` equal to the row's own `taskId` names no owner
 (`orchestration/liveness.ts`), and a Grok shell is a watch loop like any other, bounded by that
 expiry.
 
@@ -1276,7 +1276,8 @@ child session, so they never stream into the first run's.
 
 ### 47. What the adapter builds from all of it
 
-`adapters/grok/normalize.ts` and `session.ts`; the replay tests `subagent-replay.test.ts` (the
+`adapters/grok/normalize.ts` and the modules it routes to (`subagents.ts`, `background-tasks.ts`,
+`tool-calls.ts`, `segments.ts`), and `session.ts`; the replay tests `subagent-replay.test.ts` (the
 normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) and
 `session-replay.test.ts` (the real session, the mock peer playing a capture back) run these files.
 
@@ -1289,6 +1290,18 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
 - **Its child session's frames** are its own rows and touch nothing of the parent's.
 - **A resume** starts the same task again under the new call; its new id joins through
   `resumed_from`, and its child session's words are messages of their own.
+- **Its prompt** rides its start: the call's own `prompt` argument, verbatim (fixture 15, line 83;
+  every captured spawn carries one), as `prompt` on the run's `task.started` — the top of the
+  agent's drill-in (spec §7.6) — and a `resume_from` that reopens a settled agent carries the
+  resume's own (fixture 17, line 212: ``"Now run the shell command `echo resumed-ok`…"``). The
+  child's live `user_message_chunk` (observation 38; fixture 15, line 98) repeats it after the start
+  and stays dropped. None rides a start that opens no run: a `resume_from` naming an agent still
+  live, which the CLI refuses ("must be completed"), still writes a start, but the agent never
+  received its prompt, and there it would head the running run. None rides a revival's start (the
+  same run, re-emitted), an agent the CLI spawned itself with no call (a `/loop` fire, a goal's
+  planner: its start is `subagent_spawned`, and the prompt reaches the client only afterwards, as
+  the child's first `user_message_chunk`), a shell, a monitor, or a loop's or goal's own row —
+  whose scheduled prompt or objective is already its description.
 - **Shells and monitors** start from `task_backgrounded` / `background_tasks` /
   `BackgroundTaskStarted` / `Monitor`, report by `monitor_event`, polls and listings, and end by
   `task_completed`, a finished poll or a kill (a monitor's summary its last line); a subagent's own

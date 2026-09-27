@@ -215,6 +215,16 @@ Other notes on this group:
   `is_backgrounded: true`, same `task_id`, different `tool_use_id`). The roster fold reopens a
   terminal row only on that changed `tool_use_id`; a start row that names the old call after a
   terminal state is still the late/out-of-order delivery T3 guards against.
+- **The agent's prompt arrives twice, and `task_started.prompt` is the one read.** Line 38's
+  `prompt` is the launching `Agent` call's `input.prompt` (line 37) verbatim, and the subagent's
+  first nested frame (line 40, a plain-`text` `user` frame) repeats it once more. The adapter puts
+  it on the agent's `task.started` as `prompt` — the top of the agent's drill-in (spec §7.6) —
+  taking the frame's own, else the launching call's input (the SDK types `prompt` optional), and
+  never on a `local_bash` start, whose command is its description. The nested `user` frame stays
+  dropped: it is the same text, and it arrives after the start. A resume's `task_started` (the
+  bullet above) would carry the resume's own message the same way; no capture holds one, so a
+  resumed agent's start carries a prompt only when its frame or its new call names one, never the
+  first launch's.
 - `task_type` is `local_agent` for a subagent and **`local_bash`** for a backgrounded Bash — that
   is the discriminator behind §4.2's `agentKind: agent | background`.
 - A background Bash emits `system/background_tasks_changed` **before** its `task_started`:

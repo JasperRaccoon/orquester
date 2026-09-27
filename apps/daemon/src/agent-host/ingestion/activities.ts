@@ -24,6 +24,10 @@
  *   when `usedTokens` is negative;
  * - `task.*` rows carry the whole linkage bundle on **every** row, with
  *   `agentKind` stamped once here;
+ * - an agent's launch prompt rides its `task.started` row verbatim, bounded
+ *   at rest by `TASK_PROMPT_MAX_CHARS` alone — never by the 180-character
+ *   detail cap, which makes a preview, where the drill-in shows the prompt
+ *   itself (§7.6);
  * - `auth.status` and `account.rate-limits.updated` are not thread facts and
  *   produce nothing (§6.3 updates the provider snapshot instead).
  */
@@ -31,6 +35,7 @@
 import {
   classifyTaskAgentKind,
   isToolLifecycleItemType,
+  TASK_PROMPT_MAX_CHARS,
   type ProviderRequestKind,
   type RuntimeEvent,
   type ThreadActivityItem,
@@ -139,6 +144,28 @@ export function taskLinkageActivityFields(
     }
   }
   return fields;
+}
+
+/**
+ * An agent's launch prompt as its `task.started` row keeps it (§7.6): the
+ * provider's text as it came, whole up to {@link TASK_PROMPT_MAX_CHARS}, and
+ * past it the head — one unit shorter when the cut would keep the high half of
+ * a surrogate pair, which is no character — marked `promptTruncated`. A blank
+ * prompt is no prompt: the drill-in shows nothing rather than an empty block.
+ */
+function taskPromptFields(prompt: string | undefined): Record<string, unknown> {
+  if (prompt === undefined || prompt.trim().length === 0) {
+    return {};
+  }
+  if (prompt.length <= TASK_PROMPT_MAX_CHARS) {
+    return { prompt };
+  }
+  const last = prompt.charCodeAt(TASK_PROMPT_MAX_CHARS - 1);
+  const splitsPair = last >= 0xd800 && last <= 0xdbff;
+  const head = prompt.slice(0, splitsPair ? TASK_PROMPT_MAX_CHARS - 1 : TASK_PROMPT_MAX_CHARS);
+  // Own the bytes: an agent's start row is never evicted from the fold, and a
+  // slice can retain the whole source string in V8 for as long as it lives.
+  return { prompt: Array.from(head).join(""), promptTruncated: true };
 }
 
 interface ActivityInit {
@@ -522,6 +549,7 @@ export function runtimeEventToActivities(
             ...(event.payload.description !== undefined
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
+            ...taskPromptFields(event.payload.prompt),
             ...linkage
           },
           ...(event.payload.agentId !== undefined ? { agentId: event.payload.agentId } : {})

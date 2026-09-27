@@ -271,12 +271,17 @@ export function compactionContinues(input: { sessionId: string; promptId: string
  * completes at once with the tool's "still working" envelope,
  * `metadata.background` and a `jobId` (`TaskTool.execute`, read from the
  * source); in the foreground it stays running while the child works.
+ *
+ * `prompt` is the part's `input.prompt` — what the child is asked, which its
+ * start carries — and the `description` when not named; a test of the prompt
+ * names one of its own, or it could not tell the two fields apart.
  */
 export function childLaunch(input: {
   sessionId: string;
   childId: string;
   callId: string;
   description: string;
+  prompt?: string;
   background: boolean;
 }): OpenCodeRawEvent[] {
   const { sessionId, childId, callId, description } = input;
@@ -285,7 +290,7 @@ export function childLaunch(input: {
     sessionId: childId,
     model: { providerID: "openrouter", modelID: "google/gemini-3.1-flash-lite" }
   };
-  const taskInput = { subagent_type: "explore", description, prompt: description };
+  const taskInput = { subagent_type: "explore", description, prompt: input.prompt ?? description };
   const part = (state: Record<string, unknown>): OpenCodeRawEvent => ({
     type: "message.part.updated",
     properties: {

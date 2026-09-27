@@ -9,10 +9,12 @@ import {
   derivePendingUserInputProgress,
   questionAttachmentKey,
   questionOptionValue,
+  questionShortcutOption,
   resolvePendingUserInputAnswer,
   setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
-  type PendingAnswerDraft
+  type PendingAnswerDraft,
+  type QuestionShortcutInput
 } from "./pending-answer.ts";
 
 function question(overrides: Partial<UserInputQuestion> = {}): UserInputQuestion {
@@ -168,4 +170,51 @@ test("attachment drafts are namespaced per (requestId, questionId)", () => {
   assert.notEqual(questionAttachmentKey("r1", "q1"), questionAttachmentKey("r1", "q2"));
   // The separator cannot be forged out of a request id.
   assert.notEqual(questionAttachmentKey("a:b", "c"), questionAttachmentKey("a", "b:c"));
+});
+
+// ---------------------------------------------------------------------------
+// The 1–9 shortcut (§7.5)
+// ---------------------------------------------------------------------------
+
+/** A `2` pressed on the visible tab, focus on no field, a three-option question. */
+const digitPress: QuestionShortcutInput = {
+  key: "2",
+  modified: false,
+  tabActive: true,
+  layerOpen: false,
+  typing: false,
+  optionCount: 3
+};
+
+test("a digit picks its option on the visible tab", () => {
+  assert.equal(questionShortcutOption({ ...digitPress, key: "1" }), 0);
+  assert.equal(questionShortcutOption(digitPress), 1);
+  assert.equal(questionShortcutOption({ ...digitPress, key: "3" }), 2);
+  assert.equal(questionShortcutOption({ ...digitPress, key: "9", optionCount: 9 }), 8);
+});
+
+test("an open layer keeps the digit: it never answers the question behind a modal, a menu or a popover", () => {
+  // The output viewer, Settings, a dropdown, a composer popover: focus sits on
+  // a button in the layer, and a digit typed there answered the question under
+  // it — and an answer cannot be taken back. The layer set is the chat's one
+  // (`anotherLayerOwnsTheKeyboard`), the same the Escape handlers read.
+  for (const key of ["1", "2", "3"]) {
+    assert.equal(questionShortcutOption({ ...digitPress, key, layerOpen: true }), null, key);
+  }
+});
+
+test("a digit never answers from a hidden tab, while typing, or under a modifier", () => {
+  // Every open chat tab keeps its card mounted (Q2-2); a digit typed into a
+  // field is text; Ctrl/Cmd/Alt+digit is somebody else's chord.
+  assert.equal(questionShortcutOption({ ...digitPress, tabActive: false }), null);
+  assert.equal(questionShortcutOption({ ...digitPress, typing: true }), null);
+  assert.equal(questionShortcutOption({ ...digitPress, modified: true }), null);
+});
+
+test("only 1–9, and only an option the question has", () => {
+  for (const key of ["0", "a", "Enter", "F1", ""]) {
+    assert.equal(questionShortcutOption({ ...digitPress, key }), null, JSON.stringify(key));
+  }
+  assert.equal(questionShortcutOption({ ...digitPress, key: "4" }), null);
+  assert.equal(questionShortcutOption({ ...digitPress, optionCount: 0 }), null);
 });

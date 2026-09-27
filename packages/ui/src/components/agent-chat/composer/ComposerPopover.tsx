@@ -1,5 +1,6 @@
 import React from "react";
 import { createPortal } from "react-dom";
+import { useOpenLayer } from "../../../hooks/use-open-layer";
 import { cn } from "../../../lib/cn";
 import { subscribeActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { isChatTabListenerActive } from "./tab-visibility";
@@ -22,6 +23,13 @@ import { isChatTabListenerActive } from "./tab-visibility";
  * control is the composer itself — a floating layer must never leave focus
  * stranded on a button that has just disappeared.
  * *T3: `composerEventScope.ts:12-28`.*
+ *
+ * Escape: an open layer while it is up (`useOpenLayer`). The chat's `window`
+ * Escape handlers — the shell's and the composer's arm — run in the capture
+ * phase before the listener below, so they stand down for it. They used to act
+ * under it: with focus in the panel the key stopped the turn (or left the
+ * drill-in) and never reached the popover, and with focus on the trigger one
+ * Escape did both.
  */
 
 export interface ComposerPopoverTriggerProps {
@@ -69,6 +77,7 @@ export function ComposerPopover({
   const [position, setPosition] = React.useState<PanelPosition | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
+  useOpenLayer(open);
 
   const setOpenState = React.useCallback(
     (next: boolean) => {
