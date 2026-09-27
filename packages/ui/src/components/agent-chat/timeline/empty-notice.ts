@@ -29,7 +29,7 @@
  * the timeline that renders it.
  */
 
-import type { RuntimeSubagent } from "@orquester/api/agent-chat";
+import type { CanonicalItemType, RuntimeSubagent, ToolLifecycleItemType } from "@orquester/api/agent-chat";
 import { ACTIVE_SUBAGENT_STATUSES } from "@orquester/api/agent-chat";
 
 import { agentPromptOf } from "../../../lib/agent-chat/agent-prompt.logic";
@@ -49,22 +49,30 @@ const isLivePlaceholder = (row: AgentChatTimelineRow): boolean =>
   row.kind === "working" || row.kind === "thinking";
 
 /**
+ * Every canonical item type that is no tool, as a record: `satisfies` makes
+ * the compiler name a member of `CanonicalItemType` added without a verdict
+ * here, and refuse a tool type (`TOOL_LIFECYCLE_ITEM_TYPES`) listed as none.
+ */
+const NON_TOOL_ITEM_TYPE_RECORD = {
+  user_message: true,
+  assistant_message: true,
+  reasoning: true,
+  plan: true,
+  review_entered: true,
+  review_exited: true,
+  context_compaction: true,
+  error: true,
+  unknown: true
+} as const satisfies Record<Exclude<CanonicalItemType, ToolLifecycleItemType>, true>;
+
+/**
  * The item types a roster tick can name as the "last tool" that are no tool:
  * Codex's child tick carries the ITEM type (`lastToolName: classified.itemType`,
  * `adapters/codex/normalise.ts`), a word or a thought included — neither of
- * which is ever a row of the child's.
+ * which is ever a row of the child's. Exactly the canonical item types that
+ * are not `TOOL_LIFECYCLE_ITEM_TYPES`, by construction.
  */
-const NON_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set([
-  "user_message",
-  "assistant_message",
-  "reasoning",
-  "plan",
-  "review_entered",
-  "review_exited",
-  "context_compaction",
-  "error",
-  "unknown"
-]);
+export const NON_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set(Object.keys(NON_TOOL_ITEM_TYPE_RECORD));
 
 /**
  * The roster row says the agent did real tool work — a tool's name as its last

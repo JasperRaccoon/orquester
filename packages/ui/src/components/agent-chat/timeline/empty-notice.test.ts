@@ -9,10 +9,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { RuntimeSubagent } from "@orquester/api/agent-chat";
+import { TOOL_LIFECYCLE_ITEM_TYPES, type CanonicalItemType, type RuntimeSubagent } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
-import { didToolWork, drillInEmptyNotice, TIMELINE_NOTICE_KEY, timelineSlots } from "./empty-notice";
+import {
+  didToolWork,
+  drillInEmptyNotice,
+  NON_TOOL_ITEM_TYPES,
+  TIMELINE_NOTICE_KEY,
+  timelineSlots
+} from "./empty-notice";
 
 function row(overrides: Partial<RuntimeSubagent> = {}): RuntimeSubagent {
   return {
@@ -140,6 +146,35 @@ describe("drillInEmptyNotice: the three tiers", () => {
       isExpandedToolGroup: false
     };
     assert.equal(drillInEmptyNotice({ rows: [work], agent: row(), retentionDropped: true }), null);
+  });
+});
+
+describe("every canonical item type is a tool or no tool, never both, never neither (surface re-review)", () => {
+  it("the two sets partition the vocabulary", () => {
+    // A record over the whole union: `pnpm check` names a member missing here.
+    const everyItemType: Record<CanonicalItemType, true> = {
+      user_message: true,
+      assistant_message: true,
+      reasoning: true,
+      plan: true,
+      command_execution: true,
+      file_change: true,
+      mcp_tool_call: true,
+      dynamic_tool_call: true,
+      collab_agent_tool_call: true,
+      web_search: true,
+      image_view: true,
+      review_entered: true,
+      review_exited: true,
+      context_compaction: true,
+      error: true,
+      unknown: true
+    };
+    const tools: ReadonlySet<string> = new Set(TOOL_LIFECYCLE_ITEM_TYPES);
+    for (const itemType of Object.keys(everyItemType)) {
+      assert.notEqual(tools.has(itemType), NON_TOOL_ITEM_TYPES.has(itemType), `${itemType}: exactly one of the two`);
+    }
+    assert.equal(tools.size + NON_TOOL_ITEM_TYPES.size, Object.keys(everyItemType).length, "and nothing else in either");
   });
 });
 
