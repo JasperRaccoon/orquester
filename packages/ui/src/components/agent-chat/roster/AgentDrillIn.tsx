@@ -301,6 +301,7 @@ export function AgentDrillIn({
         // the empty state, so there is no second "nothing here yet" surface.
         agentId={agentId}
         readOnly
+        retentionDropped={live.retentionDropped}
         roster={roster}
         projectPath={projectPath}
         skills={skills}

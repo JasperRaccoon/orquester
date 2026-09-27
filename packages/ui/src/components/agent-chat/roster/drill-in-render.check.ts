@@ -363,58 +363,74 @@ const unprompted = await promptedDrillIn([promptedLaunch({}, "launch-none"), ans
 assert.ok(!unprompted.includes('data-agent-prompt="true"'), "no prompt on the launch, no prompt row");
 
 // ---------------------------------------------------------------------------
-// An agent whose rows left the window says so (S7)
+// An empty drill-in's copy: three tiers (S7, the controller's ruling)
 // ---------------------------------------------------------------------------
 
 const EVICTED = "agent-evicted";
 const LEFT = "Its earlier rows have left this thread&#x27;s window.";
 const NOTHING_YET = "This agent has not reported anything yet.";
-const evicted = rosterRow(EVICTED, {
+const NOTHING_HERE = "This agent reported nothing to show here.";
+/** The host's snapshot says older history lies beyond the window: retention dropped rows. */
+const EVICTED_WINDOW = {
+  history: { indexed: true, hasOlder: true, beforeCursor: null, oldestRetainedOrdinal: 2, totalTurns: 3 }
+};
+const worked = rosterRow(EVICTED, {
   title: "Survey the fleet",
   status: "completed",
   result: "Surveyed 40 packages.",
+  lastToolName: "Bash",
   usage: { totalTokens: 48_000 }
 });
-const evictedSession = await seededThread({ items: [], roster: [evicted] });
-const gone = render({ sessionId: evictedSession, agentId: EVICTED, roster: [evicted], bottomInset: 0, onBack: NOOP });
-assert.ok(gone.includes(LEFT), `a settled agent that did work, with no row left, says where they went: ${gone}`);
-assert.ok(!gone.includes(NOTHING_YET), "never that it reported nothing");
+const drill = (sessionId: string, agent: RuntimeSubagent) =>
+  render({ sessionId, agentId: agent.id, roster: [agent], bottomInset: 0, onBack: NOOP });
+
+const gone = drill(await seededThread({ items: [], roster: [worked], ...EVICTED_WINDOW }), worked);
+assert.ok(gone.includes(LEFT), `a settled agent that did tool work, in a window that dropped rows: ${gone}`);
+assert.ok(!gone.includes(NOTHING_YET) && !gone.includes(NOTHING_HERE));
+
+const kept = drill(await seededThread({ items: [], roster: [worked] }), worked);
+assert.ok(kept.includes(NOTHING_HERE), `nothing dropped, nothing claimed to have left: ${kept}`);
+assert.ok(!kept.includes(LEFT));
+
+// A Codex child that only talked: its ticks name items, never tools, and its words are no rows.
+const talker = rosterRow(EVICTED, { title: "Explain", status: "completed", lastToolName: "assistant_message" });
+const talked = drill(await seededThread({ items: [], roster: [talker], ...EVICTED_WINDOW }), talker);
+assert.ok(talked.includes(NOTHING_HERE) && !talked.includes(LEFT), talked);
 
 // Its launch prompt survives retention as an anchor: the notice sits under it.
-const promptOnly = await seededThread({
-  items: [
-    wireActivity(
-      "task.started",
-      { taskId: EVICTED, agentKind: "agent", taskType: "subagent", toolUseId: "launch-e", prompt: "Survey the fleet." },
-      { id: "launch-e", tone: "info", createdAt: LAUNCHED_AT, updatedAt: LAUNCHED_AT }
-    )
-  ],
-  roster: [evicted]
-});
-const underPrompt = render({ sessionId: promptOnly, agentId: EVICTED, roster: [evicted], bottomInset: 0, onBack: NOOP });
-assert.ok(underPrompt.includes(LEFT), "a prompt alone is not the agent's work: the notice still shows");
-assert.ok(underPrompt.indexOf("Survey the fleet.") < underPrompt.indexOf(LEFT), "under the prompt");
+const promptOnly = drill(
+  await seededThread({
+    items: [
+      wireActivity(
+        "task.started",
+        { taskId: EVICTED, agentKind: "agent", taskType: "subagent", toolUseId: "launch-e", prompt: "Survey the fleet." },
+        { id: "launch-e", tone: "info", createdAt: LAUNCHED_AT, updatedAt: LAUNCHED_AT }
+      )
+    ],
+    roster: [worked],
+    ...EVICTED_WINDOW
+  }),
+  worked
+);
+assert.ok(promptOnly.includes(LEFT), "a prompt alone is not the agent's work: the notice still shows");
+assert.ok(promptOnly.indexOf("Survey the fleet.") < promptOnly.indexOf(LEFT), "under the prompt");
 
-// A live agent that did work and lost its rows: the notice, then the live rows.
-const liveEvicted = rosterRow(EVICTED, { title: "Survey the fleet", usage: { totalTokens: 9_000 } });
-const liveEvictedSession = await seededThread({ items: [], roster: [liveEvicted] });
-const stillWorking = render({ sessionId: liveEvictedSession, agentId: EVICTED, roster: [liveEvicted], bottomInset: 0, onBack: NOOP });
-assert.ok(stillWorking.includes(LEFT), stillWorking);
-assert.ok(stillWorking.indexOf(LEFT) < stillWorking.indexOf('data-timeline-row-kind="working"'), "above its working row");
+// A live agent with no rows has not reported anything yet — above its working rows — whatever it did.
+for (const live of [
+  rosterRow(EVICTED, { title: "Survey the fleet", lastToolName: "Bash", usage: { totalTokens: 9_000 } }),
+  rosterRow(EVICTED, { title: "Explain", lastToolName: "reasoning" })
+]) {
+  const view = drill(await seededThread({ items: [], roster: [live], ...EVICTED_WINDOW }), live);
+  assert.ok(view.includes(NOTHING_YET) && !view.includes(LEFT), view);
+  assert.ok(view.indexOf(NOTHING_YET) < view.indexOf('data-timeline-row-kind="working"'), "above its working row");
+  assert.ok(view.includes('data-timeline-row-kind="thinking"'));
+}
 
-// A live agent that has done nothing yet: the live rows say so, no copy.
-const fresh = rosterRow(EVICTED, { title: "Survey the fleet" });
-const freshSession = await seededThread({ items: [], roster: [fresh] });
-const starting = render({ sessionId: freshSession, agentId: EVICTED, roster: [fresh], bottomInset: 0, onBack: NOOP });
-assert.ok(!starting.includes(LEFT) && !starting.includes(NOTHING_YET), starting);
-assert.ok(starting.includes('data-timeline-row-kind="thinking"'));
-
-// A settled shell whose every row left: its output, not "No output yet."
+// A settled shell with no rows of its own — a Grok shell a subagent owned never had any.
 const exitedShell = rosterRow(SHELL, { agentKind: "background", title: "run the suite", status: "completed", exitCode: 0 });
-const exitedShellSession = await seededThread({ items: [], roster: [exitedShell] });
-const shellGone = render({ sessionId: exitedShellSession, agentId: SHELL, roster: [exitedShell], bottomInset: 0, onBack: NOOP });
-assert.ok(shellGone.includes("Its output has left this thread&#x27;s window."), shellGone);
-assert.ok(!shellGone.includes("No output yet."));
+const shellGone = drill(await seededThread({ items: [], roster: [exitedShell], ...EVICTED_WINDOW }), exitedShell);
+assert.ok(shellGone.includes("No output from this shell is in this thread."), shellGone);
+assert.ok(!shellGone.includes("has left") && !shellGone.includes("No output yet."));
 
 // ---------------------------------------------------------------------------
 // Re-opening an agent returns to where the reader was (S12)

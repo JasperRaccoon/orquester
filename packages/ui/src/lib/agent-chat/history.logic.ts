@@ -594,6 +594,30 @@ export function historyTurns(pages: readonly ThreadHistoryPage[]): ThreadHistory
  * snapshot said; then the oldest page's own cursor — the one that reached turn
  * 1 answers `null`. Never without an index.
  */
+/**
+ * Whether the thread's retained window has dropped rows — retention evicted
+ * something, the parent's rows or any agent's. The client cannot see a row
+ * that left, only these traces of it: the host's snapshot said older history
+ * lies beyond the window (`bounds.hasOlder`, which the host bounds with its
+ * fold's `evicted` — the snapshot does not carry the flag itself); this
+ * client's fold has evicted rows since that snapshot (`fold.evicted`, set by
+ * the same retention the host runs, agents' rows included); its window has
+ * evicted a row the parent renders (`windowEvicted`); or a page of older
+ * history is loaded. What lets a drill-in say an agent's rows have LEFT the
+ * window rather than that it never had any (§7.6).
+ */
+export function windowHasDropped(
+  fold: Pick<ThreadFoldState, "evicted">,
+  history: AgentChatHistoryState
+): boolean {
+  return (
+    fold.evicted !== undefined ||
+    history.windowEvicted ||
+    history.bounds?.hasOlder === true ||
+    history.pages.length > 0
+  );
+}
+
 export function canLoadOlderHistory(history: AgentChatHistoryState): boolean {
   const oldest = history.pages[0];
   if (oldest !== undefined) {

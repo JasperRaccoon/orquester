@@ -139,6 +139,15 @@ export interface ChatTimelineProps {
   /** Read-only: every mutating affordance is withheld, nothing is disabled-looking. */
   readOnly?: boolean | undefined;
   /**
+   * The thread's retained window has dropped rows (the store's
+   * `retentionDropped`). Read by a drill-in's empty copy alone: an agent's
+   * rows may be said to have LEFT the window only when the window dropped
+   * some (`timeline/empty-notice.ts`). Absent means no.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  retentionDropped?: boolean | undefined;
+  /**
    * The roster the spawn row resolves against **at render time** — a persisted
    * member count goes stale the moment a member finishes (§7.6).
    *

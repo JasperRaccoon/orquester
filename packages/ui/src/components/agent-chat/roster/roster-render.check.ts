@@ -226,15 +226,19 @@ assert.ok(noMain.includes('data-agent-id="old"'));
 // The drill-in
 // ---------------------------------------------------------------------------
 
+const findTheBug = agent("agent-1", {
+  title: "Find the bug",
+  progress: "Reading src/index.ts",
+  recentActivity: [{ at: "2026-09-21T10:00:01.000Z", summary: "Reading src/index.ts" }]
+});
 const drillIn = render(
   createElement(AgentDrillIn, {
     sessionId: "s1",
     agentId: "agent-1",
-    agent: agent("agent-1", {
-      title: "Find the bug",
-      progress: "Reading src/index.ts",
-      recentActivity: [{ at: "2026-09-21T10:00:01.000Z", summary: "Reading src/index.ts" }]
-    }),
+    agent: findTheBug,
+    // The thread's roster, as `AgentChatView` hands it: the timeline reads the
+    // drilled row off it (a live agent with no rows has not reported yet).
+    roster: [findTheBug],
     rows: [],
     bottomInset: 0,
     onBack: () => {}

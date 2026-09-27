@@ -104,6 +104,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     threadReady = false,
     emptyThreadPanel,
     readOnly,
+    retentionDropped = false,
     roster,
     skills,
     projectPath,
@@ -158,17 +159,18 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
    * What an empty list says, and before which row. The thread's: "No messages
    * yet." once nothing else takes the space. A drill-in's is judged on the
    * agent's own rows — its launch prompts and the live placeholders aside —
-   * and says where rows the roster shows it made have gone
+   * in three tiers: a live agent has not reported anything yet, a settled
+   * one's rows have left the window only with evidence, else a neutral line
    * (`drillInEmptyNotice`).
    */
   const notice = React.useMemo<EmptyNotice | null>(
     () =>
       agentId !== undefined
-        ? drillInEmptyNotice({ rows, agent: drilledRow })
+        ? drillInEmptyNotice({ rows, agent: drilledRow, retentionDropped })
         : rows.length === 0 && !showLoadOlder && !showEmptyPanel
           ? { text: "No messages yet.", at: 0 }
           : null,
-    [agentId, drilledRow, rows, showEmptyPanel, showLoadOlder]
+    [agentId, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
   );
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);

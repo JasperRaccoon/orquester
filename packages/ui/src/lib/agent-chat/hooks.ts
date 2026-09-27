@@ -254,6 +254,8 @@ export interface AgentChatDrillInView {
    * timeline's `expandedTurnIds`, whose patch `collapsedTurnsAfter` reads back.
    */
   openTurnIds: readonly string[];
+  /** The thread's retained window has dropped rows (`AgentChatThreadState.retentionDropped`). */
+  retentionDropped: boolean;
 }
 
 /**
@@ -281,6 +283,7 @@ export function useAgentChatDrillIn(
   const roster = useThreadState(store, (state) => state.slice.roster);
   // Memoised by the roster and the session, so this selector is stable.
   const messageStreaming = useThreadState(store, (state) => messageStreamingContext(state.slice));
+  const retentionDropped = useThreadState(store, (state) => state.retentionDropped);
 
   // One projection per drill-in, held across renders so a streamed token in
   // the child's timeline changes one row object, exactly as in the parent.
@@ -288,11 +291,11 @@ export function useAgentChatDrillIn(
 
   return useMemo(() => {
     if (agentId === null) {
-      return { rows: [], agent: null, items: entries, openTurnIds: NO_TURNS };
+      return { rows: [], agent: null, items: entries, openTurnIds: NO_TURNS, retentionDropped };
     }
     const agent = agentOverride ?? roster.find((candidate) => candidate.id === agentId) ?? null;
     if (agent !== null && isBackgroundShellRow(agent)) {
-      return { rows: null, agent, items: entries, openTurnIds: NO_TURNS };
+      return { rows: null, agent, items: entries, openTurnIds: NO_TURNS, retentionDropped };
     }
     projection.current = projectAgentDrillIn(projection.current, {
       items: entries,
@@ -306,9 +309,10 @@ export function useAgentChatDrillIn(
       rows: projection.current.stable.result,
       agent,
       items: entries,
-      openTurnIds: projection.current.openTurnIds
+      openTurnIds: projection.current.openTurnIds,
+      retentionDropped
     };
-  }, [agentId, agentOverride, entries, roster, messageStreaming, disclosures]);
+  }, [agentId, agentOverride, entries, roster, messageStreaming, disclosures, retentionDropped]);
 }
 
 // ---------------------------------------------------------------------------
