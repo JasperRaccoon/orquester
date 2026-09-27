@@ -790,21 +790,33 @@ export interface TaskStartedPayload extends TaskAgentLinkage {
    *
    * It is what the agent's drill-in shows at its top (spec §7.6, "its prompt
    * at the top"). Ingestion keeps it on the `task.started` row as
-   * `payload.prompt`, whole up to {@link TASK_PROMPT_MAX_CHARS} and marked
-   * `promptTruncated` past it; the wire slimmer may cut it further (§5.6), and
-   * `GET …/items/:itemId` then serves the stored value.
+   * `payload.prompt`, whole up to {@link TASK_PROMPT_MAX_CHARS} UTF-16 units
+   * and marked `promptTruncated` past them; the wire slimmer caps it, like
+   * every string, at 16 KiB of UTF-8 (§5.6, `truncated`) — fewer characters
+   * than that whenever the text is not ASCII — and `GET …/items/:itemId`
+   * then serves the stored value.
    */
   prompt?: string;
 }
 
 /**
  * How much of an agent's launch prompt ({@link TaskStartedPayload.prompt}) a
- * `task.started` row keeps at rest, in UTF-16 code units, cut on a code-point
- * boundary and marked `promptTruncated: true` when cut. Twice the wire's
- * per-string cap (`SLIM_MAX_STRING_BYTES`, 16 KiB), so a prompt the wire
- * cuts is still read whole from the item; bounded because an agent's
- * start row is never evicted from the fold (it anchors the agent's row), so a
- * fleet's prompts live in memory for as long as its thread does.
+ * `task.started` row keeps AT REST: 32 000 UTF-16 code units — one per
+ * character, two for a character outside the Basic Multilingual Plane (an
+ * emoji) — cut on a code-point boundary and marked `promptTruncated: true`
+ * when cut.
+ *
+ * The wire cuts on another scale. Every string of an activity payload is
+ * capped at `SLIM_MAX_STRING_BYTES`, 16 KiB of UTF-8 (§5.6): about 16 000
+ * ASCII characters but only about 5 400 CJK ones, so a prompt the row keeps
+ * whole can still reach the client cut, stamped `truncated`. The item read,
+ * `GET …/items/:itemId`, returns the STORED value: the whole prompt when it
+ * fit this cap, else its head marked `promptTruncated`, whose rest no read
+ * has.
+ *
+ * Bounded because an agent's start row is never evicted from the fold (it
+ * anchors the agent's row): a fleet's prompts stay in memory, in the fold
+ * snapshot and in every snapshot read for as long as its thread lives.
  */
 export const TASK_PROMPT_MAX_CHARS = 32_000;
 
