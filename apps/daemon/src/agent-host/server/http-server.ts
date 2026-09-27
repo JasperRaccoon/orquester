@@ -23,9 +23,12 @@ import {
   MAX_TURN_FILE_BYTES,
   THREAD_HISTORY_DEFAULT_TURNS,
   THREAD_HISTORY_MAX_TURNS,
+  THREAD_PROMPTS_DEFAULT_LIMIT,
+  THREAD_PROMPTS_MAX_LIMIT,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   THREAD_SEARCH_MAX_RESULTS,
   type AgentChatCommandName,
+  type AgentChatErrorCode,
   type AgentChatStreamFrame,
   type AgentHostStopResponse,
   type AgentProvidersResponse,
@@ -33,6 +36,8 @@ import {
   type ThreadHistoryPage,
   type ThreadItemOutputResponse,
   type ThreadItemResponse,
+  type ThreadPromptsResponse,
+  type ThreadPromptTextResponse,
   type ThreadSearchResponse,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
@@ -244,6 +249,15 @@ function clampedIntParam(
 
 /** `GET /search` without a `limit`. */
 const DEFAULT_SEARCH_RESULTS = 20;
+
+/**
+ * `GET /threads/:id/prompts/:messageId`'s 404: the thread has no such prompt
+ * — no such message, or not one the user sent. A code of its own for the
+ * reason `ITEM_NOT_FOUND` has one: a host that predates the route answers the
+ * miss as its generic 404 `THREAD_NOT_FOUND`. It is a read's answer, never a
+ * command's.
+ */
+const PROMPT_NOT_FOUND = "PROMPT_NOT_FOUND" satisfies AgentChatErrorCode;
 
 function parseAfter(url: URL): number | undefined {
   const raw = url.searchParams.get("after");
@@ -578,6 +592,62 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         ...(before !== null && before.length > 0 ? { before } : {}),
         turns
       });
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // The thread's own prompts, newest first (the right rail's History), only
+    // once the index holds the thread's whole log. Otherwise 200
+    // `indexed: false` — with `catchingUp: true` while a catch-up will close
+    // the gap (ask again shortly), without it when there is no usable index or
+    // the thread will not be caught up before the host restarts — and the
+    // client lists the prompts it holds. A read that failed is a 503
+    // `INDEX_UNAVAILABLE`, retryable: never an answer the client would keep.
+    // `before` is opaque and passed through; the index reads a malformed one
+    // as a first-page request. A page may hold fewer than `limit` prompts —
+    // none, even — with a `before` when its scan budget ran out; `before`
+    // null alone says there is nothing older. The user messages a revert
+    // drops go by the fold's own rule, over the whole log (the live fold
+    // counts its restoring pass over its retained window, and a log with no
+    // started turn — numbered by checkpoints — keeps none of them here).
+    if (rest === "/prompts" && method === "GET") {
+      const before = url.searchParams.get("before");
+      const limit = clampedIntParam(url, "limit", {
+        min: 1,
+        max: THREAD_PROMPTS_MAX_LIMIT,
+        fallback: THREAD_PROMPTS_DEFAULT_LIMIT
+      });
+      const body: ThreadPromptsResponse = await orchestrator.readPrompts(threadId, {
+        ...(before !== null && before.length > 0 ? { before } : {}),
+        limit
+      });
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // One prompt's whole text, for an entry the page cut. Its 404 is
+    // `PROMPT_NOT_FOUND`, never `THREAD_NOT_FOUND`: that is what a host
+    // predating the route answers for it (the route miss below), and a reader
+    // must tell "no such prompt" from "no such route". It is answered only
+    // when the index holds the whole thread; whenever the index cannot say —
+    // catching up, behind, a failed read, none usable — 503
+    // `INDEX_UNAVAILABLE`.
+    const promptMatch = /^\/prompts\/([^/]+)$/.exec(rest);
+    if (promptMatch && method === "GET") {
+      const messageId = decodeURIComponent(promptMatch[1]!);
+      const body: ThreadPromptTextResponse | null = await orchestrator.readPromptText(
+        threadId,
+        messageId
+      );
+      if (!body) {
+        sendJson(response, 404, {
+          error: {
+            code: PROMPT_NOT_FOUND,
+            message: `No prompt '${messageId}' in this thread: no such message, or not one the user sent.`
+          }
+        });
+        return;
+      }
       sendJson(response, 200, body);
       return;
     }

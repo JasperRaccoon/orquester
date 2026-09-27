@@ -33,12 +33,14 @@ import {
   MAX_TURN_IMAGE_BYTES,
   THREAD_HISTORY_DEFAULT_TURNS,
   THREAD_HISTORY_MAX_TURNS,
+  THREAD_PROMPTS_DEFAULT_LIMIT,
   THREAD_SEARCH_MAX_RESULTS,
   decodeHistoryCursor,
   deserializeFoldState,
   encodeHistoryCursor,
   isHistoricalRuntimeEvent,
   isUnfinishedGoal,
+  recallablePromptText,
   SETTLED_TURN_STATES,
   slimActivityPayload,
   startedTurns,
@@ -70,6 +72,8 @@ import {
   type ThreadHistoryTurn,
   type ThreadItem,
   type ThreadItemOutputResponse,
+  type ThreadPromptsResponse,
+  type ThreadPromptTextResponse,
   type ThreadReadResponse,
   type ThreadSearchResponse,
   type ThreadSessionState,
@@ -557,6 +561,24 @@ export interface Orchestrator {
   ): Promise<ThreadHistoryPage>;
   /** Full-text search over every indexed thread; `indexed: false` without an index. */
   searchThreads(query: { q: string; limit: number; projectPath?: string }): ThreadSearchResponse;
+  /**
+   * The thread's own prompts, newest first, read from the index — the whole
+   * thread, not the retained window (the right rail's History), and only once
+   * the index holds all of it. `indexed: false, catchingUp: true` while it
+   * catches up; `indexed: false` without a usable index, or for a thread it
+   * will not catch up before the host restarts; throws `INDEX_UNAVAILABLE`
+   * (503) when a read failed.
+   */
+  readPrompts(
+    threadId: string,
+    query: { before?: string; limit?: number }
+  ): Promise<ThreadPromptsResponse>;
+  /**
+   * One of those prompts' whole normalised text; null when the index holds
+   * the whole thread and this is not one of its prompts. Throws
+   * `INDEX_UNAVAILABLE` (503) whenever the index cannot say.
+   */
+  readPromptText(threadId: string, messageId: string): Promise<ThreadPromptTextResponse | null>;
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
   /**
    * `GET …/items/:itemId/output`: the streamed output of the tool call the item
@@ -4065,6 +4087,142 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * The thread's own prompts (the right rail's History), a page at a time
+   * from the index, which alone holds the whole thread — the fold keeps a
+   * window. Served only once the index holds every line of the thread's log
+   * (`coverage`): a page of a partly indexed thread reads exactly like the
+   * whole list, and the client keeps it as such. Never an empty page for
+   * "cannot answer", which the client would take for "this thread has none":
+   * - catching up (the file not open yet, the boot catch-up not done with
+   *   the thread) — `indexed: false, catchingUp: true`: ask again shortly;
+   * - no usable index, or a thread it will not catch up before the host
+   *   restarts — `indexed: false`: the client lists what it holds;
+   * - a read that failed — 503 `INDEX_UNAVAILABLE`, a retryable refusal.
+   */
+  const readPrompts = async (
+    threadId: string,
+    query: { before?: string; limit?: number }
+  ): Promise<ThreadPromptsResponse> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      requireHead(runtime);
+      const unindexed: ThreadPromptsResponse = { threadId, prompts: [], before: null, indexed: false };
+      const index = options.index;
+      if (index === undefined) {
+        return unindexed;
+      }
+      switch (await index.coverage(threadId, runtime.state.seq)) {
+        case "catching-up":
+          return { ...unindexed, catchingUp: true };
+        case "unavailable":
+        case "behind":
+          return unindexed;
+        case "failed":
+          throw promptsUnreadable();
+        case "complete":
+          break;
+      }
+      let page: ReturnType<ThreadIndex["prompts"]>;
+      try {
+        page = index.prompts(threadId, {
+          ...(query.before !== undefined ? { before: query.before } : {}),
+          limit: query.limit ?? THREAD_PROMPTS_DEFAULT_LIMIT
+        });
+      } catch (error) {
+        logger.warn(`agent-host: the thread index could not list ${threadId}'s prompts`, error);
+        page = null;
+      }
+      if (page === null) {
+        throw promptsUnreadable();
+      }
+      return { threadId, prompts: page.prompts, before: page.before, indexed: true };
+    });
+
+  /** A read the index could not answer just now: retryable, never "none". */
+  const promptsUnreadable = (): AgentChatCommandError =>
+    new AgentChatCommandError(
+      "INDEX_UNAVAILABLE",
+      "Prompt history is not available on this host right now."
+    );
+
+  /**
+   * One prompt's whole normalised text, for a History entry the page cut at
+   * `THREAD_PROMPT_TEXT_MAX_CHARS`. Null — a 404 — only when the index holds
+   * the whole thread and this is not one of its prompts; an index that cannot
+   * say (catching up, behind, a failed read, none at all) is a 503
+   * `INDEX_UNAVAILABLE`, never a "no such prompt". The index's copy is whole
+   * unless it may be one of `capText`'s heads (`MAX_INDEXED_TEXT_CHARS`); then
+   * the prompt's own line is read back from the log, the authority, where
+   * nothing is cut. A message written more than once (a history replayed
+   * twice) has no single line holding its latest text, so there the index's
+   * copy stands and says it is `truncated`.
+   */
+  const readPromptText = async (
+    threadId: string,
+    messageId: string
+  ): Promise<ThreadPromptTextResponse | null> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      requireHead(runtime);
+      const index = options.index;
+      if (index === undefined || (await index.coverage(threadId, runtime.state.seq)) !== "complete") {
+        throw promptsUnreadable();
+      }
+      const lookup = index.prompt(threadId, messageId);
+      if (lookup.status === "failed") {
+        throw promptsUnreadable();
+      }
+      if (lookup.status === "absent") {
+        return null;
+      }
+      const prompt = lookup.prompt;
+      if (!prompt.cut) {
+        return { messageId, text: prompt.text, truncated: false };
+      }
+      const whole =
+        prompt.lastSeq === prompt.line.seq
+          ? await promptLineText(threadId, messageId, prompt.line)
+          : null;
+      return whole === null
+        ? { messageId, text: prompt.text, truncated: true }
+        : { messageId, text: whole, truncated: false };
+    });
+
+  /**
+   * The recallable text of a prompt's own line, read off the log (as
+   * `rowAtSeq` reads a row) — null when the line there is not that prompt
+   * (an index behind a rewritten log, a line that does not decode) or the
+   * read fails: the caller then serves the index's copy.
+   */
+  const promptLineText = async (
+    threadId: string,
+    messageId: string,
+    line: IndexedItemPosition
+  ): Promise<string | null> => {
+    try {
+      const read = await store.readEventRange(threadId, {
+        fromByte: line.byteOffset,
+        toByte: line.byteOffset + line.byteLength
+      });
+      const event = read.truncated ? undefined : read.events[0];
+      if (
+        event === undefined ||
+        event.seq !== line.seq ||
+        event.type !== "thread.message-sent" ||
+        event.payload.messageId !== messageId ||
+        event.payload.role !== "user" ||
+        typeof event.payload.text !== "string"
+      ) {
+        return null;
+      }
+      return recallablePromptText(event.payload.text);
+    } catch (error) {
+      logger.warn(`agent-host: a prompt of ${threadId} could not be read from its log`, error);
+      return null;
+    }
+  };
+
   const readThread = async (threadId: string, afterSeq?: number): Promise<ThreadReadResponse> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -5856,6 +6014,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     readThread,
     readHistory,
     searchThreads,
+    readPrompts,
+    readPromptText,
     readItem,
     readToolOutput,
     readTurnDiff,

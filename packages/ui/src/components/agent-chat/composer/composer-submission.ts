@@ -410,6 +410,77 @@ export function planExternalSend(
   return refusal === null ? { text: input.text.trim(), notice: null } : { text: null, notice: refusal };
 }
 
+/** A second identical queue from the rail inside this window is a double click's twin. */
+export const EXTERNAL_QUEUE_TWIN_MS = 1_000;
+
+/** Why the rail's second, identical Send was not queued again. */
+export const ALREADY_QUEUED_REASON = "Already queued — it sends when the current turn finishes.";
+
+/**
+ * What the composer does with a message the right rail hands it to SEND —
+ * exactly what Enter does with that text as the whole draft (§7.4):
+ *
+ * - `plan-mode`: a bare `/plan` or `/default` where the plan toggle shows is
+ *   the mode switch, never a message (`swallowsStandalonePlanCommand`);
+ * - `refuse`: the send guards (`externalSendRefusal` over the TRIMMED text —
+ *   a revert, a send in flight, an open card, the provider-command refusals,
+ *   the length bound);
+ * - `queue` / `send`: the follow-up preference while a turn runs
+ *   (`resolveFollowUpDisposition`, the foreground intent; a host-parsed
+ *   `/goal` is never queued) — and a queue that repeats the rail's previous
+ *   one within {@link EXTERNAL_QUEUE_TWIN_MS} is refused: Enter clears the
+ *   draft it sends, a button does not, so a double click would queue twice.
+ */
+export type ExternalSubmitPlan =
+  | { kind: "refuse"; reason: string }
+  | { kind: "plan-mode"; mode: "plan" | "default" }
+  | { kind: "queue"; text: string }
+  | { kind: "send"; text: string };
+
+export function planExternalSubmit(input: {
+  text: string;
+  reverting: boolean;
+  sending: boolean;
+  hasPendingRequest: boolean;
+  adapterId: string | undefined;
+  hostParsesGoal: boolean;
+  showPlanModeToggle: boolean;
+  followUpBehavior: FollowUpBehavior;
+  isTurnActive: boolean;
+  /** The last message the rail queued here, and when. */
+  lastQueued: { text: string; at: number } | null;
+  now: number;
+}): ExternalSubmitPlan {
+  const text = input.text.trim();
+  const mode = swallowsStandalonePlanCommand({
+    text,
+    showPlanModeToggle: input.showPlanModeToggle,
+    attachmentCount: 0
+  });
+  if (mode !== null) return { kind: "plan-mode", mode };
+  const refusal = externalSendRefusal({
+    text,
+    reverting: input.reverting,
+    sending: input.sending,
+    hasPendingRequest: input.hasPendingRequest,
+    adapterId: input.adapterId,
+    hostParsesGoal: input.hostParsesGoal
+  });
+  if (refusal !== null) return { kind: "refuse", reason: refusal };
+  const disposition = resolveFollowUpDisposition({
+    followUpBehavior: input.followUpBehavior,
+    intent: "foreground",
+    isRunning: input.isTurnActive,
+    hostCommand: isHostGoalCommandText(text, input.hostParsesGoal)
+  });
+  if (disposition === "send") return { kind: "send", text };
+  const twin = input.lastQueued;
+  if (twin !== null && twin.text === text && input.now - twin.at < EXTERNAL_QUEUE_TWIN_MS) {
+    return { kind: "refuse", reason: ALREADY_QUEUED_REASON };
+  }
+  return { kind: "queue", text };
+}
+
 /** A draft with neither text nor a finished attachment has nothing to send. */
 export function hasSendableContent(input: {
   text: string;

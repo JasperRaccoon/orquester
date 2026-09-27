@@ -23,6 +23,9 @@ import {
   pendingRequestBlocksSend,
   PLAN_IMPLEMENTATION_PROMPT_PREFIX,
   planExternalSend,
+  planExternalSubmit,
+  ALREADY_QUEUED_REASON,
+  EXTERNAL_QUEUE_TWIN_MS,
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
@@ -937,4 +940,103 @@ test("goals §8.2: a failed goal chip action says why and writes nothing back in
   // A send from the draft itself still comes back, as ever.
   const own = await sendComposerTurn({ text: "fix the tests", send: refusing.send });
   assert.deepEqual(own, { kind: "failed", text: "fix the tests", notice: "The agent host is restarting." });
+});
+
+// ---------------------------------------------------------------------------
+// The right rail's Send — exactly what Enter does with that text as the draft
+// ---------------------------------------------------------------------------
+
+const RAIL = {
+  text: "Review the current changes",
+  reverting: false,
+  sending: false,
+  hasPendingRequest: false,
+  adapterId: "claude",
+  hostParsesGoal: false,
+  showPlanModeToggle: true,
+  followUpBehavior: "steer" as const,
+  isTurnActive: false,
+  lastQueued: null,
+  now: 10_000
+};
+
+test("the rail's Send: an idle thread sends the trimmed text", () => {
+  assert.deepEqual(planExternalSubmit({ ...RAIL, text: "  hello  " }), { kind: "send", text: "hello" });
+});
+
+test("the rail's Send: while a turn runs, the follow-up preference decides — queue or steer", () => {
+  assert.deepEqual(planExternalSubmit({ ...RAIL, isTurnActive: true, followUpBehavior: "queue" }), {
+    kind: "queue",
+    text: RAIL.text
+  });
+  assert.deepEqual(planExternalSubmit({ ...RAIL, isTurnActive: true, followUpBehavior: "steer" }), {
+    kind: "send",
+    text: RAIL.text
+  });
+});
+
+test("the rail's Send is refused for exactly what refuses the composer's own send", () => {
+  assert.deepEqual(planExternalSubmit({ ...RAIL, reverting: true }), {
+    kind: "refuse",
+    reason: REVERT_RUNNING_REASON
+  });
+  assert.deepEqual(planExternalSubmit({ ...RAIL, hasPendingRequest: true }), {
+    kind: "refuse",
+    reason: PENDING_REQUEST_REASON
+  });
+  assert.deepEqual(planExternalSubmit({ ...RAIL, sending: true }), {
+    kind: "refuse",
+    reason: "A message is still being sent."
+  });
+  assert.deepEqual(planExternalSubmit({ ...RAIL, text: "   " }), { kind: "refuse", reason: "Nothing to send." });
+  const grok = planExternalSubmit({ ...RAIL, adapterId: "grok", text: "/always-approve" });
+  assert.ok(grok.kind === "refuse" && /mode chip/.test(grok.reason), "the provider-command refusal");
+  const long = planExternalSubmit({ ...RAIL, text: "x".repeat(MAX_TURN_INPUT_CHARS + 1) });
+  assert.ok(long.kind === "refuse" && /over the/.test(long.reason), "the turn's length bound");
+});
+
+test("the rail's Send measures the TRIMMED text against the length bound, as Enter does", () => {
+  const padded = `${"x".repeat(MAX_TURN_INPUT_CHARS)}${" ".repeat(50)}`;
+  assert.equal(planExternalSubmit({ ...RAIL, text: padded }).kind, "send");
+});
+
+test("the rail's Send: a bare /plan or /default switches the mode where the toggle shows", () => {
+  assert.deepEqual(planExternalSubmit({ ...RAIL, text: " /plan " }), { kind: "plan-mode", mode: "plan" });
+  assert.deepEqual(planExternalSubmit({ ...RAIL, text: "/default" }), { kind: "plan-mode", mode: "default" });
+  // Where the toggle is hidden the provider may dispatch it: ordinary text.
+  assert.deepEqual(planExternalSubmit({ ...RAIL, text: "/plan", showPlanModeToggle: false }), {
+    kind: "send",
+    text: "/plan"
+  });
+  // Not bare: an ordinary message.
+  assert.equal(planExternalSubmit({ ...RAIL, text: "/plan the migration" }).kind, "send");
+});
+
+test("the rail's Send: a host /goal is never queued and passes an open card", () => {
+  const goal = { ...RAIL, adapterId: "codex", hostParsesGoal: true, text: "/goal pause" };
+  assert.deepEqual(planExternalSubmit({ ...goal, isTurnActive: true, followUpBehavior: "queue" }), {
+    kind: "send",
+    text: "/goal pause"
+  });
+  assert.equal(planExternalSubmit({ ...goal, hasPendingRequest: true }).kind, "send");
+});
+
+test("the rail's Send: a double click's twin is not queued twice", () => {
+  const queued = { ...RAIL, isTurnActive: true, followUpBehavior: "queue" as const };
+  const first = { text: RAIL.text, at: 10_000 };
+  assert.deepEqual(planExternalSubmit({ ...queued, lastQueued: first, now: 10_000 + 400 }), {
+    kind: "refuse",
+    reason: ALREADY_QUEUED_REASON
+  });
+  // Past the window, or another text: queued.
+  assert.equal(
+    planExternalSubmit({ ...queued, lastQueued: first, now: 10_000 + EXTERNAL_QUEUE_TWIN_MS }).kind,
+    "queue"
+  );
+  assert.equal(planExternalSubmit({ ...queued, text: "another", lastQueued: first, now: 10_100 }).kind, "queue");
+  // A steer is guarded by the send in flight, not by this window.
+  assert.equal(
+    planExternalSubmit({ ...queued, followUpBehavior: "steer", lastQueued: first, now: 10_100 }).kind,
+    "send"
+  );
 });

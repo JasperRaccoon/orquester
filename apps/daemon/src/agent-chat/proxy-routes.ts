@@ -111,7 +111,8 @@ const CHAT_ERROR_STATUS: Record<AgentChatErrorCode, number> = {
   COMPACTION_UNAVAILABLE: 409,
   HOST_UNAVAILABLE: 503,
   INDEX_UNAVAILABLE: 503,
-  ITEM_NOT_FOUND: 404
+  ITEM_NOT_FOUND: 404,
+  PROMPT_NOT_FOUND: 404
 };
 
 /** The §6.2 status for a code, so the account route answers like a command. */
@@ -303,6 +304,45 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
           turns: request.query.turns
         })
       );
+    }
+  );
+
+  // The thread's own prompts, newest first, from the host's index (the right
+  // rail's History), and one prompt's whole text. Forwarded, never
+  // interpreted, like history: the host owns the cursor and the `limit`
+  // clamp, and answers itself for an index that cannot list the thread whole
+  // (200 `indexed:false`, with `catchingUp` while it catches up) or failed a
+  // read (503 `INDEX_UNAVAILABLE`), both passed through verbatim.
+  // Every 404 passes through untouched — the host's own `PROMPT_NOT_FOUND`,
+  // and a surviving older host's generic route-miss `THREAD_NOT_FOUND`, which
+  // the client takes as "fall back to what you hold". Unlike `/search`,
+  // nothing is synthesised for that miss: on a per-thread route a 404 can
+  // also mean the thread is gone.
+  app.get<{ Params: { id: string }; Querystring: { before?: string; limit?: string } }>(
+    pattern(agentChatRoutes.prompts(":id")),
+    async (request, reply) => {
+      const { id } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      return forwardJson(
+        deps,
+        reply,
+        "GET",
+        withQuery(agentHostRoutes.prompts(id), {
+          before: request.query.before,
+          limit: request.query.limit
+        })
+      );
+    }
+  );
+
+  app.get<{ Params: { id: string; messageId: string } }>(
+    pattern(agentChatRoutes.promptText(":id", ":messageId")),
+    async (request, reply) => {
+      const { id, messageId } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      return forwardJson(deps, reply, "GET", agentHostRoutes.promptText(id, messageId));
     }
   );
 

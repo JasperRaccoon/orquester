@@ -19,6 +19,7 @@ import type {
   CliProxyStatus,
   CliProxyUnseedRequest,
   CliProxyXaiLink,
+  CreateSavedPromptRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
   EventMessage,
@@ -42,6 +43,7 @@ import type {
   GitStashCreateRequest,
   GitStashEntry,
   GitStatusResponse,
+  GitWorkingDiffResponse,
   HealthResponse,
   ImportAgentAccountRequest,
   KillProcessResponse,
@@ -59,6 +61,8 @@ import type {
   RegistryActionResult,
   RegistryResponse,
   RepoSummary,
+  SavedPrompt,
+  SavedPromptListResponse,
   ServerInfoResponse,
   SessionSummary,
   SessionUploadRequest,
@@ -70,6 +74,7 @@ import type {
   TodoListRecord,
   TodoScope,
   UpdateProjectRequest,
+  UpdateSavedPromptRequest,
   UpdateTodoRequest,
   UpdateWorkspaceRequest,
   UsageResponse,
@@ -94,7 +99,14 @@ import {
 } from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
-import type { ThreadItemResponse, TurnDiffQuery, TurnDiffResponse } from "@orquester/api/agent-chat";
+import type {
+  ThreadItemResponse,
+  ThreadPromptsQuery,
+  ThreadPromptsResponse,
+  ThreadPromptTextResponse,
+  TurnDiffQuery,
+  TurnDiffResponse
+} from "@orquester/api/agent-chat";
 
 export interface ApiRequestOptions {
   query?: TransportRequest["query"];
@@ -589,10 +601,49 @@ export class ApiClient {
     return this.send("DELETE", `/api/todos/${encodeURIComponent(id)}`);
   }
 
+  // --- Saved prompts (the right rail; daemon-persisted, shared) ------------
+
+  /** Every global prompt, plus `projectPath`'s own when given. */
+  listSavedPrompts(projectPath: string | null, signal?: AbortSignal): Promise<SavedPromptListResponse> {
+    return this.send("GET", "/api/saved-prompts", {
+      query: projectPath ? { projectPath } : undefined,
+      signal
+    });
+  }
+
+  createSavedPrompt(req: CreateSavedPromptRequest): Promise<SavedPrompt> {
+    return this.send("POST", "/api/saved-prompts", { body: req });
+  }
+
+  updateSavedPrompt(id: string, patch: UpdateSavedPromptRequest): Promise<SavedPrompt> {
+    return this.send("PUT", `/api/saved-prompts/${encodeURIComponent(id)}`, { body: patch });
+  }
+
+  deleteSavedPrompt(id: string): Promise<void> {
+    return this.send("DELETE", `/api/saved-prompts/${encodeURIComponent(id)}`);
+  }
+
+  /** An Insert or a Send used the prompt: bumps `lastUsedAt` / `useCount`. */
+  markSavedPromptUsed(id: string): Promise<SavedPrompt> {
+    return this.send("POST", `/api/saved-prompts/${encodeURIComponent(id)}/used`);
+  }
+
   // --- Git -----------------------------------------------------------------
 
   gitStatus(path: string, signal?: AbortSignal): Promise<GitStatusResponse> {
     return this.send("GET", "/api/git/status", { query: { path }, signal });
+  }
+
+  /** The project's uncommitted changes as one capped patch (a saved prompt's `{diff}`). */
+  gitWorkingDiff(
+    path: string,
+    maxBytes?: number,
+    signal?: AbortSignal
+  ): Promise<GitWorkingDiffResponse> {
+    return this.send("GET", "/api/git/working-diff", {
+      query: { path, maxBytes },
+      signal
+    });
   }
 
   gitDiff(
@@ -954,6 +1005,31 @@ export class ApiClient {
   /** One activity item's full, unslimmed payload (§5.6's "load full output"). */
   agentChatItem(id: string, itemId: string): Promise<ThreadItemResponse> {
     return this.agentChat.readItem(id, itemId);
+  }
+
+  /**
+   * The thread's own user prompts, newest first, from the host's index — the
+   * right rail's History. `indexed:false` from a host without an index; an
+   * `ApiError` 404 from a host that predates the route.
+   */
+  agentChatPrompts(
+    id: string,
+    query: ThreadPromptsQuery = {},
+    signal?: AbortSignal
+  ): Promise<ThreadPromptsResponse> {
+    return this.send("GET", agentChatRoutes.prompts(id), {
+      query: { before: query.before, limit: query.limit },
+      signal
+    });
+  }
+
+  /** One prompt's whole text, for a History entry cut at the page's cap. */
+  agentChatPromptText(
+    id: string,
+    messageId: string,
+    signal?: AbortSignal
+  ): Promise<ThreadPromptTextResponse> {
+    return this.send("GET", agentChatRoutes.promptText(id, messageId), { signal });
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

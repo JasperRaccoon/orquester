@@ -599,6 +599,9 @@ export async function startAgentHost(
       );
     } catch (error) {
       logger.warn("agent-host: the thread index is unavailable", error);
+      // Settled as unavailable: left unopened, it would answer "catching up"
+      // for the life of the host.
+      threadIndex.open(createUnavailableThreadIndex());
       return;
     }
     void catchUpThreadIndex(threadIndex).catch((error: unknown) => {
@@ -619,29 +622,38 @@ export async function startAgentHost(
    */
   const catchUpThreadIndex = async (index: ThreadIndex): Promise<void> => {
     if (!index.available) return;
-    let threadIds: string[];
+    // Begun before the first await, so no read can find the file open and the
+    // walk not started: until a thread's own catch-up has run, a thread the
+    // index is behind on reads `catching-up` (the prompt list answers
+    // `catchingUp`), not as complete or as left behind.
+    const sweep = index.beginCatchUpSweep();
     try {
-      threadIds = await store.listThreads();
-    } catch (error) {
-      logger.warn("agent-host: the thread index catch-up could not list threads", error);
-      return;
-    }
-    for (const threadId of threadIds) {
-      if (stopping) return;
+      let threadIds: string[];
       try {
-        const head = await store.loadHead(threadId);
-        if (head === null) continue;
-        await index.catchUp({
-          threadId,
-          projectPath: head.projectPath,
-          title: head.title,
-          logSeq: await store.lastSeq(threadId),
-          read: (cursor) => store.readEventsFrom(threadId, cursor)
-        });
+        threadIds = await store.listThreads();
       } catch (error) {
-        if (stopping) return;
-        logger.warn(`agent-host: the thread index catch-up failed for ${threadId}`, error);
+        logger.warn("agent-host: the thread index catch-up could not list threads", error);
+        return;
       }
+      for (const threadId of threadIds) {
+        if (stopping) return;
+        try {
+          const head = await store.loadHead(threadId);
+          if (head === null) continue;
+          await index.catchUp({
+            threadId,
+            projectPath: head.projectPath,
+            title: head.title,
+            logSeq: await store.lastSeq(threadId),
+            read: (cursor) => store.readEventsFrom(threadId, cursor)
+          });
+        } catch (error) {
+          if (stopping) return;
+          logger.warn(`agent-host: the thread index catch-up failed for ${threadId}`, error);
+        }
+      }
+    } finally {
+      sweep.end();
     }
   };
 
@@ -794,6 +806,15 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
     messageSpan: (threadId, messageId) => target.messageSpan(threadId, messageId),
     messagesSpanning: (threadId, seq) => target.messagesSpanning(threadId, seq),
     search: (input) => target.search(input),
+    // Before the file opens, every thread is catching up: it opens on the
+    // loop's next turn, and its catch-up starts right after.
+    coverage: (threadId, logSeq) =>
+      opened
+        ? target.coverage(threadId, logSeq)
+        : Promise.resolve(closed ? "unavailable" : "catching-up"),
+    beginCatchUpSweep: () => target.beginCatchUpSweep(),
+    prompts: (threadId, input) => target.prompts(threadId, input),
+    prompt: (threadId, messageId) => target.prompt(threadId, messageId),
     stop: async (): Promise<void> => {
       // Like `close`: an index opened after this is closed on arrival.
       closed = true;

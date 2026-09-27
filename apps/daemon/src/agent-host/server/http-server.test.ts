@@ -13,12 +13,17 @@ import { describe, it } from "node:test";
 import {
   THREAD_HISTORY_DEFAULT_TURNS,
   THREAD_HISTORY_MAX_TURNS,
+  THREAD_PROMPTS_DEFAULT_LIMIT,
+  THREAD_PROMPTS_MAX_LIMIT,
+  THREAD_PROMPT_TEXT_MAX_CHARS,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   THREAD_SEARCH_MAX_RESULTS,
   type AgentChatStreamFrame,
   type RuntimeEvent,
   type ThreadActivityItem,
   type ThreadHistoryPage,
+  type ThreadPromptsResponse,
+  type ThreadPromptTextResponse,
   type ThreadSearchHit,
   type ThreadSearchResponse
 } from "@orquester/api/agent-chat";
@@ -30,7 +35,9 @@ import {
   type AgentHostHoldGoalsResponse,
   type AgentHostResumeGoalSessionsResponse
 } from "../host-protocol.ts";
-import type { ThreadIndex } from "../index/index.ts";
+import { createThreadIndex, type ThreadIndex } from "../index/index.ts";
+import { MAX_INDEXED_TEXT_CHARS } from "../index/indexer.ts";
+import { recordingLogger } from "../index/testing.ts";
 import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import { GOAL_HELD_FOR_UPDATE_SUMMARY } from "../orchestration/orchestrator.ts";
 import {
@@ -834,6 +841,372 @@ describe("agent host server — indexed history and search (design 2026-09-23, C
         indexed: false
       });
       await h.stop();
+    }
+  });
+});
+
+describe("agent host server — the thread's prompts (the right rail's History)", () => {
+  /** A real index in a directory of its own: the route answers what the index derived. */
+  async function realIndex(): Promise<{ index: ThreadIndex; release(): Promise<void> }> {
+    const dir = await mkdtemp(join(tmpdir(), "agent-host-prompts-"));
+    const index = createThreadIndex({ filePath: join(dir, "index.sqlite"), logger: recordingLogger() });
+    return {
+      index,
+      async release(): Promise<void> {
+        index.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    };
+  }
+
+  let sunk = 0;
+  /** Append events the way ingestion does — a turn's end, a replayed prompt. */
+  async function sink(
+    h: Harness,
+    threadId: string,
+    drafts: Array<
+      | { type: "thread.session-set"; payload: { session: { status: "ready"; activeTurnId: null } } }
+      | {
+          type: "thread.message-sent";
+          payload: { messageId: string; role: "user"; text: string; streaming: false; turnId: null };
+        }
+    >
+  ): Promise<void> {
+    await h.host.orchestrator.ingestionSink(
+      threadId,
+      drafts.map((draft) => {
+        sunk += 1;
+        return {
+          ...draft,
+          eventId: `sunk-${sunk}`,
+          threadId,
+          occurredAt: h.host.clock.nowIso(),
+          commandId: null,
+          causationEventId: null,
+          metadata: {}
+        };
+      })
+    );
+  }
+
+  /**
+   * The index as a host sees it while it is being rebuilt: the file is there,
+   * but live appends only reach it once `feeding` — before that, only a
+   * catch-up from the log fills it.
+   */
+  function starved(index: ThreadIndex): { index: ThreadIndex; feed(): void } {
+    let feeding = false;
+    const wrapped = new Proxy(index, {
+      get(target, key) {
+        if (key === "observe" && !feeding) {
+          return () => undefined;
+        }
+        const value = Reflect.get(target, key, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    return {
+      index: wrapped,
+      feed: () => {
+        feeding = true;
+      }
+    };
+  }
+
+  const turnEnded = {
+    type: "thread.session-set" as const,
+    payload: { session: { status: "ready" as const, activeTurnId: null } }
+  };
+  const userPrompt = (messageId: string, text: string) => ({
+    type: "thread.message-sent" as const,
+    payload: { messageId, role: "user" as const, text, streaming: false as const, turnId: null }
+  });
+
+  it("lists the thread's prompts from the index, newest first — steers included", async () => {
+    const { index, release } = await realIndex();
+    const h = await harness({ index });
+    try {
+      const threadId = await h.host.createThread();
+      await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-1", input: "first prompt" });
+      await h.host.settle();
+      await sink(h, threadId, [turnEnded]);
+      await h.call("POST", agentHostRoutes.turn(threadId), {
+        commandId: "c-2",
+        input: "second [Image #1] prompt"
+      });
+      await h.host.settle();
+      // Turn 2 is still running: this one steers it.
+      await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-3", input: "a steer" });
+      await h.host.settle();
+      await index.drain();
+
+      const answer = await h.call("GET", agentHostRoutes.prompts(threadId));
+      assert.equal(answer.status, 200);
+      const body = answer.body as ThreadPromptsResponse;
+      assert.equal(body.threadId, threadId);
+      assert.equal(body.indexed, true);
+      assert.equal(body.before, null);
+      assert.deepEqual(
+        body.prompts.map((entry) => [entry.text, entry.turnId, entry.turnOrdinal, entry.rewindable]),
+        [
+          ["a steer", "turn-2", null, null],
+          ["second prompt", "turn-2", 2, true],
+          ["first prompt", "turn-1", 1, true]
+        ]
+      );
+      assert.ok(body.prompts.every((entry) => !entry.truncated && entry.seq > 0));
+
+      const paged = await h.call("GET", `${agentHostRoutes.prompts(threadId)}?limit=2`);
+      const first = paged.body as ThreadPromptsResponse;
+      assert.deepEqual(first.prompts.map((entry) => entry.text), ["a steer", "second prompt"]);
+      assert.notEqual(first.before, null);
+      const rest = await h.call(
+        "GET",
+        `${agentHostRoutes.prompts(threadId)}?limit=2&before=${encodeURIComponent(first.before!)}`
+      );
+      assert.deepEqual(
+        (rest.body as ThreadPromptsResponse).prompts.map((entry) => entry.text),
+        ["first prompt"]
+      );
+      assert.equal((rest.body as ThreadPromptsResponse).before, null);
+    } finally {
+      await h.stop();
+      await release();
+    }
+  });
+
+  it("clamps `limit` and passes `before` through untouched", async () => {
+    const h = await harness({ index: createFakeThreadIndex() });
+    try {
+      const threadId = await h.host.createThread();
+      const calls: Array<{ threadId: string; before?: string; limit?: number }> = [];
+      const readPrompts = h.host.orchestrator.readPrompts.bind(h.host.orchestrator);
+      h.host.orchestrator.readPrompts = (id, query) => {
+        calls.push({ threadId: id, ...query });
+        return readPrompts(id, query);
+      };
+      for (const [query, expected] of [
+        ["", { limit: THREAD_PROMPTS_DEFAULT_LIMIT }],
+        ["?limit=0", { limit: 1 }],
+        ["?limit=-4", { limit: 1 }],
+        [`?limit=${THREAD_PROMPTS_MAX_LIMIT + 900}`, { limit: THREAD_PROMPTS_MAX_LIMIT }],
+        ["?limit=many", { limit: THREAD_PROMPTS_DEFAULT_LIMIT }],
+        ["?before=opaque-cursor&limit=7", { before: "opaque-cursor", limit: 7 }],
+        ["?before=&limit=7", { limit: 7 }]
+      ] as const) {
+        const answer = await h.call("GET", `${agentHostRoutes.prompts(threadId)}${query}`);
+        assert.equal(answer.status, 200, query);
+        assert.deepEqual(answer.body, { threadId, prompts: [], before: null, indexed: true }, query);
+        assert.deepEqual(calls.at(-1), { threadId, ...expected }, query);
+      }
+    } finally {
+      await h.stop();
+    }
+  });
+
+  it("answers the list `indexed: false` without a usable index, the text 503, and 404 for no thread", async () => {
+    for (const index of [undefined, createFakeThreadIndex({ available: false })]) {
+      const h = await harness(index ? { index } : {});
+      try {
+        const threadId = await h.host.createThread();
+        const list = await h.call("GET", agentHostRoutes.prompts(threadId));
+        assert.equal(list.status, 200);
+        assert.deepEqual(list.body, {
+          threadId,
+          prompts: [],
+          before: null,
+          indexed: false
+        } satisfies ThreadPromptsResponse);
+        const text = await h.call("GET", agentHostRoutes.promptText(threadId, "user:1"));
+        assert.equal(text.status, 503);
+        assert.equal((text.body as { error: { code: string } }).error.code, "INDEX_UNAVAILABLE");
+
+        for (const path of [
+          agentHostRoutes.prompts("no-such-thread"),
+          agentHostRoutes.promptText("no-such-thread", "user:1")
+        ]) {
+          const missing = await h.call("GET", path);
+          assert.equal(missing.status, 404, path);
+          assert.equal((missing.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+        }
+      } finally {
+        await h.stop();
+      }
+    }
+  });
+
+  it("serves one prompt's whole text, and 404 PROMPT_NOT_FOUND for any other id", async () => {
+    const { index, release } = await realIndex();
+    const h = await harness({ index });
+    try {
+      const threadId = await h.host.createThread();
+      await h.call("POST", agentHostRoutes.turn(threadId), {
+        commandId: "c-1",
+        input: " look at [Image #1] this "
+      });
+      await h.host.settle();
+      await sink(h, threadId, [userPrompt("user:notice", "<task-notification>done</task-notification>")]);
+      await index.drain();
+      const [entry] = (
+        (await h.call("GET", agentHostRoutes.prompts(threadId))).body as ThreadPromptsResponse
+      ).prompts;
+      assert.ok(entry !== undefined && entry.messageId.includes(":"), "an id the path must encode");
+
+      const answer = await h.call("GET", agentHostRoutes.promptText(threadId, entry.messageId));
+      assert.equal(answer.status, 200);
+      assert.deepEqual(answer.body, {
+        messageId: entry.messageId,
+        text: "look at this",
+        truncated: false
+      } satisfies ThreadPromptTextResponse);
+
+      for (const messageId of ["user:notice", "user:unknown", "assistant:turn-1"]) {
+        const missing = await h.call("GET", agentHostRoutes.promptText(threadId, messageId));
+        assert.equal(missing.status, 404, messageId);
+        assert.equal(
+          (missing.body as { error: { code: string } }).error.code,
+          "PROMPT_NOT_FOUND",
+          messageId
+        );
+      }
+    } finally {
+      await h.stop();
+      await release();
+    }
+  });
+
+  it("answers `catchingUp` while the index catches up with a thread, the page once it has, and `indexed:false` for one it never will", async () => {
+    const real = await realIndex();
+    const { index, feed } = starved(real.index);
+    const h = await harness({ index });
+    try {
+      // Written while the index sees nothing: a file rebuilt under the host.
+      const threadId = await h.host.createThread();
+      await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-1", input: "first prompt" });
+      await h.host.settle();
+      const unreached = await h.host.createThread({ threadId: "thread-unreached" });
+      await h.call("POST", agentHostRoutes.turn(unreached), { commandId: "c-2", input: "never indexed" });
+      await h.host.settle();
+      await real.index.drain();
+
+      const sweep = real.index.beginCatchUpSweep();
+      const catching = await h.call("GET", agentHostRoutes.prompts(threadId));
+      assert.equal(catching.status, 200);
+      assert.deepEqual(catching.body, {
+        threadId,
+        prompts: [],
+        before: null,
+        indexed: false,
+        catchingUp: true
+      } satisfies ThreadPromptsResponse);
+      const text = await h.call("GET", agentHostRoutes.promptText(threadId, "user:1"));
+      assert.equal(text.status, 503, "no 404 from an index that cannot say yet");
+      assert.equal((text.body as { error: { code: string } }).error.code, "INDEX_UNAVAILABLE");
+
+      await real.index.catchUp({
+        threadId,
+        projectPath: "/work/project",
+        title: "Test thread",
+        logSeq: await h.host.store.lastSeq(threadId),
+        read: (cursor) => h.host.store.readEventsFrom(threadId, cursor)
+      });
+      feed();
+      const caughtUp = (await h.call("GET", agentHostRoutes.prompts(threadId))).body as ThreadPromptsResponse;
+      assert.equal(caughtUp.indexed, true);
+      assert.equal(caughtUp.catchingUp, undefined);
+      assert.deepEqual(caughtUp.prompts.map((entry) => entry.text), ["first prompt"]);
+      const [entry] = caughtUp.prompts;
+      const whole = await h.call("GET", agentHostRoutes.promptText(threadId, entry!.messageId));
+      assert.equal(whole.status, 200);
+      const absent = await h.call("GET", agentHostRoutes.promptText(threadId, "user:unknown"));
+      assert.equal(absent.status, 404, "caught up: now a missing prompt is a 404");
+
+      // The sweep ends without reaching the other thread: nothing will now
+      // before the host restarts, which is what plain `indexed:false` says.
+      sweep.end();
+      const behind = await h.call("GET", agentHostRoutes.prompts(unreached));
+      assert.deepEqual(behind.body, {
+        threadId: unreached,
+        prompts: [],
+        before: null,
+        indexed: false
+      } satisfies ThreadPromptsResponse);
+      assert.equal((await h.call("GET", agentHostRoutes.promptText(unreached, "user:2"))).status, 503);
+    } finally {
+      await h.stop();
+      await real.release();
+    }
+  });
+
+  it("answers a read that failed with a retryable 503 INDEX_UNAVAILABLE, never an empty page", async () => {
+    const index = createFakeThreadIndex();
+    const h = await harness({ index });
+    try {
+      const threadId = await h.host.createThread();
+      const unreadable = async (): Promise<void> => {
+        for (const path of [agentHostRoutes.prompts(threadId), agentHostRoutes.promptText(threadId, "user:1")]) {
+          const answer = await h.call("GET", path);
+          assert.equal(answer.status, 503, path);
+          assert.equal((answer.body as { error: { code: string } }).error.code, "INDEX_UNAVAILABLE", path);
+        }
+      };
+      // The coverage read fails…
+      index.coverageOverride = "failed";
+      await unreadable();
+      // …or the page's and the lookup's own do.
+      index.coverageOverride = null;
+      index.prompts = () => null;
+      index.prompt = () => ({ status: "failed" });
+      await unreadable();
+    } finally {
+      await h.stop();
+    }
+  });
+
+  it("reads a prompt longer than the index keeps back from its own line in the log", async () => {
+    const { index, release } = await realIndex();
+    const h = await harness({ index });
+    try {
+      const threadId = await h.host.createThread();
+      const long = `${"x".repeat(MAX_INDEXED_TEXT_CHARS)} and the rest`;
+      const twice = "y".repeat(MAX_INDEXED_TEXT_CHARS + 5);
+      await sink(h, threadId, [
+        userPrompt("user:long", long),
+        userPrompt("user:twice", twice),
+        userPrompt("user:twice", `${twice}!`)
+      ]);
+      await index.drain();
+
+      const listed = ((await h.call("GET", agentHostRoutes.prompts(threadId))).body as ThreadPromptsResponse)
+        .prompts;
+      const longEntry = listed.find((entry) => entry.messageId === "user:long")!;
+      assert.equal(longEntry.text.length, THREAD_PROMPT_TEXT_MAX_CHARS);
+      assert.equal(longEntry.truncated, true);
+
+      const whole = await h.call("GET", agentHostRoutes.promptText(threadId, "user:long"));
+      assert.equal(whole.status, 200);
+      assert.deepEqual(whole.body, { messageId: "user:long", text: long, truncated: false });
+
+      // Written twice, so no one line holds its latest text: the index's copy,
+      // said to be cut.
+      const head = await h.call("GET", agentHostRoutes.promptText(threadId, "user:twice"));
+      assert.deepEqual(head.body, {
+        messageId: "user:twice",
+        text: "y".repeat(MAX_INDEXED_TEXT_CHARS),
+        truncated: true
+      });
+
+      // A log that no longer holds the prompt at its line: the same fallback.
+      h.host.store.truncateAt(threadId, 0);
+      const unread = await h.call("GET", agentHostRoutes.promptText(threadId, "user:long"));
+      assert.deepEqual(unread.body, {
+        messageId: "user:long",
+        text: "x".repeat(MAX_INDEXED_TEXT_CHARS),
+        truncated: true
+      });
+    } finally {
+      await h.stop();
+      await release();
     }
   });
 });

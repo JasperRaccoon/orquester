@@ -294,7 +294,8 @@ test("the error-code list is closed and RESUME_UNAVAILABLE is not in it", () => 
     "COMPACTION_UNAVAILABLE",
     "HOST_UNAVAILABLE",
     "INDEX_UNAVAILABLE",
-    "ITEM_NOT_FOUND"
+    "ITEM_NOT_FOUND",
+    "PROMPT_NOT_FOUND"
   ]);
   assert.ok(!(AGENT_CHAT_ERROR_CODES as readonly string[]).includes("RESUME_UNAVAILABLE"));
 

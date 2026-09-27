@@ -50,7 +50,8 @@ export function expandVars(value: string, vars: ConfigVars): string {
 //
 //   <appdir>/                 (~/.orquester by default, or e.g. ./.stage)
 //     app/     app.json, remotes.json, logs/<yyyy-mm-dd>.log
-//     daemon/  daemon.json, daemon.sock, sessions.json, todos.json, logs/<yyyy-mm-dd>.log
+//     daemon/  daemon.json, daemon.sock, sessions.json, todos.json, saved-prompts.json,
+//              logs/<yyyy-mm-dd>.log
 //
 // Workspaces live wherever daemon.json `workspacesDir` points (default
 // `$userhome/workspaces`; the stage sandbox uses `$appdir/workspaces`).
@@ -138,6 +139,11 @@ export function todosIndexPath(baseDir: string): string {
 /** Daemon-owned "recently interacted with" project list (shared by all clients). */
 export function recentProjectsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "recent-projects.json");
+}
+
+/** Daemon-owned saved-prompt library, global and per project (shared by all clients). */
+export function savedPromptsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "saved-prompts.json");
 }
 
 /** Web Push state (VAPID keypair + browser subscriptions); 0600 — holds the private key. */
@@ -1196,6 +1202,106 @@ export function parseRecentProjectsConfig(raw: unknown): RecentProjectsConfig {
     }
   }
   return { version: 1, projects };
+}
+
+// saved-prompts.json — the right rail's prompt library (`SavedPrompt` in
+// @orquester/api), global and per project, owned by the daemon so every client
+// shares one list. The file's mere EXISTENCE is the "starter prompts were
+// seeded" marker, so a user who deletes the starters never gets them back.
+
+/**
+ * One stored prompt. Deliberately checks SHAPE, never the editor's limits
+ * (title/body/tag lengths, the tag count): those are enforced when a prompt is
+ * written, and a read that re-applied them would hide a prompt a build with
+ * other limits stored. `passthrough` for the same reason: a field a newer build
+ * added survives a rollback's rewrite. A record that fails this schema is not
+ * lost either — the daemon writes it back verbatim (`rejected` below).
+ *
+ * **Any change to an existing field's TYPE or MEANING must bump the file
+ * `version`.** A new field is safe (an older build passes it through), and a
+ * record an older build cannot parse is kept untouched — but a record it CAN
+ * parse under the old meaning would be served and rewritten wrongly. A bumped
+ * version makes an older build quarantine the file instead (moved aside, never
+ * written over).
+ */
+export const savedPromptRecordSchema = z
+  .object({
+    id: z.string().min(1),
+    title: z.string(),
+    description: z.string().default(""),
+    body: z.string(),
+    tags: z.array(z.string()).default([]),
+    /** `null` = global; else the project directory's path as the client spells it. */
+    projectPath: z.string().min(1).nullable().default(null),
+    pinned: z.boolean().default(false),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+    lastUsedAt: z.string().datetime({ offset: true }).nullable().default(null),
+    useCount: z.number().int().nonnegative().default(0)
+  })
+  .passthrough();
+
+export type SavedPromptRecord = z.infer<typeof savedPromptRecordSchema>;
+
+export interface SavedPromptsConfig {
+  version: 1;
+  prompts: SavedPromptRecord[];
+}
+
+export function createDefaultSavedPromptsConfig(): SavedPromptsConfig {
+  return { version: 1, prompts: [] };
+}
+
+/**
+ * A read `saved-prompts.json`: the library, plus everything in the file this
+ * build cannot use, kept VERBATIM so every rewrite puts it back unchanged — a
+ * record in a newer shape must survive an older build's next write.
+ */
+export interface SavedPromptsFile extends SavedPromptsConfig {
+  /**
+   * The `prompts` entries not in `prompts`, exactly as found, in file order:
+   * each one that fails the record schema, and each record whose id an earlier
+   * one already has (a hand edit — the first record is the prompt).
+   */
+  rejected: unknown[];
+  /** Every top-level key but `version` and `prompts`, exactly as found. */
+  extra: Record<string, unknown>;
+}
+
+/**
+ * Entry-wise tolerant (the `parseRecentProjectsConfig` pattern): a record that
+ * fails its schema — hand-edited, or written by another bundle — is set aside
+ * in `rejected` and the rest of the library loads. The OUTER shape still
+ * throws, a `version` other than 1 included, because the daemon reads a throw
+ * as "this file is not mine to rewrite": it moves the file aside rather than
+ * writing an empty library over the user's prompts.
+ */
+export function parseSavedPromptsConfig(raw: unknown): SavedPromptsFile {
+  const outer = z
+    .object({ version: z.literal(1).default(1), prompts: z.array(z.unknown()).default([]) })
+    .safeParse(raw);
+  if (!outer.success) {
+    const issue = outer.error.issues[0];
+    const where = issue && issue.path.length > 0 ? issue.path.join(".") : "the file";
+    throw new Error(`Not a version-1 saved prompts file (${where}: ${issue?.message ?? "invalid"})`);
+  }
+  const prompts: SavedPromptRecord[] = [];
+  const rejected: unknown[] = [];
+  const ids = new Set<string>();
+  for (const entry of outer.data.prompts) {
+    const parsed = savedPromptRecordSchema.safeParse(entry);
+    if (parsed.success && !ids.has(parsed.data.id)) {
+      ids.add(parsed.data.id);
+      prompts.push(parsed.data);
+    } else {
+      rejected.push(entry);
+    }
+  }
+  // `fromEntries`, not assignment: a key such as `__proto__` stays an own key.
+  const extra = Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>).filter(([key]) => key !== "version" && key !== "prompts")
+  );
+  return { version: 1, prompts, rejected, extra };
 }
 
 // push.json — Web Push state for the PWA: the daemon's VAPID keypair (lazily

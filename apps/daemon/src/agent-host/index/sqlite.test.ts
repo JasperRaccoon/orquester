@@ -315,6 +315,63 @@ describe("thread index file", () => {
     assert.deepEqual(markers, [{ seq: seqOf("legacy"), kind: "compacted" }]);
   });
 
+  it("rebuilds a version-3 file — message_docs without its author, turn and stamp — as another version", async () => {
+    createThreadIndex({ filePath, logger: recordingLogger() }).close();
+    const writable = new Database(filePath);
+    writable.exec(`
+      DROP INDEX message_docs_prompts;
+      ALTER TABLE message_docs DROP COLUMN role;
+      ALTER TABLE message_docs DROP COLUMN agent_id;
+      ALTER TABLE message_docs DROP COLUMN turn_id;
+      ALTER TABLE message_docs DROP COLUMN created_at;
+    `);
+    writable.prepare("UPDATE meta SET value = '3' WHERE key = 'schema_version'").run();
+    writable.close();
+
+    const logger = recordingLogger();
+    const index = createThreadIndex({ filePath, logger });
+    assert.equal(index.available, true);
+    const log = new TestLog();
+    index.observe({
+      threadId: log.threadId,
+      projectPath: "/w/p",
+      title: "T",
+      ...log.append(created(), userMessage("u1", "hello"), userMessage("sub", "brief", null, "a-1"))
+    });
+    await index.drain();
+    assert.deepEqual(
+      index.prompts(log.threadId, { limit: 5 })?.prompts.map((entry) => entry.messageId),
+      ["u1"]
+    );
+    index.close();
+
+    const { authors, indexes } = inspect((db) => ({
+      authors: db
+        .prepare(
+          "SELECT message_id, role, agent_id, turn_id, created_at FROM message_docs ORDER BY first_seq"
+        )
+        .all(),
+      indexes: (db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'message_docs'")
+        .all() as Array<{ name: string }>).map((row) => row.name)
+    }));
+    assert.notEqual(INDEX_SCHEMA_VERSION, 3, "the premise: v3 is another version");
+    assert.deepEqual(authors, [
+      { message_id: "u1", role: "user", agent_id: null, turn_id: null, created_at: log.event(2).occurredAt },
+      { message_id: "sub", role: "user", agent_id: "a-1", turn_id: null, created_at: log.event(3).occurredAt }
+    ]);
+    assert.ok(indexes.includes("message_docs_prompts"));
+    assert.ok(
+      logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
+      "rebuilt by the version check"
+    );
+    assert.equal(
+      logger.entries.some((entry) => /does not fit this build/.test(entry.message)),
+      false,
+      "never got as far as preparing statements against it"
+    );
+  });
+
   it("runs unavailable when the file can be neither opened nor recreated", () => {
     const logger = recordingLogger();
     const broken: SqliteDriver = {

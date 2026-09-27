@@ -13,6 +13,8 @@ import {
   agentChatRoutes,
   type AgentChatErrorCode,
   type ThreadHistoryPage,
+  type ThreadPromptsResponse,
+  type ThreadPromptTextResponse,
   type ThreadSearchResponse
 } from "@orquester/api/agent-chat";
 import { AGENT_HOST_AUTH_HEADER } from "../agent-host/host-protocol.ts";
@@ -231,6 +233,8 @@ test("a down host is 503 HOST_UNAVAILABLE on commands, reads and the stream", as
     ["GET", agentChatRoutes.itemOutput("t1", "i1")],
     ["GET", agentChatRoutes.turnDiff("t1", 2)],
     ["GET", agentChatRoutes.history("t1")],
+    ["GET", agentChatRoutes.prompts("t1")],
+    ["GET", agentChatRoutes.promptText("t1", "user:1")],
     ["GET", agentChatRoutes.providers],
     ["GET", agentChatRoutes.search],
     ["POST", agentChatRoutes.hostStop]
@@ -499,7 +503,8 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
     COMPACTION_UNAVAILABLE: 409,
     HOST_UNAVAILABLE: 503,
     INDEX_UNAVAILABLE: 503,
-    ITEM_NOT_FOUND: 404
+    ITEM_NOT_FOUND: 404,
+    PROMPT_NOT_FOUND: 404
   };
   for (const code of AGENT_CHAT_ERROR_CODES) {
     const response = await h.app.inject({
@@ -681,5 +686,144 @@ test("a host that predates the index (404 on /search) answers the unavailable se
   assert.deepEqual(history.json(), {
     error: { code: "THREAD_NOT_FOUND", message: "No route for GET /threads/t1/history." }
   });
+  await h.close();
+});
+
+// --- the thread's prompts (the right rail's History) ------------------------
+
+const promptsPage = {
+  threadId: "t1",
+  prompts: [
+    {
+      messageId: "user:9",
+      turnId: "turn-4",
+      turnOrdinal: 4,
+      rewindable: true,
+      text: "fix the parser",
+      truncated: false,
+      createdAt: "2026-09-27T10:00:00.000Z",
+      seq: 120
+    }
+  ],
+  before: "eyJ0IjoidDEiLCJzIjoxMjB9",
+  indexed: true
+} satisfies ThreadPromptsResponse;
+
+const json = { "content-type": "application/json" };
+
+test("a prompts read forwards before/limit verbatim, and only those, and passes the page through", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify(promptsPage));
+  // Clamping and the cursor are the host's, in one place: both cross unchanged.
+  const response = await h.app.inject({
+    method: "GET",
+    url: `${agentChatRoutes.prompts("t1")}?before=eyJ0IjoidDEifQ&limit=9999&turns=3`
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), promptsPage);
+  assert.equal(h.host.requests[0].method, "GET");
+  assert.equal(h.host.requests[0].url, "/threads/t1/prompts?before=eyJ0IjoidDEifQ&limit=9999");
+  assert.equal(h.host.requests[0].auth, "Bearer tok");
+  // A page of old prompts says nothing about the live stream's cursor.
+  assert.deepEqual(h.seqs, []);
+
+  await h.app.inject({ method: "GET", url: agentChatRoutes.prompts("t1") });
+  assert.equal(h.host.requests[1].url, "/threads/t1/prompts", "no query: the host's first page");
+  await h.close();
+});
+
+test("a prompt's text is proxied with its id kept one encoded segment", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const answer = {
+    messageId: "user:9",
+    text: "fix the parser",
+    truncated: false
+  } satisfies ThreadPromptTextResponse;
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify(answer));
+  const response = await h.app.inject({
+    method: "GET",
+    url: agentChatRoutes.promptText("t1", "user:9")
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), answer);
+  assert.equal(h.host.requests[0].url, "/threads/t1/prompts/user%3A9");
+  assert.equal(h.host.requests[0].auth, "Bearer tok");
+  await h.close();
+});
+
+test("prompt reads for an unknown tab are 404 THREAD_NOT_FOUND and never reach the host", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  for (const url of [agentChatRoutes.prompts("ghost"), agentChatRoutes.promptText("ghost", "user:1")]) {
+    const response = await h.app.inject({ method: "GET", url });
+    assert.equal(response.statusCode, 404, url);
+    assert.equal(response.json().error.code, "THREAD_NOT_FOUND", url);
+  }
+  assert.equal(h.host.requests.length, 0);
+  await h.close();
+});
+
+test("every prompt-read 404 passes through untouched — the host's own and an older host's route miss", async () => {
+  // A current host answers `PROMPT_NOT_FOUND` for an id it has no prompt
+  // for; a surviving older host predates both routes and answers its generic
+  // route miss. Neither is interpreted, and the list's miss is NOT turned
+  // into `indexed:false` the way `/search`'s is: on a per-thread route a 404
+  // can also mean the thread is gone, and the client falls back on it itself.
+  const h = await makeHarness({ t1: tab("t1") });
+  const gone = { error: { code: "PROMPT_NOT_FOUND", message: "No prompt 'user:gone' in this thread." } };
+  h.host.handler = (req, res) => {
+    const path = req.url?.split("?")[0] ?? "";
+    if (path === "/threads/t1/prompts/user%3Agone") {
+      res.writeHead(404, json).end(JSON.stringify(gone));
+      return;
+    }
+    res
+      .writeHead(404, json)
+      .end(JSON.stringify({ error: { code: "THREAD_NOT_FOUND", message: `No route for GET ${path}.` } }));
+  };
+
+  const missing = await h.app.inject({ method: "GET", url: agentChatRoutes.promptText("t1", "user:gone") });
+  assert.equal(missing.statusCode, 404);
+  assert.deepEqual(missing.json(), gone);
+
+  const oldList = await h.app.inject({ method: "GET", url: `${agentChatRoutes.prompts("t1")}?limit=5` });
+  assert.equal(oldList.statusCode, 404);
+  assert.deepEqual(oldList.json(), {
+    error: { code: "THREAD_NOT_FOUND", message: "No route for GET /threads/t1/prompts." }
+  });
+  const oldText = await h.app.inject({ method: "GET", url: agentChatRoutes.promptText("t1", "user:1") });
+  assert.equal(oldText.statusCode, 404);
+  assert.deepEqual(oldText.json(), {
+    error: { code: "THREAD_NOT_FOUND", message: "No route for GET /threads/t1/prompts/user%3A1." }
+  });
+  assert.equal(h.host.requests.length, 3, "the host was asked every time");
+  await h.close();
+});
+
+test("the host's `indexed:false` page and its INDEX_UNAVAILABLE 503 pass through verbatim", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  // `catchingUp` included: the client asks again for it, and only it.
+  const unindexed = {
+    threadId: "t1",
+    prompts: [],
+    before: null,
+    indexed: false,
+    catchingUp: true
+  } satisfies ThreadPromptsResponse;
+  const envelope = {
+    error: { code: "INDEX_UNAVAILABLE", message: "Prompt history is not available on this host right now." }
+  };
+  h.host.handler = (req, res) => {
+    if (req.url?.startsWith("/threads/t1/prompts/")) {
+      res.writeHead(503, json).end(JSON.stringify(envelope));
+      return;
+    }
+    res.writeHead(200, json).end(JSON.stringify(unindexed));
+  };
+  const list = await h.app.inject({ method: "GET", url: agentChatRoutes.prompts("t1") });
+  assert.equal(list.statusCode, 200);
+  assert.deepEqual(list.json(), unindexed);
+  const text = await h.app.inject({ method: "GET", url: agentChatRoutes.promptText("t1", "user:1") });
+  assert.equal(text.statusCode, 503);
+  assert.deepEqual(text.json(), envelope);
   await h.close();
 });

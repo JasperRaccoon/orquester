@@ -11,7 +11,7 @@
  * - `sqlite.ts` — driver resolution (once, at load) and the file lifecycle;
  * - `schema.ts` — the tables;
  * - `indexer.ts` — domain events → rows, one transaction per batch;
- * - `queries.ts` — turn lookups, paging, search.
+ * - `queries.ts` — turn lookups, paging, search, the thread's own prompts.
  *
  * Writes are applied per thread, in order, on an internal queue: `observe`
  * returns at once, `catchUp` rides the same queue so a live append and a
@@ -23,6 +23,7 @@
 import type {
   DomainEvent,
   HistoryCursor,
+  ThreadPromptEntry,
   ThreadSearchHit
 } from "@orquester/api/agent-chat";
 
@@ -117,6 +118,69 @@ export interface SpanningMessage extends IndexedMessageSpan {
   messageId: string;
 }
 
+/** One page of the thread's prompts; the host adds `threadId` and `indexed`. */
+export interface IndexedPromptsPage {
+  /** Newest first. */
+  prompts: ThreadPromptEntry[];
+  /**
+   * The cursor of the next older page; null when the thread has no older
+   * prompt. A page the scan budget cut short carries one while holding fewer
+   * than `limit` prompts — even none (`queries.ts` `PROMPTS_SCAN_BUDGET`).
+   */
+  before: string | null;
+}
+
+/**
+ * How much of one thread's log the index holds — whether its rows are the
+ * WHOLE thread. The prompt list's gate: a page of a partly indexed thread
+ * reads exactly like the complete list, and a client keeps it as such.
+ * - `complete` — every line up to the log's own seq is indexed;
+ * - `catching-up` — not yet, and a catch-up will close the gap: the file has
+ *   not opened yet, the boot sweep has not reached the thread, or its
+ *   catch-up is queued or running — ask again shortly;
+ * - `behind` — not, and nothing will re-read the missing lines before the
+ *   host restarts: its catch-up ended short (an unreadable log, a write that
+ *   failed), a live write failed after it, or the sweep never listed it;
+ * - `failed` — the index could not tell (a read failed);
+ * - `unavailable` — there is no usable index at all.
+ */
+export type IndexCoverage = "complete" | "catching-up" | "behind" | "failed" | "unavailable";
+
+/** `prompt()`'s answer. */
+export type IndexedPromptLookup =
+  | { status: "found"; prompt: IndexedPrompt }
+  /** The index holds no such prompt of the thread. */
+  | { status: "absent" }
+  /** It could not read: a driver error, or no usable index. */
+  | { status: "failed" };
+
+/** The boot catch-up's walk over every log on disk, `beginCatchUpSweep` to `end`. */
+export interface CatchUpSweep {
+  /** Idempotent. */
+  end(): void;
+}
+
+/**
+ * One of the thread's own prompts by id, for `GET …/prompts/:messageId`: its
+ * normalised text as the index holds it, and where its line sits, so the
+ * host can read the whole prompt back from the log when the index's copy may
+ * be cut.
+ */
+export interface IndexedPrompt {
+  messageId: string;
+  /** `recallablePromptText` of the index's copy. */
+  text: string;
+  /**
+   * The index's copy may be cut: it is `MAX_INDEXED_TEXT_CHARS` long, or one
+   * short of it (`capText`), so `text` may not be the whole prompt.
+   */
+  cut: boolean;
+  /** The message's first line — its only one when `lastSeq === line.seq`. */
+  line: IndexedItemPosition;
+  /** The seq of the message's latest line. */
+  lastSeq: number;
+}
+
 export interface ThreadIndex {
   /** False when the driver could not be loaded or the file could not be opened/rebuilt. */
   readonly available: boolean;
@@ -207,6 +271,45 @@ export interface ThreadIndex {
    */
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
   search(input: { q: string; limit: number; projectPath?: string }): ThreadSearchHit[];
+  /**
+   * Whether the index holds every line of the thread's log up to `logSeq` —
+   * the log's own last seq, as the host's fold has it. Waits for the observes
+   * already queued for the thread, so a live append trailing by a moment never
+   * reads as a gap — but never for a catch-up, which reads `catching-up`
+   * whatever its progress. Never rejects.
+   */
+  coverage(threadId: string, logSeq: number): Promise<IndexCoverage>;
+  /**
+   * The boot catch-up starts walking every log on disk: until `end()`, a
+   * thread the index is behind on reads `catching-up`, not `behind` — unless
+   * its own catch-up has already finished, which is what settled it.
+   */
+  beginCatchUpSweep(): CatchUpSweep;
+  /**
+   * The thread's own prompts, newest first — the right rail's History: the
+   * parent conversation's `user` messages that `recallablePromptText`
+   * accepts, each with the turn it opened. At most `limit` of them (clamped
+   * to `[1, THREAD_PROMPTS_MAX_LIMIT]`), strictly older than a previous
+   * page's `before` cursor — a malformed or foreign one reads as none; a
+   * page that walked its scan budget past refused rows stops short with a
+   * cursor. Only as whole as the index is: ask `coverage` first.
+   *
+   * A revert takes its user messages by the fold's own rule
+   * (`indexer.ts` `dropRevertedUserMessages`): a steer with its turn, a prompt
+   * with the turn that claimed it, a turn-less one no retained turn claims
+   * (an idle `/goal`, a refused send) unless the fold's fallback restores it.
+   * Parity is with a fold of the whole log: the live fold counts that
+   * fallback over its retained window, and a log with no started turn at all
+   * (numbered by checkpoints) keeps none of its user messages here.
+   *
+   * Null when the index could not read (a driver error, or none is usable).
+   */
+  prompts(
+    threadId: string,
+    input: { before?: string | null; limit: number }
+  ): IndexedPromptsPage | null;
+  /** One of those prompts by message id — or `absent`, or `failed`. */
+  prompt(threadId: string, messageId: string): IndexedPromptLookup;
   /**
    * The host's shutdown. At once: `available` turns false, every read answers
    * its empty fallback, and new work is refused (`observe`, `catchUp`) — but a
@@ -317,6 +420,12 @@ function createOpenThreadIndex(input: {
   const lanes = new Map<string, Lane>();
   /** Threads whose last write failed: logged once until one succeeds. */
   const failing = new Set<string>();
+  /** Catch-ups queued or running, per thread: from `catchUp` until it settles. */
+  const catchUpsInFlight = new Map<string, number>();
+  /** Threads whose catch-up has settled, whatever it reached. */
+  const caughtUp = new Set<string>();
+  /** Boot catch-up sweeps under way (`beginCatchUpSweep`). */
+  let sweeps = 0;
 
   const laneOf = (threadId: string): Lane => {
     let lane = lanes.get(threadId);
@@ -501,9 +610,65 @@ function createOpenThreadIndex(input: {
       if (!serving()) {
         return;
       }
-      const lane = laneOf(request.threadId);
+      const { threadId } = request;
+      const lane = laneOf(threadId);
       const generation = lane.generation;
-      await enqueue(lane, () => runCatchUp(lane, generation, request));
+      // Catching up from the moment it is queued: a read that waited for it
+      // would wait out a whole thread's log.
+      catchUpsInFlight.set(threadId, (catchUpsInFlight.get(threadId) ?? 0) + 1);
+      try {
+        await enqueue(lane, () => runCatchUp(lane, generation, request));
+      } finally {
+        const left = (catchUpsInFlight.get(threadId) ?? 1) - 1;
+        if (left > 0) {
+          catchUpsInFlight.set(threadId, left);
+        } else {
+          catchUpsInFlight.delete(threadId);
+        }
+        caughtUp.add(threadId);
+      }
+    },
+
+    async coverage(threadId, logSeq) {
+      const settled = (): IndexCoverage | null => {
+        if (!serving()) return "unavailable";
+        return (catchUpsInFlight.get(threadId) ?? 0) > 0 ? "catching-up" : null;
+      };
+      const early = settled();
+      if (early !== null) {
+        return early;
+      }
+      // Only flushes of live observes are queued on the lane (no catch-up is):
+      // wait for them, so an append that trails the log by a moment counts.
+      await lanes.get(threadId)?.tail;
+      const late = settled();
+      if (late !== null) {
+        return late;
+      }
+      let cursor: { lastSeq: number; lastByte: number } | null;
+      try {
+        cursor = indexer.cursor(threadId);
+      } catch (error) {
+        logger.warn("agent-host: thread index read failed", { error: describeError(error) });
+        return "failed";
+      }
+      if ((cursor?.lastSeq ?? 0) >= logSeq) {
+        return "complete";
+      }
+      return sweeps > 0 && !caughtUp.has(threadId) ? "catching-up" : "behind";
+    },
+
+    beginCatchUpSweep() {
+      sweeps += 1;
+      let ended = false;
+      return {
+        end: () => {
+          if (!ended) {
+            ended = true;
+            sweeps -= 1;
+          }
+        }
+      };
     },
 
     deleteThread(threadId) {
@@ -589,6 +754,22 @@ function createOpenThreadIndex(input: {
       return serving() ? read(() => queries.search(request), []) : [];
     },
 
+    // Null on a failed read, never an empty page: the client takes an empty
+    // page for "this thread has no prompts".
+    prompts(threadId, request) {
+      return serving() ? read(() => queries.prompts(threadId, request), null) : null;
+    },
+
+    prompt(threadId, messageId) {
+      if (!serving()) {
+        return { status: "failed" };
+      }
+      return read<IndexedPromptLookup>(() => {
+        const prompt = queries.prompt(threadId, messageId);
+        return prompt === null ? { status: "absent" } : { status: "found", prompt };
+      }, { status: "failed" });
+    },
+
     stop() {
       if (stopped === null) {
         stopping = true;
@@ -630,7 +811,8 @@ function createOpenThreadIndex(input: {
 /**
  * What a host without a usable index runs with: every write a no-op, every
  * read empty. The routes turn `available === false` into 503
- * `INDEX_UNAVAILABLE` (history) and `indexed: false` (search).
+ * `INDEX_UNAVAILABLE` (history, a prompt's text) and `indexed: false`
+ * (search, the prompt list).
  */
 export function createUnavailableThreadIndex(): ThreadIndex {
   return {
@@ -655,6 +837,10 @@ export function createUnavailableThreadIndex(): ThreadIndex {
     messageSpan: () => null,
     messagesSpanning: () => [],
     search: () => [],
+    coverage: async () => "unavailable",
+    beginCatchUpSweep: () => ({ end: () => undefined }),
+    prompts: () => null,
+    prompt: () => ({ status: "failed" }),
     stop: async () => undefined,
     close: () => undefined
   };

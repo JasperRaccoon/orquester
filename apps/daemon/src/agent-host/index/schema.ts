@@ -35,6 +35,17 @@
  *   message (`first_*`), following its latest (`seq`), whether or not the
  *   message ever has text — a history page must not cut one streamed message
  *   in two. A file from before these columns fails to prepare and is rebuilt.
+ *   And its AUTHOR: `role` and `agent_id` (the owning subagent, NULL for the
+ *   parent conversation's own), both the first line's — the fold takes a
+ *   message's role and owner from its first event and never changes them.
+ *   They are what lets the right rail's History reach a thread's own prompts
+ *   through the partial index `message_docs_prompts`, which holds the
+ *   parent's `user` rows alone: the FTS row's `role` is UNINDEXED and holds
+ *   no owner at all, so without them every message of the thread — a
+ *   subagent fleet's thousands, text and all — would be read to find a few
+ *   hundred prompts. And what a revert decides a message by, as the fold
+ *   does (`indexer.ts` `dropRevertedUserMessages`): `turn_id`, the latest
+ *   line's, and `created_at`, the first line's stamp.
  * - both FTS tables fold diacritics (`remove_diacritics 2`), so "cafe" finds
  *   "café". Tokens are otherwise `unicode61`'s: letters, numbers, private use.
  */
@@ -42,6 +53,13 @@
 import type { CompactionMarkerState } from "@orquester/api/agent-chat";
 
 /**
+ * 4: `message_docs.role` / `.agent_id` / `.turn_id` / `.created_at` and
+ * `message_docs_prompts` — each message's author, turn and stamp, for the
+ * thread's prompt list (`queries.ts` `prompts`) — and a revert that drops a
+ * thread's user messages by the fold's own rule rather than by position. A
+ * version-3 file has no such columns; it is rebuilt by this number rather
+ * than by its statements failing to prepare.
+ *
  * 3: `markers` follows the compaction-marker rule the UI and the MCP share
  * ({@link IndexedMarkerKind}) — the legacy `thread.state.changed` marker
  * counts, a subagent's own compaction does not. No statement changed; a
@@ -51,7 +69,7 @@ import type { CompactionMarkerState } from "@orquester/api/agent-chat";
  * behind must read as "another version" — deleted and rebuilt — rather than
  * as a file whose statements fail to prepare.
  */
-export const INDEX_SCHEMA_VERSION = 3;
+export const INDEX_SCHEMA_VERSION = 4;
 
 /** The `meta` key that carries {@link INDEX_SCHEMA_VERSION}. */
 export const SCHEMA_VERSION_KEY = "schema_version";
@@ -122,10 +140,19 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
      first_seq INTEGER NOT NULL,
      first_byte INTEGER NOT NULL,
      first_length INTEGER NOT NULL,
+     role TEXT NOT NULL,
+     agent_id TEXT,
+     turn_id TEXT,
+     created_at TEXT NOT NULL,
      PRIMARY KEY (thread_id, message_id)
    )`,
   `CREATE INDEX message_docs_by_seq ON message_docs (thread_id, seq)`,
   `CREATE INDEX message_docs_by_first_seq ON message_docs (thread_id, first_seq)`,
+  // The parent conversation's user messages in log order — its prompts,
+  // newest first. Partial, so it holds those rows and nothing else; a query
+  // uses it only when its WHERE names both terms.
+  `CREATE INDEX message_docs_prompts ON message_docs (thread_id, first_seq)
+     WHERE role = 'user' AND agent_id IS NULL`,
   `CREATE TABLE markers (
      thread_id TEXT NOT NULL,
      seq INTEGER NOT NULL,

@@ -22,6 +22,7 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
  */
 export * from "./agent-chat/index.ts";
 export * from "./cliproxy-launch-models.ts";
+export * from "./saved-prompts.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -514,6 +515,30 @@ export interface GitDiffResponse {
   diff: string;
   binary: boolean;
 }
+
+/**
+ * `GET /api/git/working-diff?path=&maxBytes=` — the project's uncommitted
+ * changes as ONE patch (a saved prompt's `{diff}`). `isRepo:false` — never an
+ * error — for a non-repo, like `/api/git/status`.
+ */
+export interface GitWorkingDiffResponse {
+  isRepo: boolean;
+  /**
+   * Staged and unstaged changes against HEAD (`git diff HEAD`; against the
+   * empty tree before the first commit), `--no-color --no-ext-diff`, cut at a
+   * line boundary within `maxBytes`. `""` when the tree is clean.
+   */
+  diff: string;
+  /** True when `diff` was cut. */
+  truncated: boolean;
+  /** Untracked, non-ignored files — not in the patch — repo-relative. */
+  untracked: string[];
+}
+
+/** `maxBytes` when the query names none. */
+export const GIT_WORKING_DIFF_DEFAULT_MAX_BYTES = 64 * 1024;
+/** `maxBytes` is clamped to `[1, GIT_WORKING_DIFF_MAX_BYTES]`. */
+export const GIT_WORKING_DIFF_MAX_BYTES = 512 * 1024;
 
 export interface GitLogEntry {
   sha: string;

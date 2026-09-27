@@ -68,8 +68,14 @@ seven **colour schemes** × light/dark/system/dynamic; a Settings **usage overvi
 per-window quota bars and a per-device reset-time format (countdown / clock / both);
 **browser tabs (Design Mode)** — a server-side headless Chromium per
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
-delivers HTML/CSS/screenshot payloads into an agent's composer or PTY, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); and an installable **PWA** web client
-(service worker + Web Push notifications on agent-session bells).
+delivers HTML/CSS/screenshot payloads into an agent's composer or PTY, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); an installable **PWA** web client
+(service worker + Web Push notifications on agent-session bells); and a **right rail** beside the
+tab content (a bottom sheet on phones) with two panels — **Saved prompts** (global and
+per-project, searchable, pinnable, with built-in `{variable}`s: project, workspace, branch,
+changed files, the uncommitted diff, date/time, agent, model) and **History & checkpoints** (every
+prompt of the open chat — the whole thread, from the host's index — and each turn's checkpoint:
+its files, its diff, "Rewind to here") — both delivering to the visible chat by **Insert** (into
+its composer) or **Send** (exactly as Enter would).
 
 ---
 
@@ -162,7 +168,11 @@ unreadable history answers `{conversations:[]}`, never an error); `/api/git/stas
 the list shifts under a client whenever another client or a terminal stashes, and an index-only
 Drop would destroy a different, unrecoverable stash, so a re-resolve mismatch is a 409);
 `/api/system/{resources,processes,ports}` +
-`POST /api/system/processes/kill`; `/api/sessions` CRUD + `/input` + `/resize` + `/reorder` +
+`POST /api/system/processes/kill`; `/api/saved-prompts` (`GET ?projectPath=` global + that
+project's, `POST`, `PUT/DELETE /:id`, `POST /:id/used`; both transports — the right rail's prompt
+library, see the gotcha) and `GET /api/git/working-diff?path=&maxBytes=` (a project's uncommitted
+changes as ONE patch, cut at a line within `maxBytes` — 64 KiB default, 512 KiB max — plus the
+untracked files; a saved prompt's `{diff}`); `/api/sessions` CRUD + `/input` + `/resize` + `/reorder` +
 chunked `GET /:id/output`; `GET /events` (NDJSON event bus + heartbeat; an optional
 `?project=<path>` additionally subscribes that stream to `project.git.changed` — see the git
 watcher below); `GET /ws` (multiplexed WebSocket for all terminals).
@@ -198,6 +208,8 @@ agent host's thread index, is a derived cache of NDJSON logs — see "Agent chat
             tmux.sock (dedicated tmux server)         sessions.json (reattach index)
             workspaces.json (side-table: gitAccountId, createdAt, isArchived, archivedProjects)
             recent-projects.json (shared recents, capped at 30; entry-wise tolerant parse)
+            saved-prompts.json (the right rail's prompt library, global + per project, ≤ 1000;
+                               entry-wise tolerant parse; a corrupt file is moved aside)
             accounts.json  keys/ (0700 per-account SSH keys)  logs/
             env/ (per-launcher env files: opencode.env, and the generated claudex.env/claudemix.env)
             hooks/ (managed agent hook script)
@@ -313,7 +325,7 @@ older host ignores both, and a newer one re-derives from the log whatever it can
 |---|---|
 | Commands (POST, JSON, every body carries a client-minted `commandId`) | `/api/sessions/:id/{turn,interrupt,approval,answer,dismiss,revert,compact,mode,session/stop}` → `{seq}` |
 | Daemon-owned, command-shaped (NOT proxied verbatim) | `POST /api/sessions/:id/account` `{commandId, accountId}` → `{seq}` — §3.4's account switch; see the gotcha below |
-| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) |
+| Reads | `GET /api/sessions/:id/thread` (whole snapshot, with `history` bounds) · `GET …/events?after=<seq>` (long-lived chunked **NDJSON**, `:hb` every 15 s — no new WebSocket) · `GET …/turns/:n/diff` · `GET …/items/:itemId` (unslimmed payload) · `GET …/items/:itemId/output` (the streamed output of the tool call the item belongs to — its `tool.output` chunks joined from the log, ≤ 8 MiB; 404 `ITEM_NOT_FOUND`) · `GET …/attachments/:attachmentId` · `GET …/history?before=<cursor>&turns=<n>` (a block of older history from the index; 503 `INDEX_UNAVAILABLE` without one) · `GET …/prompts?before=&limit=` (the thread's own user prompts, newest first, from the index — the right rail's History; 200 `indexed:false` without one) · `GET …/prompts/:messageId` (one prompt's whole text; 404 `PROMPT_NOT_FOUND`) |
 | Host level | `GET /api/agent/providers` · `POST /api/agent/providers/:id/refresh` · `POST /api/agent-host/stop` · `GET /api/agent/search?q=&limit=&projectPath=` (full-text over every open chat; 200 `indexed:false` without an index) |
 
 Everything is built in one place — `agentChatRoutes` in `packages/api/src/agent-chat/wire.ts`; use
@@ -644,6 +656,32 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   raw: `q` is clamped to 200 code points, split on whitespace and every token quoted as a phrase
   with inner `"` doubled (`toFtsQuery`), so `NEAR`, `OR`, `*`, `-` and `:` match as text; `limit`
   is clamped to 50.
+- **`GET …/prompts` lists the PARENT's user prompts straight from the index.** The right rail's
+  History reads every prompt a thread ever had without folding anything: `message_docs` carries
+  each message's author — `role` and the owning subagent's `agent_id` (NULL for the parent), from
+  its first line — plus its `turn_id` (latest line) and `created_at` (first line), and the partial
+  index `message_docs_prompts (thread_id, first_seq) WHERE role='user' AND agent_id IS NULL` walks
+  a thread's prompts newest first, joining `messages_fts` by rowid only for the rows it walks; that
+  is why `INDEX_SCHEMA_VERSION` is 4 (and why the first host on it rebuilds the whole index). Which
+  user messages are prompts, and their text, is ONE rule for the host and the client —
+  `recallablePromptText` (`packages/api/src/agent-chat/prompts.ts`: never a provider-internal row,
+  the verbatim `/compact` or an Implement; `[Image #N]` placeholders stripped). A page walks at most
+  2 000 rows (`PROMPTS_SCAN_BUDGET`, batches of `max(limit + 1, 256)`), so it can end SHORT or
+  EMPTY with a `before` cursor — only `before: null` means "no older prompts", and the client
+  fills a short list by itself (`fillWantsOlder`) and pages the whole thread in for a search
+  (`searchWantsOlder`, capped at 5 000 prompts; both through `useAutoLoadsOlder`). `turnOrdinal`
+  and `rewindable` come from the same turn rows and compaction rule the history page uses, and a
+  revert drops user rows by the FOLD's own rule (a port of `retainMessagesAfterRevert`), not by
+  log position, so History never lists a prompt the timeline dropped. The cursor is
+  `base64url({t, s})` on the log seq — it survives a rebuild and a revert; a malformed one is a
+  first page. Before answering, the host checks the index COVERS the thread (`coverage`: it waits
+  for queued live appends, never for a catch-up): a thread still catching up (a rebuild, the boot
+  sweep not there yet) answers 200 `indexed:false, catchingUp:true` and the client re-asks with
+  backoff (3 s → 30 s, 40 tries, then Retry); no usable index, or rows that will stay behind until
+  a restart, answer a terminal `indexed:false`; a failed read is a retryable 503
+  `INDEX_UNAVAILABLE`; `…/prompts/:messageId` answers 404 `PROMPT_NOT_FOUND` only when coverage is
+  complete. A host from before the route answers its route-miss 404: in every fallback the client
+  lists what the chat itself holds, merged with the pages (the window's whole, live text wins).
 - **`better-sqlite3` is a native addon, handled like `node-pty`:** root
   `pnpm.onlyBuiltDependencies`, a dependency of both `@orquester/daemon` and `@orquester/desktop`,
   and `external` in the desktop's esbuild main bundle. Pinned `^12` because this stack runs Node 20
@@ -1262,6 +1300,60 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   immediately before signalling (a recycled pid must never get the signal). Everything under
   `/api/system/*` is Linux-only by construction (all `/proc`); off Linux each route answers
   `supported: false` with zeroed data, the same host-gating shape `/api/fs/capabilities` uses.
+- **The right rail delivers through the composer, never around it.** Its target is the visible
+  chat tab (`activeChatTab()`, the focused grid cell). **Insert** is `insertComposerText(…,
+  "cursor", {focus: true})` — at the caret, then focused with the caret after it. **Send** is
+  `submitComposerText` (`composer-bridge.ts`), decided by the pure `planExternalSubmit`
+  (`composer-submission.ts`) exactly as Enter decides for that text as the whole draft: a bare
+  `/plan`/`/default` switches the mode where the toggle shows; the composer's own guards over the
+  TRIMMED text (a revert, a send in flight, an open approval or question card — a host `/goal`
+  excepted, the provider-command refusals, the length bound); the thread's mode and model; and the
+  follow-up preference — a running turn QUEUES it or is STEERED by it — with an identical queue
+  inside 1 s refused as a double click's twin, and a failed send coming back into the draft. The goal chip's
+  `sendText` is a different path (always steers, never returns to the draft); do not route the
+  rail through it. Saved-prompt `{variables}` render on the client at click time
+  (`lib/saved-prompts/variables.ts`): only `PROMPT_VARIABLES`' known names render, `{{name}}` is the
+  literal `{name}`, anything else — code braces included — stays as written, and the git reads
+  happen only for the variables a body uses; a failed read inserts nothing. `{diff}` is scoped to
+  the project directory, `{changedFiles}` is `/api/git/status`'s whole-repo list (the Git tab's) —
+  identical when the project is its repo's root. The editor modal is mounted ONCE
+  (`SavedPromptEditorHost`, opened through `saved-prompts/editor-bridge.ts`), so History's "Save
+  as prompt" reaches it from either panel.
+- **The rail owns the keys typed into it.** The chat's chords (the composer's Ctrl/Cmd+E, +/,
+  +Shift+M, +Shift+Enter, the timeline's Ctrl/Cmd+J) are capture-phase `window` listeners that no
+  surface can stop, so they stand down for a key whose target is inside a root marked
+  `data-keyboard-surface` (the dock, the mobile sheet, the prompt editor) or any `aria-modal`
+  dialog or sheet (`insideKeyboardSurface`, `lib/keyboard-surfaces.ts`); the chat's own popovers
+  are menus, not modal, so a chord still moves between them. The question card's digits stand
+  down inside those AND inside any menu or listbox (`insideKeyboardOwner`) — target-based, so a
+  hover popover that holds a layer (the context meter's) never silences them, and a button focused
+  in a modal, the sheet or a menu never answers a question, which cannot be undone. The dock also
+  holds a keyboard layer while focus is inside it, so the chat's Escape (interrupt, Esc-Esc rewind)
+  and Ctrl+Shift+A stand down; an Escape nothing inside handled goes back to the composer, and a
+  held Escape is ONE press (the composer textarea's interrupt ignores `repeat`, or the repeats of
+  an Escape that left the dock would stop the turn). Focus must never be stranded on `<body>`
+  while a turn runs — a bare Escape there interrupts it: the dock pulls focus back to its root
+  when the element it was on is removed, disabled, hidden or made inert (`focusFellOut`,
+  `dock-keyboard.ts`), and `ui/modal.tsx` gives focus back to whatever opened a modal when the
+  close leaves it on `<body>` (read at render, before the dialog's autofocus; decided a tick later
+  so a StrictMode rehearsal never steals it; an opener that is gone is not revived).
+- **Saved prompts are daemon-owned JSON** (`<appdir>/daemon/saved-prompts.json`,
+  `apps/daemon/src/saved-prompts.ts`), broadcast on the `saved-prompts` channel
+  (`savedPrompt.upserted` / `savedPrompt.deleted`) for every mutation, cascades included. The parse
+  is entry-wise tolerant: a record keeps its unknown fields, and an entry it cannot read (a newer
+  shape) or an unknown top-level key is written back **verbatim** on every save — never listed,
+  never counted — so a rollback never strips a newer record; a change to a field's type or meaning
+  bumps the file version instead. The four starter prompts are seeded ONLY when the file does not
+  exist — its existence is the marker, so a deleted starter never comes back; a corrupt or
+  unknown-version file is renamed aside (`.corrupt-<stamp>`) and never overwritten or re-seeded,
+  and a file that merely could not be READ (EACCES, EMFILE, …) is left where it is. While the file
+  cannot be written, every mutation answers 503 `SAVED_PROMPTS_UNAVAILABLE` rather than an edit that
+  would vanish on restart. `projectPath` is `null` (global) or validated like the recent-projects
+  path (`<workspacesDir>/<ws>/<project>`, inside `fsRoot`, an existing directory) and stored as that
+  **string**, never a realpath — the client filters by comparing it with its own project path.
+  Deleting a project or workspace deletes its prompts once the directory is gone (a failed `rm`
+  deletes nothing); archiving does not, and neither does a generic `DELETE /api/fs` (as for
+  to-dos).
 - **Adapter/localStorage loads must go through a schema (or field-wise validation) with
   fallback — old bundles' payloads outlive deploys.** Raw `JSON.parse` output must never reach
   typed code: a `usage` blob persisted by a pre-migration bundle once crashed the whole web
@@ -1664,6 +1756,7 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Client store + transport + WS channel | `packages/ui/src/store/app.ts`, `packages/ui/src/lib/api-client.ts`, `packages/ui/src/lib/transporters/ws-session-channel.ts` |
 | Agent conversation history + resume | `apps/daemon/src/agent-conversations.ts`, `resumeLaunchArgs` in `apps/daemon/src/sessions.ts`, `resumeArgs`/`canResumeAgent` in `packages/registry/src/index.ts`, `packages/ui/src/components/main/ProjectOverview.tsx` |
 | Recent projects (daemon-owned) | `apps/daemon/src/recent-projects.ts`, `packages/ui/src/components/main/RecentProjects.tsx` |
+| Right rail: shell, saved prompts, history & checkpoints | `packages/ui/src/components/right-rail/` (`RightRailFrame`/`RightRailDock`/`RightRail`/`RightRailSheet`, `chat-target.ts`, `saved-prompts/`, `history/`), `packages/ui/src/lib/{saved-prompts,prompt-history}/`, `apps/daemon/src/saved-prompts.ts`, `packages/api/src/saved-prompts.ts`, `packages/api/src/agent-chat/prompts.ts`, the index's `prompts` query in `apps/daemon/src/agent-host/index/queries.ts` |
 | System status (`/proc`, process tree, kill guard) | `apps/daemon/src/system-status.ts`, `panePids`/`serverPid` in `apps/daemon/src/tmux.ts` |
 | Git watcher, stashes, commit graph | `GitWatcher` + `passesGitEventFilter` in `apps/daemon/src/git.ts`, `packages/ui/src/components/git/git-watch.ts`, `packages/ui/src/components/git/graph.ts` |
 | Project templates + create dialog | `TEMPLATES` in `packages/registry/src/index.ts`, `packages/ui/src/components/sidebar/NewProjectModal.tsx` |

@@ -121,6 +121,10 @@ describe("a send that did not go out comes back to the thread it was sent from",
         toB.push("sendText");
         return false;
       },
+      submitText: () => {
+        toB.push("submitText");
+        return { ok: false, reason: "refused" };
+      },
       restoreFailedSend: () => {
         toB.push("restoreFailedSend");
         return true;
@@ -165,6 +169,7 @@ describe("a send that did not go out comes back to the thread it was sent from",
       focusAtEnd: () => {},
       openControl: () => {},
       sendText: () => false,
+      submitText: () => ({ ok: false, reason: "refused" }),
       restoreFailedSend: (restore) => {
         handed.push(restore);
         return true;
@@ -190,6 +195,7 @@ describe("a send that did not go out comes back to the thread it was sent from",
       focusAtEnd: () => {},
       openControl: () => {},
       sendText: () => false,
+      submitText: () => ({ ok: false, reason: "refused" }),
       restoreFailedSend: () => false
     });
     try {

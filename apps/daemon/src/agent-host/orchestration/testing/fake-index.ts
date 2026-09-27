@@ -9,9 +9,11 @@
  * first line, the latest one grows with every event, and a `thread.reverted`
  * closes every range so the reverted bytes belong to no turn; settled
  * compaction markers; every activity's LATEST line (last write wins); every
- * message's span, first chunk to last; the revert truncation. The turn rules themselves come
- * from the shared fold, so they cannot drift. It records every call for a test
- * to assert on. No SQLite, no I/O, and nothing in it waits.
+ * message's span, first chunk to last, with its author and text; the revert
+ * truncation. The turn rules themselves come from the shared fold, and the
+ * prompt list pages through the real index's `readPromptsPage`, so neither
+ * can drift. It records every call for a test to assert on. No SQLite, no
+ * I/O, and nothing in it waits.
  */
 
 import {
@@ -19,6 +21,7 @@ import {
   compactionMarkerState,
   createEmptyThreadState,
   isConversationCompactionActivity,
+  recallablePromptText,
   startedTurns,
   type DomainEvent,
   type HistoryCursor,
@@ -27,13 +30,18 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type {
+  IndexCoverage,
   IndexedItemPosition,
   IndexedMessageSpan,
+  IndexedPromptLookup,
+  IndexedPromptsPage,
   IndexedThreadMeta,
   IndexedTurn,
   SpanningMessage,
   ThreadIndex
 } from "../../index/index.ts";
+import { capText, MAX_INDEXED_TEXT_CHARS } from "../../index/indexer.ts";
+import { readPromptsPage, type PromptCandidate } from "../../index/queries.ts";
 import type { EventPosition } from "../../services.ts";
 
 interface ThreadRows {
@@ -49,9 +57,23 @@ interface ThreadRows {
   markers: Array<{ seq: number; compacted: boolean }>;
   /** Every activity's latest line, by id. */
   items: Map<string, IndexedItemPosition>;
-  /** Every message's first line and last seq, by id. */
-  messages: Map<string, { first: IndexedItemPosition; lastSeq: number }>;
+  /** Every message's first line and last seq, its author and its text, by id. */
+  messages: Map<string, FakeMessage>;
   cursor: { lastSeq: number; lastByte: number } | null;
+}
+
+interface FakeMessage {
+  first: IndexedItemPosition;
+  lastSeq: number;
+  /** The first line's, as `message_docs` keeps them. */
+  role: string;
+  agentId: string | null;
+  /** The fold's text rule: a delta appends, a finished row with text replaces. */
+  text: string;
+  /** The latest line's turn, as the FTS row keeps it. */
+  turnId: string | null;
+  /** The first line's stamp. */
+  at: string;
 }
 
 export interface FakeThreadIndex extends ThreadIndex {
@@ -65,6 +87,14 @@ export interface FakeThreadIndex extends ThreadIndex {
   readonly searches: Array<{ q: string; limit: number; projectPath?: string }>;
   /** What `search` answers, cut to the requested limit. */
   searchHits: ThreadSearchHit[];
+  /**
+   * What `coverage` answers for every thread, when set — to model a catch-up
+   * in progress, a thread left behind, a failed read. Unset: `complete` once
+   * the thread's observed events reach the log's seq, else `behind`.
+   */
+  coverageOverride: IndexCoverage | null;
+  /** Sweeps begun and not ended. */
+  sweeps: number;
   closed: boolean;
 }
 
@@ -110,14 +140,29 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
       rows.prompts.set(event.payload.messageId, position);
     }
     if (event.type === "thread.message-sent") {
-      const known = rows.messages.get(event.payload.messageId);
+      const payload = event.payload;
+      const known = rows.messages.get(payload.messageId);
       if (known === undefined) {
-        rows.messages.set(event.payload.messageId, {
+        rows.messages.set(payload.messageId, {
           first: { seq: event.seq, byteOffset: position.byteOffset, byteLength: position.byteLength },
-          lastSeq: event.seq
+          lastSeq: event.seq,
+          role: payload.role,
+          agentId:
+            typeof payload.agentId === "string" && payload.agentId.length > 0
+              ? payload.agentId
+              : null,
+          text: payload.text,
+          turnId: payload.turnId,
+          at: event.occurredAt
         });
       } else {
         known.lastSeq = event.seq;
+        known.turnId = payload.turnId;
+        known.text = payload.streaming
+          ? `${known.text}${payload.text}`
+          : payload.text.length > 0
+            ? payload.text
+            : known.text;
       }
     }
     if (event.type === "thread.activity-appended") {
@@ -146,13 +191,21 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
           if (item.seq >= cut) rows.items.delete(id);
         }
         for (const [id, message] of [...rows.messages]) {
-          if (message.first.seq >= cut) rows.messages.delete(id);
+          if (message.role !== "user" && message.first.seq >= cut) rows.messages.delete(id);
         }
       }
       rows.turns = rows.turns.filter((turn) => turn.ordinal <= keep);
       // A revert closes every range: nothing grows until the next turn starts.
       rows.openTurnId = null;
       rows.state = applyDomainEvent(rows.state, event);
+      // User messages go the fold's way, as the real index takes them
+      // (`dropRevertedUserMessages`): the fold here holds the whole log.
+      const surviving = new Set(
+        rows.state.items.filter((item) => item.kind === "message").map((item) => item.id)
+      );
+      for (const [id, message] of [...rows.messages]) {
+        if (message.role === "user" && !surviving.has(id)) rows.messages.delete(id);
+      }
       return;
     }
 
@@ -231,6 +284,8 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
     deleted: [],
     searches: [],
     searchHits: [],
+    coverageOverride: null,
+    sweeps: 0,
     closed: false,
 
     observe(input): void {
@@ -412,6 +467,78 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
       });
       if (!fake.available || fake.closed) return [];
       return fake.searchHits.slice(0, input.limit);
+    },
+
+    async coverage(threadId: string, logSeq: number): Promise<IndexCoverage> {
+      if (!fake.available || fake.closed) return "unavailable";
+      if (fake.coverageOverride !== null) return fake.coverageOverride;
+      const lastSeq = threads.get(threadId)?.cursor?.lastSeq ?? 0;
+      return lastSeq >= logSeq ? "complete" : fake.sweeps > 0 ? "catching-up" : "behind";
+    },
+
+    beginCatchUpSweep() {
+      fake.sweeps += 1;
+      let ended = false;
+      return {
+        end: () => {
+          if (!ended) {
+            ended = true;
+            fake.sweeps -= 1;
+          }
+        }
+      };
+    },
+
+    prompts(threadId, input): IndexedPromptsPage | null {
+      if (!fake.available || fake.closed) return null;
+      const rows = threads.get(threadId);
+      // The rows `message_docs_prompts` reaches: the parent's `user` messages,
+      // text or not — one without text is walked past like a refused one.
+      const candidates: PromptCandidate[] = [...(rows?.messages.entries() ?? [])]
+        .filter(([, message]) => message.role === "user" && message.agentId === null)
+        .map(([messageId, message]) => ({
+          messageId,
+          seq: message.first.seq,
+          text: capText(message.text),
+          turnId: message.turnId,
+          createdAt: message.at
+        }))
+        .sort((left, right) => right.seq - left.seq);
+      return readPromptsPage(threadId, input, {
+        olderThan: (beforeSeq, count) => {
+          const read = candidates.filter((candidate) => candidate.seq < beforeSeq).slice(0, count);
+          return { candidates: read, scanned: read.length };
+        },
+        turnOpenedBy: (messageId) => {
+          const opened = (rows?.turns ?? [])
+            .filter((turn) => turn.userMessageId === messageId)
+            .sort((left, right) => left.ordinal - right.ordinal)[0];
+          return opened === undefined ? null : { ...opened };
+        },
+        rewindable: (turn) => fake.rewindable(threadId, turn)
+      });
+    },
+
+    prompt(threadId: string, messageId: string): IndexedPromptLookup {
+      if (!fake.available || fake.closed) return { status: "failed" };
+      const message = threads.get(threadId)?.messages.get(messageId);
+      if (message === undefined || message.role !== "user" || message.agentId !== null) {
+        return { status: "absent" };
+      }
+      const copy = capText(message.text);
+      const text = recallablePromptText(copy);
+      return text === null
+        ? { status: "absent" }
+        : {
+            status: "found",
+            prompt: {
+              messageId,
+              text,
+              cut: copy.length >= MAX_INDEXED_TEXT_CHARS - 1,
+              line: { ...message.first },
+              lastSeq: message.lastSeq
+            }
+          };
     },
 
     async stop(): Promise<void> {

@@ -15,6 +15,7 @@ import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
+import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { useAppStore } from "../../../store/app";
 import { attachmentPathOf } from "../../../lib/agent-chat/composer.logic";
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
@@ -46,7 +47,7 @@ import {
 } from "./composer-draft";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
-import { registerComposerHandle } from "./composer-bridge";
+import { registerComposerHandle, type ComposerSubmitResult } from "./composer-bridge";
 import { restoreFailedSendDraft } from "./composer-failed-send";
 import {
   blockedProviderCommandMessage,
@@ -85,6 +86,7 @@ import {
   PENDING_REQUEST_REASON,
   pendingRequestBlocksSend,
   planExternalSend,
+  planExternalSubmit,
   proposedPlanTitle,
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
@@ -703,12 +705,14 @@ export function ChatComposer({
         // event triggered it (a queued row's X, a card's option click, an
         // interrupt's drain, a delivered ref): place the caret, keep focus
         // where it is. A surface that wants the composer focused asks for it
-        // explicitly (`focusAtEnd` / `focusComposer`).
-        insertText: (text, mode) => insertText(text, mode, { focus: isTextareaFocused() }),
+        // explicitly (`options.focus`, `focusAtEnd` / `focusComposer`).
+        insertText: (text, mode, options) =>
+          insertText(text, mode, { focus: options?.focus ?? isTextareaFocused() }),
         stageAttachment,
         focusAtEnd,
         openControl,
         sendText: (text) => sendExternalTextRef.current(text),
+        submitText: (text) => submitExternalTextRef.current(text),
         restoreFailedSend: (restore) => restoreIntoLiveDraft(sessionId, restore)
       }),
     [
@@ -1207,6 +1211,61 @@ export function ChatComposer({
   const sendExternalTextRef = React.useRef(sendExternalText);
   sendExternalTextRef.current = sendExternalText;
 
+  /**
+   * Submit a message the right rail hands over — a saved prompt, a prompt from
+   * the thread's history — exactly as Enter would submit it as the whole draft
+   * (`planExternalSubmit`, pure and tested): the mode switch for a bare
+   * `/plan` or `/default`, the send guards, then the follow-up preference, so
+   * a running turn QUEUES it or is STEERED by it as the user chose. The draft
+   * is left as it is, and a send that fails comes back into it (`runSend`'s
+   * default): the text is the user's prompt.
+   */
+  const lastExternalQueueRef = React.useRef<{ text: string; at: number } | null>(null);
+  const submitExternalText = (text: string): ComposerSubmitResult => {
+    const now = Date.now();
+    const plan = planExternalSubmit({
+      text,
+      reverting,
+      sending,
+      hasPendingRequest,
+      adapterId: provider?.id,
+      hostParsesGoal: hostGoalCommand,
+      showPlanModeToggle,
+      followUpBehavior: chatPrefs.followUpBehavior,
+      isTurnActive,
+      lastQueued: lastExternalQueueRef.current,
+      now
+    });
+    switch (plan.kind) {
+      case "refuse":
+        setNotice(plan.reason);
+        return { ok: false, reason: plan.reason };
+      case "plan-mode":
+        setNotice(null);
+        setPlanMode(plan.mode);
+        return { ok: true, disposition: "mode", mode: plan.mode };
+      case "queue":
+        setNotice(null);
+        lastExternalQueueRef.current = { text: plan.text, at: now };
+        actions.queueMessage({
+          text: plan.text,
+          attachments: [],
+          context: [],
+          interactionMode,
+          // As `submit`'s queue: the store re-anchors it to the current tool boundary.
+          queuedAfterToolActivityId: null,
+          holdUntilUserAction: false
+        });
+        return { ok: true, disposition: "queued" };
+      case "send":
+        setNotice(null);
+        void runSend(plan.text, interactionMode, []);
+        return { ok: true, disposition: "sent" };
+    }
+  };
+  const submitExternalTextRef = React.useRef(submitExternalText);
+  submitExternalTextRef.current = submitExternalText;
+
   const submit = React.useCallback(
     (intent: "foreground" | "alternate") => {
       if (reverting || sending) return;
@@ -1415,6 +1474,10 @@ export function ChatComposer({
       // inactive tabs with a class, it does not unmount them), so without this
       // gate one chord fires on every thread at once.
       if (!isChatTabListenerActive(active, shellRef.current)) return;
+      // A key typed into the right rail's panel, its sheet, the prompt editor
+      // or any modal dialog is that surface's, never a chord of this chat
+      // (`lib/keyboard-surfaces.ts`).
+      if (insideKeyboardSurface(event.target)) return;
       const shortcut = resolveChatShortcut(event);
       if (!shortcut) return;
       if (shortcut.kind === "steer-queued") {
@@ -1536,7 +1599,10 @@ export function ChatComposer({
       event.preventDefault();
       // This Escape stopped the turn; it is nobody's first press.
       escapeSequence.reset();
-      interrupt();
+      // A held key is ONE press: its first keydown acted — here, or where it
+      // started (an Escape that left the right rail's panel lands its
+      // auto-repeats in this textarea, and they must not stop the turn).
+      if (!event.repeat) interrupt();
       return;
     }
     if (event.key === "Escape") {

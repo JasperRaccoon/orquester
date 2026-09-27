@@ -9,6 +9,8 @@ import {
   restoreComposerFailedSend,
   sendComposerText,
   stageComposerAttachment,
+  submitComposerText,
+  COMPOSER_NOT_MOUNTED_REASON,
   type ComposerHandle
 } from "./composer-bridge.ts";
 import type { StagedAttachment } from "./ComposerAttachments";
@@ -30,6 +32,10 @@ function fakeHandle(
     sendText: (text) => {
       log.push(`send:${text}`);
       return sendResult;
+    },
+    submitText: (text) => {
+      log.push(`submit:${text}`);
+      return sendResult ? { ok: true, disposition: "sent" } : { ok: false, reason: "refused" };
     },
     restoreFailedSend: (restore) => {
       log.push(`restore:${restore.outcome.notice}`);
@@ -130,4 +136,26 @@ test("goals §8.2: a refused or unmounted send reports false", () => {
   assert.equal(sendComposerText("s6", "/goal clear"), false);
   unregister();
   assert.equal(sendComposerText("never-mounted", "/goal clear"), false);
+});
+
+test("the right rail's submit reaches the mounted composer and answers its result", () => {
+  const log: string[] = [];
+  const unregister = registerComposerHandle("rail", fakeHandle(log));
+  assert.deepEqual(submitComposerText("rail", "review this"), { ok: true, disposition: "sent" });
+  assert.deepEqual(log, ["submit:review this"]);
+  unregister();
+});
+
+test("the right rail's submit says why when the composer refuses it", () => {
+  const log: string[] = [];
+  const unregister = registerComposerHandle("rail-refused", fakeHandle(log, true, { sendResult: false }));
+  assert.deepEqual(submitComposerText("rail-refused", "x"), { ok: false, reason: "refused" });
+  unregister();
+});
+
+test("the right rail's submit to a thread with no composer is refused, never dropped silently", () => {
+  assert.deepEqual(submitComposerText("never-mounted", "x"), {
+    ok: false,
+    reason: COMPOSER_NOT_MOUNTED_REASON
+  });
 });

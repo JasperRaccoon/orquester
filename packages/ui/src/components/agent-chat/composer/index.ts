@@ -48,6 +48,7 @@ export {
 } from "./RewindControl";
 
 export {
+  COMPOSER_NOT_MOUNTED_REASON,
   composerHandle,
   focusComposer,
   insertComposerText,
@@ -55,7 +56,9 @@ export {
   registerComposerHandle,
   restoreComposerFailedSend,
   stageComposerAttachment,
-  type ComposerHandle
+  submitComposerText,
+  type ComposerHandle,
+  type ComposerSubmitResult
 } from "./composer-bridge";
 
 export {

@@ -1,25 +1,33 @@
 /**
  * Agent host — the thread index's reads: turn lookups, history paging and
  * search (design 2026-09-23 "thread index and lazy boot", §C "History page",
- * "Search").
+ * "Search"), and the thread's own prompts (the right rail's History).
  *
  * Nothing here trusts a row's shape: the file is a cache another build may
  * have written, so every column is checked before it reaches a caller.
  */
 
 import {
+  THREAD_PROMPTS_DEFAULT_LIMIT,
+  THREAD_PROMPTS_MAX_LIMIT,
+  THREAD_PROMPT_TEXT_MAX_CHARS,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   THREAD_SEARCH_MAX_RESULTS,
+  recallablePromptText,
   type HistoryCursor,
+  type ThreadPromptEntry,
   type ThreadSearchHit
 } from "@orquester/api/agent-chat";
 
 import type {
   IndexedItemPosition,
   IndexedMessageSpan,
+  IndexedPrompt,
+  IndexedPromptsPage,
   IndexedTurn,
   SpanningMessage
 } from "./index.ts";
+import { MAX_INDEXED_TEXT_CHARS } from "./indexer.ts";
 import type { SqliteDatabase } from "./sqlite.ts";
 
 export interface ThreadIndexQueries {
@@ -41,6 +49,8 @@ export interface ThreadIndexQueries {
   ): IndexedTurn[];
   rewindable(threadId: string, turn: IndexedTurn): boolean;
   search(input: { q: string; limit: number; projectPath?: string }): ThreadSearchHit[];
+  prompts(threadId: string, input: { before?: string | null; limit: number }): IndexedPromptsPage;
+  prompt(threadId: string, messageId: string): IndexedPrompt | null;
 }
 
 const TURN_COLUMNS = `turn_id, ordinal, user_message_id, requested_at, started_at, completed_at,
@@ -108,6 +118,33 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
     compactedAfter: db.prepare(
       "SELECT 1 AS hit FROM markers WHERE thread_id = ? AND kind = 'compacted' AND seq > ? LIMIT 1"
     ),
+    // The thread's own prompts, newest first: its parent `user` rows walked
+    // down the partial index `message_docs_prompts` — no other message's row
+    // is touched — each joined to its text by rowid. A LEFT join: a message
+    // with no FTS row never had any text, and is walked past like any row the
+    // recall rule refuses, so a page's read counts every row it scanned.
+    promptsBefore: db.prepare(
+      `SELECT d.message_id AS message_id, d.first_seq AS first_seq,
+              d.turn_id AS turn_id, d.created_at AS created_at, f.text AS text
+       FROM message_docs AS d
+       LEFT JOIN messages_fts AS f ON f.rowid = d.rowid
+       WHERE d.thread_id = ? AND d.role = 'user' AND d.agent_id IS NULL AND d.first_seq < ?
+       ORDER BY d.first_seq DESC
+       LIMIT ?`
+    ),
+    prompt: db.prepare(
+      `SELECT d.first_seq AS first_seq, d.first_byte AS first_byte,
+              d.first_length AS first_length, d.seq AS seq, f.text AS text
+       FROM message_docs AS d
+       CROSS JOIN messages_fts AS f ON f.rowid = d.rowid
+       WHERE d.thread_id = ? AND d.message_id = ? AND d.role = 'user' AND d.agent_id IS NULL`
+    ),
+    // The started turns naming a prompt as theirs (one, but for a log that
+    // says otherwise). No ORDER BY: sorting by ordinal here makes SQLite walk
+    // `turns_by_ordinal` over the whole thread instead of `turns_by_prompt`.
+    turnsOpenedBy: db.prepare(
+      `SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? AND user_message_id = ?`
+    ),
     // A prompt is persisted before the provider mints its turn id, so its
     // own `turn_id` is null; the turn that names it as `user_message_id` is
     // the turn a hit on it must reveal.
@@ -152,6 +189,21 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
 
   function turnById(threadId: string, turnId: string): IndexedTurn | null {
     return toIndexedTurn(sql.turnById.get(threadId, turnId));
+  }
+
+  /**
+   * A rewind to `turn` cuts the conversation just before its opening prompt
+   * (`targetTurnCount = ordinal - 1`), so any SETTLED compaction after that
+   * prompt lies between the cut and now — the provider no longer holds what
+   * it would roll back to, and refuses (§5.5). The window's rule, exactly:
+   * "no compacted marker after the message"; an in-flight or failed
+   * compaction dropped nothing and withholds nothing. `markers` holds only
+   * the conversation's own markers (`schema.ts` `IndexedMarkerKind`), so a
+   * `compacted` row here is what `isSettledConversationCompaction` accepts.
+   * The history page's turns and the prompt list's entries both ask here.
+   */
+  function rewindable(threadId: string, turn: IndexedTurn): boolean {
+    return sql.compactedAfter.get(threadId, turn.firstSeq) === undefined;
   }
 
   /**
@@ -329,19 +381,7 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
         .reverse();
     },
 
-    /**
-     * A rewind to `turn` cuts the conversation just before its opening prompt
-     * (`targetTurnCount = ordinal - 1`), so any SETTLED compaction after that
-     * prompt lies between the cut and now — the provider no longer holds what
-     * it would roll back to, and refuses (§5.5). The window's rule, exactly:
-     * "no compacted marker after the message"; an in-flight or failed
-     * compaction dropped nothing and withholds nothing. `markers` holds only
-     * the conversation's own markers (`schema.ts` `IndexedMarkerKind`), so a
-     * `compacted` row here is what `isSettledConversationCompaction` accepts.
-     */
-    rewindable(threadId, turn) {
-      return sql.compactedAfter.get(threadId, turn.firstSeq) === undefined;
-    },
+    rewindable,
 
     search(input) {
       const match = toFtsQuery(typeof input.q === "string" ? input.q : "");
@@ -366,7 +406,298 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
       // interleave — one ranked list, the best `limit` of both.
       rows.sort((left, right) => left.score - right.score || right.hit.seq - left.hit.seq);
       return rows.slice(0, limit).map((row) => row.hit);
+    },
+
+    prompts(threadId, input) {
+      return readPromptsPage(threadId, input, {
+        olderThan: (beforeSeq, count) => {
+          const rows = sql.promptsBefore.all(threadId, boundOf(beforeSeq), count);
+          return {
+            candidates: rows
+              .map(toPromptCandidate)
+              .filter((candidate): candidate is PromptCandidate => candidate !== null),
+            scanned: rows.length
+          };
+        },
+        // The first, as search reveals it.
+        turnOpenedBy: (messageId) =>
+          sql.turnsOpenedBy
+            .all(threadId, messageId)
+            .map(toIndexedTurn)
+            .reduce<IndexedTurn | null>(
+              (first, turn) =>
+                turn !== null && (first === null || turn.ordinal < first.ordinal) ? turn : first,
+              null
+            ),
+        rewindable: (turn) => rewindable(threadId, turn)
+      });
+    },
+
+    /**
+     * The prompt's text as the index holds it, judged by the list's own rule:
+     * only an id `prompts` could have listed answers — never an assistant or
+     * a subagent's message, a reverted turn's prompt (its row is gone) or a
+     * row the recall rule refuses.
+     */
+    prompt(threadId, messageId) {
+      if (typeof messageId !== "string" || messageId.length === 0) {
+        return null;
+      }
+      const row = asRecord(sql.prompt.get(threadId, messageId));
+      if (row === null || typeof row.text !== "string") {
+        return null;
+      }
+      const {
+        first_seq: firstSeq,
+        first_byte: byteOffset,
+        first_length: byteLength,
+        seq: lastSeq
+      } = row;
+      if (!isCount(firstSeq) || !isCount(byteOffset) || !isCount(byteLength) || !isCount(lastSeq)) {
+        return null;
+      }
+      const text = recallablePromptText(row.text);
+      if (text === null || byteLength === 0) {
+        return null;
+      }
+      return {
+        messageId,
+        text,
+        // `capText` keeps MAX_INDEXED_TEXT_CHARS units, or one fewer rather
+        // than split a surrogate pair: a copy that long may be a head.
+        cut: row.text.length >= MAX_INDEXED_TEXT_CHARS - 1,
+        line: { seq: firstSeq, byteOffset, byteLength },
+        lastSeq
+      };
     }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The thread's prompts
+// ---------------------------------------------------------------------------
+
+/** A parent `user` message as the index holds it, before the recall rule judges it. */
+export interface PromptCandidate {
+  messageId: string;
+  /** The seq of its first line: where it sits in the conversation. */
+  seq: number;
+  /** The index's copy of its text. */
+  text: string;
+  /** The turn the message itself names — a steer's is the turn it steered. */
+  turnId: string | null;
+  createdAt: string;
+}
+
+/**
+ * What {@link readPromptsPage} reads through: the SQL above, or the
+ * orchestration tests' in-memory index, which pages by the same rule.
+ */
+export interface PromptSource {
+  /**
+   * Up to `count` of the thread's parent `user` rows whose `seq` is below
+   * `beforeSeq`, newest first: `candidates` are the ones that could be
+   * placed, and `scanned` how many rows the read returned, placed or not — a
+   * read shorter than `count` is what says the thread has no more.
+   */
+  olderThan(beforeSeq: number, count: number): { candidates: PromptCandidate[]; scanned: number };
+  /** The started turn the message opened (the first, if several name it), or null. */
+  turnOpenedBy(messageId: string): IndexedTurn | null;
+  /** The history page's rule, for a turn a prompt opened. */
+  rewindable(turn: IndexedTurn): boolean;
+}
+
+/**
+ * Rows one page may walk before it stops and hands back a cursor instead —
+ * the bound on a page's synchronous work: a Claude thread resumed from its
+ * transcript can hold thousands of `<task-notification>` rows between two
+ * prompts, and every row walked is one FTS row read.
+ */
+export const PROMPTS_SCAN_BUDGET = 2_000;
+
+/** Rows one read takes at the least, whatever the page's `limit`. */
+export const PROMPTS_MIN_BATCH = 256;
+
+/**
+ * One page of the thread's own prompts, newest first: `limit` of the
+ * candidates `recallablePromptText` accepts, strictly older than the
+ * `before` cursor. Rows the rule refuses — a provider-internal row, the
+ * verbatim `/compact`, an Implement, an image-only message — never cost the
+ * page a slot: the walk goes on down the thread, `max(limit + 1,
+ * PROMPTS_MIN_BATCH)` rows a read, until the page is full plus ONE prompt,
+ * whose existence is what `before` says — or until the thread is exhausted
+ * (`before` null), or until {@link PROMPTS_SCAN_BUDGET} rows have been walked:
+ * then the page stops where it is, however few prompts it holds (none,
+ * even), with `before` at the last row it walked, and the next page goes on
+ * from there. A malformed or foreign cursor reads as none — a first page, as
+ * the history cursor does.
+ *
+ * `turnOrdinal` and `rewindable` belong to the turn a prompt OPENED (the
+ * started turn naming it as its prompt — `/revert`'s count, and the history
+ * page's rule); a steer, or a prompt no started turn claims yet, has neither.
+ * Its `turnId` is then the turn the message itself names: the one a steer
+ * steered, null for a prompt still waiting for its turn.
+ */
+export function readPromptsPage(
+  threadId: string,
+  input: { before?: string | null; limit: number },
+  source: PromptSource
+): IndexedPromptsPage {
+  const limit = clampPromptsLimit(input.limit);
+  const cursor =
+    typeof input.before === "string" && input.before.length > 0
+      ? decodePromptsCursor(input.before, threadId)
+      : null;
+  let bound = cursor ?? Number.MAX_SAFE_INTEGER;
+  const accepted: Array<{ candidate: PromptCandidate; text: string }> = [];
+  const batch = Math.max(limit + 1, PROMPTS_MIN_BATCH);
+  const budget = Math.max(PROMPTS_SCAN_BUDGET, batch);
+  let scanned = 0;
+  // Why the walk stopped short of a full page plus one: the thread ran out
+  // (nothing older), or the budget did (more may be older).
+  let exhausted = false;
+  while (accepted.length <= limit) {
+    if (scanned >= budget) {
+      break;
+    }
+    const count = Math.min(batch, budget - scanned);
+    const read = source.olderThan(bound, count);
+    scanned += read.scanned;
+    let moved = false;
+    for (const row of read.candidates) {
+      // Newest first and below the bound, by the source's contract; a row
+      // that would not move the bound down could only walk in a circle.
+      if (!(row.seq < bound)) {
+        continue;
+      }
+      bound = row.seq;
+      moved = true;
+      const text = recallablePromptText(row.text);
+      if (text === null) {
+        continue;
+      }
+      accepted.push({ candidate: row, text });
+      if (accepted.length > limit) {
+        break;
+      }
+    }
+    // Counted in rows READ, placed or not: a short read is the end.
+    if (read.scanned < count || !moved) {
+      exhausted = true;
+      break;
+    }
+  }
+  const page = accepted.slice(0, limit);
+  const oldest = page[page.length - 1];
+  let before: string | null = null;
+  if (accepted.length > limit && oldest !== undefined) {
+    before = encodePromptsCursor(threadId, oldest.candidate.seq);
+  } else if (!exhausted && bound < Number.MAX_SAFE_INTEGER) {
+    // Out of budget: the next page starts below the last row walked.
+    before = encodePromptsCursor(threadId, bound);
+  }
+  return {
+    prompts: page.map(({ candidate, text }) => promptEntry(candidate, text, source)),
+    before
+  };
+}
+
+function promptEntry(
+  candidate: PromptCandidate,
+  text: string,
+  source: PromptSource
+): ThreadPromptEntry {
+  const opened = source.turnOpenedBy(candidate.messageId);
+  const shown = headOf(text, THREAD_PROMPT_TEXT_MAX_CHARS);
+  return {
+    messageId: candidate.messageId,
+    turnId: opened?.turnId ?? candidate.turnId,
+    turnOrdinal: opened?.ordinal ?? null,
+    rewindable: opened === null ? null : source.rewindable(opened),
+    text: shown,
+    truncated: shown.length < text.length,
+    createdAt: candidate.createdAt,
+    seq: candidate.seq
+  };
+}
+
+/** `limit` clamped to `[1, THREAD_PROMPTS_MAX_LIMIT]`; anything not a finite number is the default. */
+export function clampPromptsLimit(limit: number): number {
+  const requested = Math.floor(limit);
+  return Number.isFinite(requested)
+    ? Math.min(Math.max(requested, 1), THREAD_PROMPTS_MAX_LIMIT)
+    : THREAD_PROMPTS_DEFAULT_LIMIT;
+}
+
+/**
+ * The first `max` UTF-16 units of `text` — one fewer when the cut would
+ * leave the high half of a surrogate pair as the last unit (`capText`'s
+ * rule).
+ */
+function headOf(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  const last = text.charCodeAt(max - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+}
+
+/**
+ * The prompt list's cursor, opaque on the wire: `base64url(JSON {t, s})`,
+ * unpadded — the thread, and the seq of the oldest prompt the previous page
+ * held; the next page is what lies strictly below it. A log seq never moves
+ * (the log is append-only; a rebuilt index derives the same seq from it), so
+ * the cursor survives an index rebuild and a revert, as the history cursor
+ * does.
+ */
+export function encodePromptsCursor(threadId: string, beforeSeq: number): string {
+  return Buffer.from(JSON.stringify({ t: threadId, s: beforeSeq }), "utf8").toString("base64url");
+}
+
+const BASE64URL_ALPHABET = /^[A-Za-z0-9_-]*$/;
+
+/**
+ * The seq a cursor pages below, or null when it is not one of ours for
+ * `threadId` — the caller then serves a first page. Never throws: the input
+ * is a query parameter. Fields beyond `{t, s}` are ignored, so a later build
+ * can add one.
+ */
+export function decodePromptsCursor(encoded: string, threadId: string): number | null {
+  // `Buffer` skips characters outside the alphabet rather than refusing them,
+  // and a length of `4n + 1` is never a whole byte count.
+  if (typeof encoded !== "string" || !BASE64URL_ALPHABET.test(encoded) || encoded.length % 4 === 1) {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(encoded, "base64url"))
+    );
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null || record.t !== threadId) {
+    return null;
+  }
+  const seq = record.s;
+  return typeof seq === "number" && Number.isSafeInteger(seq) && seq > 0 ? seq : null;
+}
+
+function toPromptCandidate(value: unknown): PromptCandidate | null {
+  const row = asRecord(value);
+  if (row === null || !isCount(row.first_seq)) {
+    return null;
+  }
+  return {
+    messageId: typeof row.message_id === "string" ? row.message_id : "",
+    seq: row.first_seq,
+    // A row whose text or id does not read back — a message that never had
+    // text has no FTS row at all — is still walked past, its seq moving the
+    // page on, but the recall rule refuses the empty text.
+    text: typeof row.text === "string" && typeof row.message_id === "string" ? row.text : "",
+    turnId: typeof row.turn_id === "string" ? row.turn_id : null,
+    createdAt: typeof row.created_at === "string" ? row.created_at : ""
   };
 }
 

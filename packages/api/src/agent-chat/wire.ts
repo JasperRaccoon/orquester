@@ -107,7 +107,21 @@ export const agentChatRoutes = {
    */
   history: (sessionId: string): string => `${sessionBase(sessionId)}/history`,
   /** Full-text search over every indexed thread on the host: `?q=&limit=&projectPath=`. */
-  search: "/api/agent/search"
+  search: "/api/agent/search",
+  /**
+   * The thread's own user prompts, newest first, read from the index — the
+   * right rail's History (`?before=&limit=`, {@link ThreadPromptsResponse}).
+   * A host without a usable index answers 200 `indexed:false`; a host that
+   * predates the route answers its generic 404 `THREAD_NOT_FOUND`.
+   */
+  prompts: (sessionId: string): string => `${sessionBase(sessionId)}/prompts`,
+  /**
+   * One prompt's whole text ({@link ThreadPromptTextResponse}) — for a page
+   * entry cut at {@link THREAD_PROMPT_TEXT_MAX_CHARS}. 404 `PROMPT_NOT_FOUND`
+   * when the thread has no such user prompt.
+   */
+  promptText: (sessionId: string, messageId: string): string =>
+    `${sessionBase(sessionId)}/prompts/${encodeURIComponent(messageId)}`
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -210,6 +224,91 @@ export interface ThreadSearchResponse {
   truncated: boolean;
   /** False when the host has no usable index; `hits` is then empty. */
   indexed: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// The thread's prompts (the right rail's History)
+// ---------------------------------------------------------------------------
+
+/**
+ * Query string of `GET …/prompts`. A page holds AT MOST `limit` prompts: the
+ * host walks a bounded number of rows per request, so a stretch of rows that
+ * are no prompts (a subagent fleet's task notifications) can end a page short
+ * — even empty — with a `before` cursor. Only `before: null` means the
+ * thread's first prompt was reached.
+ */
+export interface ThreadPromptsQuery {
+  /** Opaque, from a previous page's `before`. Absent: the newest prompts. */
+  before?: string;
+  /** Prompts per page at most, clamped to `[1, THREAD_PROMPTS_MAX_LIMIT]`. */
+  limit?: number;
+}
+
+export const THREAD_PROMPTS_DEFAULT_LIMIT = 100;
+export const THREAD_PROMPTS_MAX_LIMIT = 500;
+/** A page entry's `text` is cut here (UTF-16 units); `truncated` says so. */
+export const THREAD_PROMPT_TEXT_MAX_CHARS = 4_000;
+
+/**
+ * One prompt the user sent in the thread — a `user` message of the PARENT
+ * conversation that `recallablePromptText` accepts (never a subagent's, never
+ * a provider-internal row, never the verbatim `/compact` or an Implement), its
+ * text already normalised by that rule.
+ */
+export interface ThreadPromptEntry {
+  messageId: string;
+  /** The turn the message belongs to (a steer: the turn it steered); null when no turn claimed it. */
+  turnId: string | null;
+  /**
+   * The 1-based ordinal — by ORDER of started turns, the count `/revert` uses —
+   * of the turn this prompt STARTED; null for a steer (a message-mode answer
+   * sent while a turn runs is one) or a prompt no started turn claims yet.
+   */
+  turnOrdinal: number | null;
+  /**
+   * For a prompt that started a turn: false when a compaction happened after
+   * that turn (the history page's `rewindable` rule). Null when it started none.
+   */
+  rewindable: boolean | null;
+  /** The normalised text, cut at {@link THREAD_PROMPT_TEXT_MAX_CHARS}. */
+  text: string;
+  /** `text` was cut; `GET …/prompts/:messageId` reads it whole. */
+  truncated: boolean;
+  createdAt: string;
+  /** The log sequence of the message's line. */
+  seq: number;
+}
+
+/** `GET …/prompts` — newest first. */
+export interface ThreadPromptsResponse {
+  threadId: string;
+  prompts: ThreadPromptEntry[];
+  /** Cursor of the next OLDER page; null when this page reached the thread's first prompt. */
+  before: string | null;
+  /**
+   * False when the host cannot list this thread's prompts from its index:
+   * `prompts` is then empty and the client falls back to what it holds.
+   */
+  indexed: boolean;
+  /**
+   * With `indexed: false`: the index exists but has not caught up with this
+   * thread yet — a rebuild (every `INDEX_SCHEMA_VERSION` bump) or the boot
+   * catch-up is still reading its log — so the answer WILL change: ask again
+   * shortly. Absent (or false) with `indexed: false` when the host has no
+   * usable index, or this thread's rows are behind and nothing will read them
+   * before the host restarts — neither changes by asking again; and absent
+   * from a host that predates the field. A failed read of a usable index is
+   * neither: it answers 503 `INDEX_UNAVAILABLE`, which is retryable.
+   */
+  catchingUp?: boolean;
+}
+
+/** `GET …/prompts/:messageId` — one prompt's whole normalised text. */
+export interface ThreadPromptTextResponse {
+  messageId: string;
+  text: string;
+  /** True only when even the host's copy is cut (the index keeps at most 128 K chars of a message). */
+  truncated: boolean;
 }
 
 /** The `name` accepted by `Transporter.agentChat.command(sessionId, name, body)`. */
@@ -443,7 +542,14 @@ export type AgentChatErrorCode =
    * `THREAD_NOT_FOUND` ("No route for GET …") — the code `GET …/items/:itemId`
    * gives a missing item — and a reader must tell the two apart.
    */
-  | "ITEM_NOT_FOUND";
+  | "ITEM_NOT_FOUND"
+  /**
+   * 404 — only `GET …/prompts/:messageId` answers it: the thread has no such
+   * message, or not one the user sent. Its own code for `ITEM_NOT_FOUND`'s
+   * reason: a host that predates the route answers the miss as its generic
+   * 404 `THREAD_NOT_FOUND`.
+   */
+  | "PROMPT_NOT_FOUND";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -453,7 +559,8 @@ export const AGENT_CHAT_ERROR_CODES = [
   "COMPACTION_UNAVAILABLE",
   "HOST_UNAVAILABLE",
   "INDEX_UNAVAILABLE",
-  "ITEM_NOT_FOUND"
+  "ITEM_NOT_FOUND",
+  "PROMPT_NOT_FOUND"
 ] as const satisfies readonly AgentChatErrorCode[];
 
 /** A failed command answers this, and it is not a transport error to swallow. */

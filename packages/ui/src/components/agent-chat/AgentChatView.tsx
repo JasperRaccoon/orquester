@@ -23,7 +23,6 @@ import { isGoalHeldForUpdate } from "../../lib/agent-chat/goal.logic";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
 import { Modal, ModalCloseButton } from "../ui";
-import { DiffView } from "../git/DiffView";
 import {
   useAgentChatPending,
   useAgentChatRoster,
@@ -73,6 +72,7 @@ import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { ChatStatusLine } from "./status/ChatStatusLine";
 import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-chip";
 import { ChatTimeline } from "./timeline/ChatTimeline";
+import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
 import {
   nextHeldTimeline,
   resolveThreadSwitchTimeline,
@@ -104,12 +104,14 @@ function dispatch(run: () => Promise<unknown>): void {
   });
 }
 
-/** The read-only overlay for a turn diff or one item's full, unslimmed payload. */
+/**
+ * The read-only overlay for one item's full, unslimmed payload. A turn diff
+ * has its own, shared with the right rail's History (`TurnDiffModal`).
+ */
 interface ChatViewerState {
-  kind: "diff" | "output";
+  kind: "output";
   title: string;
   loading: boolean;
-  diff?: string;
   text?: string;
   error?: string;
 }
@@ -694,30 +696,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // slice is deliberate — a 200 KB unslimmed payload is something the user
   // asked to look at once, not thread state every later render pays for.
   const [viewer, setViewer] = React.useState<ChatViewerState | null>(null);
+  // The turn diff is read and shown by `TurnDiffModal`, the one the right
+  // rail's History opens too.
+  const [turnDiff, setTurnDiff] = React.useState<TurnDiffRequest | null>(null);
   const openTurnDiff = React.useCallback(
-    (turnCount: number) => {
-      setViewer({ kind: "diff", title: `Turn ${turnCount}`, loading: true });
-      void api
-        .agentChatTurnDiff(sessionId, turnCount)
-        .then((response) =>
-          setViewer({
-            kind: "diff",
-            title: `Turn ${turnCount}`,
-            loading: false,
-            diff: response.diff
-          })
-        )
-        .catch((error: unknown) =>
-          setViewer({
-            kind: "diff",
-            title: `Turn ${turnCount}`,
-            loading: false,
-            error: errorText(error, "That turn's diff could not be read.")
-          })
-        );
-    },
-    [api, sessionId]
+    (turnCount: number) => setTurnDiff({ sessionId, turnCount }),
+    [sessionId]
   );
+  const closeTurnDiff = React.useCallback(() => setTurnDiff(null), []);
   const loadFullOutput = React.useCallback(
     (itemId: string) => {
       setViewer({ kind: "output", title: "Full output", loading: true });
@@ -744,6 +730,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   );
   // A viewer belongs to the thread that opened it.
   React.useEffect(() => setViewer(null), [sessionId]);
+  React.useEffect(() => setTurnDiff(null), [sessionId]);
 
   /**
    * Click-through from a changed-file row to the file browser.
@@ -999,12 +986,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           <div className="min-h-0 flex-1 overflow-auto">
             {viewer?.error ? (
               <p className="px-4 py-6 text-sm text-danger">{viewer.error}</p>
-            ) : viewer?.kind === "diff" ? (
-              <DiffView
-                diff={viewer.diff ?? ""}
-                loading={viewer.loading}
-                emptyLabel="This turn changed no files."
-              />
             ) : (
               <pre className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs text-neutral-300">
                 {viewer?.loading ? "Loading…" : (viewer?.text ?? "")}
@@ -1013,6 +994,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           </div>
         </div>
       </Modal>
+      <TurnDiffModal request={turnDiff} onClose={closeTurnDiff} />
     </div>
   );
 }

@@ -8,9 +8,10 @@
  * they do not render, so the composer registers a tiny handle per session and
  * they call it by session id.
  *
- * The goal chip's actions (goals §8.2) are the one caller that SENDS rather
- * than inserts, and they send through the composer too, never around it: the
- * action must be the user's message, refused for whatever refuses the user's
+ * The goal chip's actions (goals §8.2) and the right rail's Send (a saved
+ * prompt, a prompt from the thread's history) are the callers that SEND
+ * rather than insert, and they send through the composer too, never around
+ * it: the message must be the user's, refused for whatever refuses the user's
  * own send, with the thread's mode and model riding along.
  *
  * A handle for a session that is not mounted is simply absent and every call
@@ -24,9 +25,31 @@ import type { StagedAttachment } from "./ComposerAttachments";
 import type { ComposerShortcutCommand } from "./composer-shortcuts";
 import type { FailedSendRestore } from "./composer-submission";
 
+/**
+ * What the right rail's Send gets back: the message left (`sent`) or waits
+ * behind the running turn (`queued`); a bare `/plan` or `/default` switched
+ * the mode instead, as Enter does (`mode`) — or nothing was sent, and why (the
+ * composer shows the same reason as its own notice).
+ */
+export type ComposerSubmitResult =
+  | { ok: true; disposition: "sent" | "queued" }
+  | { ok: true; disposition: "mode"; mode: "plan" | "default" }
+  | { ok: false; reason: string };
+
+/**
+ * Why an Insert or a Send reached no composer: none is mounted for that
+ * thread — its tab is closed, or its chat is still loading.
+ */
+export const COMPOSER_NOT_MOUNTED_REASON = "This chat isn't ready for input yet.";
+
 export interface ComposerHandle {
-  /** Insert text into the draft at the caret (or append it); focus stays where it is (§7.4). */
-  insertText: (text: string, mode?: "cursor" | "append") => void;
+  /**
+   * Insert text into the draft at the caret (or append it). Focus stays where
+   * it is (§7.4) unless `options.focus` asks for it — the right rail's Insert,
+   * a user's click that means "put this in the composer and let me type" —
+   * which focuses the textarea with the caret right after the inserted text.
+   */
+  insertText: (text: string, mode?: "cursor" | "append", options?: { focus?: boolean }) => void;
   /**
    * Stage an **already-uploaded** attachment as a real chip.
    *
@@ -51,6 +74,16 @@ export interface ComposerHandle {
    * composer refused it; the reason is then the composer's own notice.
    */
   sendText: (text: string) => boolean;
+  /**
+   * Submit `text` as the user's message exactly as Enter would — the right
+   * rail's Send: the composer's guards, the thread's interaction mode and
+   * model, and the follow-up preference, so while a turn runs the message is
+   * queued behind it or steers it as the user chose. The draft is left as it
+   * is; a send that fails comes back INTO the draft with its notice, because
+   * this text is the user's prompt and must not be lost (unlike `sendText`'s
+   * goal commands).
+   */
+  submitText: (text: string) => ComposerSubmitResult;
   /**
    * Put a failed send's draft back into this composer's live draft (§7.4) —
    * `draftAfterSend` over what it holds now, the send's notice with it — for
@@ -82,9 +115,10 @@ export function composerHandle(sessionId: string): ComposerHandle | null {
 export function insertComposerText(
   sessionId: string,
   text: string,
-  mode: "cursor" | "append" = "cursor"
+  mode: "cursor" | "append" = "cursor",
+  options?: { focus?: boolean }
 ): void {
-  composerHandle(sessionId)?.insertText(text, mode);
+  composerHandle(sessionId)?.insertText(text, mode, options);
 }
 
 /**
@@ -128,4 +162,18 @@ export function focusComposer(sessionId: string): void {
  */
 export function sendComposerText(sessionId: string, text: string): boolean {
   return composerHandle(sessionId)?.sendText(text) ?? false;
+}
+
+/**
+ * Submit `text` from a session's composer as Enter would (the right rail's
+ * Send). Refused with {@link COMPOSER_NOT_MOUNTED_REASON} when no composer
+ * is mounted for that session.
+ */
+export function submitComposerText(sessionId: string, text: string): ComposerSubmitResult {
+  return (
+    composerHandle(sessionId)?.submitText(text) ?? {
+      ok: false,
+      reason: COMPOSER_NOT_MOUNTED_REASON
+    }
+  );
 }

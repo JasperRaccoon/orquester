@@ -134,6 +134,22 @@ export const agentHostRoutes = {
   history: (threadId: string): string => `${thread(threadId)}/history`,
   /** `GET ?q=&limit=&projectPath=` → `ThreadSearchResponse`. */
   search: "/search",
+  /**
+   * `GET ?before=<cursor>&limit=<n>` → `ThreadPromptsResponse`: the thread's
+   * own prompts, newest first (the right rail's History) — 200 `indexed:
+   * false` (+ `catchingUp` while the index catches up with the thread) when
+   * the index cannot list it whole, 503 `INDEX_UNAVAILABLE` when a read
+   * failed. A host that predates the route answers its generic route-miss 404
+   * `THREAD_NOT_FOUND` until its drain-restart.
+   */
+  prompts: (threadId: string): string => `${thread(threadId)}/prompts`,
+  /**
+   * `GET` → `ThreadPromptTextResponse`, one prompt's whole text; 404
+   * `PROMPT_NOT_FOUND` when the index holds the whole thread and has no such
+   * prompt, 503 `INDEX_UNAVAILABLE` whenever it cannot say.
+   */
+  promptText: (threadId: string, messageId: string): string =>
+    `${thread(threadId)}/prompts/${encodeURIComponent(messageId)}`,
 
 
   /**

@@ -5,6 +5,7 @@ import type { AttachmentRef, PendingUserInput, UserInputQuestion } from "@orques
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import { insideKeyboardOwner } from "../../../lib/keyboard-surfaces";
 import { BannerCard, ChatIconButton, DisclosureChevron, DisclosurePanel, Kbd } from "../primitives";
 import { isChatTabListenerActive } from "../composer/tab-visibility";
 import {
@@ -208,6 +209,12 @@ export function QuestionCard({
       // Q2-2: hidden tabs stay mounted, so without this gate one `1` answers
       // the question in EVERY open chat tab — and an answer cannot be undone.
       if (!isChatTabListenerActive(active, cardRef.current)) return;
+      // A digit typed inside a surface that owns its keys — a modal dialog or
+      // sheet, a menu, the right rail's panel — is that surface's: a button
+      // focused there must never answer this question, which cannot be undone
+      // (`lib/keyboard-surfaces.ts`). Target-based, so a hover popover open
+      // elsewhere does not silence the digits.
+      if (insideKeyboardOwner(event.target)) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;

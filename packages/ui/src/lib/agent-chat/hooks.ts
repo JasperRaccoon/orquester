@@ -119,6 +119,21 @@ export const useAgentChatThread: UseAgentChatThread = (sessionId) => {
   );
 };
 
+/**
+ * ONE value of a thread's state, for a surface OUTSIDE the chat view (the
+ * right rail's History) that must not re-render on every streamed token.
+ * `select` must return a stable value — a field of the state, or a
+ * derivation memoised on its inputs: a fresh object on every call re-renders
+ * on every store update. Retains the thread's store as the other hooks do.
+ */
+export function useAgentChatThreadSelector<T>(
+  sessionId: string,
+  select: (state: AgentChatThreadState) => T
+): T {
+  const store = useThreadStore(sessionId);
+  return useThreadState(store, select);
+}
+
 export const useAgentChatRoster: UseAgentChatRoster = (sessionId) => {
   const store = useThreadStore(sessionId);
   const agents = useThreadState(store, (state) => state.slice.roster);

@@ -8,6 +8,8 @@ export interface BottomSheetProps {
   open: boolean;
   onClose: () => void;
   title?: string;
+  /** The dialog's accessible name, for a sheet without a visible `title`. */
+  label?: string;
   children: React.ReactNode;
 }
 
@@ -16,7 +18,7 @@ export interface BottomSheetProps {
  * targets, respects the safe-area inset. Provides DropdownContext so the same
  * DropdownItem/Label/Separator render here as in a desktop dropdown.
  */
-export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, children }) => {
+export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, label, children }) => {
   useEffect(() => {
     if (!open) {
       return;
@@ -46,6 +48,7 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, 
       <div
         role="dialog"
         aria-modal="true"
+        aria-label={label}
         onMouseDown={(e) => e.stopPropagation()}
         className={cn(
           // Full-bleed: `w-screen max-w-none` pins the sheet to the viewport

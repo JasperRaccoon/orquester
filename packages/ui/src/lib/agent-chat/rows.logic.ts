@@ -30,6 +30,7 @@
 
 import {
   GOAL_STATUS_ACTIVITY_KIND,
+  isProviderInternalUserText,
   startedTurns,
   type Checkpoint,
   type LatestTurnSummary,
@@ -195,21 +196,11 @@ export function isCompactCommandMessage(message: ThreadMessageItem): boolean {
  * starts in the transcript), so they render as bubbles — but "rewind to here"
  * would return one of them to the composer as the user's own prompt, which
  * is never what a rewind means. Withheld, like the verbatim `/compact`.
+ * The prefix list is `@orquester/api`'s (`isProviderInternalUserText`), the
+ * one the right rail's prompt history filters by too.
  */
-const PROVIDER_INTERNAL_USER_PREFIXES = [
-  "<command-name>",
-  "<local-command-stdout>",
-  "<local-command-caveat>",
-  "<task-notification>",
-  "<system-reminder>"
-] as const;
-
 export function isProviderInternalUserMessage(message: ThreadMessageItem): boolean {
-  if (message.role !== "user") {
-    return false;
-  }
-  const text = message.text.trimStart();
-  return PROVIDER_INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix));
+  return message.role === "user" && isProviderInternalUserText(message.text);
 }
 
 /**
