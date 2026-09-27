@@ -4363,9 +4363,11 @@ the tab's outbox as `generatedPrompt`; only a host-parsed one (Codex) also passe
 question card — for Claude and Grok the card still holds it back (`resolveFollowUpDisposition`,
 `pendingRequestBlocksSend`, `packages/ui/src/components/agent-chat/composer/composer-submission.ts`;
 goals §8.2, §8.5). The right rail's Send is Enter's path instead (`submitText`/`planExternalSubmit`:
-queued or steering as the preference says). A host-run `/goal` passed an open message-mode question
-never answers it: it reaches no provider turn, and the question stays pending for a later message
-(merge ruling, 2026-09-27).*
+queued or steering as the preference says). Both refuse while the thread has a send on its way, read
+from the composer's send registry as they act (`isComposerSending`), as Enter does — never from the
+`sending` a render captured, which lags a send the registry took since. A host-run `/goal` passed an
+open message-mode question never answers it: it reaches no provider turn, and the question stays
+pending for a later message (merge ruling, 2026-09-27).*
 
 The ghost bubble is a dashed, right-aligned, dimmed user bubble carrying a "Queued" clock chip whose
 tooltip says *when* it will go — "Sends after the next tool call or when the turn ends", or "Sends

@@ -2294,7 +2294,8 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   `submitComposerText` (`composer-bridge.ts`), decided by the pure `planExternalSubmit`
   (`composer-submission.ts`) exactly as Enter decides for that text as the whole draft: a bare
   `/plan`/`/default` switches the mode where the toggle shows; the composer's own guards over the
-  TRIMMED text (a revert, a send in flight, an open approval or question card — a host `/goal`
+  TRIMMED text (a revert, a send in flight — the composer's send registry, read as it acts:
+  `isComposerSending`, as Enter does —, an open approval or question card — a host `/goal`
   excepted, the provider-command refusals, the length bound); the thread's mode and model; and the
   follow-up preference — a running turn QUEUES it or is STEERED by it — with an identical queue
   inside 1 s refused as a double click's twin, and a failed send coming back into the draft.

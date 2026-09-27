@@ -1275,7 +1275,9 @@ export function ChatComposer({
     const plan = planExternalSend({
       text,
       reverting,
-      sending,
+      // The live registry, as `submit` reads it: a send this thread has on its
+      // way — from any composer, a reload's re-post included — refuses this one.
+      sending: isComposerSending(sessionId),
       hasPendingRequest,
       adapterId: provider?.id,
       hostParsesGoal: hostGoalCommand
@@ -1305,7 +1307,9 @@ export function ChatComposer({
     const plan = planExternalSubmit({
       text,
       reverting,
-      sending,
+      // The live registry, as `submit` reads it: a send this thread has on its
+      // way — from any composer, a reload's re-post included — refuses this one.
+      sending: isComposerSending(sessionId),
       hasPendingRequest,
       adapterId: provider?.id,
       hostParsesGoal: hostGoalCommand,

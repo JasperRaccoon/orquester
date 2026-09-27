@@ -6,7 +6,10 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   beginComposerSend,
@@ -108,5 +111,48 @@ describe("the per-thread queued-send marker", () => {
     unsubscribe();
     beginQueuedSend("A")();
     assert.equal(heard.length, 4);
+  });
+});
+
+/**
+ * Every composer path that sends reads THIS registry at the moment it acts, as
+ * `submit` always has — never the `sending` a render captured. That snapshot
+ * lags any send the registry took since the composer last rendered (a reload's
+ * re-post, which the thread store registers when it takes the send over; a
+ * second click in the same tick), and a path acting on it could post a second
+ * message, under a second command id, while the first is still on its way.
+ *
+ * A SOURCE check, like `right-rail/keyboard-surface-wiring.test.ts`: the paths
+ * are closures inside `ChatComposer`, and nothing here can render one (no DOM,
+ * and static rendering runs no handler). Comments are stripped first, so a
+ * commented-out read never passes for a live one.
+ */
+describe("the composer's send paths read the live registry", () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "ChatComposer.tsx"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+  /** The code from `start` up to `end`: one path's body. */
+  const pathBody = (start: string, end: string): string => {
+    const from = source.indexOf(start);
+    assert.ok(from >= 0, `ChatComposer has ${start}`);
+    const to = source.indexOf(end, from);
+    assert.ok(to > from, `${start} ends at ${end}`);
+    return source.slice(from, to);
+  };
+  const readsRegistry = /\bsending:\s*isComposerSending\(sessionId\)/;
+
+  it("the goal chip's actions (`sendExternalText`)", () => {
+    assert.match(pathBody("const sendExternalText = (", "const sendExternalTextRef"), readsRegistry);
+  });
+
+  it("the right rail's Send (`submitExternalText`)", () => {
+    assert.match(pathBody("const submitExternalText = (", "const submitExternalTextRef"), readsRegistry);
+  });
+
+  it("Enter and the send button (`submit`)", () => {
+    assert.match(
+      pathBody("const submit = React.useCallback(", "const interrupt = React.useCallback("),
+      /if \(reverting \|\| isComposerSending\(sessionId\)\) return;/
+    );
   });
 });
