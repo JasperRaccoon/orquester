@@ -10,7 +10,7 @@ import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
-import { drillInEmptyNotice, type EmptyNotice } from "./empty-notice";
+import { drillInEmptyNotice, timelineSlots, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { LoadOlderRow } from "./rows/LoadOlderRow";
 import { nextRowEnterState, rowEnters, type RowEnterState } from "./row-enter";
@@ -172,6 +172,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
           : null,
     [agentId, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
   );
+  const slots = React.useMemo(() => timelineSlots(rows, notice), [rows, notice]);
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -802,29 +803,29 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
             {showLoadOlder ? (
               <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
             ) : null}
-            {(notice === null ? rows : rows.slice(0, notice.at)).map((row) => (
-              <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />
-            ))}
-            {showEmptyPanel ? (
-              // An empty thread shows the provider's resumable conversations
-              // (`EmptyThreadPanel`, built by the view). The wrapper fits the
-              // visible area so only the panel's own list scrolls.
-              emptyThreadPanel
-            ) : notice !== null ? (
-              <div
-                className={cn(
-                  "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
-                  notice.at === 0 ? "py-12" : "py-4"
-                )}
-              >
-                {notice.text}
-              </div>
-            ) : null}
-            {notice === null
-              ? null
-              : rows
-                  .slice(notice.at)
-                  .map((row) => <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />)}
+            {/* ONE keyed list, the empty notice spliced in at its place: a row
+                that crosses it never remounts (`timelineSlots`). */}
+            {slots.map((slot) =>
+              "row" in slot ? (
+                <TimelineRow key={slot.key} row={slot.row} enter={enterFlag(slot.row.id)} />
+              ) : (
+                <div
+                  key={slot.key}
+                  className={cn(
+                    "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
+                    slot.notice.at === 0 ? "py-12" : "py-4"
+                  )}
+                >
+                  {slot.notice.text}
+                </div>
+              )
+            )}
+            {showEmptyPanel
+              ? // An empty thread shows the provider's resumable conversations
+                // (`EmptyThreadPanel`, built by the view). The wrapper fits the
+                // visible area so only the panel's own list scrolls.
+                emptyThreadPanel
+              : null}
             {/* The footer spacer reserves exactly what the composer overlay hides. */}
             {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
             <div className="h-3 shrink-0 sm:h-4" aria-hidden />

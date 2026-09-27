@@ -12,7 +12,7 @@ import { describe, it } from "node:test";
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
-import { didToolWork, drillInEmptyNotice } from "./empty-notice";
+import { didToolWork, drillInEmptyNotice, TIMELINE_NOTICE_KEY, timelineSlots } from "./empty-notice";
 
 function row(overrides: Partial<RuntimeSubagent> = {}): RuntimeSubagent {
   return {
@@ -130,5 +130,26 @@ describe("didToolWork", () => {
     assert.equal(didToolWork(row({ lastToolName: "  " })), false);
     assert.equal(didToolWork(row({ usage: { totalTokens: 5, toolUses: 0 } })), false);
     assert.equal(didToolWork(row()), false);
+  });
+});
+
+describe("timelineSlots: the notice is spliced into ONE keyed list (surface review M2)", () => {
+  const rows: AgentChatTimelineRow[] = [
+    { kind: "working", id: "working-indicator-row", createdAt: null },
+    { kind: "thinking", id: "live-activity-row", createdAt: null }
+  ];
+  const keys = (slots: ReturnType<typeof timelineSlots>) => slots.map((slot) => slot.key);
+
+  it("the rows and the notice are siblings of one list, the notice at its place", () => {
+    const slots = timelineSlots(rows, { text: "This agent has not reported anything yet.", at: 0 });
+    assert.deepEqual(keys(slots), [TIMELINE_NOTICE_KEY, "working-indicator-row", "live-activity-row"]);
+    // A row keeps its key whichever side of the notice it falls on, so crossing it never remounts it.
+    const afterFirstRow = timelineSlots(rows, { text: "x", at: 1 });
+    assert.deepEqual(keys(afterFirstRow), ["working-indicator-row", TIMELINE_NOTICE_KEY, "live-activity-row"]);
+    assert.deepEqual(keys(timelineSlots(rows, { text: "x", at: 2 })), [...rows.map((row) => row.id), TIMELINE_NOTICE_KEY]);
+  });
+
+  it("no notice: the rows alone", () => {
+    assert.deepEqual(keys(timelineSlots(rows, null)), rows.map((row) => row.id));
   });
 });

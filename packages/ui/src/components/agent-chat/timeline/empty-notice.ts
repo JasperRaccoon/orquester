@@ -119,3 +119,32 @@ export function drillInEmptyNotice(input: {
   }
   return notice(left ? "Its earlier rows have left this thread's window." : "This agent reported nothing to show here.");
 }
+
+/** The notice's key among the rows: no row id takes this shape. */
+export const TIMELINE_NOTICE_KEY = "timeline-empty-notice";
+
+/** One child of the timeline's list: a row, or the empty notice. */
+export type TimelineSlot =
+  | { readonly key: string; readonly row: AgentChatTimelineRow }
+  | { readonly key: typeof TIMELINE_NOTICE_KEY; readonly notice: EmptyNotice };
+
+/**
+ * The timeline's children, as ONE keyed list: the rows, with the notice
+ * spliced in at its place. Rendered as separate arrays around it, a row that
+ * crossed the notice — a live agent's working row, the moment its first own row
+ * lands and the notice goes — moved to another array and remounted, replaying
+ * its rise; §7.3 wants the working row swapped in place, never remounted.
+ */
+export function timelineSlots(rows: readonly AgentChatTimelineRow[], notice: EmptyNotice | null): TimelineSlot[] {
+  const slots: TimelineSlot[] = [];
+  rows.forEach((row, index) => {
+    if (notice !== null && index === notice.at) {
+      slots.push({ key: TIMELINE_NOTICE_KEY, notice });
+    }
+    slots.push({ key: row.id, row });
+  });
+  if (notice !== null && notice.at >= rows.length) {
+    slots.push({ key: TIMELINE_NOTICE_KEY, notice });
+  }
+  return slots;
+}
