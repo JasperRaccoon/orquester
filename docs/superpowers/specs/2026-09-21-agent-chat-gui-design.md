@@ -4443,7 +4443,10 @@ cover it. The thread's own boundary wrapped everything and kept the open agent, 
 composer, the roster and Back, and on a touch device only closing the tab recovered; its "Try again"
 now also leaves an open drill-in.*
 
-*Built: **"Escape back to main" holds wherever focus is, the composer included.** With a child open,
+*Built: **"Escape back to main" holds wherever focus is in this chat, the composer included** — a field
+that is not this chat's (the tab strip's rename box, the sidebar's name field, a terminal, an editor in
+another grid cell) keeps its own Escape, so the drill-in stays open under it (§7.4,
+`chatEscapeTargetGate`). With a child open,
 Escape leaves it before it would interrupt the turn: the shell's resolver has always ranked it so
 (`resolveChatEscape`), but it stands down inside the composer, and the composer did not know a child
 was open. So a user who typed a steer while watching a child and pressed Escape to go back stopped
