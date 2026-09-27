@@ -7,6 +7,16 @@ import { openLayerEffect } from "../lib/open-layers";
  * the key handlers that read `anotherLayerOwnsTheKeyboard` stand down for it
  * and its own Escape listener gets the key (`lib/open-layers.ts`).
  *
+ * **A registered layer must be able to close on its own Escape.** While it is
+ * open, the chat stands down for it: Escape neither stops the turn nor leaves
+ * the drill-in, the question card's 1–9 keys answer nothing, and
+ * `Ctrl+Shift+A` does not jump. A layer that stays registered while its own
+ * listener refuses the key therefore leaves all of that dead until something
+ * else closes it. `ComposerPopover`'s listener refuses while its trigger has
+ * no layout box; it is safe only because it also closes whenever the visible
+ * chat tab changes, which is when a trigger loses its box. A layer that cannot
+ * take its Escape must close, or pass `open: false`.
+ *
  * An effect of its own, keyed on `open` alone: a layer's Escape listener
  * re-binds whenever its `onClose` changes identity, and the registration must
  * not churn with it. A passive effect, like every layer's own Escape listener,
