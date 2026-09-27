@@ -1084,11 +1084,14 @@ rewind."; after it, it aborts the source session, then its tree (`abortDescendan
 the aborts' own — are by then a foreign session's. Built, not captured: no rewind with a live child
 has been captured.
 
-**A Stop whose abort request failed.** When `POST …/abort` fails (a 500, a timeout) the turn stays
-the thread's — and when the stream said the run stopped first (its `MessageAbortedError` and idle,
-fixture 06's order), that idle came while the abort was pending and settles nothing. The next Stop
-of that turn used to find it already interrupted and do nothing; it now asks the server again
-(`failedStopTurnId`). Built, not captured.
+**A Stop whose abort request failed.** When `POST …/abort` fails (a 500, a timeout), the stream may
+already have said the run stopped — its `MessageAbortedError` and idle, fixture 06's order — or may
+say it later. Its idle is the run's end either way: the Stop then ends the turn as it ends one,
+`turn.aborted` and the session back to `ready` (`deferredIdle` for an idle that came while the
+request was pending, `failedStopTurnId` for one after it). Until it comes, the turn is still the
+thread's, and the next Stop of that turn asks the server again. A second Stop used to find the turn
+already interrupted and do nothing, and an idle that came while the abort was pending was parked
+where nothing read it, so the turn stayed active for good. Built, not captured.
 
 ---
 

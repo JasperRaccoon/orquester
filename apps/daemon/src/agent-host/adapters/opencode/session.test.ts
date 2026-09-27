@@ -3292,44 +3292,38 @@ test("an abort error that may still be the Stop's echo fails no host turn: befor
   }
 });
 
-test("after a Stop whose abort request failed, the stopped turn is no turn sent since: an abort error is still the Stop's echo", async () => {
+test("after a Stop whose abort request failed, an abort error before the run's idle is still the Stop's echo: it fails nothing, and the idle then ends the turn as the Stop would have", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
   const sessionId = session.sessionId;
   const stopped = await turnStreaming(harness, session);
-  // The server stops the run — its abort error, then its idle — but the
-  // abort's own answer is an error: the turn stays the thread's.
-  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, async () => {
-    pushAll(harness.fake, [
-      { type: "session.error", properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
-      { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
-      { type: "session.idle", properties: { sessionID: sessionId } }
-    ]);
-    await drainedWith(harness, sessionId, "during the abort");
-    return new Response("boom", { status: 500 });
-  });
+  // The abort's answer is an error, and nothing on the stream has said yet
+  // that the run stopped: the turn stays the thread's.
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, () => new Response("boom", { status: 500 }));
   await assert.rejects(session.interruptTurn(stopped.turnId));
   const fed = harness.events.length;
   harness.fake.push({
     type: "session.error",
     properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } }
   });
-  await drainedWith(harness, sessionId, "after another abort error");
+  await drainedWith(harness, sessionId, "after the abort error");
   assert.deepEqual(eventsOfType(harness.events.slice(fed), "runtime.error"), []);
   assert.deepEqual(
-    eventsOfType(harness.events.slice(fed), "turn.completed").filter((event) => event.payload.state === "failed"),
+    eventsOfType(harness.events.slice(fed), "turn.completed"),
     [],
     "the Stop's own turn is not failed by the Stop's echo"
   );
+  pushAll(harness.fake, [
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: sessionId } }
+  ]);
+  await waitFor(harness, "turn.aborted", (event) => event.turnId === stopped.turnId);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
 
-test("a Stop whose abort request failed can be retried: the next Stop asks the server again and ends the turn — whether or not the stream acknowledged the first", async () => {
-  // The abort's answer is an error, and nothing on the stream said the run
-  // stopped (probe PZ) — or the stream did, and the run's idle came while the
-  // abort was pending, which the failed Stop never settles the turn with.
-  for (const acknowledged of [false, true]) {
+test("a Stop whose abort request failed: the stream's word that the run ended settles the turn as the abort would have, before the failure or after it; without that word, the next Stop asks the server again", async () => {
+  for (const order of ["run ends before the failure", "run ends after the failure", "no word from the stream"] as const) {
     const harness = makeHarness();
     const session = await startSession(harness);
     const sessionId = session.sessionId;
@@ -3337,32 +3331,51 @@ test("a Stop whose abort request failed can be retried: the next Stop asks the s
     const abortPath = `/session/${sessionId}/abort`;
     const aborts = (): number =>
       harness.fake.requests.filter((request) => request.method === "POST" && request.path === abortPath).length;
+    // The server stops the run and says so — its abort error, then its idle —
+    // but the abort's own answer is an error.
+    const runEnds = [
+      { type: "session.error", properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
+      { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+      { type: "session.idle", properties: { sessionID: sessionId } }
+    ];
     harness.fake.overrides.set(`POST ${abortPath}`, async () => {
-      if (acknowledged) {
-        pushAll(harness.fake, [
-          { type: "session.error", properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
-          { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
-          { type: "session.idle", properties: { sessionID: sessionId } }
-        ]);
+      if (order === "run ends before the failure") {
+        pushAll(harness.fake, runEnds);
         await drainedWith(harness, sessionId, "during the abort");
       }
       return new Response("boom", { status: 500 });
     });
-    await assert.rejects(session.interruptTurn(stopped.turnId));
-    assert.deepEqual(eventsOfType(harness.events, "turn.aborted"), [], `acknowledged: ${acknowledged} — the first Stop ended nothing`);
-    const sent = aborts();
-
-    // The user presses Stop again.
-    await session.interruptTurn(stopped.turnId);
-    assert.equal(aborts() - sent, 1, `acknowledged: ${acknowledged} — the retry asks the server again`);
+    if (order === "run ends before the failure") {
+      await session.interruptTurn(stopped.turnId);
+    } else {
+      await assert.rejects(session.interruptTurn(stopped.turnId));
+      assert.deepEqual(eventsOfType(harness.events, "turn.aborted"), [], `${order}: the failed Stop ended nothing yet`);
+      if (order === "run ends after the failure") {
+        pushAll(harness.fake, runEnds);
+        await waitFor(harness, "turn.aborted");
+      } else {
+        const sent = aborts();
+        // The user presses Stop again.
+        await session.interruptTurn(stopped.turnId);
+        assert.equal(aborts() - sent, 1, `${order}: the retry asks the server again`);
+      }
+    }
+    await drainedWith(harness, sessionId, "after the Stop");
     assert.deepEqual(
       eventsOfType(harness.events, "turn.aborted").map((event) => event.turnId),
       [stopped.turnId],
-      `acknowledged: ${acknowledged} — and ends the turn`
+      `${order}: the turn ends as a Stop ends it`
     );
-    // A Stop of a turn the last Stop ended is still nothing.
+    assert.deepEqual(
+      eventsOfType(harness.events, "turn.completed").filter((event) => event.turnId === stopped.turnId),
+      [],
+      `${order}: once`
+    );
+    assert.equal(session.session.status, "ready", `${order}: the session reads ready`);
+    // A Stop of a turn that ended is nothing.
+    const sent = aborts();
     await session.interruptTurn(stopped.turnId);
-    assert.equal(aborts() - sent, 1);
+    assert.equal(aborts(), sent, order);
     await session.stop({ reason: "test", hostInitiated: true });
     harness.dispose();
   }

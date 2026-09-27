@@ -746,13 +746,6 @@ export class OpenCodeThreadSession {
         void this.autoReplyOnce(signal.request, signal.raw);
         return;
       }
-      case "abort-acknowledged": {
-        this.state.cancellation?.acknowledge();
-        if (this.state.cancellation !== undefined) {
-          this.state.cancellation.acknowledged = true;
-        }
-        return;
-      }
       case "turn-failed": {
         this.failActiveTurn(signal.message);
         return;
@@ -801,7 +794,15 @@ export class OpenCodeThreadSession {
     }
     const cancellation = this.state.cancellation;
     if (cancellation !== undefined && cancellation.turnId === turnId) {
-      cancellation.deferredIdle = raw;
+      cancellation.deferredIdle = true;
+      return;
+    }
+    // A Stop of this turn failed before the stream said the run was over, and
+    // now it has: the turn ends as that Stop would have ended it.
+    if (this.state.failedStopTurnId === turnId) {
+      this.state.failedStopTurnId = undefined;
+      this.settleStop(turnId);
+      void this.abortDescendants();
       return;
     }
     const admission = this.state.promptAdmission;
@@ -1129,12 +1130,6 @@ export class OpenCodeThreadSession {
   private failActiveTurn(message: string): void {
     const turnId = this.state.activeTurnId;
     this.cancelIdleReconciliation();
-    const cancellation = this.state.cancellation;
-    if (turnId !== undefined && cancellation?.turnId === turnId) {
-      cancellation.turnSettled = true;
-      cancellation.acknowledged = true;
-      cancellation.acknowledge();
-    }
     const tokenUsage = turnId !== undefined ? takeTurnTokenUsage(this.state, false) : undefined;
     this.state.activeTurnId = undefined;
     this.state.activeAgent = undefined;
@@ -1966,8 +1961,12 @@ export class OpenCodeThreadSession {
    * Interrupt is **turn-scoped**: a Stop aimed at a turn that is no longer the
    * active one is a no-op, so it cannot kill the next turn (§4.1). So is a
    * second Stop of a turn already interrupted — unless the first one's abort
-   * failed (`failedStopTurnId`): the turn is still running on our books, and
-   * a retry is how the user stops it.
+   * failed before the stream said the run was over (`failedStopTurnId`): the
+   * turn is still running on our books, and a retry is how the user stops it.
+   * An abort whose request fails AFTER the stream said so — the run's idle
+   * came while it was pending (`deferredIdle`) — ends the turn as any Stop
+   * does (`settleStop`), and so does that idle when it comes after the failure
+   * (`onIdle`).
    */
   async interruptTurn(turnId?: string): Promise<void> {
     // An interrupt already under way — another Stop, a failed admission's
@@ -2005,60 +2004,75 @@ export class OpenCodeThreadSession {
         admission.cancelled = true;
       }
 
-      const cancellation = makeCancellation(target);
+      const cancellation: OpenCodeCancellation = {
+        ...(target !== undefined ? { turnId: target } : {}),
+        deferredIdle: false
+      };
       this.state.cancellation = cancellation;
       try {
-        await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
-        cancellation.acknowledged = true;
-        cancellation.acknowledge();
+        try {
+          await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
+        } catch (error) {
+          // The abort's request failed. If the stream has already said the
+          // run is over — its idle came while the request was pending — the
+          // Stop did its work: it ends the turn below as any Stop does.
+          // Otherwise the turn is still the thread's, and the user's next Stop
+          // of it tries again rather than finding it interrupted.
+          if (!cancellation.deferredIdle) {
+            if (target !== undefined && this.state.activeTurnId === target) {
+              this.state.failedStopTurnId = target;
+            }
+            throw error;
+          }
+        }
         await this.abortDescendants();
-        // §6.2: "`/interrupt` is also the only way to stop background work, and
-        // it stops all of it. It is addressed to the SESSION, not to a turn, so
-        // it is valid with no turn running." The descendant abort above already
-        // killed the children provider-side; closing their roster rows is what
-        // lets `backgroundLiveness` drop to null — without it the client's Stop
-        // button stays on "Stopping…" forever. Runs on EVERY interrupt, with or
-        // without an active turn, and is idempotent.
-        this.closeChildAgents("interrupted");
-        const tokenUsage = takeTurnTokenUsage(this.state, false);
-        if (target !== undefined && this.state.activeTurnId === target) {
-          this.state.activeTurnId = undefined;
-          this.state.activeAgent = undefined;
-          this.state.activeVariant = undefined;
-          this.state.promptAdmission = undefined;
-          this.updateRecord({ status: "ready" }, { activeTurnId: true });
-          this.emit({
-            ...this.base({ turnId: target }),
-            type: "turn.aborted",
-            payload: { reason: "interrupted", tokenUsage }
-          });
-          // The Stop ended a turn, not the session: OpenCode's lives on, and
-          // so may a run the abort never reached. `turn.aborted` alone reads
-          // `stopped` — a session the roster reads as dead (every running row
-          // `interrupted`, a child relaunched on the server's word included)
-          // and the host refuses a later Stop on — so it goes back to
-          // `ready`, as Claude's and Grok's do after every settled turn.
-          this.emit({
-            ...this.base({ turnId: target }),
-            type: "session.state.changed",
-            payload: { state: "ready", reason: "turn:interrupted" }
-          });
-        }
-        cancellation.complete();
-      } catch (error) {
-        // The abort failed: the turn is still the thread's, and the user's
-        // next Stop of it tries again rather than finding it interrupted.
-        if (target !== undefined && this.state.activeTurnId === target) {
-          this.state.failedStopTurnId = target;
-        }
-        cancellation.complete(error);
-        throw error;
+        this.settleStop(target);
       } finally {
         if (this.state.cancellation === cancellation) {
           this.state.cancellation = undefined;
         }
       }
     });
+  }
+
+  /**
+   * What a Stop does once its abort took: every child closed and the turn
+   * `turn.aborted`, the session back to `ready`.
+   *
+   * §6.2: "`/interrupt` is also the only way to stop background work, and it
+   * stops all of it. It is addressed to the SESSION, not to a turn, so it is
+   * valid with no turn running." The descendant abort before this already
+   * killed the children provider-side; closing their roster rows is what lets
+   * `backgroundLiveness` drop to null — without it the client's Stop button
+   * stays on "Stopping…" forever. Runs on EVERY interrupt, with or without an
+   * active turn, and is idempotent.
+   */
+  private settleStop(target: string | undefined): void {
+    this.closeChildAgents("interrupted");
+    const tokenUsage = takeTurnTokenUsage(this.state, false);
+    if (target !== undefined && this.state.activeTurnId === target) {
+      this.state.activeTurnId = undefined;
+      this.state.activeAgent = undefined;
+      this.state.activeVariant = undefined;
+      this.state.promptAdmission = undefined;
+      this.updateRecord({ status: "ready" }, { activeTurnId: true });
+      this.emit({
+        ...this.base({ turnId: target }),
+        type: "turn.aborted",
+        payload: { reason: "interrupted", tokenUsage }
+      });
+      // The Stop ended a turn, not the session: OpenCode's lives on, and so
+      // may a run the abort never reached. `turn.aborted` alone reads
+      // `stopped` — a session the roster reads as dead (every running row
+      // `interrupted`, a child relaunched on the server's word included) and
+      // the host refuses a later Stop on — so it goes back to `ready`, as
+      // Claude's and Grok's do after every settled turn.
+      this.emit({
+        ...this.base({ turnId: target }),
+        type: "session.state.changed",
+        payload: { state: "ready", reason: "turn:interrupted" }
+      });
+    }
   }
 
   /** `POST /session/<nonexistent>/abort` answers `200 true` — it proves nothing. */
@@ -2424,26 +2438,6 @@ function addRelated(state: OpenCodeSessionState, sessionId: string): void {
   if (state.activeTurnId !== undefined && state.turnTokenUsage !== undefined) {
     state.turnTokenUsage.hasSubagents = true;
   }
-}
-
-function makeCancellation(turnId: string | undefined): OpenCodeCancellation {
-  const ack = deferred<void>();
-  const done = deferred<void>();
-  return {
-    ...(turnId !== undefined ? { turnId } : {}),
-    acknowledged: false,
-    turnSettled: false,
-    acknowledgment: ack.promise,
-    acknowledge: () => ack.resolve(),
-    completion: done.promise,
-    complete: (error?: unknown) => {
-      if (error !== undefined) {
-        done.reject(error);
-      } else {
-        done.resolve();
-      }
-    }
-  };
 }
 
 /**

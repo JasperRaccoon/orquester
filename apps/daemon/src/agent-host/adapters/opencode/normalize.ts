@@ -98,8 +98,6 @@ export type NormalizerSignal =
   | { kind: "user-message-observed"; messageId: string }
   /** Full access: answer this ask `once`, never `always` (§4.3). */
   | { kind: "auto-reply-permission"; request: OpenCodePermissionRequest; raw: unknown }
-  /** `MessageAbortedError` — the abort acknowledgement arrived on the stream. */
-  | { kind: "abort-acknowledged" }
   /** The turn failed on a `session.error`; requests need a recovery sweep. */
   | { kind: "turn-failed"; message: string }
   /** A request event from a session whose ancestry is not yet known. */
@@ -915,12 +913,11 @@ function demux(
       const cancellation = state.cancellation;
 
       if (isAbortError(error)) {
+        // The Stop's own abort, answered on the stream: the Stop settles.
         if (cancellation !== undefined && cancellation.turnId === undefined) {
-          out.signal({ kind: "abort-acknowledged" });
           return;
         }
         if (activeTurnId !== undefined && cancellation?.turnId === activeTurnId) {
-          out.signal({ kind: "abort-acknowledged" });
           return;
         }
         if (
