@@ -811,8 +811,16 @@ export interface TaskStartedPayload extends TaskAgentLinkage {
  * ASCII characters but only about 5 400 CJK ones, so a prompt the row keeps
  * whole can still reach the client cut, stamped `truncated`. The item read,
  * `GET …/items/:itemId`, returns the STORED value: the whole prompt when it
- * fit this cap, else its head marked `promptTruncated`, whose rest no read
- * has.
+ * fit this cap, else its head marked `promptTruncated`.
+ *
+ * The rest of a prompt cut here is on no read of the start row. Where the
+ * launching call keeps its whole input on its own completion row — the
+ * `tool.completed` row whose `toolUseId` is the start's — that row's item
+ * read holds it (the wire copy drops the call's input): Claude's `Agent` call
+ * as `data.input.prompt`, Grok's `spawn_subagent` call as
+ * `data.rawInput.prompt`, OpenCode's `task` part as `data.state.input.prompt`.
+ * Codex keeps it on no row: its collab call's row holds a 180-character
+ * `detail` preview.
  *
  * Bounded because an agent's start row is never evicted from the fold (it
  * anchors the agent's row): a fleet's prompts stay in memory, in the fold
