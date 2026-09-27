@@ -142,6 +142,13 @@ interface Rig {
   /** The host's environment: a second host on the same appdir starts with it. */
   env: NodeJS.ProcessEnv;
   host: AgentHost;
+  /**
+   * Every host started on this rig, in order, `host` first: a test's
+   * `finally` stops each, so a failure fails — a host left running (its
+   * socket, its providers) would keep the file's process alive for good, and
+   * with it the whole daemon run.
+   */
+  hosts: AgentHost[];
 }
 
 /** Point the shim `name` of the rig's PATH at `script`, run under this node. */
@@ -153,8 +160,28 @@ async function writeShim(home: string, name: string, script: string): Promise<vo
 
 async function startHost(appdir: string, env: NodeJS.ProcessEnv): Promise<AgentHost> {
   const host = await startAgentHost({ appdir, env, logger: quiet });
+  try {
+    await host.ready;
+  } catch (error) {
+    await host.stop();
+    throw error;
+  }
+  return host;
+}
+
+/** Start the next host on the rig's appdir — registered on the rig first, so the test stops it whatever fails. */
+async function startNextHost(rig: Rig): Promise<AgentHost> {
+  const host = await startAgentHost({ appdir: rig.appdir, env: rig.env, logger: quiet });
+  rig.hosts.push(host);
   await host.ready;
   return host;
+}
+
+/** Stop every host the rig started, newest first. */
+async function stopHosts(rig: Rig | undefined): Promise<void> {
+  for (const host of [...(rig?.hosts ?? [])].reverse()) {
+    await host.stop();
+  }
 }
 
 /**
@@ -173,7 +200,8 @@ async function bootHost(shims: Record<string, string>, extraEnv: Record<string, 
     await writeShim(home, name, script);
   }
   const env = { HOME: home, PATH: "/usr/bin:/bin", ORQUESTER_APPDIR: appdir, TMPDIR: join(appdir, "tmp"), ...extraEnv };
-  return { root, appdir, project, env, host: await startHost(appdir, env) };
+  const host = await startHost(appdir, env);
+  return { root, appdir, project, env, host, hosts: [host] };
 }
 
 /** Start a Grok thread `t1` whose turn leaves the mock's `leftover` work running, and settle it. */
@@ -496,7 +524,7 @@ async function handover(
   rig: Rig,
   thread: { refId: string; model: string; launchEnv?: Record<string, string> },
   beforeNextHost: () => Promise<void> = async () => undefined
-): Promise<{ next: AgentHost; first: string; log: DomainEvent[] }> {
+): Promise<{ first: string; log: DomainEvent[] }> {
   await rig.host.orchestrator.createThread({
     threadId: "t1",
     projectPath: rig.project,
@@ -528,7 +556,7 @@ async function handover(
   assert.equal(typeof stopped.continueAfterRestart?.markedAt, "string", "the marker is stamped");
 
   await beforeNextHost();
-  const next = await startHost(rig.appdir, rig.env);
+  const next = await startNextHost(rig);
   const log = await untilLog(
     next,
     rig.appdir,
@@ -541,7 +569,7 @@ async function handover(
   );
   // The continuation's effect clears the marker once the turn runs.
   await next.orchestrator.drain();
-  return { next, first, log };
+  return { first, log };
 }
 
 /** What the handover must leave: the old turn settled once, by the teardown; no error; no marker. */
@@ -561,16 +589,13 @@ async function assertContinued(rig: Rig, first: string, log: readonly DomainEven
 
 test("an intentional stop's running Grok turn is continued by the next host, the teardown's rows kept", async () => {
   let rig: Rig | undefined;
-  let next: AgentHost | undefined;
   try {
     rig = await bootHost({ grok: GROK_MOCK }, { ORQUESTER_AGENT_CONTINUE_AFTER_RESTART: "1" });
     // `slow`: the turn runs until something cancels it.
     const done = await handover(rig, { refId: "grok", model: "grok-4.6", launchEnv: { GROK_MOCK_SCENARIO: "slow" } });
-    next = done.next;
     await assertContinued(rig, done.first, done.log);
   } finally {
-    await next?.stop();
-    await rig?.host.stop();
+    await stopHosts(rig);
     if (rig !== undefined) await rm(rig.root, { recursive: true, force: true, maxRetries: 3 });
   }
 });
@@ -581,20 +606,17 @@ test("an intentional stop's running Codex turn is continued by the next host, th
   const firstServer = writeMockCodexServer({ turns: [{ kind: "silent" }] });
   const nextServer = writeMockCodexServer({ turns: [{ kind: "silent" }], firstTurnSeq: 100 });
   let rig: Rig | undefined;
-  let next: AgentHost | undefined;
   try {
     rig = await bootHost({ codex: firstServer.bin }, { ORQUESTER_AGENT_CONTINUE_AFTER_RESTART: "1" });
     const home = rig.env["HOME"]!;
     const done = await handover(rig, { refId: "codex", model: "gpt-5.5" }, async () => {
       await writeShim(home, "codex", nextServer.bin);
     });
-    next = done.next;
     await assertContinued(rig, done.first, done.log);
     const resumed = nextServer.received().filter((frame) => frame.method === "thread/resume");
     assert.equal(resumed.length, 1, "the next host resumed the thread from its cursor");
   } finally {
-    await next?.stop();
-    await rig?.host.stop();
+    await stopHosts(rig);
     reap("ORQUESTER_SESSION_ID=t1");
     if (rig !== undefined) await rm(rig.root, { recursive: true, force: true, maxRetries: 3 });
     rmSync(firstServer.dir, { recursive: true, force: true });
