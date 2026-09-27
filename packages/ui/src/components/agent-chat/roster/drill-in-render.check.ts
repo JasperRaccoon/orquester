@@ -24,6 +24,7 @@ import {
   type RuntimeSubagent,
   type ThreadActivityItem,
   type ThreadItem,
+  type ThreadSessionState,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
@@ -82,15 +83,16 @@ const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve
 
 let sessions = 0;
 
-/** A fresh thread whose store holds `thread`, as a snapshot frame delivers it. */
-async function seededThread(thread: Partial<ThreadSnapshotPayload>): Promise<string> {
+/** A fresh thread whose store holds `thread`, as a snapshot frame delivers it — on `session`, when given. */
+async function seededThread(thread: Partial<ThreadSnapshotPayload>, session?: ThreadSessionState): Promise<string> {
   sessions += 1;
   const sessionId = `drill-${sessions}`;
   ensureThreadStore(sessionId, { transport });
   await flush();
   const push = frameHandlers.get(sessionId);
   assert.ok(push, "the store opened its stream");
-  push({ kind: "snapshot", thread: snapshot({ head: head({ id: sessionId }), seq: 1, ...thread }) });
+  const threadHead = head({ id: sessionId, ...(session !== undefined ? { session } : {}) });
+  push({ kind: "snapshot", thread: snapshot({ head: threadHead, seq: 1, ...thread }) });
   return sessionId;
 }
 
@@ -293,22 +295,32 @@ assert.equal((orphanGrok.match(/data-activity-id=/g) ?? []).length, 1, `a Grok s
 assert.ok(orphanGrok.includes('data-shell-output="true"') && orphanGrok.includes("ready in 300ms"), "its last line is its output");
 assert.ok(!orphanGrok.includes("reported nothing to show here"), "never the agent's empty copy");
 
-// Its row evicted while its drill-in was open: the drill-in reads the row it last saw (`drillInAgentRow`,
-// handed over through the same slot as a host's override). The header keeps the title and the status, and
-// the one row keeps the shell pane, though the thread's roster has no row for it.
+// Its row evicted while its drill-in was open: the drill-in keeps the row it last saw (`drillInAgentRow`) —
+// in the host's per-agent memory too, which is how these checks hand it over (`remembered.agent`). A
+// remembered row keeps the agent's title and kind, never its status (final review C r1, m1): the header says
+// the agent is no longer in the thread's roster, with no status chip, and the one row keeps the shell pane.
+const memoryOf = (agent: RuntimeSubagent) => ({
+  disclosures: { expandedTurnIds: [], expandedGroupIds: [], expandedAgentIds: [], expandedReasoningIds: [], toolOutputOffsets: {} },
+  collapsedTurnIds: [],
+  collapsedShellRowIds: [],
+  position: null,
+  follow: true,
+  agent
+});
+const STATUS_CHIP = "data-drill-in-status";
 const rememberedClaude = rosterRow(SHELL, { agentKind: "background", title: "run the suite", status: "completed", exitCode: 0 });
 const keptClaude = render({
   sessionId: await seededThread({ items: [shellStart, shellChunk, shellEnd], roster: [] }),
   agentId: SHELL,
-  agent: rememberedClaude,
   roster: [],
   bottomInset: 0,
-  onBack: NOOP
+  onBack: NOOP,
+  remembered: memoryOf(rememberedClaude)
 });
 assert.ok(keptClaude.includes(`data-timeline-row-id="background-shell:${SHELL}"`), keptClaude);
-assert.ok(keptClaude.includes('data-shell-output="true"'), "the shell pane: the timeline reads the kept row, not the roster");
-assert.ok(keptClaude.includes("run the suite") && keptClaude.includes("Exited with code 0"), "the header keeps its title and status");
-assert.ok(!keptClaude.includes("no longer in the thread&#x27;s roster"));
+assert.ok(keptClaude.includes('data-shell-output="true"'), "the shell pane: the timeline reads the kept row's kind");
+assert.ok(keptClaude.includes("run the suite"), "the header keeps its title");
+assert.ok(keptClaude.includes("no longer in the thread&#x27;s roster") && !keptClaude.includes(STATUS_CHIP), "never its status");
 
 const rememberedGrok = rosterRow(GROK_SHELL, { agentKind: "background", title: "npm run dev", status: "completed", exitCode: 0 });
 const keptGrok = render({
@@ -320,14 +332,85 @@ const keptGrok = render({
     roster: []
   }),
   agentId: GROK_SHELL,
-  agent: rememberedGrok,
   roster: [],
   bottomInset: 0,
-  onBack: NOOP
+  onBack: NOOP,
+  remembered: memoryOf(rememberedGrok)
 });
 assert.equal((keptGrok.match(/data-activity-id=/g) ?? []).length, 1, keptGrok);
 assert.ok(keptGrok.includes('data-shell-output="true"') && keptGrok.includes("ready in 300ms"), "its last line, in the shell pane");
-assert.ok(keptGrok.includes("npm run dev") && keptGrok.includes("Exited with code 0"));
+assert.ok(keptGrok.includes("npm run dev") && !keptGrok.includes(STATUS_CHIP));
+
+// Evicted while still at work (final review C r1, m1): more than 100 agents live, and the cap evicts the
+// oldest-updated live ones. The session is live and the remembered row says `running`, but a remembered row
+// is not live: no pulsing "Working" and no ticking timer in the header, no working row in the timeline, and
+// an empty timeline's notice is the settled one — they agree.
+const LIVE_SESSION: ThreadSessionState = { status: "running", activeTurnId: "turn-9" };
+const evictedClaude = render({
+  sessionId: await seededThread({ items: [shellStart, shellChunk], roster: [] }, LIVE_SESSION),
+  agentId: SHELL,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP,
+  remembered: memoryOf(rosterRow(SHELL, { agentKind: "background", title: "run the suite", status: "running" }))
+});
+assert.ok(evictedClaude.includes(`data-timeline-row-id="background-shell:${SHELL}"`), `a shell still: ${evictedClaude}`);
+assert.ok(evictedClaude.includes('data-shell-output="true"') && evictedClaude.includes("run the suite"));
+assert.ok(!evictedClaude.includes(STATUS_CHIP) && !evictedClaude.includes("ac-dot-pulse"), `no live chip: ${evictedClaude}`);
+assert.ok(evictedClaude.includes("no longer in the thread&#x27;s roster"));
+
+const evictedGrok = render({
+  sessionId: await seededThread({ items: [grokShellRow("task.started", { detail: "npm run dev" }, "gsh-e-start")], roster: [] }, LIVE_SESSION),
+  agentId: GROK_SHELL,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP,
+  remembered: memoryOf(rosterRow(GROK_SHELL, { agentKind: "background", title: "npm run dev", status: "running" }))
+});
+assert.equal((evictedGrok.match(/data-activity-id=/g) ?? []).length, 1, evictedGrok);
+assert.ok(!evictedGrok.includes(STATUS_CHIP) && !evictedGrok.includes("ac-dot-pulse"), `no live chip: ${evictedGrok}`);
+assert.ok(evictedGrok.includes("npm run dev") && evictedGrok.includes("no longer in the thread&#x27;s roster"));
+
+const LIVE_AGENT = "agent-live-evicted";
+const liveAgentRow = rosterRow(LIVE_AGENT, { title: "Survey the fleet", status: "running", lastToolName: "Bash" });
+const evictedQuietAgent = render({
+  sessionId: await seededThread({ items: [], roster: [] }, LIVE_SESSION),
+  agentId: LIVE_AGENT,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP,
+  remembered: memoryOf(liveAgentRow)
+});
+assert.ok(evictedQuietAgent.includes("Survey the fleet") && !evictedQuietAgent.includes(STATUS_CHIP), evictedQuietAgent);
+assert.ok(!evictedQuietAgent.includes('data-timeline-row-kind="working"'), "no working row: the timeline reads it settled");
+assert.ok(
+  evictedQuietAgent.includes("This agent reported nothing to show here.") && !evictedQuietAgent.includes("not reported anything yet"),
+  "and so does its notice"
+);
+const agentCall = wireActivity(
+  "tool.completed",
+  { itemType: "command_execution", toolUseId: "call-e1", title: "ls", command: "ls", status: "completed" },
+  { id: "agent-e-call", agentId: LIVE_AGENT }
+);
+const evictedBusyAgent = render({
+  sessionId: await seededThread({ items: [agentCall], roster: [] }, LIVE_SESSION),
+  agentId: LIVE_AGENT,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP,
+  remembered: memoryOf(liveAgentRow)
+});
+assert.ok(!evictedBusyAgent.includes(STATUS_CHIP) && !evictedBusyAgent.includes('data-timeline-row-kind="working"'), evictedBusyAgent);
+// The control: the same agent still in the roster is live — its chip, and its working row.
+const listedAgent = render({
+  sessionId: await seededThread({ items: [agentCall], roster: [liveAgentRow] }, LIVE_SESSION),
+  agentId: LIVE_AGENT,
+  roster: [liveAgentRow],
+  bottomInset: 0,
+  onBack: NOOP,
+  remembered: memoryOf(liveAgentRow)
+});
+assert.ok(listedAgent.includes(STATUS_CHIP) && listedAgent.includes('data-timeline-row-kind="working"'), listedAgent);
 
 // Nothing of its own left in the window, only its launch: a shell's empty copy, not an agent's.
 const orphanQuiet = render({

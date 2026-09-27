@@ -93,12 +93,15 @@ export function didToolWork(agent: Pick<RuntimeSubagent, "lastToolName" | "usage
  * `retentionDropped` says the thread's window has dropped rows;
  * `backgroundShell` says it is a shell's drill-in — the row's kind, or, with
  * no row, the items' (`isBackgroundShellItems`). Absent: the row's kind.
+ * `agentRemembered` says the row is the one last seen, not the roster's: its
+ * kind and its work still count, its status does not — it is never live.
  */
 export function drillInEmptyNotice(input: {
   rows: readonly AgentChatTimelineRow[];
   agent: RuntimeSubagent | undefined;
   retentionDropped: boolean;
   backgroundShell?: boolean;
+  agentRemembered?: boolean;
 }): EmptyNotice | null {
   const { rows, agent, retentionDropped } = input;
   if (rows.some((row) => !isPromptRow(row) && !isLivePlaceholder(row))) {
@@ -119,8 +122,9 @@ export function drillInEmptyNotice(input: {
   const left = agent !== undefined && retentionDropped && didToolWork(agent);
   // Live by its roster status (`pending`, `running`, `waiting`), which the
   // roster fold already settles when the session dies — the notion the
-  // drill-in's live rows follow too.
-  const live = agent !== undefined && ACTIVE_SUBAGENT_STATUSES.has(agent.status);
+  // drill-in's live rows follow too. A remembered row is not the roster's: its
+  // status is not current, and the timeline reads it as not live.
+  const live = agent !== undefined && input.agentRemembered !== true && ACTIVE_SUBAGENT_STATUSES.has(agent.status);
   if (input.backgroundShell ?? agent?.agentKind === "background") {
     // A shell prints output, it does not "report".
     if (left) {

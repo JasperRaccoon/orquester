@@ -249,6 +249,11 @@ export interface AgentChatDrillInView {
   /** The agent's row: the override, the roster's, else the one last seen (`drillInAgentRow`). */
   agent: RuntimeSubagent | null;
   /**
+   * `agent` is the row last seen, not the roster's: its title and kind hold,
+   * its status is not current, and it is never live (`DrillInAgent`).
+   */
+  agentRemembered: boolean;
+  /**
    * A background shell's drill-in: its row says so, or — with no row at all —
    * its items (`isBackgroundShellItems`). Its rows are then `null`.
    */
@@ -304,26 +309,41 @@ export function useAgentChatDrillIn(
 
   return useMemo(() => {
     if (agentId === null) {
-      return { rows: [], agent: null, backgroundShell: false, items: entries, openTurnIds: NO_TURNS, retentionDropped };
+      return {
+        rows: [],
+        agent: null,
+        agentRemembered: false,
+        backgroundShell: false,
+        items: entries,
+        openTurnIds: NO_TURNS,
+        retentionDropped
+      };
     }
-    const agent = drillInAgentRow({ agentId, override: agentOverride, roster, lastKnown: lastKnownAgent });
+    const { row: agent, remembered: agentRemembered } = drillInAgentRow({
+      agentId,
+      override: agentOverride,
+      roster,
+      lastKnown: lastKnownAgent
+    });
     // A shell by its row; with no row at all, by its items — a walk of the
     // window, only while no row is known.
     const backgroundShell = agent !== null ? isBackgroundShellRow(agent) : isBackgroundShellItems(entries, agentId);
     if (backgroundShell) {
-      return { rows: null, agent, backgroundShell, items: entries, openTurnIds: NO_TURNS, retentionDropped };
+      return { rows: null, agent, agentRemembered, backgroundShell, items: entries, openTurnIds: NO_TURNS, retentionDropped };
     }
     projection.current = projectAgentDrillIn(projection.current, {
       items: entries,
       agentId,
+      // Its current run's start and its kind: a live agent reads live — by the
+      // context's own notion, which a row the roster evicted is never in.
       messageStreaming,
-      // Its current run's start and its kind: a live agent reads live.
       agent,
       disclosures
     });
     return {
       rows: projection.current.stable.result,
       agent,
+      agentRemembered,
       backgroundShell,
       items: entries,
       openTurnIds: projection.current.openTurnIds,

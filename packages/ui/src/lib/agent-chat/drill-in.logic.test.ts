@@ -1170,25 +1170,37 @@ describe("a prompted, relaunched agent's streamed tokens re-derive nothing a ful
   });
 });
 
-describe("the drill-in's agent row outlives the roster's cap (final review C, M2)", () => {
+describe("the drill-in's agent row outlives the roster's cap (final review C, M2 and r1 m1)", () => {
   const row = (id: string, overrides: Record<string, unknown> = {}) =>
     ({ id, kind: "subagent", agentKind: "background", title: id, status: "completed", ...overrides }) as never;
 
-  it("the roster's row while it has one — the newer — and the row last seen once the roster drops it", () => {
+  it("the roster's row while it has one — the newer, and current — and the row last seen once the roster drops it", () => {
     const seen = row("sh1", { title: "dev server", status: "running" });
     const now = row("sh1", { title: "dev server", status: "completed" });
-    assert.equal(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [now], lastKnown: seen }), now);
-    assert.equal(
-      drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: now }),
-      now,
-      "evicted: its title and status stay on the header, and its kind keeps the shell's one row"
+    assert.deepEqual(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [now], lastKnown: seen }), {
+      row: now,
+      remembered: false
+    });
+    assert.deepEqual(
+      drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: seen }),
+      { row: seen, remembered: true },
+      "evicted: its title and kind keep the header and the shell's one row; remembered, its status is not current"
     );
   });
 
-  it("the host's override wins; a remembered row of another agent is none of this one's", () => {
+  it("the host's override wins, and is current; a remembered row of another agent is none of this one's", () => {
     const override = row("sh1", { title: "from the host" });
-    assert.equal(drillInAgentRow({ agentId: "sh1", override, roster: [row("sh1")], lastKnown: row("sh1") }), override);
-    assert.equal(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: row("sh2") }), null);
-    assert.equal(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: null }), null);
+    assert.deepEqual(drillInAgentRow({ agentId: "sh1", override, roster: [], lastKnown: row("sh1") }), {
+      row: override,
+      remembered: false
+    });
+    assert.deepEqual(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: row("sh2") }), {
+      row: null,
+      remembered: false
+    });
+    assert.deepEqual(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: null }), {
+      row: null,
+      remembered: false
+    });
   });
 });

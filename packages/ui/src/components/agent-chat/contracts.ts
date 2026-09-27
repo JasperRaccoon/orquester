@@ -165,6 +165,14 @@ export interface ChatTimelineProps {
    */
   drilledAgent?: RuntimeSubagent | null | undefined;
   /**
+   * `drilledAgent` is the row the drill-in last saw, not the roster's: its
+   * kind holds, its status is not current — the empty copy reads it as not
+   * live, as the timeline's rows do.
+   *
+   * *Added with the UI fix wave (2026-09-27).*
+   */
+  drilledAgentRemembered?: boolean | undefined;
+  /**
    * The drill-in is a background shell's: its row says so, or, with no row at
    * all, its items (`isBackgroundShellItems`). Absent: the drilled row's kind.
    *

@@ -67,6 +67,14 @@ describe("the drill-in's per-agent memory", () => {
     assert.deepEqual(opened.disclosures.expandedGroupIds, ["group-1"], "its disclosures still come back");
   });
 
+  it("an entry keeps the last roster row seen, so a reopened agent the roster evicted keeps its title and kind", () => {
+    const seen = { id: "a1", kind: "subagent", agentKind: "background", title: "dev server", status: "running" } as never;
+    const opened = openDrillIn(rememberDrillIn(EMPTY_DRILL_IN_MEMORY, "a1", entry({ agent: seen })), "a1");
+    assert.equal(opened.agent, seen);
+    assert.equal(openDrillIn(EMPTY_DRILL_IN_MEMORY, "a1").agent, null, "none never seen");
+    assert.equal(openDrillIn(rememberDrillIn(EMPTY_DRILL_IN_MEMORY, "a1", entry()), "a1").agent, null, "none remembered");
+  });
+
   it("A → B saves A's and restores B's, and each keeps its own", () => {
     let memory = rememberDrillIn(EMPTY_DRILL_IN_MEMORY, "a", entry({ collapsedTurnIds: ["ta"] }));
     memory = rememberDrillIn(memory, "b", entry({ collapsedTurnIds: ["tb"] }));

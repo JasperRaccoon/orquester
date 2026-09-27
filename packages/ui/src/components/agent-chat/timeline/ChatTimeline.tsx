@@ -106,6 +106,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     readOnly,
     retentionDropped = false,
     drilledAgent,
+    drilledAgentRemembered = false,
     backgroundShell: backgroundShellProp,
     roster,
     skills,
@@ -175,11 +176,17 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   const notice = React.useMemo<EmptyNotice | null>(
     () =>
       agentId !== undefined
-        ? drillInEmptyNotice({ rows, agent: drilledRow, retentionDropped, backgroundShell })
+        ? drillInEmptyNotice({
+            rows,
+            agent: drilledRow,
+            retentionDropped,
+            backgroundShell,
+            agentRemembered: drilledAgentRemembered
+          })
         : rows.length === 0 && !showLoadOlder && !showEmptyPanel
           ? { text: "No messages yet.", at: 0 }
           : null,
-    [agentId, backgroundShell, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
+    [agentId, backgroundShell, drilledAgentRemembered, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
   );
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);

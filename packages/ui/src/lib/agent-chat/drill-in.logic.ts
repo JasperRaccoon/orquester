@@ -140,29 +140,47 @@ export function collapsedTurnsAfter(
   return next;
 }
 
+/** The drill-in's agent row, and where it came from ({@link drillInAgentRow}). */
+export interface DrillInAgent {
+  readonly row: RuntimeSubagent | null;
+  /**
+   * The row is the one last seen, not one the roster has now. Its title and
+   * its kind hold — a shell stays a one-row shell view — but its status is
+   * not current and it is never live: the roster evicted it, and a live
+   * status there was live when it was seen, nothing more (past 100 agents at
+   * work the cap evicts the oldest-updated live ones).
+   */
+  readonly remembered: boolean;
+}
+
 /**
  * The drill-in's agent row: the host's override, else the roster's, else the
- * row the drill-in last saw for this agent (`lastKnown`). The roster keeps 100
- * rows and evicts the oldest settled ones first, so an open drill-in's row can
- * leave it (final review C, M2); the remembered row keeps the header's title
- * and status, and its kind keeps a shell's drill-in the shell's one row. The
- * roster's own row wins over the remembered one: it is the newer.
+ * row the drill-in last saw for this agent (`lastKnown`), which is then
+ * `remembered`. The roster keeps 100 rows and evicts the oldest settled ones
+ * first, so an open drill-in's row can leave it (final review C, M2); the
+ * remembered row keeps the header's title and the shell's one row, and
+ * nothing reads its status as current (r1, m1): the header says the agent is
+ * no longer in the thread's roster, and the timeline and its empty notice
+ * read it as not live. The roster's own row wins over the remembered one: it
+ * is the newer, and current; so is a host's override.
  */
 export function drillInAgentRow(input: {
   readonly agentId: string;
   readonly override: RuntimeSubagent | null | undefined;
   readonly roster: readonly RuntimeSubagent[];
   readonly lastKnown: RuntimeSubagent | null | undefined;
-}): RuntimeSubagent | null {
+}): DrillInAgent {
   const { agentId, override, roster, lastKnown } = input;
   if (override !== undefined && override !== null) {
-    return override;
+    return { row: override, remembered: false };
   }
   const row = roster.find((candidate) => candidate.id === agentId);
   if (row !== undefined) {
-    return row;
+    return { row, remembered: false };
   }
-  return lastKnown !== undefined && lastKnown !== null && lastKnown.id === agentId ? lastKnown : null;
+  return lastKnown !== undefined && lastKnown !== null && lastKnown.id === agentId
+    ? { row: lastKnown, remembered: true }
+    : { row: null, remembered: false };
 }
 
 /**

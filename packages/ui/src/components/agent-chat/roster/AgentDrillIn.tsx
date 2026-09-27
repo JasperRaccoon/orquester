@@ -121,11 +121,11 @@ export function AgentDrillIn({
     () => ({ expandedGroupIds: disclosures.expandedGroupIds, collapsedTurnIds }),
     [disclosures.expandedGroupIds, collapsedTurnIds]
   );
-  // The last row seen for this agent (the component is keyed by it): the
-  // roster keeps 100 rows and evicts the oldest settled ones first, and an
-  // open drill-in keeps its header — title, status — and its kind through
-  // that (`drillInAgentRow`).
-  const lastKnownAgent = React.useRef<RuntimeSubagent | null>(null);
+  // The last row seen for this agent (the component is keyed by it), from
+  // the host's memory when it was opened before: the roster keeps 100 rows
+  // and evicts the oldest settled ones first, and an open drill-in keeps its
+  // header's title and its kind through that (`drillInAgentRow`).
+  const lastKnownAgent = React.useRef<RuntimeSubagent | null>(opening.agent);
   const live = useAgentChatDrillIn(sessionId, agentId, {
     disclosures: projectionDisclosures,
     agent: agentOverride,
@@ -135,6 +135,9 @@ export function AgentDrillIn({
     lastKnownAgent.current = live.agent;
   }
   const agent = live.agent;
+  // The roster's own row (or a host's): its status is current. A remembered
+  // one keeps the title and the kind, never the status (`drillInAgentRow`).
+  const current = agent !== null && !live.agentRemembered;
   // A shell by its row, or — with no row at all — by its items.
   const background = live.backgroundShell;
 
@@ -182,9 +185,9 @@ export function AgentDrillIn({
   const latest = React.useRef({ disclosures, collapsedTurnIds, collapsedShellRowIds, follow });
   latest.current = { disclosures, collapsedTurnIds, collapsedShellRowIds, follow };
   const remember = React.useCallback(() => {
-    onRemember?.(agentId, { ...latest.current, position: position.current });
+    onRemember?.(agentId, { ...latest.current, position: position.current, agent: lastKnownAgent.current });
   }, [agentId, onRemember]);
-  React.useEffect(remember, [disclosures, collapsedTurnIds, collapsedShellRowIds, follow, remember]);
+  React.useEffect(remember, [disclosures, collapsedTurnIds, collapsedShellRowIds, follow, live.agent, remember]);
   const onScrollPositionChange = React.useCallback(
     (next: TimelineScrollPosition) => {
       position.current = next;
@@ -280,8 +283,11 @@ export function AgentDrillIn({
             {agent?.title ?? agentId}
           </span>
         </nav>
-        {agent && visuals ? (
-          <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] text-neutral-500">
+        {current && agent && visuals ? (
+          <span
+            className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] text-neutral-500"
+            data-drill-in-status=""
+          >
             <StatusDot tone={visuals.tone} size="xs" pulse={visuals.pulse} label={statusText} />
             <span>{statusText}</span>
             <ElapsedTicker
@@ -293,7 +299,7 @@ export function AgentDrillIn({
         ) : null}
       </header>
 
-      {agent ? (
+      {current && agent ? (
         <div className="shrink-0 border-b border-neutral-800 px-3 py-2 sm:px-5">
           <div className="mx-auto w-full max-w-3xl">
             <p className="truncate text-sm leading-relaxed text-neutral-300" title={line}>
@@ -305,8 +311,9 @@ export function AgentDrillIn({
           </div>
         </div>
       ) : (
-        // The roster dropped the row (retention, or a host restart) while its
-        // items are still in the thread. Say so, and keep showing them.
+        // The roster dropped the row (its cap, or a host restart) while its
+        // items are still in the thread. Say so, and keep showing them — under
+        // the remembered row's title, if one was seen, never its status.
         <div className="shrink-0 border-b border-neutral-800 px-3 py-2 sm:px-5">
           <p className="mx-auto w-full max-w-3xl text-sm italic text-neutral-600">
             This agent is no longer in the thread&apos;s roster.
@@ -325,6 +332,7 @@ export function AgentDrillIn({
         // The row and the kind as this view knows them — the roster may no
         // longer have the row — for the empty copy and the shell pane.
         drilledAgent={agent}
+        drilledAgentRemembered={live.agentRemembered}
         backgroundShell={background}
         roster={roster}
         projectPath={projectPath}

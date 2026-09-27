@@ -146,6 +146,19 @@ describe("drillInEmptyNotice: the three tiers", () => {
     assert.equal(text({ rows: [], agent: undefined, retentionDropped: true }), NOTHING_HERE, "no row and no word: an agent's");
   });
 
+  it("a remembered row is never live: an agent the roster evicted while at work reads settled (final review C r1, m1)", () => {
+    const running = row({ status: "running" });
+    assert.equal(text({ rows: [], agent: running, retentionDropped: true, agentRemembered: true }), NOTHING_HERE);
+    assert.equal(
+      text({ rows: [], agent: row({ status: "running", lastToolName: "Bash" }), retentionDropped: true, agentRemembered: true }),
+      LEFT,
+      "its tool work is still evidence"
+    );
+    const shell = row({ agentKind: "background", title: "npm run dev", status: "running" });
+    assert.equal(text({ rows: [], agent: shell, retentionDropped: true, agentRemembered: true }), SHELL_NONE, "never 'No output yet.'");
+    assert.equal(text({ rows: [], agent: running, retentionDropped: true }), NOT_YET, "the roster's own running row is live");
+  });
+
   it("a row of the agent's own is on screen: no notice at all", () => {
     const work: AgentChatTimelineRow = {
       kind: "work",
