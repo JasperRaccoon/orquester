@@ -248,8 +248,16 @@ export class OpenCodeThreadSession {
   /** The interrupts under way (`asInterrupt`), each settling when it ends. */
   private readonly interruptFlights = new Set<Promise<void>>();
   /**
-   * How many interrupts have begun. A judge compares it across its reads: one
-   * that began — and maybe already ended — while the server answered may have
+   * The descendant aborts under way that the end of a Stop whose abort
+   * request failed sent (`endFailedStopTurn`), each settling when it ends.
+   * That end closes the children first and aborts them after, outside
+   * `asInterrupt`, so a judge waits for these too (`abortsSettled`).
+   */
+  private readonly descendantAborts = new Set<Promise<void>>();
+  /**
+   * How many interrupts have begun, the descendant abort a failed Stop's end
+   * sends counted as one. A judge compares it across its reads: one that
+   * began — and maybe already ended — while the server answered may have
    * ended what was asked about, so that answer is stale.
    */
   private interruptsBegun = 0;
@@ -515,8 +523,8 @@ export class OpenCodeThreadSession {
   /**
    * Run `work` as an interrupt (`OpenCodeSessionState.interrupting`): from its
    * first step to its last, a request is held (`holdsRequests` in
-   * `normalize.ts`), and judged only once every interrupt is over
-   * (`interruptsSettled`) — the abort is what ends an asker, and a Stop's
+   * `normalize.ts`), and judged only once every abort is over
+   * (`abortsSettled`) — the abort is what ends an asker, and a Stop's
    * first step, withdrawing the parked cards, comes before it.
    */
   private async asInterrupt<T>(work: () => Promise<T>): Promise<T> {
@@ -544,6 +552,18 @@ export class OpenCodeThreadSession {
   private async interruptsSettled(): Promise<void> {
     while (this.interruptFlights.size > 0) {
       await Promise.all([...this.interruptFlights]);
+    }
+  }
+
+  /**
+   * Settles once no interrupt is in flight and no descendant abort a failed
+   * Stop's end sent is (`descendantAborts`), one that begins meanwhile
+   * included. The abort is what ends a child or an asker, so a judge asks the
+   * server about one only once every abort that may end it is over.
+   */
+  private async abortsSettled(): Promise<void> {
+    while (this.interruptFlights.size > 0 || this.descendantAborts.size > 0) {
+      await Promise.all([...this.interruptFlights, ...this.descendantAborts]);
     }
   }
 
@@ -1235,19 +1255,19 @@ export class OpenCodeThreadSession {
    * or after one before any run has said `busy` (`holdsRequests` in
    * `normalize.ts`). Its asker may be one the abort ended — its frame reached
    * the stream late — or one the abort never reached, which waits on it for
-   * good unless it is shown. So once the interrupt in flight is over, the
-   * server is asked (`askerWaits`): a request whose asker still waits is shown
-   * as any would be (`openHeldRequest`); one whose asker is gone writes no
-   * card and is rejected on the wire, which releases what an older server
-   * kept listed (fixtures README observation 11). A request answered
-   * elsewhere meanwhile is dropped from the hold by its terminal frame, and
-   * nothing is done here.
+   * good unless it is shown. So once every abort in flight is over — a failed
+   * Stop's end's too (`abortsSettled`) — the server is asked (`askerWaits`): a
+   * request whose asker still waits is shown as any would be
+   * (`openHeldRequest`); one whose asker is gone writes no card and is
+   * rejected on the wire, which releases what an older server kept listed
+   * (fixtures README observation 11). A request answered elsewhere meanwhile
+   * is dropped from the hold by its terminal frame, and nothing is done here.
    */
   private async judgeHeldRequest(held: OpenCodeHeldRequest, raw: unknown): Promise<void> {
     const requestId = held.request.id;
     for (let round = 0; ; round += 1) {
-      // The abort is what ends an asker: ask only once every interrupt is over.
-      await this.interruptsSettled();
+      // The abort is what ends an asker: ask only once every abort is over.
+      await this.abortsSettled();
       if (this.closed || !this.state.heldRequestIds.has(requestId)) {
         return;
       }
@@ -1321,15 +1341,16 @@ export class OpenCodeThreadSession {
 
   /**
    * A child whose run the adapter ended reported that it goes on
-   * (`reportChildRun` in `normalize.ts`). Once every interrupt is over — the
-   * abort is what ends a child — the server says whether its session still
-   * runs, and check `checkId` settles it (`settleChildSurvival`): a survivor
-   * is relaunched. A read that fails relaunches it too: never let a deploy
-   * kill running work.
+   * (`reportChildRun` in `normalize.ts`). Once every abort that may end it is
+   * over — every interrupt, and the descendant abort a failed Stop's end
+   * sends (`abortsSettled`) — the server says whether its session still runs,
+   * and check `checkId` settles it (`settleChildSurvival`): a survivor is
+   * relaunched. A read that fails relaunches it too: never let a deploy kill
+   * running work.
    */
   private async judgeChildSurvival(childId: string, checkId: number): Promise<void> {
     for (let round = 0; ; round += 1) {
-      await this.interruptsSettled();
+      await this.abortsSettled();
       if (this.closed) {
         return;
       }
@@ -1338,8 +1359,8 @@ export class OpenCodeThreadSession {
       if (this.closed) {
         return;
       }
-      // A Stop that began while the server answered may have ended the child:
-      // that answer is stale.
+      // An abort that began while the server answered — a Stop's, or a failed
+      // Stop's end's — may have ended the child: that answer is stale.
       if (this.interruptsBegun !== interruptsBefore && round < 2) {
         continue;
       }
@@ -2063,13 +2084,28 @@ export class OpenCodeThreadSession {
    * kept the next woken run dropped and took the next turn's own abort for
    * the Stop's echo. A turn the user took back by a steer is no longer the
    * failed Stop's (`sendTurn`), and ends as any turn does.
+   *
+   * Unlike a Stop's, this abort comes after the children are closed, and
+   * outside `asInterrupt`: it counts as an interrupt that begins
+   * (`interruptsBegun`), and the judges wait for it (`descendantAborts`,
+   * `abortsSettled`). A report of a child it is aborting, or an ask of one,
+   * that arrives meanwhile is judged once it is over — or asked about again,
+   * when the server answered while it began. Judged at once, the server's
+   * `busy` from before that abort relaunched the child for a moment, until
+   * the abort's own frames ended it again, and showed a card for an ask it
+   * then ended.
    */
   private endFailedStopTurn(turnId: string): void {
     this.state.failedStopTurnId = undefined;
     this.cancelIdleReconciliation();
     this.settleStop(turnId);
     this.state.idleAfterInterrupt = true;
-    void this.abortDescendants();
+    this.interruptsBegun += 1;
+    const aborting = this.abortDescendants().catch(() => undefined);
+    this.descendantAborts.add(aborting);
+    void aborting.then(() => {
+      this.descendantAborts.delete(aborting);
+    });
   }
 
   /**

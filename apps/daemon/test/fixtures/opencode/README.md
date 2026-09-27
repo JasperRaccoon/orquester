@@ -1094,9 +1094,12 @@ run's end: the Stop then ends the turn as it ends one, `turn.aborted` and the se
 any end after it), and that end counts as the idle after the interrupt, so the next `busy` is a new
 run's. Until it comes, the turn is still the thread's, and the next Stop of that turn asks the
 server again; a steer into it takes it back — the failed Stop is over, and the run's end completes
-the turn as any. A second Stop used to find the turn already interrupted and do nothing, and an idle
-that came while the abort was pending was parked where nothing read it, so the turn stayed active
-for good. Built, not captured.
+the turn as any. An end after the failure closes the children before it aborts them, outside the
+Stop's interrupt: a child's report or ask that arrives before that abort is over is judged after it,
+as after any Stop's abort — judged at once, the server's `busy` from before it relaunched the child
+for a moment, and an ask it then ended got a card. A second Stop used to find the turn already
+interrupted and do nothing, and an idle that came while the abort was pending was parked where
+nothing read it, so the turn stayed active for good. Built, not captured.
 
 ---
 

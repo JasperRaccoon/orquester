@@ -1244,7 +1244,7 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the abort — and a failed admission's abort, which now leaves the same lingering state a Stop
   does), or after it before any run says `busy` (`interruptionLingers`, the windows the parent's
   output is dropped in), is held (`holdsRequests`) and judged once every interrupt is over
-  (`judgeHeldRequest`, `interruptsSettled`): asked again if another interrupt began while the server
+  (`judgeHeldRequest`, `abortsSettled`): asked again if another interrupt began while the server
   answered (`interruptsBegun`) — a Stop that starts and ends during the reads makes their answer
   stale; listed by the server and its session busy — the card, as any (a child's question on no
   turn), or full access's `once`; unlisted or its session idle (an older server's orphan) — no card,
@@ -1305,10 +1305,14 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   uncounted, a lone idle or the poll kept the next woken run dropped and took the next turn's own
   abort for the Stop's echo. Until then the turn is still the thread's, and the next Stop of it asks
   the server again; a steer into it is the user taking it back — the failed Stop is over, the run's
-  end completes the turn as any, and its children run on. A second Stop used to find the turn
-  already interrupted and do nothing, and an idle that came while the abort was pending was parked
-  where nothing read it: the turn stayed active — the thread reading working, every deploy's drain
-  held — and no Stop could end it.
+  end completes the turn as any, and its children run on. An end after the failure
+  (`endFailedStopTurn`) closes the children before it aborts them, outside the interrupt, so that
+  abort counts as one (`interruptsBegun`) and the judges wait for it (`descendantAborts`,
+  `abortsSettled`): judged at once, a child's report in between relaunched it for a moment on the
+  server's `busy` from before the abort, and an ask it then ended got a card. A second Stop used to
+  find the turn already interrupted and do nothing, and an idle that came while the abort was
+  pending was parked where nothing read it: the turn stayed active — the thread reading working,
+  every deploy's drain held — and no Stop could end it.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures
