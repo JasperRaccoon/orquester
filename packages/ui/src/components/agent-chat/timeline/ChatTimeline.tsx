@@ -223,7 +223,8 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   // The drill-in counts as its own list (session and agent): another agent's
   // rows are a list just opened, not rows that arrived.
   const listIdentity = timelineListIdentity(sessionId, agentId);
-  const enterFlag = useRowEnterFlags(rows, listIdentity);
+  // Only the thread's own list is primed by a ready, empty render.
+  const enterFlag = useRowEnterFlags(rows, listIdentity, agentId === undefined && threadReady);
 
   // -------------------------------------------------------------------------
   // Disclosure plumbing
@@ -860,11 +861,16 @@ export function threadPlanReader(sessionId: string): AgentChatActions["readFullP
 /**
  * Decides, once per row id, whether that row animates in (`row-enter.ts`):
  * rows that arrive rise; a list's first rows — a thread's first snapshot,
- * another agent's drill-in — do not.
+ * another agent's drill-in — do not. `ready` primes the thread's own list on
+ * an empty render too, so a brand-new thread's first message rises.
  */
-function useRowEnterFlags(rows: readonly { id: string }[], listIdentity: string): (id: string) => boolean {
+function useRowEnterFlags(
+  rows: readonly { id: string }[],
+  listIdentity: string,
+  ready: boolean
+): (id: string) => boolean {
   const state = React.useRef<RowEnterState | null>(null);
-  state.current = nextRowEnterState(state.current, rows, listIdentity);
+  state.current = nextRowEnterState(state.current, rows, listIdentity, ready);
   return React.useCallback((id: string) => state.current !== null && rowEnters(state.current, id), []);
 }
 

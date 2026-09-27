@@ -3621,8 +3621,9 @@ a boolean nothing paints would be strictly worse.*
 not. The rule is per list — `timelineListIdentity`, session and agent, so the drill-in switching from
 one agent to another is a new list whose rows do not all rise — and it is primed by the list's first
 NON-EMPTY render, because a cold thread renders empty and its first snapshot lands a render later
-and used to rise in whole. A row landing above every row on screen is older history and never
-rises (`timeline/row-enter.ts`).*
+and used to rise in whole; the thread's own list is also primed by a render where the thread is
+ready (synchronized), empty or not, so a brand-new thread's first message rises. A row landing
+above every row on screen is older history and never rises (`timeline/row-enter.ts`).*
 
 Row kinds and behaviour:
 

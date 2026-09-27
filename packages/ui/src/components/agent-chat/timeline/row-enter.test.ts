@@ -13,10 +13,10 @@ import { nextRowEnterState, rowEnters, type RowEnterState } from "./row-enter";
 const rows = (...ids: string[]) => ids.map((id) => ({ id }));
 
 /** Feed each render's rows under `identity`; the ids that rise in each. */
-function renders(steps: Array<{ identity: string; ids: string[] }>): string[][] {
+function renders(steps: Array<{ identity: string; ids: string[]; ready?: boolean }>): string[][] {
   let state: RowEnterState | null = null;
   return steps.map((step) => {
-    state = nextRowEnterState(state, rows(...step.ids), step.identity);
+    state = nextRowEnterState(state, rows(...step.ids), step.identity, step.ready === true);
     const current = state;
     return step.ids.filter((id) => rowEnters(current, id));
   });
@@ -45,6 +45,40 @@ describe("row enter flags", () => {
         { identity: THREAD, ids: ["r1", "r2", "r3", "r4"] }
       ]),
       [[], [], ["r4"]]
+    );
+  });
+
+  it("a brand-new thread's first message rises: its list was primed by a ready, empty render", () => {
+    assert.deepEqual(
+      renders([
+        { identity: THREAD, ids: [], ready: true },
+        { identity: THREAD, ids: ["user-1"], ready: true },
+        { identity: THREAD, ids: ["user-1", "working"], ready: true }
+      ]),
+      // A flag is decided once and kept: the row that rose keeps its rise.
+      [[], ["user-1"], ["user-1", "working"]]
+    );
+  });
+
+  it("an empty render that is not ready yet (a cold thread) primes nothing, whatever lands next", () => {
+    assert.deepEqual(
+      renders([
+        { identity: THREAD, ids: [], ready: false },
+        { identity: THREAD, ids: ["r1", "r2"], ready: true },
+        { identity: THREAD, ids: ["r1", "r2", "r3"], ready: true }
+      ]),
+      [[], [], ["r3"]]
+    );
+  });
+
+  it("a drill-in's empty render never primes: its first rows never rise", () => {
+    assert.deepEqual(
+      renders([
+        { identity: AGENT_A, ids: [] },
+        { identity: AGENT_A, ids: ["a1"] },
+        { identity: AGENT_A, ids: ["a1", "a2"] }
+      ]),
+      [[], [], ["a2"]]
     );
   });
 

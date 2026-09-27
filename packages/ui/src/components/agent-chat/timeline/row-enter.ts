@@ -10,9 +10,13 @@
  *    — session and agent — so the drill-in switching from agent A to agent B
  *    is a new list whose first rows do not rise. Keyed on the session alone,
  *    every row of B rose at once.
- *  - **Primed by the first NON-EMPTY render.** A cold thread renders empty and
- *    its first snapshot lands a render later; priming on the empty render
- *    made that whole snapshot rise.
+ *  - **Primed by the first NON-EMPTY render** — or, for the thread's own list,
+ *    by a render where the thread is READY (`threadReady`), empty or not. A
+ *    cold thread renders empty and its first snapshot lands a render later;
+ *    priming on that empty render made the whole snapshot rise. But a
+ *    brand-new thread that is ready and empty is a list the user is looking
+ *    at, and its first message arrives: it rises. A drill-in has no such
+ *    render — its list is primed by its first rows.
  *  - **Older history does not rise.** A row that arrives ABOVE every row
  *    already on screen is a "Load older turns" page landing, not news.
  *
@@ -28,11 +32,16 @@ export interface RowEnterState {
   primed: boolean;
 }
 
-/** The flags after this render of `rows` under `identity` — a fresh state for a new list. */
+/**
+ * The flags after this render of `rows` under `identity` — a fresh state for a
+ * new list. `ready`: the list is the thread's own and its thread is
+ * synchronized, so even an empty render of it primes the list.
+ */
 export function nextRowEnterState(
   previous: RowEnterState | null,
   rows: readonly { id: string }[],
-  identity: string
+  identity: string,
+  ready = false
 ): RowEnterState {
   const state: RowEnterState =
     previous !== null && previous.identity === identity
@@ -53,7 +62,7 @@ export function nextRowEnterState(
       state.flags.set(row.id, state.primed && index > firstKnownIndex);
     }
   });
-  if (rows.length > 0) {
+  if (rows.length > 0 || ready) {
     state.primed = true;
   }
   // Drop ids that have left, so a long-lived tab does not accumulate a flag per
