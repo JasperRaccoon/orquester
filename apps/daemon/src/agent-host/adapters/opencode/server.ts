@@ -166,6 +166,16 @@ interface Started {
  */
 export class OpenCodeServerPool {
   private readonly entries = new Map<string, PoolEntry>();
+  /**
+   * The server stops `stopAll` started and that have not settled, so every
+   * call waits for all of them: the host's teardown calls the adapter's
+   * `stopAll()` twice (its abort listener, then its own `stop()`), and the
+   * second pool stop used to find the entries cleared and return while the
+   * first one's kills were still in their SIGTERM grace — the host could
+   * exit before a `serve` that ignored SIGTERM got its SIGKILL (final review
+   * A r1, m4).
+   */
+  private readonly stopping = new Set<Promise<void>>();
   private readonly options: OpenCodeServerPoolOptions;
   private readonly hostname: string;
   private readonly idleCloseMs: number;
@@ -250,12 +260,16 @@ export class OpenCodeServerPool {
     return out;
   }
 
-  /** Stop every server now, regardless of refcount (host shutdown). */
+  /**
+   * Stop every server now, regardless of refcount (host shutdown), and wait
+   * for every server stop in flight — this call's and an earlier call's. A
+   * failed stop fails the call only once the others are done.
+   */
   async stopAll(): Promise<void> {
     const entries = [...this.entries.values()];
     this.entries.clear();
-    await Promise.all(
-      entries.map(async (entry) => {
+    for (const entry of entries) {
+      const stop = (async () => {
         if (entry.idleTimer !== undefined) {
           this.clearTimer(entry.idleTimer);
         }
@@ -263,8 +277,18 @@ export class OpenCodeServerPool {
         if (started !== undefined) {
           await started.child.kill();
         }
-      })
-    );
+      })();
+      this.stopping.add(stop);
+      const forget = (): void => {
+        this.stopping.delete(stop);
+      };
+      void stop.then(forget, forget);
+    }
+    const results = await Promise.allSettled([...this.stopping]);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure !== undefined) {
+      throw failure.reason;
+    }
   }
 
   private handle(entry: PoolEntry, started: Started): OpenCodeServerHandle {

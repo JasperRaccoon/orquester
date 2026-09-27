@@ -87,8 +87,9 @@ const CLIPROXY_CREDENTIAL_ENV_VAR = "ANTHROPIC_AUTH_TOKEN";
  * How long a host teardown lets the consumers read what the adapters'
  * teardown queued, once every `stopAll()` resolved (`stop()` below). Reading
  * a closed stream to its end takes a few milliseconds per row; the bound only
- * matters for a stream that never ends, and it keeps the stop well inside the
- * SIGTERM path's 3 s backstop.
+ * matters for a stream that never ends. It is the one wait on the consumers:
+ * `stop()` awaits them nowhere else, so a stream that never ends holds the
+ * stop for this long and no longer.
  */
 const TEARDOWN_CONSUME_MS = 1_000;
 
@@ -705,7 +706,11 @@ export async function startAgentHost(
     // The provider cache's last write, queued before `snapshots.stop()`, lands
     // before the stop resolves; the stopped registry queues none after it.
     await snapshots.flush();
-    await Promise.allSettled(consumers);
+    // The consumers are not awaited again: each ended within the bounded read
+    // above — every adapter ends its stream after its teardown — or its stream
+    // never ends, and then the orchestrator's stop drops whatever it would
+    // still deliver. Waiting on it here held `stop()` for good (final review
+    // A r1, m3).
   };
 
   const ready = (async (): Promise<void> => {
