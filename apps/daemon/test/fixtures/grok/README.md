@@ -1606,10 +1606,12 @@ first MCP report leaves unswept none of the helpers it had started by then: the 
 answer came too late for it, and its exit then swept nothing. Whether every server's process exists
 by the first report is not captured (the harness listed the children only once the open answered):
 each later report records again, adding what it finds; a CLI that dies before any report still
-leaves its helpers recorded nowhere (only `server_status` among the reports comes after the answer:
-t=763 ms and later). Any end before the session is announced — the CLI's death, the host's
-teardown, a stop — records the children as helpers too, never as the user's work: nothing of the
-user's has run.
+leaves its helpers recorded nowhere. Of those reports only `servers_updated` (t=489 ms) and the
+first `init_progress` (t=645) came before the answer: `init_progress` went on after it (t=724 to
+3558), and `server_status` (t=763 and later) and `mcp_initialized` (t=3563) came only after it — and
+a report that arrives once the session is announced records nothing, since the user's work may be
+running by then. Any end before the session is announced — the CLI's death, the host's teardown, a
+stop — records the children as helpers too, never as the user's work: nothing of the user's has run.
 
 ### 56. agent-browser's daemon leaves its MCP server's session — the helper sweep spares the shared browser
 
