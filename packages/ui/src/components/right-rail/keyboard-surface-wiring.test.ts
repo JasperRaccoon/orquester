@@ -89,6 +89,29 @@ test("the composer's chords stand down in a surface, before any chord is resolve
   );
 });
 
+test("an Escape a layer takes resets the composer's Esc-Esc count before the surface gate returns", () => {
+  // A modal's, a sheet's or the rail dock's Escape is nobody's first press
+  // (chat spec §7.4): the textarea never sees it, and the surface gate below
+  // returns before the interrupt arm's own reset could run — so, left there,
+  // closing a dialog between two Escapes in the composer opened the rewind
+  // picker.
+  const composer = code("composer", "ChatComposer.tsx");
+  const listener = listenerDoing(
+    composer,
+    "onKeyDown",
+    'window.addEventListener("keydown", onKeyDown, true)',
+    "resolveChatShortcut(event)"
+  );
+  const reset =
+    /if\s*\(\s*event\.key === "Escape" && anotherLayerOwnsTheKeyboard\(\)\s*\)\s*escapeSequence\.reset\(\)/.exec(
+      listener
+    );
+  assert.ok(reset, "the listener resets the count for an Escape a layer takes");
+  const gate = gateLine("insideKeyboardSurface").exec(listener);
+  assert.ok(gate, "the surface gate is still there");
+  assert.ok(reset.index < gate.index, "the reset runs before the surface gate returns");
+});
+
 test("the timeline's Ctrl/Cmd+J stands down in a surface", () => {
   const timeline = code("timeline", "ChatTimeline.tsx");
   assert.match(timeline, importsFromSurfaces("insideKeyboardSurface"));

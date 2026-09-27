@@ -1562,6 +1562,10 @@ export function ChatComposer({
       // inactive tabs with a class, it does not unmount them), so without this
       // gate one chord fires on every thread at once.
       if (!isChatTabListenerActive(active, shellRef.current)) return;
+      // An Escape a layer takes — a modal, a sheet, the rail's dock — is
+      // nobody's first press: the textarea never sees it, and the surface gate
+      // below returns before the interrupt arm's own reset.
+      if (event.key === "Escape" && anotherLayerOwnsTheKeyboard()) escapeSequence.reset();
       // A key typed into the right rail's panel, its sheet, the prompt editor
       // or any modal dialog is that surface's, never a chord of this chat
       // (`lib/keyboard-surfaces.ts`).
