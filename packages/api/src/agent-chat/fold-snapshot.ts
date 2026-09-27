@@ -372,7 +372,8 @@ const isSessionState = shaped<ThreadSessionState>({
 
 const isContinueAfterRestart = shaped<ContinueAfterRestart>({
   turnId: isString,
-  prepared: optional(isBoolean)
+  prepared: optional(isBoolean),
+  markedAt: optional(isString)
 });
 
 const isThreadHead = shaped<ThreadHead>({

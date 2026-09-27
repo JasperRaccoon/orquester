@@ -479,12 +479,16 @@ test("saveHead wins over the store's own projection and survives a reopen", asyn
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   await store.append({ threadId: "t1", events: [created()] });
   const head = await headOf(store, "t1");
-  await store.saveHead({ ...head, continueAfterRestart: { turnId: "T-9", prepared: true } });
+  const marker = { turnId: "T-9", prepared: true, markedAt: "2026-09-27T08:00:00.000Z" };
+  await store.saveHead({ ...head, continueAfterRestart: marker });
   await store.drain();
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   const loaded = await headOf(reopened, "t1");
-  assert.deepEqual(loaded.continueAfterRestart, { turnId: "T-9", prepared: true });
+  // The stamp too (§3.3): `meta.json` is parsed by a zod object, which drops
+  // a key it does not list, and a marker that lost its stamp could never
+  // continue a turn the host's own teardown settled.
+  assert.deepEqual(loaded.continueAfterRestart, marker);
 });
 
 test("deleteThread deletes the thread's checkpoint refs before its directory", async () => {

@@ -449,9 +449,15 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   active turn, which the next host used to take for a settled thread: nothing continued, the marker
   left for good (final review A r1). Such a head is a candidate (`meta.json` cannot see the turns)
   that the full path decides (`continuesSettledTurn`): the marked turn must be the thread's LATEST
-  (positional) and settled `interrupted`, and is then continued as an orphan whose turn is already
-  settled — no second settle, no error row, and a marker the thread cannot use (a closed tab, no
-  cursor) is simply dropped. A marker that names anything else is stale and dropped too, as it is
+  (positional) and settled `interrupted`, and the marker STAMPED (`markedAt`, which this code writes
+  on every marker it sets; the config schema lists it, since a zod object drops a key it does not
+  know), and is then continued as an orphan whose turn is already settled — no second settle, no
+  error row, and a marker the thread cannot use (a closed tab, no cursor) is simply dropped. An
+  older host's unstamped marker keeps the rule it was written under — continued only while the head
+  still reads running — and on a settled head is cleared, never continued: a manual stop during a
+  Claude or OpenCode turn could leave one on a thread nobody touched since, and continuing it would
+  replay a turn of any age (final review A r2). A marker that names anything else is stale and
+  dropped too, as it is
   whenever the thread moves on (`dropContinuationMarker`: the user's end, a new turn's effect before
   its session is ensured, any other turn's `turn.started`), and with no active turn an unprepared
   marker matches only that settled turn: a crash while a new turn's session starts never continues

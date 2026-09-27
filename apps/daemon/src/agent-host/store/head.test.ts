@@ -139,9 +139,10 @@ test("an event before thread.created leaves the head null", () => {
 test("continueAfterRestart is carried forward, never minted", () => {
   const events = representativeLog();
   let head = applyEventToHead(null, events[0]!);
-  head = { ...head!, continueAfterRestart: { turnId: "T-9", prepared: true } };
+  const marker = { turnId: "T-9", prepared: true, markedAt: "2026-09-27T08:00:00.000Z" };
+  head = { ...head!, continueAfterRestart: marker };
   for (const event of events.slice(1)) {
     head = applyEventToHead(head, event);
   }
-  assert.deepEqual(head?.continueAfterRestart, { turnId: "T-9", prepared: true });
+  assert.deepEqual(head?.continueAfterRestart, marker);
 });

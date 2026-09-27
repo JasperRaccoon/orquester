@@ -856,8 +856,10 @@ export const agentThreadHeadSchema = z.object({
   session: agentThreadSessionSchema,
   turnCount: z.number().int().nonnegative().default(0),
   seq: z.number().int().nonnegative().default(0),
+  // `markedAt` must be listed: a zod object strips unknown keys, and a stamp
+  // lost on load would make every marker read as an older host's (§3.3).
   continueAfterRestart: z
-    .object({ turnId: z.string().min(1), prepared: z.boolean().optional() })
+    .object({ turnId: z.string().min(1), prepared: z.boolean().optional(), markedAt: z.string().optional() })
     .optional(),
   createdAt: z.string(),
   updatedAt: z.string()

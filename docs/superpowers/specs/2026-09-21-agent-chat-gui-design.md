@@ -475,9 +475,14 @@ it did to that turn — settled `interrupted`, the session `stopped` — since e
 rows reach the log (the Grok fix wave). Such a head no longer claims a live process, so the input
 above also takes a head with an unprepared marker on a settled session: `meta.json` cannot see the
 turns, so it is a candidate, and the full path continues it only when the marked turn is the
-thread's latest and settled `interrupted` — as an orphan whose turn is already settled, with no
-second settle and no error row (a thread it cannot continue, a closed tab or no cursor, only loses
-the marker). Any other marker is stale and cleared, and every marker is cleared as the thread moves
+thread's latest and settled `interrupted` and the marker is stamped (`markedAt`, which every marker
+this code writes carries) — as an orphan whose turn is already settled, with no second settle and no
+error row (a thread it cannot continue, a closed tab or no cursor, only loses the marker). A marker
+an older host wrote carries no stamp: it keeps the rule it was written under (continued only while
+the head still reads running), and on a settled head it is cleared, never continued — a manual stop
+during a Claude or OpenCode turn could leave one on a thread nobody touched since, and it must not
+replay a turn of any age (final review A r2). Any other marker is stale and cleared, and every
+marker is cleared as the thread moves
 on — the user ends its session, a new turn starts — so none can continue an old turn later; with no
 active turn only a prepared marker or that settled turn matches (`continuesSettledTurn`,
 `dropContinuationMarker` in `orchestrator.ts`).*
@@ -2454,7 +2459,7 @@ type ThreadHead = {
   session: { status: "idle"|"starting"|"ready"|"running"|"stopped"|"error"; resumeCursor?: unknown;
              providerThreadId?: string; activeTurnId: string|null; lastError?: string };
   turnCount: number; seq: number;
-  continueAfterRestart?: { turnId: string; prepared?: boolean };   // §3.3: a turn id, never a flag
+  continueAfterRestart?: { turnId: string; prepared?: boolean; markedAt?: string };   // §3.3: a turn id, never a flag; markedAt: §3.3's Built note
   createdAt: string; updatedAt: string;
 };
 ```

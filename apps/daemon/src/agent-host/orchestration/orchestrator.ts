@@ -4412,7 +4412,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // reconcile trusts a marker on its own, exactly because the stop path
         // is supposed to be the place that filter is applied.
         if ((await options.continuationEnabled?.(head.projectPath)) !== true) continue;
-        await writeMarker(runtime, { turnId: session.activeTurnId });
+        await writeMarker(runtime, { turnId: session.activeTurnId, markedAt: clock.nowIso() });
         marked.push(threadId);
       } catch (error) {
         logger.warn(`agent-host: failed to mark ${threadId} for continuation`, error);
@@ -4863,7 +4863,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // resuming and sending is recovered by the next boot rather than looking
     // like a settled thread (*T3: `serverRuntimeStartup.ts:655-690`*).
     try {
-      await writeMarker(runtime, { turnId, prepared: true });
+      await writeMarker(runtime, { turnId, prepared: true, markedAt: clock.nowIso() });
       await upsertBinding(runtime, { status: "starting" });
       await persistSession(runtime, { ...session, status: "starting", activeTurnId: null });
     } catch (error) {
@@ -5070,9 +5070,16 @@ function isLiveOrphan(head: ThreadHead): boolean {
  * The marked turn must still be the thread's LATEST turn (positional, as
  * `deriveLatestTurn` reads it — a newer turn, even one only requested, means
  * the user moved on) and settled `interrupted`: a turn that ended on its own
- * between the mark and the teardown is not continued. `turns` undefined is
- * the boot decision's read of `meta.json` alone, which cannot tell: a
- * candidate, folded and decided on the full path.
+ * between the mark and the teardown is not continued. And the marker must be
+ * STAMPED (`markedAt`, on every marker this code writes): an older host could
+ * leave one on a turn its own teardown settled — Claude's and OpenCode's
+ * teardown rows always reached its log, and its reconcile never folded such a
+ * head — where it stuck, however old. An unstamped marker keeps the rule it
+ * was written under (continued only while the head reads running) and is
+ * cleared here, never continued (final review A r2, M1). `turns` undefined is
+ * the boot decision's read of `meta.json` alone, which cannot tell: every
+ * unprepared marker on a settled head is a candidate, folded once and then
+ * continued or cleared.
  */
 function continuesSettledTurn(head: ThreadHead, turns: readonly Turn[] | undefined): boolean {
   const marker = head.continueAfterRestart;
@@ -5083,7 +5090,12 @@ function continuesSettledTurn(head: ThreadHead, turns: readonly Turn[] | undefin
     return true;
   }
   const latest = turns[turns.length - 1];
-  return latest !== undefined && latest.turnId === marker.turnId && latest.state === "interrupted";
+  return (
+    marker.markedAt !== undefined &&
+    latest !== undefined &&
+    latest.turnId === marker.turnId &&
+    latest.state === "interrupted"
+  );
 }
 
 /**

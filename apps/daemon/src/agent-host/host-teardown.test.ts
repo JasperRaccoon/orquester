@@ -478,11 +478,11 @@ function runningTurn(log: readonly DomainEvent[]): string | null {
 
 async function readMeta(appdir: string, threadId: string): Promise<{
   session: { status: string; activeTurnId: string | null };
-  continueAfterRestart?: { turnId: string; prepared?: boolean };
+  continueAfterRestart?: { turnId: string; prepared?: boolean; markedAt?: string };
 }> {
   return JSON.parse(await readFile(agentChatThreadMetaPath(appdir, threadId), "utf8")) as {
     session: { status: string; activeTurnId: string | null };
-    continueAfterRestart?: { turnId: string; prepared?: boolean };
+    continueAfterRestart?: { turnId: string; prepared?: boolean; markedAt?: string };
   };
 }
 
@@ -522,7 +522,10 @@ async function handover(
   const stopped = await readMeta(rig.appdir, "t1");
   assert.equal(stopped.session.status, "stopped", "the teardown's rows reached the log");
   assert.equal(stopped.session.activeTurnId, null);
-  assert.deepEqual(stopped.continueAfterRestart, { turnId: first });
+  // Stamped: only a marker this code wrote may continue a turn the teardown
+  // settled. The next host reads it back through the store's schema.
+  assert.equal(stopped.continueAfterRestart?.turnId, first);
+  assert.equal(typeof stopped.continueAfterRestart?.markedAt, "string", "the marker is stamped");
 
   await beforeNextHost();
   const next = await startHost(rig.appdir, rig.env);
