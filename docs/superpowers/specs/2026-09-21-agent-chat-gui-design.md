@@ -4294,8 +4294,12 @@ count in the row would go stale the moment a member finishes.
 turn's live row (`WorkLiveRow`) and a settled turn's hoisted row (`WorkRow`) alike, as T3's
 `SimpleWorkEntryRow` renders `AgentSpawnRow` for every entry carrying `agentSpawn`
 (`MessagesTimeline.tsx:4701-4711`). The port had brought only the live half, so a settled batch read
-as a plain tool row labelled with its first agent's description, with no members to open. Inside a
-child's drill-in a nested batch's member opens that agent's drill-in (navigation, not a command).*
+as a plain tool row labelled with its entry's merged detail — the latest-merged member row's, usually
+the last-finished member's result, shown as if it were the batch's — with no members to open. A batch
+none of whose members the roster still holds (its 100-row cap evicts the oldest settled first, so an
+old fleet batch loses them all) keeps that text in place of "Status unavailable", and opened says its
+agents are no longer in the roster, so it never reads empty. Inside a child's drill-in a nested
+batch's member opens that agent's drill-in (navigation, not a command).*
 
 Rows past five collapse behind "N more", and finished rows fade and disappear when the turn ends —
 except a live background row, which is exempt from both: it is always rendered, it does not count

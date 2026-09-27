@@ -117,4 +117,20 @@ assert.ok(outliving.includes("1 working"));
 const unknown = render(settledBatch, [done[0]!], false);
 assert.ok(unknown.includes("Status unavailable"), unknown);
 
+// An old fleet batch whose members the roster evicted (its 100 rows keep the newest settled): the row keeps the
+// batch's own text — its entry's merged detail, the latest member row's, what the row showed before — and never
+// reads empty.
+const merged: AgentChatTimelineRow = {
+  ...settledBatch,
+  groupedEntries: [{ ...spawnEntry, detail: "Tests cover 80% of parse()" }]
+} as AgentChatTimelineRow;
+const evicted = render(merged, [], false);
+assert.ok(evicted.includes("Ran 2 subagents"), evicted);
+assert.ok(evicted.includes("Tests cover 80% of parse()"), `its own text, in place of "Status unavailable": ${evicted}`);
+assert.ok(!evicted.includes("Status unavailable"));
+const evictedOpen = render(merged, [], true);
+assert.ok(evictedOpen.includes("Tests cover 80% of parse()"), "opened, it keeps the text");
+assert.ok(!evictedOpen.includes("No agent rows reported"), "and says where its agents went");
+assert.ok(evictedOpen.includes("no longer in the roster"), evictedOpen);
+
 console.log("agent-chat spawn row render checks passed");
