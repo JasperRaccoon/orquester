@@ -59,6 +59,7 @@ import {
   showsNewRow,
   spawnGroupKeyOf,
   splitLiveItems,
+  windowHasDropped,
   withoutOrphanBridge,
   type HistoryFoldStep,
   type HistoryRowsInput
@@ -1638,5 +1639,34 @@ describe("hasSettledCompaction", () => {
     assert.equal(hasSettledCompaction([entry("compacting")]), false, "a phase drops nothing");
     assert.equal(hasSettledCompaction([entry("compaction-failed")]), false, "a failure drops nothing");
     assert.equal(hasSettledCompaction([]), false);
+  });
+});
+
+describe("windowHasDropped: the thread's retained window has evicted rows (§7.6)", () => {
+  const bounds = (hasOlder: boolean): ThreadHistoryBounds => ({
+    indexed: true,
+    hasOlder,
+    beforeCursor: null,
+    oldestRetainedOrdinal: 1,
+    totalTurns: 3
+  });
+  const noFold: Pick<ThreadFoldState, "evicted"> = {};
+
+  it("nothing dropped: a fresh fold and a snapshot that said nothing lies older", () => {
+    assert.equal(windowHasDropped(noFold, EMPTY_HISTORY), false);
+    assert.equal(windowHasDropped(noFold, { ...EMPTY_HISTORY, bounds: bounds(false) }), false);
+  });
+
+  it("the host's snapshot said older history lies beyond the window", () => {
+    assert.equal(windowHasDropped(noFold, { ...EMPTY_HISTORY, bounds: bounds(true) }), true);
+  });
+
+  it("this client's fold evicted rows since that snapshot — any row, an agent's included", () => {
+    assert.equal(windowHasDropped({ evicted: { activities: true, messages: false } }, EMPTY_HISTORY), true);
+    assert.equal(windowHasDropped({ evicted: { activities: false, messages: true } }, EMPTY_HISTORY), true);
+  });
+
+  it("the window evicted a row the parent renders, or a page of older history is loaded", () => {
+    assert.equal(windowHasDropped(noFold, { ...EMPTY_HISTORY, windowEvicted: true }), true);
   });
 });

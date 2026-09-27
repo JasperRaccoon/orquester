@@ -94,6 +94,7 @@ import {
   showsNewRow,
   splitLiveItems,
   userMessageIdForTurn,
+  windowHasDropped,
   withoutOrphanBridge,
   type HistoryItemsState,
   type HistoryRowsState,
@@ -255,6 +256,15 @@ export interface AgentChatThreadState {
    * what the turn is doing.
    */
   isCompacting: boolean;
+  /**
+   * The thread's retained window has dropped rows (`windowHasDropped`): the
+   * host's snapshot said older history lies beyond it, or this client's fold
+   * has evicted rows since. What lets a drill-in say an agent's rows have LEFT
+   * the window rather than that it never had any (§7.6).
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  retentionDropped: boolean;
   activePlan: ActivePlanState | null;
   /**
    * The proposal the composer's primary action acts on (§7.3): the latest
@@ -684,6 +694,7 @@ function project(state: InternalState): InternalState {
     sessionStatus: slice.sessionStatus,
     turnStatus: slice.turnStatus
   });
+  const retentionDropped = windowHasDropped(state.reducer.fold, slice.history);
   // The timeline's last prompt sits in the history — a running turn so long
   // its early rows went there — when the window's own rows hold none: the
   // turn's "Working…" header then follows that prompt up there.
@@ -781,6 +792,7 @@ function project(state: InternalState): InternalState {
     rows === state.rows &&
     activePlan === state.activePlan &&
     isCompacting === state.isCompacting &&
+    retentionDropped === state.retentionDropped &&
     cachedSets === state.derivedSets &&
     keptPlan === state.actionableProposedPlan
   ) {
@@ -798,6 +810,7 @@ function project(state: InternalState): InternalState {
     rowsSource,
     rows,
     isCompacting,
+    retentionDropped,
     // `deriveActivePlanState` rebuilds its object each call; keep the previous
     // one when nothing about it moved, so the composer's checklist does not
     // re-render on every streamed token.
@@ -2468,6 +2481,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
       rows: warm?.rows ?? [],
       isCompacting: warm?.isCompacting ?? false,
+      retentionDropped: windowHasDropped(initialReducer.fold, initialReducer.slice.history),
       activePlan: warm?.activePlan ?? null,
       actionableProposedPlan: warm?.actionableProposedPlan ?? null,
       // An in-flight command belonged to the generation that is gone.

@@ -2,9 +2,11 @@
  * The subagent drill-in (§7.6).
  *
  * Clicking a roster row swaps the **main area** — not the whole view — to that
- * agent's own timeline: its prompt at the top, then its items filtered by
- * `agentId`, streaming live, rendered with the same row components, read-only,
- * with a breadcrumb and Escape back to main.
+ * agent's own timeline: its prompt at the top (the first row of the scroll,
+ * from its launch's `task.started`, `agent-prompt.logic.ts`), then its items
+ * filtered by `agentId`, streaming live, rendered with the same row
+ * components, read-only, with a breadcrumb and Escape back to main. Under the
+ * breadcrumb, one fixed line says what it is doing now, or how it ended.
  *
  * Two constraints shape the component:
  *
@@ -14,29 +16,32 @@
  *    and takes `onBack` rather than owning any navigation. They float over it
  *    as they float over the thread's own timeline, so it takes the view's
  *    `bottomInset` too.
- *  - **The child view dispatches no commands.** Every timeline callback here
+ *  - **The child view dispatches no commands.** Every command callback here
  *    is inert: there is no revert, no approval and no queue inside a child.
- *    The one exception is opening a file, which is navigation, not a command —
- *    and even that is left to the parent through props we do not have, so it
- *    is a no-op here too. Reading a call's whole output is no command either:
- *    the parent's viewer serves it (`onLoadFullOutput`), because an agent's
- *    window keeps 200 rows and a long command's output outlives them.
+ *    Navigation and reads are no commands, and pass the parent's own handlers
+ *    through (`drill-in-callbacks.ts`): opening a file a child's words link to
+ *    (`onOpenFile`), reading a call's whole output in the parent's viewer
+ *    (`onLoadFullOutput`) — an agent's window keeps 200 rows, and a long
+ *    command's output outlives them — and opening an agent the child launched
+ *    from its spawn row (`onOpenAgent`), which switches this view to it.
  *
  * §7.2's rule holds on the way in: items stamped with an `agentId` never
  * render in the parent timeline, they are re-homed here. **Both halves come
  * from W11's `useAgentChatDrillIn`**, which projects them off the *parent's*
  * slice — so the child streams live without opening a second stream, and the
- * parent's composer and roster keep their state. On OpenCode and Grok the
- * surface shows whatever their protocols report and nothing more; when a
- * provider reports a task but no per-agent items, the timeline says so rather
- * than this view inventing lineage.
+ * parent's composer and roster keep their state. **That projection is the one
+ * the timeline renders**: `ChatTimeline` takes the rows handed to it and
+ * projects nothing of its own. On OpenCode and Grok the surface shows whatever
+ * their protocols report and nothing more; when a provider reports a task but
+ * no per-agent items, the timeline says so rather than this view inventing
+ * lineage.
  *
- * **A background shell is the one exception** (§7.6). Its rows are projected
- * here, by `background-shell.ts`, because the shared projection applies the
- * quiet-timeline filter a second time inside the child's own view and drops
- * every row the shell owns — the drill-in then claimed the shell had reported
- * nothing while it was printing. They also open themselves: a shell's output
- * is the reason its row was clicked.
+ * **A background shell is the one exception** (§7.6). Its drill-in is ONE
+ * row, its command with every chunk it printed, projected here by
+ * `background-shell.ts` — the hook projects nothing for a shell — because the
+ * shared projection would fold it behind a turn fold per turn its chunks rode
+ * and cap its output pane like any conversation's tool row. Its rows also open
+ * themselves: a shell's output is the reason its row was clicked.
  *
  * Escape is **not** bound here: the app has one window-level key listener
  * (AGENTS.md), and the view that owns the drill-in state owns the key that
@@ -50,54 +55,25 @@
 
 import React from "react";
 import { ArrowLeft, Terminal } from "lucide-react";
-import type { ThreadItem } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
-import type { DisclosureState } from "../../../lib/agent-chat/contracts";
+import type { AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
+import { collapsedTurnsAfter } from "../../../lib/agent-chat/drill-in.logic";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
-import { peekThreadStore } from "../../../lib/agent-chat/store";
-import type { AgentDrillInProps } from "../contracts";
+import type { AgentDrillInProps, TimelineScrollPosition } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import { backgroundShellDisclosureIds, backgroundShellRows } from "./background-shell";
+import { drillInTimelineCallbacks } from "./drill-in-callbacks";
+import { drillInOpening } from "./drill-in-memory";
 import { rosterRowIcon } from "./AgentRosterRow";
 import { agentActivityText, rosterRowMetrics } from "./format";
 import { isBackgroundShellRow, rosterRowTicks, rosterRowVisual } from "./roster-rows";
 
-const EMPTY_DISCLOSURES: DisclosureState = {
-  expandedTurnIds: [],
-  expandedGroupIds: [],
-  expandedAgentIds: [],
-  expandedReasoningIds: [],
-  toolOutputOffsets: {}
-};
-
-const EMPTY_ITEMS: readonly ThreadItem[] = [];
+const EMPTY_ROWS: AgentChatTimelineRow[] = [];
 
 const EMPTY_ROW_IDS: readonly string[] = [];
 
 const noop = (): void => {};
-
-/**
- * The thread's own items, live.
- *
- * Only a background shell needs them: its rows come from this component's own
- * projection (see `background-shell.ts`), not from the shared drill-in one.
- * `peekThreadStore` never creates a slice — `useAgentChatDrillIn` has already
- * ensured it during this same render, and a host without one (a static render
- * check) simply reads as an empty thread.
- */
-function useThreadItems(sessionId: string, enabled: boolean): readonly ThreadItem[] {
-  const store = enabled ? peekThreadStore(sessionId) : null;
-  const subscribe = React.useCallback(
-    (onChange: () => void) => (store === null ? noop : store.subscribe(onChange)),
-    [store]
-  );
-  const read = React.useCallback(
-    () => (store === null ? EMPTY_ITEMS : store.getState().slice.entries),
-    [store]
-  );
-  return React.useSyncExternalStore(subscribe, read, read);
-}
 
 export function AgentDrillIn({
   sessionId,
@@ -108,38 +84,62 @@ export function AgentDrillIn({
   bottomInset,
   roster,
   projectPath,
-  onLoadFullOutput
+  onLoadFullOutput,
+  onOpenFile,
+  onOpenAgent,
+  errorBanner = null,
+  onDismissErrorBanner,
+  remembered = null,
+  onRemember,
+  skills
 }: AgentDrillInProps): React.ReactElement {
-  const [disclosures, setDisclosures] = React.useState<DisclosureState>(EMPTY_DISCLOSURES);
+  // Opened once, from what the host remembered of THIS agent: the host keys
+  // this component by the agent, so A → B mounts B from B's own entry
+  // (`drill-in-memory.ts`) and nothing of A's carries over.
+  const [opening] = React.useState(() => drillInOpening(remembered));
+  const [disclosures, setDisclosures] = React.useState<DisclosureState>(opening.disclosures);
   // Live-follow for the child's own list (§7.3): armed on entry, disarmed by
   // the user's scroll, re-armed by the band at the end or the pill. The
   // parent's flag lives in its slice, and a child's list is not the thread's,
-  // so it is kept here — and another agent opens at its end, following again.
-  // Pinned to `true` with every change dropped, each streamed row pulled a
-  // reader back down and the pill never showed.
-  const [follow, setFollow] = React.useState(true);
-  const [followAgentId, setFollowAgentId] = React.useState(agentId);
-  if (followAgentId !== agentId) {
-    setFollowAgentId(agentId);
-    setFollow(true);
-  }
-  const live = useAgentChatDrillIn(sessionId, agentId, disclosures);
-  const agent = agentOverride ?? live.agent;
+  // so it is kept here. Pinned to `true` with every change dropped, each
+  // streamed row pulled a reader back down and the pill never showed. Off
+  // when the agent reopens where the reader left it mid-list, or the first
+  // re-pin would carry the list to its end over the restore.
+  const [follow, setFollow] = React.useState(opening.follow);
+  /**
+   * Turn folds the user closed. Folds start open — the child's rows are why
+   * the view was opened — so what is kept is what was closed, as for a
+   * shell's rows below, and a collapse sticks as the agent keeps working.
+   */
+  const [collapsedTurnIds, setCollapsedTurnIds] = React.useState<readonly string[]>(opening.collapsedTurnIds);
+  const projectionDisclosures = React.useMemo(
+    () => ({ expandedGroupIds: disclosures.expandedGroupIds, collapsedTurnIds }),
+    [disclosures.expandedGroupIds, collapsedTurnIds]
+  );
+  const live = useAgentChatDrillIn(sessionId, agentId, {
+    disclosures: projectionDisclosures,
+    agent: agentOverride
+  });
+  const agent = live.agent;
   const background = agent !== null && isBackgroundShellRow(agent);
 
-  // A shell's own rows are projected here rather than by the shared drill-in
-  // hook, which applies the quiet-timeline filter a second time and drops
-  // them. See `background-shell.ts`. The shell's roster title names its row
-  // once no frame of its call is left to name it.
-  const items = useThreadItems(sessionId, background);
+  // A shell's own rows are projected here — the hook projects nothing for a
+  // shell (`live.rows` is null) — because its drill-in is one row, its
+  // command, and the shared projection would fold it behind the turn its
+  // chunks rode. See `background-shell.ts`. The shell's roster title names its
+  // row once no frame of its call is left to name it.
   const shellTitle = agent?.title;
   const shellRows = React.useMemo(
-    () => (background ? backgroundShellRows(items, agentId, shellTitle) : null),
-    [background, items, agentId, shellTitle]
+    () =>
+      live.rows === null && rowsOverride === undefined
+        ? backgroundShellRows(live.items, agentId, shellTitle)
+        : null,
+    [live.rows, live.items, rowsOverride, agentId, shellTitle]
   );
-  // The hook is the source; the props are an override for a host that already
-  // holds the projection (and for tests, which have no store).
-  const rows = rowsOverride ?? shellRows ?? live.rows;
+  // The hook is the source, and the ONLY projection: the timeline renders
+  // these rows as they are. The prop overrides it for a host that already
+  // holds the rows (and for tests, which have no store).
+  const rows = rowsOverride ?? live.rows ?? shellRows ?? EMPTY_ROWS;
 
   // A shell's rows open THEMSELVES: the output is the whole reason the row was
   // clicked, and one more click to reach it is the bug this fixes. Seeded by
@@ -151,44 +151,86 @@ export function AgentDrillIn({
     [background, rows]
   );
   /** Default-open rows the user closed; they stay closed as output keeps coming. */
-  const [collapsedShellRowIds, setCollapsedShellRowIds] =
-    React.useState<readonly string[]>(EMPTY_ROW_IDS);
+  const [collapsedShellRowIds, setCollapsedShellRowIds] = React.useState<readonly string[]>(
+    opening.collapsedShellRowIds
+  );
 
+  // The host's memory of this agent, kept current: every change of what is
+  // open and of the follow, and every published reading position. Memory
+  // only — a drill-in never writes the thread's §7.2 LRU.
+  const position = React.useRef(opening.position);
+  const latest = React.useRef({ disclosures, collapsedTurnIds, collapsedShellRowIds, follow });
+  latest.current = { disclosures, collapsedTurnIds, collapsedShellRowIds, follow };
+  const remember = React.useCallback(() => {
+    onRemember?.(agentId, { ...latest.current, position: position.current });
+  }, [agentId, onRemember]);
+  React.useEffect(remember, [disclosures, collapsedTurnIds, collapsedShellRowIds, follow, remember]);
+  const onScrollPositionChange = React.useCallback(
+    (next: TimelineScrollPosition) => {
+      position.current = next;
+      remember();
+    },
+    [remember]
+  );
+
+  const openTurnIds = live.openTurnIds;
   const onDisclosureChange = React.useCallback(
     (patch: Partial<DisclosureState>) => {
-      const groups = patch.expandedGroupIds;
+      const { expandedTurnIds: turns, ...rest } = patch;
+      if (turns !== undefined) {
+        // The timeline patches the WHOLE open list it was handed: the fold it
+        // is missing was just closed, and a closed one it names was reopened.
+        setCollapsedTurnIds((current) => collapsedTurnsAfter(current, openTurnIds, turns));
+      }
+      const groups = rest.expandedGroupIds;
       if (groups !== undefined && shellRowIds.length > 0) {
         // The timeline patches the WHOLE list, so a default-open id missing
         // from it is one the user just collapsed — and one that reappears was
         // re-opened.
         setCollapsedShellRowIds(shellRowIds.filter((id) => !groups.includes(id)));
       }
-      setDisclosures((current) => ({ ...current, ...patch }));
+      if (Object.keys(rest).length > 0) {
+        setDisclosures((current) => ({ ...current, ...rest }));
+      }
     },
-    [shellRowIds]
+    [openTurnIds, shellRowIds]
   );
 
   const timelineDisclosures = React.useMemo<DisclosureState>(() => {
     const open = shellRowIds.filter(
       (id) => !collapsedShellRowIds.includes(id) && !disclosures.expandedGroupIds.includes(id)
     );
-    return open.length === 0
-      ? disclosures
-      : { ...disclosures, expandedGroupIds: [...disclosures.expandedGroupIds, ...open] };
-  }, [collapsedShellRowIds, disclosures, shellRowIds]);
+    return {
+      ...disclosures,
+      // The folds open now: the projection's, which every toggle patches.
+      expandedTurnIds: openTurnIds as string[],
+      ...(open.length === 0 ? {} : { expandedGroupIds: [...disclosures.expandedGroupIds, ...open] })
+    };
+  }, [collapsedShellRowIds, disclosures, openTurnIds, shellRowIds]);
+
+  // Navigation and reads are the host's; every command is inert (§7.6).
+  const callbacks = React.useMemo(
+    () => drillInTimelineCallbacks({ onOpenFile, onLoadFullOutput, onOpenAgent }),
+    [onOpenFile, onLoadFullOutput, onOpenAgent]
+  );
 
   const visuals = agent ? rosterRowVisual(agent) : null;
   const Icon = background ? Terminal : rosterRowIcon(agent ?? { kind: "subagent" });
-  // The agent's prompt is the task description the provider reported: the
-  // live/settled precedence of the roster's own activity line, so a settled
-  // child leads with its outcome here too. A shell's description is its title
-  // (the Bash call's own `description`), and the header already carries its
-  // state twice — the status chip and the metrics line — so the prompt block
-  // is the one place the full, untruncated description can live.
+  // The line under the breadcrumb: what the agent is doing now, or how it
+  // ended — the roster's own activity line, live/settled precedence and all.
+  // Its prompt is not here: that is the first row of the scroll, where a
+  // prompt of any length has room (`agent-prompt.logic.ts`). A shell's line
+  // is its description, its title (the Bash call's own `description`): the
+  // header already carries its state twice — the status chip and the
+  // metrics line. ONE line, whatever it says, with the whole of it as the
+  // tooltip: a line that wrapped as the activity changed moved every row
+  // below it.
   const description = background ? (agent?.title.trim() ?? "") : "";
   const activity = agent ? agentActivityText(agent) : null;
-  const prompt =
-    background && description.length > 0 && description !== agentId ? description : activity;
+  const line =
+    (background && description.length > 0 && description !== agentId ? description : activity) ??
+    visuals?.label ??
+    "";
   // The chip reads the shell's own state word — "Running", "Exited with code
   // 0" — rather than the agent vocabulary ("Working", "Completed"), which is
   // the same string its roster row shows. The DOT keeps the status colour and
@@ -234,8 +276,8 @@ export function AgentDrillIn({
       {agent ? (
         <div className="shrink-0 border-b border-neutral-800 px-3 py-2 sm:px-5">
           <div className="mx-auto w-full max-w-3xl">
-            <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-neutral-300">
-              {prompt ?? visuals?.label ?? ""}
+            <p className="truncate text-sm leading-relaxed text-neutral-300" title={line}>
+              {line}
             </p>
             <p className="ac-tabular mt-1 truncate font-mono text-[11px] text-neutral-500">
               {rosterRowMetrics(agent).join(" · ")}
@@ -259,24 +301,25 @@ export function AgentDrillIn({
         // the empty state, so there is no second "nothing here yet" surface.
         agentId={agentId}
         readOnly
+        retentionDropped={live.retentionDropped}
         roster={roster}
         projectPath={projectPath}
+        skills={skills}
         rows={rows}
         follow={follow}
         onFollowChange={setFollow}
+        // Where the reader left this agent, restored on mount; published back
+        // into the host's memory, never the thread's LRU.
+        scroll={opening.position}
+        onScrollPositionChange={onScrollPositionChange}
         disclosures={timelineDisclosures}
         onDisclosureChange={onDisclosureChange}
         bottomInset={bottomInset}
-        canRevert={false}
-        onRevert={noop}
-        onOpenTurnDiff={noop}
-        onOpenFile={noop}
-        onLoadFullOutput={onLoadFullOutput ?? noop}
-        onOpenAgent={noop}
-        onSendQueuedNow={noop}
-        onReturnQueuedToComposer={noop}
-        errorBanner={null}
-        onDismissErrorBanner={noop}
+        {...callbacks}
+        // The thread's banner: the overlay's commands fail through it, and it
+        // is on screen whichever timeline the main area shows.
+        errorBanner={errorBanner}
+        onDismissErrorBanner={onDismissErrorBanner ?? noop}
       />
     </div>
   );

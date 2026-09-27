@@ -51,6 +51,7 @@ import type {
   QueuedComposerMessage,
   WorkLogEntry
 } from "./contracts";
+import { agentPromptOf } from "./agent-prompt.logic";
 import { isStreamingMessageTextUpdate, type TimelineEntry } from "./entries.logic";
 import {
   omitSupersededLifecycleMarkers,
@@ -271,11 +272,20 @@ export function computeMessageDurationStart(
   return result;
 }
 
-/** *T3: `MessagesTimeline.logic.ts:509-533`.* */
-function deriveTerminalAssistantMessageIds(entries: readonly TimelineEntry[]): Set<string> {
+/**
+ * The last answer of each response: of each fold key's rows ({@link timelineFoldKeys}),
+ * else of each run of turnless rows between two prompts.
+ *
+ * *T3: `MessagesTimeline.logic.ts:509-533`; differs: keyed by the fold key, so a
+ * drill-in run that shares its turn with another has an answer of its own.*
+ */
+function deriveTerminalAssistantMessageIds(
+  entries: readonly TimelineEntry[],
+  foldKeys: readonly (string | null)[]
+): Set<string> {
   const lastByResponseKey = new Map<string, string>();
   let nullTurnIndex = 0;
-  for (const entry of entries) {
+  for (const [position, entry] of entries.entries()) {
     if (entry.kind !== "message") {
       continue;
     }
@@ -290,11 +300,102 @@ function deriveTerminalAssistantMessageIds(entries: readonly TimelineEntry[]): S
       continue;
     }
     lastByResponseKey.set(
-      message.turnId ? `turn:${message.turnId}` : `unkeyed:${nullTurnIndex}`,
+      message.turnId ? `turn:${foldKeys[position] ?? message.turnId}` : `unkeyed:${nullTurnIndex}`,
       message.id
     );
   }
   return new Set(lastByResponseKey.values());
+}
+
+/**
+ * Each entry's fold key: the turn its fold groups it by, or null for an entry
+ * with no turn. In the thread's timeline it is the turn id. In a drill-in, a
+ * launch prompt starts a run, and an agent can be relaunched inside the
+ * parent turn its previous run rode (a Claude resume, a Codex follow-up): the
+ * rows after a prompt are keyed by their turn AND that prompt, so each run
+ * folds and is timed on its own, under its own prompt, and its last answer is
+ * terminal in its run. Stable as the list grows: a key names its turn and the
+ * prompt above it, never a count.
+ */
+export function timelineFoldKeys(entries: readonly TimelineEntry[]): (string | null)[] {
+  let promptId: string | null = null;
+  return entries.map((entry) => {
+    if (entry.kind === "message" && agentPromptOf(entry.message) !== null) {
+      promptId = entry.message.id;
+      return null;
+    }
+    const turnId = timelineEntryTurnId(entry);
+    if (turnId === null) {
+      return null;
+    }
+    return promptId === null ? turnId : `${turnId}@${promptId}`;
+  });
+}
+
+/** Each entry's fold key ({@link timelineFoldKeys}), with the entries they were read off. */
+export interface TimelineFoldKeys {
+  readonly entries: readonly TimelineEntry[];
+  readonly keys: readonly (string | null)[];
+}
+
+export const EMPTY_TIMELINE_FOLD_KEYS: TimelineFoldKeys = { entries: [], keys: [] };
+
+/**
+ * `entries`' fold keys, reusing `previous`'s when every one of them holds.
+ * A key after a launch prompt is a string built per turn-bearing entry, so
+ * deriving them on every streamed token cost a prompted agent's drill-in a
+ * third of its time per token (content review Minor 1). The held keys are
+ * kept exactly when each position keeps its key ({@link keepsFoldKeys}) —
+ * what the streamed-text path produces, and nothing a real change does.
+ */
+export function timelineFoldKeysWithState(
+  entries: readonly TimelineEntry[],
+  previous: TimelineFoldKeys | null
+): TimelineFoldKeys {
+  if (previous !== null) {
+    if (previous.entries === entries) {
+      return previous;
+    }
+    if (keepsFoldKeys(previous.entries, entries)) {
+      return { entries, keys: previous.keys };
+    }
+  }
+  return { entries, keys: timelineFoldKeys(entries) };
+}
+
+/**
+ * Whether `next` has `previous`'s fold keys, position by position. A key is
+ * read off a position's turn ({@link timelineEntryTurnId}) and the last launch
+ * prompt above it (its message id), so it holds wherever the entry is the
+ * same object, or a message with the same id, role and turn that is a prompt
+ * on neither side — the only change the streamed-text path makes
+ * (`isStreamingMessageTextUpdate`: a streaming answer or thought, whose text
+ * and last write moved). Anything else — a length, a work row, a plan, a turn
+ * or a prompt that moved — derives them again.
+ */
+function keepsFoldKeys(previous: readonly TimelineEntry[], next: readonly TimelineEntry[]): boolean {
+  if (previous.length !== next.length) {
+    return false;
+  }
+  for (let index = 0; index < next.length; index += 1) {
+    const before = previous[index]!;
+    const after = next[index]!;
+    if (before === after) {
+      continue;
+    }
+    if (
+      before.kind !== "message" ||
+      after.kind !== "message" ||
+      before.message.id !== after.message.id ||
+      before.message.role !== after.message.role ||
+      before.message.turnId !== after.message.turnId ||
+      agentPromptOf(before.message) !== null ||
+      agentPromptOf(after.message) !== null
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -340,6 +441,22 @@ function deriveActiveVisualResponseTurnIds(input: {
   return turnIds;
 }
 
+/**
+ * A drill-in run's folds: the fold key of every row from `start` on. The run
+ * unfolds them all, as a running response unfolds the turns after its prompt
+ * — a turn it shares with the rows before it included.
+ */
+function foldKeysFrom(foldKeys: readonly (string | null)[], start: number): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (let index = start; index < foldKeys.length; index += 1) {
+    const key = foldKeys[index];
+    if (key !== null && key !== undefined) {
+      keys.add(key);
+    }
+  }
+  return keys;
+}
+
 /** *T3: `MessagesTimeline.logic.ts:614-620`.* */
 export { workEntryIsActiveTurnActivity };
 
@@ -378,6 +495,7 @@ function fromLastFailingRow(run: readonly WorkTimelineEntry[]): readonly WorkTim
 // ---------------------------------------------------------------------------
 
 interface TurnFold {
+  /** Its fold key ({@link timelineFoldKeys}): the turn id in the thread's timeline. */
   turnId: string;
   anchorEntryId: string;
   createdAt: string;
@@ -439,22 +557,29 @@ function foldClockLabel(clock: TurnFoldClock, entries: readonly TimelineEntry[])
  * of the agent's own rows (`drill-in.logic.ts`). Such a fold keeps its
  * {@link TurnFoldClock}: its last row may be a thinking block still being
  * written — a thinking block never holds a fold open — and the streamed-text
- * fast path moves its label with every token.
+ * fast path moves its label with every token. (A live agent's current run is
+ * its running response and never folds, `agentRunStartIndex`; a drill-in's
+ * fold is a settled agent's, or a run before the current one.)
  *
  * *T3: `MessagesTimeline.logic.ts:627-803`; differs: T3 times every turn but
  * the latest by its rows.*
  */
 function deriveTurnFolds(input: {
   entries: readonly TimelineEntry[];
+  /** Each entry's fold key ({@link timelineFoldKeys}); the fold's groups are keyed by it. */
+  foldKeys: readonly (string | null)[];
   terminalAssistantMessageIds: ReadonlySet<string>;
   latestTurn: LatestTurnSummary | null;
   /** The fold's turns: a settled one is timed by its own start and completion. */
   turns: readonly Turn[];
+  /** The fold keys that do not fold: the running response's. */
   unfoldedTurnIds: ReadonlySet<string>;
   /** {@link TimelineRowsInput.messageStreaming}'s answer for a message. */
   isStreaming: (message: ThreadMessageItem) => boolean;
 }): ReadonlyMap<string, TurnFold> {
   interface TurnGroup {
+    /** The turn the group's rows ride. */
+    turnId: string;
     entries: TimelineEntry[];
     terminalEntry: Extract<TimelineEntry, { kind: "message" }> | null;
     /** Positions in `input.entries`: the terminal answer's, the last row's. */
@@ -465,6 +590,15 @@ function deriveTurnFolds(input: {
   }
   const groups = new Map<string, TurnGroup>();
   let pendingUserBoundary: string | null = null;
+  // A drill-in's launch prompt heads only the rows right after it: the first
+  // entry after it — turnless or not — ends its reach. An agent's first rows
+  // often ride no turn (a background agent writes after its parent's turn
+  // ended), and a boundary carried past them timed a LATER turn's fold from
+  // the launch ("Worked for 16m 49s" for 10 s of work). A thread's own prompt
+  // keeps its boundary across turnless rows: a woken or synthetic turn can
+  // have some between its prompt and the turn, and the thread's `turns` time
+  // every settled one anyway.
+  let promptReach = false;
   // First row per id wins, as `startedTurns` numbers them.
   const turnRows = new Map<string, Turn>();
   for (const turn of input.turns) {
@@ -476,15 +610,23 @@ function deriveTurnFolds(input: {
   for (const [position, entry] of input.entries.entries()) {
     if (entry.kind === "message" && entry.message.role === "user") {
       pendingUserBoundary = entry.message.createdAt;
+      promptReach = agentPromptOf(entry.message) !== null;
       continue;
     }
+    const endsPromptReach = promptReach;
+    promptReach = false;
     const turnId = timelineEntryTurnId(entry);
-    if (!turnId || entry.kind === "proposed-plan") {
+    const foldKey = input.foldKeys[position];
+    if (!turnId || !foldKey || entry.kind === "proposed-plan") {
+      if (endsPromptReach) {
+        pendingUserBoundary = null;
+      }
       continue;
     }
-    let group = groups.get(turnId);
+    let group = groups.get(foldKey);
     if (!group) {
       group = {
+        turnId,
         entries: [],
         terminalEntry: null,
         terminalAt: null,
@@ -493,7 +635,10 @@ function deriveTurnFolds(input: {
         startBoundary: pendingUserBoundary
       };
       pendingUserBoundary = null;
-      groups.set(turnId, group);
+      groups.set(foldKey, group);
+    } else if (endsPromptReach) {
+      // Its turn began before the prompt: the prompt heads none of it.
+      pendingUserBoundary = null;
     }
     group.entries.push(entry);
     group.lastAt = position;
@@ -512,10 +657,11 @@ function deriveTurnFolds(input: {
   }
 
   const folds = new Map<string, TurnFold>();
-  for (const [turnId, group] of groups) {
-    if (input.unfoldedTurnIds.has(turnId) || group.hasStreamingMessage) {
+  for (const [foldKey, group] of groups) {
+    if (input.unfoldedTurnIds.has(foldKey) || group.hasStreamingMessage) {
       continue;
     }
+    const turnId = group.turnId;
     const hiddenEntryIds = new Set<string>();
     const terminalIndex = group.terminalEntry
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
@@ -593,7 +739,7 @@ function deriveTurnFolds(input: {
     }
 
     folds.set(firstHidden.id, {
-      turnId,
+      turnId: foldKey,
       anchorEntryId: firstHidden.id,
       createdAt: firstHidden.createdAt,
       hiddenEntryIds,
@@ -764,6 +910,23 @@ export interface TimelineRowsInput {
    * *Added with the history bridge.*
    */
   liveActivityAbove?: boolean;
+  /**
+   * A drill-in's live agent (§7.6): where its current run begins in these
+   * entries — the first row after the prompt that heads it, else its first
+   * row at or after its start — which makes that run the running response,
+   * as the running turn is the thread's. An agent's rows ride whatever parent
+   * turn was live when each started, or none between the parent's turns, so a
+   * run is a POSITION, never a turn: every row from here on is the response
+   * whatever turn it rides — its turns unfold, an in-progress call is a live
+   * row, a live tail is live and a provisional answer shows no meta yet — and
+   * the working row goes here, timed from `activeTurnStartedAt`. A run before
+   * it folds as a settled turn does. Read only with `isWorking`; absent — the
+   * thread's own timeline — the running response is the running turn's, after
+   * the last prompt.
+   *
+   * *Added with the drill-in's live rows.*
+   */
+  agentRunStartIndex?: number;
 }
 
 export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineRow[] {
@@ -772,12 +935,13 @@ export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineR
 
 /**
  * The rows, whether any of them is a live activity row (`hasActivityRow`),
- * and the clocks of the folds they time by their rows (`foldClocks`).
+ * and the clocks of the folds they time by their rows, by the positions they
+ * read (`foldClocksAt`).
  */
 function deriveRowsDetailed(input: TimelineRowsInput): {
   rows: AgentChatTimelineRow[];
   hasActivityRow: boolean;
-  foldClocks: ReadonlyMap<string, TurnFoldClock>;
+  foldClocksAt: ReadonlyMap<number, FoldClockAt>;
 } {
   const entries = input.timelineEntries;
   const header = input.activeTurnHeader ?? "here";
@@ -807,20 +971,31 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
   const durationStartByMessageId = computeMessageDurationStart(
     entries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : []))
   );
-  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(entries);
+  const foldKeys = timelineFoldKeys(entries);
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(entries, foldKeys);
   const unsettledTurnId = deriveUnsettledTurnId(
     input.latestTurn ?? null,
     input.runningTurnId ?? null
   );
-  const activeVisualResponseTurnIds = deriveActiveVisualResponseTurnIds({
-    entries,
-    unsettledTurnId,
-    // The rows after the timeline's last prompt are the live response; with
-    // that prompt below, no row here is.
-    isWorking: input.isWorking && header !== "below"
-  });
+  // A drill-in's live agent: its current run, by position — whatever turns its
+  // rows ride (`agentRunStartIndex`).
+  const agentRun =
+    input.isWorking && input.agentRunStartIndex !== undefined
+      ? Math.min(Math.max(input.agentRunStartIndex, 0), entries.length)
+      : null;
+  const activeVisualResponseTurnIds =
+    agentRun !== null
+      ? foldKeysFrom(foldKeys, agentRun)
+      : deriveActiveVisualResponseTurnIds({
+          entries,
+          unsettledTurnId,
+          // The rows after the timeline's last prompt are the live response;
+          // with that prompt below, no row here is.
+          isWorking: input.isWorking && header !== "below"
+        });
   const foldsByAnchorEntryId = deriveTurnFolds({
     entries,
+    foldKeys,
     terminalAssistantMessageIds,
     latestTurn: input.latestTurn ?? null,
     turns: input.turns ?? [],
@@ -828,7 +1003,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     isStreaming
   });
   const collapsedEntryIds = new Set<string>();
-  const foldClocks = new Map<string, TurnFoldClock>();
+  const foldClocksAt = new Map<number, FoldClockAt>();
   for (const fold of foldsByAnchorEntryId.values()) {
     if (!input.expandedTurnIds?.has(fold.turnId)) {
       for (const entryId of fold.hiddenEntryIds) {
@@ -836,26 +1011,40 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       }
     }
     if (fold.clock !== null) {
-      foldClocks.set(fold.turnId, fold.clock);
+      // Each position a clock reads is one of its own fold's rows, so no two
+      // folds ever share one.
+      const at: FoldClockAt = { foldKey: fold.turnId, clock: fold.clock };
+      foldClocksAt.set(fold.clock.lastAt, at);
+      if (fold.clock.terminalAt !== null) {
+        foldClocksAt.set(fold.clock.terminalAt, at);
+      }
     }
   }
 
   // Where the running response starts: after the last prompt here, from the
   // first row when that prompt is above (`lastUserMessageIndex` finds none
-  // here), and nowhere in these rows when it is below.
+  // here), and nowhere in these rows when it is below — or, in a drill-in, at
+  // its live agent's current run.
   let activeTurnHeaderIndex = entries.length;
   if (input.isWorking && header !== "below") {
-    activeTurnHeaderIndex = lastUserMessageIndex(entries) + 1;
+    activeTurnHeaderIndex = agentRun ?? lastUserMessageIndex(entries) + 1;
   }
   const entryBelongsToActiveTurn = (entry: TimelineEntry, index: number): boolean =>
     input.isWorking &&
     index >= activeTurnHeaderIndex &&
-    (unsettledTurnId === null || timelineEntryTurnId(entry) === unsettledTurnId);
+    (agentRun !== null || unsettledTurnId === null || timelineEntryTurnId(entry) === unsettledTurnId);
+  // A drill-in's run is judged by position; its rows are the ones from the
+  // run's start, whatever turn each rides.
+  const agentRunWork =
+    agentRun === null
+      ? null
+      : new Set(entries.slice(agentRun).flatMap((entry) => (entry.kind === "work" ? [entry.entry] : [])));
   const workEntryIsInActiveRun = (entry: WorkLogEntry): boolean =>
     input.isWorking &&
-    unsettledTurnId !== null &&
     entry.toolLifecycleStatus === "inProgress" &&
-    entry.turnId === unsettledTurnId;
+    (agentRunWork !== null
+      ? agentRunWork.has(entry)
+      : unsettledTurnId !== null && entry.turnId === unsettledTurnId);
 
   // The live tool run: the trailing streak of work entries in the active turn
   // — at the timeline's end, so never in a projection the timeline continues
@@ -936,7 +1125,10 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
   let hasActivityRow = false;
   const appendWorkingRow = (): void => {
     const latestUserMessage = entries[lastUserMessageIndex(entries)];
+    // A drill-in's run is timed from its own start: the prompt above it, if
+    // any, may head an earlier run.
     const startedAt =
+      agentRun === null &&
       activeVisualResponseTurnIds.size > 1 &&
       latestUserMessage?.kind === "message" &&
       latestUserMessage.message.role === "user"
@@ -1011,11 +1203,12 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       // A run with no reasoning row is a plain tool group, not an activity group.
       if (groupEntries.some((entry) => entry.kind === "message")) {
         // Live only at the timeline's end — this projection's end is not that
-        // when the timeline continues below it.
+        // when the timeline continues below it — and only in the running
+        // response: the running turn's, or a drill-in run's by position.
         const active =
           input.isWorking &&
           tailHere &&
-          activityTurnId === unsettledTurnId &&
+          (agentRun !== null ? cursor > activeTurnHeaderIndex : activityTurnId === unsettledTurnId) &&
           cursor === entries.length &&
           !latestToolFailed &&
           (latestVisibleToolEntry === undefined || latestToolKeepsActivityLive);
@@ -1216,14 +1409,16 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     // ── Message ───────────────────────────────────────────────────────────
     const message = timelineEntry.message;
     // §4.6.5(b): the `/compact` the host persisted verbatim is rendered as the
-    // compaction marker, never as a bubble (fix-wave R2-4).
-    if (isCompactCommandMessage(message)) {
+    // compaction marker, never as a bubble (fix-wave R2-4). An agent's launch
+    // prompt is never the thread's command, whatever it says.
+    if (isCompactCommandMessage(message) && agentPromptOf(message) === null) {
       continue;
     }
     const stillInProgress =
       message.role === "assistant" &&
-      message.turnId !== null &&
-      activeVisualResponseTurnIds.has(message.turnId);
+      (agentRun !== null
+        ? index >= activeTurnHeaderIndex
+        : message.turnId !== null && activeVisualResponseTurnIds.has(message.turnId));
     // While the turn is still running the latest assistant message is only
     // provisionally terminal: withhold the metadata row so commentary does not
     // flash timestamps mid-work.
@@ -1296,7 +1491,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       isNext: index === 0
     });
   });
-  return { rows: withMeta, hasActivityRow, foldClocks };
+  return { rows: withMeta, hasActivityRow, foldClocksAt };
 }
 
 /**
@@ -1421,11 +1616,19 @@ export interface TimelineRowsProjection {
    */
   readonly hasActivityRow: boolean;
   /**
-   * The clocks of the folds these rows time by their rows, by turn id: what
-   * the streamed-text fast path re-reads a fold's label by. Streamed text
-   * never changes which folds there are, nor where their rows sit.
+   * The clocks of the folds these rows time by their rows, by each position a
+   * clock reads (its last row's, and its terminal answer's): what the
+   * streamed-text fast path re-reads a fold's label by, one lookup per
+   * streamed message. Streamed text never changes which folds there are, nor
+   * where their rows sit.
    */
-  readonly foldClocks: ReadonlyMap<string, TurnFoldClock>;
+  readonly foldClocksAt: ReadonlyMap<number, FoldClockAt>;
+}
+
+/** A fold's clock, and the fold it times: its key ({@link timelineFoldKeys}), which its row's `turnId` carries. */
+export interface FoldClockAt {
+  readonly foldKey: string;
+  readonly clock: TurnFoldClock;
 }
 
 function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): boolean {
@@ -1435,6 +1638,7 @@ function shallowEqualInput(left: TimelineRowsInput, right: TimelineRowsInput): b
     left.continuesBelow === right.continuesBelow &&
     left.activeTurnHeader === right.activeTurnHeader &&
     left.liveActivityAbove === right.liveActivityAbove &&
+    left.agentRunStartIndex === right.agentRunStartIndex &&
     left.activeTurnStartedAt === right.activeTurnStartedAt &&
     left.runningTurnId === right.runningTurnId &&
     left.supportsConversationRollback === right.supportsConversationRollback &&
@@ -1475,7 +1679,7 @@ function replaceStreamingMessageRows(
     return null;
   }
   const replacements = new Map<ThreadMessageItem, ThreadMessageItem>();
-  // The folds whose clock reads a message a token moved, by turn id.
+  // The folds whose clock reads a message a token moved, by fold key.
   let movedFolds: Map<string, TurnFoldClock> | null = null;
   for (const [index, entry] of input.timelineEntries.entries()) {
     const previousEntry = previous.input.timelineEntries[index]!;
@@ -1504,18 +1708,21 @@ function replaceStreamingMessageRows(
     // A turnless message joins no fold and keeps the fast path, as does one
     // that reads as streaming — a streaming answer holds its turn unfolded; a
     // streaming thinking block does not, and a fold it ends (in a drill-in,
-    // where no turn is unfolded as running) is relabelled below, off its
-    // clock, so its "Worked for …" follows the tokens.
+    // outside a live agent's current run, which never folds) is relabelled
+    // below, off its clock, so its "Worked for …" follows the tokens.
     const turnId = entry.message.turnId;
     if (turnId !== null && !isMessageStreaming(entry.message, input.messageStreaming ?? NOTHING_STREAMS)) {
       return null;
     }
     replacements.set(previousEntry.message, entry.message);
     if (turnId !== null) {
-      const clock = previous.foldClocks.get(turnId);
-      // `terminalAt` never matches today: a streaming answer's turn has no fold, a settled one rebuilt above.
-      if (clock !== undefined && (clock.lastAt === index || clock.terminalAt === index)) {
-        (movedFolds ??= new Map()).set(turnId, clock);
+      // The fold whose clock reads this position, found by the position — a
+      // fold's key is its turn and, in a drill-in, the prompt above its run.
+      // Its terminal answer never matches today: a streaming answer's turn
+      // has no fold, and a settled one rebuilt above.
+      const moved = previous.foldClocksAt.get(index);
+      if (moved !== undefined) {
+        (movedFolds ??= new Map()).set(moved.foldKey, moved.clock);
       }
     }
   }
@@ -1523,8 +1730,8 @@ function replaceStreamingMessageRows(
     return previous.rows;
   }
   let labels: Map<string, string> | null = null;
-  for (const [turnId, clock] of movedFolds ?? []) {
-    (labels ??= new Map()).set(turnId, foldClockLabel(clock, input.timelineEntries));
+  for (const [foldKey, clock] of movedFolds ?? []) {
+    (labels ??= new Map()).set(foldKey, foldClockLabel(clock, input.timelineEntries));
   }
   return previous.rows.map((row) => {
     if (row.kind === "turn-fold") {
@@ -1560,7 +1767,7 @@ export function deriveTimelineRowsWithState(
 ): TimelineRowsProjection {
   const streamed = previous === null ? null : replaceStreamingMessageRows(input, previous);
   if (streamed !== null && previous !== null) {
-    return { input, rows: streamed, hasActivityRow: previous.hasActivityRow, foldClocks: previous.foldClocks };
+    return { input, rows: streamed, hasActivityRow: previous.hasActivityRow, foldClocksAt: previous.foldClocksAt };
   }
   return { input, ...deriveRowsDetailed(input) };
 }

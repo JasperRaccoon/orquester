@@ -10,16 +10,30 @@ import { RotateCcw, TriangleAlert } from "lucide-react";
  * mounted, so one bad row in one background tab would blank the window.
  *
  * Keyed by session id at the call site, so remounting one thread's boundary
- * never disturbs another's, and "Try again" re-renders only this thread.
+ * never disturbs another's, and "Try again" re-renders only this thread — after
+ * the view's own `onReset`, which leaves an open drill-in: the fallback
+ * replaces the Back button and the roster with it, and a child row that threw
+ * would only throw again. (A child's own crash is its drill-in's boundary's,
+ * `DrillInErrorBoundary`, and never reaches this one.)
  */
-export class ChatErrorBoundary extends React.Component<
-  { sessionId: string; children: React.ReactNode },
-  { error: Error | null }
-> {
-  constructor(props: { sessionId: string; children: React.ReactNode }) {
+interface ChatErrorBoundaryProps {
+  sessionId: string;
+  /** Runs before "Try again" renders the thread again: the view's own reset. */
+  onReset?: (() => void) | undefined;
+  children: React.ReactNode;
+}
+
+export class ChatErrorBoundary extends React.Component<ChatErrorBoundaryProps, { error: Error | null }> {
+  constructor(props: ChatErrorBoundaryProps) {
     super(props);
     this.state = { error: null };
   }
+
+  /** "Try again": the view's reset first, then render the thread again. */
+  reset = (): void => {
+    this.props.onReset?.();
+    this.setState({ error: null });
+  };
 
   static getDerivedStateFromError(error: Error): { error: Error } {
     return { error };
@@ -55,7 +69,7 @@ export class ChatErrorBoundary extends React.Component<
         </div>
         <button
           type="button"
-          onClick={() => this.setState({ error: null })}
+          onClick={this.reset}
           className="flex items-center gap-1.5 rounded-md border border-neutral-700 px-2.5 py-1.5 text-xs text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 hover:text-neutral-100"
         >
           <RotateCcw size={13} />

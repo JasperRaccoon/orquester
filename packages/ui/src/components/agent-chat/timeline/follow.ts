@@ -1,5 +1,7 @@
 // Ported from T3 Code (MIT): apps/web/src/components/chat/MessagesTimeline.logic.ts:149-172
 
+import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+
 /**
  * Live-follow's re-arm rule (spec §7.3).
  *
@@ -72,6 +74,24 @@ export function shouldAnimateFollow(input: {
   return input.working && !input.reducedMotion && !input.firstPaint && !input.settling;
 }
 
+/**
+ * Whether the rows show work in progress — the `working` input above.
+ *
+ * Read off the rows alone: a response is live exactly when the projection says
+ * so, with its live rows (§7.2: the UI renders, it does not fold). That holds
+ * in the thread's timeline and in the drill-in alike, where a live agent's
+ * current run projects the same live rows (`agentRunStartIndex`,
+ * `rows.logic.ts`) — so a child's streamed prose glides as the thread's does.
+ */
+export function timelineIsWorking(rows: readonly AgentChatTimelineRow[]): boolean {
+  return rows.some(
+    (row) =>
+      row.kind === "working" ||
+      row.kind === "thinking" ||
+      ((row.kind === "activity-group" || row.kind === "work-live") && row.active)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The settle latch
 // ---------------------------------------------------------------------------
@@ -108,10 +128,14 @@ export const IDLE_SETTLE_LATCH: TimelineSettleLatch = { identity: null, frames: 
 /**
  * One list's identity.
  *
- * The drill-in mounts a *second* timeline for the same session id while the
- * parent's is still mounted (§7.6), so the agent id is part of the identity —
- * otherwise opening a drill-in would not count as a switch and its first end
- * pin would glide.
+ * The drill-in's timeline is a second list under the same session id (§7.6),
+ * so the agent id is part of the identity. Today that is defence: the thread's
+ * own timeline is unmounted while a child is open (not hidden), and the
+ * drill-in mounts afresh per agent (`AgentChatView` keys it), so every change
+ * of list is a new `ChatTimeline` whose latch and enter flags start fresh
+ * anyway. Kept so that a timeline which did switch lists in place — a mount
+ * reused across agents — could never read another list as its own: its first
+ * end pin would glide and its first rows would rise.
  */
 export function timelineListIdentity(sessionId: string, agentId?: string | null): string {
   return `${sessionId}\u0000${agentId ?? ""}`;

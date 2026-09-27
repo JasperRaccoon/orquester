@@ -3,7 +3,6 @@ import { TriangleAlert, X } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
 import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
-import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
 import { isLoopOrGoalRow } from "../../../lib/agent-chat/roster.logic";
@@ -11,8 +10,10 @@ import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
+import { drillInEmptyNotice, timelineSlots, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { LoadOlderRow } from "./rows/LoadOlderRow";
+import { nextRowEnterState, rowEnters, type RowEnterState } from "./row-enter";
 
 import {
   findFirstVisibleIndex,
@@ -27,6 +28,7 @@ import {
   nextFollowState,
   shouldAnimateFollow,
   tickSettleLatch,
+  timelineIsWorking,
   timelineListIdentity,
   type TimelineSettleLatch
 } from "./follow";
@@ -67,37 +69,15 @@ const REVEAL_TOP_MARGIN_PX = 16;
  *     page under the pointer.
  *  3. **Rows are `memo`ised on W11's stable row identity** and read everything
  *     else from a context, so one streamed token re-renders one row.
+ *
+ * **It renders exactly the rows it is given**, in both of its surfaces: the
+ * thread's own, and the subagent drill-in (§7.6), which projects its agent's
+ * rows itself (`AgentDrillIn`, through `useAgentChatDrillIn`) and sets
+ * `agentId`, which makes the surface read-only. A second projection in here
+ * once rendered its own rows whenever it had any — two projections per token,
+ * and a background shell's one-row projection thrown away.
  */
 export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
-  // Two surfaces, one component. The drill-in sources its rows from the
-  // per-agent projection (§7.6) rather than from the `rows` prop, so the
-  // subscription that projection needs is not paid for by the parent
-  // timeline — hence a separate component rather than a conditional hook.
-  // The branch is fixed per mount site (W15 never passes `agentId`, W14
-  // always does), so nothing remounts.
-  return props.agentId === undefined ? (
-    <TimelineSurface {...props} rows={props.rows} />
-  ) : (
-    <DrillInTimeline {...props} agentId={props.agentId} />
-  );
-}
-
-/**
- * The drill-in's rows come from `useAgentChatDrillIn`, which reuses the
- * parent's slice and holds its own projection so a streamed token in the
- * child's timeline changes one row object — exactly as in the parent. Filtering
- * the parent's already-projected rows here would rebuild the whole list on
- * every frame and would lose the per-agent turn grouping.
- */
-function DrillInTimeline(props: ChatTimelineProps & { agentId: string }): React.ReactElement {
-  const { rows } = useAgentChatDrillIn(props.sessionId, props.agentId, props.disclosures);
-  // The projection is the source of truth; the prop is the fallback for a
-  // caller that already resolved the child's rows another way, so a surface
-  // that has rows never renders the empty state because the hook has none.
-  return <TimelineSurface {...props} rows={rows.length > 0 ? rows : props.rows} readOnly />;
-}
-
-function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   const {
     sessionId,
     rows,
@@ -124,6 +104,7 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
     threadReady = false,
     emptyThreadPanel,
     readOnly,
+    retentionDropped = false,
     roster,
     skills,
     projectPath,
@@ -174,6 +155,25 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   const drivesWork = drilledRow !== undefined && isLoopOrGoalRow(drilledRow);
   const backgroundShell = drilledRow !== undefined && drilledRow.agentKind === "background" && !drivesWork;
 
+  /**
+   * What an empty list says, and before which row. The thread's: "No messages
+   * yet." once nothing else takes the space. A drill-in's is judged on the
+   * agent's own rows — its launch prompts and the live placeholders aside —
+   * in three tiers: a live agent has not reported anything yet, a settled
+   * one's rows have left the window only with evidence, else a neutral line
+   * (`drillInEmptyNotice`).
+   */
+  const notice = React.useMemo<EmptyNotice | null>(
+    () =>
+      agentId !== undefined
+        ? drillInEmptyNotice({ rows, agent: drilledRow, retentionDropped })
+        : rows.length === 0 && !showLoadOlder && !showEmptyPanel
+          ? { text: "No messages yet.", at: 0 }
+          : null,
+    [agentId, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
+  );
+  const slots = React.useMemo(() => timelineSlots(rows, notice), [rows, notice]);
+
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
   /**
@@ -215,21 +215,17 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   // The drill-in dispatches no commands, whether or not the caller says so.
   const effectiveReadOnly = readOnly === true || agentId !== undefined;
 
-  // A turn is live exactly when the projection says so; nothing here re-derives
-  // turn state from items (§7.2: the UI renders, it does not fold).
-  const working = React.useMemo(
-    () =>
-      rows.some(
-        (row) =>
-          row.kind === "working" ||
-          row.kind === "thinking" ||
-          ((row.kind === "activity-group" || row.kind === "work-live") && row.active)
-      ),
-    [rows]
-  );
+  // A turn — or a drill-in's live agent — is live exactly when the projection
+  // says so; nothing here re-derives turn state from items (§7.2: the UI
+  // renders, it does not fold).
+  const working = React.useMemo(() => timelineIsWorking(rows), [rows]);
 
   const reducedMotion = usePrefersReducedMotion();
-  const enterFlag = useRowEnterFlags(rows, sessionId);
+  // The drill-in counts as its own list (session and agent): another agent's
+  // rows are a list just opened, not rows that arrived.
+  const listIdentity = timelineListIdentity(sessionId, agentId);
+  // Only the thread's own list is primed by a ready, empty render.
+  const enterFlag = useRowEnterFlags(rows, listIdentity, agentId === undefined && threadReady);
 
   // -------------------------------------------------------------------------
   // Disclosure plumbing
@@ -357,8 +353,14 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
   /**
    * Writes the reading position through W11's store action, debounced.
    *
-   * The `onScrollPositionChange` prop feeds the shell's own paint-hold copy;
-   * **this** is what lands in the §7.2 100-entry LRU. Two rules:
+   * The `onScrollPositionChange` prop is the host's: the thread view passes
+   * the same store action, which writes `slice.scroll`, sets `follow` and
+   * persists the §7.2 100-entry LRU entry on every published position (a
+   * no-op during its §7.1 paint hold); a drill-in hands the position to the
+   * view's per-agent memory (`roster/drill-in-memory.ts`). **This** is the
+   * timeline's own write of the thread's LRU — for the thread's view a second
+   * one, which also keeps the last position when a host passes nothing. Two
+   * rules:
    *
    *  - it is debounced, so a flick is one write rather than sixty, and the
    *    pending write is flushed on unmount so leaving a tab still records where
@@ -516,7 +518,6 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
    *
    * *T3: `MessagesTimeline.tsx:555-567, :618-631` (`settlingListIdentity`).*
    */
-  const listIdentity = timelineListIdentity(sessionId, agentId);
   const settleRef = React.useRef<TimelineSettleLatch>(armSettleLatch(listIdentity));
   const settleFrames = React.useRef<number[]>([]);
 
@@ -732,9 +733,12 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
    * **It acts only for the visible tab.** Every chat tab stays mounted
    * (`MainView` shows and hides), so a naive `window` listener would fire once
    * per open thread. `isActiveChatTab` is the shell's answer to "am I the one
-   * on screen?", and the layout check behind it covers the drill-in, which
-   * mounts a second timeline for the *same* session id while the parent's is
-   * still mounted — only the one with a layout box may take the chord.
+   * on screen?", and the layout check behind it is a second discriminator: a
+   * timeline with no layout box never takes the chord. The drill-in's timeline
+   * shares its thread's session id, but the thread's own is UNMOUNTED while a
+   * child is open (not hidden, §7.6) — the check stays as defence, so a
+   * surface that did keep a hidden timeline under one session id could not
+   * take the chord twice.
    */
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -805,27 +809,29 @@ function TimelineSurface(props: ChatTimelineProps): React.ReactElement {
             {showLoadOlder ? (
               <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
             ) : null}
-            {rows.map((row) => (
-              <TimelineRow key={row.id} row={row} enter={enterFlag(row.id)} />
-            ))}
-            {showEmptyPanel ? (
-              // An empty thread shows the provider's resumable conversations
-              // (`EmptyThreadPanel`, built by the view). The wrapper fits the
-              // visible area so only the panel's own list scrolls.
-              emptyThreadPanel
-            ) : rows.length === 0 && !showLoadOlder ? (
-              <div className="mx-auto w-full max-w-3xl py-12 text-center text-sm italic text-neutral-600">
-                {agentId === undefined
-                  ? "No messages yet."
-                  : backgroundShell
-                    ? "No output yet."
-                    : drilledRow?.kind === "loop"
-                      ? "Each fire runs as an agent of its own, in the roster."
-                      : drilledRow?.kind === "goal"
-                        ? "A goal's work runs in the thread's own turns and the agents it starts."
-                        : "This agent has not reported anything yet."}
-              </div>
-            ) : null}
+            {/* ONE keyed list, the empty notice spliced in at its place: a row
+                that crosses it never remounts (`timelineSlots`). */}
+            {slots.map((slot) =>
+              "row" in slot ? (
+                <TimelineRow key={slot.key} row={slot.row} enter={enterFlag(slot.row.id)} />
+              ) : (
+                <div
+                  key={slot.key}
+                  className={cn(
+                    "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
+                    slot.notice.at === 0 ? "py-12" : "py-4"
+                  )}
+                >
+                  {slot.notice.text}
+                </div>
+              )
+            )}
+            {showEmptyPanel
+              ? // An empty thread shows the provider's resumable conversations
+                // (`EmptyThreadPanel`, built by the view). The wrapper fits the
+                // visible area so only the panel's own list scrolls.
+                emptyThreadPanel
+              : null}
             {/* The footer spacer reserves exactly what the composer overlay hides. */}
             {showEmptyPanel ? null : <div aria-hidden style={{ height: bottomInset }} />}
             <div className="h-3 shrink-0 sm:h-4" aria-hidden />
@@ -860,49 +866,19 @@ export function threadPlanReader(sessionId: string): AgentChatActions["readFullP
 }
 
 /**
- * Decides, once per row id, whether that row animates in.
- *
- * The first render of a thread is a page of history and must not replay a
- * hundred fades; every row that appears *after* it did just arrive and should
- * rise. The answer is memoised per id and never revisited, so the flag is a
- * stable prop and cannot break `TimelineRow`'s memo.
+ * Decides, once per row id, whether that row animates in (`row-enter.ts`):
+ * rows that arrive rise; a list's first rows — a thread's first snapshot,
+ * another agent's drill-in — do not. `ready` primes the thread's own list on
+ * an empty render too, so a brand-new thread's first message rises.
  */
 function useRowEnterFlags(
   rows: readonly { id: string }[],
-  sessionId: string
+  listIdentity: string,
+  ready: boolean
 ): (id: string) => boolean {
-  const state = React.useRef<{ session: string; flags: Map<string, boolean>; primed: boolean }>({
-    session: sessionId,
-    flags: new Map(),
-    primed: false
-  });
-  if (state.current.session !== sessionId) {
-    state.current = { session: sessionId, flags: new Map(), primed: false };
-  }
-  const current = state.current;
-  // A row that arrives ABOVE every row already on screen is older history — a
-  // "Load older turns" page landing — not news: it never rises in. Rows after
-  // the first known one keep the rule above.
-  let firstKnownIndex = -1;
-  for (let index = 0; index < rows.length; index += 1) {
-    if (current.flags.has(rows[index]!.id)) {
-      firstKnownIndex = index;
-      break;
-    }
-  }
-  rows.forEach((row, index) => {
-    if (!current.flags.has(row.id)) current.flags.set(row.id, current.primed && index > firstKnownIndex);
-  });
-  current.primed = true;
-  // Drop ids that have left, so a long-lived tab does not accumulate a flag per
-  // row it ever showed.
-  if (current.flags.size > rows.length * 2 + 64) {
-    const live = new Set(rows.map((row) => row.id));
-    for (const id of [...current.flags.keys()]) {
-      if (!live.has(id)) current.flags.delete(id);
-    }
-  }
-  return React.useCallback((id: string) => state.current.flags.get(id) === true, []);
+  const state = React.useRef<RowEnterState | null>(null);
+  state.current = nextRowEnterState(state.current, rows, listIdentity, ready);
+  return React.useCallback((id: string) => state.current !== null && rowEnters(state.current, id), []);
 }
 
 function usePrefersReducedMotion(): boolean {

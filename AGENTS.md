@@ -882,9 +882,18 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   closer rides the turn its work started in, so a turn of seconds read "Worked for 50h". Only a turn
   still running, or one no row describes, is timed by its rows. A drill-in's folds are always timed
   by the agent's own rows (`drill-in.logic.ts` passes no `turns`): a background agent works long
-  past the parent turn its rows ride, and that turn's seconds would say nothing of it. A thinking
-  block never holds a fold open, so there — no turn is unfolded as running — a thought still being
-  written can end a folded turn: a fold its rows time keeps a clock (`TurnFoldClock` in
+  past the parent turn its rows ride, and that turn's seconds would say nothing of it. **A live
+  agent's current run is the drill-in's running response** — while the session is live and the
+  roster shows it `pending`/`running`/`waiting` (the `messageStreamingContext` notion, never a
+  second one; a loop or a goal never), its run from its start (the roster's `startedAt`, else its
+  latest launch) is unfolded, its in-progress calls are live rows, its tail is live and a working
+  row heads it: a run is a POSITION, not a turn (`agentRunStartIndex` in `rows.logic.ts`), because
+  an agent's rows ride whatever parent turn was live when each started, or none. A launch prompt
+  (`agent-prompt.logic.ts`) heads its run: the rows after it fold by their turn AND that prompt
+  (`timelineFoldKeys` — a drill-in fold's key, and its row id `turn-fold:<turn>@<prompt>`, is not a
+  bare turn id), and it times only the fold of the rows right after it. A thinking block
+  never holds a fold open, so a fold outside that run — a settled agent's, or an earlier run's — can
+  end on a thought still being written: a fold its rows time keeps a clock (`TurnFoldClock` in
   `rows.logic.ts`: its start and the POSITIONS of its answer and its last row, which a token never
   moves), and the streamed-text fast path relabels it off that clock, so its "Worked for …" follows
   the tokens and closes on the thought's last write. The drill-in holds its disclosure sets across
@@ -955,6 +964,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   row from the PARENT timeline, and applying it again inside the agent's own view is how every
   drill-in read "This agent has not reported anything yet". Streamed `tool.output` chunks ride
   `payload.delta` and become the entry's `detail`, untrimmed, for `joinLifecycleDetails` to fold.
+  **The drill-in's timeline renders exactly the rows its one projection hands it**
+  (`useAgentChatDrillIn`, called by `AgentDrillIn`; `ChatTimeline` projects nothing of its own): a
+  second projection inside the timeline once won whenever it had rows, which threw a background
+  shell's one-row projection (`roster/background-shell.ts`) away for every shell on a turn.
   (5) **Message segments are keyed per agent** — `(turnId, agentId | none, role)` in
   `ingestion/index.ts`, with the owner baked into the message id (`ownedBaseKey`) and stamped on
   every `thread.message-sent` of an agent-owned segment: a subagent narrates inside the PARENT's

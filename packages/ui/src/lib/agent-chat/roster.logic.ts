@@ -126,6 +126,25 @@ export function isLoopOrGoalRow(agent: { kind?: RuntimeSubagent["kind"] }): bool
 }
 
 /**
+ * A shell row — a command the agent ran in the background, listed in the same
+ * roster (§7.6, the deliberate difference from T3).
+ *
+ * Deliberately **status-blind**, unlike the roster's live-background test: the
+ * exemption from the collapse is about a row that outlives its turn, while
+ * this is about what the row *is*. A finished shell is still a shell, and it
+ * must keep the terminal glyph, the "shell" chip and its exit code while it
+ * fades. A loop and a goal are background too, and never shells: they print
+ * nothing and exit with no code ({@link isLoopOrGoalRow}). Here rather than
+ * beside the roster's rows because the drill-in's projection asks it too: a
+ * shell's drill-in is one row, projected apart (`roster/background-shell.ts`).
+ */
+export function isBackgroundShellRow(
+  agent: Pick<RuntimeSubagent, "agentKind"> & { kind?: RuntimeSubagent["kind"] }
+): boolean {
+  return agent.agentKind === "background" && !isLoopOrGoalRow(agent);
+}
+
+/**
  * A loop's or a goal's second line (§7.6). While live, what it last did — a
  * loop's latest fire, a goal's phase — else that it stands: a loop between its
  * fires is `Scheduled`, not working; a goal is `Active`. Once over, how it

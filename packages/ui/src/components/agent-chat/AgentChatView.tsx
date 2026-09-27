@@ -1,12 +1,7 @@
 import React from "react";
 import { flushSync } from "react-dom";
 
-import {
-  DEFAULT_RUNTIME_MODE,
-  SETTLED_TURN_STATES,
-  startedTurns,
-  TERMINAL_SUBAGENT_STATUSES
-} from "@orquester/api/agent-chat";
+import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, startedTurns } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -40,6 +35,7 @@ import {
   openComposerControl,
   stageComposerAttachment
 } from "./composer/composer-bridge";
+import { timelineSkillNames } from "./composer/composer-menu";
 import { rewindPickerEnabled } from "./composer/RewindControl";
 import { useComposerSending } from "./composer/use-composer-sending";
 import {
@@ -53,6 +49,7 @@ import {
   createViewerReads,
   fullOutputNotes,
   fullOutputText,
+  fullOutputViewerCopy,
   readFullOutput,
   type FullOutputSource
 } from "../../lib/agent-chat/full-output";
@@ -67,9 +64,23 @@ import {
   resolveChatEscape,
   type EscapeTargetLike
 } from "./escape-action";
+import {
+  NO_DRILL_IN_WATCH,
+  nextDrillInReturn,
+  revealClosesDrillIn,
+  type DrillInWatch
+} from "./drill-in-navigation";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
+import { DrillInErrorBoundary } from "./roster/DrillInErrorBoundary";
+import {
+  EMPTY_DRILL_IN_MEMORY,
+  recallDrillIn,
+  rememberDrillIn,
+  type DrillInMemory,
+  type DrillInMemoryEntry
+} from "./roster/drill-in-memory";
 import { AgentRoster } from "./roster/AgentRoster";
 import { EmptyThreadPanel } from "./EmptyThreadPanel";
 
@@ -158,7 +169,10 @@ function errorText(error: unknown, fallback: string): string {
  * *T3: `apps/web/src/components/ChatView.tsx:9941-9988` — `contentInsetEndAdjustment`.*
  *
  * **The drill-in swaps only the main area.** The composer and roster stay
- * mounted, so the parent can be steered while watching a child (§7.6).
+ * mounted, so the parent can be steered while watching a child (§7.6). One
+ * drill-in mount per agent, opened from what this view remembers of that
+ * agent — its disclosures, reading position and follow — in memory only,
+ * never the thread's §7.2 LRU (`roster/drill-in-memory.ts`).
  *
  * **Placement note (deliberate difference from §7.1's wording).** The spec says
  * one `AgentChatView` instance serves every chat tab in a project. Orquester's
@@ -178,6 +192,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const roster = useAgentChatRoster(sessionId);
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
+  // The skills a sent `$mention` re-chips against (§4.6.7): the ones the
+  // composer offers for this thread's cwd — in the thread and in a drill-in.
+  const skills = React.useMemo(() => timelineSkillNames(provider, session.cwd), [provider, session.cwd]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   // §3.4's account chip: a proxy launcher may only pin accounts SEEDED into
   // the model proxy, the same rule the "+" menu's launch chips apply.
@@ -249,35 +266,61 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
 
   // --- the subagent drill-in (§7.6) ----------------------------------------
   const [drillInAgentId, setDrillInAgentId] = React.useState<string | null>(null);
+  const closeDrillIn = React.useCallback(() => setDrillInAgentId(null), []);
+  // What each agent's drill-in was left as — its disclosures, reading
+  // position and follow — so re-opening an agent (Back, an auto-return, a
+  // switch to another agent and back) returns to where the reader was. In
+  // memory only, never the thread's §7.2 LRU, bounded to the agents most
+  // recently opened (`drill-in-memory.ts`).
+  const drillInMemory = React.useRef<DrillInMemory>(EMPTY_DRILL_IN_MEMORY);
+  const rememberDrillInAgent = React.useCallback((agentId: string, entry: DrillInMemoryEntry) => {
+    drillInMemory.current = rememberDrillIn(drillInMemory.current, agentId, entry);
+  }, []);
   // A drill-in belongs to one thread; carrying it across a switch would open a
   // stranger's agent. The hold is exactly the window where that could happen.
-  React.useEffect(() => setDrillInAgentId(null), [sessionId]);
+  // Its memory is the thread's too.
+  React.useEffect(() => {
+    setDrillInAgentId(null);
+    drillInMemory.current = EMPTY_DRILL_IN_MEMORY;
+  }, [sessionId]);
   // Auto-return: an agent that SETTLES (finishes, fails, is stopped) while its
   // drill-in is open hands the view back to the thread — the parent is where
-  // the result lands. Only a live→settled transition observed here does it,
-  // so deliberately opening an already-finished agent stays open.
+  // the result lands. Per agent: only an agent seen at work in this opening
+  // of its drill-in does it, so an agent opened already finished stays open,
+  // and only while the reader follows its end — a reader who scrolled up is
+  // reading, and stays (`nextDrillInReturn`). The follow flag is the one the
+  // drill-in reported into its memory.
   const drilledStatus = drillInAgentId
     ? (roster.agents.find((agent) => agent.id === drillInAgentId)?.status ?? null)
     : null;
-  const drilledWasLive = React.useRef(false);
+  const drillInWatch = React.useRef<DrillInWatch>(NO_DRILL_IN_WATCH);
   React.useEffect(() => {
-    if (drillInAgentId === null || drilledStatus === null) {
-      drilledWasLive.current = false;
-      return;
-    }
-    const settled = TERMINAL_SUBAGENT_STATUSES.has(drilledStatus);
-    if (!settled) {
-      drilledWasLive.current = true;
-      return;
-    }
-    if (drilledWasLive.current) {
-      drilledWasLive.current = false;
+    const following =
+      drillInAgentId === null ? true : (recallDrillIn(drillInMemory.current, drillInAgentId)?.follow ?? true);
+    const next = nextDrillInReturn(drillInWatch.current, {
+      agentId: drillInAgentId,
+      status: drilledStatus,
+      following
+    });
+    drillInWatch.current = next.watch;
+    if (next.returnToMain) {
       setDrillInAgentId(null);
     }
   }, [drillInAgentId, drilledStatus]);
+  // A palette search hit lands in the thread's timeline, which is not mounted
+  // while a child is open: a NEW reveal closes the drill-in, and the thread's
+  // timeline takes it at once instead of minutes later on Back.
+  const revealNonce = reveal?.nonce ?? null;
+  const seenRevealNonce = React.useRef(revealNonce);
+  React.useEffect(() => {
+    if (revealClosesDrillIn(seenRevealNonce.current, revealNonce)) {
+      setDrillInAgentId(null);
+    }
+    seenRevealNonce.current = revealNonce;
+  }, [revealNonce]);
   // The child's rows and its roster row come from `useAgentChatDrillIn`, which
-  // AgentDrillIn calls itself: one projection off this thread's slice, sharing
-  // the parent's memoisation instead of a second one beside it.
+  // AgentDrillIn calls itself: one projection of the agent off this thread's
+  // slice, and the one its timeline renders.
 
   // --- roster collapse state (§7.6) ----------------------------------------
   const [rosterExpanded, setRosterExpanded] = React.useState(false);
@@ -581,11 +624,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [active, sessionId, actions]);
-  // The composer keeps the same precedence inside its shell, where this
-  // listener stands down: with a child open, its Escape leaves the drill-in
-  // before it would stop the parent's turn (`composerEscapeAction`). It gets
-  // this only while a child is open — that is how it knows one is.
-  const leaveDrillIn = React.useCallback(() => setDrillInAgentId(null), []);
 
   // §3.4's account chip. The HEAD is the authority — the host records the
   // switch there first — with the tab summary as the fallback for a thread
@@ -688,7 +726,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const loadFullOutput = React.useCallback(
     (itemId: string, source?: FullOutputSource) => {
       const signal = viewerReads.begin();
-      setViewer({ kind: "output", title: "Full output", loading: true });
+      // A drill-in's launch prompt reads the same way, titled for a prompt.
+      const copy = fullOutputViewerCopy(source);
+      setViewer({ kind: "output", title: copy.title, loading: true });
       void readFullOutput(
         {
           item: (id) => api.agentChatItem(sessionId, id),
@@ -701,7 +741,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           if (signal.aborted) return;
           setViewer({
             kind: "output",
-            title: "Full output",
+            title: copy.title,
             loading: false,
             text: output.kind === "item" ? fullOutputText(output.item) : output.text,
             notes: fullOutputNotes(output)
@@ -711,9 +751,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           if (signal.aborted) return;
           setViewer({
             kind: "output",
-            title: "Full output",
+            title: copy.title,
             loading: false,
-            error: errorText(error, "That output is no longer available.")
+            error: errorText(error, copy.missing)
           });
         });
     },
@@ -762,19 +802,43 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         !active && "[--ac-anim-state:paused]"
       )}
     >
-      <ChatErrorBoundary sessionId={sessionId}>
+      {/* Its "Try again" also leaves an open drill-in: the fallback replaced the
+          Back button and the roster, and a child row that threw would throw
+          again. A child's own crash is caught below, around the drill-in. */}
+      <ChatErrorBoundary sessionId={sessionId} onReset={closeDrillIn}>
         {/* Main area — the one thing the drill-in swaps. */}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-950">
           {drillInAgentId ? (
-            <AgentDrillIn
-              sessionId={sessionId}
+            // One mount per agent — each opens from its own memory — inside a
+            // boundary of its own: a child row that throws takes down the
+            // child's view alone, the overlay stays, and its fallback offers
+            // the way back on any device.
+            <DrillInErrorBoundary
+              key={drillInAgentId}
               agentId={drillInAgentId}
-              roster={roster.agents}
-              projectPath={projectPath}
-              onBack={() => setDrillInAgentId(null)}
+              onBack={closeDrillIn}
               bottomInset={bottomInset}
-              onLoadFullOutput={paintOnly ? noop : loadFullOutput}
-            />
+            >
+              <AgentDrillIn
+                remembered={recallDrillIn(drillInMemory.current, drillInAgentId)}
+                onRemember={rememberDrillInAgent}
+                sessionId={sessionId}
+                agentId={drillInAgentId}
+                roster={roster.agents}
+                projectPath={projectPath}
+                onBack={closeDrillIn}
+                bottomInset={bottomInset}
+                onLoadFullOutput={paintOnly ? noop : loadFullOutput}
+                onOpenFile={paintOnly ? noop : openFile}
+                // A nested spawn row's member: switch the drill-in to it.
+                onOpenAgent={paintOnly ? noop : setDrillInAgentId}
+                // The overlay's commands fail through the thread's banner, and
+                // the overlay stays live over a child.
+                errorBanner={paintOnly ? null : slice.errorBanner}
+                onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
+                skills={skills}
+              />
+            </DrillInErrorBoundary>
           ) : (
             <ChatTimeline
               sessionId={displayed.displaySessionId}
@@ -822,6 +886,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               onDismissErrorBanner={paintOnly ? noop : actions.dismissErrorBanner}
               roster={roster.agents}
               projectPath={projectPath}
+              skills={skills}
               scroll={paintOnly ? null : scrollPosition}
               onScrollPositionChange={paintOnly ? noop : rememberScrollPosition}
               historyHasOlder={historyHasOlder}
@@ -929,8 +994,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 rewindTargets={rewindTargets}
                 onRewind={paintOnly ? noop : rewindToTarget}
                 active={active}
-                // Escape in the composer leaves an open drill-in first (§7.6).
-                onLeaveDrillIn={drillInAgentId !== null ? leaveDrillIn : undefined}
+                // Escape in the composer leaves an open drill-in first (§7.6):
+                // the composer keeps the shell's precedence inside itself, where
+                // the shell's listener stands down, so with a child open its
+                // Escape leaves the drill-in before it would stop the parent's
+                // turn (`composerEscapeAction`). It gets `closeDrillIn` — Back's
+                // own door, so the agent's memory is left as Back leaves it —
+                // only while a child is open: that is how it knows one is.
+                onLeaveDrillIn={drillInAgentId !== null ? closeDrillIn : undefined}
                 actions={composerActions}
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to

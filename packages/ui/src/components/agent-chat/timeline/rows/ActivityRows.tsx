@@ -467,14 +467,25 @@ export const WorkRow = React.memo(function WorkRow({ row }: { row: Row<"work"> }
   );
   return (
     <div className={row.isExpandedToolGroup ? "ms-7 flex flex-col" : "flex flex-col"}>
-      {entries.map((entry) => (
-        <ToolEntryRow
-          key={entry.id}
-          entry={entry}
-          insideExpandedGroup={row.isExpandedToolGroup}
-          displayLabel={entries.length === 1 ? row.displayLabel : undefined}
-        />
-      ))}
+      {entries.map((entry) =>
+        // A spawn batch is its spawn row in every state — "Kicked off …" while
+        // a member works, "Ran …" once all are done, its members one click
+        // from their drill-ins — never a plain tool row labelled with its
+        // entry's merged detail, the latest member row's (usually the
+        // last-finished member's result), as a settled batch was (§7.6).
+        // *T3: `SimpleWorkEntryRow`, `MessagesTimeline.tsx:4701-4711`, active
+        // unless inside a group.*
+        entry.agentSpawn ? (
+          <AgentSpawnRow key={entry.id} entry={entry} active={!row.isExpandedToolGroup} />
+        ) : (
+          <ToolEntryRow
+            key={entry.id}
+            entry={entry}
+            insideExpandedGroup={row.isExpandedToolGroup}
+            displayLabel={entries.length === 1 ? row.displayLabel : undefined}
+          />
+        )
+      )}
     </div>
   );
 });
@@ -745,7 +756,11 @@ const MEMBER_STATUS_LABEL: Record<RuntimeSubagent["status"], string> = {
 };
 
 /**
- * One row per spawn batch.
+ * One row per spawn batch, in every state: the running turn's live row
+ * (`WorkLiveRow`) and a settled turn's hoisted row (`WorkRow`) alike — "Kicked
+ * off 3 subagents" while a member works, "Ran 3 subagents" once all are done,
+ * each member one click from its drill-in (in a child's drill-in too, which
+ * switches to it).
  *
  * **The row stores only ids** — the batch's `workflowId` and its member task
  * ids — and resolves its label, live flag and member list from the roster **at
@@ -785,6 +800,15 @@ export const AgentSpawnRow = React.memo(function AgentSpawnRow({
   const summary = deriveAgentSpawnSummary({ agents, agentCount, coordinatorStatus });
   const workflowName = agents.find((agent) => agent.workflowName !== null)?.workflowName ?? null;
   const lead = workflowName ? `${summary.lead} · ${workflowName}` : summary.lead;
+  // A batch none of whose members the roster still holds — its 100-row cap
+  // evicts the oldest settled agents first, so an old fleet batch loses them
+  // all: it keeps the text its entry carries (its merged detail, the latest
+  // member row's — what the row showed before it was a spawn row) rather than
+  // read "Status unavailable" with nothing to name or open.
+  const ownText =
+    agents.length === 0 && coordinatorStatus === undefined && spawn.agentTaskIds.length > 0
+      ? workEntryDisplayLabel(entry, ctx.workspaceRoot)
+      : null;
 
   return (
     <div className="flex flex-col">
@@ -804,7 +828,7 @@ export const AgentSpawnRow = React.memo(function AgentSpawnRow({
                   summary.tone === "failed" ? "text-danger-300" : "text-neutral-500"
                 )}
               >
-                {summary.status}
+                {ownText ?? summary.status}
               </span>
             </span>
           }
@@ -826,7 +850,14 @@ export const AgentSpawnRow = React.memo(function AgentSpawnRow({
               <span className="shrink-0 text-neutral-500">{MEMBER_STATUS_LABEL[agent.status]}</span>
             </button>
           ))}
-          {agents.length === 0 ? (
+          {ownText !== null ? (
+            <>
+              <p className="whitespace-pre-wrap break-words px-1 py-0.5 text-xs text-neutral-400">{ownText}</p>
+              <span className="px-1 py-0.5 text-xs italic text-neutral-600">
+                Its agents are no longer in the roster.
+              </span>
+            </>
+          ) : agents.length === 0 ? (
             <span className="px-1 py-0.5 text-xs italic text-neutral-600">No agent rows reported</span>
           ) : null}
         </div>

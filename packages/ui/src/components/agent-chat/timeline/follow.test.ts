@@ -9,12 +9,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { messageStreamingContext, type RuntimeSubagentStatus } from "@orquester/api/agent-chat";
+
+import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn } from "../../../lib/agent-chat/drill-in.logic";
+import { activity, head, stamp } from "../../../lib/agent-chat/test-helpers";
 import {
   armSettleLatch,
   IDLE_SETTLE_LATCH,
   isSettling,
   shouldAnimateFollow,
   tickSettleLatch,
+  timelineIsWorking,
   timelineListIdentity,
   TIMELINE_SETTLE_FRAMES
 } from "./follow";
@@ -98,5 +104,39 @@ describe("the settle latch", () => {
     const latch = tickSettleLatch(armSettleLatch(identity));
     assert.equal(latch.frames, 1);
     assert.equal(armSettleLatch(identity).frames, TIMELINE_SETTLE_FRAMES);
+  });
+});
+
+describe("timelineIsWorking: what makes the follow glide", () => {
+  /** A drill-in's rows for agent `a1`, with one call still running. */
+  const drillInRows = (status: RuntimeSubagentStatus): AgentChatTimelineRow[] =>
+    projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items: [
+        activity(
+          "tool.started",
+          { itemType: "command_execution", toolUseId: "call-1", title: "npm test", command: "npm test", status: "inProgress" },
+          { id: "run", agentId: "a1", turnId: "t1", createdAt: stamp(2) }
+        )
+      ],
+      agentId: "a1",
+      messageStreaming: messageStreamingContext({
+        head: head({ session: { status: "ready", activeTurnId: null } }),
+        roster: [{ id: "a1", status }]
+      }),
+      agent: { startedAt: stamp(1) }
+    }).stable.result;
+
+  it("a live agent's drill-in glides as the thread's running turn does", () => {
+    assert.equal(timelineIsWorking(drillInRows("running")), true);
+  });
+
+  it("a settled agent's does not", () => {
+    assert.equal(timelineIsWorking(drillInRows("completed")), false);
+  });
+
+  it("reads the live rows alone: a working or thinking row, or a live group or call", () => {
+    assert.equal(timelineIsWorking([{ kind: "working", id: "w", createdAt: null }]), true);
+    assert.equal(timelineIsWorking([{ kind: "thinking", id: "t", createdAt: null }]), true);
+    assert.equal(timelineIsWorking([]), false);
   });
 });

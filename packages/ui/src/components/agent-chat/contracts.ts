@@ -40,6 +40,7 @@ import type {
   RememberedTimelinePosition
 } from "../../lib/agent-chat/contracts";
 import type { FullOutputSource } from "../../lib/agent-chat/full-output";
+import type { DrillInMemoryEntry } from "./roster/drill-in-memory";
 import type { RewindTarget } from "../../lib/agent-chat/rewind.logic";
 
 /**
@@ -127,15 +128,25 @@ export interface ChatTimelineProps {
   errorBanner: string | null;
   onDismissErrorBanner: () => void;
   /**
-   * Set by the drill-in (§7.6): the same component renders THIS agent's rows,
-   * already filtered by the store. Its presence also forces {@link readOnly},
-   * because a child view dispatches no commands.
+   * Set by the drill-in (§7.6): `rows` are then THIS agent's, which the
+   * drill-in projected itself (`useAgentChatDrillIn`) — the timeline renders
+   * them as they are, as it renders the thread's. Its presence also forces
+   * {@link readOnly}, because a child view dispatches no commands.
    *
    * *Added by W12; additive to the foundation's contract.*
    */
   agentId?: string | undefined;
   /** Read-only: every mutating affordance is withheld, nothing is disabled-looking. */
   readOnly?: boolean | undefined;
+  /**
+   * The thread's retained window has dropped rows (the store's
+   * `retentionDropped`). Read by a drill-in's empty copy alone: an agent's
+   * rows may be said to have LEFT the window only when the window dropped
+   * some (`timeline/empty-notice.ts`). Absent means no.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  retentionDropped?: boolean | undefined;
   /**
    * The roster the spawn row resolves against **at render time** — a persisted
    * member count goes stale the moment a member finishes (§7.6).
@@ -148,20 +159,35 @@ export interface ChatTimelineProps {
   /**
    * The current per-cwd skill names, so a sent message's `$mentions` are
    * **re-chipped from the stored text** (§4.6.7) — no `isCommand` flag is
-   * persisted, the text is the record. Wire it from the provider snapshot
-   * (`provider.skills.map((skill) => skill.name)`); empty means no chips.
+   * persisted, the text is the record. Wired from the provider snapshot
+   * (`timelineSkillNames`: every skill in the thread's cwd's overlay, else in
+   * the machine-level catalogue — wider than the `$` menu, which offers only
+   * the enabled, user-invocable ones); empty means no chips.
    *
    * *Added by W12; additive to the foundation's contract.*
    */
   skills?: readonly string[] | undefined;
   /**
-   * The remembered reading position for this thread, from W11's 100-entry LRU
-   * (§7.2). Restored on mount and on every `sessionId` change.
+   * The remembered reading position to restore on mount and on every
+   * `sessionId` (or `agentId`) change: the thread's, from W11's 100-entry LRU
+   * (§7.2); a drill-in's, from the view's per-agent memory
+   * (`roster/drill-in-memory.ts`), never that LRU. An absent or at-end
+   * position opens at the end.
    *
    * *Added by W12; additive to the foundation's contract.*
    */
   scroll?: TimelineScrollPosition | null | undefined;
-  /** Publishes the reading position back into that LRU as the user scrolls. */
+  /**
+   * Publishes the reading position as the user scrolls (one measurement per
+   * frame). The thread's view passes its store's `rememberScroll`, which
+   * writes `slice.scroll`, sets `follow` from `atEnd` and persists the §7.2
+   * LRU entry at once — a no-op while the view paints a held timeline (the
+   * §7.1 paint hold). The timeline also writes the same action itself,
+   * debounced and flushed on unmount and on a thread switch: a second write
+   * of the thread's LRU, never made for a drill-in. A drill-in hands the
+   * position to its per-agent memory (`roster/drill-in-memory.ts`), never the
+   * LRU.
+   */
   onScrollPositionChange?: ((position: TimelineScrollPosition) => void) | undefined;
   /**
    * Older turns exist beyond everything the timeline holds (design
@@ -386,6 +412,52 @@ export interface AgentDrillInProps {
    * command's output outlives it in the host's join. Absent means inert.
    */
   onLoadFullOutput?: ((itemId: string, source?: FullOutputSource) => void) | undefined;
+  /**
+   * The parent view's click-through to the file browser: navigation, not a
+   * command, so a file a child's words link to, a changed-file line and a
+   * diff heading open it as they do in the thread. Absent means inert.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  onOpenFile?: ((path: string) => void) | undefined;
+  /**
+   * Switch the drill-in to another agent: a spawn row inside a child — an
+   * agent that launched its own — lists its members, and opening one is
+   * navigation, as the roster's rows are. Absent means inert.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  onOpenAgent?: ((agentId: string) => void) | undefined;
+  /**
+   * The THREAD's error banner, overlaid on the child's timeline as on the
+   * thread's own. The overlay stays live over a child — approvals, answers,
+   * Stop, compact — and those commands report a failure only here, so a
+   * drill-in that hid it hid the failure until Back. Dismissing it is a UI
+   * action, not a command. Absent means no banner.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  errorBanner?: string | null | undefined;
+  onDismissErrorBanner?: (() => void) | undefined;
+  /**
+   * What the host remembered of this agent (`roster/drill-in-memory.ts`): the
+   * drill-in opens from it — its disclosures, and a reading position left
+   * mid-list, with follow off. The host keys the component by `agentId`, so
+   * every agent opens from its own entry. Absent: at the end, following.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  remembered?: DrillInMemoryEntry | null | undefined;
+  /** Every change of the agent's disclosures, follow or reading position: the host's memory. */
+  onRemember?: ((agentId: string, entry: DrillInMemoryEntry) => void) | undefined;
+  /**
+   * The thread's skill names, so a `$mention` in the child's rows — its
+   * launch prompt above all — re-chips as it does in the thread
+   * (`ChatTimelineProps.skills`). Absent means no chips.
+   *
+   * *Added with the drill-in fixes (2026-09-27).*
+   */
+  skills?: readonly string[] | undefined;
 }
 
 export interface ChatStatusLineProps {

@@ -332,8 +332,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   // names no start as a call's `outputItemId` for a cut payload either. A
   // start of a command whose output streamed does offer "Load full output",
   // through `streamedOutput`: it reads the call's join, never the start's item
-  // (the GUI spec's §6.3 note on `GET …/items/:itemId/output`).
-  if (payload?.truncated === true && activity.activityKind !== "tool.started") {
+  // (the GUI spec's §6.3 note on `GET …/items/:itemId/output`). Nor a task
+  // row's: a launch's cut is its prompt, which the drill-in's prompt row reads
+  // whole ("Show full prompt", in a viewer titled "Prompt"), and no task row
+  // is a tool's output — the spawn row it merges into would have offered its
+  // payload as JSON.
+  if (payload?.truncated === true && activity.activityKind !== "tool.started" && !isTaskActivity) {
     entry.truncated = true;
   }
 
@@ -755,7 +759,10 @@ export interface DeriveWorkLogOptions {
    * The drill-in's own agent (§7.6): its rows are agent-internal to the
    * PARENT timeline and must stay out of it, but inside the agent's own view
    * they are the whole point. Without this the drill-in applied the parent's
-   * quiet-timeline filter a second time and showed nothing.
+   * quiet-timeline filter a second time and showed nothing. Its own task rows
+   * (`payload.taskId` naming it — Codex, OpenCode and Grok stamp them with its
+   * id) are the one exception: they are the agent itself, never a spawn row
+   * inside its own view.
    */
   readonly ownerAgentId?: string;
 }
@@ -765,6 +772,15 @@ function ownedByAgent(activity: ThreadActivityItem, agentId: string | undefined)
     return false;
   }
   return activity.agentId === agentId || asRecord(activity.payload)?.agentId === agentId;
+}
+
+/** A task row OF the drill-in's own agent (`payload.taskId`), not of an agent it launched. */
+function isOwnTaskRow(activity: ThreadActivityItem, agentId: string | undefined): boolean {
+  return (
+    agentId !== undefined &&
+    TASK_KINDS.has(activity.activityKind) &&
+    asTrimmedString(asRecord(activity.payload)?.taskId) === agentId
+  );
 }
 
 export function deriveWorkLogEntries(
@@ -838,6 +854,13 @@ export function deriveWorkLogEntries(
       continue;
     }
     if (activity.activityKind === "task.started" && !isAgentTaskStartedActivity(activity)) {
+      continue;
+    }
+    // A drill-in never lists its own agent as a spawn row. Codex, OpenCode
+    // and Grok stamp an agent's own task rows with its id, so they are the
+    // agent's rows too — but they describe the agent itself, which the
+    // drill-in's header and the roster already say (R8).
+    if (isOwnTaskRow(activity, options?.ownerAgentId)) {
       continue;
     }
     if (isNoContentRuntimeWarning(activity)) {
@@ -1144,15 +1167,16 @@ export function splitThreadItems(
 }
 
 /**
- * The per-agent drill-in view: that agent's own items, in order (§7.6) — and
- * an older log's unstamped output chunks of this agent's calls, which are its
- * own too (see `callOwnersOf`).
+ * Whether an item of `items` is `agentId`'s own: stamped with it, or an older
+ * log's unstamped output chunk of one of its calls (see `callOwnersOf`). One
+ * test per window, so a caller walking the window for more than the agent's
+ * items (the drill-in's launches) does it in the same pass.
  */
-export function itemsForAgent(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
+export function agentItemFilter(items: readonly ThreadItem[], agentId: string): (item: ThreadItem) => boolean {
   // Built at the first unstamped chunk; the parent's own output is one, so
   // nearly always.
   let callOwners: Map<string, string> | undefined;
-  return items.filter((item) => {
+  return (item) => {
     if (item.agentId === agentId) {
       return true;
     }
@@ -1161,7 +1185,16 @@ export function itemsForAgent(items: readonly ThreadItem[], agentId: string): Th
     }
     callOwners ??= callOwnersOf(items);
     return inheritedChunkOwner(item, callOwners) === agentId;
-  });
+  };
+}
+
+/**
+ * The per-agent drill-in view: that agent's own items, in order (§7.6) — and
+ * an older log's unstamped output chunks of this agent's calls, which are its
+ * own too (see `callOwnersOf`).
+ */
+export function itemsForAgent(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
+  return items.filter(agentItemFilter(items, agentId));
 }
 
 // ---------------------------------------------------------------------------

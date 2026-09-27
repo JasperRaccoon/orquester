@@ -202,3 +202,67 @@ test("a roster title that is only the shell's own id — the roster's fallback w
   const spaced = backgroundShellRows(chunks, TASK, `  ${TASK} `)[0];
   assert.equal(spaced?.kind === "work" ? spaced.displayLabel : null, undefined);
 });
+
+/**
+ * A Grok background shell: its rows are its own TASK rows (Grok stamps them with
+ * the shell itself, `shellLinkage`) — a start naming it, a completion carrying
+ * its last output line and its exit code — and no command item at all.
+ */
+function grokShell(activityKind: string, payload: Record<string, unknown>, id: string): ThreadItem {
+  return activity(
+    activityKind,
+    { taskId: "sh1", taskType: "shell", agentKind: "background", agentId: "sh1", title: "npm run dev", ...payload },
+    { agentId: "sh1", id, summary: activityKind }
+  );
+}
+
+test("a Grok shell is ONE command row: its start and its end, never two task rows", () => {
+  const rows = backgroundShellRows(
+    [
+      grokShell("task.started", { detail: "npm run dev" }, "gs-start"),
+      grokShell("task.updated", { isBackgrounded: true }, "gs-bg"),
+      grokShell(
+        "task.completed",
+        { status: "completed", summary: "ready in 300ms", detail: "ready in 300ms", exitCode: 0 },
+        "gs-end"
+      )
+    ],
+    "sh1",
+    "npm run dev"
+  );
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.kind, "work");
+  if (row.kind !== "work") throw new Error("unreachable");
+  assert.equal(row.groupedEntries.length, 1, "one entry: the shell's command, its start and end folded in");
+  const [entry] = row.groupedEntries;
+  assert.equal(entry?.id, "gs-start", "keyed by its first row, so an opened row stays open");
+  assert.equal(entry?.itemType, "command_execution", "the shell pane, as a Claude shell's");
+  assert.equal(entry?.detail, "ready in 300ms", "its last output line is its output, once");
+  assert.equal(entry?.toolLifecycleStatus, "completed");
+  assert.equal(row.displayLabel, "npm run dev", "headed by its title");
+  assert.deepEqual(backgroundShellDisclosureIds(rows), ["gs-start"], "and it opens itself");
+});
+
+test("a running Grok shell is its row already, with nothing printed yet", () => {
+  const rows = backgroundShellRows([grokShell("task.started", { detail: "npm run dev" }, "gs-start")], "sh1", "npm run dev");
+  const row = rows[0]!;
+  assert.equal(row.kind === "work" ? row.groupedEntries.length : 0, 1);
+  const entry = row.kind === "work" ? row.groupedEntries[0] : undefined;
+  assert.equal(entry?.detail, undefined, "its title is not its output");
+  assert.equal(row.kind === "work" ? row.displayLabel : null, "npm run dev");
+});
+
+test("a Grok monitor's latest line is its output", () => {
+  const rows = backgroundShellRows(
+    [
+      grokShell("task.started", { taskType: "monitor", detail: "watch the build" }, "m-start"),
+      grokShell("task.progress", { taskType: "monitor", summary: "build 3 passed" }, "m-line")
+    ],
+    "sh1",
+    "watch the build"
+  );
+  const entry = rows[0]?.kind === "work" ? rows[0].groupedEntries : [];
+  assert.equal(entry.length, 1);
+  assert.equal(entry[0]?.detail, "build 3 passed");
+});

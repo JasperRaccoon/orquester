@@ -5,6 +5,7 @@ import type { AttachmentRef } from "@orquester/api";
 
 import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
+import { PROMPT_CUT_AT_REST_NOTE, type AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import { ComposerPopover } from "../../composer/ComposerPopover";
 import {
@@ -167,7 +168,52 @@ function RewindToHereButton({
 }
 
 /**
- * The only filled bubble in the timeline (§5.1 of the design reference).
+ * The text of a bubble, clamped past a few lines with a mask fade and a toggle
+ * that names what it reveals (`shouldClampUserMessage`). With `onShowFull` the
+ * text it holds is not the whole of it (a prompt the wire cut): it stays
+ * clamped, and the one toggle reads the whole elsewhere instead of unclamping
+ * a cut text as if it were whole.
+ */
+function ClampedBubbleText({
+  text,
+  showLabel,
+  onShowFull
+}: {
+  text: string;
+  showLabel: string;
+  onShowFull?: (() => void) | undefined;
+}): React.ReactElement {
+  const [expanded, setExpanded] = React.useState(false);
+  const clampable = onShowFull !== undefined || shouldClampUserMessage(text);
+  const clamped = clampable && (onShowFull !== undefined || !expanded);
+  return (
+    <>
+      <div
+        className={cn(
+          "whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]",
+          clamped &&
+            "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-1.75rem),transparent)]"
+        )}
+      >
+        <MessageBodyText text={text} />
+      </div>
+      {clampable ? (
+        <button
+          type="button"
+          onClick={onShowFull ?? (() => setExpanded((value) => !value))}
+          className="mt-1.5 rounded text-xs text-neutral-400 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+        >
+          {!clamped ? "Show less" : showLabel}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The user's filled bubble (§5.1 of the design reference) — the one filled
+ * bubble in the timeline, which an agent's launch prompt reuses in its drill-in
+ * ({@link AgentPromptRow}): to the agent the prompt is its user turn.
  *
  * Right-aligned, capped at 80 %, no border, no avatar and no name label — the
  * asymmetry with the assistant's full-width, unbubbled output *is* the
@@ -179,12 +225,10 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   row: Row<"message">;
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
-  const [expanded, setExpanded] = React.useState(false);
   // The meta row is hover-revealed; while the rewind confirm is open it stays
   // shown, so the button the popover is anchored to does not fade out under it.
   const [rewindOpen, setRewindOpen] = React.useState(false);
   const text = row.message.text;
-  const clamp = shouldClampUserMessage(text) && !expanded;
   const attachments = row.message.attachments ?? [];
   const revertTurnCount = row.revertTurnCount;
 
@@ -193,23 +237,7 @@ export const UserMessageRow = React.memo(function UserMessageRow({
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
         <AuthorHeading>You</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
-        <div
-          className={cn(
-            "whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]",
-            clamp && "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-1.75rem),transparent)]"
-          )}
-        >
-          <MessageBodyText text={text} />
-        </div>
-        {shouldClampUserMessage(text) ? (
-          <button
-            type="button"
-            onClick={() => setExpanded((value) => !value)}
-            className="mt-1.5 rounded text-xs text-neutral-400 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
-          >
-            {expanded ? "Show less" : "Show full message"}
-          </button>
-        ) : null}
+        <ClampedBubbleText text={text} showLabel="Show full message" />
       </div>
       <div
         className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs"
@@ -229,6 +257,62 @@ export const UserMessageRow = React.memo(function UserMessageRow({
           />
         ) : null}
         {text.length > 0 ? <CopyButton size="micro" value={text} label="Copy message" /> : null}
+      </div>
+    </div>
+  );
+});
+
+// ---------------------------------------------------------------------------
+// An agent's launch prompt (§7.6)
+// ---------------------------------------------------------------------------
+
+/**
+ * An agent's launch prompt, heading the run it started — "its prompt at the
+ * top" of a drill-in, and a relaunch's at its place (`agent-prompt.logic.ts`).
+ *
+ * In the user's bubble, because to the agent it IS its user turn — what it was
+ * asked, verbatim — with a caption that says whose words these are not. Read-
+ * only like the whole drill-in: no rewind. A long prompt clamps behind "Show
+ * full prompt". One the wire cut (§5.6) offers that same ONE affordance, which
+ * reads the whole prompt in the parent's viewer (titled "Prompt"; the item
+ * read, as the compaction summary's "Load the full summary" does) rather than
+ * unclamping the cut text, and offers no Copy of the cut text; one ingestion
+ * cut at rest says only its start was kept, up to the cap it was cut at
+ * (`PROMPT_CUT_AT_REST_NOTE`, naming `TASK_PROMPT_MAX_CHARS`) — no read of its
+ * start row holds the rest.
+ */
+export const AgentPromptRow = React.memo(function AgentPromptRow({
+  row,
+  prompt
+}: {
+  row: Row<"message">;
+  prompt: AgentPrompt;
+}): React.ReactElement {
+  const ctx = useTimelineRowContext();
+  const text = row.message.text;
+  return (
+    <div className="group flex flex-col items-end gap-1" data-agent-prompt="true">
+      <span className="pe-1 text-[11px] text-neutral-500">Prompt</span>
+      <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
+        <AuthorHeading>Prompt</AuthorHeading>
+        <ClampedBubbleText
+          text={text}
+          showLabel="Show full prompt"
+          // Cut on the wire: its one "Show full prompt" reads the whole prompt
+          // in the parent's viewer, never unclamps the cut text.
+          onShowFull={prompt.truncated ? () => ctx.onLoadFullOutput(prompt.itemId, "prompt") : undefined}
+        />
+        {prompt.cutAtRest ? (
+          <p className="mt-1.5 text-xs text-neutral-400">{PROMPT_CUT_AT_REST_NOTE}</p>
+        ) : null}
+      </div>
+      <div className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs">
+        <span className="text-neutral-500" title={formatRowTimestampTooltip(row.createdAt)}>
+          {formatRowTimestamp(row.createdAt)}
+        </span>
+        {!prompt.truncated && text.length > 0 ? (
+          <CopyButton size="micro" value={text} label="Copy prompt" />
+        ) : null}
       </div>
     </div>
   );

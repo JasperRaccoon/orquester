@@ -2260,6 +2260,14 @@ the parent.*
   stored text by the same tokeniser the composer uses. No `isCommand` flag is persisted.
   *T3: `packages/shared/src/composerInlineTokens.ts:100-127` + `apps/web/src/components/ChatView.tsx:735-738` — chips and
   the compaction marker are both derived from the text.*
+  *Built (2026-09-27): the chips render. `AgentChatView` never handed the timeline the catalogue the
+  tokeniser matches against, so no `$mention` was ever chipped, in either view; it now passes the
+  names of every skill in the thread's catalogue for its cwd — the cwd's overlay where it lists
+  skills, else the machine-level catalogue, the catalogue the composer reads too (`workspaceSkills` /
+  `timelineSkillNames`, `composer/composer-menu.ts`) — to the thread's timeline and a drill-in's,
+  whose launch prompt re-chips the same way. The chips are wider than the menu: the `$` menu offers
+  only the catalogue's enabled, user-invocable skills, while a mention of any skill in it chips — an
+  agent's launch prompt may name a skill only agents invoke, and it is still that skill.*
 
 #### 4.6.8 Skills
 
@@ -3604,14 +3612,22 @@ fresh-data layout pass and the initial end pin — not a wall-clock window, whic
 (a turn streaming into a thread opened half a second ago jumps instead of gliding) and too short
 (a slow first fold lands after it expires and glides down in front of the user). The latch is
 matched on the identity, so one armed for the thread just left cannot affect the one arrived at,
-and the subagent drill-in counts as its own identity because it mounts a second timeline for the
-same session id while the parent's is still mounted (§7.6).
+and the subagent drill-in counts as its own identity because its timeline is a second list under
+the same session id (§7.6): the thread's timeline unmounts while a child is open, and the identity
+keeps a list opened under one session id from reading as the same list.
 *T3: `apps/web/src/components/chat/MessagesTimeline.tsx:1287` — `initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}`, with `positionedThreadKey` initialised at `:548-551` so no restore scroll runs in that case; `:389-395` — `TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH`, "thread switches and layout settles keep the instant variant so nothing visibly travels"; `:555-567, :618-631` — `settlingListIdentity` and its two-frame `requestAnimationFrame` clear; `:1294-1304` — `isWorking && !prefersReducedMotion && settlingListIdentity === null` picks the smooth variant.*
 *Built: the rules are pure and live in `packages/ui/src/components/agent-chat/timeline/follow.ts`
 (`shouldAnimateFollow`, `armSettleLatch`/`tickSettleLatch`/`isSettling`,
 `timelineListIdentity`); `ChatTimeline` holds the latch in a ref, because the decision is read at
 call time inside a scroll handler and re-rendering the whole timeline twice per switch to publish
 a boolean nothing paints would be strictly worse.*
+*Built (2026-09-27): a row that ARRIVES plays a one-shot rise; a list the user just opened does
+not. The rule is per list — `timelineListIdentity`, session and agent, so the drill-in switching from
+one agent to another is a new list whose rows do not all rise — and it is primed by the list's first
+NON-EMPTY render, because a cold thread renders empty and its first snapshot lands a render later
+and used to rise in whole; the thread's own list is also primed by a render where the thread is
+ready (synchronized), empty or not, so a brand-new thread's first message rises. A row landing
+above every row on screen is older history and never rises (`timeline/row-enter.ts`).*
 
 Row kinds and behaviour:
 
@@ -3654,10 +3670,12 @@ Row kinds and behaviour:
   their work started in; timed by its rows, a turn of seconds read "Worked for 50h". A turn still
   running, or one no turn row describes, is still timed by its rows, and so is every fold of a
   drill-in: a background agent works long past the parent turn its rows ride, so its fold keeps
-  the span of the agent's own rows, never that turn's seconds. A thinking block never holds a fold
-  open, so a drill-in's fold can end on a thought still being written: its "Worked for …" follows
-  the tokens — the streamed-text fast path re-reads it off the fold's clock (`TurnFoldClock`), and
-  the drill-in's tokens take that fast path as the window's do — and closes on the thought's last
+  the span of the agent's own rows, never that turn's seconds. A live agent's current run is the
+  drill-in's running response and never folds (§7.6), as the thread's running turn does not. A
+  thinking block never holds a fold open, so a drill-in's fold — a settled agent's, or a run before
+  the current one — can end on a thought still being written: its "Worked for …" follows the tokens
+  — the streamed-text fast path re-reads it off the fold's clock (`TurnFoldClock`), and the
+  drill-in's tokens take that fast path as the window's do — and closes on the thought's last
   write.*
 - **"+N more" toggle** inside a long expanded group, and a **working row** — one element whose
   label is swapped in place (starting → running → tool name) rather than remounted, with a
@@ -4285,7 +4303,12 @@ row only among the most recently active running work (§5.1), so a shell past th
 with its chunks alone: they are still one row, and it is labelled with the shell's roster title (its
 description, or the command itself), which `AgentDrillIn` hands `backgroundShellRows` as its
 fallback title, rather than with the first line of the output — never with the shell's own id, the
-roster's title when nothing ever named the task.*
+roster's title when nothing ever named the task. That row is the one on screen: the drill-in's
+timeline renders exactly the rows its one projection hands it (`useAgentChatDrillIn`, called by
+`AgentDrillIn`; the hook projects nothing for a shell). Until 2026-09-27 a second projection inside
+the timeline rendered its own rows whenever it had any — for a Claude shell, whose rows always ride
+a turn, a "Worked for …" fold, a capped output pane that did not follow, one row per turn its chunks
+rode, and an exited shell's output collapsed.*
 
 Stopping is T3's, not the row's. Once a turn settles the composer's stop button is gone, so while
 `backgroundLiveness` is non-null and no turn is working, a banner sits in the notice stack above the
@@ -4302,6 +4325,16 @@ The timeline's spawn row stores only ids — the batch's `workflowId` and its me
 resolves its label, live flag and member list from the roster model at render time. Persisting a
 count in the row would go stale the moment a member finishes.
 *T3: `apps/web/src/session-logic.ts:85-94` — `agentSpawn: {workflowId, agentTaskIds}` and the "derives its live status and member list from the agent panel model at render time" comment; `apps/web/src/components/chat/MessagesTimeline.tsx:4594-4664` — `AgentSpawnRow` re-resolving against the panel model each render; `apps/web/src/components/chat/agentSpawnSummary.ts:8-64` — `deriveAgentSpawnSummary`: "Kicked off 3 subagents" live, "Ran 3 subagents" settled, and a status of `N working` / `N failed` / `N idle` / `Status unavailable` / `✓ completed` that never reads a missing agent as completed*
+*Built (2026-09-27): the spawn row renders every batch, in both states and both views — the running
+turn's live row (`WorkLiveRow`) and a settled turn's hoisted row (`WorkRow`) alike, as T3's
+`SimpleWorkEntryRow` renders `AgentSpawnRow` for every entry carrying `agentSpawn`
+(`MessagesTimeline.tsx:4701-4711`). The port had brought only the live half, so a settled batch read
+as a plain tool row labelled with its entry's merged detail — the latest-merged member row's, usually
+the last-finished member's result, shown as if it were the batch's — with no members to open. A batch
+none of whose members the roster still holds (its 100-row cap evicts the oldest settled first, so an
+old fleet batch loses them all) keeps that text in place of "Status unavailable", and opened says its
+agents are no longer in the roster, so it never reads empty. Inside a child's drill-in a nested
+batch's member opens that agent's drill-in (navigation, not a command).*
 
 Rows past five collapse behind "N more", and finished rows fade and disappear when the turn ends —
 except a live background row, which is exempt from both: it is always rendered, it does not count
@@ -4317,6 +4350,89 @@ move to the background, its end and result, a `resume_from` relaunch — and, si
 session's own frames reach the client under its own `sessionId` (captured 2026-09-25), a Grok
 agent's drill-in holds its thinking, its words, its tool calls and its own background shells (the
 Grok fixtures README, observation 38).*
+*Built (2026-09-27): "streaming live" means the drill-in reads as live as the thread does while its
+agent works. While the session is live and the roster shows the agent `pending`, `running` or
+`waiting` — `messageStreamingContext`'s notion, the one `isMessageStreaming` and the roster's
+session-death pass read; never a loop or a goal, which drive work and do none — its current run,
+from the roster's `startedAt` (reset on every relaunch; else its latest launch), is the running
+response: unfolded as the running turn is, its in-progress calls live rows ("Running npm", a call
+waiting on the parent's approval card included, a streaming command's output following it), its
+tail live (an active group's shimmer, a live spawn row, the thinking placeholder when nothing there
+is live), a working row at its head timed from its start, and the smooth follow glides. A run is a
+position, not a turn, because an agent's rows ride whatever parent turn was live when each started,
+or none (`agentRunStartIndex` in `rows.logic.ts`, `drill-in.logic.ts`). A settled agent, and a run
+before the current one, fold as before; a drill-in's folds start open and a collapse sticks — the
+drill-in keeps the turns the user closed (`collapsedTurnsAfter`) rather than reopening every fold on
+each projection, which left the chevron dead.*
+*Built (2026-09-27): "dispatches no commands" withholds rewind, approvals as rows, the queue and
+Ctrl+B; navigation and reads are no commands and pass the thread's own handlers through — a file a
+child's words link to, a changed-file line and a diff heading open it as they do in the thread, and
+"Load full output" reads in the parent's viewer (`roster/drill-in-callbacks.ts`). The thread's error
+banner overlays the child's timeline as it does the thread's: the overlay stays live over a child,
+and its commands (approve, answer, dismiss, Stop, compact) report a failure only there.*
+*Built (2026-09-27, the client half of "its prompt at the top"): the prompt is the FIRST row of the
+drill-in's scroll — the launch's `task.started` `payload.prompt`, found by `payload.taskId` whoever
+owns the row (Claude's launch is the parent's) — rendered in the user's bubble under a "Prompt"
+caption, because to the agent it is its user turn; read-only, no rewind. Each relaunch that carries
+one adds a prompt row at its place, heading the run it started: a live run's working row follows it;
+the rows after it fold by their turn AND that prompt (`timelineFoldKeys`), so a relaunch inside the
+parent turn its previous run rode — a Claude resume, a Codex follow-up — folds and is timed on its own,
+and the previous run's last answer is terminal in its run; and the fold of the rows right after it is
+timed from it — only those: the first row after a prompt, turnless or not, ends its reach, because an
+agent's first rows often ride no turn and a boundary carried past them timed a later turn's fold from
+the launch (`lib/agent-chat/agent-prompt.logic.ts`, `deriveTurnFolds`; the thread's own timeline has no
+launch prompts, and its folds and boundaries are as before). A long
+prompt clamps behind "Show full prompt"; one the wire cut (the item's `truncated`) offers that same
+ONE affordance, which reads the whole prompt in the parent's viewer — titled "Prompt", the item read
+(`GET …/items/:itemId`) as "Load the full summary" does — rather than unclamping the cut text, and
+offers no Copy of the cut text; one ingestion cut at rest (`promptTruncated`) says only its start was
+kept, naming the cap — "stored up to 32,000 characters", `TASK_PROMPT_MAX_CHARS`, an upper bound in
+characters since the cap counts UTF-16 units — in its row and in the viewer alike
+(`PROMPT_CUT_AT_REST_NOTE`); the rest is on no read of the start row. No prompt on the launch — an older log, a provider that reports none, a shell — no row: the
+client never invents one. The block under the breadcrumb is no longer the "prompt": it keeps the
+roster's live activity / outcome line at one fixed line with the whole of it as its tooltip, so its
+wrapping never moves the rows below.*
+*Built (2026-09-27): a drill-in reads the thread's live window alone, and retention can empty an
+agent's share of it (its own window keeps 200 rows, the cross-agent ceiling 2 000) — but an agent can
+also have no rows because it never had any: stopped or declined before it did anything, a Codex child
+whose words and thoughts are no rows, an agent whose only rows are its own hidden task rows. So an
+empty drill-in (its launch prompts and the live placeholders aside) says one of three things, under
+the prompt (`timeline/empty-notice.ts`): its "earlier rows have left this thread's window" only with
+evidence of both halves — the thread's window has dropped rows (the store's `retentionDropped`: the
+snapshot's `history.hasOlder`, or the client fold's `evicted` since) and the agent did real tool work
+(a tool's name as its last tool, never a Codex word or thought tick, or a tool-use count above zero) —
+whether it is live or settled (amended in fix round 2: a fleet agent still at work can lose every row
+to the cross-agent ceiling, and "not reported anything yet" was then untrue); otherwise a live agent
+"has not reported anything yet", and a settled one reads "This agent reported nothing to show here.",
+which is true whatever happened. A shell follows the same rule: "Its output has left this thread's
+window." with the evidence, else "No output yet." while it runs and "No output from this shell is in
+this thread." once it has not (a Grok shell a subagent owned never had rows of its own). Paging an
+agent's older rows from the thread index, as the MCP's drill-in does (`apps/daemon/src/mcp/history.ts`),
+is a follow-up.*
+*Built (2026-09-27): re-opening an agent returns to where the reader was. `AgentChatView` keeps a
+per-agent memory — each agent's disclosures (its closed folds and a shell's closed rows included),
+reading position and follow — in memory only, NEVER the thread's §7.2 LRU (the refusal below
+stands), per thread (a switch drops it) and bounded to the 50 agents most recently opened
+(`roster/drill-in-memory.ts`). The drill-in mounts once per agent, so A → B saves A's and opens B
+from B's own entry; a position left mid-list is restored with follow off (a re-pin would carry the
+list over it), one left at the end, or none, opens at the end, following — and so does an entry
+whose follow is armed, whatever position it holds: the pill and mod+J re-arm follow with a scroll
+whose own event the timeline ignores, so no at-end position is published after them.*
+*Built (2026-09-27): the view leaves a drill-in on its own in two cases (`drill-in-navigation.ts`).
+An agent that settles while its drill-in is open hands the view back to the thread, where its result
+lands — judged per agent (only an agent seen at work in this opening of its drill-in, then settling;
+one opened already finished stays open, where one "was live" flag for the whole view once bounced a
+reader who opened a finished agent from a running one's view) and only while the reader follows the
+child's end: a reader who scrolled up stays, and the header's status chip says it finished. And a
+palette search hit, which only the thread's timeline takes, closes an open drill-in so that timeline
+takes it at once — it used to wait, unmounted, and fire minutes later on Back.*
+*Built (2026-09-27): the drill-in renders inside an error boundary of its own
+(`roster/DrillInErrorBoundary.tsx`): a child row that throws takes down the child's view alone — the
+overlay stays mounted over it — and its fallback's "Back to the thread" is a real, touch-sized button,
+centred above the overlay (padded by the view's bottom inset) so a phone's composer and roster never
+cover it. The thread's own boundary wrapped everything and kept the open agent, so a crashing child replaced the
+composer, the roster and Back, and on a touch device only closing the tab recovered; its "Try again"
+now also leaves an open drill-in.*
 
 *Built: **"Escape back to main" holds wherever focus is, the composer included.** With a child open,
 Escape leaves it before it would interrupt the turn: the shell's resolver has always ranked it so
@@ -4328,13 +4444,21 @@ the parent's turn instead (or, idle, got the Esc-Esc hint). The shell now hands 
 its own Escape first, and interrupting from the composer while watching a child is the Stop button
 or one more Escape.*
 
-**The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
-there are *two* live timelines under one session id, one of them hidden behind the other. Anything
-keyed on the session id alone therefore cannot tell them apart: a `window` keyboard listener gated
-only on "am I the visible tab?" fires twice, and a per-thread write (the §7.2 scroll LRU) would
-record the child's position against the parent's thread. Both need a second discriminator — the
-drill-in refuses the write outright, and the timeline's `mod+J` additionally requires the listener's
-own scroller to have a layout box. Several surfaces could trip on this, not just those two.
+**The drill-in shares the parent's `sessionId`**, and does not remount the parent's thread — its
+slice, composer and roster stay mounted. Anything keyed on the session id alone therefore cannot
+tell the child's timeline from the thread's: a per-thread write (the §7.2 scroll LRU) would record
+the child's position against the parent's thread, and a list identity keyed on the session alone
+would read another list as the same one. Both need a second discriminator — the drill-in refuses
+the write outright, and the list identity carries the agent id (`timelineListIdentity`).
+*Built (2026-09-27): the thread's own `ChatTimeline` is UNMOUNTED while a child is open, not hidden
+behind it — the main area is one or the other (`AgentChatView`), as it has been since the first
+shell commit; the text above once said two live timelines, one hidden. Back mounts the thread's
+timeline again, which restores its reading position from the §7.2 LRU (a row anchor, else the
+pixel offset) and its disclosures from the store; a child's own state lives in the drill-in's
+per-agent memory. So only one timeline per session id is ever mounted; the second discriminators
+stay as defence and say why — the LRU refusal is load-bearing whatever is mounted, the agent id in
+the identity keeps the settle latch and the enter flags per list, and `mod+J`'s layout-box check
+still stops a timeline with no box from taking the chord.*
 *T3: `apps/web/src/components/AgentsPanel.tsx:139-140` — `/** Flat, non-interactive agent status line. No unfold. */`; `:550-567` — every row renders, with no "+N more" and no removal of finished rows; only the fold's silent 100-row cap bounds it; `:313-317` — a workflow section "keeps that shape as it settles so completion never yanks rows out from under the user"; `apps/web/src/components/chat/MessagesTimeline.tsx:4654-4660` — the closest T3 equivalent of a drill-in, an "Open Agents panel ›" link into a right-panel surface. differs on three counts: T3's roster is a right-panel surface rather than a dock under the composer; its rows are not clickable and there is no per-agent timeline, no `agentId` filter and no breadcrumb; and it neither collapses nor removes settled rows. Our collapse-past-five, fade-on-turn-end and the live-background exemption from both are new, so they must not fight the "never reshuffle what stays visible" rule above, and the drill-in is new surface with no precedent to lean on*
 
 *Built: "its items filtered by `agentId`" holds because a call's rows are stamped as one. Claude's
