@@ -3244,16 +3244,36 @@ test("a `task_id` resume's start carries the resume's own prompt, never the firs
 
 test("a grandchild's start carries the prompt its parent child's `task` part gave it", () => {
   const run = liveSession("ses_parent");
+  // Prompts unlike their descriptions: the start carries `input.prompt`, and
+  // the description stays the task's name.
   const launched = feed(run, [
-    ...childLaunch({ sessionId: "ses_parent", childId: "ses_child", callId: "call_child", description: "list files", background: false }),
+    ...childLaunch({
+      sessionId: "ses_parent",
+      childId: "ses_child",
+      callId: "call_child",
+      description: "list files",
+      prompt: "List every file under src/ and name the largest.",
+      background: false
+    }),
     busyOf("ses_child"),
-    ...childLaunch({ sessionId: "ses_child", childId: "ses_gc", callId: "call_gc", description: "dig deeper", background: false })
+    ...childLaunch({
+      sessionId: "ses_child",
+      childId: "ses_gc",
+      callId: "call_gc",
+      description: "dig deeper",
+      prompt: "Read the largest file and summarise its exports.",
+      background: false
+    })
   ]).flat();
   assert.deepEqual(
-    eventsOfType(launched, "task.started").map((event) => [event.payload.taskId, event.payload.prompt]),
+    eventsOfType(launched, "task.started").map((event) => [
+      event.payload.taskId,
+      event.payload.description,
+      event.payload.prompt
+    ]),
     [
-      ["ses_child", "list files"],
-      ["ses_gc", "dig deeper"]
+      ["ses_child", "list files", "List every file under src/ and name the largest."],
+      ["ses_gc", "dig deeper", "Read the largest file and summarise its exports."]
     ]
   );
 });
