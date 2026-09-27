@@ -2300,7 +2300,8 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   follow-up preference — a running turn QUEUES it or is STEERED by it — with an identical queue
   inside 1 s refused as a double click's twin, and a failed send coming back into the draft.
   History's "Rewind to here" waits for a send in flight, as the composer's picker does
-  (`rewindBusyReason` reads the composer's send registry). The goal chip's `sendText` is a
+  (the panel reads the composer's send registry — `useComposerSending` for the button, `isComposerSending`
+  fresh as the rewind runs — and hands it to `rewindBusyReason` as `isSending`). The goal chip's `sendText` is a
   different path (always steers, never returns to the draft — not even from the tab's outbox
   after a reload, which it rides as `generatedPrompt`); do not route the rail through it.
   Saved-prompt `{variables}` render on the client at click time

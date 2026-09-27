@@ -3,7 +3,7 @@
  * surface (`lib/keyboard-surfaces.ts`): the right rail's dock and its mobile
  * sheet, the saved-prompt editor.
  *
- * A SOURCE check, like `components/ui/keyboard-layer-wiring.test.ts`, because
+ * A SOURCE check, like `components/ui/open-layer-wiring.test.ts`, because
  * the gates are lines inside `window`/`document` listeners that nothing here
  * can fire: there is no DOM under node, and static rendering runs no effect.
  * What has to be prevented is a gate disappearing, or moving below the code
