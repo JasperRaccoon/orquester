@@ -2463,6 +2463,16 @@ export class ClaudeNormalizer {
       message.task_type !== undefined &&
       isBackgroundTaskType(message.task_type);
     const suppressed = housekeeping || foregroundShell;
+    // The prompt THIS launch was given, verbatim, for the top of the agent's
+    // drill-in (§7.6): the frame's own (fixture 07, line 38), else its
+    // launching call's input — the same text there (line 37) — for a frame
+    // that leaves it out. A resume's frame and call are the resume's own, so a
+    // relaunch never repeats the first launch's prompt. Never a shell's: its
+    // command is its description.
+    const prompt =
+      message.task_type !== undefined && isBackgroundTaskType(message.task_type)
+        ? undefined
+        : (verbatimPrompt(message.prompt) ?? verbatimPrompt(launchInput?.prompt));
 
     this.taskAgents.set(message.task_id, {
       taskId: message.task_id,
@@ -2492,7 +2502,7 @@ export class ClaudeNormalizer {
     if (suppressed) {
       return events;
     }
-    events.push(...this.surfaceTask(message.task_id, raw));
+    events.push(...this.surfaceTask(message.task_id, raw, prompt));
     return events;
   }
 
@@ -2500,8 +2510,10 @@ export class ClaudeNormalizer {
    * Put a task on the roster: `task.started`, the liveness set, and — for a
    * shell — the `command_execution` item its drill-in renders. Called from
    * `task_started` and, for a promoted foreground shell, from `task_updated`.
+   * `prompt` is the launch's own, handed over rather than remembered: it
+   * rides this one start, and a promoted shell has none.
    */
-  private surfaceTask(taskId: string, raw: RuntimeEventRaw): RuntimeEvent[] {
+  private surfaceTask(taskId: string, raw: RuntimeEventRaw, prompt?: string): RuntimeEvent[] {
     const agent = this.taskAgents.get(taskId);
     if (agent === undefined || agent.surfaced === true) {
       return [];
@@ -2523,6 +2535,7 @@ export class ClaudeNormalizer {
           taskId,
           ...(agent.description !== undefined ? { description: agent.description } : {}),
           ...(agent.isBackgrounded !== undefined ? { isBackgrounded: agent.isBackgrounded } : {}),
+          ...(prompt !== undefined ? { prompt } : {}),
           ...this.taskLinkageFor(taskId)
         }
       }
@@ -3551,6 +3564,14 @@ function backgroundShellDetail(command: string | undefined): string | undefined 
 /** Task types that are watch loops or shells rather than agents. */
 function isBackgroundTaskType(taskType: string): boolean {
   return taskType === "local_bash" || taskType === "shell" || taskType.startsWith("monitor");
+}
+
+/**
+ * A prompt as the provider wrote it — whitespace and all, never trimmed — or
+ * `undefined` when it holds no text.
+ */
+function verbatimPrompt(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function isAgentFlavoured(taskType: string | undefined, agentId: string | undefined): boolean {

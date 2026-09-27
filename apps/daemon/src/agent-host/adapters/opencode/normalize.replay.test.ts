@@ -3207,3 +3207,99 @@ test("12: a child session's step-finish tokens never reach the parent's meter", 
   assert.ok(!used.includes(3_538));
   assert.ok(!used.includes(3_585));
 });
+
+// ---------------------------------------------------------------------------
+// An agent's start carries the prompt its launching part gave it (§7.6)
+// ---------------------------------------------------------------------------
+
+/** Fixture 12's launching `task` part, as the capture holds it: its `running` frame (line 142). */
+function launchPromptOfFixture12(): string {
+  const [running] = childFixtureFrames([142]);
+  const prompt = (running as { properties: { part: { state: { input?: { prompt?: unknown } } } } })
+    .properties.part.state.input?.prompt;
+  assert.ok(typeof prompt === "string" && prompt.startsWith("List the files"));
+  return prompt;
+}
+
+test("12: the child's start carries the prompt its launching `task` part gave it; no other task row does", () => {
+  const prompt = launchPromptOfFixture12();
+  const { events } = replayChildParent();
+  const [start, ...rest] = eventsOfType(events, "task.started");
+  assert.deepEqual(rest, []);
+  assert.equal(start?.payload.prompt, prompt, "the part's `input.prompt`, verbatim");
+  for (const row of events.filter((event) => event.type.startsWith("task.") && event !== start)) {
+    assert.equal("prompt" in (row.payload as object), false, `${row.type} repeats no prompt`);
+  }
+});
+
+test("a `task_id` resume's start carries the resume's own prompt, never the first launch's", () => {
+  const first = launchPromptOfFixture12();
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-resume";
+  const resume = resumeFrames("call_resume", { [first]: "Now list the hidden files too." });
+  const [start] = eventsOfType(feed(run, [resume.pending, resume.running]).flat(), "task.started");
+  assert.equal(start?.payload.toolUseId, "call_resume");
+  assert.equal(start?.payload.prompt, "Now list the hidden files too.");
+});
+
+test("a grandchild's start carries the prompt its parent child's `task` part gave it", () => {
+  const run = liveSession("ses_parent");
+  // Prompts unlike their descriptions: the start carries `input.prompt`, and
+  // the description stays the task's name.
+  const launched = feed(run, [
+    ...childLaunch({
+      sessionId: "ses_parent",
+      childId: "ses_child",
+      callId: "call_child",
+      description: "list files",
+      prompt: "List every file under src/ and name the largest.",
+      background: false
+    }),
+    busyOf("ses_child"),
+    ...childLaunch({
+      sessionId: "ses_child",
+      childId: "ses_gc",
+      callId: "call_gc",
+      description: "dig deeper",
+      prompt: "Read the largest file and summarise its exports.",
+      background: false
+    })
+  ]).flat();
+  assert.deepEqual(
+    eventsOfType(launched, "task.started").map((event) => [
+      event.payload.taskId,
+      event.payload.description,
+      event.payload.prompt
+    ]),
+    [
+      ["ses_child", "list files", "List every file under src/ and name the largest."],
+      ["ses_gc", "dig deeper", "Read the largest file and summarise its exports."]
+    ]
+  );
+});
+
+test("a start no part named yet carries no prompt, and neither does a revive of a run that already had one", () => {
+  // Fixture 12's child in the background, its `running` frame lost: its own
+  // `busy` starts it under its own launch id, before any part names it.
+  const run = replayChildParent();
+  run.state.activeTurnId = "turn-background";
+  const [pending, created, completed] = childFixtureFrames([140, 141, 180], BACKGROUND_RENAMES);
+  assert.ok(pending && created && completed);
+  const launched = feed(run, [pending, created, ...childFixtureFrames([148], BACKGROUND_RENAMES), inBackground(completed)]).flat();
+  const [orphan] = eventsOfType(launched, "task.started");
+  assert.equal(orphan?.payload.toolUseId, "opencode-child:ses_background_child");
+  assert.equal("prompt" in (orphan?.payload ?? {}), false, "no part had said what it was asked");
+
+  // A Stop closes it; the server says it runs on: the revive continues the run
+  // its launch prompted, with no prompt of its own.
+  closeLiveChildAgents(run.state, run.ctx, "interrupted");
+  const reported = normalizeOpenCodeEvent(run.state, childFixtureFrames([148], BACKGROUND_RENAMES)[0]!, run.ctx)
+    .signals.find((signal) => signal.kind === "child-reports-run");
+  assert.ok(reported !== undefined && reported.kind === "child-reports-run");
+  const revived = eventsOfType(
+    settleChildSurvival(run.state, "ses_background_child", reported.checkId, true, run.ctx),
+    "task.started"
+  );
+  assert.deepEqual(revived.map((event) => event.payload.toolUseId), ["opencode-revive:call_background:1"]);
+  assert.equal("prompt" in (revived[0]?.payload ?? {}), false);
+});

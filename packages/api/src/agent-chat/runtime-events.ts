@@ -779,7 +779,54 @@ export interface TaskStartedPayload extends TaskAgentLinkage {
    * ones. Absent when the provider does not say.
    */
   isBackgrounded?: boolean;
+  /**
+   * The prompt THIS launch of the agent was given, verbatim — never a summary,
+   * never the description (which is the task's name). It rides the first
+   * `task.started` of a run; a relaunch's start (a new launch id) carries the
+   * relaunch's own prompt — a resumed Claude agent's message, a Grok
+   * `resume_from`'s, an OpenCode `task_id` re-prompt's, a Codex follow-up's —
+   * when the provider reports one. Absent when it does not, and never on a
+   * shell or a monitor: a shell's command is its description.
+   *
+   * It is what the agent's drill-in shows at its top (spec §7.6, "its prompt
+   * at the top"). Ingestion keeps it on the `task.started` row as
+   * `payload.prompt`, whole up to {@link TASK_PROMPT_MAX_CHARS} UTF-16 units
+   * and marked `promptTruncated` past them; the wire slimmer caps it, like
+   * every string, at 16 KiB of UTF-8 (§5.6, `truncated`) — fewer characters
+   * than that whenever the text is not ASCII — and `GET …/items/:itemId`
+   * then serves the stored value.
+   */
+  prompt?: string;
 }
+
+/**
+ * How much of an agent's launch prompt ({@link TaskStartedPayload.prompt}) a
+ * `task.started` row keeps AT REST: 32 000 UTF-16 code units — one per
+ * character, two for a character outside the Basic Multilingual Plane (an
+ * emoji) — cut on a code-point boundary and marked `promptTruncated: true`
+ * when cut.
+ *
+ * The wire cuts on another scale. Every string of an activity payload is
+ * capped at `SLIM_MAX_STRING_BYTES`, 16 KiB of UTF-8 (§5.6): about 16 000
+ * ASCII characters but only about 5 400 CJK ones, so a prompt the row keeps
+ * whole can still reach the client cut, stamped `truncated`. The item read,
+ * `GET …/items/:itemId`, returns the STORED value: the whole prompt when it
+ * fit this cap, else its head marked `promptTruncated`.
+ *
+ * The rest of a prompt cut here is on no read of the start row. Where the
+ * launching call keeps its whole input on its own completion row — the
+ * `tool.completed` row whose `toolUseId` is the start's — that row's item
+ * read holds it (the wire copy drops the call's input): Claude's `Agent` call
+ * as `data.input.prompt`, Grok's `spawn_subagent` call as
+ * `data.rawInput.prompt`, OpenCode's `task` part as `data.state.input.prompt`.
+ * Codex keeps it on no row: its collab call's row holds a 180-character
+ * `detail` preview.
+ *
+ * Bounded because an agent's start row is never evicted from the fold (it
+ * anchors the agent's row): a fleet's prompts stay in memory, in the fold
+ * snapshot and in every snapshot read for as long as its thread lives.
+ */
+export const TASK_PROMPT_MAX_CHARS = 32_000;
 
 export interface TaskProgressPayload extends TaskAgentLinkage {
   taskId: string;

@@ -366,3 +366,254 @@ describe("interacted is no evidence of a run", () => {
     assert.equal(registry.liveness("thread-1"), null);
   });
 });
+
+/**
+ * A collab tool call of `threadId` (the parent's by default), typed against
+ * the bindings: `prompt` is "Prompt text sent as part of the collab tool call,
+ * when available", and `receiverThreadIds` names the agents it addresses — for
+ * a spawn, "the newly spawned agent" (`ThreadItem.ts`).
+ */
+function collabCall(
+  normaliser: CodexNormaliser,
+  phase: "started" | "completed",
+  call: {
+    id: string;
+    tool: CodexProtocol.v2.CollabAgentTool;
+    receivers: string[];
+    prompt: string | null;
+    threadId?: string;
+    /** The call's status on this frame: `inProgress` started, `completed` completed, unless named. */
+    status?: CodexProtocol.v2.CollabAgentToolCallStatus;
+    /** The sending thread's own turn the call runs in: `parent-turn` unless named. */
+    turnId?: string;
+  }
+): RuntimeEventDraft[] {
+  const threadId = call.threadId ?? PARENT;
+  const turnId = call.turnId ?? "parent-turn";
+  const item: CodexProtocol.v2.ThreadItem = {
+    type: "collabAgentToolCall",
+    id: call.id,
+    tool: call.tool,
+    status: call.status ?? (phase === "started" ? "inProgress" : "completed"),
+    senderThreadId: threadId,
+    receiverThreadIds: call.receivers,
+    prompt: call.prompt,
+    model: null,
+    reasoningEffort: null,
+    agentsStates: {}
+  };
+  if (phase === "started") {
+    const params: CodexProtocol.v2.ItemStartedNotification = {
+      item,
+      threadId,
+      turnId,
+      startedAtMs: 0
+    };
+    return normaliser.notification("item/started", params);
+  }
+  const params: CodexProtocol.v2.ItemCompletedNotification = {
+    item,
+    threadId,
+    turnId,
+    completedAtMs: 0
+  };
+  return normaliser.notification("item/completed", params);
+}
+
+describe("a child's start carries the prompt its collab call gave it (§7.6)", () => {
+  const SPAWN = "Survey packages/ui and list every store.";
+
+  it("a spawn naming the child as its receiver: the launch record's start carries the spawn's prompt", () => {
+    const normaliser = make();
+    collabCall(normaliser, "started", { id: "call-spawn", tool: "spawnAgent", receivers: [], prompt: SPAWN });
+    collabCall(normaliser, "completed", { id: "call-spawn", tool: "spawnAgent", receivers: [CHILD], prompt: SPAWN });
+    assert.equal(startOf(launch(normaliser)).payload.prompt, SPAWN);
+  });
+
+  it("a spawn that is the launch record's own call — the same item id — before it names a receiver", () => {
+    const normaliser = make();
+    collabCall(normaliser, "started", { id: LAUNCH_ITEM, tool: "spawnAgent", receivers: [], prompt: SPAWN });
+    assert.equal(startOf(launch(normaliser)).payload.prompt, SPAWN);
+  });
+
+  it("a follow-up re-engaging a settled child: the relaunch carries ITS prompt, once, and never the launch's", () => {
+    const normaliser = make();
+    collabCall(normaliser, "completed", { id: "call-spawn", tool: "spawnAgent", receivers: [CHILD], prompt: SPAWN });
+    assert.equal(startOf(launch(normaliser)).payload.prompt, SPAWN);
+    turnStarted(normaliser, "child-turn-1");
+    turnCompleted(normaliser, "child-turn-1");
+
+    const followUp = "Now list the hooks too.";
+    collabCall(normaliser, "started", { id: "call-followup", tool: "followupTask", receivers: [CHILD], prompt: followUp });
+    const relaunch = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(relaunch.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal(relaunch.payload.prompt, followUp);
+
+    // The call's own completion, and a later run nothing prompted: no prompt.
+    collabCall(normaliser, "completed", { id: "call-followup", tool: "followupTask", receivers: [CHILD], prompt: followUp });
+    turnCompleted(normaliser, "child-turn-2");
+    collabCall(normaliser, "completed", { id: "call-followup", tool: "followupTask", receivers: [CHILD], prompt: followUp });
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-3"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-3");
+    assert.equal("prompt" in unprompted.payload, false);
+  });
+
+  it("input sent to a child mid-run joins that run: no later start carries it", () => {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    collabCall(normaliser, "started", { id: "call-input", tool: "sendInput", receivers: [CHILD], prompt: "Also check tests." });
+    turnCompleted(normaliser, "child-turn-1");
+    assert.equal("prompt" in startOf(turnStarted(normaliser, "child-turn-2")).payload, false);
+  });
+
+  it("a call that starts no work — a wait, a message — gives no start its text", () => {
+    const normaliser = make();
+    collabCall(normaliser, "completed", { id: "call-wait", tool: "wait", receivers: [CHILD], prompt: null });
+    collabCall(normaliser, "completed", { id: "call-message", tool: "sendMessage", receivers: [CHILD], prompt: "FYI." });
+    assert.equal("prompt" in startOf(launch(normaliser)).payload, false);
+  });
+
+  it("a child this session never saw launched: its first turn's start carries the call that addressed it", () => {
+    const normaliser = make();
+    collabCall(normaliser, "completed", { id: "call-spawn", tool: "spawnAgent", receivers: [CHILD], prompt: SPAWN });
+    const start = startOf(turnStarted(normaliser, "child-turn-1"));
+    assert.equal(start.payload.toolUseId, "codex-run:child-turn-1");
+    assert.equal(start.payload.prompt, SPAWN);
+  });
+
+  it("a grandchild: a child's own spawn gives the grandchild's first start its prompt", () => {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    const GRANDCHILD = "grandchild-thread";
+    collabCall(normaliser, "completed", {
+      id: "call-inner",
+      tool: "spawnAgent",
+      receivers: [GRANDCHILD],
+      prompt: "Read one file.",
+      threadId: CHILD
+    });
+    const start = startOf(turnStarted(normaliser, "grandchild-turn-1", GRANDCHILD));
+    assert.equal(start.payload.taskId, GRANDCHILD);
+    assert.equal(start.payload.prompt, "Read one file.");
+  });
+
+  /** Launched, one run settled by its own turn: the child's next turn is a relaunch. */
+  function settledChild(): CodexNormaliser {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    turnCompleted(normaliser, "child-turn-1");
+    return normaliser;
+  }
+
+  it("a call that fails prompts nothing: the child's next run, which no call prompted, carries no prompt", () => {
+    const normaliser = settledChild();
+    const call = { id: "call-failed", tool: "followupTask" as const, receivers: [CHILD], prompt: "Delete the old fixtures." };
+    collabCall(normaliser, "started", call);
+    collabCall(normaliser, "completed", { ...call, status: "failed" });
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal("prompt" in unprompted.payload, false);
+  });
+
+  // Each mechanism that keeps a stale prompt off a later run is pinned on its
+  // own below: remove any one and exactly its test fails.
+
+  it("a call the server ends `interrupted` prompts nothing — with no Stop and no turn's end", () => {
+    // The binding's other way a call does not complete (whatever raises it: not
+    // captured). Its end names its prompt and receivers again, and nothing else
+    // — no Stop, no turn's end — would drop what it left waiting.
+    const normaliser = settledChild();
+    const call = { id: "call-interrupted", tool: "followupTask" as const, receivers: [CHILD], prompt: "Refactor the store." };
+    collabCall(normaliser, "started", call);
+    collabCall(normaliser, "completed", { ...call, status: "interrupted" });
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal("prompt" in unprompted.payload, false);
+  });
+
+  it("a call that fails after one receiver's run took its prompt still drops what it left for another", () => {
+    const normaliser = make();
+    const OTHER = "other-child-thread";
+    for (const child of [CHILD, OTHER]) {
+      turnStarted(normaliser, `${child}-turn-1`, child);
+      turnCompleted(normaliser, `${child}-turn-1`, "completed", child);
+    }
+    const call = { id: "call-both", tool: "sendInput" as const, receivers: [CHILD, OTHER], prompt: "Both of you: rebase." };
+    collabCall(normaliser, "started", call);
+    assert.equal(startOf(turnStarted(normaliser, "child-turn-2")).payload.prompt, "Both of you: rebase.");
+    collabCall(normaliser, "completed", { ...call, status: "failed" });
+    assert.equal("prompt" in startOf(turnStarted(normaliser, "other-turn-2", OTHER)).payload, false);
+  });
+
+  it("a Stop with no turn running drops every prompt still waiting — a delivered call's included", () => {
+    const normaliser = settledChild();
+    const call = { id: "call-delivered", tool: "followupTask" as const, receivers: [CHILD], prompt: "Refactor the store." };
+    collabCall(normaliser, "started", call);
+    collabCall(normaliser, "completed", call);
+    // `CodexSession.stopBackgroundWork`, the session-scoped Stop's (and the
+    // exit's) teardown: the open calls closed — this one is not open — then
+    // the agents forgotten. No later end comes.
+    normaliser.closeOpenItems("failed");
+    normaliser.forgetAgents();
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal("prompt" in unprompted.payload, false);
+  });
+
+  /**
+   * The Stop a user presses while the parent's turn runs: `turn/interrupt`,
+   * which never reaches `forgetAgents()`. The turn ends `interrupted` and a
+   * call it abandons gets no `item/completed` of its own (fixtures README
+   * observation 5): the turn's end closes it `failed` (`closeOpenItems`).
+   */
+  function stoppedMidCall(call: { id: string; prompt: string }): CodexNormaliser {
+    const normaliser = settledChild();
+    turnStarted(normaliser, "parent-turn", PARENT);
+    collabCall(normaliser, "started", { ...call, tool: "followupTask", receivers: [CHILD] });
+    const closers = turnCompleted(normaliser, "parent-turn", "interrupted", PARENT);
+    assert.ok(
+      closers.some((draft) => draft.type === "item.completed" && draft.itemId === call.id),
+      "precondition: the turn's end closes the call"
+    );
+    return normaliser;
+  }
+
+  it("a Stop of the running parent turn drops what the calls it abandons left waiting", () => {
+    const normaliser = stoppedMidCall({ id: "call-abandoned", prompt: "Refactor the store." });
+    const unprompted = startOf(turnStarted(normaliser, "child-turn-2"));
+    assert.equal(unprompted.payload.toolUseId, "codex-run:child-turn-2");
+    assert.equal("prompt" in unprompted.payload, false);
+  });
+
+  it("a call its turn's end closed is spent: its own end, arriving later after all, records nothing", () => {
+    const call = { id: "call-abandoned", prompt: "Refactor the store." };
+    const normaliser = stoppedMidCall(call);
+    collabCall(normaliser, "completed", { ...call, tool: "followupTask", receivers: [CHILD] });
+    assert.equal("prompt" in startOf(turnStarted(normaliser, "child-turn-2")).payload, false);
+  });
+
+  it("a child's own call its interrupted turn abandons drops what it left for the grandchild", () => {
+    const normaliser = make();
+    launch(normaliser);
+    turnStarted(normaliser, "child-turn-1");
+    const GRANDCHILD = "grandchild-thread";
+    collabCall(normaliser, "started", {
+      id: "call-inner",
+      tool: "spawnAgent",
+      receivers: [GRANDCHILD],
+      prompt: "Read one file.",
+      threadId: CHILD,
+      turnId: "child-turn-1"
+    });
+    // The Stop interrupts the child's turn: it ends `interrupted`, and its
+    // open call gets no end of its own — the child's turn's end closes it.
+    const closers = turnCompleted(normaliser, "child-turn-1", "interrupted");
+    assert.ok(closers.some((draft) => draft.type === "item.completed"), "precondition: the child's call is closed");
+    const start = startOf(turnStarted(normaliser, "grandchild-turn-1", GRANDCHILD));
+    assert.equal(start.payload.taskId, GRANDCHILD);
+    assert.equal("prompt" in start.payload, false);
+  });
+});

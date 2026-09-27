@@ -416,3 +416,84 @@ test("23 cut: the Stop closes the spawn call it cut — the CLI never answers it
   assert.ok(run.events.indexOf(closed[0]!) < turnEnd, "on the turn it cut, before that turn settles");
   assert.equal(rows.at(-1), closed[0], "and nothing of the call after it");
 });
+
+// ---------------------------------------------------------------------------
+// The launch prompt (§7.6, "its prompt at the top")
+// ---------------------------------------------------------------------------
+
+/**
+ * Every `spawn_subagent` call of a capture, by call id → the `prompt` its
+ * first frame carries — the model's own arguments (observation 37).
+ */
+function spawnPromptsOf(file: string): Map<string, string> {
+  const prompts = new Map<string, string>();
+  for (const frame of agentFrames(readCapture(file))) {
+    const update = (frame.params as { update?: Record<string, unknown> } | undefined)?.update;
+    if (update?.sessionUpdate !== "tool_call") continue;
+    const tool = (update._meta as Record<string, { name?: unknown }> | undefined)?.["x.ai/tool"];
+    const input = update.rawInput as { prompt?: unknown } | undefined;
+    if (tool?.name === "spawn_subagent" && typeof input?.prompt === "string") {
+      prompts.set(String(update.toolCallId), input.prompt);
+    }
+  }
+  return prompts;
+}
+
+const SPAWNING_CAPTURES = [
+  "15-subagent-foreground.ndjson",
+  "16-subagent-background-poll.ndjson",
+  "17-subagent-resume-from.ndjson",
+  "19-subagent-background-unpolled.ndjson",
+  "22-subagent-await-budget.ndjson",
+  "23-stop-cuts-foreground-subagent.ndjson",
+  "25-subagent-child-approval.ndjson",
+  "26-subagent-child-write-rejected.ndjson",
+  "28-subagent-max-turns.ndjson"
+];
+
+test("15–28: every spawn's start carries the prompt its call gave it, verbatim", () => {
+  for (const file of SPAWNING_CAPTURES) {
+    const prompts = spawnPromptsOf(file);
+    assert.ok(prompts.size > 0, `${file} spawns`);
+    const starts = only(driveCapture(file).events, "task.started").filter((row) =>
+      prompts.has(String(row.payload.toolUseId))
+    );
+    assert.deepEqual(
+      starts.map((row) => [row.payload.toolUseId, row.payload.prompt]),
+      [...prompts].filter(([call]) => starts.some((row) => row.payload.toolUseId === call)),
+      file
+    );
+    assert.equal(new Set(starts.map((row) => row.payload.toolUseId)).size, prompts.size, `${file}: a start per spawn`);
+  }
+});
+
+test("17 resume_from: the relaunch's start carries the resume's own prompt, never the first run's", () => {
+  const prompts = spawnPromptsOf("17-subagent-resume-from.ndjson");
+  const starts = only(taskRows(driveCapture("17-subagent-resume-from.ndjson").events, FIRST_CALL), "task.started");
+  assert.deepEqual(
+    starts.map((row) => row.payload.prompt),
+    [prompts.get(FIRST_CALL), prompts.get(RESUME_CALL)]
+  );
+  assert.match(String(starts[1]?.payload.prompt), /^Now run the shell command `echo resumed-ok`/);
+});
+
+test("no shell, monitor, loop, goal or CLI-spawned agent start carries a prompt", () => {
+  for (const file of [
+    "16-subagent-background-poll.ndjson",
+    "18-subagent-kill.ndjson",
+    "20-monitor.ndjson",
+    "21-stop-with-background-work.ndjson",
+    "24-background-shell-outlives-cli.ndjson",
+    "29-loop-scheduled-task.ndjson",
+    "30-goal.ndjson"
+  ]) {
+    const spawns = spawnPromptsOf(file);
+    const others = only(driveCapture(file).events, "task.started").filter(
+      (row) => !spawns.has(String(row.payload.toolUseId))
+    );
+    assert.ok(others.length > 0, `${file} starts work no spawn call launched`);
+    for (const row of others) {
+      assert.equal("prompt" in row.payload, false, `${file}: ${row.payload.taskType} ${row.payload.taskId}`);
+    }
+  }
+});

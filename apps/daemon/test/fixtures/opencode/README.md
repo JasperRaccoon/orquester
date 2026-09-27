@@ -509,6 +509,16 @@ so `toolUseId` = `callID`, `role` = `subagent_type`, `model` = `providerID/model
 `description` = `input.description`. Linkage is repeated on **every** task row (§4.2);
 `agentKind` is left for the host to stamp at ingestion.
 
+`input.prompt` is what the agent was asked, and it rides the run's `task.started` alone, as
+`prompt` — the top of the agent's drill-in (spec §7.6). Fixture 12 line 142 carries it
+(`"List the files in this directory and reply with their names."`); the child's own first user
+message repeats it (line 145) and stays dropped, since the demux emits no user-role text part.
+A `task_id` resume's start carries its own part's prompt, never the first launch's
+(observation 26). Two starts carry none: a child whose own frames started it before any part
+named it (`opencode-child:<session id>` — a start is never rewritten, so the part read later
+adds nothing), and a revive (`opencode-revive:…`, observation 29), which continues the run its
+launch already prompted. A child's own `task` part gives its grandchild's start the same way.
+
 Two invariants worth restating: a child's `step-finish` tokens are a *different session's*
 spend and never join the parent turn's accumulator (only `hasSubagents` is set), and a
 child's permission/question frames keep the original routing — an approval belongs on the

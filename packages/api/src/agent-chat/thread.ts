@@ -285,6 +285,18 @@ export interface ThreadActivityPayloadFields {
    * §5.6 wire cap as every other string, which is what `truncated` reports.
    */
   summary?: string;
+  /**
+   * On an agent's `task.started` row: the prompt that launch was given,
+   * verbatim (`TaskStartedPayload.prompt`), for the top of its drill-in
+   * (§7.6). Subject to the §5.6 wire cap like every other string —
+   * `truncated` then says `GET …/items/:itemId` holds the stored value.
+   */
+  prompt?: string;
+  /**
+   * The STORED prompt is itself cut, at `TASK_PROMPT_MAX_CHARS` (ingestion's
+   * bound at rest): no read has the rest.
+   */
+  promptTruncated?: boolean;
   /** True when the full payload was truncated and `GET …/items/:itemId` has more. */
   truncated?: boolean;
 }

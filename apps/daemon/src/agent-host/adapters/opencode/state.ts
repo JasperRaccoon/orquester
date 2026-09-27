@@ -506,6 +506,15 @@ export interface OpenCodeChildAgent {
   seenCallIds?: Set<string>;
   /** Set when this child was itself launched from another child. */
   parentAgentId?: string;
+  /**
+   * What the launching `task` part asked the CURRENT run to do — its
+   * `input.prompt`, verbatim, on its `running` frame and later — held until the
+   * run's start carries it, once (`emitTaskStarted`): the top of the agent's
+   * drill-in (§7.6). A run that started before any part named it
+   * (`opencode-child:<session id>`) carries none, since a start row is never
+   * rewritten. Cleared by a relaunch, whose own part gives its own.
+   */
+  prompt?: string;
   lastToolName?: string;
   lastStatus?: RuntimeTaskStatus;
   started: boolean;
