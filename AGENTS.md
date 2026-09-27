@@ -2063,8 +2063,8 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   the Attention Center menu is the reliable path. `Ctrl/Cmd+K` matches the physical `code`
   (`KeyK`), survives layouts that rewrite `key`, and only swallows the event when a mounted
   palette actually took it. **`anotherLayerOwnsTheKeyboard()` is the one set of open layers** the
-  `Ctrl+Shift+A` cycle and the chat's Escape (the shell's listener and both composer arms) stand
-  down for: the store's modals, the palette, and every `Modal`/`BottomSheet`/`Dropdown`/
+  `Ctrl+Shift+A` cycle, the chat's Escape (the shell's listener and both composer arms) and the
+  question card's 1–9 keys stand down for: the store's modals, the palette, and every `Modal`/`BottomSheet`/`Dropdown`/
   `ContextMenu`/`ComposerPopover` open at the moment — each registers through `useOpenLayer`
   (`packages/ui/src/lib/open-layers.ts`). A layer closes on its own `document` listener, which a
   `window` capture handler always runs before, so a layer missing from the set loses its Escape to

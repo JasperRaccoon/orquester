@@ -253,3 +253,37 @@ export function derivePendingUserInputProgress(
 export function questionAttachmentKey(requestId: string, questionId: string): string {
   return `${encodeURIComponent(requestId)}:${encodeURIComponent(questionId)}`;
 }
+
+/** What the card's `document` key listener knows about one keydown. */
+export interface QuestionShortcutInput {
+  /** `KeyboardEvent.key`. */
+  key: string;
+  /** Meta, Ctrl or Alt was held: somebody else's chord. */
+  modified: boolean;
+  /** The card's tab is the visible one (`isChatTabListenerActive`). */
+  tabActive: boolean;
+  /** A layer is up anywhere in the app (`anotherLayerOwnsTheKeyboard()`). */
+  layerOpen: boolean;
+  /** The key was typed into a field or an editing host: it is text. */
+  typing: boolean;
+  /** How many options the question on screen offers. */
+  optionCount: number;
+}
+
+/**
+ * The 1–9 shortcut: which option (0-based) a keydown picks, or `null`.
+ *
+ * An answer cannot be taken back, so every doubt is a `null`. A hidden tab's
+ * card stays mounted (Q2-2), a digit typed into a field is text, and a chord
+ * with a modifier is somebody else's. **An open layer keeps the key** — the
+ * one rule the chat's Escape follows too: while a modal, a sheet, a menu or a
+ * popover is up, keys that would act on the chat behind it stand down. Focus
+ * sits on a button in the layer, so a digit typed there used to answer the
+ * question underneath it.
+ */
+export function questionShortcutOption(input: QuestionShortcutInput): number | null {
+  if (!input.tabActive || input.layerOpen || input.modified || input.typing) return null;
+  if (!/^[1-9]$/.test(input.key)) return null;
+  const index = Number(input.key) - 1;
+  return index < input.optionCount ? index : null;
+}

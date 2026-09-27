@@ -5,6 +5,7 @@ import type { AttachmentRef, PendingUserInput, UserInputQuestion } from "@orques
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
 import { BannerCard, ChatIconButton, DisclosureChevron, DisclosurePanel, Kbd } from "../primitives";
 import { isChatTabListenerActive } from "../composer/tab-visibility";
 import {
@@ -17,6 +18,7 @@ import {
   isSecretQuestion,
   questionAttachmentKey,
   questionOptionValue,
+  questionShortcutOption,
   setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
   type PendingAnswerDraft
@@ -200,26 +202,28 @@ export function QuestionCard({
     [advance, draftAnswers, onCarryTextToDraft]
   );
 
-  // Digits 1–9 pick an option when focus is outside an editable field. The
-  // collapsed opt-out is deliberate: those numbers are off screen.
+  // Digits 1–9 pick an option. Whether one does is `questionShortcutOption`'s
+  // call, pure and tested: never from a hidden tab (Q2-2 — one `1` answered
+  // the question in EVERY open chat tab), under an open layer, while typing or
+  // under a modifier. This gathers the facts. The collapsed opt-out is
+  // deliberate: those numbers are off screen.
   React.useEffect(() => {
     if (!activeQuestion || isResponding || isCollapsed) return;
     const handler = (event: KeyboardEvent) => {
-      // Q2-2: hidden tabs stay mounted, so without this gate one `1` answers
-      // the question in EVERY open chat tab — and an answer cannot be undone.
-      if (!isChatTabListenerActive(active, cardRef.current)) return;
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
-      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
-      if (
-        target instanceof HTMLElement &&
-        target.closest('[contenteditable]:not([contenteditable="false"])')
-      ) {
-        return;
-      }
-      const digit = Number.parseInt(event.key, 10);
-      if (Number.isNaN(digit) || digit < 1 || digit > 9) return;
-      const option = activeQuestion.options[digit - 1];
+      const index = questionShortcutOption({
+        key: event.key,
+        modified: event.metaKey || event.ctrlKey || event.altKey,
+        tabActive: isChatTabListenerActive(active, cardRef.current),
+        layerOpen: anotherLayerOwnsTheKeyboard(),
+        typing:
+          target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          (target instanceof HTMLElement &&
+            target.closest('[contenteditable]:not([contenteditable="false"])') !== null),
+        optionCount: activeQuestion.options.length
+      });
+      const option = index === null ? undefined : activeQuestion.options[index];
       if (!option) return;
       event.preventDefault();
       selectOption(activeQuestion, questionOptionValue(option));

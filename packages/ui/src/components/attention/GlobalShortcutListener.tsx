@@ -78,10 +78,11 @@ export function matchesPaletteToggle(event: ShortcutEventLike): boolean {
  * stops the event when it acts: a layer missing from this set lost its
  * Escape to it.
  *
- * Exported because the chat's Escape handlers — the shell's listener
- * (`AgentChatView`) and the composer's two arms — must stand down for exactly
- * the same set: two copies of this list would drift, and the drift would only
- * show up as a shortcut firing under a modal.
+ * Exported because the chat's own keys — its Escape handlers (the shell's
+ * listener in `AgentChatView` and the composer's two arms) and the question
+ * card's 1–9 — must stand down for exactly the same set: two copies of this
+ * list would drift, and the drift would only show up as a shortcut firing
+ * under a modal.
  */
 export function anotherLayerOwnsTheKeyboard(): boolean {
   const state = useAppStore.getState();

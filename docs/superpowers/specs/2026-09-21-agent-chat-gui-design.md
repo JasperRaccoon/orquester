@@ -4132,6 +4132,12 @@ since the numbers they refer to are off screen. "Dismiss" is offered only when t
 must be answered.
 *T3: `apps/web/src/pendingUserInput.ts:160-191` — `derivePendingUserInputProgress` (`activeQuestion`, `answeredQuestionCount`, `isLastQuestion`, `canAdvance`, `isComplete`); `:42-68` — `resolvePendingUserInputAnswer`, custom-beats-options, array for multi-select, attachments-alone → `""`; `apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx:75-82` — the collapse-keyed-by-question-id comment; `:118-135` — the 200 ms auto-advance with optimistic selection; `:137-166` — the digit handler and its collapsed opt-out; `packages/client-runtime/src/pendingRequests.ts:21-27, 171` — `dismissible` = `responseMode === "message"`*
 
+*Built: the digit shortcuts also stand down while any layer is up — the set the chat's Escape reads
+(`anotherLayerOwnsTheKeyboard()`, §7.4's open-layer note). The card listens on `document`, and with
+focus on a button in a modal, a menu or a popover, a digit used to answer the question behind the
+layer: an answer that cannot be taken back. The rule is `questionShortcutOption`
+(`banners/pending-answer.ts`), pure and tested; the listener only gathers the facts.*
+
 *Built: the question card owns its **Submit** button and its custom-answer field outright, rather
 than handing them to the composer's primary action. A question and a draft are two different
 intents sharing one text input, and the 200 ms optimistic advance above makes "which one does
