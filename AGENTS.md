@@ -1450,8 +1450,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   that withdrew the spawn's own card — has no child to cancel and no `subagent_finished` to come:
   its agent, started at the call's first frame, ends there, `stopped`, "Stopped before it started."
   (`cutUnspawnedLaunch`; left live it read running and held a deploy's drain for its hour), and a
-  late `subagent_spawned` still joins that launch, never a second agent. A question the HOST cancels
-  (a Stop, the session's stop, a closed tab) reaches the CLI as its own cancel, `{outcome:
+  late `subagent_spawned` still joins that launch, never a second agent — one narrow, known window:
+  unsupervised, when that report trails the Stop by the 7–20 ms of observation 37, the child did
+  start, and its frames join the ended agent's drill-in while its row keeps "Stopped before it
+  started." (the CLI's own `cancelled` end then adds no row). A question the HOST cancels (a Stop,
+  the session's stop, a closed tab) reaches the CLI as its own cancel, `{outcome:
   "cancelled"}`: the host flags it (`respondToUserInput`'s host-only `options.cancel`, which the
   other adapters ignore), because its `{}` is also a user's skip — passed on as an answer, it told
   the CLI the user had answered, nothing. (11) **What the 2026-09-26 captures settled** (fixtures
@@ -1523,75 +1526,77 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   guard's rule: never a recycled pid; a zombie is gone. Two kinds, two rules. **The CLI's own
   helpers** — its children while its session opens, which are its MCP servers (fixture 31: all four
   existed as `session/new` answered, none of the user's work had run), recorded as the CLI reports
-  them booting (`_x.ai/mcp/servers_updated`, `init_progress`, `server_status`: before `session/new`
-  answers, so a CLI that dies first leaves none unswept), once the open answered, and at any end
-  before the session was announced (every child a helper then, never the user's work: a host
-  teardown during the open used to record them as work and leave them running) — are swept at EVERY
-  end: a restart of a thread that goes on (an account, permission-mode or cwd change — Grok switches
-  models in-session), the host's teardown (a drain-restart's included), the CLI's own exit (a crash,
-  an open that failed), the user's stop. The host's teardown waits for them: both of its `stopAll()`
-  calls — the adapter's abort listener's, then `main.ts`'s — wait for every stop in flight, and
-  `stop()` lets the consumers read what the stops queued before the orchestrator stops consuming
-  (`host-teardown.test.ts`; the second call used to return at once, and the process exited with the
-  sweep unsent and the closing rows unwritten — Codex's stream, too, closed before its teardown
-  rows). There the helpers' grace is 1 s (`HOST_TEARDOWN_SWEEP_GRACE_MS`), well inside the SIGTERM
-  path's 3 s backstop; a CLI that ignores SIGTERM itself spends its own 2 s first, and the backstop
-  can then cut the helpers' SIGKILL — a helper that ignored SIGTERM too runs on, a marked orphan
-  Settings → System lists (a deploy's `/stop` has no such backstop). **The work its agent started**
-  — its shells, the dev servers they run — is swept ONLY when the user ends the session: the session
-  stop command or a closed tab (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`;
-  the MCP's `stop_session` and `close_session` are that command and that close) — recorded FIRST,
-  before anything reaches the CLI: the orchestrator calls the adapter's `prepareUserEnd` before it
-  answers the session's cards with its cancels (a cancel can end the CLI, and a CLI already gone
-  gets no `stopSession`), which records them while the CLI lives, remembers them in
-  `leftover-work.json` and marks the end as the user's; the stop that follows records again as it
-  begins. They are swept by a sweep of their own (`stopTaskLeftovers`), so a CLI exiting in the
-  middle of the end (on its card's cancel, say) cannot hand it a helpers-only sweep: its exit,
-  marked the user's end, sweeps them itself and closes them `stopped` with no "Left running…", and
-  the thread's `sweepEndedSession` finds them too (until 2026-09-27 the cards were answered first,
-  and such an exit read as a crash) — and on an open that failed, where nothing of the user's has
-  run. Never at a deploy's teardown or a restart: the drain waits for live work only within its
-  bound (a watch loop's TTL, an agent's hour), and a dev server started in a Grok chat must survive
-  every deploy that comes after it. Never at a crash either (no user ended anything). There it runs
-  on as a marked orphan, listed and killable in Settings → System, and — at a deploy's or a
-  restart's end, and at the CLI's own exit — never silently: its task's closing row says so — "Left
-  running when the agent host stopped / the session restarted / the agent process exited — stop it
-  from Settings → System." (`leftRunningNote`), marked `leftRunning` on the row and the roster entry
-  — the one summary a stopped shell's row shows in place of a bare "Stopped"; any other completion
-  summary (the CLI's stop sentence, a killed shell's output line) never replaces it. A HOST that
-  crashed (an OOM, a SIGKILL) ran no teardown and wrote no such row: the next host's first load
-  closes the task with the generic `stopped` row of `leftoverWorkClosings` ("Task stopped",
-  `orchestration/leftover-work.ts`), which cannot tell work that runs on from work that died — the
-  process is still listed and killable in Settings → System. Nor is it forgotten: each launch's task
-  sessions — recorded as the CLI reports the work (a shell's, a monitor's `task.started`: nothing
-  can be read off a CLI that crashed) and again at every end, while it lives — are kept in the
-  thread's `leftover-work.json` (SID, leader starttime, launch id; the last 8 launches; 0600,
-  atomic, written only while the thread's directory exists (a late record must not raise a deleted
-  thread), the adapter's own file, never `binding.json`; `support/leftover-work.ts`), so a LATER
-  user end — the session stop command or a closed tab, live session or not: `stopSessionInternal`
-  calls `AgentAdapter.sweepEndedSession` either way — sweeps what every earlier launch left, with
-  the same identity checks. A Claude chat's background shells outlive their session the same way —
-  the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s later, before the CLI's own 5 s
-  wind-down would stop them, and they run on under init (`bun run dev`, `stripe listen`, `vite` of
-  closed Claude chats, live on the owner's host on 2026-09-26). An open that fails stops its CLI now
-  too: a `session/load` the CLI refused (a cursor it no longer knows) left it running outside the
-  adapter's map, holding its pipes. It adds no row of its own either: the start's rejection is its
-  whole report, which the host writes — an exit row besides it read as a crash of a session that
-  never ran (`GrokSession.announced`) — and a CLI that ends after `session/new` answered but before
-  the session is announced (on the open's `session/set_model`, say) fails the open with its exit
-  rather than being announced ready, dead. A work process whose shell had exited before the stop is
-  in no recorded session and stays running; a process that scrubs its environment (`env -i`,
-  `sudo`'s `env_reset`) escapes. A Stop kills nothing: its `session/cancel` leaves the CLI — which
-  owns them — running (fixture 21). Linux-only (`/proc`); elsewhere the sweep reads and signals
-  nothing. **Settings → System reads the same marker**: a process of the daemon's own uid that no
-  root reaches, whose parent is init (or gone) and that carries any launch's marker is a root of its
-  own — listed under the chat its `ORQUESTER_SESSION_ID` names, and a legal kill target
-  (`launchedOrphans` in `system-status.ts`), what it started coming with it as its descendants — so
-  the work a session end left running, and whatever a crashed host never swept, is in reach. A
-  marked process whose parent still runs outside every root is that parent's, never a root: no
-  marker makes it ours — nor is one a subreaper adopted (`systemd --user`, a container's non-pid-1
-  init; the kill-guard gotcha). Every adapter's launches carry the marker (next bullet); only Grok's
-  sweep by it.
+  them booting (`_x.ai/mcp/servers_updated` and `init_progress` arrive before `session/new` answers,
+  `server_status` after it: a CLI that dies after its first MCP report leaves unswept none of the
+  helpers it had started by then — whether every server's process exists by that first report is not
+  captured, and one that dies before any report still leaves them recorded nowhere), once the open
+  answered, and at any end before the session was announced (every child a helper then, never the
+  user's work: a host teardown during the open used to record them as work and leave them running) —
+  are swept at EVERY end: a restart of a thread that goes on (an account, permission-mode or cwd
+  change — Grok switches models in-session), the host's teardown (a drain-restart's included), the
+  CLI's own exit (a crash, an open that failed), the user's stop. The host's teardown waits for
+  them: both of its `stopAll()` calls — the adapter's abort listener's, then `main.ts`'s — wait for
+  every stop in flight, and `stop()` lets the consumers read what the stops queued before the
+  orchestrator stops consuming (`host-teardown.test.ts`; the second call used to return at once, and
+  the process exited with the sweep unsent and the closing rows unwritten — Codex's stream, too,
+  closed before its teardown rows). There the helpers' grace is 1 s
+  (`HOST_TEARDOWN_SWEEP_GRACE_MS`), well inside the SIGTERM path's 3 s backstop; a CLI that ignores
+  SIGTERM itself spends its own 2 s first, and the backstop can then cut the helpers' SIGKILL — a
+  helper that ignored SIGTERM too runs on, a marked orphan Settings → System lists (a deploy's
+  `/stop` has no such backstop). **The work its agent started** — its shells, the dev servers they
+  run — is swept ONLY when the user ends the session: the session stop command or a closed tab
+  (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`; the MCP's `stop_session` and
+  `close_session` are that command and that close) — recorded FIRST, before anything reaches the
+  CLI: the orchestrator calls the adapter's `prepareUserEnd` before it answers the session's cards
+  with its cancels (a cancel can end the CLI, and a CLI already gone gets no `stopSession`), which
+  records them while the CLI lives, remembers them in `leftover-work.json` and marks the end as the
+  user's; the stop that follows records again as it begins. They are swept by a sweep of their own
+  (`stopTaskLeftovers`), so a CLI exiting in the middle of the end (on its card's cancel, say)
+  cannot hand it a helpers-only sweep: its exit, marked the user's end, sweeps them itself and
+  closes them `stopped` with no "Left running…", and the thread's `sweepEndedSession` finds them too
+  (until 2026-09-27 the cards were answered first, and such an exit read as a crash) — and on an
+  open that failed, where nothing of the user's has run. Never at a deploy's teardown or a restart:
+  the drain waits for live work only within its bound (a watch loop's TTL, an agent's hour), and a
+  dev server started in a Grok chat must survive every deploy that comes after it. Never at a crash
+  either (no user ended anything). There it runs on as a marked orphan, listed and killable in
+  Settings → System, and — at a deploy's or a restart's end, and at the CLI's own exit — never
+  silently: its task's closing row says so — "Left running when the agent host stopped / the session
+  restarted / the agent process exited — stop it from Settings → System." (`leftRunningNote`),
+  marked `leftRunning` on the row and the roster entry — the one summary a stopped shell's row shows
+  in place of a bare "Stopped"; any other completion summary (the CLI's stop sentence, a killed
+  shell's output line) never replaces it. A HOST that crashed (an OOM, a SIGKILL) ran no teardown
+  and wrote no such row: the next host's first load closes the task with the generic `stopped` row
+  of `leftoverWorkClosings` ("Task stopped", `orchestration/leftover-work.ts`), which cannot tell
+  work that runs on from work that died — the process is still listed and killable in Settings →
+  System. Nor is it forgotten: each launch's task sessions — recorded as the CLI reports the work (a
+  shell's, a monitor's `task.started`: nothing can be read off a CLI that crashed) and again at
+  every end, while it lives — are kept in the thread's `leftover-work.json` (SID, leader starttime,
+  launch id; the last 8 launches; 0600, atomic, written only while the thread's directory exists (a
+  late record must not raise a deleted thread), the adapter's own file, never `binding.json`;
+  `support/leftover-work.ts`), so a LATER user end — the session stop command or a closed tab, live
+  session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession` either way — sweeps
+  what every earlier launch left, with the same identity checks. A Claude chat's background shells
+  outlive their session the same way — the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s
+  later, before the CLI's own 5 s wind-down would stop them, and they run on under init
+  (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
+  2026-09-26). An open that fails stops its CLI now too: a `session/load` the CLI refused (a cursor
+  it no longer knows) left it running outside the adapter's map, holding its pipes. It adds no row
+  of its own either: the start's rejection is its whole report, which the host writes — an exit row
+  besides it read as a crash of a session that never ran (`GrokSession.announced`) — and a CLI that
+  ends after `session/new` answered but before the session is announced (on the open's
+  `session/set_model`, say) fails the open with its exit rather than being announced ready, dead. A
+  work process whose shell had exited before the stop is in no recorded session and stays running; a
+  process that scrubs its environment (`env -i`, `sudo`'s `env_reset`) escapes. A Stop kills
+  nothing: its `session/cancel` leaves the CLI — which owns them — running (fixture 21). Linux-only
+  (`/proc`); elsewhere the sweep reads and signals nothing. **Settings → System reads the same
+  marker**: a process of the daemon's own uid that no root reaches, whose parent is init (or gone)
+  and that carries any launch's marker is a root of its own — listed under the chat its
+  `ORQUESTER_SESSION_ID` names, and a legal kill target (`launchedOrphans` in `system-status.ts`),
+  what it started coming with it as its descendants — so the work a session end left running, and
+  whatever a crashed host never swept, is in reach. A marked process whose parent still runs outside
+  every root is that parent's, never a root: no marker makes it ours — nor is one a subreaper
+  adopted (`systemd --user`, a container's non-pid-1 init; the kill-guard gotcha). Every adapter's
+  launches carry the marker (next bullet); only Grok's sweep by it.
 - **Every provider launch carries a launch marker; only the Grok adapter sweeps by it.** The host's
   `buildEnv` (`agent-host/main.ts`) stamps `ORQUESTER_AGENT_LAUNCH` on every provider child's
   environment through `buildProviderEnv`'s required `launchId` — one `randomUUID()` per call, and

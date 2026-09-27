@@ -1409,7 +1409,10 @@ harness answered every card) cuts a call that no `subagent_spawned` joined and n
 frames up to turn 2's card, then the Stop): left live, the roster read it running and liveness held
 a deploy's drain for its hour. A launch a spawn joined still waits for the CLI's end (fixture 23),
 and a `subagent_spawned` that trails the cut (unsupervised, the CLI spawns at once) joins the ended
-launch, never a second agent.
+launch, never a second agent. That leaves one narrow window, known and kept: when the report trails
+the Stop by the 7–20 ms of observation 37, the child did start — its frames join the ended agent's
+drill-in, while its row keeps "Stopped before it started." (the CLI's own `cancelled` end then adds
+no row, the adapter's end standing).
 
 ### 50. A run that ends short is `cancelled`, with an `error` that says why
 
@@ -1598,11 +1601,13 @@ their stdin's end) — a helper, swept by its recorded session.
 The CLI says so before its open answers, too: `_x.ai/mcp/servers_updated` (t=489) and
 `init_progress {total: 5, connected: 0}` (t=645) precede the `session/new` answer (t=717). While
 the session is not announced, every such report — and `initialized`, `server_status` — records the
-CLI's children as helpers (`GrokSession.recordHelpersWhileOpening`), so a CLI that dies before its
-open answers leaves none unswept: the recording after the answer came too late for it, and its
-exit then swept nothing. Whether every server's process exists by the first report is not captured
-(the harness listed the children only once the open answered): each later report records again,
-adding what it finds. Any end before the session is announced — the CLI's death, the host's
+CLI's children as helpers (`GrokSession.recordHelpersWhileOpening`), so a CLI that dies after its
+first MCP report leaves unswept none of the helpers it had started by then: the recording after the
+answer came too late for it, and its exit then swept nothing. Whether every server's process exists
+by the first report is not captured (the harness listed the children only once the open answered):
+each later report records again, adding what it finds; a CLI that dies before any report still
+leaves its helpers recorded nowhere (only `server_status` among the reports comes after the answer:
+t=763 ms and later). Any end before the session is announced — the CLI's death, the host's
 teardown, a stop — records the children as helpers too, never as the user's work: nothing of the
 user's has run.
 

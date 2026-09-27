@@ -1554,6 +1554,49 @@ test("the host's teardown and a restart stop a Grok session's helpers — never 
   }
 });
 
+test("the host's teardown resolves only once every session's stop is done: the second stopAll() waits for the first's", { skip: process.platform !== "linux" }, async () => {
+  // The host calls `stopAll()` twice: its abort fires this adapter's own
+  // listener, which takes the sessions and starts their stops, and then the
+  // host awaits `stopAll()` itself. The second call used to find no session
+  // and return at once, the helper sweep not begun and the rows not written.
+  const r = await rig({ scenario: "leftover" });
+  try {
+    await start(r);
+    await turnWithLeftovers(r);
+    assert.equal(leftovers(r).helper.length, 1);
+    await r.teardown();
+    // The moment it resolves, before anything else is awaited:
+    assert.deepEqual(leftovers(r).helper, [], "the helper is swept before the host's own call resolves");
+    await r.drain();
+    assert.deepEqual(shellEnds(r), [
+      ["stopped", "Left running when the agent host stopped — stop it from Settings → System."]
+    ]);
+    assert.ok(r.events.some((event) => event.type === "session.exited"), "and the session's exit row");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
+test("at the host's teardown a helper that ignores SIGTERM is killed after a 1 s grace, not spawn.ts's 2 s", { skip: process.platform !== "linux" }, async () => {
+  // Under the SIGTERM path's 3 s backstop (`main.ts`): with the 2 s grace the
+  // helper's SIGKILL landed ~2.4 s into the host's stop.
+  const r = await rig({ scenario: "leftover", env: { GROK_MOCK_HELPER_IGNORES_TERM: "1" } });
+  try {
+    await start(r);
+    await turnWithLeftovers(r);
+    assert.equal(leftovers(r).helper.length, 1);
+    const began = performance.now();
+    await r.teardown();
+    const took = performance.now() - began;
+    assert.deepEqual(leftovers(r).helper, [], "only the SIGKILL ends it, and it came");
+    assert.ok(took < 2_000, `the teardown took ${Math.round(took)} ms — a 2 s grace alone takes longer`);
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
 test("the user ending the session stops its running work too — never what daemonized away", { skip: process.platform !== "linux" }, async () => {
   const r = await rig({ scenario: "leftover" });
   try {

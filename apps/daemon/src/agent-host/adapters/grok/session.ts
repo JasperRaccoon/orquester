@@ -1690,10 +1690,18 @@ export class GrokSession {
    * failed, and any end while the session opens (the CLI's death, the host's
    * teardown, a stop): nothing of the user's has run yet. They are recorded
    * as the CLI reports its MCP servers booting ({@link
-   * recordHelpersWhileOpening}), so a CLI that dies before its open answers
-   * leaves none unswept, and the sweep waits for a recording in flight. A
-   * sweep that finds nothing recorded is not kept: a later call — once a
-   * recording has landed — sweeps what it finds.
+   * recordHelpersWhileOpening}), so a CLI that dies AFTER its first MCP
+   * report leaves unswept none of the helpers it had started by then —
+   * whether every server's process exists by that first report is not
+   * captured, and one that dies before any report still leaves its helpers
+   * recorded nowhere — and the sweep waits for a recording in flight.
+   *
+   * A sweep that finds nothing recorded is not kept, so a later call sweeps
+   * what a recording landed since. That is defensive: every recording of the
+   * CLI's children starts before its exit's sweep, which awaits it, or finds
+   * nothing (a dead CLI has no children left to read), so no path today
+   * records after an empty sweep; it keeps a future one from being answered
+   * by a cached no-op.
    *
    * This sweeps the helpers; idempotent once it found any; never rejects.
    */
@@ -1876,14 +1884,17 @@ export class GrokSession {
   }
 
   /**
-   * The CLI reported its MCP servers booting (`_x.ai/mcp/servers_updated`,
-   * `init_progress`, `initialized`, `server_status`): while its session is
-   * still opening, record its children as helpers now — the recording after
-   * `session/new` answered comes too late for a CLI that dies first (fixture
-   * 31: `init_progress` 70 ms before that answer, every MCP server existing
-   * by it). Only before the session is announced, when nothing of the user's
-   * can have run: after it, a child may be the user's work, which only the
-   * user's end may stop. One recording at a time; never rejects.
+   * The CLI reported its MCP servers booting (`_x.ai/mcp/servers_updated`
+   * and `init_progress` before `session/new` answers; `server_status` and
+   * `initialized` after it, fixture 31): while its session is still opening,
+   * record its children as helpers now — the recording after `session/new`
+   * answered comes too late for a CLI that dies first (fixture 31:
+   * `init_progress {connected: 0}` 70 ms before that answer). Whether every
+   * MCP server's process exists by the first report is not captured: each
+   * later report records again, adding what it finds. Only before the
+   * session is announced, when nothing of the user's can have run: after it,
+   * a child may be the user's work, which only the user's end may stop. One
+   * recording at a time; never rejects.
    */
   private recordHelpersWhileOpening(): void {
     if (this.announced || this.stopped) {

@@ -477,7 +477,11 @@ export const SUBAGENT_NEVER_STARTED = "Stopped before it started.";
  * the call's first frame, read running on the roster and held a deploy's
  * drain for its hour. It ends here, `stopped`, by the adapter's word. A
  * launch a spawn joined keeps waiting for the CLI's end (fixture 23:
- * `subagent_finished {cancelled}` 42 ms after the cancel).
+ * `subagent_finished {cancelled}` 42 ms after the cancel). One narrow window
+ * is known and kept: unsupervised, a `subagent_spawned` trailing the Stop by
+ * the 7–20 ms of observation 37 means the child did start — its frames join
+ * this ended agent (`cutBeforeSpawn`), whose row keeps "Stopped before it
+ * started.", and the CLI's `cancelled` end then adds no row.
  */
 export function cutUnspawnedLaunch(state: GrokNormalizerState, toolCallId: string): RuntimeEvent[] {
   const launch = state.subagentLaunches.get(toolCallId);
