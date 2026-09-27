@@ -704,8 +704,9 @@ export interface OpenCodeSessionState {
    * stream said the run was over, so the turn is still the thread's. A Stop
    * of the turn already interrupted is otherwise nothing (`interruptTurn`);
    * this one may be tried again — and the run's idle, when it comes, ends the
-   * turn as the Stop would have (`onIdle`). Cleared when an interrupt begins,
-   * when the turn so ends and when the interruption ends.
+   * turn as the Stop would have (`onIdle`). A steer into the turn takes it
+   * back, which ends the interruption (`sendTurn`). Cleared when an interrupt
+   * begins, when the turn so ends and when the interruption ends.
    */
   failedStopTurnId?: string;
   reconcileIdleStatus: boolean;

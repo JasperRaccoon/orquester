@@ -1661,6 +1661,13 @@ export class OpenCodeThreadSession {
       // finds the turn again in `GET /session/:id/message`, across a host
       // restart too (§5.5).
       const steeringTurnId = this.state.activeTurnId;
+      if (steeringTurnId !== undefined && steeringTurnId === this.state.failedStopTurnId) {
+        // A steer into the turn a failed Stop left running is the user taking
+        // it back: that Stop is over. The run's end completes the turn as any
+        // (its children run on), and a later Stop is a fresh one — even if
+        // the server refuses this prompt, which leaves the run going as it was.
+        endInterruption(this.state);
+      }
       const messageId = mintOpenCodeMessageId();
       const turnId = steeringTurnId ?? messageId;
       // Claimed before it is sent: a reply to it is this turn's, never one
@@ -1966,7 +1973,7 @@ export class OpenCodeThreadSession {
    * An abort whose request fails AFTER the stream said so — the run's idle
    * came while it was pending (`deferredIdle`) — ends the turn as any Stop
    * does (`settleStop`), and so does that idle when it comes after the failure
-   * (`onIdle`).
+   * (`onIdle`). A steer into that turn takes it back instead (`sendTurn`).
    */
   async interruptTurn(turnId?: string): Promise<void> {
     // An interrupt already under way — another Stop, a failed admission's

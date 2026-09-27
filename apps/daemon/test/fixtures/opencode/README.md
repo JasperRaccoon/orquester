@@ -1090,9 +1090,10 @@ already have said the run stopped — its `MessageAbortedError` and idle, fixtur
 say it later. Its idle is the run's end either way: the Stop then ends the turn as it ends one,
 `turn.aborted` and the session back to `ready` (`deferredIdle` for an idle that came while the
 request was pending, `failedStopTurnId` for one after it). Until it comes, the turn is still the
-thread's, and the next Stop of that turn asks the server again. A second Stop used to find the turn
-already interrupted and do nothing, and an idle that came while the abort was pending was parked
-where nothing read it, so the turn stayed active for good. Built, not captured.
+thread's, and the next Stop of that turn asks the server again; a steer into it takes it back — the
+failed Stop is over, and the run's end completes the turn as any. A second Stop used to find the
+turn already interrupted and do nothing, and an idle that came while the abort was pending was
+parked where nothing read it, so the turn stayed active for good. Built, not captured.
 
 ---
 

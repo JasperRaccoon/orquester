@@ -1300,9 +1300,11 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   turn once the stream says the run is over — `turn.aborted`, the session back to `ready`, as the
   Stop ends it — whether the run's idle came while the request was pending (`deferredIdle`) or after
   it failed (`failedStopTurnId`). Until then the turn is still the thread's, and the next Stop of it
-  asks the server again. A second Stop used to find the turn already interrupted and do nothing, and
-  an idle that came while the abort was pending was parked where nothing read it: the turn stayed
-  active — the thread reading working, every deploy's drain held — and no Stop could end it.
+  asks the server again; a steer into it is the user taking it back — the failed Stop is over, the
+  run's end completes the turn as any, and its children run on. A second Stop used to find the turn
+  already interrupted and do nothing, and an idle that came while the abort was pending was parked
+  where nothing read it: the turn stayed active — the thread reading working, every deploy's drain
+  held — and no Stop could end it.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

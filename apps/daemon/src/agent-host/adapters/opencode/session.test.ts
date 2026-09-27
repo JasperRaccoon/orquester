@@ -3474,6 +3474,48 @@ test("a Stop whose abort request failed: the stream's word that the run ended se
   }
 });
 
+test("a steer after a failed Stop takes the turn back: the run's own end completes it, and the background work it started runs on", async () => {
+  // Probes S and S2 of the final review B's re-review.
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const stopped = await turnStreaming(harness, session);
+  harness.fake.overrides.set(`POST /session/${sessionId}/abort`, () => new Response("boom", { status: 500 }));
+  await assert.rejects(session.interruptTurn(stopped.turnId));
+
+  // The user sends a message while the turn still runs: a steer, which the run takes.
+  const steer = await session.sendTurn({ threadId: "thread-1", input: "keep going", attachments: [], interactionMode: "default" });
+  assert.equal(steer.turnId, stopped.turnId, "a steer joins the running turn");
+  const promptId = (harness.fake.requests.filter((request) => request.path.endsWith("/prompt_async")).at(-1)?.body as {
+    messageID: string;
+  }).messageID;
+  harness.fake.children = [{ id: "ses_after" }];
+  const requestsBefore = harness.fake.requests.length;
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: promptId, role: "user", sessionID: sessionId } } },
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    ...childLaunch({ sessionId, childId: "ses_after", callId: "call_after", description: "dig deeper", background: true }),
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: sessionId } }
+  ]);
+  const ended = await waitFor(harness, "turn.completed", (event) => event.turnId === stopped.turnId);
+  assert.equal(ended.payload.state, "completed", "the run's own end, not the failed Stop's");
+  assert.deepEqual(eventsOfType(harness.events, "turn.aborted"), []);
+  assert.deepEqual(taskEnds(harness.events), [], "the background child it started runs on");
+  assert.deepEqual(
+    harness.fake.requests.slice(requestsBefore).filter((request) => request.path.endsWith("/abort")),
+    [],
+    "and nothing is aborted"
+  );
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working");
+
+  // A later Stop is a fresh one: it stops the background work.
+  await session.interruptTurn();
+  assert.deepEqual(taskEnds(harness.events), ["ses_after:stopped:interrupted"]);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("after a Stop, a busy from before the stopped run's idle ends nothing: a reply to an unclaimed prompt after it still opens no turn", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
