@@ -1063,10 +1063,11 @@ longer listed, or when the asker's session runs nothing — an older server's or
 (fixture 06): no card, the request is rejected on the wire, which releases what an older server kept
 listed, and its closing frame writes no row. Otherwise it is shown as any request is: the card on
 the turn running then, if one does — a child's question on none — or, with full access, a `once`. A
-read that fails decides nothing, and the card is shown: the user answers it, and a reply to a gone
-request settles locally, whereas a reject would answer for them — and 1.18.32's `Permission.reply`
-rejects every other pending ask of that session with it. A request answered elsewhere while it is
-judged leaves the hold with its closing frame, and writes no row.
+read that fails decides nothing: the card is shown unless the other read says its asker is gone (the
+request unlisted, or its session idle). Shown, the user answers it, and a reply to a gone request
+settles locally, whereas a reject without the server's word would answer for them — and 1.18.32's
+`Permission.reply` rejects every other pending ask of that session with it. A request answered
+elsewhere while it is judged leaves the hold with its closing frame, and writes no row.
 
 **A rewind leaves the source's children behind.** A rewind forks the session at its cut (observation
 17, captured in fixture 10) and the thread moves to the fork. A child's parent is the session that

@@ -1248,7 +1248,8 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   answered (`interruptsBegun`) — a Stop that starts and ends during the reads makes their answer
   stale; listed by the server and its session busy — the card, as any (a child's question on no
   turn), or full access's `once`; unlisted or its session idle (an older server's orphan) — no card,
-  a reject on the wire, and no row when it closes. A read that fails shows the card: a reject would
+  a reject on the wire, and no row when it closes. A read that fails decides nothing: the card is
+  shown unless the other read says the asker is gone — without the server's word a reject would
   answer for the user, and 1.18.32's `Permission.reply` rejects every other ask of that session with
   it. (7) A child the adapter closed itself (a Stop, a failed admission's abort, a failed turn:
   `closeLiveChildAgents` marks `endedByAdapter`, as does its launching call's abort cleanup

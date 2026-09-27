@@ -1289,10 +1289,12 @@ export class OpenCodeThreadSession {
    * ask whose fiber an abort interrupted (fixtures README observation 29) — or
    * when the asker's session runs nothing, so nothing can wait on it: an older
    * server keeps such an ask listed (fixture 06), idle. A read that fails
-   * decides nothing, and the request is shown: a card the user answers — a
-   * reply to a gone request settles locally (`respondToApproval`,
-   * `respondToUserInput`) — never a reject sent on their behalf, which 1.18.32
-   * applies to every other ask of that session too (`Permission.reply`).
+   * decides nothing: the request is shown unless the other read says its
+   * asker is gone. Shown, it is a card the user answers — a reply to a gone
+   * request settles locally (`respondToApproval`, `respondToUserInput`) —
+   * never a reject sent on their behalf without the server's word, which
+   * 1.18.32 applies to every other ask of that session too
+   * (`Permission.reply`).
    */
   private async askerWaits(held: OpenCodeHeldRequest): Promise<boolean> {
     const [listed, statuses] = await Promise.all([

@@ -1600,8 +1600,9 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   asker waited for good. It is now held while an interrupt is under way — a Stop from its first
   step, before its abort; a failed admission's abort — and until a run says `busy` again, then
   judged on the server's lists and session status: a live asker's is shown as any request is, a
-  gone asker's is rejected on the wire and writes nothing, and a read that fails shows the card
-  (`adapters/opencode/normalize.ts`, `session.ts`; fixtures README observation 29).*
+  gone asker's is rejected on the wire and writes nothing, and a read that fails decides nothing —
+  the card is shown unless the other read says the asker is gone (`adapters/opencode/normalize.ts`,
+  `session.ts`; fixtures README observation 29).*
 - **Child-session event routing.** Parent-session events pass; **child-session events pass only if
   they are permission or question events**, behind an ancestry-resolution retry loop (250 ms→5 s
   backoff; asked-events retry forever, terminal events give up after 5). This is the whole reason
