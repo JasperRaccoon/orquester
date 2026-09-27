@@ -162,3 +162,26 @@ export function timelineSlots(rows: readonly AgentChatTimelineRow[], notice: Emp
   }
   return slots;
 }
+
+/**
+ * The timeline's children, as ONE keyed array (see {@link timelineSlots}):
+ * each row rendered under its id, the notice under {@link TIMELINE_NOTICE_KEY}
+ * at its place. The keys are this function's, never the callers': with no
+ * notice — every thread with a row — the rows are mapped directly, under
+ * exactly the keys and in exactly the order the slots give them, so no row
+ * remounts when a notice comes or goes, and a token allocates no slot object
+ * per row (the slots cost ~62 µs a token at 2 500 rows; final review C, O1).
+ */
+export function timelineChildren<T>(
+  rows: readonly AgentChatTimelineRow[],
+  notice: EmptyNotice | null,
+  renderRow: (row: AgentChatTimelineRow, key: string) => T,
+  renderNotice: (notice: EmptyNotice, key: string) => T
+): T[] {
+  if (notice === null) {
+    return rows.map((row) => renderRow(row, row.id));
+  }
+  return timelineSlots(rows, notice).map((slot) =>
+    "row" in slot ? renderRow(slot.row, slot.key) : renderNotice(slot.notice, slot.key)
+  );
+}

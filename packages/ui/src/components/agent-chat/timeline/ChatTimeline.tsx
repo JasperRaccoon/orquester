@@ -10,7 +10,7 @@ import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
-import { drillInEmptyNotice, timelineSlots, type EmptyNotice } from "./empty-notice";
+import { drillInEmptyNotice, timelineChildren, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { LoadOlderRow } from "./rows/LoadOlderRow";
 import { nextRowEnterState, rowEnters, type RowEnterState } from "./row-enter";
@@ -181,7 +181,6 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
           : null,
     [agentId, backgroundShell, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
   );
-  const slots = React.useMemo(() => timelineSlots(rows, notice), [rows, notice]);
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -819,19 +818,23 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
               <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
             ) : null}
             {/* ONE keyed list, the empty notice spliced in at its place: a row
-                that crosses it never remounts (`timelineSlots`). */}
-            {slots.map((slot) =>
-              "row" in slot ? (
-                <TimelineRow key={slot.key} row={slot.row} enter={enterFlag(slot.row.id)} />
-              ) : (
+                that crosses it never remounts, and with no notice the rows are
+                mapped directly under the same keys (`timelineChildren`). */}
+            {timelineChildren(
+              rows,
+              notice,
+              (row, key) => (
+                <TimelineRow key={key} row={row} enter={enterFlag(row.id)} />
+              ),
+              (shown, key) => (
                 <div
-                  key={slot.key}
+                  key={key}
                   className={cn(
                     "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
-                    slot.notice.at === 0 ? "py-12" : "py-4"
+                    shown.at === 0 ? "py-12" : "py-4"
                   )}
                 >
-                  {slot.notice.text}
+                  {shown.text}
                 </div>
               )
             )}
