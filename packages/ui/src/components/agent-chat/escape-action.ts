@@ -31,9 +31,10 @@
  * capture phase — before any modal's, sheet's, menu's or popover's own Escape
  * listener — and stops the event when it acts, so the only way a layer gets
  * its Escape is for this side to stand down while one is up
- * (`blockingLayerOpen`). The composer's two arms do the same. **So does a field
- * that is not this chat's**: an Escape typed into one is that field's
- * (`editableOutsideChat`).
+ * (`blockingLayerOpen`). The composer's two arms do the same — the textarea
+ * only after its own token menu, which sits at the caret and closes first.
+ * **So does a field that is not this chat's**: an Escape typed into one is
+ * that field's (`editableOutsideChat`).
  */
 
 export type ChatEscapeAction = "close-drill-in" | "interrupt" | "rewind" | "ignore";
@@ -217,9 +218,10 @@ export function chatEscapeSequenceStep(input: ChatEscapeGate): "press" | "keep" 
  * The drill-in wins over the interrupt: leaving a child view is the narrower,
  * reversible action, and a user watching a subagent who presses Escape means
  * "take me back", not "stop the agent". The composer keeps the same order
- * inside its shell (`composerEscapeAction`), so where the caret sits never
- * changes what Escape does. The rewind comes last: it is only ever what an
- * idle Escape does, and only the second of two.
+ * inside its shell (`composerEscapeAction`), so where the caret sits in this
+ * chat never changes what Escape does — a field that is not this chat's keeps
+ * its own (`editableOutsideChat`). The rewind comes last: it is only ever what
+ * an idle Escape does, and only the second of two.
  */
 export function resolveChatEscape(input: ChatEscapeInput): ChatEscapeAction {
   if (input.key !== "Escape" || input.defaultPrevented || input.repeat) {

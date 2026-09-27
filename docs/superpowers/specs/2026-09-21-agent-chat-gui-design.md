@@ -3874,8 +3874,10 @@ parent), and where the shell acted the layer never saw the key and stayed open. 
 closes on Escape — `Modal`, `BottomSheet`, `Dropdown`, `ContextMenu`, `ComposerPopover`, the
 command palette — registers while it is open (`useOpenLayer`, `packages/ui/src/lib/open-layers.ts`);
 `anotherLayerOwnsTheKeyboard()` reads that registry beside the store's own modals, and all three
-handlers stand down while it answers true. The layer closes itself, nothing is interrupted or left,
-and an Escape a layer took is never half of Esc Esc. The same set gates the Attention Center's
+handlers stand down while it answers true. The one thing ranked ahead of an open layer is the
+composer's own `@` / `/` / `$` token menu: it sits at the caret, so the textarea's Escape closes it
+first (`composerEscapeAction`: menu, layer, drill-in, turn, idle). The layer closes itself, nothing
+is interrupted or left, and an Escape a layer took is never half of Esc Esc. The same set gates the Attention Center's
 `Ctrl+Shift+A`. Holding Escape is one press: the key's auto-repeat does nothing in any of the three
 handlers (the composer's `window` arm never took one), so a hold whose first keydown closed a layer
 or left a drill-in no longer stops the turn half a second later. An Escape typed into a field that
