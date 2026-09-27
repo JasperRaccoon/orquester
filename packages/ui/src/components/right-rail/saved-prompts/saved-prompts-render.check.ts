@@ -202,18 +202,19 @@ const row = cardOf(panel, PLAN.id);
 assert.ok(row.includes("Plan before coding"));
 assert.ok(row.includes("Explore the codebase and propose a plan"), "its one-line description");
 const rowBody = buttonWith(row, "Plan before coding");
-assert.ok(rowBody.includes("Insert: "), "the row body is the insert, and says so to a screen reader");
+assert.ok(!rowBody.includes("Insert"), "clicking the row never inserts");
 assert.ok(!DISABLED_ATTR.test(rowBody));
-const chevron = buttonWith(row, "Show details for Plan before coding");
-assert.ok(chevron.includes('aria-expanded="false"'), "the chevron is its own button, and expands");
-assert.ok(chevron.includes("lucide-chevron-right"));
+assert.ok(rowBody.includes('aria-expanded="false"'), "the whole row is one button, and expands");
+assert.ok(rowBody.includes("lucide-chevron-right"), "the chevron is inside it");
+assert.equal((row.match(/<button\b/g) ?? []).length, 1, "one button per collapsed row");
 assert.ok(!row.includes(">Insert</button>"), "a collapsed row has no Insert/Send buttons");
 assert.ok(!panel.includes(NO_CHAT_TARGET_REASON), "no no-chat hint while a chat is the target");
 
 // The footer.
 const newPrompt = buttonWith(panel, "New prompt");
 assert.ok(newPrompt.includes("lucide-plus") && newPrompt.includes("w-full"), "+ New prompt, full width");
-assert.ok(panel.includes("Click to insert · Send to run"), "the hint under it");
+assert.ok(newPrompt.includes("bg-neutral-200"), "filled, like Insert");
+assert.ok(panel.includes("Open a prompt to insert or send it"), "the hint under it");
 assert.ok(
   panel.lastIndexOf("New prompt") > panel.lastIndexOf("data-saved-prompt="),
   "the footer is below the list"
@@ -239,11 +240,7 @@ assert.ok(
 const noChatCard = cardOf(noChat, REVIEW.id);
 assert.ok(DISABLED_ATTR.test(buttonWith(noChatCard, "Insert")), "Insert disabled");
 assert.ok(DISABLED_ATTR.test(buttonWith(noChatCard, "Send")), "Send disabled");
-assert.ok(DISABLED_ATTR.test(buttonWith(cardOf(noChat, PLAN.id), "Plan before coding")), "the row's insert too");
-assert.ok(
-  !DISABLED_ATTR.test(buttonWith(cardOf(noChat, PLAN.id), "Show details")),
-  "but a row still opens"
-);
+assert.ok(!DISABLED_ATTR.test(buttonWith(cardOf(noChat, PLAN.id), "Plan before coding")), "a row still opens");
 assert.ok(!DISABLED_ATTR.test(buttonWith(noChat, "New prompt")), "and a prompt can still be written");
 
 // ---------------------------------------------------------------------------
@@ -270,7 +267,7 @@ const busyRow = render(
   createElement(SavedPromptsPanelView, viewProps({ expandedId: null, busy: { id: PLAN.id, action: "insert" } }))
 );
 const busyRowBody = buttonWith(cardOf(busyRow, PLAN.id), "Plan before coding");
-assert.ok(busyRowBody.includes(ARIA_DISABLED) && !DISABLED_ATTR.test(busyRowBody), "a row resolving keeps its focus too");
+assert.ok(!DISABLED_ATTR.test(busyRowBody), "a row resolving still opens");
 assert.ok(busyRowBody.includes("animate-spin"));
 
 const queued = render(
