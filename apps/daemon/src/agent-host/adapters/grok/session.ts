@@ -1675,7 +1675,9 @@ export class GrokSession {
    *   dev servers they started) ONLY when the user ends the session — the
    *   session stop command or a closed tab — by a sweep of its own
    *   ({@link stopTaskLeftovers}); this one sweeps the helpers alone, and an
-   *   exit in the middle of the user's stop starts it. A deploy's drain waits
+   *   exit in the middle of the user's end — after {@link prepareUserEnd},
+   *   which the host calls before it answers the session's cards — starts
+   *   both ({@link sweepLeftovers}). A deploy's drain waits
    *   for live work only within its bound (a watch loop's TTL, an agent's
    *   hour), and a dev server started in a Grok chat must survive every deploy
    *   after it; so must a thread's restart, and at a crash nobody ended
