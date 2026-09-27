@@ -685,7 +685,7 @@ test("seedProvider writes a prefixed auth file 0600, records the account, marks 
   h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
   await h.mgr.enable();
 
-  const accountId = "65eebd90-01d1-4063-b743-c4a5713f5519";
+  const accountId = "5eed0000-0000-4000-8000-00000000c0de";
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const authJson = {
     tokens: {
@@ -700,7 +700,7 @@ test("seedProvider writes a prefixed auth file 0600, records the account, marks 
   assert.equal(status.provider, "codex");
   assert.equal(status.state, "ok");
 
-  const authFile = join(cliproxyDir(h.daemonDir), "auth", "codex-acc65eebd90.json");
+  const authFile = join(cliproxyDir(h.daemonDir), "auth", "codex-acc5eed0000.json");
   assert.ok(existsSync(authFile), "auth file written under auth/");
   assert.equal(statSync(authFile).mode & 0o777, 0o600, "auth file is 0600");
 
@@ -740,7 +740,7 @@ test("status per-provider state gates launchers: codex seeded → claudex on, cl
   h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
   await h.mgr.enable();
 
-  const accountId = "65eebd90-01d1-4063-b743-c4a5713f5519";
+  const accountId = "5eed0000-0000-4000-8000-00000000c0de";
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const authJson = {
     tokens: {
@@ -767,7 +767,7 @@ test("unseedProvider removes the auth file, drops the account, degrades the prov
   h.setProbe({ ok: true, reachable: true, models: ["gpt-5.6-sol"] });
   await h.mgr.enable();
 
-  const accountId = "65eebd90-01d1-4063-b743-c4a5713f5519";
+  const accountId = "5eed0000-0000-4000-8000-00000000c0de";
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const authJson = {
     tokens: {
@@ -777,7 +777,7 @@ test("unseedProvider removes the auth file, drops the account, degrades the prov
     }
   };
   await h.mgr.seedProvider({ provider: "codex", accountId }, async () => authJson);
-  const authFile = join(cliproxyDir(h.daemonDir), "auth", "codex-acc65eebd90.json");
+  const authFile = join(cliproxyDir(h.daemonDir), "auth", "codex-acc5eed0000.json");
   assert.ok(existsSync(authFile), "auth file written by seed");
   assert.equal(h.mgr.status().accounts.length, 1);
 
@@ -944,9 +944,9 @@ test("claudex coupling: a KEYLESS router provider + a claude account → disable
     seededAccounts: [
       {
         provider: "claude",
-        accountId: "65eebd90-01d1-4063-b743-c4a5713f5519",
+        accountId: "5eed0000-0000-4000-8000-00000000c0de",
         label: "claude a",
-        prefix: "acc65eebd90"
+        prefix: "acc5eed0000"
       }
     ],
     routerProviders: [routerProvider("tokenrouter")]
@@ -1125,9 +1125,9 @@ test("clearRouterKey: keeps the provider row, drops the key, and un-satisfies th
       seededAccounts: [
         {
           provider: "claude",
-          accountId: "65eebd90-01d1-4063-b743-c4a5713f5519",
+          accountId: "5eed0000-0000-4000-8000-00000000c0de",
           label: "claude a",
-          prefix: "acc65eebd90"
+          prefix: "acc5eed0000"
         }
       ]
     }
@@ -1303,7 +1303,7 @@ test("seeded accounts persist: a manager over a state file with a seeded codex a
     ...createDefaultCliProxyState(),
     enabled: true,
     seededAccounts: [
-      { provider: "codex", accountId: "65eebd90-01d1-4063-b743-c4a5713f5519", label: "a@b.com", prefix: "acc65eebd90" }
+      { provider: "codex", accountId: "5eed0000-0000-4000-8000-00000000c0de", label: "a@b.com", prefix: "acc5eed0000" }
     ]
   };
   await mkdir(cliproxyDir(h.daemonDir), { recursive: true });
@@ -2140,9 +2140,9 @@ test("claudex coupling: a linked Grok account alone satisfies the gate", async (
     seededAccounts: [
       {
         provider: "claude",
-        accountId: "65eebd90-01d1-4063-b743-c4a5713f5519",
+        accountId: "5eed0000-0000-4000-8000-00000000c0de",
         label: "claude a",
-        prefix: "acc65eebd90"
+        prefix: "acc5eed0000"
       }
     ]
   });

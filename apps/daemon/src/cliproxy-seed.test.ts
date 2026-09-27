@@ -49,10 +49,10 @@ test("claude conversion maps from claudeAiOauth and stamps a routing prefix", ()
 });
 
 test("two accounts of one provider get distinct prefixes → individually routable", () => {
-  const a = accountPrefix("65eebd90-01d1-4063-b743-c4a5713f5519");
+  const a = accountPrefix("5eed0000-0000-4000-8000-00000000c0de");
   const b = accountPrefix("14137047-98b2-4cf1-9b54-b18a22a85a62");
   assert.notEqual(a, b);
-  assert.equal(a, "acc65eebd90"); // "acc" + first 8 hex of the dash-stripped uuid
+  assert.equal(a, "acc5eed0000"); // "acc" + first 8 hex of the dash-stripped uuid
 });
 
 test("invalid shapes throw, not silently produce garbage", () => {

@@ -44,7 +44,7 @@ test("compactEnvForModel: curated gpt model resolves window + pct", () => {
 });
 
 test("compactEnvForModel: acc-prefixed model resolves like its bare id", () => {
-  assert.deepEqual(compactEnvForModel("acc65eebd90/gpt-5.6-terra"), {
+  assert.deepEqual(compactEnvForModel("acc5eed0000/gpt-5.6-terra"), {
     maxContextTokens: 200000,
     autoCompactWindow: 200000,
     autoCompactPct: 75

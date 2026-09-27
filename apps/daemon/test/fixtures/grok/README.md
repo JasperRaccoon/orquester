@@ -89,7 +89,8 @@ Frames are verbatim apart from the redaction and elision below.
 
 ### Redaction
 
-Applied at record time and again on export:
+Applied at record time and again on export — the last two rules only by the 2026-09-27 rewrite of
+the committed files (see the note below the list):
 
 - absolute home paths → `~`
 - the same home **percent-encoded** (`%2Fvar%2Flib%2F…`, either hex case) → `~`: the CLI keys its
@@ -117,6 +118,31 @@ Applied at record time and again on export:
   file reproduces the committed set byte for byte): the reply and the harness note echoing it are
   the only two lines that changed, and no other file names a workspace, a project, a user, an
   e-mail address or a host beyond the rules above.
+- **a managed account's id** → `<account-id>`, by the Claude fixtures' rule: in
+  `agent-accounts/<family>/<uuid>` the uuid alone is replaced, the rest of the path kept
+  (`~/daemon/agent-accounts/grok/<account-id>/home/…`), and that uuid anywhere else becomes
+  `<account-id>` too. The CLI names the Orquester-managed homes it runs under and reads from — its
+  own `GROK_HOME`, and the Claude account homes holding the Claude plugins whose commands and
+  skills it loads — in `available_commands_update`'s skill paths, in tool calls and in task
+  snapshots' `output_file`s. Missed by the home rule, which collapsed only the prefix, until
+  2026-09-27: that day's rewrite of the committed files applied it to every file that held one
+  (02, 03, 03b, 07, 11, `12-cli-text/grok-inspect.json`, 15–22, 24, 25, 27–30: three ids, 1 143
+  occurrences on 96 lines), and nothing else in them changed.
+- **a byte array** — a tool's `rawOutput.output` or `stdout`, which the CLI sends as UTF-8 bytes —
+  is redacted on its decoded text by the rules above and re-encoded. The text rules never saw one:
+  07's `GrepSearch` stdout (line 241) spelled the home twice until the same rewrite (227 → 193
+  bytes; every other field of the frame, `match_count` included, kept).
+
+The out-of-repo harness's `redact.mjs` predates the last two rules: a re-export must gain them
+first, or it no longer reproduces the committed set.
+
+**The post-check** is `apps/daemon/src/agent-host/adapters/fixture-redaction.test.ts`, which the
+daemon's test suite runs over all four fixture sets. It scans every line, every byte array decoded,
+and every value the CLI streamed, joined as it streams it — message and thought chunks per session
+and prompt, a tool call's `arguments_delta` pieces per call — for the host's home in any spelling
+(plain, JSON-escaped, percent-encoded, flattened), any `agent-accounts/<family>/<uuid>` path,
+e-mail addresses, token shapes and credential-named fields, and allows only the placeholders and
+fakes the READMEs document.
 
 ### Elision
 

@@ -45,13 +45,34 @@ of how the frames were produced** — read it before asserting on a file.
 
 ## Redaction
 
-Applied to every file before committing, verified by an automated post-check:
+Applied to every file before committing:
 
 - the account email → `user@example.invalid`; the organization name derived from it → `<organization>`
 - the managed-account home `/var/lib/orquester/daemon/agent-accounts/claude/<uuid>/home` → `~`
 - that account uuid anywhere else → `<account-id>`
 - the service user's home `/var/lib/orquester` → `~` (and its flattened form `-var-lib-orquester-…`,
   as it appears inside CLI cache directory names, → `-home-…`)
+
+**A value the CLI streamed is redacted on the joined stream, not line by line.** A block's
+`content_block_delta` pieces (`partial_json`, `text`, `thinking`, `signature`) are joined per block
+— its `index` under the `message_start` that opened it — the rules run on the joined text, and the
+result is written back across the same pieces: same count, same order, every line still one JSON
+object. A piece boundary that fell inside a redacted span moves to the span's start, so the piece
+the span ends in carries the replacement, and a piece wholly inside a span is left `""` — the shape
+the CLI gives every block's first `input_json_delta`. A per-line pass cannot see a path the CLI
+split as `"/var/l"` + `"ib/orquester/tm"`: until 2026-09-27 the streamed tool inputs of eight files
+(`02`, `06`, `07`, `08`, `09`, `14a`, `14b`, `16`) still spelled the home — `09`'s the managed
+account's, its uuid included — while each block's complete `assistant` frame held `~`. That day's
+rewrite changed only those pieces (50 lines); every other line of every file is byte-identical.
+
+**The post-check** is `apps/daemon/src/agent-host/adapters/fixture-redaction.test.ts`, which the
+daemon's test suite runs over all four fixture sets. It scans every line, every byte array decoded
+and every value a protocol streamed, joined as that protocol streams it, for this host's home in
+any spelling (plain, JSON-escaped, percent-encoded, flattened), any `agent-accounts/<family>/<uuid>`
+path, e-mail addresses, token shapes and credential-named fields, and allows only the placeholders
+and fakes the READMEs document. For this set it also checks that every streamed block joins to
+exactly what its complete frame holds: a rule applied to the one and not the other shows there
+whatever it redacts, the organization name included.
 
 **Session ids are deliberately kept** — they are what makes the resume/fork fixture legible — and
 none of them is a credential. No token, key or credential file was read, printed or copied.
@@ -899,7 +920,8 @@ only when it names a subagent already on the roster.
 ## Re-capturing
 
 Nothing here is generated; re-capturing means driving the real CLI again. Keep the format above,
-re-run the redaction rules, and update the provenance block — a fixture whose CLI version is
-unknown cannot be judged when the protocol moves (spec §9). Scenario 13 costs nothing and should be
+re-run the redaction rules — on every line and on every streamed block, joined (see Redaction) —
+run the post-check, and update the provenance block — a fixture whose CLI version is unknown
+cannot be judged when the protocol moves (spec §9). Scenario 13 costs nothing and should be
 re-run first whenever the CLI is upgraded: it alone will show a changed model list, a changed
 account shape or a changed command set.

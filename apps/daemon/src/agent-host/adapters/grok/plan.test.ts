@@ -16,7 +16,7 @@ import {
   type PlanPathHost
 } from "./plan.ts";
 
-const GROK_HOME = "/var/lib/orquester/daemon/agent-accounts/grok/b9682f5c/home";
+const GROK_HOME = "/var/lib/orquester/daemon/agent-accounts/grok/<account-id>/home";
 const host: PlanPathHost = { platform: "linux", env: { GROK_HOME, HOME: "/var/lib/orquester" } };
 
 const REAL_PLAN_PATH = `${GROK_HOME}/sessions/%2Fvar%2Flib%2Fworkspace/01a0c1a4-d265-7c63-825d-4896587d488c/plan.md`;

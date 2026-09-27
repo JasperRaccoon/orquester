@@ -49,6 +49,10 @@ scenario.
 - The `authorization` headers in fixture 01 are **not** redacted: that server was
   started with the throwaway password `fixture-password` specifically to record the
   auth handshake.
+- `GET /provider`'s `opencode` provider keeps `"options":{"apiKey":"public"}` verbatim
+  (fixture 01): OpenCode Zen's public key for its free models, not a credential. The
+  redaction post-check (`apps/daemon/src/agent-host/adapters/fixture-redaction.test.ts`)
+  allows it by name, beside the `fixture-password` credentials above.
 
 `openapi.json` is the server's own `GET /doc`, complete and minified (479 KB):
 162 routes and an 89-member `Event` union. It is the reference for anything the

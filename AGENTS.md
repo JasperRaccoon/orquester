@@ -344,8 +344,11 @@ stays pristine (`node --test` hands `--import` on to each file's child process).
 **under `src/`** (the daemon's test glob only walks `src`) and read recorded real-CLI captures from
 `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/`, each with a `capturedWith` provenance
 block and a `README.md` of protocol observations that is required reading before touching its
-adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
-`Ingestion.drain()`, or on an event. Filtered runs while developing:
+adapter. Their redaction is checked by `src/agent-host/adapters/fixture-redaction.test.ts`: every
+line, and every value a provider streamed in pieces joined the way its protocol streams it, for the
+host's home, managed-account ids, e-mail addresses and credentials — a per-line redaction misses a
+path the CLI split across two chunks. Nothing waits on a sleep: wait on a receipt, on
+`ThreadStore.drain()` / `Ingestion.drain()`, or on an event. Filtered runs while developing:
 `pnpm --filter @orquester/daemon test`, `pnpm --filter @orquester/ui test`.
 
 **Gotchas that bite:**

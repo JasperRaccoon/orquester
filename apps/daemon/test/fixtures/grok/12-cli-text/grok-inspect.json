@@ -180,7 +180,7 @@
       "target": "~/.local/bin/serena",
       "source": {
         "type": "configToml",
-        "path": "~/daemon/agent-accounts/grok/b9682f5c-425a-4c53-be6e-28de477be6c7/home/config.toml"
+        "path": "~/daemon/agent-accounts/grok/<account-id>/home/config.toml"
       }
     },
     {
@@ -211,7 +211,7 @@
     "layers": [
       {
         "role": "user",
-        "path": "~/daemon/agent-accounts/grok/b9682f5c-425a-4c53-be6e-28de477be6c7/home/config.toml"
+        "path": "~/daemon/agent-accounts/grok/<account-id>/home/config.toml"
       }
     ]
   },
