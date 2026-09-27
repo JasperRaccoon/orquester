@@ -3866,6 +3866,30 @@ second, inside the 600 ms window of `createEscapeSequence`, opens the control. A
 outside the composer goes through the shell's resolver (`escape-action.ts`), which returns
 `"rewind"` for the same double press and opens the control through the composer bridge.*
 
+*Built: **an open layer takes its own Escape first.** The chat's Escape handlers — the shell's
+`window` capture listener (`resolveChatEscape`) and the composer's two arms (its `window` arm,
+`composerOwnsEscape`, and the textarea's own handler, `composerEscapeAction`, both in
+`composer/tab-visibility.ts`) — run before any layer's own listener, and used to act under it: with
+the output or turn-diff viewer, the context meter's panel or a composer popover up, Escape stopped
+the running turn (in a drill-in it closed the child behind the viewer, and the next one stopped the
+parent), and where the shell acted the layer never saw the key and stayed open. Every layer that
+closes on Escape — `Modal`, `BottomSheet`, `Dropdown`, `ContextMenu`, `ComposerPopover`, the
+command palette — registers while it is open (`useOpenLayer`, `packages/ui/src/lib/open-layers.ts`);
+`anotherLayerOwnsTheKeyboard()` reads that registry beside the store's own modals, and all three
+handlers stand down while it answers true. The one thing ranked ahead of an open layer is the
+composer's own `@` / `/` / `$` token menu: it sits at the caret, so the textarea's Escape closes it
+first (`composerEscapeAction`: menu, layer, drill-in, turn, idle). The layer closes itself, nothing
+is interrupted or left, and an Escape a layer took is never half of Esc Esc. The same set gates the Attention Center's
+`Ctrl+Shift+A`. Holding Escape is one press: the key's auto-repeat does nothing in any of the three
+handlers (the composer's `window` arm never took one), so a hold whose first keydown closed a layer
+or left a drill-in no longer stops the turn half a second later. An Escape typed into a field that
+is not this chat's — the tab strip's rename box, the sidebar's name field, a terminal, a file editor:
+any text `<input>`, `<textarea>`, `<select>` or editing host, CodeMirror's included — is that
+field's too. The shell does nothing with it and Esc Esc starts over (`chatEscapeTargetGate`); before,
+cancelling a tab rename stopped the turn instead. This chat's own fields keep this chat's rules: the
+composer's, and the question card's answer in the dock, which still leaves a drill-in or stops the
+turn.*
+
 Prompt-length validation measures the **larger of the literal draft and its wire-expanded form**, so
 a short reference that expands on the wire cannot smuggle the thread past §4.1's input bound;
 answers to a pending question are exempt, because they are not a provider turn. A paste of 32 KiB or
@@ -4110,6 +4134,12 @@ since the numbers they refer to are off screen. "Dismiss" is offered only when t
 must be answered.
 *T3: `apps/web/src/pendingUserInput.ts:160-191` — `derivePendingUserInputProgress` (`activeQuestion`, `answeredQuestionCount`, `isLastQuestion`, `canAdvance`, `isComplete`); `:42-68` — `resolvePendingUserInputAnswer`, custom-beats-options, array for multi-select, attachments-alone → `""`; `apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx:75-82` — the collapse-keyed-by-question-id comment; `:118-135` — the 200 ms auto-advance with optimistic selection; `:137-166` — the digit handler and its collapsed opt-out; `packages/client-runtime/src/pendingRequests.ts:21-27, 171` — `dismissible` = `responseMode === "message"`*
 
+*Built: the digit shortcuts also stand down while any layer is up — the set the chat's Escape reads
+(`anotherLayerOwnsTheKeyboard()`, §7.4's open-layer note). The card listens on `document`, and with
+focus on a button in a modal, a menu or a popover, a digit used to answer the question behind the
+layer: an answer that cannot be taken back. The rule is `questionShortcutOption`
+(`banners/pending-answer.ts`), pure and tested; the listener only gathers the facts.*
+
 *Built: the question card owns its **Submit** button and its custom-answer field outright, rather
 than handing them to the composer's primary action. A question and a draft are two different
 intents sharing one text input, and the 200 ms optimistic advance above makes "which one does
@@ -4287,6 +4317,16 @@ move to the background, its end and result, a `resume_from` relaunch — and, si
 session's own frames reach the client under its own `sessionId` (captured 2026-09-25), a Grok
 agent's drill-in holds its thinking, its words, its tool calls and its own background shells (the
 Grok fixtures README, observation 38).*
+
+*Built: **"Escape back to main" holds wherever focus is, the composer included.** With a child open,
+Escape leaves it before it would interrupt the turn: the shell's resolver has always ranked it so
+(`resolveChatEscape`), but it stands down inside the composer, and the composer did not know a child
+was open. So a user who typed a steer while watching a child and pressed Escape to go back stopped
+the parent's turn instead (or, idle, got the Esc-Esc hint). The shell now hands the composer
+`onLeaveDrillIn` while a child is open, and both composer arms rank it the same way
+(`composerEscapeAction`, `composer/tab-visibility.ts`): a token menu or an open layer still takes
+its own Escape first, and interrupting from the composer while watching a child is the Stop button
+or one more Escape.*
 
 **The drill-in shares the parent's `sessionId`**, and does not remount it — so while a child is open
 there are *two* live timelines under one session id, one of them hidden behind the other. Anything

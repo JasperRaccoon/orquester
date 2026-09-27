@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Box, Search } from "lucide-react";
+import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 import { cachedProjectIndex, refreshProjectIndex, type ProjectIndex } from "../../lib/project-index";
 import { jumpToProject } from "../../lib/session-nav";
@@ -152,6 +153,9 @@ export const CommandPalette: React.FC = () => {
   const sessions = useAppStore((s) => s.sessions);
 
   const [open, setOpen] = useState(false);
+  // An open layer like any other (`useOpenLayer`); `isCommandPaletteOpen`
+  // answers the same question from `openRef`, a commit sooner.
+  useOpenLayer(open);
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState<ProjectIndex | null>(null);
   const [highlight, setHighlight] = useState(0);

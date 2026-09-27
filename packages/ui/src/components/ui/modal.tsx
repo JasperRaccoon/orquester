@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
+import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 
 export interface ModalProps {
@@ -10,8 +11,13 @@ export interface ModalProps {
   className?: string;
 }
 
-/** Centered modal dialog rendered in a portal; closes on backdrop click / Escape. */
+/**
+ * Centered modal dialog rendered in a portal; closes on backdrop click / Escape.
+ * An open layer while it is up (`useOpenLayer`), so the app-level key handlers
+ * that run before its `document` listener leave its Escape to it.
+ */
 export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className }) => {
+  useOpenLayer(open);
   useEffect(() => {
     if (!open) {
       return;
