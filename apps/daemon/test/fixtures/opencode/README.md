@@ -486,7 +486,7 @@ the roster shows whatever the provider reports. The mapping this capture support
 | child `session.updated` | `task.progress` on a real title change (an unchanged title is re-stated on every recompute — observation 25) |
 | child `session.status` | `task.updated {status: running \| idle}` |
 | child `session.idle` | `task.completed {status:"completed"}` — the child's terminal signal; the parent's `task` part that follows it gives that end its result (observation 27) |
-| child `session.error` | `task.completed {status:"failed"}` |
+| child `session.error` | `task.completed {status:"failed"}`; `{status:"stopped"}` for an abort (`MessageAbortedError`) — the child's own word that its run was stopped, never failed (observation 29) |
 | child `message.part.updated` (tool) | `task.progress {lastToolName}` **and** an `item.*` row stamped `agentId`; while a command runs, its output as `command_output` chunks stamped the same (observation 28) |
 | child text / reasoning parts | `content.delta` stamped `agentId` |
 | child `todo.updated` | `task.progress` with an `n/m steps done` summary — a child's plan is its own, and must not overwrite the thread's `turn.plan` |
