@@ -1,9 +1,25 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { RegistryService, parseEnvFile } from "./registry.ts";
+
+/**
+ * This file's process resolves only what it is given. `RegistryService`
+ * resolves every catalog entry against the process's PATH and HOME, and
+ * `init()` runs each agent it finds with `--version` in the background: left
+ * alone, this file ran the machine's real claude, codex and grok on every
+ * run. So HOME is a scratch dir and PATH an empty one; the one entry the test
+ * writes names its bin by absolute path. Each test file runs in a process of
+ * its own, so no other file sees this.
+ */
+const sandbox = mkdtempSync(join(tmpdir(), "orquester-registry-sandbox-"));
+mkdirSync(join(sandbox, "bin"));
+process.env.HOME = sandbox;
+process.env.PATH = join(sandbox, "bin");
+after(() => rmSync(sandbox, { recursive: true, force: true }));
 
 test("parseEnvFile handles common dotenv syntax", () => {
   assert.deepEqual(
