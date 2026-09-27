@@ -537,18 +537,15 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     sequence?.reset();
     const onKeyDown = (event: KeyboardEvent) => {
       const state = escapeState.current;
-      const id = CSS.escape(sessionId);
       const gate = {
         key: event.key,
         defaultPrevented: event.defaultPrevented,
         isActiveTab: isActiveChatTab(sessionId),
         blockingLayerOpen: anotherLayerOwnsTheKeyboard(),
         // Where it landed: this thread's composer, or a field that is not this
-        // chat's — the rename box in the tab strip, a terminal — whose key it is.
-        ...chatEscapeTargetGate(event.target as EscapeTargetLike | null, {
-          chatRoot: `[data-agent-chat="${id}"]`,
-          composerShell: `[data-agent-chat-composer-shell="${id}"]`
-        }),
+        // chat's — the rename box in the tab strip, a terminal, another grid
+        // cell's composer — whose key it is.
+        ...chatEscapeTargetGate(event.target as EscapeTargetLike | null, sessionId),
         drillInOpen: state.drillInAgentId !== null,
         turnActive: state.turnActive,
         repeat: event.repeat

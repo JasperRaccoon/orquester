@@ -104,7 +104,8 @@ export interface EscapeTargetLike {
   type?: string;
   /** True for an editing host and everything inside one. */
   isContentEditable?: boolean;
-  closest?(selector: string): unknown;
+  /** `Element.closest`: asked only for an attribute (`[data-…]`), read back with `getAttribute`. */
+  closest?(selector: string): { getAttribute(name: string): string | null } | null;
 }
 
 /** `<input>` types that take no typed text, so no Escape of theirs to keep. */
@@ -137,7 +138,11 @@ export function isEditableTarget(target: EscapeTargetLike | null | undefined): b
 
 /**
  * The gate's fields that come from where the Escape landed, for the thread
- * whose chat root and composer shell the two selectors name.
+ * `sessionId`. The listener hands over only the event target: which chat root
+ * (`data-agent-chat`) and which composer shell
+ * (`data-agent-chat-composer-shell`) the target sits in is decided here, by
+ * the thread id each carries — so in the grid, another cell's composer or
+ * answer field is that chat's, never this one's.
  *
  * `editableOutsideChat` is the rule the shell stands down for: an Escape typed
  * into a field that is not this chat's belongs to that field. The shell's
@@ -152,13 +157,18 @@ export function isEditableTarget(target: EscapeTargetLike | null | undefined): b
  */
 export function chatEscapeTargetGate(
   target: EscapeTargetLike | null,
-  scope: { chatRoot: string; composerShell: string }
+  sessionId: string
 ): Pick<ChatEscapeGate, "insideComposer" | "editableOutsideChat"> {
-  const inside = (selector: string): boolean =>
-    typeof target?.closest === "function" && target.closest(selector) !== null;
+  // The thread whose root (or composer shell) is the nearest one around the
+  // target — read back from the id it carries, never inferred from being in
+  // some chat.
+  const threadOf = (attribute: string): string | null => {
+    const host = typeof target?.closest === "function" ? target.closest(`[${attribute}]`) : null;
+    return host?.getAttribute(attribute) ?? null;
+  };
   return {
-    insideComposer: inside(scope.composerShell),
-    editableOutsideChat: isEditableTarget(target) && !inside(scope.chatRoot)
+    insideComposer: threadOf("data-agent-chat-composer-shell") === sessionId,
+    editableOutsideChat: isEditableTarget(target) && threadOf("data-agent-chat") !== sessionId
   };
 }
 

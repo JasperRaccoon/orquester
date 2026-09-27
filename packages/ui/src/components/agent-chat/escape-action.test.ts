@@ -275,34 +275,46 @@ test("holding Escape is one press, and its auto-repeat breaks nothing either", (
 // Where the Escape landed: a field outside this chat is that field's own
 // ---------------------------------------------------------------------------
 
-const CHAT_ROOT = '[data-agent-chat="thread-1"]';
-const COMPOSER_SHELL = '[data-agent-chat-composer-shell="thread-1"]';
-const SCOPE = { chatRoot: CHAT_ROOT, composerShell: COMPOSER_SHELL };
+/** The chat whose shell is asking; "thread-2" sits in the next grid cell. */
+const THIS_CHAT = "thread-1";
 
 /**
  * An element as the gate reads one: its tag, an input's type, whether it sits
- * in an editing host, and the ancestors `closest` finds — by the exact
- * selectors this thread's gate asks for, and no other.
+ * in an editing host, and the chat root and composer shell around it, each
+ * carrying its thread id as the DOM does (`data-agent-chat`,
+ * `data-agent-chat-composer-shell`). Its `closest` walks those ancestors,
+ * nearest first, the way the DOM's does for an attribute selector — and
+ * refuses any other selector, so a change in what the gate asks shows here.
  */
 function element(
   tagName: string,
-  options: { type?: string; contentEditable?: boolean; within?: readonly string[] } = {}
+  options: { type?: string; contentEditable?: boolean; chat?: string; composer?: string } = {}
 ): EscapeTargetLike {
-  const within = options.within ?? [];
+  const ancestors: Array<Record<string, string>> = [
+    ...(options.composer !== undefined
+      ? [{ "data-agent-chat-composer-shell": options.composer }]
+      : []),
+    ...(options.chat !== undefined ? [{ "data-agent-chat": options.chat }] : [])
+  ];
   return {
     tagName,
     ...(options.type !== undefined ? { type: options.type } : {}),
     isContentEditable: options.contentEditable === true,
-    closest: (selector: string) => (within.includes(selector) ? {} : null)
+    closest: (selector: string) => {
+      const attribute = /^\[([a-z-]+)\]$/.exec(selector)?.[1];
+      if (attribute === undefined) throw new Error(`unexpected selector ${selector}`);
+      const found = ancestors.find((attributes) => attribute in attributes);
+      return found ? { getAttribute: (name: string) => found[name] ?? null } : null;
+    }
   };
 }
 
-/** The gate for an Escape landing on `target` in thread-1, with the rest of the state given. */
+/** The gate for an Escape landing on `target` in this chat, with the rest of the state given. */
 function gateAt(
   target: EscapeTargetLike | null,
   state: Partial<ChatEscapeInput> = {}
 ): ChatEscapeInput {
-  return { ...base, ...chatEscapeTargetGate(target, SCOPE), ...state };
+  return { ...base, ...chatEscapeTargetGate(target, THIS_CHAT), ...state };
 }
 
 /** Every thing the shell could otherwise do: leave, stop, rewind. */
@@ -370,7 +382,7 @@ test("an Escape typed into a field outside this chat is that field's: nothing he
   ];
   for (const [name, field] of fields) {
     assert.deepEqual(
-      chatEscapeTargetGate(field, SCOPE),
+      chatEscapeTargetGate(field, THIS_CHAT),
       { insideComposer: false, editableOutsideChat: true },
       name
     );
@@ -385,8 +397,8 @@ test("an Escape typed into a field outside this chat is that field's: nothing he
 test("the same field inside this chat's composer keeps the composer's rules", () => {
   // The composer's own textarea: the shell hands it over as before, and the
   // composer resolves it as it always has — the drill-in first (S6).
-  const textarea = element("TEXTAREA", { within: [COMPOSER_SHELL, CHAT_ROOT] });
-  assert.deepEqual(chatEscapeTargetGate(textarea, SCOPE), {
+  const textarea = element("TEXTAREA", { composer: THIS_CHAT, chat: THIS_CHAT });
+  assert.deepEqual(chatEscapeTargetGate(textarea, THIS_CHAT), {
     insideComposer: true,
     editableOutsideChat: false
   });
@@ -420,8 +432,8 @@ test("a field inside this chat but outside its composer keeps today's rules", ()
   // The question card's custom answer, in the banner dock above the composer:
   // it is this chat's own, so Escape there still leaves the drill-in first and
   // otherwise stops the turn.
-  const answer = element("INPUT", { type: "text", within: [CHAT_ROOT] });
-  assert.deepEqual(chatEscapeTargetGate(answer, SCOPE), {
+  const answer = element("INPUT", { type: "text", chat: THIS_CHAT });
+  assert.deepEqual(chatEscapeTargetGate(answer, THIS_CHAT), {
     insideComposer: false,
     editableOutsideChat: false
   });
@@ -429,17 +441,46 @@ test("a field inside this chat but outside its composer keeps today's rules", ()
   assert.equal(resolveChatEscape(gateAt(answer, { turnActive: true })), "interrupt");
 });
 
+test("in the grid, another chat's composer and answer field are that chat's, not this one's", () => {
+  // Two chat tabs side by side; this one is the active tab. Whose chat a
+  // field belongs to is decided by its thread id, not by being in some chat:
+  // the next cell's composer and question card are outside THIS chat, so an
+  // Escape typed there is theirs — it never stops this chat's turn.
+  const theirComposer = element("TEXTAREA", { composer: "thread-2", chat: "thread-2" });
+  const theirAnswer = element("INPUT", { type: "text", chat: "thread-2" });
+  for (const [name, target] of [
+    ["their composer", theirComposer],
+    ["their answer field", theirAnswer]
+  ] as const) {
+    assert.deepEqual(
+      chatEscapeTargetGate(target, THIS_CHAT),
+      { insideComposer: false, editableOutsideChat: true },
+      name
+    );
+    assert.equal(resolveChatEscape(gateAt(target, { turnActive: true })), "ignore", name);
+  }
+  // To their own chat's shell, each is its own again.
+  assert.deepEqual(chatEscapeTargetGate(theirComposer, "thread-2"), {
+    insideComposer: true,
+    editableOutsideChat: false
+  });
+  assert.deepEqual(chatEscapeTargetGate(theirAnswer, "thread-2"), {
+    insideComposer: false,
+    editableOutsideChat: false
+  });
+});
+
 test("a target that takes no text keeps today's rules, inside this chat or out", () => {
   // The page itself (focus falls to <body> after a click elsewhere), and a
   // timeline button.
   const targets: Array<[string, EscapeTargetLike | null]> = [
     ["the page", element("BODY")],
-    ["a timeline button", element("BUTTON", { within: [CHAT_ROOT] })],
+    ["a timeline button", element("BUTTON", { chat: THIS_CHAT })],
     ["no target", null]
   ];
   for (const [name, target] of targets) {
     assert.deepEqual(
-      chatEscapeTargetGate(target, SCOPE),
+      chatEscapeTargetGate(target, THIS_CHAT),
       { insideComposer: false, editableOutsideChat: false },
       name
     );
