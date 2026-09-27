@@ -2260,10 +2260,12 @@ the parent.*
   the compaction marker are both derived from the text.*
   *Built (2026-09-27): the chips render. `AgentChatView` never handed the timeline the catalogue the
   tokeniser matches against, so no `$mention` was ever chipped, in either view; it now passes the
-  names the composer offers for the thread's cwd — the cwd's overlay where it lists skills, else the
-  machine-level catalogue, one rule the composer reads too (`workspaceSkills` /
+  names of every skill in the thread's catalogue for its cwd — the cwd's overlay where it lists
+  skills, else the machine-level catalogue, the catalogue the composer reads too (`workspaceSkills` /
   `timelineSkillNames`, `composer/composer-menu.ts`) — to the thread's timeline and a drill-in's,
-  whose launch prompt re-chips the same way.*
+  whose launch prompt re-chips the same way. The chips are wider than the menu: the `$` menu offers
+  only the catalogue's enabled, user-invocable skills, while a mention of any skill in it chips — an
+  agent's launch prompt may name a skill only agents invoke, and it is still that skill.*
 
 #### 4.6.8 Skills
 
@@ -4389,8 +4391,9 @@ palette search hit, which only the thread's timeline takes, closes an open drill
 takes it at once — it used to wait, unmounted, and fire minutes later on Back.*
 *Built (2026-09-27): the drill-in renders inside an error boundary of its own
 (`roster/DrillInErrorBoundary.tsx`): a child row that throws takes down the child's view alone — the
-overlay stays mounted over it — and its fallback's "Back to the thread" is a real, touch-sized button.
-The thread's own boundary wrapped everything and kept the open agent, so a crashing child replaced the
+overlay stays mounted over it — and its fallback's "Back to the thread" is a real, touch-sized button,
+centred above the overlay (padded by the view's bottom inset) so a phone's composer and roster never
+cover it. The thread's own boundary wrapped everything and kept the open agent, so a crashing child replaced the
 composer, the roster and Back, and on a touch device only closing the tab recovered; its "Try again"
 now also leaves an open drill-in.*
 

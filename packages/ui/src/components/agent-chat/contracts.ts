@@ -160,20 +160,29 @@ export interface ChatTimelineProps {
    * The current per-cwd skill names, so a sent message's `$mentions` are
    * **re-chipped from the stored text** (§4.6.7) — no `isCommand` flag is
    * persisted, the text is the record. Wired from the provider snapshot
-   * (`timelineSkillNames`: the thread's cwd's overlay, else the machine-level
-   * catalogue — what the composer offers); empty means no chips.
+   * (`timelineSkillNames`: every skill in the thread's cwd's overlay, else in
+   * the machine-level catalogue — wider than the `$` menu, which offers only
+   * the enabled, user-invocable ones); empty means no chips.
    *
    * *Added by W12; additive to the foundation's contract.*
    */
   skills?: readonly string[] | undefined;
   /**
-   * The remembered reading position for this thread, from W11's 100-entry LRU
-   * (§7.2). Restored on mount and on every `sessionId` change.
+   * The remembered reading position to restore on mount and on every
+   * `sessionId` (or `agentId`) change: the thread's, from W11's 100-entry LRU
+   * (§7.2); a drill-in's, from the view's per-agent memory
+   * (`roster/drill-in-memory.ts`), never that LRU. An absent or at-end
+   * position opens at the end.
    *
    * *Added by W12; additive to the foundation's contract.*
    */
   scroll?: TimelineScrollPosition | null | undefined;
-  /** Publishes the reading position back into that LRU as the user scrolls. */
+  /**
+   * Publishes the reading position as the user scrolls: the thread's view
+   * keeps it for its paint hold, and the timeline itself writes the thread's
+   * LRU (debounced — never for a drill-in); a drill-in hands it to its
+   * per-agent memory.
+   */
   onScrollPositionChange?: ((position: TimelineScrollPosition) => void) | undefined;
   /**
    * Older turns exist beyond everything the timeline holds (design

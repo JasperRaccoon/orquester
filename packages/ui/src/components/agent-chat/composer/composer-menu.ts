@@ -85,10 +85,12 @@ function dedupeSkillsByName(skills: readonly Skill[]): Skill[] {
  * The skills a thread works with (§4.6.4): its cwd's overlay where the
  * overlay lists any, else the provider's machine-level catalogue. Per array
  * and only when non-empty — an overlay can carry skills and drop commands
- * (Claude's did), and an empty one is never a blank catalogue. The composer's
- * `$` and `/` menus read it, and so does the timeline's re-chipping
- * ({@link timelineSkillNames}), so a sent mention chips in exactly the cases
- * the composer offered it.
+ * (Claude's did), and an empty one is never a blank catalogue. One catalogue,
+ * read two ways: the composer's `$` and `/` menus OFFER only its enabled,
+ * user-invocable skills, deduped by name ({@link skillsForSkillMenu}); the
+ * timeline's re-chipping ({@link timelineSkillNames}) chips a mention of ANY
+ * skill in it — an agent's launch prompt may name a skill only agents invoke,
+ * and it is still that skill.
  */
 export function workspaceSkills(
   provider: Pick<ProviderSnapshot, "skills" | "workspaceSnapshots"> | null | undefined,
@@ -101,7 +103,8 @@ export function workspaceSkills(
 /**
  * The skill names a sent message's `$mentions` are re-chipped against
  * (§4.6.7, `ChatTimelineProps.skills`) — the thread's and a drill-in's alike —
- * each once.
+ * each once: every skill in the thread's catalogue ({@link workspaceSkills}),
+ * enabled or not, user-invocable or not — wider than what the `$` menu offers.
  */
 export function timelineSkillNames(
   provider: Pick<ProviderSnapshot, "skills" | "workspaceSnapshots"> | null | undefined,

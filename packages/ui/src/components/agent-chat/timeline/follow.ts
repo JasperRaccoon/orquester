@@ -129,11 +129,13 @@ export const IDLE_SETTLE_LATCH: TimelineSettleLatch = { identity: null, frames: 
  * One list's identity.
  *
  * The drill-in's timeline is a second list under the same session id (§7.6),
- * so the agent id is part of the identity — otherwise opening a drill-in, or
- * switching it to another agent, would not count as a switch: its first end
- * pin would glide and its first rows would rise. (The thread's own timeline
- * is unmounted while a child is open, not hidden; keyed on the session alone,
- * the list mounted next under it would still read as the same list.)
+ * so the agent id is part of the identity. Today that is defence: the thread's
+ * own timeline is unmounted while a child is open (not hidden), and the
+ * drill-in mounts afresh per agent (`AgentChatView` keys it), so every change
+ * of list is a new `ChatTimeline` whose latch and enter flags start fresh
+ * anyway. Kept so that a timeline which did switch lists in place — a mount
+ * reused across agents — could never read another list as its own: its first
+ * end pin would glide and its first rows would rise.
  */
 export function timelineListIdentity(sessionId: string, agentId?: string | null): string {
   return `${sessionId}\u0000${agentId ?? ""}`;
