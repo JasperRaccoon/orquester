@@ -1498,32 +1498,40 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   servers (fixture 31: all four existed then, none of the user's work had run) — are swept at EVERY
   end: a restart of a thread that goes on (an account, permission-mode or cwd change — Grok switches
   models in-session), the host's teardown (a drain-restart's included), the CLI's own exit (a crash,
-  an open that failed), the user's stop. **The work its agent started** — its shells, the dev
-  servers they run — is swept ONLY when the user ends the session: the session stop command or a
-  closed tab (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`; the MCP's
-  `stop_session` and `close_session` are that command and that close) — recorded FIRST in that stop,
-  before anything reaches the CLI, and swept by a sweep of their own (`stopTaskLeftovers`), so a CLI
-  exiting in the middle of the stop (on its card's cancel, say) cannot hand the stop a helpers-only
-  sweep — and on an open that failed, where nothing of the user's has run. Never at a deploy's
-  teardown or a restart: the drain waits for live work only within its bound (a watch loop's TTL, an
-  agent's hour), and a dev server started in a Grok chat must survive every deploy that comes after
-  it. Never at a crash either (no user ended anything). There it runs on as a marked orphan, listed
-  and killable in Settings → System, and never silently: its task's closing row says so — "Left
-  running when the agent host stopped / the session restarted / the agent process exited — stop it
-  from Settings → System." (`leftRunningNote`), marked `leftRunning` on the row and the roster entry
-  — the one summary a stopped shell's row shows in place of a bare "Stopped"; any other completion
-  summary (the CLI's stop sentence, a killed shell's output line) never replaces it. Nor is it
-  forgotten: each launch's task sessions — recorded as the CLI reports the work (a shell's, a
-  monitor's `task.started`: nothing can be read off a CLI that crashed) and again at every end,
-  while it lives — are kept in the thread's `leftover-work.json` (SID, leader starttime, launch id;
-  the last 8 launches; 0600, atomic, written only while the thread's directory exists (a late record
-  must not raise a deleted thread), the adapter's own file, never `binding.json`;
-  `support/leftover-work.ts`), so a LATER user end — the session stop command or a closed tab, live
-  session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession` either way — sweeps
-  what every earlier launch left, with the same identity checks. A Claude chat's background shells
-  outlive their session the same way — the SDK closes the Claude CLI's stdin and SIGTERMs it 2 s
-  later, before the CLI's own 5 s wind-down would stop them, and they run on under init
-  (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
+  an open that failed), the user's stop. The host's teardown waits for them: both of its `stopAll()`
+  calls — the adapter's abort listener's, then `main.ts`'s — wait for every stop in flight, and
+  `stop()` lets the consumers read what the stops queued before the orchestrator stops consuming
+  (`host-teardown.test.ts`; the second call used to return at once, and the process exited with the
+  sweep unsent and the closing rows unwritten — Codex's stream, too, closed before its teardown
+  rows). There the helpers' grace is 1 s (`HOST_TEARDOWN_SWEEP_GRACE_MS`), well inside the SIGTERM
+  path's 3 s backstop; a CLI that ignores SIGTERM itself spends its own 2 s first, and the backstop
+  can then cut the helpers' SIGKILL — a helper that ignored SIGTERM too runs on, a marked orphan
+  Settings → System lists (a deploy's `/stop` has no such backstop). **The work its agent started**
+  — its shells, the dev servers they run — is swept ONLY when the user ends the session: the session
+  stop command or a closed tab (`stopSessionInternal` passes `stopSession(…, {endedByUser: true})`;
+  the MCP's `stop_session` and `close_session` are that command and that close) — recorded FIRST in
+  that stop, before anything reaches the CLI, and swept by a sweep of their own
+  (`stopTaskLeftovers`), so a CLI exiting in the middle of the stop (on its card's cancel, say)
+  cannot hand the stop a helpers-only sweep — and on an open that failed, where nothing of the
+  user's has run. Never at a deploy's teardown or a restart: the drain waits for live work only
+  within its bound (a watch loop's TTL, an agent's hour), and a dev server started in a Grok chat
+  must survive every deploy that comes after it. Never at a crash either (no user ended anything).
+  There it runs on as a marked orphan, listed and killable in Settings → System, and never silently:
+  its task's closing row says so — "Left running when the agent host stopped / the session restarted
+  / the agent process exited — stop it from Settings → System." (`leftRunningNote`), marked
+  `leftRunning` on the row and the roster entry — the one summary a stopped shell's row shows in
+  place of a bare "Stopped"; any other completion summary (the CLI's stop sentence, a killed shell's
+  output line) never replaces it. Nor is it forgotten: each launch's task sessions — recorded as the
+  CLI reports the work (a shell's, a monitor's `task.started`: nothing can be read off a CLI that
+  crashed) and again at every end, while it lives — are kept in the thread's `leftover-work.json`
+  (SID, leader starttime, launch id; the last 8 launches; 0600, atomic, written only while the
+  thread's directory exists (a late record must not raise a deleted thread), the adapter's own file,
+  never `binding.json`; `support/leftover-work.ts`), so a LATER user end — the session stop command
+  or a closed tab, live session or not: `stopSessionInternal` calls `AgentAdapter.sweepEndedSession`
+  either way — sweeps what every earlier launch left, with the same identity checks. A Claude chat's
+  background shells outlive their session the same way — the SDK closes the Claude CLI's stdin and
+  SIGTERMs it 2 s later, before the CLI's own 5 s wind-down would stop them, and they run on under
+  init (`bun run dev`, `stripe listen`, `vite` of closed Claude chats, live on the owner's host on
   2026-09-26). An open that fails stops its CLI now too: a `session/load` the CLI refused (a cursor
   it no longer knows) left it running outside the adapter's map, holding its pipes. It adds no row
   of its own either: the start's rejection is its whole report, which the host writes — an exit row

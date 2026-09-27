@@ -197,7 +197,10 @@ while the CLI lived (never a process that daemonized away): SIGTERM, then SIGKIL
 each pid checked against its `/proc` starttime before each signal (`support/leftover-processes.ts`,
 `GrokSession.stopLeftovers`). Its own helpers — the MCP servers, its children as its session opened
 (the README's observation 55) — go at every end of the session: a restart, the host's teardown (a
-drain-restart's included), the CLI's own exit, an open that failed, the user's stop. The work its
+drain-restart's included), the CLI's own exit, an open that failed, the user's stop. The host's
+teardown waits for them: both of its `stopAll()` calls wait for every stop in flight, and its
+consumers read what the stops queued before the orchestrator stops (`host-teardown.test.ts`); the
+helpers get a 1 s grace there, inside the SIGTERM path's 3 s backstop. The work its
 agent started — shells, the dev servers they run — goes only when the USER ends the session (the
 session stop command or a closed tab: `stopSession(…, {endedByUser: true})`) and on an open that
 failed; a deploy must never kill running work, so at a drain-restart, a restart or a crash it runs

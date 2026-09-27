@@ -273,7 +273,16 @@ export interface AgentAdapter {
    * an adapter that leaves no such work has nothing to sweep.
    */
   sweepEndedSession?(threadId: string): Promise<void>;
-  /** The host's teardown: never the user ending a session (see {@link stopSession}). */
+  /**
+   * The host's teardown: never the user ending a session (see {@link
+   * stopSession}). Called twice by it — by the adapter's own listener on the
+   * host's abort signal, then by `main.ts`'s `stop()` — so no call may
+   * resolve before the stops an earlier call started have written their rows
+   * and done their work (Grok's and Codex's took the session map and returned
+   * at once on the second call), and the event stream must end only after
+   * those rows: `stop()` then lets the consumer read the stream to its end
+   * (bounded), stops the orchestrator, and the process exits.
+   */
   stopAll(): Promise<void>;
 
   /**

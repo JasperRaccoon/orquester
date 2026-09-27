@@ -83,6 +83,15 @@ import { buildProviderEnv } from "./support/env.ts";
  */
 const CLIPROXY_CREDENTIAL_ENV_VAR = "ANTHROPIC_AUTH_TOKEN";
 
+/**
+ * How long a host teardown lets the consumers read what the adapters'
+ * teardown queued, once every `stopAll()` resolved (`stop()` below). Reading
+ * a closed stream to its end takes a few milliseconds per row; the bound only
+ * matters for a stream that never ends, and it keeps the stop well inside the
+ * SIGTERM path's 3 s backstop.
+ */
+const TEARDOWN_CONSUME_MS = 1_000;
+
 // ---------------------------------------------------------------------------
 // Small host-local helpers
 // ---------------------------------------------------------------------------
@@ -660,6 +669,21 @@ export async function startAgentHost(
         logger.warn(`agent-host: ${adapter.id} stopAll failed`, error);
       });
     }
+    // Every adapter ends its event stream once its sessions are stopped, and
+    // a stop writes its last rows at its very end — Codex's whole teardown
+    // (the turn's settle, each live task's `stopped`, the `session.exited`)
+    // lands when its child exits. The orchestrator's stop below ends
+    // consumption at once, so a row still queued then never reached the log:
+    // each consumer reads its stream to the end first. Bounded — a stream
+    // that never ends must not hold the stop.
+    let consumed: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled(consumers),
+      new Promise<void>((resolve) => {
+        consumed = setTimeout(resolve, TEARDOWN_CONSUME_MS);
+      })
+    ]);
+    clearTimeout(consumed);
     await host.stop().catch((error: unknown) => {
       logger.warn("agent-host: orchestrator stop failed", error);
     });

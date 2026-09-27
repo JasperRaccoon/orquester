@@ -194,6 +194,19 @@ export interface GrokSessionOptions {
 export type GrokSessionEndCause = "restart" | "host";
 
 /**
+ * The helpers' grace at the host's teardown — SIGTERM, then SIGKILL this long
+ * after — where every other end gives them `spawn.ts`'s 2 s. The host's
+ * process entry exits 3 s after a SIGTERM whatever its stop is still doing
+ * (`main.ts`), and the sweep starts only once the CLI is gone (the captured
+ * CLI exits on SIGTERM at once, fixture 14): with 2 s, a helper that ignores
+ * SIGTERM was killed some 2.4 s into the stop, a hair inside the backstop;
+ * with this, about 1.2 s (`host-teardown.test.ts`). A CLI that ignores
+ * SIGTERM itself spends its own 2 s grace first, and the backstop can then
+ * cut the helpers' SIGKILL — see {@link GrokSession.stopLeftovers}.
+ */
+export const HOST_TEARDOWN_SWEEP_GRACE_MS = 1_000;
+
+/**
  * The line a shell's or a monitor's closing row says when its process
  * outlives the end — never a bare "stopped" for work that runs on.
  */
@@ -306,6 +319,8 @@ export class GrokSession {
   private readonly taskSessions = new Map<number, RecordedSession>();
   /** The sweep of the helpers this launch left running, once started — the exit and a stop share it. */
   private leftovers: Promise<void> | null = null;
+  /** The helpers' SIGTERM grace, when not `spawn.ts`'s: the host's teardown ({@link HOST_TEARDOWN_SWEEP_GRACE_MS}). */
+  private sweepGraceMs: number | undefined;
   /**
    * The sweep of the user's work, once started. Its own, never the helpers':
    * a CLI that exits in the middle of the user's stop starts the helpers'
@@ -1603,7 +1618,12 @@ export class GrokSession {
    *   EVERY end — a restart (account, permission mode, cwd), the host's
    *   teardown (a drain-restart's included), the CLI's own exit (a crash, an
    *   open that failed), the user's stop. They are pure per-session leaks:
-   *   two survived every session until 2026-09-26.
+   *   two survived every session until 2026-09-26. The host's teardown waits
+   *   for this sweep (`GrokAdapter.stopAll`), and gives them a 1 s grace
+   *   ({@link HOST_TEARDOWN_SWEEP_GRACE_MS}): the host's process entry exits
+   *   3 s after a SIGTERM whatever the stop is doing, so a CLI that ignores
+   *   SIGTERM itself — its own 2 s grace first — can see a helper that ignores
+   *   it too outlive the backstop, a marked orphan Settings → System lists.
    * - **The user's work** ({@link taskSessions}: the shells the agent ran, the
    *   dev servers they started) ONLY when the user ends the session — the
    *   session stop command or a closed tab — by a sweep of its own
@@ -1627,7 +1647,8 @@ export class GrokSession {
     }
     this.leftovers ??= stopLeftoverProcesses({
       launchId: this.launchId,
-      sessions: [...this.helperSessions.values()]
+      sessions: [...this.helperSessions.values()],
+      ...(this.sweepGraceMs === undefined ? {} : { graceMs: this.sweepGraceMs })
     }).then(
       (result) => {
         if (result.found > 0) {
@@ -1808,6 +1829,10 @@ export class GrokSession {
     }
     const endedByUser = options.endedByUser === true;
     this.endingByUser = endedByUser;
+    if (options.cause === "host") {
+      // Under the SIGTERM path's backstop: a shorter grace for the helpers.
+      this.sweepGraceMs = HOST_TEARDOWN_SWEEP_GRACE_MS;
+    }
     // FIRST — before the host path is armed and before anything reaches the
     // CLI (the card's cancel below can end it): every child's session, while
     // the CLI still lives, after any recording already in flight. Once it is

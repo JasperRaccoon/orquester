@@ -1344,13 +1344,16 @@ What the adapter does about it (`GrokSession.stopLeftovers`, `support/leftover-p
 each launch's environment carries its own marker value, and a sweep takes only the processes
 carrying it inside a session one of the CLI's children led — recorded while the CLI lived, so a
 process that daemonized into a session of its own (agent-browser's daemon, an SSH ControlMaster)
-is spared — with SIGTERM, then SIGKILL past a 2 s grace to whatever a fresh scan still finds, each
-pid checked against its `/proc` starttime before every signal. Two kinds, two rules:
+is spared — with SIGTERM, then SIGKILL past a 2 s grace (1 s at the host's teardown, inside the
+SIGTERM path's 3 s backstop) to whatever a fresh scan still finds, each pid checked against its
+`/proc` starttime before every signal. Two kinds, two rules:
 
 - **The CLI's own helpers** — its children the moment `session/new` or `session/load` answered,
   its MCP servers (observation 55) — are swept at every end of the session: a restart of a thread
   that goes on, the host's teardown (a drain-restart's included), the CLI's own exit (a crash, an
-  open that failed) and the user's stop.
+  open that failed) and the user's stop. The host's teardown waits for the sweep: until 2026-09-27
+  the second of its two `stopAll()` calls returned at once, and the process exited before the
+  sweep signalled anything and before the closing rows were written (`host-teardown.test.ts`).
 - **The work its agent started** — its shells and whatever they run — only when the USER ends the
   session (the session stop command, a closed tab), and on an open that failed. A deploy must never
   kill running work: a dev server started in a Grok chat outlives a drain-restart, a restart and a

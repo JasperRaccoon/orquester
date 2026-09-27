@@ -1079,10 +1079,16 @@ async function wakeUntilCancelled() {
 /**
  * The `leftover` scenarios' helper — an MCP server's stand-in: a session of
  * its own, started before `session/new` (or `session/load`) answers, as the
- * real CLI's MCP servers are (fixture 31).
+ * real CLI's MCP servers are (fixture 31). `GROK_MOCK_HELPER_IGNORES_TERM=1`
+ * makes it one that ignores SIGTERM (an ignored signal stays ignored across
+ * `exec`), so only the sweep's SIGKILL ends it.
  */
 function startHelper() {
   if (!scenario.startsWith("leftover")) {
+    return;
+  }
+  if (process.env.GROK_MOCK_HELPER_IGNORES_TERM === "1") {
+    spawn("sh", ["-c", "trap '' TERM; exec sleep 301"], { detached: true, stdio: "ignore" }).unref();
     return;
   }
   spawn("sleep", ["301"], { detached: true, stdio: "ignore" }).unref();
