@@ -1962,7 +1962,10 @@ export class OpenCodeThreadSession {
    * **`turn.aborted`**, not `turn.completed`.
    *
    * Interrupt is **turn-scoped**: a Stop aimed at a turn that is no longer the
-   * active one is a no-op, so it cannot kill the next turn (§4.1).
+   * active one is a no-op, so it cannot kill the next turn (§4.1). So is a
+   * second Stop of a turn already interrupted — unless the first one's abort
+   * failed (`failedStopTurnId`): the turn is still running on our books, and
+   * a retry is how the user stops it.
    */
   async interruptTurn(turnId?: string): Promise<void> {
     // An interrupt already under way — another Stop, a failed admission's
@@ -1974,7 +1977,11 @@ export class OpenCodeThreadSession {
       return;
     }
     const target = turnId ?? activeTurnId;
-    if (target !== undefined && this.state.interruptedTurnId === target) {
+    if (
+      target !== undefined &&
+      this.state.interruptedTurnId === target &&
+      this.state.failedStopTurnId !== target
+    ) {
       return;
     }
 
@@ -1988,6 +1995,7 @@ export class OpenCodeThreadSession {
       if (target !== undefined) {
         this.state.interruptedTurnId = target;
       }
+      this.state.failedStopTurnId = undefined;
       this.state.reconcileIdleStatus = true;
       this.state.awaitingBusyAfterInterruption = false;
       const admission = this.state.promptAdmission;
@@ -2036,6 +2044,11 @@ export class OpenCodeThreadSession {
         }
         cancellation.complete();
       } catch (error) {
+        // The abort failed: the turn is still the thread's, and the user's
+        // next Stop of it tries again rather than finding it interrupted.
+        if (target !== undefined && this.state.activeTurnId === target) {
+          this.state.failedStopTurnId = target;
+        }
         cancellation.complete(error);
         throw error;
       } finally {

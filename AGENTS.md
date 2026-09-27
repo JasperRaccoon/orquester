@@ -1291,7 +1291,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   its newest row rode), then every live run `stopped`, each "Stopped by a rewind."; a run's closer
   rides no turn, so no revert drops it, whichever of the host's `thread.reverted` and these rows
   lands first. After it the source session, then its tree (`abortDescendants`), is aborted on the
-  server, their frames — the aborts' own — already a foreign session's.
+  server, their frames — the aborts' own — already a foreign session's. (9) A Stop whose
+  `POST …/abort` failed leaves the turn running on our books (`failedStopTurnId`), and the next Stop
+  of that turn asks the server again: it used to find the turn already interrupted and do nothing,
+  so a turn whose first Stop failed could not be stopped. It asks again whether or not the stream
+  acknowledged that abort: an idle that came while it was pending settles nothing, so the turn would
+  stay running.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

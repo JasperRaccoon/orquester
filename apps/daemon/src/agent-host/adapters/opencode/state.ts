@@ -692,6 +692,14 @@ export interface OpenCodeSessionState {
    */
   interrupting: boolean;
   interruptedTurnId?: string;
+  /**
+   * The turn a Stop failed to end: its `POST …/abort` failed, so the turn is
+   * still the thread's (acknowledged on the stream or not — an idle that came
+   * while the abort was pending settles nothing). A Stop of the turn already
+   * interrupted is otherwise nothing (`interruptTurn`); this one may be tried
+   * again. Cleared when an interrupt begins and when the interruption ends.
+   */
+  failedStopTurnId?: string;
   reconcileIdleStatus: boolean;
   awaitingBusyAfterInterruption: boolean;
   /**
@@ -846,6 +854,7 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
  */
 export function endInterruption(state: OpenCodeSessionState): void {
   state.interruptedTurnId = undefined;
+  state.failedStopTurnId = undefined;
   state.reconcileIdleStatus = false;
   state.awaitingBusyAfterInterruption = false;
   state.idleAfterInterrupt = false;

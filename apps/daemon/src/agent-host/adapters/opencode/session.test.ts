@@ -3325,6 +3325,49 @@ test("after a Stop whose abort request failed, the stopped turn is no turn sent 
   harness.dispose();
 });
 
+test("a Stop whose abort request failed can be retried: the next Stop asks the server again and ends the turn — whether or not the stream acknowledged the first", async () => {
+  // The abort's answer is an error, and nothing on the stream said the run
+  // stopped (probe PZ) — or the stream did, and the run's idle came while the
+  // abort was pending, which the failed Stop never settles the turn with.
+  for (const acknowledged of [false, true]) {
+    const harness = makeHarness();
+    const session = await startSession(harness);
+    const sessionId = session.sessionId;
+    const stopped = await turnStreaming(harness, session);
+    const abortPath = `/session/${sessionId}/abort`;
+    const aborts = (): number =>
+      harness.fake.requests.filter((request) => request.method === "POST" && request.path === abortPath).length;
+    harness.fake.overrides.set(`POST ${abortPath}`, async () => {
+      if (acknowledged) {
+        pushAll(harness.fake, [
+          { type: "session.error", properties: { sessionID: sessionId, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
+          { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+          { type: "session.idle", properties: { sessionID: sessionId } }
+        ]);
+        await drainedWith(harness, sessionId, "during the abort");
+      }
+      return new Response("boom", { status: 500 });
+    });
+    await assert.rejects(session.interruptTurn(stopped.turnId));
+    assert.deepEqual(eventsOfType(harness.events, "turn.aborted"), [], `acknowledged: ${acknowledged} — the first Stop ended nothing`);
+    const sent = aborts();
+
+    // The user presses Stop again.
+    await session.interruptTurn(stopped.turnId);
+    assert.equal(aborts() - sent, 1, `acknowledged: ${acknowledged} — the retry asks the server again`);
+    assert.deepEqual(
+      eventsOfType(harness.events, "turn.aborted").map((event) => event.turnId),
+      [stopped.turnId],
+      `acknowledged: ${acknowledged} — and ends the turn`
+    );
+    // A Stop of a turn the last Stop ended is still nothing.
+    await session.interruptTurn(stopped.turnId);
+    assert.equal(aborts() - sent, 1);
+    await session.stop({ reason: "test", hostInitiated: true });
+    harness.dispose();
+  }
+});
+
 test("after a Stop, a busy from before the stopped run's idle ends nothing: a reply to an unclaimed prompt after it still opens no turn", async () => {
   const harness = makeHarness();
   const session = await startSession(harness);
