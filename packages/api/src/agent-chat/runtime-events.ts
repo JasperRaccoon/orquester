@@ -786,7 +786,11 @@ export interface TaskStartedPayload extends TaskAgentLinkage {
    * relaunch's own prompt — a resumed Claude agent's message, a Grok
    * `resume_from`'s, an OpenCode `task_id` re-prompt's, a Codex follow-up's —
    * when the provider reports one. Absent when it does not, and never on a
-   * shell or a monitor: a shell's command is its description.
+   * shell or a monitor: a shell's command is its description. A start
+   * emitted before the provider could refuse the launch keeps the request it
+   * carried — a Grok spawn whose own card the user declined (fixture 25,
+   * turn 2), which ends `stopped` with the provider's refusal: once emitted,
+   * a start cannot be withdrawn.
    *
    * It is what the agent's drill-in shows at its top (spec §7.6, "its prompt
    * at the top"). Ingestion keeps it on the `task.started` row as

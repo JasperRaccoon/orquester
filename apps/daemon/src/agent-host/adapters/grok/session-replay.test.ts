@@ -347,6 +347,43 @@ test("25 replayed, supervised: a subagent's own write asks on the PARENT's sessi
       [["completed", "done"]],
       "allowed, the child wrote its file and finished"
     );
+
+    // Turn 2: the spawn's own card declined. The call fails ("User rejected
+    // the execution for tool `spawn_subagent`") and no subagent is spawned.
+    const SPAWN_2 = "call-d288c474-db56-4180-813b-74576843d412-1";
+    const second = await send(r, "spawn another writer");
+    const declinedCard = (await r.waitForNth(3, isCard, "turn 2's spawn card")) as Extract<
+      RuntimeEvent,
+      { type: "request.opened" }
+    >;
+    assert.equal((declinedCard.payload.args as { toolCallId?: string }).toolCallId, SPAWN_2);
+    await r.adapter.respondToApproval("t1", declinedCard.requestId!, "decline");
+    const secondDone = (await r.waitForNth(2, isTurnCompleted, "turn 2")) as Extract<
+      RuntimeEvent,
+      { type: "turn.completed" }
+    >;
+    assert.equal(secondDone.turnId, second);
+    const declined = r.events.filter(
+      (event) => event.type.startsWith("task.") && (event.payload as { taskId?: string }).taskId === SPAWN_2
+    );
+    assert.deepEqual(
+      declined.map((event) => [event.type, (event.payload as { status?: string }).status]),
+      [
+        ["task.started", undefined],
+        ["task.completed", "stopped"]
+      ],
+      "a run the user declined ends stopped — never a failed agent that never existed"
+    );
+    assert.equal(
+      (declined[1]!.payload as { summary?: string }).summary,
+      "User rejected the execution for tool `spawn_subagent`",
+      "with the CLI's own word for why"
+    );
+    assert.match(
+      String((declined[0]!.payload as { prompt?: string }).prompt),
+      /child-b\.txt/,
+      "its start keeps the request that was declined: emitted before the card, it cannot be withdrawn"
+    );
   } finally {
     await r.dispose();
   }

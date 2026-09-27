@@ -1286,7 +1286,10 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   child session; `subagent_progress` re-arms it; `subagent_finished` ends it, once, with its clean
   answer and counters. The call's `SubagentCompleted`, a poll or a kill answer end it only if that
   never came. A background launch and a run past its await budget go on without their call; a Stop
-  never sends a foreground run to the background.
+  never sends a foreground run to the background. A launch no `subagent_spawned` joined never had a
+  child: its call failing (a declined card, a refusal) ends its agent `stopped` with the CLI's text,
+  and a Stop cutting it ends it `stopped`, "Stopped before it started." (observation 49); only a
+  run that started fails.
 - **Its child session's frames** are its own rows and touch nothing of the parent's.
 - **A resume** starts the same task again under the new call; its new id joins through
   `resumed_from`, and its child session's words are messages of their own.
@@ -1297,7 +1300,12 @@ normaliser), `fold-seam.test.ts` (ingestion, the fold, the liveness registry) an
   child's live `user_message_chunk` (observation 38; fixture 15, line 98) repeats it after the start
   and stays dropped. None rides a start that opens no run: a `resume_from` naming an agent still
   live, which the CLI refuses ("must be completed"), still writes a start, but the agent never
-  received its prompt, and there it would head the running run. None rides a revival's start (the
+  received its prompt, and there it would head the running run. A start that opens a run the CLI
+  then refuses keeps the request it carried: supervised, the spawn asks after its first frame
+  (observation 49), so a declined spawn's start already names its prompt, and a start cannot be
+  withdrawn once emitted — the run ends `stopped` with the CLI's refusal ("User rejected the
+  execution for tool `spawn_subagent`", fixture 25 turn 2), and its drill-in reads the prompt as
+  the request that was declined, never as one an agent received. None rides a revival's start (the
   same run, re-emitted), an agent the CLI spawned itself with no call (a `/loop` fire, a goal's
   planner: its start is `subagent_spawned`, and the prompt reaches the client only afterwards, as
   the child's first `user_message_chunk`), a shell, a monitor, or a loop's or goal's own row —

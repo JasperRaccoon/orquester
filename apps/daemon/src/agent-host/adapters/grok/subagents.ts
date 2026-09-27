@@ -413,8 +413,13 @@ function launchSubagent(
  * call fails the run it opened — unless the run had already gone on without
  * it (a cut call's failure is the call's own) — and a resume the CLI refused
  * (its source still running) fails the call and never the agent it named. A
- * resume answered with the completion tag proves the earlier run over,
- * whatever this adapter had seen of it.
+ * failed call no `subagent_spawned` joined never had a child: the user
+ * declined the spawn's own card (fixture 25, turn 2: "User rejected the
+ * execution for tool `spawn_subagent`") or the CLI refused it, so the run it
+ * opened ends `stopped`, with the CLI's text — a run cut short, as a run the
+ * user declined reads (observation 50) — never a failed agent that never
+ * existed. A resume answered with the completion tag proves the earlier run
+ * over, whatever this adapter had seen of it.
  */
 function settleSubagentLaunch(
   state: GrokNormalizerState,
@@ -435,7 +440,14 @@ function settleSubagentLaunch(
     if (launch.detached || !track.live) {
       return [];
     }
-    return closeSubagent(state, track, "failed", "cli", toolContentText(update.content), raw);
+    return closeSubagent(
+      state,
+      track,
+      launch.joined ? "failed" : "stopped",
+      "cli",
+      toolContentText(update.content),
+      raw
+    );
   }
   learnSubagentIds(state, launch, update);
   const output = asRecord(update.rawOutput);

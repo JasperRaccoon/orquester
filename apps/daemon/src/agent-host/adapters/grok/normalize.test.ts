@@ -495,16 +495,29 @@ test("a foreground spawn_subagent is a roster agent, started with its call, sett
   assert.equal(turnUsage(settled)?.hasSubagents, true, "the turn ran a subagent");
 });
 
-test("a failed spawn settles its agent failed, with the reason", () => {
+test("a spawn the CLI refused before any child ran ends its agent stopped, with the CLI's reason", () => {
+  // No `subagent_spawned` joined the launch: the user declined its card
+  // (fixture 25, turn 2) or the CLI refused it — the run never started, so it
+  // ends short, as a run the user cut short does (observation 50).
   const grok = normalizer();
   startedBy(grok, "call-s1", { prompt: "p", description: "nested", subagent_type: "explore" });
-  const failed = endedBy(
+  const ended = endedBy(
     grok,
     spawnEnd("call-s1", "failed", "max_depth_exceeded: a subagent cannot spawn subagents")
   );
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0]!.payload.status, "stopped");
+  assert.equal(ended[0]!.payload.summary, "max_depth_exceeded: a subagent cannot spawn subagents");
+});
+
+test("a failed spawn whose child ran settles its agent failed, with the reason", () => {
+  const grok = normalizer();
+  startedBy(grok, "call-s1", { prompt: "p", description: "nested", subagent_type: "explore" });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "nested"));
+  const failed = endedBy(grok, spawnEnd("call-s1", "failed", "tool_execution_failed: the child crashed"));
   assert.equal(failed.length, 1);
   assert.equal(failed[0]!.payload.status, "failed");
-  assert.match(failed[0]!.payload.summary ?? "", /max_depth_exceeded/);
+  assert.match(failed[0]!.payload.summary ?? "", /the child crashed/);
 });
 
 test("a background spawn outlives its call and its turn; Stop or exit closes it", () => {
@@ -606,6 +619,7 @@ test("a foreground spawn its turn cut with no CLI end stays live until Stop", ()
   // Stop, the session's stop or the exit ends the run.
   const grok = normalizer();
   startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
+  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
   grok.endTurn();
   const late = grok.handleSessionUpdate(spawnEnd("call-s1", "failed", "cancelled"));
   assert.deepEqual(

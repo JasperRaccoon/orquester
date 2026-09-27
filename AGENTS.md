@@ -1449,19 +1449,23 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the call itself is the agent's own row. A run that ends short is `subagent_finished {status:
   "cancelled", error}` every way it does — a kill, a Stop, a declined tool, the runtime's turn cap
   ("max turns reached (limit: 1)"); the CLI never said `failed`, so the run reads `stopped` and its
-  `error` is the row's reason (a bare "Stopped" before). The scheduler (`/loop`, `scheduler_create`)
-  reports by methods of its own, `_x.ai/scheduled_task_created` / `_fired` / `_deleted` (a peer
-  warning per frame before they were registered — one per fire of a week-long loop), and `/goal` by
-  `goal_updated` on the private channel (an "unmapped" warning every few seconds of a goal run):
-  each loop and the goal is a roster row, typed `scheduled` / `goal`, which the roster folds to a
-  kind of its own, `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what it is, a metrics line
-  of its own ("scheduled prompt"; "goal · 48.4k tok", the count the goal reports), a live loop
-  `Scheduled` and a live goal `Active` rather than "Working", a settled one's line its end reason
-  ("Token budget reached: …"), never a shell's row, and never counted or token-summed as work
-  (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) — background, and
-  `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain (its work does,
-  each fire and each planner being a subagent the CLI spawns itself: an agent row under its own id,
-  whose end wakes the parent), and the open tab's own liveness skips both
+  `error` is the row's reason (a bare "Stopped" before). A spawn the user declined never runs: its
+  call fails ("User rejected the execution for tool `spawn_subagent`", fixture 25 turn 2) with no
+  `subagent_spawned` joined to it, so its agent ends `stopped` with that text — never a failed agent
+  that never existed — and its start, emitted before the card, keeps the prompt that was declined (a
+  start cannot be withdrawn); only a run that started fails. The scheduler (`/loop`,
+  `scheduler_create`) reports by methods of its own, `_x.ai/scheduled_task_created` / `_fired` /
+  `_deleted` (a peer warning per frame before they were registered — one per fire of a week-long
+  loop), and `/goal` by `goal_updated` on the private channel (an "unmapped" warning every few
+  seconds of a goal run): each loop and the goal is a roster row, typed `scheduled` / `goal`, which
+  the roster folds to a kind of its own, `loop` / `goal` (`RuntimeSubagent.kind`): chipped as what
+  it is, a metrics line of its own ("scheduled prompt"; "goal · 48.4k tok", the count the goal
+  reports), a live loop `Scheduled` and a live goal `Active` rather than "Working", a settled one's
+  line its end reason ("Token budget reached: …"), never a shell's row, and never counted or
+  token-summed as work (`deriveAgentPanelModel`: a goal's count is its turns' and agents' tokens) —
+  background, and `INERT_TASK_TYPES` in the liveness registry, so neither holds a deploy's drain
+  (its work does, each fire and each planner being a subagent the CLI spawns itself: an agent row
+  under its own id, whose end wakes the parent), and the open tab's own liveness skips both
   (`deriveBackgroundLiveness` in the store), agreeing with the host, the tab strip, the Attention
   Center, pushes and the account-switch gate that a thread with only a loop or a goal live is idle.
   A fire notes itself on the loop's row and a goal's change of phase on the goal's, in place (a
