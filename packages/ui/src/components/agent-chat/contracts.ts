@@ -178,10 +178,15 @@ export interface ChatTimelineProps {
    */
   scroll?: TimelineScrollPosition | null | undefined;
   /**
-   * Publishes the reading position as the user scrolls: the thread's view
-   * keeps it for its paint hold, and the timeline itself writes the thread's
-   * LRU (debounced — never for a drill-in); a drill-in hands it to its
-   * per-agent memory.
+   * Publishes the reading position as the user scrolls (one measurement per
+   * frame). The thread's view passes its store's `rememberScroll`, which
+   * writes `slice.scroll`, sets `follow` from `atEnd` and persists the §7.2
+   * LRU entry at once — a no-op while the view paints a held timeline (the
+   * §7.1 paint hold). The timeline also writes the same action itself,
+   * debounced and flushed on unmount and on a thread switch: a second write
+   * of the thread's LRU, never made for a drill-in. A drill-in hands the
+   * position to its per-agent memory (`roster/drill-in-memory.ts`), never the
+   * LRU.
    */
   onScrollPositionChange?: ((position: TimelineScrollPosition) => void) | undefined;
   /**

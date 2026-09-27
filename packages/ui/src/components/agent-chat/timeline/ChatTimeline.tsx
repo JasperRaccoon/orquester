@@ -353,10 +353,14 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   /**
    * Writes the reading position through W11's store action, debounced.
    *
-   * The `onScrollPositionChange` prop feeds the thread view's own paint-hold
-   * copy — and, for a drill-in, the view's per-agent memory
-   * (`roster/drill-in-memory.ts`); **this** is what lands in the §7.2
-   * 100-entry LRU. Two rules:
+   * The `onScrollPositionChange` prop is the host's: the thread view passes
+   * the same store action, which writes `slice.scroll`, sets `follow` and
+   * persists the §7.2 100-entry LRU entry on every published position (a
+   * no-op during its §7.1 paint hold); a drill-in hands the position to the
+   * view's per-agent memory (`roster/drill-in-memory.ts`). **This** is the
+   * timeline's own write of the thread's LRU — for the thread's view a second
+   * one, which also keeps the last position when a host passes nothing. Two
+   * rules:
    *
    *  - it is debounced, so a flick is one write rather than sixty, and the
    *    pending write is flushed on unmount so leaving a tab still records where

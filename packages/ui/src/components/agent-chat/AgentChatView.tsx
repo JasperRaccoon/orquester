@@ -624,11 +624,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [active, sessionId, actions]);
-  // The composer keeps the same precedence inside its shell, where this
-  // listener stands down: with a child open, its Escape leaves the drill-in
-  // before it would stop the parent's turn (`composerEscapeAction`). It gets
-  // `closeDrillIn` — Back's own door, so the agent's memory is left as Back
-  // leaves it — only while a child is open: that is how it knows one is.
 
   // §3.4's account chip. The HEAD is the authority — the host records the
   // switch there first — with the tab summary as the fallback for a thread
@@ -999,7 +994,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 rewindTargets={rewindTargets}
                 onRewind={paintOnly ? noop : rewindToTarget}
                 active={active}
-                // Escape in the composer leaves an open drill-in first (§7.6).
+                // Escape in the composer leaves an open drill-in first (§7.6):
+                // the composer keeps the shell's precedence inside itself, where
+                // the shell's listener stands down, so with a child open its
+                // Escape leaves the drill-in before it would stop the parent's
+                // turn (`composerEscapeAction`). It gets `closeDrillIn` — Back's
+                // own door, so the agent's memory is left as Back leaves it —
+                // only while a child is open: that is how it knows one is.
                 onLeaveDrillIn={drillInAgentId !== null ? closeDrillIn : undefined}
                 actions={composerActions}
                 onHeightChange={setComposerHeight}

@@ -588,13 +588,6 @@ export function historyTurns(pages: readonly ThreadHistoryPage[]): ThreadHistory
 }
 
 /**
- * Whether anything older can be asked for: until a page has landed, the
- * snapshot's `hasOlder` — or the window having evicted a row since that
- * snapshot (`windowEvicted`), which makes older history exist whatever the
- * snapshot said; then the oldest page's own cursor — the one that reached turn
- * 1 answers `null`. Never without an index.
- */
-/**
  * Whether the thread's retained window has dropped rows — retention evicted
  * something, the parent's rows or any agent's. The client cannot see a row
  * that left, only these traces of it: the host's snapshot said older history
@@ -618,6 +611,13 @@ export function windowHasDropped(
   );
 }
 
+/**
+ * Whether anything older can be asked for: until a page has landed, the
+ * snapshot's `hasOlder` — or the window having evicted a row since that
+ * snapshot (`windowEvicted`), which makes older history exist whatever the
+ * snapshot said; then the oldest page's own cursor — the one that reached turn
+ * 1 answers `null`. Never without an index.
+ */
 export function canLoadOlderHistory(history: AgentChatHistoryState): boolean {
   const oldest = history.pages[0];
   if (oldest !== undefined) {
@@ -742,7 +742,12 @@ export function liveTurnIdsOf(items: readonly ThreadItem[], turns: readonly Turn
   return turnIds;
 }
 
-/** The turn a projected row belongs to, as far as the row itself says. */
+/**
+ * The turn a projected row belongs to, as far as the row itself says. Only
+ * the thread's own rows reach it, where a fold row's `turnId` is its turn; a
+ * drill-in's fold row carries a fold key there (`<turn>@<prompt id>`), and a
+ * drill-in has no history section.
+ */
 function rowTurnId(row: AgentChatTimelineRow): string | null {
   switch (row.kind) {
     case "message":

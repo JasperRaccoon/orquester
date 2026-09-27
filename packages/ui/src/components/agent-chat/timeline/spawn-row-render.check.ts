@@ -4,8 +4,9 @@
  * time — "Kicked off 3 subagents" live, "Ran 3 subagents" settled (T3's
  * `deriveAgentSpawnSummary`) — in both of its states. T3 renders every work
  * entry carrying `agentSpawn` with its spawn row (`SimpleWorkEntryRow`); a
- * settled batch here used to fall through to a plain tool row, its label the
- * first agent's description and no members to open.
+ * settled batch here used to fall through to a plain tool row, labelled with
+ * its entry's merged detail — the latest-merged member row's, usually the
+ * last-finished member's result — and no members to open.
  *
  * Static markup only — no DOM, no effects — like every other `*.check.ts`.
  */

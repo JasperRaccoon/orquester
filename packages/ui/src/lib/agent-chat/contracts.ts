@@ -420,6 +420,13 @@ export type AgentChatTimelineRow =
       kind: "turn-fold";
       id: string;
       createdAt: string;
+      /**
+       * The fold's KEY (`timelineFoldKeys` in `rows.logic.ts`), which names its
+       * toggle and its row id: the turn id in the thread's own timeline, and
+       * in a drill-in, after a launch prompt, `<turn>@<prompt message id>` —
+       * no turn id at all. Only the thread's own rows reach the readers that
+       * take it for a turn (`history.logic`'s `rowTurnId`).
+       */
       turnId: string;
       label: string;
       expanded: boolean;
