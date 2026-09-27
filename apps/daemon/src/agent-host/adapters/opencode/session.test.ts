@@ -2010,6 +2010,15 @@ async function rewindPast(
  * adapter's rows still reach the log through ingestion — before them.
  */
 function rostersAfterRevert(before: readonly DomainEvent[], after: readonly DomainEvent[]): string[][] {
+  return foldsAfterRevert(before, after, 0).map((fold) => fold.roster.map((row) => `${row.id}:${row.status}`));
+}
+
+/** {@link rostersAfterRevert}'s two folds, the revert keeping the first `turnCount` turns. */
+function foldsAfterRevert(
+  before: readonly DomainEvent[],
+  after: readonly DomainEvent[],
+  turnCount: number
+): ReturnType<typeof applyDomainEvent>[] {
   const reverted = (seq: number): DomainEvent => ({
     seq,
     eventId: "reverted",
@@ -2019,17 +2028,29 @@ function rostersAfterRevert(before: readonly DomainEvent[], after: readonly Doma
     causationEventId: null,
     metadata: {},
     type: "thread.reverted",
-    payload: { turnCount: 0 }
+    payload: { turnCount }
   });
-  const rowsOf = (log: DomainEvent[]): string[] =>
-    log.reduce(applyDomainEvent, createEmptyThreadState()).roster.map((row) => `${row.id}:${row.status}`);
+  const foldOf = (log: DomainEvent[]) => log.reduce(applyDomainEvent, createEmptyThreadState());
   const revertLast = [...after, reverted(after.length + 1)];
   const revertFirst = [
     ...before,
     reverted(before.length + 1),
     ...after.slice(before.length).map((event, index) => ({ ...event, seq: before.length + 2 + index }) as DomainEvent)
   ];
-  return [rowsOf(revertLast), rowsOf(revertFirst)];
+  return [foldOf(revertLast), foldOf(revertFirst)];
+}
+
+/** A call's rows, keyed as the timeline keys them (`tool:<turn>:<id>`), each with whether a completion closed it. */
+function callRowsIn(fold: ReturnType<typeof applyDomainEvent>): Map<string, boolean> {
+  const rows = new Map<string, boolean>();
+  for (const activity of fold.activities) {
+    if (!activity.activityKind.startsWith("tool.") || activity.activityKind === "tool.output") continue;
+    const toolUseId = (activity.payload as { toolUseId?: string } | null)?.toolUseId;
+    if (toolUseId === undefined) continue;
+    const key = `tool:${activity.turnId ?? "no-turn"}:${toolUseId}`;
+    rows.set(key, (rows.get(key) ?? false) || activity.activityKind === "tool.completed");
+  }
+  return rows;
 }
 
 /** The child's running call as 1.18.32's cleanup closes it when an abort cuts it (README observation 29). */
@@ -2122,6 +2143,78 @@ test("a rewind ends a relaunched child the fork leaves behind: aborted, its call
   await drainedWith(harness, session.sessionId, "after its late end");
   assert.deepEqual(rowsOfAgent(harness.events, after, "ses_bg"), []);
   assert.equal(livenessOf(harness).liveness("thread-1"), null);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+/** One of the child's calls, running, as a `bash` part reports it — {@link childCall} under another id. */
+function childCallNamed(childId: string, callId: string): unknown {
+  const frame = JSON.parse(JSON.stringify(childCall(childId))) as { properties: { part: Record<string, unknown> } };
+  frame.properties.part.id = `prt_${callId}`;
+  frame.properties.part.callID = callId;
+  return frame;
+}
+
+test("a rewind closes a left-behind child's calls on the turns it keeps only: a call whose rows ride a removed turn goes with them, and leaves no lone closer", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turnOf = async (input: string, frames: unknown[]): Promise<string> => {
+    const turn = await session.sendTurn({ threadId: "thread-1", input, attachments: [], interactionMode: "default" });
+    pushAll(harness.fake, [
+      { type: "message.updated", properties: { sessionID: sessionId, info: { id: turn.turnId, role: "user", sessionID: sessionId } } },
+      { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+      ...frames,
+      { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+      { type: "session.idle", properties: { sessionID: sessionId } }
+    ]);
+    await waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId);
+    return turn.turnId;
+  };
+  // The first turn launches a background child, whose calls A and D run in it;
+  // the second turn — the one the rewind removes — sees its call B, and D
+  // again; between turns, its call C.
+  const kept = await turnOf("delegate it", [
+    ...childLaunch({ sessionId, childId: "ses_bg", callId: "call_bg", description: "list files", background: true }),
+    childCallNamed("ses_bg", "call_a"),
+    childCallNamed("ses_bg", "call_d")
+  ]);
+  const removed = await turnOf("go on", [childCallNamed("ses_bg", "call_b"), childCallNamed("ses_bg", "call_d")]);
+  pushAll(harness.fake, [childCallNamed("ses_bg", "call_c")]);
+  await drainedWith(harness, sessionId, "between turns");
+
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  const before = host.log();
+  const fed = harness.events.length;
+  harness.fake.faithfulForks = true;
+  harness.fake.messages = [
+    { info: { id: kept, role: "user" }, parts: [] },
+    { info: { id: "msg_kept_reply", role: "assistant" }, parts: [] },
+    { info: { id: removed, role: "user" }, parts: [] },
+    { info: { id: "msg_removed_reply", role: "assistant" }, parts: [] }
+  ];
+  harness.fake.children = [{ id: "ses_bg" }];
+  await session.rollbackThread(1, { firstRemovedTurnId: removed, droppedTurnIds: [removed], retainedTurnIds: [kept] });
+  const rewound = harness.events.slice(fed);
+  assert.deepEqual(
+    eventsOfType(rewound, "item.completed")
+      .map((event) => `${event.itemId}@${event.turnId === kept ? "kept" : event.turnId === undefined ? "no turn" : event.turnId}`)
+      .sort(),
+    ["call_a@kept", "call_c@no turn", "call_d@kept"],
+    "B's only rows ride the removed turn: no closer; D's newest kept row is the kept turn's"
+  );
+  assert.deepEqual(taskEnds(rewound), ["ses_bg:stopped:Stopped by a rewind."]);
+
+  // Folded with the host's revert, whichever lands first: no call of the
+  // child is left open, and nothing of B remains.
+  await host.ingest(rewound);
+  for (const fold of foldsAfterRevert(before, host.log(), 1)) {
+    const rows = callRowsIn(fold);
+    assert.deepEqual([...rows.entries()].filter(([, closed]) => !closed), [], "no open call");
+    assert.deepEqual([...rows.keys()].filter((key) => key.endsWith(":call_b")), [], "no lone closer");
+    assert.equal(fold.roster.find((row) => row.id === "ses_bg")?.status, "interrupted");
+  }
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

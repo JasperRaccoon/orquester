@@ -1290,18 +1290,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   dropped: a child still working (a background run outliving its turn, a run relaunched after a
   Stop, whose start rides no turn a revert could drop) stayed `running` in the roster, kept liveness
   `working` — holding every code-only deploy's drain until the session exited — and no Stop could
-  close it. Before the re-point every call a child still has open is closed `failed` (on the turn
-  its newest row rode), then every live run `stopped`, each "Stopped by a rewind."; a run's closer
-  rides no turn, so no revert drops it, whichever of the host's `thread.reverted` and these rows
-  lands first. After it the source session, then its tree (`abortDescendants`), is aborted on the
-  server, their frames — the aborts' own — already a foreign session's. (9) A Stop whose
-  `POST …/abort` failed still ends the turn once the stream says the run is over — `turn.aborted`,
-  the session back to `ready`, as the Stop ends it — whether the run's idle came while the request
-  was pending (`deferredIdle`) or after it failed (`failedStopTurnId`). Until then the turn is still
-  the thread's, and the next Stop of it asks the server again. A second Stop used to find the turn
-  already interrupted and do nothing, and an idle that came while the abort was pending was parked
-  where nothing read it: the turn stayed active — the thread reading working, every deploy's drain
-  held — and no Stop could end it.
+  close it. Before the re-point every call a child still has open is closed `failed` — on the newest
+  turn its rows rode that the rewind keeps, and not at all when only removed turns carried it (the
+  host's revert drops those rows, and a closer there could only survive as a lone failed row) — then
+  every live run `stopped`, each "Stopped by a rewind."; a run's closer rides no turn, so no revert
+  drops it, whichever of the host's `thread.reverted` and these rows lands first. After it the
+  source session, then its tree (`abortDescendants`), is aborted on the server, their frames — the
+  aborts' own — already a foreign session's. (9) A Stop whose `POST …/abort` failed still ends the
+  turn once the stream says the run is over — `turn.aborted`, the session back to `ready`, as the
+  Stop ends it — whether the run's idle came while the request was pending (`deferredIdle`) or after
+  it failed (`failedStopTurnId`). Until then the turn is still the thread's, and the next Stop of it
+  asks the server again. A second Stop used to find the turn already interrupted and do nothing, and
+  an idle that came while the abort was pending was parked where nothing read it: the turn stayed
+  active — the thread reading working, every deploy's drain held — and no Stop could end it.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

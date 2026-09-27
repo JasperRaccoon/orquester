@@ -2338,7 +2338,8 @@ export class OpenCodeThreadSession {
       for (const event of closeChildWorkLeftBehind(
         this.state,
         this.normalizeContext(),
-        REWIND_LEFT_BEHIND_REASON
+        REWIND_LEFT_BEHIND_REASON,
+        new Set(target?.droppedTurnIds ?? [])
       )) {
         this.emit(event);
       }

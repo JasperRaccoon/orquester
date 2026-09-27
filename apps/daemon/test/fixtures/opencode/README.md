@@ -1079,10 +1079,11 @@ stops reading the source's frames. A child still working (a background run, a ru
 Stop) then stayed `running` on the adapter's books for good: in the roster, in the liveness registry
 — holding a deploy's drain until the session exited — and beyond any Stop, its own end dropped as a
 foreign session's frame. Before the re-point the adapter now closes what each child still has open
-(`closeChildWorkLeftBehind`): every call `failed`, then every live run `stopped`, "Stopped by a
-rewind."; after it, it aborts the source session, then its tree (`abortDescendants`), whose frames —
-the aborts' own — are by then a foreign session's. Built, not captured: no rewind with a live child
-has been captured.
+(`closeChildWorkLeftBehind`): every call `failed` — on the newest turn its rows rode that the rewind
+keeps, none when only removed turns carried it, since the host's revert drops those rows — then
+every live run `stopped`, "Stopped by a rewind."; after it, it aborts the source session, then its
+tree (`abortDescendants`), whose frames — the aborts' own — are by then a foreign session's. Built,
+not captured: no rewind with a live child has been captured.
 
 **A Stop whose abort request failed.** When `POST …/abort` fails (a 500, a timeout), the stream may
 already have said the run stopped — its `MessageAbortedError` and idle, fixture 06's order — or may

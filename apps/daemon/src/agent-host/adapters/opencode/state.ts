@@ -609,8 +609,14 @@ export interface OpenCodeOpenCall {
   tool: string;
   itemType: CanonicalItemType;
   title: string;
-  /** The turn its newest row rode, which its closing row rides too: one row per call and turn. */
-  turnId?: string;
+  /**
+   * Every turn its rows rode (`null`: none), the newest last. The timeline
+   * keys a call's row by its turn, so its closing row rides the newest of
+   * these a rewind keeps — never a turn the rewind removes: the host's revert
+   * drops that turn's rows, and a closer there would survive, if it landed
+   * after the revert, only as a lone failed row.
+   */
+  turns: (string | null)[];
 }
 
 /**

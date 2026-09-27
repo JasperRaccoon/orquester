@@ -73,6 +73,7 @@ import {
   openTurn,
   stepTotalTokens,
   type OpenCodeChildAgent,
+  type OpenCodeOpenCall,
   type OpenCodeSessionState,
   type OpenCodeStepUsage,
   type OpenCodeTextPartState
@@ -1236,19 +1237,34 @@ export const REWIND_LEFT_BEHIND_REASON = "Stopped by a rewind.";
  * The runs' rows ride no turn (none runs at a rewind: the host refuses one
  * mid-turn), so no revert drops them — however the host's `thread.reverted`
  * and these rows land against each other, and a relaunch's start rides no
- * turn either. A call's row rides the turn its newest row rode: one row per
- * call and turn.
+ * turn either. A call's closing row rides the newest turn its rows rode that
+ * the rewind keeps (`droppedTurnIds` names the ones it removes; a turnless row
+ * is kept): the timeline keys a call's row by its turn. A call whose rows all
+ * ride removed turns gets none — the revert drops those rows whichever lands
+ * first, and its closer could only survive as a lone failed row. (Without the
+ * host's list — a caller that predates it — every call closes on its newest.)
  */
 export function closeChildWorkLeftBehind(
   state: OpenCodeSessionState,
   ctx: NormalizeContext,
-  reason: string
+  reason: string,
+  droppedTurnIds: ReadonlySet<string> = new Set()
 ): RuntimeEvent[] {
   const out = new Emitter(state, ctx);
   for (const agent of state.childAgents.values()) {
     for (const [callId, call] of agent.openCalls ?? []) {
+      let kept: string | null | undefined;
+      for (let index = call.turns.length - 1; index >= 0 && kept === undefined; index -= 1) {
+        const turn = call.turns[index]!;
+        if (turn === null || !droppedTurnIds.has(turn)) {
+          kept = turn;
+        }
+      }
+      if (kept === undefined) {
+        continue;
+      }
       out.push({
-        ...out.base({ turnId: call.turnId, itemId: callId, agentId: agent.sessionId }),
+        ...out.base({ turnId: kept ?? undefined, itemId: callId, agentId: agent.sessionId }),
         type: "item.completed",
         payload: {
           itemType: call.itemType,
@@ -2323,14 +2339,17 @@ function noteChildCall(
     agent.openCalls?.delete(part.callID);
     return;
   }
-  const calls = (agent.openCalls ??= new Map());
+  const calls: Map<string, OpenCodeOpenCall> = (agent.openCalls ??= new Map());
+  const turn = turnId ?? null;
+  const turns = (calls.get(part.callID)?.turns ?? []).filter((seen) => seen !== turn);
+  turns.push(turn);
   // Re-inserted, so the oldest is the one the cap drops.
   calls.delete(part.callID);
   calls.set(part.callID, {
     tool: part.tool,
     itemType: toToolLifecycleItemType(part.tool),
     title: toolItemTitle(part),
-    ...(turnId !== undefined ? { turnId } : {})
+    turns
   });
   if (calls.size > OPEN_CALLS_PER_CHILD_MAX) {
     const oldest = calls.keys().next().value;
