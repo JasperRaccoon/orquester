@@ -13,8 +13,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyDomainEvent,
+  createEmptyThreadState,
   isMessageStreaming,
   messageStreamingContext,
+  type DomainEvent,
   type RuntimeEvent,
   type ThreadMessageItem
 } from "@orquester/api/agent-chat";
@@ -1979,6 +1982,205 @@ function taskEnds(events: readonly RuntimeEvent[]): string[] {
 function nextTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+/**
+ * Rewind the thread past `turnId`, the turn its session's first prompt opened:
+ * the fork keeps nothing before it. `children` is what `GET …/children`
+ * answers for the source session.
+ */
+async function rewindPast(
+  harness: Harness,
+  session: OpenCodeThreadSession,
+  turnId: string,
+  children: { id: string }[]
+): Promise<void> {
+  harness.fake.faithfulForks = true;
+  harness.fake.messages = [
+    { info: { id: turnId, role: "user" }, parts: [] },
+    { info: { id: "msg_turn_reply", role: "assistant" }, parts: [] }
+  ];
+  harness.fake.children = children;
+  await session.rollbackThread(1, { firstRemovedTurnId: turnId, droppedTurnIds: [turnId], retainedTurnIds: [] });
+}
+
+/**
+ * The roster once the host appends the rewind's `thread.reverted` (keeping no
+ * turn), in both orders it can land in against the rewind's own rows: after
+ * them, or — the host appends it once `rollbackThread` resolved, while the
+ * adapter's rows still reach the log through ingestion — before them.
+ */
+function rostersAfterRevert(before: readonly DomainEvent[], after: readonly DomainEvent[]): string[][] {
+  const reverted = (seq: number): DomainEvent => ({
+    seq,
+    eventId: "reverted",
+    threadId: "thread-1",
+    occurredAt: "2026-09-21T11:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    metadata: {},
+    type: "thread.reverted",
+    payload: { turnCount: 0 }
+  });
+  const rowsOf = (log: DomainEvent[]): string[] =>
+    log.reduce(applyDomainEvent, createEmptyThreadState()).roster.map((row) => `${row.id}:${row.status}`);
+  const revertLast = [...after, reverted(after.length + 1)];
+  const revertFirst = [
+    ...before,
+    reverted(before.length + 1),
+    ...after.slice(before.length).map((event, index) => ({ ...event, seq: before.length + 2 + index }) as DomainEvent)
+  ];
+  return [rowsOf(revertLast), rowsOf(revertFirst)];
+}
+
+/** The child's running call as 1.18.32's cleanup closes it when an abort cuts it (README observation 29). */
+function childCallCut(childId: string): unknown {
+  const frame = JSON.parse(JSON.stringify(childCall(childId))) as { properties: { part: { state: unknown } } };
+  frame.properties.part.state = {
+    status: "error",
+    error: "Tool execution aborted",
+    metadata: { interrupted: true },
+    time: { start: 1, end: 2 }
+  };
+  return frame;
+}
+
+/** Every event after `from` that names `agentId` as its task or its owner. */
+function rowsOfAgent(events: readonly RuntimeEvent[], from: number, agentId: string): RuntimeEvent[] {
+  return events
+    .slice(from)
+    .filter(
+      (event) =>
+        event.agentId === agentId || (event.payload as { taskId?: string } | undefined)?.taskId === agentId
+    );
+}
+
+test("a rewind ends a relaunched child the fork leaves behind: aborted, its call and then its run closed, and nothing of it comes back", async () => {
+  // Probe PY: a child a Stop closed and the server's word relaunched — its
+  // relaunch start rides no turn, so no rewind drops it — then a rewind past
+  // the turn that launched it.
+  const harness = makeHarness();
+  harness.fake.statusMap = { ses_bg: { type: "busy" } };
+  const { session, sessionId } = await stoppedWithChild(harness);
+  const launchTurn = firstOfType(harness.events, "turn.started")!.turnId!;
+  const revival = nextStartOf(harness, "ses_bg");
+  pushAll(harness.fake, [...childStreams("ses_bg", "a.ts"), childCall("ses_bg")]);
+  assert.equal((await revival).turnId, undefined, "relaunched between turns");
+  await drainedWith(harness, sessionId, "after the relaunch");
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working");
+
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  const before = host.log();
+  const fed = harness.events.length;
+  const requestsBefore = harness.fake.requests.length;
+  // The child's abort ends its run on the server, which says so on the
+  // stream — by then a session the thread has left.
+  harness.fake.overrides.set("POST /session/ses_bg/abort", async () => {
+    pushAll(harness.fake, [
+      { type: "session.error", properties: { sessionID: "ses_bg", error: { name: "MessageAbortedError", data: { message: "Aborted" } } } },
+      childCallCut("ses_bg"),
+      ...runSettles("ses_bg")
+    ]);
+    await drainedWith(harness, session.sessionId, "as the child's abort answers");
+    return json(true);
+  });
+  await rewindPast(harness, session, launchTurn, [{ id: "ses_bg" }]);
+  const rewound = harness.events.slice(fed);
+
+  assert.deepEqual(
+    rewound
+      .filter((event) => event.type === "item.completed" || event.type === "task.completed")
+      .map((event) =>
+        event.type === "item.completed"
+          ? `call:${event.itemId}:${event.payload.status}:${event.payload.detail}`
+          : `task:${(event as Extract<RuntimeEvent, { type: "task.completed" }>).payload.taskId}:${event.payload.status}:${event.payload.summary}`
+      ),
+    ["call:call_child_ls:failed:Stopped by a rewind.", "task:ses_bg:stopped:Stopped by a rewind."],
+    "its open call first, then its run, each saying why"
+  );
+  assert.deepEqual(
+    harness.fake.requests
+      .slice(requestsBefore)
+      .filter((request) => request.method === "POST" && request.path.endsWith("/abort"))
+      .map((request) => request.path),
+    [`/session/${sessionId}/abort`, "/session/ses_bg/abort"],
+    "the source session, then every child, aborted on the server"
+  );
+  assert.equal(livenessOf(harness).liveness("thread-1"), null, "the drain is released");
+  await host.ingest(rewound);
+  assert.deepEqual(
+    rostersAfterRevert(before, host.log()),
+    [["ses_bg:interrupted"], ["ses_bg:interrupted"]],
+    "stopped, whichever of the host's revert and the rewind's rows lands first"
+  );
+
+  // Nothing of it comes back: a later Stop closes nothing, and its own end,
+  // late, is a frame of a session the thread left behind.
+  const after = harness.events.length;
+  await session.interruptTurn();
+  pushAll(harness.fake, runSettles("ses_bg"));
+  await drainedWith(harness, session.sessionId, "after its late end");
+  assert.deepEqual(rowsOfAgent(harness.events, after, "ses_bg"), []);
+  assert.equal(livenessOf(harness).liveness("thread-1"), null);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("a rewind ends a background child still running between turns: aborted, closed, and the drain released", async () => {
+  // Probe PR: no Stop at all — a child launched in the background outlives
+  // its turn, and the thread is rewound while it works.
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  const sessionId = session.sessionId;
+  const turn = await session.sendTurn({ threadId: "thread-1", input: "delegate it", attachments: [], interactionMode: "default" });
+  pushAll(harness.fake, [
+    { type: "message.updated", properties: { sessionID: sessionId, info: { id: turn.turnId, role: "user", sessionID: sessionId } } },
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } },
+    ...childLaunch({ sessionId, childId: "ses_bg", callId: "call_bg", description: "list files", background: true }),
+    { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: sessionId } }
+  ]);
+  await waitFor(harness, "turn.completed", (event) => event.turnId === turn.turnId);
+  // One call finished, one still running.
+  const finished = JSON.parse(JSON.stringify(childCall("ses_bg"))) as { properties: { part: Record<string, unknown> } };
+  finished.properties.part = {
+    ...finished.properties.part,
+    id: "prt_child_done",
+    callID: "call_child_done",
+    state: { status: "completed", title: "pwd", input: { command: "pwd" }, output: "/repo\n", metadata: { output: "/repo\n" }, time: { start: 1, end: 2 } }
+  };
+  pushAll(harness.fake, [
+    { type: "session.status", properties: { sessionID: "ses_bg", status: { type: "busy" } } },
+    finished,
+    childCall("ses_bg")
+  ]);
+  await drainedWith(harness, sessionId, "while it works");
+  assert.equal(livenessOf(harness).liveness("thread-1"), "working");
+
+  const host = createHostIngestion();
+  await host.ingest(harness.events);
+  const before = host.log();
+  const fed = harness.events.length;
+  await rewindPast(harness, session, turn.turnId, [{ id: "ses_bg" }]);
+  const rewound = harness.events.slice(fed);
+  assert.deepEqual(
+    rewound
+      .filter((event) => event.type === "item.completed" || event.type === "task.completed")
+      .map((event) => `${event.type}:${event.itemId ?? (event.payload as { taskId?: string }).taskId}:${event.payload.status}`),
+    ["item.completed:call_child_ls:failed", "task.completed:ses_bg:stopped"],
+    "the call it finished is not closed again"
+  );
+  assert.equal(livenessOf(harness).liveness("thread-1"), null);
+  await host.ingest(rewound);
+  assert.deepEqual(rostersAfterRevert(before, host.log()), [["ses_bg:interrupted"], ["ses_bg:interrupted"]]);
+
+  const after = harness.events.length;
+  pushAll(harness.fake, runSettles("ses_bg"));
+  await drainedWith(harness, session.sessionId, "after its late end");
+  assert.deepEqual(rowsOfAgent(harness.events, after, "ses_bg"), []);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
 
 test("a child whose abort frames beat the Stop's own close ends stopped — its own abort error, or its call's cleanup — never failed", async () => {
   for (const first of ["its abort error", "its call's cleanup"] as const) {

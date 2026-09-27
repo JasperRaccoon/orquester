@@ -39,6 +39,8 @@ import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachmen
 import { OpenCodeHttpError, isOpenCodeNotFound, type OpenCodeClient } from "./http.ts";
 import {
   NormalizerEmitter,
+  REWIND_LEFT_BEHIND_REASON,
+  closeChildWorkLeftBehind,
   closeLiveChildAgents,
   emitTerminalPermission,
   emitTerminalQuestion,
@@ -2045,9 +2047,12 @@ export class OpenCodeThreadSession {
   }
 
   /** `POST /session/<nonexistent>/abort` answers `200 true` — it proves nothing. */
-  private async abortSession(timeoutMs: number): Promise<void> {
+  private async abortSession(
+    timeoutMs: number,
+    sessionId: string = this.state.openCodeSessionId
+  ): Promise<void> {
     await this.client
-      .post<unknown>(openCodeRoutes.abort(this.state.openCodeSessionId), { timeoutMs })
+      .post<unknown>(openCodeRoutes.abort(sessionId), { timeoutMs })
       .catch((error: unknown) => {
         if (isOpenCodeNotFound(error)) {
           return;
@@ -2056,8 +2061,8 @@ export class OpenCodeThreadSession {
       });
   }
 
-  private async abortDescendants(): Promise<void> {
-    const visited = new Set([this.state.openCodeSessionId]);
+  private async abortDescendants(rootId: string = this.state.openCodeSessionId): Promise<void> {
+    const visited = new Set([rootId]);
     const visit = async (sessionId: string, abortIt: boolean): Promise<void> => {
       if (abortIt) {
         await withDeadline(
@@ -2090,7 +2095,7 @@ export class OpenCodeThreadSession {
     };
     // The whole fleet interrupt is bounded, however many children there are:
     // the runaway-fleet case is precisely when Stop has to work (§3.1).
-    await withDeadline(visit(this.state.openCodeSessionId, false), {
+    await withDeadline(visit(rootId, false), {
       label: "opencode descendant abort",
       timeoutMs: AGENT_HOST_DEADLINES.interruptAllMs
     }).catch(() => undefined);
@@ -2292,6 +2297,22 @@ export class OpenCodeThreadSession {
 
       this.rememberFork(list, forked);
       await this.settlePendingRequests().catch(() => undefined);
+      // The fork leaves the source session's children behind, and their work
+      // with the abandoned branch: closed on our books first — every open
+      // call, then every live run — while their frames are still ours to
+      // read; then aborted on the server, the source session first so it
+      // cannot start another while the tree is read (as a stop does), once
+      // the re-point has made every frame of theirs — the aborts' own
+      // included — a foreign session's.
+      const abandoned =
+        this.state.childAgents.size > 0 ? this.state.openCodeSessionId : undefined;
+      for (const event of closeChildWorkLeftBehind(
+        this.state,
+        this.normalizeContext(),
+        REWIND_LEFT_BEHIND_REASON
+      )) {
+        this.emit(event);
+      }
       repointSession(this.state, fork.id);
       // Every prompt the fork holds is the past, re-minted: a copied reply
       // whose frame reaches the stream after this — one its run never
@@ -2300,6 +2321,10 @@ export class OpenCodeThreadSession {
         if (entry?.info?.role === "user" && typeof entry.info.id === "string") {
           claimPrompt(this.state, entry.info.id);
         }
+      }
+      if (abandoned !== undefined) {
+        await this.abortSession(1_000, abandoned).catch(() => undefined);
+        await this.abortDescendants(abandoned);
       }
       this.updateRecord({ status: "ready" }, { activeTurnId: true });
       this.emit({

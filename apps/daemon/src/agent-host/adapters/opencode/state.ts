@@ -13,7 +13,12 @@
  * without a server.
  */
 
-import type { RuntimeMode, RuntimeTaskStatus, TurnTokenUsage } from "@orquester/api/agent-chat";
+import type {
+  CanonicalItemType,
+  RuntimeMode,
+  RuntimeTaskStatus,
+  TurnTokenUsage
+} from "@orquester/api/agent-chat";
 
 import type {
   OpenCodeMessageRole,
@@ -583,6 +588,27 @@ export interface OpenCodeChildAgent {
    * is relaunched, or the roster could not reopen it (`settleChildSurvival`).
    */
   startLaunchId?: string;
+  /**
+   * The child's calls still open — a `pending` or `running` frame and no
+   * terminal one yet — keyed by call id, each as its newest row was written.
+   * Only a rewind reads it (`closeChildWorkLeftBehind` in `normalize.ts`): once
+   * the thread is on the fork, the child's frames are a foreign session's and
+   * are dropped, so the ones that would close these never land. The newest
+   * {@link OPEN_CALLS_PER_CHILD_MAX}.
+   */
+  openCalls?: Map<string, OpenCodeOpenCall>;
+}
+
+/** How many open calls a child's record keeps ({@link OpenCodeChildAgent.openCalls}). */
+export const OPEN_CALLS_PER_CHILD_MAX = 64;
+
+/** A child's call still open, as its newest row named it — what its closing row repeats. */
+export interface OpenCodeOpenCall {
+  tool: string;
+  itemType: CanonicalItemType;
+  title: string;
+  /** The turn its newest row rode, which its closing row rides too: one row per call and turn. */
+  turnId?: string;
 }
 
 /**

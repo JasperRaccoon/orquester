@@ -1068,6 +1068,19 @@ request settles locally, whereas a reject would answer for them — and 1.18.32'
 rejects every other pending ask of that session with it. A request answered elsewhere while it is
 judged leaves the hold with its closing frame, and writes no row.
 
+**A rewind leaves the source's children behind.** A rewind forks the session at its cut (observation
+17, captured in fixture 10) and the thread moves to the fork. A child's parent is the session that
+launched it — its `session.created` names it (fixture 12), and 1.18.32 prompts a background run's
+answer into it (observation 27, read from the source) — so no child is the fork's, and the thread
+stops reading the source's frames. A child still working (a background run, a run relaunched after a
+Stop) then stayed `running` on the adapter's books for good: in the roster, in the liveness registry
+— holding a deploy's drain until the session exited — and beyond any Stop, its own end dropped as a
+foreign session's frame. Before the re-point the adapter now closes what each child still has open
+(`closeChildWorkLeftBehind`): every call `failed`, then every live run `stopped`, "Stopped by a
+rewind."; after it, it aborts the source session, then its tree (`abortDescendants`), whose frames —
+the aborts' own — are by then a foreign session's. Built, not captured: no rewind with a live child
+has been captured.
+
 ---
 
 ## Reproducing
