@@ -760,7 +760,10 @@ describe("its prompt at the top (§7.6): each launch's prompt heads the run it s
     const ids = kinds(rows);
     const at = (id: string) => ids.indexOf(id);
     assert.ok(at("message:agent-prompt:first") === 0, ids.join(", "));
-    assert.ok(at("turn-fold:turn-fold:t0") > at("message:agent-prompt:first"), "the first run's fold, under its prompt");
+    assert.ok(
+      at("turn-fold:turn-fold:t0@agent-prompt:first") > at("message:agent-prompt:first"),
+      `the first run's fold, under its prompt: ${ids.join(", ")}`
+    );
     assert.equal(at("working:working-indicator-row"), at("message:agent-prompt:again") + 1, "the current run's header");
     assert.ok(at("message:agent-prompt:again") > at("message:once"));
   });
@@ -902,6 +905,70 @@ describe("a launch prompt times only the rows right after it (content review I1)
       supportsConversationRollback: false
     });
     assert.deepEqual(foldLabels(rows), ["Worked for 16m 49s"], "from the prompt at 1 s, as before");
+  });
+});
+
+describe("a relaunch inside the same parent turn heads a run of its own (content review M1)", () => {
+  const launch = (id: string, at: number, prompt: string, toolUseId: string): ThreadItem =>
+    activity(
+      "task.started",
+      { taskId: "a1", agentKind: "agent", taskType: "subagent", title: "Survey", toolUseId, prompt },
+      { id, turnId: "t1", tone: "info", createdAt: stamp(at) }
+    );
+  const done = (id: string, at: number): ThreadItem =>
+    activity(
+      "tool.completed",
+      { itemType: "command_execution", toolUseId: `call-${id}`, title: id, command: id, status: "completed" },
+      { id, agentId: "a1", turnId: "t1", createdAt: stamp(at) }
+    );
+  const said = (id: string, at: number, text: string): ThreadItem =>
+    message("assistant", text, { id, agentId: "a1", turnId: "t1", createdAt: stamp(at) });
+  // Both runs ride the parent's turn `t1`: a Claude resume or a Codex follow-up can land inside it.
+  const items: ThreadItem[] = [
+    launch("L1", 1, "First.", "call-1"),
+    done("ls", 2),
+    said("once", 12, "Done once."),
+    launch("L2", 20, "Second.", "call-2"),
+    done("cat", 21),
+    said("twice", 30, "Done twice.")
+  ];
+  const settled = messageStreamingContext({
+    head: head({ session: { status: "ready", activeTurnId: null } }),
+    roster: [{ id: "a1", status: "completed" }]
+  });
+  const project = (collapsedTurnIds?: readonly string[]) =>
+    projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
+      items,
+      agentId: "a1",
+      messageStreaming: settled,
+      disclosures: { expandedGroupIds: [], ...(collapsedTurnIds ? { collapsedTurnIds } : {}) }
+    });
+
+  it("each run folds and is timed on its own, under its own prompt", () => {
+    const rows = project().stable.result;
+    const at = (id: string) => rows.findIndex((row) => row.id === id);
+    const folds = rows.filter((row): row is Extract<AgentChatTimelineRow, { kind: "turn-fold" }> => row.kind === "turn-fold");
+    assert.deepEqual(folds.map((fold) => fold.label), ["Worked for 11s", "Worked for 10s"]);
+    assert.ok(at(folds[0]!.id) > at("agent-prompt:L1") && at(folds[0]!.id) < at("agent-prompt:L2"), "run 1's fold under L1");
+    assert.ok(at(folds[1]!.id) > at("agent-prompt:L2"), "run 2's fold under L2");
+    assert.notEqual(folds[0]!.id, folds[1]!.id, "two folds, two rows");
+  });
+
+  it("the first run's last answer is terminal in its run: its meta shows, and it is no fold's hidden commentary", () => {
+    const rows = project().stable.result;
+    const once = rows.find((row) => row.kind === "message" && row.id === "once");
+    assert.ok(once && once.kind === "message", rows.map((row) => row.id).join(", "));
+    assert.equal(once.showAssistantMeta, true);
+  });
+
+  it("collapsing one run's fold hides that run's work alone", () => {
+    const open = project();
+    const [firstRun] = open.openTurnIds;
+    assert.ok(firstRun !== undefined && open.openTurnIds.length === 2, `one open fold per run: ${open.openTurnIds.join(", ")}`);
+    const collapsed = project([firstRun]).stable.result;
+    const ids = collapsed.map((row) => row.id);
+    assert.ok(!ids.includes("ls"), "run 1's work is behind its fold");
+    assert.ok(ids.includes("cat"), "run 2's work is not");
   });
 });
 

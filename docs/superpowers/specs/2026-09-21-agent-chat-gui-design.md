@@ -4335,11 +4335,14 @@ and its commands (approve, answer, dismiss, Stop, compact) report a failure only
 drill-in's scroll — the launch's `task.started` `payload.prompt`, found by `payload.taskId` whoever
 owns the row (Claude's launch is the parent's) — rendered in the user's bubble under a "Prompt"
 caption, because to the agent it is its user turn; read-only, no rewind. Each relaunch that carries
-one adds a prompt row at its place, heading the run it started: a live run's working row follows it,
-and the fold of the rows right after it is timed from it — only those: the first row after a prompt,
-turnless or not, ends its reach, because an agent's first rows often ride no turn and a boundary
-carried past them timed a later turn's fold from the launch (`lib/agent-chat/agent-prompt.logic.ts`,
-`deriveTurnFolds`; a thread's own prompt keeps its boundary across turnless rows, as before). A long
+one adds a prompt row at its place, heading the run it started: a live run's working row follows it;
+the rows after it fold by their turn AND that prompt (`timelineFoldKeys`), so a relaunch inside the
+parent turn its previous run rode — a Claude resume, a Codex follow-up — folds and is timed on its own,
+and the previous run's last answer is terminal in its run; and the fold of the rows right after it is
+timed from it — only those: the first row after a prompt, turnless or not, ends its reach, because an
+agent's first rows often ride no turn and a boundary carried past them timed a later turn's fold from
+the launch (`lib/agent-chat/agent-prompt.logic.ts`, `deriveTurnFolds`; the thread's own timeline has no
+launch prompts, and its folds and boundaries are as before). A long
 prompt clamps behind "Show full prompt"; one the wire cut (the item's `truncated`) reads whole in the
 parent's viewer ("Load the full prompt", `GET …/items/:itemId`, as "Load the full summary" does) and
 offers no Copy of the cut text; one ingestion cut at rest (`promptTruncated`) says only its start was

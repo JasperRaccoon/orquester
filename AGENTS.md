@@ -888,7 +888,10 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   second one; a loop or a goal never), its run from its start (the roster's `startedAt`, else its
   latest launch) is unfolded, its in-progress calls are live rows, its tail is live and a working
   row heads it: a run is a POSITION, not a turn (`agentRunStartIndex` in `rows.logic.ts`), because
-  an agent's rows ride whatever parent turn was live when each started, or none. A thinking block
+  an agent's rows ride whatever parent turn was live when each started, or none. A launch prompt
+  (`agent-prompt.logic.ts`) heads its run: the rows after it fold by their turn AND that prompt
+  (`timelineFoldKeys` — a drill-in fold's key, and its row id `turn-fold:<turn>@<prompt>`, is not a
+  bare turn id), and it times only the fold of the rows right after it. A thinking block
   never holds a fold open, so a fold outside that run — a settled agent's, or an earlier run's — can
   end on a thought still being written: a fold its rows time keeps a clock (`TurnFoldClock` in
   `rows.logic.ts`: its start and the POSITIONS of its answer and its last row, which a token never

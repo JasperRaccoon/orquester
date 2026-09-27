@@ -43,6 +43,7 @@ import {
   computeStableRows,
   deriveTimelineRowsWithState,
   EMPTY_STABLE_ROWS,
+  timelineFoldKeys,
   type StableRowsState,
   type TimelineRowsProjection
 } from "./rows.logic";
@@ -54,10 +55,11 @@ export type DrillInAgentRow = Pick<RuntimeSubagent, "startedAt"> & { kind?: Runt
 export interface AgentDrillInDisclosures {
   readonly expandedGroupIds: readonly string[];
   /**
-   * The turns whose fold the user closed. Folds start OPEN — the child's rows
-   * are the reason the view was opened, and a fold keyed on the parent's
-   * turns would hide them behind one more click — so the drill-in keeps what
-   * was closed, as it keeps a shell's collapsed rows, and a collapse sticks.
+   * The folds the user closed, by fold key (`timelineFoldKeys`: the turn, and
+   * the launch prompt above its run). Folds start OPEN — the child's rows are
+   * the reason the view was opened, and a fold keyed on the parent's turns
+   * would hide them behind one more click — so the drill-in keeps what was
+   * closed, as it keeps a shell's collapsed rows, and a collapse sticks.
    */
   readonly collapsedTurnIds?: readonly string[];
 }
@@ -88,9 +90,9 @@ export interface AgentDrillInProjection {
   readonly rows: TimelineRowsProjection | null;
   readonly stable: StableRowsState;
   /**
-   * The turns whose fold is open: every turn the agent's rows ride but the
-   * collapsed ones. The timeline's toggle patches this list whole, so the
-   * drill-in hands it over as its `expandedTurnIds` and reads a patch back
+   * The folds that are open, by fold key: every fold the agent's rows make
+   * but the collapsed ones. The timeline's toggle patches this list whole, so
+   * the drill-in hands it over as its `expandedTurnIds` and reads a patch back
    * with {@link collapsedTurnsAfter}. Held while its members stay the same.
    */
   readonly openTurnIds: readonly string[];
@@ -194,18 +196,15 @@ export function projectAgentDrillIn(
     // The agent's own rows are agent-internal to the parent, not to itself.
     { ownerAgentId: agentId }
   );
-  // Every fold starts open; the ones the user closed stay closed.
+  // Every fold starts open; the ones the user closed stay closed. A fold is
+  // keyed by its turn — and, after a launch prompt, by that prompt too, so a
+  // relaunch inside the turn its previous run rode folds on its own
+  // (`timelineFoldKeys`).
   const collapsedTurnIds = new Set(input.disclosures?.collapsedTurnIds ?? []);
   const expandedTurnIds = new Set<string>();
-  for (const entry of timeline.entries) {
-    const turnId =
-      entry.kind === "message"
-        ? entry.message.turnId
-        : entry.kind === "work"
-          ? entry.entry.turnId
-          : null;
-    if (typeof turnId === "string" && turnId.length > 0 && !collapsedTurnIds.has(turnId)) {
-      expandedTurnIds.add(turnId);
+  for (const foldKey of timelineFoldKeys(timeline.entries)) {
+    if (foldKey !== null && foldKey.length > 0 && !collapsedTurnIds.has(foldKey)) {
+      expandedTurnIds.add(foldKey);
     }
   }
   const live = isDrillInAgentLive(agentId, input.agent, input.messageStreaming);
