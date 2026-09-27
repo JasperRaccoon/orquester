@@ -799,6 +799,19 @@ test("the wire is told an Implement's prompt is the composer's, so no send of it
   ]);
 });
 
+test("a goal chip action is not the draft's either: a reload's re-post of it never gives it back", async () => {
+  // `returnToDraftOnFailure: false` keeps a failed chip action out of the
+  // draft; the outbox's own give-back — a re-post after a reload that the host
+  // refuses, or a send too stale to re-post — must keep it out the same way,
+  // or a `/goal pause` lands in whatever the user is typing.
+  const seen: unknown[] = [];
+  const send = async (text: string, options?: { generatedPrompt: boolean }): Promise<void> => {
+    seen.push({ text, ...options });
+  };
+  await sendComposerTurn({ text: "/goal pause", returnToDraftOnFailure: false, send });
+  assert.deepEqual(seen, [{ text: "/goal pause", generatedPrompt: true }]);
+});
+
 test("every Implement reads its plan at send time, intact or cut, and no other send does", async () => {
   const reads: string[] = [];
   const read = async (plan: { id: string; planMarkdown: string }) => {

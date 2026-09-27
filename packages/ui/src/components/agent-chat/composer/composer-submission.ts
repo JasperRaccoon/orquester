@@ -654,10 +654,12 @@ export function implementationTextResolver<Proposal>(input: {
  * would glue a command onto whatever the user is typing.
  *
  * `send` is the transport (the store's `sendTurn`), passed in so every branch
- * is testable without a renderer. It is told when the text is a resolved
- * prompt (`generatedPrompt`): the store keeps every send in the tab's outbox
- * until it settles, and gives one a reload left behind back to the draft when
- * it cannot re-post it — never an Implement's, for the same reason.
+ * is testable without a renderer. It is told when the text is not the
+ * draft's (`generatedPrompt`): an Implement's resolved prompt, or a message
+ * another surface handed over (a goal chip action). The store keeps every
+ * send in the tab's outbox until it settles, and gives one a reload left
+ * behind back to the draft when it cannot re-post it — never one of these,
+ * for the reasons their failures above write nothing back.
  */
 export async function sendComposerTurn(input: {
   text: string;
@@ -686,7 +688,9 @@ export async function sendComposerTurn(input: {
     if (validation) return { kind: "refused", notice: validation };
   }
   try {
-    await input.send(text, { generatedPrompt: input.resolveText !== undefined });
+    await input.send(text, {
+      generatedPrompt: input.resolveText !== undefined || input.returnToDraftOnFailure === false
+    });
     return { kind: "sent" };
   } catch (error) {
     return {

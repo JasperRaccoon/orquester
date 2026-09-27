@@ -1463,8 +1463,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         }
       }
       // Newest first: each goes ahead of what the draft holds, so the oldest
-      // ends up first, as they were sent. An Implement's prompt gives nothing
-      // back — the plan is still there to implement.
+      // ends up first, as they were sent. An Implement's prompt or a goal chip
+      // action gives nothing back — neither was the draft's
+      // (`generatedPrompt`).
       let givenBack = false;
       for (const entry of [...stale].reverse()) {
         if (entry.generatedPrompt !== true) {

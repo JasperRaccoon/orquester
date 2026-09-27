@@ -2300,8 +2300,9 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   inside 1 s refused as a double click's twin, and a failed send coming back into the draft.
   History's "Rewind to here" waits for a send in flight, as the composer's picker does
   (`rewindBusyReason` reads the composer's send registry). The goal chip's `sendText` is a
-  different path (always steers, never returns to the draft); do not route the
-  rail through it. Saved-prompt `{variables}` render on the client at click time
+  different path (always steers, never returns to the draft — not even from the tab's outbox
+  after a reload, which it rides as `generatedPrompt`); do not route the rail through it.
+  Saved-prompt `{variables}` render on the client at click time
   (`lib/saved-prompts/variables.ts`): only `PROMPT_VARIABLES`' known names render, `{{name}}` is the
   literal `{name}`, anything else — code braces included — stays as written, and the git reads
   happen only for the variables a body uses; a failed read inserts nothing. `{diff}` is scoped to

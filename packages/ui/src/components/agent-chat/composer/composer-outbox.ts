@@ -132,7 +132,10 @@ export interface OutboxSend {
   /** Epoch ms of its first post: what {@link OUTBOX_REPLAY_MAX_AGE_MS} is measured from. */
   sentAt: number;
   turn: OutboxTurn;
-  /** An Implement's prompt: a send that does not go out gives nothing back to the draft. */
+  /**
+   * Not the draft's — an Implement's prompt or a goal chip action: a send that
+   * does not go out gives nothing back to the draft.
+   */
   generatedPrompt?: true;
 }
 

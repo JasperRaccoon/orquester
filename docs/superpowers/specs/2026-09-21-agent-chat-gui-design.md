@@ -4272,11 +4272,12 @@ queued (`holdAtFront`'s `behind`, by message id: never a count, which the user s
 a later message held for another reason, would turn into a place behind a message queued after it),
 in post order — with a banner, under a new `commandId`, the user's next send of it being a new command
 as for any failed queued send. An
-Implement's prompt never comes back: the plan is still there to implement (`generatedPrompt`, told
-by `sendComposerTurn`). The queue comes back in order, behind any queued send still on its way — as
-it was after an ordinary reload, but **held** (`holdUntilUserAction`, "Waits for Send now", its
-`commandId` kept, a banner saying why) once nobody has seen it for `OUTBOX_QUEUE_ABSENCE_MAX_MS`
-(ten minutes): a queued message is due as soon as its thread is idle and would otherwise go out on
+Implement's prompt never comes back: the plan is still there to implement; nor does a goal chip's
+action, which never came from the draft (`generatedPrompt`, told by `sendComposerTurn`). The queue
+comes back in order, behind any queued send still on its way — as it was after an ordinary reload,
+but **held** (`holdUntilUserAction`, "Waits for Send now", its `commandId` kept, a banner saying
+why) once nobody has seen it for `OUTBOX_QUEUE_ABSENCE_MAX_MS` (ten minutes): a queued message is
+due as soon as its thread is idle and would otherwise go out on
 the thread's first frame — hours or days later, after a discarded tab or a restored session, a
 "push and deploy" nobody still wants. The absence is measured from when the queue was last on
 screen **or last driven by a live page** — the thread's store stamps it as the page is hidden, on
@@ -4357,7 +4358,8 @@ binding sends the head of the queue immediately, leaving the current draft alone
 itself is never queued: a typed `/goal …` where the host parses it (Codex) starts no turn and never
 reaches the model, so holding a Pause until the goal's own turn ends would defeat it — and no open
 approval or question holds it back either. And the goal chip's actions are never queued, on every
-adapter (`sendExternalText`); only a host-parsed one (Codex) also passes an open approval or
+adapter (`sendExternalText`), and never come back to the draft — not after a reload either, riding
+the tab's outbox as `generatedPrompt`; only a host-parsed one (Codex) also passes an open approval or
 question card — for Claude and Grok the card still holds it back (`resolveFollowUpDisposition`,
 `pendingRequestBlocksSend`, `packages/ui/src/components/agent-chat/composer/composer-submission.ts`;
 goals §8.2, §8.5). The right rail's Send is Enter's path instead (`submitText`/`planExternalSubmit`:

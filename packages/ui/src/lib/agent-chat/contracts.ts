@@ -609,10 +609,12 @@ export interface AgentChatActions {
     interactionMode?: InteractionMode;
     modelSelection?: ModelSelection;
     /**
-     * `text` is a prompt the composer wrote — an Implement's (§7.3) — not
-     * the user's words: a send that does not go out gives nothing back to the
-     * draft, a re-post after a reload included, and the plan stays there to
-     * implement again.
+     * `text` is not the user's draft — a prompt the composer wrote (an
+     * Implement's, §7.3) or a message another surface handed over (a goal
+     * chip action, goals §8.2): a send that does not go out gives nothing
+     * back to the draft, a re-post after a reload included — the plan stays
+     * there to implement again, and a chip's `/goal …` is never glued onto
+     * what the user is typing.
      *
      * *Added with the reload-safe sends; `contracts.ts` stays additive-only.*
      */
