@@ -439,32 +439,44 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   the moment it answers healthy (the respawn cap still holds) — `error` used to be terminal until
   the daemon restarted. A manual `POST /api/agent-host/stop` still restarts at once, by design.
 - **Boot folds only orphaned threads.** The §3.3 reconcile decides "orphaned" from `meta.json`
-  alone (`isOrphanedHead`: `starting`/`running`, an `activeTurnId`, or `ready` with a prepared
-  `continueAfterRestart`; `commit` rewrites the head on every session transition for exactly this
-  reader), read with `loadHead(id, { seedRuntime: false })`, which never opens `events.ndjson`,
-  and folds nothing else before the gate. Every other thread goes into
-  `bootSettlePending`: §3.4's stale-`pending`-turn settle, which the reconcile used to run on every
-  idle thread at boot, runs on the thread's **first load**, inside `loadRuntime` before the runtime
-  is published — and so does the closing of the requests, calls and tasks its last process left
-  open and the naming of its legacy agents' launches (`repairLeftovers`, see "A running state never
-  outlives its process" and "Agent rows must survive resumes and retention"), which an orphan gets in
-  the reconcile itself — so no read, stream snapshot or command can see the thread unsettled — and
-  never at boot. A head that cannot be read is folded, as before. Measured before, on the owner's VPS
-  (2026-09-23): 16 s of folding for 78 MB of logs, all of it on the readiness path — an 18 s
-  "connecting" window on every host replacement; the reconcile now costs one `meta.json` read per
-  thread plus the orphans' own folds. The deploy handover's `/stop` (`markThreadsForContinuation`)
-  applies the same rule: it folds only a thread this host serves, one with a live provider session,
-  or one whose `meta.json` says a turn is running in an opted-in project with a cursor — folding
-  every log there made a healthy host take a minute to acknowledge its stop. The boot sweep is
-  `sweepStartup` (fired unawaited just before the gate): stale partial uploads and the raw-log
-  ceiling, no history read at all. The deep attachment-reference sweep (`sweepNow`) runs on the
-  store's 6 h schedule, reads references off the snapshot + tail (`foldForSweep`) and skips a thread
-  with no stored attachment outright; a host restarted more often than that collects orphaned
-  completed attachments late — disk, never correctness. The folds on the load, history, sweep and
-  item-read paths yield to the loop every 500 events (`applyEventsChunked`; the store's
-  `foldForward`), and decoding a log yields every 8 ms (`DECODE_SLICE_MS`: `readLog`,
-  `decodeWindow`): a multi-second fold or parse starved the 15 s health probe (5 s timeout), and
-  two consecutive misses restart a healthy host.
+  alone (`isOrphanedHead`: `starting`/`running`, an `activeTurnId`, `ready` with a prepared
+  `continueAfterRestart`, or an unprepared marker on a settled head, below; `commit` rewrites the
+  head on every session transition for exactly this reader), read with
+  `loadHead(id, { seedRuntime: false })`, which never opens `events.ndjson`, and folds nothing else
+  before the gate. **The deploy handover's marker survives the teardown's rows:** `/stop` marks a
+  running turn (`markThreadsForContinuation`), and the host's teardown then writes what it did to it
+  — every adapter's rows reach the log since the Grok fix wave — so the head reads `stopped` with no
+  active turn, which the next host used to take for a settled thread: nothing continued, the marker
+  left for good (final review A r1). Such a head is a candidate (`meta.json` cannot see the turns)
+  that the full path decides (`continuesSettledTurn`): the marked turn must be the thread's LATEST
+  (positional) and settled `interrupted`, and is then continued as an orphan whose turn is already
+  settled — no second settle, no error row, and a marker the thread cannot use (a closed tab, no
+  cursor) is simply dropped. A marker that names anything else is stale and dropped too, as it is
+  whenever the thread moves on (`dropContinuationMarker`: the user's end, a new turn's effect before
+  its session is ensured, any other turn's `turn.started`), and with no active turn an unprepared
+  marker matches only that settled turn: a crash while a new turn's session starts never continues
+  the old one. Every other thread goes into `bootSettlePending`: §3.4's stale-`pending`-turn settle,
+  which the reconcile used to run on every idle thread at boot, runs on the thread's **first load**,
+  inside `loadRuntime` before the runtime is published — and so does the closing of the requests,
+  calls and tasks its last process left open and the naming of its legacy agents' launches
+  (`repairLeftovers`, see "A running state never outlives its process" and "Agent rows must survive
+  resumes and retention"), which an orphan gets in the reconcile itself — so no read, stream
+  snapshot or command can see the thread unsettled — and never at boot. A head that cannot be read
+  is folded, as before. Measured before, on the owner's VPS (2026-09-23): 16 s of folding for 78 MB
+  of logs, all of it on the readiness path — an 18 s "connecting" window on every host replacement;
+  the reconcile now costs one `meta.json` read per thread plus the orphans' own folds. The deploy
+  handover's `/stop` (`markThreadsForContinuation`) applies the same rule: it folds only a thread
+  this host serves, one with a live provider session, or one whose `meta.json` says a turn is
+  running in an opted-in project with a cursor — folding every log there made a healthy host take a
+  minute to acknowledge its stop. The boot sweep is `sweepStartup` (fired unawaited just before the
+  gate): stale partial uploads and the raw-log ceiling, no history read at all. The deep
+  attachment-reference sweep (`sweepNow`) runs on the store's 6 h schedule, reads references off the
+  snapshot + tail (`foldForSweep`) and skips a thread with no stored attachment outright; a host
+  restarted more often than that collects orphaned completed attachments late — disk, never
+  correctness. The folds on the load, history, sweep and item-read paths yield to the loop every 500
+  events (`applyEventsChunked`; the store's `foldForward`), and decoding a log yields every 8 ms
+  (`DECODE_SLICE_MS`: `readLog`, `decodeWindow`): a multi-second fold or parse starved the 15 s
+  health probe (5 s timeout), and two consecutive misses restart a healthy host.
 - **The fold snapshot, the thread index and the tool-output cache are caches, never authorities.** `events.ndjson` stays
   the record; any doubt — another version, a seq or byte offset that does not line up, a file that
   does not parse — is resolved by discarding the cache and re-deriving from the log, never the

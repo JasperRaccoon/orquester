@@ -1634,6 +1634,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const adapter = options.adapters.get(head.adapter);
     runtime.watchdog?.stop();
     runtime.watchdog = null;
+    // The user ended the session: nothing of it is to be continued (§3.3).
+    await dropContinuationMarker(runtime);
     // FIRST, before the host answers the session's cards: a card's cancel can
     // end the provider, and an adapter that must read what its provider
     // started while it lives — or mark the end as the user's — does it now
@@ -1763,6 +1765,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // agent writes in the meantime — and anything a provider writes on session
     // start — into the baseline, and the turn's numstat would under-report it.
     await captureBaseline(runtime, { turnCount: dispatchBaselineTurnCount(runtime) });
+    // A new turn — not a steer into a running one — means the thread moved on
+    // from any turn a `/stop` marked: the marker goes before the session is
+    // ensured, so a crash while it starts can never continue the old turn in
+    // this one's place (§3.3).
+    if (currentSession(runtime).activeTurnId === null) {
+      await dropContinuationMarker(runtime);
+    }
     try {
       await ensureSession(runtime, { pendingTurnStart: true });
     } catch (error) {
@@ -4179,6 +4188,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               // the target, so the late-capture guard ends here (§5.5).
               if (!isHistoricalRuntimeEvent(event)) {
                 runtime.revertedTo = null;
+                // Any other turn starting — the provider's own, a
+                // continuation's — means the marked turn is behind the thread
+                // (§3.3).
+                if (
+                  runtime.continueAfterRestart !== undefined &&
+                  runtime.continueAfterRestart.turnId !== turnId
+                ) {
+                  await dropContinuationMarker(runtime);
+                }
               }
               // Backstop for turns the host did not dispatch itself (a
               // continuation, an adapter-initiated turn). The turn id is
@@ -4308,6 +4326,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Promise<void> => {
     runtime.continueAfterRestart = marker;
     await saveHeadNow(runtime);
+  };
+
+  /**
+   * The thread moved on from the turn a `/stop` marked (§3.3): the user ended
+   * its session, or a new turn started. The marker goes, so no later
+   * reconcile can continue the old turn — a stale one used to survive every
+   * path but a continuation, a settle and a failed stop (final review A r1,
+   * I1). Best-effort: a failure is logged, and the reconcile's own checks
+   * still refuse a marker whose turn is not the latest.
+   */
+  const dropContinuationMarker = async (runtime: ThreadRuntime): Promise<void> => {
+    if (runtime.continueAfterRestart === undefined) return;
+    try {
+      await writeMarker(runtime, undefined);
+    } catch (error) {
+      logger.warn(`agent-host: failed to clear the continuation marker on ${runtime.id}`, error);
+    }
   };
 
   const markThreadsForContinuation = async (): Promise<string[]> => {
@@ -4734,8 +4769,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     const session = head.session;
     const marker = head.continueAfterRestart;
-    const orphaned = isOrphanedHead(head);
+    const orphaned = isOrphanedHead(head, runtime.state.turns);
+    // The intentional stop's handover: a marked turn the host's teardown
+    // settled — continued, never settled again (`continuesSettledTurn`).
+    const settledByTeardown = orphaned && !isLiveOrphan(head);
     if (!orphaned) {
+      // A marker that names nothing to continue — its turn ended on its own,
+      // or is no longer the latest — is stale: it goes, so it can never
+      // continue an old turn later (`markerMatches` below).
+      if (marker !== undefined) {
+        await writeMarker(runtime, undefined);
+      }
       // Threads without an active turn are not resumed eagerly; the first
       // `sendTurn` re-adopts them (lazy recovery, §4.1). One folded here all
       // the same — its head could not be read, or it was already in memory —
@@ -4749,9 +4793,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // Decided before anything is written — every input is a read — because
     // an orphan that is not continued is settled before anything else.
     const closed = runtime.deleted || (await options.isThreadClosed?.(threadId)) === true;
+    // With no active turn a marker matches only when it was prepared (a host
+    // died between preparing and sending) or names the turn the teardown
+    // settled: an unprepared marker that names neither is a stale one, and a
+    // crash while a NEW turn's session was starting must not continue the
+    // old turn in its place (final review A r1, I1).
     const markerMatches =
       marker !== undefined &&
-      (session.activeTurnId === null || marker.turnId === session.activeTurnId);
+      (session.activeTurnId === null
+        ? marker.prepared === true || settledByTeardown
+        : marker.turnId === session.activeTurnId);
     const optIn = (await options.continuationEnabled?.(head.projectPath)) === true;
     const hasCursor = persistedResumeCursor(runtime, head) !== undefined;
     const continuable =
@@ -4769,6 +4820,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // reconcile's first row when it writes one, and ends this orphan's running
     // turn with the pending one.
     await settleStalePendingTurns(runtime);
+
+    if (settledByTeardown && (!continuable || typeof turnId !== "string")) {
+      // The teardown's rows already said what happened — the turn
+      // interrupted, the session stopped — and the thread cannot be continued
+      // (its tab closed, its cursor gone): the marker goes, nothing else is
+      // written.
+      await writeMarker(runtime, undefined);
+      await repairLeftovers(runtime);
+      return;
+    }
 
     if (!continuable || typeof turnId !== "string") {
       // Archived and deleted threads, threads whose project opted out, and
@@ -4977,11 +5038,19 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
 
 /**
  * §3.3's orphan predicate: a turn was in flight, or a continuation was
- * prepared and never sent. One expression for both of its readers — the boot
- * decision off `meta.json` (A1) and the full path off the folded head — so the
- * two can never disagree on what "orphaned" means.
+ * prepared and never sent — or an intentional stop marked a running turn that
+ * the host's own teardown then settled ({@link continuesSettledTurn}). One
+ * expression for both of its readers — the boot decision off `meta.json` (A1)
+ * and the full path off the folded state — so the two never disagree in the
+ * direction that drops a turn: the boot decision cannot see the turns, so it
+ * folds every head a marker could make an orphan, and the full path decides.
  */
-function isOrphanedHead(head: ThreadHead): boolean {
+function isOrphanedHead(head: ThreadHead, turns?: readonly Turn[]): boolean {
+  return isLiveOrphan(head) || continuesSettledTurn(head, turns);
+}
+
+/** A turn was in flight, or a continuation was prepared and never sent. */
+function isLiveOrphan(head: ThreadHead): boolean {
   const session = head.session;
   return (
     session.status === "starting" ||
@@ -4989,6 +5058,32 @@ function isOrphanedHead(head: ThreadHead): boolean {
     session.activeTurnId !== null ||
     (session.status === "ready" && head.continueAfterRestart?.prepared === true)
   );
+}
+
+/**
+ * The intentional stop's handover, after the host's teardown wrote what it
+ * did (§3.3): `/stop` marked a running turn (`{turnId}`, not yet prepared),
+ * and the teardown — which waits for every adapter's rows since the Grok fix
+ * wave — settled that turn `interrupted` and the session `stopped`. The head
+ * then reads settled, and without this the next host left the turn
+ * interrupted and the marker on the head for good (final review A r1, I1).
+ * The marked turn must still be the thread's LATEST turn (positional, as
+ * `deriveLatestTurn` reads it — a newer turn, even one only requested, means
+ * the user moved on) and settled `interrupted`: a turn that ended on its own
+ * between the mark and the teardown is not continued. `turns` undefined is
+ * the boot decision's read of `meta.json` alone, which cannot tell: a
+ * candidate, folded and decided on the full path.
+ */
+function continuesSettledTurn(head: ThreadHead, turns: readonly Turn[] | undefined): boolean {
+  const marker = head.continueAfterRestart;
+  if (marker === undefined || marker.prepared === true || isLiveOrphan(head)) {
+    return false;
+  }
+  if (turns === undefined) {
+    return true;
+  }
+  const latest = turns[turns.length - 1];
+  return latest !== undefined && latest.turnId === marker.turnId && latest.state === "interrupted";
 }
 
 /**

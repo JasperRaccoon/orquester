@@ -163,6 +163,13 @@ export interface MockConfig {
   exitAfterMs?: number;
   exitCode?: number;
   threadId?: string;
+  /**
+   * Number this server's turns after it (`<thread>-turn-<n>`, the first one
+   * `firstTurnSeq + 1`). Every mock process counts from its start, so a second
+   * host resuming a thread would otherwise mint the id of the first host's
+   * turn again, as no real server does.
+   */
+  firstTurnSeq?: number;
   /** `thread/resume` answers an error, exercising the fresh-thread fallback. */
   failResume?: boolean;
   /**
@@ -331,7 +338,7 @@ let serverRequestId = 0;
 const pendingServerRequests = new Map();
 
 const threadId = config.threadId ?? "thread-mock-1";
-let turnSeq = 0;
+let turnSeq = config.firstTurnSeq ?? 0;
 let activeTurnId = null;
 let turnIndex = 0;
 const turnScripts = config.turns ?? [{ kind: "text", text: "ok" }];

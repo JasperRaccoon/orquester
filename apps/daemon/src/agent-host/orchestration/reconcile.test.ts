@@ -28,6 +28,7 @@ import {
   openWorkOf,
   THREAD_HISTORY_DEFAULT_TURNS,
   type DomainEvent,
+  type RuntimeEvent,
   type ThreadActivityItem,
   type ThreadHistoryPage,
   type ThreadHistoryQuery,
@@ -916,6 +917,240 @@ describe("reconcile (§3.3)", () => {
     assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
     assert.equal(headOf(store, threadId).session.status, "error");
     await next.stop();
+  });
+});
+
+describe("reconcile — an intentional stop's marked turn the host's own teardown settled (§3.3)", () => {
+  /**
+   * The session-set ingestion writes when a turn ends: `stopped` settles it
+   * `interrupted` (a teardown's, a Stop's), `ready` `completed`.
+   */
+  async function turnEnded(host: TestHost, threadId: string, turnId: string, status: "stopped" | "ready"): Promise<void> {
+    await host.orchestrator.ingestionSink(threadId, [
+      writtenAt(
+        sunk(threadId, "thread.session-set", {
+          session: { status, activeTurnId: null },
+          turn: { turnId }
+        } as Extract<DomainEvent, { type: "thread.session-set" }>["payload"]),
+        host.clock.nowIso()
+      )
+    ]);
+    await host.settle();
+  }
+
+  /**
+   * `/stop` marks a running turn, and the host's teardown then writes what it
+   * did to it — the turn settled interrupted, the session stopped — before
+   * the host stops consuming: every adapter's rows now reach the log.
+   */
+  async function markedThenTornDown(): Promise<{ store: FakeThreadStore; threadId: string }> {
+    const first = createTestHost({ continuationEnabled: () => true });
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    assert.deepEqual(await first.orchestrator.markThreadsForContinuation(), [threadId]);
+    await turnEnded(first, threadId, "turn-1", "stopped");
+    const head = headOf(first.store, threadId);
+    assert.equal(head.session.status, "stopped", "the teardown's rows reached the log");
+    assert.equal(head.session.activeTurnId, null);
+    assert.deepEqual(head.continueAfterRestart, { turnId: "turn-1" });
+    await first.stop();
+    return { store: first.store, threadId };
+  }
+
+  const turnsOf = async (host: TestHost, threadId: string) => {
+    const read = await host.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    return read.kind === "snapshot" ? read.thread.turns : [];
+  };
+
+  const continuationSends = (host: TestHost) =>
+    host.adapter.calls.filter(
+      (call) => call.kind === "sendTurn" && (call.detail as { input?: string }).input === CONTINUATION_PROMPT
+    );
+
+  it("continues it: the next host resumes the turn the teardown settled, and never settles it again", async () => {
+    const { store, threadId } = await markedThenTornDown();
+    const logBefore = store.logs.get(threadId)?.length ?? 0;
+
+    // The marker alone decides (the stop path applied the opt-in filter).
+    const next = createTestHost({ store, continuationEnabled: () => false });
+    await next.orchestrator.reconcile();
+    await next.settle();
+
+    assert.equal(continuationSends(next).length, 1, "the marked turn is continued");
+    assert.deepEqual(next.adapter.lastStart?.resumeCursor, { cursor: "turn-1" });
+    const head = headOf(store, threadId);
+    assert.equal(head.continueAfterRestart, undefined, "the marker is cleared on success");
+    assert.equal(head.session.status, "running");
+    const turns = await turnsOf(next, threadId);
+    assert.equal(turns.find((turn) => turn.turnId === "turn-1")?.state, "interrupted", "the teardown's settle stands");
+    const appended = (store.logs.get(threadId) ?? []).slice(logBefore);
+    assert.equal(
+      appended.some(
+        (event) =>
+          event.type === "thread.activity-appended" && event.payload.activity.activityKind === "runtime.error"
+      ),
+      false,
+      "never a second settle, nor an error: the log already said what happened"
+    );
+    await next.stop();
+  });
+
+  it("clears it without continuing when the tab was closed, and writes nothing else", async () => {
+    const { store, threadId } = await markedThenTornDown();
+    const logBefore = store.logs.get(threadId)?.length ?? 0;
+    const next = createTestHost({ store, isThreadClosed: (id) => id === threadId });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(next.adapter.calls.filter((call) => call.kind === "sendTurn").length, 0);
+    assert.equal(headOf(store, threadId).continueAfterRestart, undefined, "no stale marker survives");
+    assert.equal(headOf(store, threadId).session.status, "stopped");
+    assert.deepEqual((store.logs.get(threadId) ?? []).slice(logBefore), [], "the teardown's rows say it all");
+    await next.stop();
+  });
+
+  it("never continues a marked turn that is no longer the thread's latest, and clears the marker", async () => {
+    const { store, threadId } = await markedThenTornDown();
+    // A later turn ran to its end; the old marker put back on the head is the
+    // stale one the reconcile must still refuse.
+    const between = createTestHost({ store });
+    await between.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.turn-start-requested", {
+        turnId: null,
+        messageId: "msg-later",
+        interactionMode: "default"
+      } as Extract<DomainEvent, { type: "thread.turn-start-requested" }>["payload"]),
+      sunk(threadId, "thread.session-set", {
+        session: { status: "running", activeTurnId: "turn-later" }
+      } as Extract<DomainEvent, { type: "thread.session-set" }>["payload"])
+    ]);
+    await turnEnded(between, threadId, "turn-later", "stopped");
+    await between.stop();
+    store.heads.set(threadId, { ...headOf(store, threadId), continueAfterRestart: { turnId: "turn-1" } });
+    assert.deepEqual(
+      (await turnsOf(createTestHost({ store }), threadId)).map((turn) => [turn.turnId, turn.state]),
+      [
+        ["turn-1", "interrupted"],
+        ["turn-later", "interrupted"]
+      ],
+      "turn-1 is interrupted, but no longer the latest"
+    );
+
+    const next = createTestHost({ store });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(continuationSends(next).length, 0, "the old turn is never replayed");
+    assert.equal(headOf(store, threadId).continueAfterRestart, undefined);
+    await next.stop();
+  });
+
+  it("never continues a marked turn that ended on its own, and clears the marker", async () => {
+    const first = createTestHost({ continuationEnabled: () => true });
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await first.settle();
+    await first.orchestrator.markThreadsForContinuation();
+    // It finished between the mark and the teardown.
+    await turnEnded(first, threadId, "turn-1", "ready");
+    await first.stop();
+
+    const next = createTestHost({ store: first.store });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(continuationSends(next).length, 0);
+    assert.equal(headOf(first.store, threadId).continueAfterRestart, undefined);
+    await next.stop();
+  });
+
+  it("a stale marker never continues an old turn when a crash leaves a new turn starting", async () => {
+    const { store, threadId } = await markedThenTornDown();
+    // A later host took a new message and died while its session was
+    // starting, the old marker somehow still on the head.
+    const between = createTestHost({ store });
+    await between.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.turn-start-requested", {
+        turnId: null,
+        messageId: "msg-new",
+        interactionMode: "default"
+      } as Extract<DomainEvent, { type: "thread.turn-start-requested" }>["payload"]),
+      sunk(threadId, "thread.session-set", {
+        session: { status: "starting", activeTurnId: null }
+      } as Extract<DomainEvent, { type: "thread.session-set" }>["payload"])
+    ]);
+    await between.settle();
+    await between.stop();
+    store.heads.set(threadId, { ...headOf(store, threadId), continueAfterRestart: { turnId: "turn-1" } });
+    assert.equal(headOf(store, threadId).session.status, "starting");
+
+    const next = createTestHost({ store, continuationEnabled: () => false });
+    await next.orchestrator.reconcile();
+    await next.settle();
+    assert.equal(continuationSends(next).length, 0, "turn-1 is never continued in place of the new message");
+    assert.equal(headOf(store, threadId).continueAfterRestart, undefined);
+    await next.stop();
+  });
+
+  it("the marker is cleared when the user ends the session", async () => {
+    for (const end of ["session/stop", "close"] as const) {
+      const host = createTestHost({ continuationEnabled: () => true });
+      const threadId = await host.createThread();
+      await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+      await host.settle();
+      await host.orchestrator.markThreadsForContinuation();
+      assert.deepEqual(headOf(host.store, threadId).continueAfterRestart, { turnId: "turn-1" });
+      if (end === "session/stop") {
+        await host.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
+        await host.settle();
+        assert.equal(headOf(host.store, threadId).continueAfterRestart, undefined, `${end}: cleared`);
+      } else {
+        const cleared: Array<unknown> = [];
+        const save = host.store.saveHead.bind(host.store);
+        host.store.saveHead = async (head) => {
+          if (head.id === threadId) cleared.push(head.continueAfterRestart);
+          await save(head);
+        };
+        await host.orchestrator.deleteThread(threadId);
+        assert.ok(cleared.includes(undefined), `${end}: cleared before the thread is removed`);
+      }
+      await host.stop();
+    }
+  });
+
+  it("the marker is cleared when a new turn starts — the user's or the provider's own", async () => {
+    const host = createTestHost({ continuationEnabled: () => true });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "long job" });
+    await host.settle();
+    await host.orchestrator.markThreadsForContinuation();
+    await turnEnded(host, threadId, "turn-1", "ready");
+    assert.deepEqual(headOf(host.store, threadId).continueAfterRestart, { turnId: "turn-1" });
+    // The user's next message.
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "next" });
+    await host.settle();
+    assert.equal(headOf(host.store, threadId).continueAfterRestart, undefined, "the user's new turn clears it");
+
+    // A marker again, then a turn the provider starts on its own (a wake).
+    const again = createTestHost({ continuationEnabled: () => true });
+    const consumed = again.orchestrator.consume(again.adapter);
+    const other = await again.createThread();
+    await again.orchestrator.command(other, "turn", { commandId: cmd(), input: "long job" });
+    await again.settle();
+    await again.orchestrator.markThreadsForContinuation();
+    await turnEnded(again, other, "turn-1", "ready");
+    again.adapter.emit({
+      eventId: "wake",
+      threadId: other,
+      turnId: "wake-1",
+      createdAt: again.clock.nowIso(),
+      type: "turn.started",
+      payload: {}
+    } as unknown as RuntimeEvent);
+    await again.settle();
+    assert.equal(headOf(again.store, other).continueAfterRestart, undefined, "the provider's own turn clears it too");
+    await host.stop();
+    await again.stop();
+    await consumed;
   });
 });
 

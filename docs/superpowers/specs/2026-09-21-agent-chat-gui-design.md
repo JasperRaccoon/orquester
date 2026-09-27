@@ -469,6 +469,19 @@ continue."` — the user is told the thread could not be picked up, not that it
 was never eligible. Both clear the marker and leave the cursor alone, so the
 thread is still resumable by hand.*
 
+*Built: **the intentional stop's marker survives the teardown's rows** (final review A r1). The
+marker `/stop` writes for a running turn is followed by the host's own teardown, which writes what
+it did to that turn — settled `interrupted`, the session `stopped` — since every adapter's teardown
+rows reach the log (the Grok fix wave). Such a head no longer claims a live process, so the input
+above also takes a head with an unprepared marker on a settled session: `meta.json` cannot see the
+turns, so it is a candidate, and the full path continues it only when the marked turn is the
+thread's latest and settled `interrupted` — as an orphan whose turn is already settled, with no
+second settle and no error row (a thread it cannot continue, a closed tab or no cursor, only loses
+the marker). Any other marker is stale and cleared, and every marker is cleared as the thread moves
+on — the user ends its session, a new turn starts — so none can continue an old turn later; with no
+active turn only a prepared marker or that settled turn matches (`continuesSettledTurn`,
+`dropContinuationMarker` in `orchestrator.ts`).*
+
 *Built: **the turn is settled at the time its process last wrote, not at the restart.** The fold
 settles a turn at its settling `thread.session-set`'s `occurredAt` (§5.1), and a settle stamped
 with the restart counted the whole downtime in the turn's duration — a turn that worked for a
