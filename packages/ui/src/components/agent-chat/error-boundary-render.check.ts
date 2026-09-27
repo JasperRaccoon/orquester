@@ -18,7 +18,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { DrillInErrorBoundary } from "./roster/DrillInErrorBoundary";
 
-const drillIn = new DrillInErrorBoundary({ agentId: "agent-1", onBack: () => {}, children: null });
+const drillIn = new DrillInErrorBoundary({ agentId: "agent-1", onBack: () => {}, bottomInset: 212, children: null });
 drillIn.state = { error: new Error("a malformed row") };
 const fallback = renderToStaticMarkup(drillIn.render() as ReactElement);
 assert.ok(fallback.includes('data-drill-in-crashed="agent-1"'), fallback);
@@ -26,6 +26,10 @@ assert.ok(fallback.includes("Back to the thread"), "the way back is on screen, o
 assert.match(fallback, /<button type="button" class="[^"]*min-h-10[^"]*"/, "a touch-sized button, not a key");
 assert.ok(fallback.includes("a malformed row"), "and it says what broke");
 assert.ok(fallback.includes("the thread are untouched"));
+assert.ok(
+  fallback.includes("padding-bottom:212px"),
+  "centred above the overlay (status line, composer, roster), never under it on a phone"
+);
 
 const thread = new ChatErrorBoundary({ sessionId: "s1", children: null });
 thread.state = { error: new Error("boom") };

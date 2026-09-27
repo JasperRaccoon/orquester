@@ -795,7 +795,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             // boundary of its own: a child row that throws takes down the
             // child's view alone, the overlay stays, and its fallback offers
             // the way back on any device.
-            <DrillInErrorBoundary key={drillInAgentId} agentId={drillInAgentId} onBack={closeDrillIn}>
+            <DrillInErrorBoundary
+              key={drillInAgentId}
+              agentId={drillInAgentId}
+              onBack={closeDrillIn}
+              bottomInset={bottomInset}
+            >
               <AgentDrillIn
                 remembered={recallDrillIn(drillInMemory.current, drillInAgentId)}
                 onRemember={rememberDrillInAgent}

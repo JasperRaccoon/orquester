@@ -19,6 +19,13 @@ interface DrillInErrorBoundaryProps {
   agentId: string;
   /** Leave the drill-in, back to the thread's timeline. */
   onBack: () => void;
+  /**
+   * The overlay's measured height (the view's `bottomInset`): the overlay —
+   * status line, composer, a roster of up to `min(40vh, 18rem)` — still covers
+   * the main area from below, so the fallback is centred in what it leaves,
+   * or on a phone its way back can sit under the overlay.
+   */
+  bottomInset?: number | undefined;
   children: React.ReactNode;
 }
 
@@ -52,6 +59,7 @@ export class DrillInErrorBoundary extends React.Component<DrillInErrorBoundaryPr
       <div
         data-drill-in-crashed={this.props.agentId}
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+        style={{ paddingBottom: this.props.bottomInset ?? 0 }}
       >
         <TriangleAlert size={28} strokeWidth={1.25} className="text-danger" />
         <div className="space-y-1">
