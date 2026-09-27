@@ -872,9 +872,16 @@ export const agentThreadHeadSchema = z.object({
   turnCount: z.number().int().nonnegative().default(0),
   seq: z.number().int().nonnegative().default(0),
   // `markedAt` must be listed: a zod object strips unknown keys, and a stamp
-  // lost on load would make every marker read as an older host's (§3.3).
+  // lost on load would make every marker read as an older host's (§3.3). A
+  // stamp that is not a string reads as none — the marker an older host wrote,
+  // under its older rule — never as a head nothing can read, like the goal
+  // marks below.
   continueAfterRestart: z
-    .object({ turnId: z.string().min(1), prepared: z.boolean().optional(), markedAt: z.string().optional() })
+    .object({
+      turnId: z.string().min(1),
+      prepared: z.boolean().optional(),
+      markedAt: z.string().optional().catch(undefined)
+    })
     .optional(),
   resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),
   goalHeldForHandover: z.literal(true).optional().catch(undefined),

@@ -833,6 +833,18 @@ export const LEAN_LONG_CALL_WEIGHTS: Partial<Record<FleetAction, number>> = {
 };
 
 /**
+ * {@link LEAN_LONG_CALL_WEIGHTS} with provider goal updates: the two fold
+ * changes a merge once had to renumber together (`FOLD_SNAPSHOT_VERSION` 5) —
+ * the opening rows of running work every trim keeps and the thread's goal no
+ * trim or rewind touches — in one log, the goal rows spending slots of the
+ * same parent window the kept openings do.
+ */
+export const GOAL_LONG_CALL_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  ...LEAN_LONG_CALL_WEIGHTS,
+  goal: 1
+};
+
+/**
  * {@link AGENT_CEILING_WEIGHTS} with long-running work: many agents past the
  * ceiling across them (with `maxAgents` 14) while some of their calls — and
  * shells, each a window of its own — stay open and stream.

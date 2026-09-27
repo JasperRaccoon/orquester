@@ -134,3 +134,48 @@ test("a malformed goal-hold marker is dropped, never the whole head", () => {
     assert.equal(parsed.id, "t1", "the rest of the head is untouched");
   }
 });
+
+// --- §3.3: the continuation marker's stamp (`markedAt`) ---------------------
+
+test("a stamped continuation marker round-trips beside both goal marks — through JSON, as meta.json holds it", () => {
+  const marker = { turnId: "turn-7", prepared: true, markedAt: "2026-09-27T08:00:00.000Z" };
+  const parsed = parseAgentThreadHead({
+    ...persistedHead,
+    continueAfterRestart: marker,
+    resumeGoalAfterRestart: true,
+    goalHeldForHandover: true
+  });
+  assert.ok(parsed, "the head parses");
+  // A zod object drops a key it does not list: a stamp lost here would make
+  // every marker read as an older host's, never continued once the host's own
+  // teardown settled its turn.
+  assert.deepEqual(parsed.continueAfterRestart, marker);
+  assert.equal(parsed.resumeGoalAfterRestart, true);
+  assert.equal(parsed.goalHeldForHandover, true);
+  const reread = parseAgentThreadHead(JSON.parse(JSON.stringify(parsed)));
+  assert.deepEqual(reread, parsed, "unchanged through JSON");
+});
+
+test("a malformed continuation stamp reads as unstamped — an older host's marker — never an unreadable head", () => {
+  // The stamp is optional state the host writes; a bad one must not turn the
+  // thread's meta.json into one nothing can read. Unstamped, the marker keeps
+  // the older rule: continued only while the head still reads running.
+  for (const value of [7, null, true, { at: "2026-09-27T08:00:00.000Z" }, ["2026-09-27T08:00:00.000Z"]]) {
+    const parsed = parseAgentThreadHead({
+      ...persistedHead,
+      continueAfterRestart: { turnId: "turn-7", prepared: true, markedAt: value },
+      goalHeldForHandover: true
+    });
+    assert.ok(parsed, JSON.stringify(value));
+    assert.equal(parsed.continueAfterRestart?.turnId, "turn-7", JSON.stringify(value));
+    assert.equal(parsed.continueAfterRestart?.prepared, true, JSON.stringify(value));
+    assert.equal(parsed.continueAfterRestart?.markedAt, undefined, JSON.stringify(value));
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(parsed.continueAfterRestart)),
+      { turnId: "turn-7", prepared: true },
+      "written back unstamped"
+    );
+    assert.equal(parsed.goalHeldForHandover, true, "the rest of the head is untouched");
+    assert.equal(parsed.id, "t1");
+  }
+});
