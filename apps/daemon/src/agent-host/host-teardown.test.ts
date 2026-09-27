@@ -1,5 +1,7 @@
 /**
- * The host's own teardown, through the real composition root.
+ * The host's own teardown — and the user's end of a session, the other end
+ * the host drives through every adapter hook — through the real composition
+ * root.
  *
  * Every deploy's drain-restart, a manual host restart and a SIGTERM run
  * `startAgentHost(...).stop()`: `shutdown.abort()` fires each adapter's own
@@ -18,7 +20,7 @@
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmodSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -332,6 +334,86 @@ test(
       await rig?.host.stop();
       if (rig !== undefined) await rm(rig.root, { recursive: true, force: true, maxRetries: 3 });
       rmSync(server.dir, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "the user's end of a Grok session is prepared before its card is answered: a CLI that exits on the cancel still has its work stopped, and its row says so",
+  { skip: process.platform !== "linux" },
+  async () => {
+    // `leftover-question-exit`: the turn leaves a background shell (with a
+    // member and a daemonizing grandchild) and a question open, and the CLI
+    // exits the moment its card is answered — which the host does, with a
+    // cancel, right after `prepareUserEnd` and before it stops the session.
+    // Whether the exit lands before the stop begins or inside it is the
+    // scheduler's call here: the ORDER is pinned in `orchestrator.test.ts`,
+    // and the exit before any stop in the Grok `lifecycle.test.ts`; this pins
+    // the outcome through the real composition.
+    const mark = randomUUID();
+    let rig: Rig | undefined;
+    try {
+      rig = await bootHost({ grok: GROK_MOCK });
+      await rig.host.orchestrator.createThread({
+        threadId: "t1",
+        projectPath: rig.project,
+        cwd: rig.project,
+        title: "user end",
+        refId: "grok",
+        accountId: "",
+        home: "system",
+        modelSelection: { model: "grok-4.6" },
+        runtimeMode: "approval-required",
+        launchEnv: { GROK_MOCK_SCENARIO: "leftover-question-exit", GROK_RIG_MARK: mark }
+      });
+      // The shell is reported before the question is asked, on one stream:
+      // once the card is in the log, so is the shell's start.
+      const asked = persisted(
+        rig.host,
+        "t1",
+        (event) =>
+          event.type === "thread.activity-appended" && event.payload.activity.activityKind === "user-input.requested"
+      );
+      await rig.host.orchestrator.command("t1", "turn", {
+        commandId: randomUUID(),
+        input: "go",
+        interactionMode: "default"
+      });
+      await asked;
+      const before = launched(mark);
+      assert.equal(before.shell.length, 1, "the shell runs");
+      assert.equal(before.member.length, 1);
+      assert.equal(before.daemon.length, 1);
+
+      // The session stop command, as the GUI and the MCP send it.
+      await rig.host.orchestrator.command("t1", "session/stop", { commandId: randomUUID() });
+      await rig.host.orchestrator.drain();
+
+      const after = launched(mark);
+      assert.deepEqual(after.helper, []);
+      assert.deepEqual(after.shell, [], "the user ended the session: its work goes with it");
+      assert.deepEqual(after.member, []);
+      assert.deepEqual(after.daemon, before.daemon, "never what daemonized away");
+      const log = await readLog(rig.appdir, "t1");
+      assert.deepEqual(
+        activitiesOf(log, "task.completed")
+          .filter((activity) => (activity.payload as { taskId?: string }).taskId === "task-bg-1")
+          .map((activity) => {
+            const payload = activity.payload as { status?: string; summary?: string; leftRunning?: boolean };
+            return [payload.status, payload.summary, payload.leftRunning];
+          }),
+        [["stopped", undefined, undefined]],
+        "it really stopped: nothing left running to speak of"
+      );
+      assert.equal(
+        existsSync(agentChatThreadLeftoverWorkPath(rig.appdir, "t1")),
+        false,
+        "and the thread remembers none of it"
+      );
+    } finally {
+      reap(`GROK_RIG_MARK=${mark}`);
+      await rig?.host.stop();
+      if (rig !== undefined) await rm(rig.root, { recursive: true, force: true, maxRetries: 3 });
     }
   }
 );

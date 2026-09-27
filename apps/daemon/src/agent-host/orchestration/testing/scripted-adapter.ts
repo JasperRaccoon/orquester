@@ -44,6 +44,7 @@ export interface ScriptedCall {
     | "projectHistory"
     | "rollbackThread"
     | "stopSession"
+    | "prepareUserEnd"
     | "sweepEndedSession"
     | "stopAll"
     | "refreshSnapshot";
@@ -287,6 +288,11 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
 
     async sweepEndedSession(threadId: string): Promise<void> {
       calls.push({ kind: "sweepEndedSession", threadId });
+      await Promise.resolve();
+    },
+
+    async prepareUserEnd(threadId: string): Promise<void> {
+      calls.push({ kind: "prepareUserEnd", threadId });
       await Promise.resolve();
     },
 

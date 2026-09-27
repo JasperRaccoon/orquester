@@ -1547,6 +1547,35 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
     await host.stop();
   });
 
+  it("the user's end lets the adapter prepare it before any card is answered", async () => {
+    // A card's cancel can end the provider (a Grok CLI that exits on it):
+    // what the adapter must read off its live provider — and the mark that
+    // the end is the user's — comes FIRST.
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-1");
+    await openQuestion(host, "q-1", { dismissible: false });
+    await host.settle();
+    await host.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
+    await host.settle();
+
+    const order = host.adapter.calls
+      .filter((call) => call.threadId === threadId)
+      .map((call) => call.kind)
+      .filter((kind) =>
+        ["prepareUserEnd", "respondToApproval", "respondToUserInput", "stopSession", "sweepEndedSession"].includes(kind)
+      );
+    assert.deepEqual(order, [
+      "prepareUserEnd",
+      "respondToApproval",
+      "respondToUserInput",
+      "stopSession",
+      "sweepEndedSession"
+    ]);
+    await host.stop();
+  });
+
   it("the session stop command and a closed tab end the session for the user; a restart does not", async () => {
     const host = createTestHost();
     const stopped = await host.createThread({ threadId: "thread-stopped" });
@@ -1580,6 +1609,11 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
     assert.equal(sweeps(stopped), 1, "the user's end sweeps what earlier launches left running");
     assert.equal(sweeps(closed), 1);
     assert.equal(sweeps(restarted), 0, "a restart sweeps none of it");
+    const prepared = (threadId: string) =>
+      host.adapter.calls.filter((call) => call.kind === "prepareUserEnd" && call.threadId === threadId).length;
+    assert.equal(prepared(stopped), 1, "the user's end is prepared for");
+    assert.equal(prepared(closed), 1);
+    assert.equal(prepared(restarted), 0, "a restart is no user's end");
     await host.stop();
   });
 

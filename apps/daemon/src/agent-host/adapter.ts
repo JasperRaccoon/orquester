@@ -264,6 +264,19 @@ export interface AgentAdapter {
    */
   stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void>;
   /**
+   * The user is ending the thread's live session — the session stop command
+   * or a closed tab (`stopSessionInternal`) — and the host is about to answer
+   * its open cards with a cancel, which can end the provider before
+   * `stopSession(…, {endedByUser: true})` runs (and a provider that is gone
+   * gets no `stopSession` at all). Called FIRST, before any card is answered,
+   * so an adapter that must read what its provider started while it lives,
+   * or mark the end as the user's, does so now (Grok: its task sessions,
+   * recorded and remembered for the end's sweep; an exit in between closes
+   * its work stopped, not "Left running…"). Optional; never the host's
+   * teardown or a restart.
+   */
+  prepareUserEnd?(threadId: string): Promise<void>;
+  /**
    * The user ended the thread's session — the session stop command, a closed
    * tab — so stop what EARLIER launches of the thread left running that only
    * a user's end may stop, live session or not (Grok: the work its agent

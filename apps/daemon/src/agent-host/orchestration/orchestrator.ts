@@ -1634,6 +1634,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const adapter = options.adapters.get(head.adapter);
     runtime.watchdog?.stop();
     runtime.watchdog = null;
+    // FIRST, before the host answers the session's cards: a card's cancel can
+    // end the provider, and an adapter that must read what its provider
+    // started while it lives — or mark the end as the user's — does it now
+    // (Grok: `prepareUserEnd`).
+    if (adapter?.prepareUserEnd && adapter.hasSession(runtime.id)) {
+      try {
+        await adapter.prepareUserEnd(runtime.id);
+      } catch (error) {
+        logger.warn("agent-host: failed to prepare the user's end of the session", error);
+      }
+    }
     await settlePendingRequests(runtime);
     if (adapter && adapter.hasSession(runtime.id)) {
       try {

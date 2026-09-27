@@ -1612,10 +1612,24 @@ export class GrokSession {
     this.stopped = true;
     this.settleEverythingForExit(reason, stderrTail);
     this.emitExited(reason, stderrTail, false);
-    // The rows above closed every task `stopped`; this makes it so. Started
-    // before `onClosed`, so the adapter's teardown can wait for it.
-    void this.stopLeftovers();
+    // The rows above closed every task `stopped`; this makes it so — the
+    // helpers, and the user's work when the user is ending the session (an
+    // exit on the cancel of its card, {@link prepareUserEnd}). Started before
+    // `onClosed`, so the adapter's teardown can wait for it.
+    void this.sweepLeftovers();
     this.options.onClosed?.(this.threadId);
+  }
+
+  /**
+   * Every sweep this end calls for: the helpers' ({@link stopLeftovers}),
+   * and the user's work when the user is ending the session ({@link
+   * stopTaskLeftovers}). What the adapter's teardown waits for once the CLI
+   * is gone. Never rejects.
+   */
+  sweepLeftovers(): Promise<void> {
+    return Promise.all([this.stopLeftovers(), this.endingByUser ? this.stopTaskLeftovers() : undefined]).then(
+      () => undefined
+    );
   }
 
   /**
@@ -1882,6 +1896,28 @@ export class GrokSession {
   }
 
   /**
+   * The user is ending this session, and the host is about to answer its
+   * cards (`stopSessionInternal` calls this FIRST): a card's cancel can end
+   * the CLI before {@link stop} runs, and a CLI that is gone gets no stop at
+   * all. So now, while it lives: record the sessions its children lead as its
+   * work (as helpers while it opens) and remember them for the end's sweep,
+   * and mark the end as the user's — an exit in between closes its work
+   * `stopped`, with no "Left running…", and sweeps it ({@link onExit}); the
+   * sessions remembered are the thread's `sweepEndedSession`'s too. Never
+   * rejects.
+   */
+  async prepareUserEnd(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    this.endingByUser = true;
+    await this.taskRecording;
+    if (await this.recordSessions(this.announced ? "tasks" : "helpers")) {
+      await this.persistTaskSessions();
+    }
+  }
+
+  /**
    * Host-initiated stop. Idempotent — a session that already ended still waits
    * for its sweep. `endedByUser`: the user ended the session (the session stop
    * command, a closed tab), and the work its agent left running goes with it
@@ -1905,6 +1941,8 @@ export class GrokSession {
     // CLI (the card's cancel below can end it): every child's session, while
     // the CLI still lives, after any recording already in flight. Once it is
     // gone its children are init's, and only their sessions tie them to it.
+    // The user's end has recorded them once already, before the host
+    // answered the cards ({@link prepareUserEnd}): this adds what came since.
     await this.taskRecording;
     // While the session opens nothing of the user's has run: every child is a
     // helper, the failed-open rule — recorded as work, a host teardown during

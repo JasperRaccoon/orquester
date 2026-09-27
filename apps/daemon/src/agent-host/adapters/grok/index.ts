@@ -295,7 +295,7 @@ class GrokAdapter implements AgentAdapter {
         if (this.sessions.get(threadId) === session) {
           this.sessions.delete(threadId);
         }
-        const sweep = session.stopLeftovers();
+        const sweep = session.sweepLeftovers();
         this.sweeps.add(sweep);
         void sweep.then(() => this.sweeps.delete(sweep));
       },
@@ -517,6 +517,16 @@ class GrokAdapter implements AgentAdapter {
     };
     void stop.then(forget, forget);
     return stop;
+  }
+
+  /**
+   * The user is ending the thread's session, and the host is about to answer
+   * its cards (`AgentAdapter.prepareUserEnd`): the live session records its
+   * work while the CLI lives and marks the end as the user's
+   * (`GrokSession.prepareUserEnd`).
+   */
+  async prepareUserEnd(threadId: string): Promise<void> {
+    await this.sessions.get(threadId)?.prepareUserEnd();
   }
 
   /**

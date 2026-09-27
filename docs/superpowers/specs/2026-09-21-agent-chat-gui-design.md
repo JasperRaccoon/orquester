@@ -200,15 +200,16 @@ each pid checked against its `/proc` starttime before each signal (`support/left
 drain-restart's included), the CLI's own exit, an open that failed, the user's stop. The host's
 teardown waits for them: both of its `stopAll()` calls wait for every stop in flight, and its
 consumers read what the stops queued before the orchestrator stops (`host-teardown.test.ts`); the
-helpers get a 1 s grace there, inside the SIGTERM path's 3 s backstop. The work its
-agent started — shells, the dev servers they run — goes only when the USER ends the session (the
-session stop command or a closed tab: `stopSession(…, {endedByUser: true})`) and on an open that
-failed; a deploy must never kill running work, so at a drain-restart, a restart or a crash it runs
-on as a marked orphan, which the kill guard's note below lets Settings → System list and kill, its
-task's closing row saying so ("Left running when … — stop it from Settings → System."), and its
-sessions remembered in the thread's `leftover-work.json` (0600, the last 8 launches), which the
-user's next end of the session sweeps, live session or not (`AgentAdapter.sweepEndedSession`).
-Linux-only; a no-op elsewhere.*
+helpers get a 1 s grace there, inside the SIGTERM path's 3 s backstop. The work its agent started —
+shells, the dev servers they run — goes only when the USER ends the session (the session stop
+command or a closed tab: `prepareUserEnd` before the host answers the session's cards, which records
+it while the CLI lives, then `stopSession(…, {endedByUser: true})`) and on an open that failed; a
+deploy must never kill running work, so at a drain-restart, a restart or a crash it runs on as a
+marked orphan, which the kill guard's note below lets Settings → System list and kill, its task's
+closing row saying so ("Left running when … — stop it from Settings → System."), and its sessions
+remembered in the thread's `leftover-work.json` (0600, the last 8 launches), which the user's next
+end of the session sweeps, live session or not (`AgentAdapter.sweepEndedSession`). Linux-only; a
+no-op elsewhere.*
 
 **No restart backoff, by construction.** A child that exits is not respawned. The thread's
 session becomes `stopped`/`error` and the next `sendTurn` starts a fresh one from the persisted

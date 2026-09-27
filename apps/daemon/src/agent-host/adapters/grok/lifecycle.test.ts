@@ -1590,6 +1590,37 @@ test("the user's stop sweeps the running work even when the CLI exits in the mid
   }
 });
 
+test("the user's end is prepared before its card is answered: a CLI that exits on the cancel before any stop still has its work stopped, and says so", { skip: process.platform !== "linux" }, async () => {
+  // The orchestrator's order (`stopSessionInternal`): `prepareUserEnd`, then
+  // the cards' cancels — which this CLI exits on — and, its session gone
+  // before `stopSession` could run, no stop at all: only the thread's
+  // `sweepEndedSession`. Unprepared, the exit read as a crash — "Left running
+  // when the agent process exited" — although the user was ending the session.
+  const r = await rig({ scenario: "leftover-question-exit" });
+  try {
+    await start(r);
+    await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    const asked = await r.waitFor((event) => event.type === "user-input.requested", "the open card");
+    await r.waitFor((event) => event.type === "task.started", "the shell's task");
+    const before = leftovers(r);
+    assert.equal(before.shell.length, 1);
+    await r.adapter.prepareUserEnd?.("t1");
+    await r.adapter.respondToUserInput("t1", asked.requestId!, {}, { cancel: true });
+    await r.waitFor((event) => event.type === "session.exited", "the CLI's exit on the cancel");
+    await r.drain();
+    assert.equal(r.adapter.hasSession("t1"), false, "gone before any stop could reach it");
+    assert.deepEqual(shellEnds(r), [["stopped", undefined]], "the user's end: nothing left running to speak of");
+    await r.adapter.sweepEndedSession!("t1");
+    const after = leftovers(r);
+    assert.deepEqual(after.shell, [], "the user ended the session: its work goes with it");
+    assert.deepEqual(after.member, []);
+    assert.deepEqual(after.daemon, before.daemon, "never what daemonized away");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
 /** `[status, summary]` of the leftover shell's closing rows — a summary only with the adapter's marker. */
 function shellEnds(r: Rig): Array<[string | undefined, string | undefined]> {
   return r.events
