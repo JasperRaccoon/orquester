@@ -1170,7 +1170,8 @@ export function splitThreadItems(
  * Whether an item of `items` is `agentId`'s own: stamped with it, or an older
  * log's unstamped output chunk of one of its calls (see `callOwnersOf`). One
  * test per window, so a caller walking the window for more than the agent's
- * items (the drill-in's launches) does it in the same pass.
+ * items (the drill-in's launches) does it in the same pass — beside one walk
+ * of its own: the call-owner map, built at the first unstamped chunk.
  */
 export function agentItemFilter(items: readonly ThreadItem[], agentId: string): (item: ThreadItem) => boolean {
   // Built at the first unstamped chunk; the parent's own output is one, so

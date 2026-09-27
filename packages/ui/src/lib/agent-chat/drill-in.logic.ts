@@ -2,9 +2,11 @@
  * Agent chat — the drill-in's rows: one subagent's own timeline (§7.6).
  *
  * Its items filtered by `agentId` (`itemsForAgent`'s rule), each launch's
- * prompt at its place, both in one pass over the window (`drillInWindow`,
- * `agent-prompt.logic.ts` — "its prompt at the top"), through the very same
- * three layers as the parent's timeline —
+ * prompt at its place, both in one pass over the window — plus
+ * `agentItemFilter`'s call-owner map, a second walk whenever the window holds
+ * an unstamped output chunk (`drillInWindow`, `agent-prompt.logic.ts` — "its
+ * prompt at the top") — through the very same three layers as the parent's
+ * timeline —
  * entries, rows, stable rows — held
  * between renders so a streamed token in the child's timeline changes one row
  * object, exactly as in the parent. `useAgentChatDrillIn` (hooks.ts) holds the
@@ -206,8 +208,10 @@ export function projectAgentDrillIn(
   // A different child is a different timeline: never reuse the previous
   // agent's projection as the fast path's baseline.
   const held = previous.agentId === agentId ? previous : null;
-  // ONE pass over the window: its own items, each launch's prompt at its
-  // place, and its latest launch (`agent-prompt.logic.ts`).
+  // One pass over the window — its own items, each launch's prompt at its
+  // place, and its latest launch — plus `agentItemFilter`'s call-owner map, a
+  // second walk whenever the window holds an unstamped output chunk (the
+  // parent's own streamed command output is one) (`agent-prompt.logic.ts`).
   const window = drillInWindow(input.items, agentId);
   const timeline = deriveTimelineEntriesFromItems(
     window.items,
