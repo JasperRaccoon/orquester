@@ -1171,7 +1171,7 @@ export class CodexSession {
    * what Codex held as it answered. The two differ only when a notification
    * was observed during the `get`, and that notification can be OLDER than
    * the reply (goal notifications trail replies, fixtures README observation
-   * 20): the tracker's word is what may be emitted, but a decision about the
+   * 23): the tracker's word is what may be emitted, but a decision about the
    * goal as it stands — the host's conditional resume (goals §5.7) — is taken
    * on the reply.
    */
@@ -2697,7 +2697,7 @@ function goalBudget(label: string, totalMs: number): GoalBudget {
 /**
  * Codex refusing a goal update because the thread has no goal. Its message is
  * the only thing that tells this refusal apart — every refusal is `-32600`
- * (fixtures README observations 13 and 19).
+ * (fixtures README observations 13 and 23).
  */
 function isNoGoalRefusal(error: unknown): boolean {
   return error instanceof CodexRpcError && /\bno goal exists\b/i.test(error.providerMessage);

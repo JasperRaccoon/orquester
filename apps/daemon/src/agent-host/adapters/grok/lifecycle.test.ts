@@ -1225,6 +1225,22 @@ function turnText(events: readonly RuntimeEvent[], turnId: string | undefined): 
     .join("");
 }
 
+/**
+ * The assistant bubbles a turn streamed — one per item, its text — in the
+ * order they opened: a prompt's chunks share one, and a chunk naming another
+ * prompt opens the next (`segments.ts`).
+ */
+function turnBubbles(events: readonly RuntimeEvent[], turnId: string | undefined): string[] {
+  const bubbles = new Map<string, string>();
+  for (const event of events) {
+    if (event.type !== "content.delta" || event.turnId !== turnId || event.payload.streamKind !== "assistant_text") {
+      continue;
+    }
+    bubbles.set(event.itemId ?? "", (bubbles.get(event.itemId ?? "") ?? "") + event.payload.delta);
+  }
+  return [...bubbles.values()];
+}
+
 /** The mock's wake text: `w1;w2;…` */
 function wakeChunks(count: number): string {
   return Array.from({ length: count }, (_, index) => `w${index + 1};`).join("");
@@ -1241,6 +1257,11 @@ test("a waiting wake that outgrows the hold loses nothing: all 300 chunks join t
   await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "our turn's end");
   await r.drain();
   assert.equal(turnText(r.events, turnId), `ours;${wakeChunks(300)}`, "every chunk, in the order the CLI streamed it");
+  assert.deepEqual(
+    turnBubbles(r.events, turnId),
+    ["ours;", wakeChunks(300)],
+    "a bubble per prompt: the wake's chunks name its prompt, so the first closes ours and opens its own"
+  );
   assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"], "no turn for a wake that ended merged");
   await r.dispose();
 });
@@ -1292,6 +1313,11 @@ test("a steer after the waiting wake finished keeps its reply: it joins the turn
   await r.waitFor((event) => event.type === "turn.completed" && event.turnId === turnId, "the steered turn's end");
   await r.drain();
   assert.equal(turnText(r.events, turnId), `ours;${wakeChunks(50)}steered;`, "nothing the wake said is lost");
+  assert.deepEqual(
+    turnBubbles(r.events, turnId),
+    ["ours;", wakeChunks(50), "steered;"],
+    "a bubble per prompt: ours, the wake's that joined the turn, the steered prompt's"
+  );
   assert.deepEqual(turnMarks(r.events, turnId), ["turn.started:ours", "turn.completed:ours"]);
   await r.dispose();
 });

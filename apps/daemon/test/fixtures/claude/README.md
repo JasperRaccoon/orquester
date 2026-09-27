@@ -910,8 +910,8 @@ open, so everything it emits from then on rides it, while what it emitted before
 early input update) stays turnless. The turn that opens carries nothing new for such a call, and its
 next frame is its `tool_result`, so the adapter marks the adoption with one `item.updated` on the
 turn, the call's state so far (`adoptedToolEvent`): without it a foreground command's whole run had
-no row that carried its turn. Logs written before the hold (2026-09-24) keep turnless starts for
-every woken call.
+no row that carried its turn. Logs written before the hold (acd40a47; on this machine, every log up
+to the 2026-09-27 merge) keep turnless starts for every woken call.
 
 **c. Nested `tool_progress` frames carry no `task_id`.** The live windows held 6 / 10 / 46
 `tool_progress` frames — every one nested (a subagent's `Bash`), and not one with `task_id`; the SDK

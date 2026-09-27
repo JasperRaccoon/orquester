@@ -1215,6 +1215,92 @@ test("every row naming a subagent carries the hour-long liveness TTL", () => {
 });
 
 // ---------------------------------------------------------------------------
+// One bubble per prompt: a steer's reply, and a CLI prompt's held frames that
+// join our open turn (AGENTS.md, "Grok: shells are live work", point (5))
+// ---------------------------------------------------------------------------
+
+/** One `agent_message_chunk`, naming the prompt that produced it when `promptId` is given. */
+function chunkOf(grok: GrokNormalizer, text: string, promptId?: string): RuntimeEvent[] {
+  return grok.handleSessionUpdate({
+    sessionId: SESSION,
+    update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+    _meta: promptId === undefined ? {} : { promptId }
+  } as unknown as SessionNotification);
+}
+
+/** Each assistant bubble's text, in the order the bubbles opened. */
+function bubbleTexts(events: readonly RuntimeEvent[]): string[] {
+  const bubbles = new Map<string, string>();
+  for (const event of only(events, "content.delta")) {
+    if (event.payload.streamKind !== "assistant_text") continue;
+    bubbles.set(event.itemId ?? "", (bubbles.get(event.itemId ?? "") ?? "") + event.payload.delta);
+  }
+  return [...bubbles.values()];
+}
+
+/** `item.started` / `item.completed` of the assistant bubbles, in order. */
+function bubbleEdges(events: readonly RuntimeEvent[]): string[] {
+  return events
+    .filter(
+      (event) =>
+        (event.type === "item.started" || event.type === "item.completed") &&
+        (event.payload as { itemType?: string }).itemType === "assistant_message"
+    )
+    .map((event) => `${event.type}:${event.itemId}`);
+}
+
+test("one bubble per prompt: a chunk naming another prompt closes the open bubble and opens its own", () => {
+  // Our prompt P streams; the CLI's own prompt W's held frames join our open
+  // turn (past the hold, or a card on our turn — `prompt-queue.ts`); P goes
+  // on. ACP's chunks name no message, but every one names its prompt
+  // (`_meta.promptId`, fixtures README 19): three bubbles, never one.
+  const grok = normalizer();
+  const events = [
+    ...chunkOf(grok, "p1 ", "P"),
+    ...chunkOf(grok, "p2 ", "P"),
+    ...chunkOf(grok, "w1 ", "W"),
+    ...chunkOf(grok, "w2 ", "W"),
+    ...chunkOf(grok, "p3", "P")
+  ];
+  assert.deepEqual(bubbleTexts(events), ["p1 p2 ", "w1 w2 ", "p3"]);
+  const edges = bubbleEdges(events);
+  assert.equal(edges.length, 5, "three opened, the first two closed as the next prompt's first chunk arrives");
+  assert.deepEqual(
+    edges.map((edge) => edge.split(":")[0]),
+    ["item.started", "item.completed", "item.started", "item.completed", "item.started"]
+  );
+  assert.equal(edges[1]!.slice("item.completed:".length), edges[0]!.slice("item.started:".length), "each closes before the next opens");
+  assert.ok(events.every((event) => event.turnId === "turn-1"), "all on the one open turn");
+  // Whitespace never opens a bubble, even under a prompt of its own.
+  assert.deepEqual(bubbleTexts(chunkOf(grok, "  ", "W")), [], "a blank chunk of another prompt opens nothing");
+});
+
+test("a prompt's dispatch keeps a prompt-named bubble open for its late chunks, and closes one no chunk named", () => {
+  // A steer: the cancelled prompt's bubble stays open at the steered prompt's
+  // dispatch, so a chunk it flushes after the cancel still joins it; the
+  // steered prompt's first chunk closes it.
+  const named = normalizer();
+  const opened = chunkOf(named, "one;", "P1");
+  assert.deepEqual(named.beginTurn(), [], "a named bubble stays open at the dispatch");
+  const late = chunkOf(named, " two", "P1");
+  const steered = chunkOf(named, "stop", "P2");
+  assert.deepEqual(bubbleTexts([...opened, ...late, ...steered]), ["one; two", "stop"]);
+  // With no prompt id to compare, the bubble closes at the dispatch (T3's
+  // rule, `AcpSessionRuntime.ts:1033-1034`), so the next prompt's text is a
+  // bubble of its own.
+  const unnamed = normalizer();
+  const first = chunkOf(unnamed, "one;");
+  const closed = unnamed.beginTurn();
+  assert.deepEqual(
+    bubbleEdges(closed),
+    bubbleEdges(first).map((edge) => edge.replace("item.started", "item.completed")),
+    "the dispatch closes the unnamed bubble"
+  );
+  const next = chunkOf(unnamed, "two");
+  assert.deepEqual(bubbleTexts([...first, ...next]), ["one;", "two"]);
+});
+
+// ---------------------------------------------------------------------------
 // A subagent's child session (fixture 15: its frames arrive under its own id)
 // ---------------------------------------------------------------------------
 
