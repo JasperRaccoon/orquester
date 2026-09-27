@@ -2067,8 +2067,12 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   on the resolved *mode* (`oneDark` ↔ CodeMirror's own light chrome), never on the scheme.
 - **One global shortcut listener, capture phase.** `GlobalShortcutListener` is the single
   `window` keydown handler, so the surfaces that own their keys are excluded once via
-  `insideShortcutBailZone`. Capture phase + `stopPropagation` are load-bearing: xterm reads
-  `Ctrl+Shift+A` as plain `Ctrl+A` and would encode `\x01` into the focused PTY. `Ctrl+Shift+A`
+  `insideShortcutBailZone`. Capture phase + `stopPropagation` keep a chord the listener takes from
+  reaching the focused surface's own key handling: a Design Mode browser tab forwards every
+  keydown to its remote page (`BrowserView`'s `onKey`), and on macOS CodeMirror's emacs-style
+  `Ctrl-Shift-a` extends the selection to the line start. (xterm is not the reason any more: the
+  installed `@xterm/xterm` 6.0.0 maps Ctrl+letter to a C0 byte only without Shift —
+  `src/common/input/Keyboard.ts` — so `Ctrl+Shift+A` never reaches a PTY as `\x01`.) `Ctrl+Shift+A`
   walks a *cursor* through the Needs-Attention group rather than always taking the top row —
   focusing a tab clears the bell/hook `attention` but not the structural `waiting` state, so a
   session parked on a permission prompt would otherwise trap every press. **Caveat: Chrome
