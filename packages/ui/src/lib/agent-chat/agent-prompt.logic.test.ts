@@ -101,6 +101,25 @@ describe("drillInItems: the agent's own items, each launch's prompt at its place
     assert.deepEqual(prompts(drillInItems(items, "a1")).map((prompt) => prompt.id), ["agent-prompt:first"]);
   });
 
+  it("a re-emitted start with NO launch id is still one prompt: keyed by what the start says", () => {
+    const items: ThreadItem[] = [
+      launch("a1", { prompt: "The task." }, { id: "first", at: 1 }),
+      launch("a1", { prompt: "The task." }, { id: "again", at: 5 })
+    ];
+    assert.deepEqual(prompts(drillInItems(items, "a1")).map((prompt) => prompt.id), ["agent-prompt:first"]);
+  });
+
+  it("two starts with no launch id that say different things are two prompts", () => {
+    const items: ThreadItem[] = [
+      launch("a1", { prompt: "First task." }, { id: "first", at: 1 }),
+      launch("a1", { prompt: "Second task." }, { id: "second", at: 5 })
+    ];
+    assert.deepEqual(prompts(drillInItems(items, "a1")).map((prompt) => prompt.id), [
+      "agent-prompt:first",
+      "agent-prompt:second"
+    ]);
+  });
+
   it("says what the log kept: cut on the wire (the item holds all of it), or cut at rest", () => {
     const items: ThreadItem[] = [
       launch("a1", { prompt: "A long prompt…", truncated: true }, { id: "wire", at: 1 }),

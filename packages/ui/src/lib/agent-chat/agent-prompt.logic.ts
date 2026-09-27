@@ -98,8 +98,8 @@ function launchPromptMessage(launch: ThreadActivityItem, agentId: string): Threa
 /**
  * One agent's drill-in items: its own ({@link itemsForAgent}), in order, with
  * the prompt of each launch that carries one just before the launch's place.
- * A launch delivered twice — the same launch id (`payload.toolUseId`) — is
- * one prompt, the first.
+ * A launch delivered twice is one prompt, the first: the same launch id
+ * (`payload.toolUseId`), or — for a start that names none — the same prompt.
  */
 export function drillInItems(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
   const own = itemsForAgent(items, agentId);
@@ -114,13 +114,14 @@ export function drillInItems(items: readonly ThreadItem[], agentId: string): Thr
     if (message === null) {
       continue;
     }
+    // One prompt per launch: its launch id; a start that names none (an older
+    // log) is keyed by what it says, so a re-emitted one is still one prompt.
     const launchId = asRecord(launch.payload)?.toolUseId;
-    if (typeof launchId === "string" && launchId.length > 0) {
-      if (launches.has(launchId)) {
-        continue;
-      }
-      launches.add(launchId);
+    const key = typeof launchId === "string" && launchId.length > 0 ? `launch:${launchId}` : `prompt:${message.text}`;
+    if (launches.has(key)) {
+      continue;
     }
+    launches.add(key);
     (prompts ??= new Map()).set(item, message);
   }
   if (prompts === null) {
