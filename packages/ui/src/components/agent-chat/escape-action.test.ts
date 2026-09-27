@@ -331,13 +331,30 @@ test("a text field, a select or an editor takes its own keys; a button, a checkb
     ["the page", element("BODY")],
     ["a button", element("BUTTON")],
     ["a plain div", element("DIV")],
-    ["a checkbox", element("INPUT", { type: "checkbox" })],
-    ["an input button", element("INPUT", { type: "button" })],
-    ["a submit input", element("INPUT", { type: "submit" })],
     ["no target", null]
   ];
   for (const [name, target] of notEditable) {
     assert.equal(isEditableTarget(target), false, name);
+  }
+});
+
+test("an input that takes no text is not a field, whatever its type", () => {
+  // Every type the HTML spec gives an <input> that no one types text into.
+  // Escape means nothing to any of them, so the chat keeps it — and a type
+  // dropped from the classifier's list would silently start swallowing it.
+  for (const type of [
+    "button",
+    "checkbox",
+    "color",
+    "file",
+    "hidden",
+    "image",
+    "radio",
+    "range",
+    "reset",
+    "submit"
+  ]) {
+    assert.equal(isEditableTarget(element("INPUT", { type })), false, type);
   }
 });
 
