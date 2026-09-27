@@ -56,6 +56,7 @@
 import React from "react";
 import { ArrowLeft, Terminal } from "lucide-react";
 import { cn } from "../../../lib/cn";
+import type { RuntimeSubagent } from "@orquester/api/agent-chat";
 import type { AgentChatTimelineRow, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { collapsedTurnsAfter } from "../../../lib/agent-chat/drill-in.logic";
 import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
@@ -71,7 +72,7 @@ import { drillInTimelineCallbacks } from "./drill-in-callbacks";
 import { drillInOpening } from "./drill-in-memory";
 import { rosterRowIcon } from "./AgentRosterRow";
 import { agentActivityText, rosterRowMetrics } from "./format";
-import { isBackgroundShellRow, rosterRowTicks, rosterRowVisual } from "./roster-rows";
+import { rosterRowTicks, rosterRowVisual } from "./roster-rows";
 
 const EMPTY_ROWS: AgentChatTimelineRow[] = [];
 
@@ -120,12 +121,22 @@ export function AgentDrillIn({
     () => ({ expandedGroupIds: disclosures.expandedGroupIds, collapsedTurnIds }),
     [disclosures.expandedGroupIds, collapsedTurnIds]
   );
+  // The last row seen for this agent (the component is keyed by it): the
+  // roster keeps 100 rows and evicts the oldest settled ones first, and an
+  // open drill-in keeps its header — title, status — and its kind through
+  // that (`drillInAgentRow`).
+  const lastKnownAgent = React.useRef<RuntimeSubagent | null>(null);
   const live = useAgentChatDrillIn(sessionId, agentId, {
     disclosures: projectionDisclosures,
-    agent: agentOverride
+    agent: agentOverride,
+    lastKnownAgent: lastKnownAgent.current
   });
+  if (live.agent !== null) {
+    lastKnownAgent.current = live.agent;
+  }
   const agent = live.agent;
-  const background = agent !== null && isBackgroundShellRow(agent);
+  // A shell by its row, or — with no row at all — by its items.
+  const background = live.backgroundShell;
 
   // A shell's own rows are projected here — the hook projects nothing for a
   // shell (`live.rows` is null) — because its drill-in is one row, its
@@ -311,6 +322,10 @@ export function AgentDrillIn({
         agentId={agentId}
         readOnly
         retentionDropped={live.retentionDropped}
+        // The row and the kind as this view knows them — the roster may no
+        // longer have the row — for the empty copy and the shell pane.
+        drilledAgent={agent}
+        backgroundShell={background}
         roster={roster}
         projectPath={projectPath}
         skills={skills}

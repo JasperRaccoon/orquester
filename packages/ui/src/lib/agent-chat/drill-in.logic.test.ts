@@ -14,6 +14,7 @@ import {
 import type { AgentChatTimelineRow } from "./contracts";
 import {
   collapsedTurnsAfter,
+  drillInAgentRow,
   EMPTY_AGENT_DRILL_IN,
   projectAgentDrillIn,
   type AgentDrillInProjection
@@ -1166,5 +1167,28 @@ describe("a prompted, relaunched agent's streamed tokens re-derive nothing a ful
       assert.equal(held.openTurnIds, before.openTurnIds, `${step.name}: the same open list`);
       assert.equal(held.rows?.foldClocksAt, before.rows?.foldClocksAt, `${step.name}: the same clocks`);
     }
+  });
+});
+
+describe("the drill-in's agent row outlives the roster's cap (final review C, M2)", () => {
+  const row = (id: string, overrides: Record<string, unknown> = {}) =>
+    ({ id, kind: "subagent", agentKind: "background", title: id, status: "completed", ...overrides }) as never;
+
+  it("the roster's row while it has one — the newer — and the row last seen once the roster drops it", () => {
+    const seen = row("sh1", { title: "dev server", status: "running" });
+    const now = row("sh1", { title: "dev server", status: "completed" });
+    assert.equal(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [now], lastKnown: seen }), now);
+    assert.equal(
+      drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: now }),
+      now,
+      "evicted: its title and status stay on the header, and its kind keeps the shell's one row"
+    );
+  });
+
+  it("the host's override wins; a remembered row of another agent is none of this one's", () => {
+    const override = row("sh1", { title: "from the host" });
+    assert.equal(drillInAgentRow({ agentId: "sh1", override, roster: [row("sh1")], lastKnown: row("sh1") }), override);
+    assert.equal(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: row("sh2") }), null);
+    assert.equal(drillInAgentRow({ agentId: "sh1", override: undefined, roster: [], lastKnown: null }), null);
   });
 });

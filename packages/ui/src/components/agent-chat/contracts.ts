@@ -154,6 +154,23 @@ export interface ChatTimelineProps {
    * *Added by W12; additive to the foundation's contract.*
    */
   roster?: readonly RuntimeSubagent[] | undefined;
+  /**
+   * A drill-in's agent row as the drill-in knows it: the roster's, else the
+   * last one it saw — the roster keeps 100 rows and evicts the oldest settled
+   * ones first (`drillInAgentRow`). Read instead of looking the row up in
+   * `roster`: its kind decides the shell pane and the empty copy. Absent: the
+   * roster's.
+   *
+   * *Added with the UI fix wave (2026-09-27).*
+   */
+  drilledAgent?: RuntimeSubagent | null | undefined;
+  /**
+   * The drill-in is a background shell's: its row says so, or, with no row at
+   * all, its items (`isBackgroundShellItems`). Absent: the drilled row's kind.
+   *
+   * *Added with the UI fix wave (2026-09-27).*
+   */
+  backgroundShell?: boolean | undefined;
   /** The project directory, so changed-file paths render workspace-relative. */
   projectPath?: string | undefined;
   /**

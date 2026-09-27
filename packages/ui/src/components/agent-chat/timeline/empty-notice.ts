@@ -89,13 +89,16 @@ export function didToolWork(agent: Pick<RuntimeSubagent, "lastToolName" | "usage
 
 /**
  * The drill-in's notice, or null when a row of the agent's own is on screen.
- * `agent` is the drilled roster row, absent when the roster dropped it;
- * `retentionDropped` says the thread's window has dropped rows.
+ * `agent` is the drilled row, absent when there is none at all;
+ * `retentionDropped` says the thread's window has dropped rows;
+ * `backgroundShell` says it is a shell's drill-in — the row's kind, or, with
+ * no row, the items' (`isBackgroundShellItems`). Absent: the row's kind.
  */
 export function drillInEmptyNotice(input: {
   rows: readonly AgentChatTimelineRow[];
   agent: RuntimeSubagent | undefined;
   retentionDropped: boolean;
+  backgroundShell?: boolean;
 }): EmptyNotice | null {
   const { rows, agent, retentionDropped } = input;
   if (rows.some((row) => !isPromptRow(row) && !isLivePlaceholder(row))) {
@@ -118,7 +121,7 @@ export function drillInEmptyNotice(input: {
   // roster fold already settles when the session dies — the notion the
   // drill-in's live rows follow too.
   const live = agent !== undefined && ACTIVE_SUBAGENT_STATUSES.has(agent.status);
-  if (agent?.agentKind === "background") {
+  if (input.backgroundShell ?? agent?.agentKind === "background") {
     // A shell prints output, it does not "report".
     if (left) {
       return notice("Its output has left this thread's window.");

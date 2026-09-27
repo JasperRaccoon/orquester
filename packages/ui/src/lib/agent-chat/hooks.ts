@@ -44,13 +44,14 @@ import type {
   UseProviderSnapshot
 } from "./contracts";
 import {
+  drillInAgentRow,
   EMPTY_AGENT_DRILL_IN,
   projectAgentDrillIn,
   type AgentDrillInDisclosures,
   type AgentDrillInProjection
 } from "./drill-in.logic";
 import { loadProviders, providerForRefId, providersStore } from "./providers";
-import { isBackgroundShellRow } from "./roster.logic";
+import { isBackgroundShellItems, isBackgroundShellRow } from "./roster.logic";
 import { resolveActivityLabel } from "./status.logic";
 import {
   ensureThreadStore,
@@ -235,11 +236,23 @@ export interface AgentChatDrillInOptions {
   disclosures?: AgentDrillInDisclosures | null;
   /** The agent's roster row, where the host already holds it; the thread's own otherwise. */
   agent?: RuntimeSubagent | null;
+  /**
+   * The row the drill-in last saw for this agent: read once the roster no
+   * longer has one — it keeps 100 rows and evicts the oldest settled ones
+   * first (`drillInAgentRow`).
+   */
+  lastKnownAgent?: RuntimeSubagent | null;
 }
 
 /** One drill-in, as {@link useAgentChatDrillIn} projects it. */
 export interface AgentChatDrillInView {
+  /** The agent's row: the override, the roster's, else the one last seen (`drillInAgentRow`). */
   agent: RuntimeSubagent | null;
+  /**
+   * A background shell's drill-in: its row says so, or — with no row at all —
+   * its items (`isBackgroundShellItems`). Its rows are then `null`.
+   */
+  backgroundShell: boolean;
   /**
    * What the drill-in's timeline renders — the ONE projection of it, which the
    * timeline takes as it is. `null` for a background shell: its drill-in is
@@ -277,7 +290,7 @@ export function useAgentChatDrillIn(
   agentId: string | null,
   options: AgentChatDrillInOptions = {}
 ): AgentChatDrillInView {
-  const { disclosures, agent: agentOverride } = options;
+  const { disclosures, agent: agentOverride, lastKnownAgent } = options;
   const store = useThreadStore(sessionId);
   const entries = useThreadState(store, (state) => state.slice.entries);
   const roster = useThreadState(store, (state) => state.slice.roster);
@@ -291,11 +304,14 @@ export function useAgentChatDrillIn(
 
   return useMemo(() => {
     if (agentId === null) {
-      return { rows: [], agent: null, items: entries, openTurnIds: NO_TURNS, retentionDropped };
+      return { rows: [], agent: null, backgroundShell: false, items: entries, openTurnIds: NO_TURNS, retentionDropped };
     }
-    const agent = agentOverride ?? roster.find((candidate) => candidate.id === agentId) ?? null;
-    if (agent !== null && isBackgroundShellRow(agent)) {
-      return { rows: null, agent, items: entries, openTurnIds: NO_TURNS, retentionDropped };
+    const agent = drillInAgentRow({ agentId, override: agentOverride, roster, lastKnown: lastKnownAgent });
+    // A shell by its row; with no row at all, by its items — a walk of the
+    // window, only while no row is known.
+    const backgroundShell = agent !== null ? isBackgroundShellRow(agent) : isBackgroundShellItems(entries, agentId);
+    if (backgroundShell) {
+      return { rows: null, agent, backgroundShell, items: entries, openTurnIds: NO_TURNS, retentionDropped };
     }
     projection.current = projectAgentDrillIn(projection.current, {
       items: entries,
@@ -308,11 +324,12 @@ export function useAgentChatDrillIn(
     return {
       rows: projection.current.stable.result,
       agent,
+      backgroundShell,
       items: entries,
       openTurnIds: projection.current.openTurnIds,
       retentionDropped
     };
-  }, [agentId, agentOverride, entries, roster, messageStreaming, disclosures, retentionDropped]);
+  }, [agentId, agentOverride, lastKnownAgent, entries, roster, messageStreaming, disclosures, retentionDropped]);
 }
 
 // ---------------------------------------------------------------------------

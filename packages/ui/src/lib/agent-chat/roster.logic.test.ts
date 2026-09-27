@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { RuntimeSubagent, RuntimeSubagentStatus } from "@orquester/api/agent-chat";
+import type { RuntimeSubagent, RuntimeSubagentStatus, ThreadItem } from "@orquester/api/agent-chat";
 
 import {
   agentActivityText,
@@ -9,11 +9,13 @@ import {
   deriveAgentSpawnSummary,
   deriveLivenessBanner,
   deriveRosterDockView,
+  isBackgroundShellItems,
   liveAgentTaskIds,
   resolveSpawnRowAgents,
   ROSTER_VISIBLE_ROWS,
   rosterRowLook
 } from "./roster.logic";
+import { activity } from "./test-helpers";
 
 const agent = (
   id: string,
@@ -306,5 +308,44 @@ describe("the liveness banner", () => {
       }).stopLabel,
       "Stopping…"
     );
+  });
+});
+
+describe("a shell known by its items alone, for a drill-in with no roster row (final review C, M2)", () => {
+  const task = (activityKind: string, payload: Record<string, unknown>, agentId?: string): ThreadItem =>
+    activity(activityKind, payload, { tone: "info", ...(agentId !== undefined ? { agentId } : {}) });
+
+  it("a Claude shell: its own command item, `bgshell:<id>` — its start, or a chunk alone", () => {
+    const start = activity(
+      "tool.started",
+      { toolUseId: "bgshell:sh1", itemType: "command_execution", title: "Background shell" },
+      { agentId: "sh1" }
+    );
+    const chunk = activity("tool.output", { toolUseId: "bgshell:sh1", streamKind: "command_output", delta: "ok\n" }, { agentId: "sh1" });
+    assert.equal(isBackgroundShellItems([start], "sh1"), true);
+    assert.equal(isBackgroundShellItems([chunk], "sh1"), true, "retention may have left only its output");
+    assert.equal(isBackgroundShellItems([start], "sh2"), false, "another shell's call names only that shell");
+  });
+
+  it("a Grok shell, or any shell's launch: task rows naming it, of a shell's kind", () => {
+    const grok = task("task.started", { taskId: "gsh", taskType: "shell", agentKind: "background" }, "gsh");
+    assert.equal(isBackgroundShellItems([grok], "gsh"), true);
+    const monitor = task("task.progress", { taskId: "mon", taskType: "monitor", agentKind: "background" }, "mon");
+    assert.equal(isBackgroundShellItems([monitor], "mon"), true, "a monitor is a shell's view too");
+    const launch = task("task.started", { taskId: "sh1", taskType: "local_bash", agentKind: "background" });
+    assert.equal(isBackgroundShellItems([launch], "sh1"), true, "the parent's launch row of a Claude shell");
+  });
+
+  it("never an agent, a loop, a goal — nor an id with nothing in the window", () => {
+    const agentStart = task("task.started", { taskId: "a1", taskType: "subagent", agentKind: "agent" }, "a1");
+    assert.equal(isBackgroundShellItems([agentStart], "a1"), false);
+    const unstampedThenAgent = [
+      task("task.progress", { taskId: "a2" }),
+      task("task.started", { taskId: "a2", agentKind: "agent" })
+    ];
+    assert.equal(isBackgroundShellItems(unstampedThenAgent, "a2"), false, "a row naming it an agent makes it one, as the roster reads it");
+    assert.equal(isBackgroundShellItems([task("task.started", { taskId: "loop", taskType: "scheduled" }, "loop")], "loop"), false);
+    assert.equal(isBackgroundShellItems([task("task.started", { taskId: "goal", taskType: "goal" }, "goal")], "goal"), false);
+    assert.equal(isBackgroundShellItems([], "sh1"), false);
   });
 });

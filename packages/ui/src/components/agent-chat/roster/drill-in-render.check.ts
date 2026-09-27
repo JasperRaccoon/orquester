@@ -259,6 +259,59 @@ assert.equal(
 );
 assert.ok(grokShellView.includes('data-shell-output="true"') && grokShellView.includes("ready in 300ms"), "its last line is its output");
 
+// A shell with no roster row at all (final review C, M2): the roster keeps 100 rows and evicts the oldest
+// settled ones first. Its kind is read off its items then, and its drill-in is still its ONE row.
+const orphanClaude = render({
+  sessionId: await seededThread({ items: [shellStart, shellChunk, shellEnd], roster: [] }),
+  agentId: SHELL,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP
+});
+assert.ok(
+  orphanClaude.includes(`data-timeline-row-id="background-shell:${SHELL}"`),
+  `a Claude shell's own command item names it a shell: ${orphanClaude}`
+);
+assert.ok(!orphanClaude.includes('data-timeline-row-kind="turn-fold"'), "never the shared projection's 'Worked for' fold");
+assert.ok(orphanClaude.includes('data-shell-output="true"') && orphanClaude.includes("PASS src/a.test.ts"), "the shell pane");
+assert.ok(orphanClaude.includes("no longer in the thread&#x27;s roster"), "and the header says where its row went");
+
+const orphanGrok = render({
+  sessionId: await seededThread({
+    items: [
+      grokShellRow("task.started", { detail: "npm run dev" }, "gsh-o-start"),
+      grokShellRow("task.completed", { status: "completed", summary: "ready in 300ms", detail: "ready in 300ms", exitCode: 0 }, "gsh-o-end")
+    ],
+    roster: []
+  }),
+  agentId: GROK_SHELL,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP
+});
+assert.equal((orphanGrok.match(/data-activity-id=/g) ?? []).length, 1, `a Grok shell's own task rows name it a shell: ${orphanGrok}`);
+assert.ok(orphanGrok.includes('data-shell-output="true"') && orphanGrok.includes("ready in 300ms"), "its last line is its output");
+assert.ok(!orphanGrok.includes("reported nothing to show here"), "never the agent's empty copy");
+
+// Nothing of its own left in the window, only its launch: a shell's empty copy, not an agent's.
+const orphanQuiet = render({
+  sessionId: await seededThread({
+    items: [
+      wireActivity(
+        "task.started",
+        { taskId: SHELL, agentKind: "background", taskType: "local_bash", title: "run the suite" },
+        { id: "shell-launch", tone: "info" }
+      )
+    ],
+    roster: []
+  }),
+  agentId: SHELL,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP
+});
+assert.ok(orphanQuiet.includes("No output from this shell is in this thread."), orphanQuiet);
+
 // ---------------------------------------------------------------------------
 // A live agent reads live: its running call, its working row
 // ---------------------------------------------------------------------------

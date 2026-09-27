@@ -139,6 +139,31 @@ export function collapsedTurnsAfter(
 }
 
 /**
+ * The drill-in's agent row: the host's override, else the roster's, else the
+ * row the drill-in last saw for this agent (`lastKnown`). The roster keeps 100
+ * rows and evicts the oldest settled ones first, so an open drill-in's row can
+ * leave it (final review C, M2); the remembered row keeps the header's title
+ * and status, and its kind keeps a shell's drill-in the shell's one row. The
+ * roster's own row wins over the remembered one: it is the newer.
+ */
+export function drillInAgentRow(input: {
+  readonly agentId: string;
+  readonly override: RuntimeSubagent | null | undefined;
+  readonly roster: readonly RuntimeSubagent[];
+  readonly lastKnown: RuntimeSubagent | null | undefined;
+}): RuntimeSubagent | null {
+  const { agentId, override, roster, lastKnown } = input;
+  if (override !== undefined && override !== null) {
+    return override;
+  }
+  const row = roster.find((candidate) => candidate.id === agentId);
+  if (row !== undefined) {
+    return row;
+  }
+  return lastKnown !== undefined && lastKnown !== null && lastKnown.id === agentId ? lastKnown : null;
+}
+
+/**
  * Whether the drilled agent is at work: the session is live and the roster
  * shows it `pending`, `running` or `waiting` — the context's own notion
  * (`MessageStreamingContext`, which `isMessageStreaming` and the roster's

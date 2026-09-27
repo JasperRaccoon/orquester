@@ -137,6 +137,11 @@ describe("drillInEmptyNotice: the three tiers", () => {
     assert.equal(text({ rows: [], agent: shell({ lastToolName: "Bash" }), retentionDropped: true }), SHELL_LEFT);
   });
 
+  it("a shell with no roster row at all, known by its items, reads a shell's copy (final review C, M2)", () => {
+    assert.equal(text({ rows: [], agent: undefined, retentionDropped: true, backgroundShell: true }), SHELL_NONE);
+    assert.equal(text({ rows: [], agent: undefined, retentionDropped: true }), NOTHING_HERE, "no row and no word: an agent's");
+  });
+
   it("a row of the agent's own is on screen: no notice at all", () => {
     const work: AgentChatTimelineRow = {
       kind: "work",
