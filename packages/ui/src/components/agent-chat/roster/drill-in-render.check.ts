@@ -293,6 +293,42 @@ assert.equal((orphanGrok.match(/data-activity-id=/g) ?? []).length, 1, `a Grok s
 assert.ok(orphanGrok.includes('data-shell-output="true"') && orphanGrok.includes("ready in 300ms"), "its last line is its output");
 assert.ok(!orphanGrok.includes("reported nothing to show here"), "never the agent's empty copy");
 
+// Its row evicted while its drill-in was open: the drill-in reads the row it last saw (`drillInAgentRow`,
+// handed over through the same slot as a host's override). The header keeps the title and the status, and
+// the one row keeps the shell pane, though the thread's roster has no row for it.
+const rememberedClaude = rosterRow(SHELL, { agentKind: "background", title: "run the suite", status: "completed", exitCode: 0 });
+const keptClaude = render({
+  sessionId: await seededThread({ items: [shellStart, shellChunk, shellEnd], roster: [] }),
+  agentId: SHELL,
+  agent: rememberedClaude,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP
+});
+assert.ok(keptClaude.includes(`data-timeline-row-id="background-shell:${SHELL}"`), keptClaude);
+assert.ok(keptClaude.includes('data-shell-output="true"'), "the shell pane: the timeline reads the kept row, not the roster");
+assert.ok(keptClaude.includes("run the suite") && keptClaude.includes("Exited with code 0"), "the header keeps its title and status");
+assert.ok(!keptClaude.includes("no longer in the thread&#x27;s roster"));
+
+const rememberedGrok = rosterRow(GROK_SHELL, { agentKind: "background", title: "npm run dev", status: "completed", exitCode: 0 });
+const keptGrok = render({
+  sessionId: await seededThread({
+    items: [
+      grokShellRow("task.started", { detail: "npm run dev" }, "gsh-k-start"),
+      grokShellRow("task.completed", { status: "completed", summary: "ready in 300ms", detail: "ready in 300ms", exitCode: 0 }, "gsh-k-end")
+    ],
+    roster: []
+  }),
+  agentId: GROK_SHELL,
+  agent: rememberedGrok,
+  roster: [],
+  bottomInset: 0,
+  onBack: NOOP
+});
+assert.equal((keptGrok.match(/data-activity-id=/g) ?? []).length, 1, keptGrok);
+assert.ok(keptGrok.includes('data-shell-output="true"') && keptGrok.includes("ready in 300ms"), "its last line, in the shell pane");
+assert.ok(keptGrok.includes("npm run dev") && keptGrok.includes("Exited with code 0"));
+
 // Nothing of its own left in the window, only its launch: a shell's empty copy, not an agent's.
 const orphanQuiet = render({
   sessionId: await seededThread({
