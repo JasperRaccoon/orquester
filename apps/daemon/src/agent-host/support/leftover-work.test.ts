@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import { AGENT_LAUNCH_ENV_VAR, type ProcSource } from "./leftover-processes.ts";
 import {
@@ -15,8 +15,18 @@ import {
   sweepLeftoverWork
 } from "./leftover-work.ts";
 
+/** Every scratch directory, removed once the file is done. */
+const scratchDirs: string[] = [];
+after(async () => {
+  for (const dir of scratchDirs) {
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 async function scratch(): Promise<string> {
-  return join(await mkdtemp(join(tmpdir(), "leftover-work-")), "leftover-work.json");
+  const dir = await mkdtemp(join(tmpdir(), "leftover-work-"));
+  scratchDirs.push(dir);
+  return join(dir, "leftover-work.json");
 }
 
 test("a thread's leftover work is kept per launch, merged by launch, the newest launches only, 0600", async () => {

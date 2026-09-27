@@ -15,7 +15,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,9 @@ interface Rig {
   waitFor(predicate: (event: RuntimeEvent) => boolean, label: string): Promise<RuntimeEvent>;
   /** Let the event consumer catch up, so `events` reflects what was emitted. */
   drain(): Promise<void>;
+  /** The host's teardown — its abort, then its own `stopAll()` — the rig's files kept. */
+  teardown(): Promise<void>;
+  /** The teardown, then the rig's directory removed. */
   dispose(): Promise<void>;
   disposed: boolean;
   cwd: string;
@@ -161,10 +164,15 @@ async function rig(
           }
         });
       }),
-    dispose: async () => {
-      built.disposed = true;
+    teardown: async () => {
       controller.abort();
       await adapter.stopAll();
+    },
+    dispose: async () => {
+      built.disposed = true;
+      await built.teardown();
+      // Its HOME, TMPDIR and thread directory: nothing of a test outlives it.
+      await rm(cwd, { recursive: true, force: true, maxRetries: 3 });
     },
     cwd,
     mark,
@@ -1766,7 +1774,7 @@ test("a host teardown while the session opens sweeps the CLI's helpers — never
     );
     assert.equal(leftovers(r).helper.length, 1, "the helper runs");
     // The host's teardown: its abort, then its own `stopAll()`.
-    await r.dispose();
+    await r.teardown();
     await assert.rejects(opening);
     assert.deepEqual(leftovers(r).helper, [], "swept as the helper it is");
     assert.deepEqual(await readLeftoverWork(r.leftoverWork), [], "and never remembered as the user's work");

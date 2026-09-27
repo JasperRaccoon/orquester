@@ -3,9 +3,9 @@
  * table, and the TOML patcher that turns the approvals surface on.
  */
 
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -149,8 +149,22 @@ test("no runtime mode pins the permission mode in the overlay — it rides argv"
   }
 });
 
-test("the overlay is written into a host-owned dir and its path returned", async () => {
+/** The overlay tests' scratch directories, removed once the file is done. */
+const overlayDirs: string[] = [];
+after(async () => {
+  for (const dir of overlayDirs) {
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+async function overlayScratch(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "grok-overlay-"));
+  overlayDirs.push(dir);
+  return dir;
+}
+
+test("the overlay is written into a host-owned dir and its path returned", async () => {
+  const dir = await overlayScratch();
   const path = await writeGrokOverlayConfig(join(dir, "thread-1"));
   assert.ok(path !== null);
   assert.match(await readFile(path, "utf8"), /support_permission = true/);
@@ -162,13 +176,12 @@ test("a SYMLINKED config is never written — the bug that rewrote the user's gl
   // The managed account home's `config.toml` is a symlink to the daemon
   // user's `~/.grok/config.toml` on this host; the previous revision followed
   // it and rewrote the global file for every Grok process on the box.
-  const dir = await mkdtemp(join(tmpdir(), "grok-overlay-"));
+  const dir = await overlayScratch();
   const victim = join(dir, "the-users-real-config.toml");
   const original = '[ui]\ntheme = "dark"\n';
   await writeFile(victim, original, "utf8");
 
   const overlayDir = join(dir, "overlay");
-  await mkdtemp(join(tmpdir(), "grok-overlay-x-"));
   const { mkdir } = await import("node:fs/promises");
   await mkdir(overlayDir, { recursive: true });
   await symlink(victim, join(overlayDir, "orquester-grok.toml"));
@@ -179,7 +192,7 @@ test("a SYMLINKED config is never written — the bug that rewrote the user's gl
 
 test("an unwritable directory degrades to a warning, not a failed session", async () => {
   // `null` is the caller's signal to emit `grokConfigAdvisory()` and carry on.
-  const dir = await mkdtemp(join(tmpdir(), "grok-overlay-"));
+  const dir = await overlayScratch();
   const blocker = join(dir, "not-a-dir");
   await writeFile(blocker, "", "utf8");
   assert.equal(await writeGrokOverlayConfig(join(blocker, "nested")), null);

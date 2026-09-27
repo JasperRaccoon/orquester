@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,6 +97,7 @@ async function replayRig(fixture: string): Promise<ReplayRig> {
     dispose: async () => {
       controller.abort();
       await adapter.stopAll();
+      await rm(cwd, { recursive: true, force: true, maxRetries: 3 });
     }
   };
 }
