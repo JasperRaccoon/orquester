@@ -89,13 +89,19 @@ export function didToolWork(agent: Pick<RuntimeSubagent, "lastToolName" | "usage
 
 /**
  * The drill-in's notice, or null when a row of the agent's own is on screen.
- * `agent` is the drilled roster row, absent when the roster dropped it;
- * `retentionDropped` says the thread's window has dropped rows.
+ * `agent` is the drilled row, absent when there is none at all;
+ * `retentionDropped` says the thread's window has dropped rows;
+ * `backgroundShell` says it is a shell's drill-in — the row's kind, or, with
+ * no row, the items' (`isBackgroundShellItems`). Absent: the row's kind.
+ * `agentRemembered` says the row is the one last seen, not the roster's: its
+ * kind and its work still count, its status does not — it is never live.
  */
 export function drillInEmptyNotice(input: {
   rows: readonly AgentChatTimelineRow[];
   agent: RuntimeSubagent | undefined;
   retentionDropped: boolean;
+  backgroundShell?: boolean;
+  agentRemembered?: boolean;
 }): EmptyNotice | null {
   const { rows, agent, retentionDropped } = input;
   if (rows.some((row) => !isPromptRow(row) && !isLivePlaceholder(row))) {
@@ -116,9 +122,10 @@ export function drillInEmptyNotice(input: {
   const left = agent !== undefined && retentionDropped && didToolWork(agent);
   // Live by its roster status (`pending`, `running`, `waiting`), which the
   // roster fold already settles when the session dies — the notion the
-  // drill-in's live rows follow too.
-  const live = agent !== undefined && ACTIVE_SUBAGENT_STATUSES.has(agent.status);
-  if (agent?.agentKind === "background") {
+  // drill-in's live rows follow too. A remembered row is not the roster's: its
+  // status is not current, and the timeline reads it as not live.
+  const live = agent !== undefined && input.agentRemembered !== true && ACTIVE_SUBAGENT_STATUSES.has(agent.status);
+  if (input.backgroundShell ?? agent?.agentKind === "background") {
     // A shell prints output, it does not "report".
     if (left) {
       return notice("Its output has left this thread's window.");
@@ -158,4 +165,27 @@ export function timelineSlots(rows: readonly AgentChatTimelineRow[], notice: Emp
     slots.push({ key: TIMELINE_NOTICE_KEY, notice });
   }
   return slots;
+}
+
+/**
+ * The timeline's children, as ONE keyed array (see {@link timelineSlots}):
+ * each row rendered under its id, the notice under {@link TIMELINE_NOTICE_KEY}
+ * at its place. The keys are this function's, never the callers': with no
+ * notice — every thread with a row — the rows are mapped directly, under
+ * exactly the keys and in exactly the order the slots give them, so no row
+ * remounts when a notice comes or goes, and a token allocates no slot object
+ * per row (the slots cost ~62 µs a token at 2 500 rows; final review C, O1).
+ */
+export function timelineChildren<T>(
+  rows: readonly AgentChatTimelineRow[],
+  notice: EmptyNotice | null,
+  renderRow: (row: AgentChatTimelineRow, key: string) => T,
+  renderNotice: (notice: EmptyNotice, key: string) => T
+): T[] {
+  if (notice === null) {
+    return rows.map((row) => renderRow(row, row.id));
+  }
+  return timelineSlots(rows, notice).map((slot) =>
+    "row" in slot ? renderRow(slot.row, slot.key) : renderNotice(slot.notice, slot.key)
+  );
 }

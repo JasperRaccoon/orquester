@@ -23,7 +23,8 @@ import {
   ACTIVE_SUBAGENT_STATUSES,
   TERMINAL_SUBAGENT_STATUSES,
   type RuntimeSubagent,
-  type RuntimeSubagentStatus
+  type RuntimeSubagentStatus,
+  type ThreadItem
 } from "@orquester/api/agent-chat";
 
 export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
@@ -142,6 +143,53 @@ export function isBackgroundShellRow(
   agent: Pick<RuntimeSubagent, "agentKind"> & { kind?: RuntimeSubagent["kind"] }
 ): boolean {
   return agent.agentKind === "background" && !isLoopOrGoalRow(agent);
+}
+
+/** A task's own rows: its start, its progress and patches, its end. */
+const TASK_ROW_KINDS: ReadonlySet<string> = new Set([
+  "task.started",
+  "task.progress",
+  "task.updated",
+  "task.completed"
+]);
+
+/**
+ * Whether `agentId` is a background shell by the thread's items alone — for a
+ * drill-in whose agent has no roster row at all (the roster keeps 100 rows and
+ * evicts the oldest settled ones first; final review C, M2): a Claude shell's
+ * own command item (`bgshell:<agentId>`, the call the adapter gives a surfaced
+ * shell — its start, or any chunk retention left), or task rows naming it
+ * that the roster folds to a shell's row: none of them names it an `agent`
+ * (the roster's rule: one such row promotes it), and none names a loop's or a
+ * goal's task type ({@link isLoopOrGoalRow}). A walk of the window, so the
+ * drill-in asks it only while it has no row to read.
+ */
+export function isBackgroundShellItems(items: readonly ThreadItem[], agentId: string): boolean {
+  const shellCall = `bgshell:${agentId}`;
+  let taskRows = false;
+  for (const item of items) {
+    if (item.kind !== "activity") {
+      continue;
+    }
+    const payload =
+      item.payload !== null && typeof item.payload === "object" && !Array.isArray(item.payload)
+        ? (item.payload as Record<string, unknown>)
+        : null;
+    if (payload === null) {
+      continue;
+    }
+    if (payload.toolUseId === shellCall) {
+      return true;
+    }
+    if (!TASK_ROW_KINDS.has(item.activityKind) || payload.taskId !== agentId) {
+      continue;
+    }
+    if (payload.agentKind === "agent" || payload.taskType === "scheduled" || payload.taskType === "goal") {
+      return false;
+    }
+    taskRows = true;
+  }
+  return taskRows;
 }
 
 /**

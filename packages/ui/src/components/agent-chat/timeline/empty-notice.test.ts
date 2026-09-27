@@ -12,12 +12,16 @@ import { describe, it } from "node:test";
 import { TOOL_LIFECYCLE_ITEM_TYPES, type CanonicalItemType, type RuntimeSubagent } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
+import { createElement, type ReactElement } from "react";
+
 import {
   didToolWork,
   drillInEmptyNotice,
   NON_TOOL_ITEM_TYPES,
   TIMELINE_NOTICE_KEY,
-  timelineSlots
+  timelineChildren,
+  timelineSlots,
+  type EmptyNotice
 } from "./empty-notice";
 
 function row(overrides: Partial<RuntimeSubagent> = {}): RuntimeSubagent {
@@ -137,6 +141,24 @@ describe("drillInEmptyNotice: the three tiers", () => {
     assert.equal(text({ rows: [], agent: shell({ lastToolName: "Bash" }), retentionDropped: true }), SHELL_LEFT);
   });
 
+  it("a shell with no roster row at all, known by its items, reads a shell's copy (final review C, M2)", () => {
+    assert.equal(text({ rows: [], agent: undefined, retentionDropped: true, backgroundShell: true }), SHELL_NONE);
+    assert.equal(text({ rows: [], agent: undefined, retentionDropped: true }), NOTHING_HERE, "no row and no word: an agent's");
+  });
+
+  it("a remembered row is never live: an agent the roster evicted while at work reads settled (final review C r1, m1)", () => {
+    const running = row({ status: "running" });
+    assert.equal(text({ rows: [], agent: running, retentionDropped: true, agentRemembered: true }), NOTHING_HERE);
+    assert.equal(
+      text({ rows: [], agent: row({ status: "running", lastToolName: "Bash" }), retentionDropped: true, agentRemembered: true }),
+      LEFT,
+      "its tool work is still evidence"
+    );
+    const shell = row({ agentKind: "background", title: "npm run dev", status: "running" });
+    assert.equal(text({ rows: [], agent: shell, retentionDropped: true, agentRemembered: true }), SHELL_NONE, "never 'No output yet.'");
+    assert.equal(text({ rows: [], agent: running, retentionDropped: true }), NOT_YET, "the roster's own running row is live");
+  });
+
   it("a row of the agent's own is on screen: no notice at all", () => {
     const work: AgentChatTimelineRow = {
       kind: "work",
@@ -208,5 +230,44 @@ describe("timelineSlots: the notice is spliced into ONE keyed list (surface revi
 
   it("no notice: the rows alone", () => {
     assert.deepEqual(keys(timelineSlots(rows, null)), rows.map((row) => row.id));
+  });
+});
+
+describe("timelineChildren: with no notice the rows render directly, as the same keyed list (final review C, O1)", () => {
+  const rowsOf = (count: number): AgentChatTimelineRow[] =>
+    Array.from({ length: count }, (_, index) => ({ kind: "thinking", id: `row-${index}`, createdAt: null }) as AgentChatTimelineRow);
+  const children = (rows: readonly AgentChatTimelineRow[], notice: EmptyNotice | null): ReactElement[] =>
+    timelineChildren<ReactElement>(
+      rows,
+      notice,
+      (row, key) => createElement("div", { key, "data-row": row.id }),
+      (shown, key) => createElement("p", { key }, shown.text)
+    );
+  const keys = (elements: readonly ReactElement[]) => elements.map((element) => element.key);
+
+  it("every row keeps its React key and its order whether a notice is on screen or not", () => {
+    for (const count of [0, 1, 2, 7]) {
+      const rows = rowsOf(count);
+      const bare = keys(children(rows, null));
+      assert.deepEqual(bare, rows.map((row) => row.id), `${count} rows, no notice: the rows' own ids, in order`);
+      for (let at = 0; at <= count; at += 1) {
+        const withNotice = keys(children(rows, { text: "x", at }));
+        assert.deepEqual(
+          withNotice.filter((key) => key !== TIMELINE_NOTICE_KEY),
+          bare,
+          `${count} rows, the notice at ${at}: the same keys, in the same order`
+        );
+        assert.equal(withNotice.indexOf(TIMELINE_NOTICE_KEY), at, "the notice at its place");
+        assert.deepEqual(withNotice, timelineSlots(rows, { text: "x", at }).map((slot) => slot.key), "as the slots have them");
+      }
+    }
+  });
+
+  it("each row renders once, itself, and the notice with its own text", () => {
+    const rows = rowsOf(3);
+    const bare = children(rows, null);
+    assert.deepEqual(bare.map((element) => (element.props as { "data-row": string })["data-row"]), ["row-0", "row-1", "row-2"]);
+    const noticed = children(rows, { text: "No output yet.", at: 1 });
+    assert.equal((noticed[1]!.props as { children: string }).children, "No output yet.");
   });
 });

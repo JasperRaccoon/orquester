@@ -10,10 +10,13 @@ import type { ProjectSummary, WorkspaceSummary } from "../types";
  * **A chat tab is deliberately NOT in here.** Its composer is a plain
  * `<textarea>` with no readline semantics, so `Ctrl/Cmd+K` means nothing in it
  * and the command palette may have the key; its own chords are all
- * `mod+shift+…` and none of them collide. `Ctrl+Shift+A` is stolen
- * unconditionally elsewhere anyway, and that theft is harmless here — the
- * reason it exists is that xterm would otherwise encode `\x01` into a PTY, and
- * a chat tab has no PTY.
+ * `mod+shift+…` and none of them collide. `Ctrl+Shift+A` is taken
+ * unconditionally anyway — the Attention Center's cycle, whose capture-phase
+ * stop keeps the chord from a focused surface's own key handling: a browser
+ * tab would forward it to its remote page, and CodeMirror on macOS would
+ * extend its selection (`GlobalShortcutListener`; xterm 6 encodes nothing for
+ * it) — and that theft is harmless here: a chat tab's composer has no chord on
+ * it.
  */
 export const SHORTCUT_BAIL_SELECTOR = ".xterm, [data-browser-view]";
 

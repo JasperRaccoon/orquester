@@ -4309,6 +4309,20 @@ timeline renders exactly the rows its one projection hands it (`useAgentChatDril
 the timeline rendered its own rows whenever it had any — for a Claude shell, whose rows always ride
 a turn, a "Worked for …" fold, a capped output pane that did not follow, one row per turn its chunks
 rode, and an exited shell's output collapsed.*
+*Built (2026-09-27, the UI fix wave): the row is held, and it survives the roster's cap. The drill-in
+keeps a shell's projection while the shell's own items are the same objects (`projectBackgroundShell`):
+a token of any other stream in the thread rebuilt the row and made `WorkRow` join the shell's whole
+output again — a dev server's ~780 KiB log on every token of the parent's answer. And the drill-in
+keeps the last row it saw for its agent (`drillInAgentRow`, and the host's per-agent memory): the
+roster keeps 100 rows and evicts the oldest settled ones first, and an evicted shell fell back to the
+shared projection — a "Worked for …" fold and a capped pane, or for a Grok shell "This agent reported
+nothing to show here." A remembered row keeps the agent's title and its kind (a shell stays a one-row
+shell view) and never its status: past 100 agents at work the cap evicts the oldest-updated live ones,
+and a remembered `running` row read "Working" with a ticking timer over a timeline that read it
+settled. So the header says the agent is no longer in the thread's roster, with no status, and the
+timeline and its empty notice read it as not live (`DrillInAgent.remembered`). A shell with no row at
+all is known by its items (`isBackgroundShellItems`: its own `bgshell:<id>` call, or task rows naming
+it of a shell's kind), and the header says the same.*
 
 Stopping is T3's, not the row's. Once a turn settles the composer's stop button is gone, so while
 `backgroundLiveness` is non-null and no turn is working, a banner sits in the notice stack above the
@@ -4434,7 +4448,10 @@ cover it. The thread's own boundary wrapped everything and kept the open agent, 
 composer, the roster and Back, and on a touch device only closing the tab recovered; its "Try again"
 now also leaves an open drill-in.*
 
-*Built: **"Escape back to main" holds wherever focus is, the composer included.** With a child open,
+*Built: **"Escape back to main" holds wherever focus is in this chat, the composer included** — a field
+that is not this chat's (the tab strip's rename box, the sidebar's name field, a terminal, an editor in
+another grid cell) keeps its own Escape, so the drill-in stays open under it (§7.4,
+`chatEscapeTargetGate`). With a child open,
 Escape leaves it before it would interrupt the turn: the shell's resolver has always ranked it so
 (`resolveChatEscape`), but it stands down inside the composer, and the composer did not know a child
 was open. So a user who typed a steer while watching a child and pressed Escape to go back stopped

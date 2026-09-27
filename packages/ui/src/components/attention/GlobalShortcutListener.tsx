@@ -18,8 +18,12 @@ import { agentSessionsSnapshot, focusAgentSession, verifiedAgentSessions } from 
  * one": focusing a tab clears only the bell/hook `attention`, not the
  * structural `waiting` state, so a session stuck at a permission prompt stays
  * in the group and would otherwise trap every press. Capture phase + a
- * `stopPropagation` matter because xterm sees `Ctrl+Shift+A` as plain `Ctrl+A`
- * and would encode `\x01` (beginning of line) into the focused PTY.
+ * `stopPropagation` keep the chord from the focused surface's own key
+ * handling: a Design Mode browser tab forwards every keydown to its remote
+ * page (`BrowserView`), and on macOS CodeMirror's emacs-style `Ctrl-Shift-a`
+ * extends the selection. (Not xterm any more: `@xterm/xterm` 6.0.0 maps
+ * Ctrl+letter to a C0 byte only without Shift, so the chord never reaches a
+ * PTY as `\x01` on this version.)
  *
  * `Ctrl/Cmd+K` toggles the command palette, which owns the open state — the
  * shortcut only asks, and swallows the key only if the palette took it (a

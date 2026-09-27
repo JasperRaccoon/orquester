@@ -117,8 +117,11 @@ export interface DrillInWindow {
 }
 
 /**
- * One agent's drill-in window, in ONE pass over the thread's items (AGENTS.md:
- * never add per-event work that walks the window): its own items, in order,
+ * One agent's drill-in window, in one pass over the thread's items — plus
+ * `agentItemFilter`'s call-owner map, a second walk whenever the window holds
+ * an unstamped output chunk, which the parent's own streamed command output
+ * nearly always is (AGENTS.md: never add per-event work that walks the
+ * window): its own items, in order,
  * with the prompt of each launch that carries one just before the launch's
  * place, and the time of its latest launch (where a live run starts when the
  * roster names none). A launch delivered twice is one prompt, the first: the

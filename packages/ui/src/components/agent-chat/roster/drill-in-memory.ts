@@ -14,6 +14,8 @@
  * Pure: the view holds the value, this says what it becomes.
  */
 
+import type { RuntimeSubagent } from "@orquester/api/agent-chat";
+
 import type { DisclosureState } from "../../../lib/agent-chat/contracts";
 import type { TimelineScrollPosition } from "../contracts";
 
@@ -29,6 +31,14 @@ export interface DrillInMemoryEntry {
   readonly position: TimelineScrollPosition | null;
   /** The drill-in's live-follow flag as it was left. */
   readonly follow: boolean;
+  /**
+   * The last roster row the drill-in saw for this agent: the roster keeps 100
+   * rows and evicts the oldest settled ones first — and, past 100 at work, the
+   * oldest-updated live ones — so an agent reopened after its row left keeps
+   * its title and its kind (`drillInAgentRow`). Never its status: a
+   * remembered row is not live.
+   */
+  readonly agent?: RuntimeSubagent | null;
 }
 
 /** One thread's memory: agent id → entry, least recently remembered first. */
@@ -81,6 +91,8 @@ export interface DrillInOpening {
   /** A position to restore — only one the reader left mid-list; null opens at the end. */
   readonly position: TimelineScrollPosition | null;
   readonly follow: boolean;
+  /** The last roster row seen for the agent, if any ({@link DrillInMemoryEntry.agent}). */
+  readonly agent: RuntimeSubagent | null;
 }
 
 /**
@@ -110,6 +122,7 @@ export function drillInOpening(entry: DrillInMemoryEntry | null): DrillInOpening
     collapsedTurnIds: entry?.collapsedTurnIds ?? NO_IDS,
     collapsedShellRowIds: entry?.collapsedShellRowIds ?? NO_IDS,
     position,
-    follow: position === null
+    follow: position === null,
+    agent: entry?.agent ?? null
   };
 }

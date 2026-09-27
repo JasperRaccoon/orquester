@@ -10,7 +10,7 @@ import { peekThreadStore } from "../../../lib/agent-chat/store";
 import type { ChatTimelineProps, TimelineScrollPosition } from "../contracts";
 import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
-import { drillInEmptyNotice, timelineSlots, type EmptyNotice } from "./empty-notice";
+import { drillInEmptyNotice, timelineChildren, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
 import { LoadOlderRow } from "./rows/LoadOlderRow";
 import { nextRowEnterState, rowEnters, type RowEnterState } from "./row-enter";
@@ -105,6 +105,9 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     emptyThreadPanel,
     readOnly,
     retentionDropped = false,
+    drilledAgent,
+    drilledAgentRemembered = false,
+    backgroundShell: backgroundShellProp,
     roster,
     skills,
     projectPath,
@@ -141,19 +144,26 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   /**
    * This surface is a **background shell's** drill-in (§7.6).
    *
-   * Read off the roster rather than taken as a prop: the drill-in already
-   * forwards the roster for its spawn rows, and the kind of a row is the
-   * roster's own fact. It changes two things — the empty copy (a shell prints
-   * output, it does not "report"), and the shell variant of a tool row's
-   * output pane, which is the whole content of this view rather than a detail
-   * hidden under a label.
+   * The drill-in hands over its row and its kind (`drilledAgent`,
+   * `backgroundShell`): the roster may no longer have the row — it keeps 100
+   * rows and evicts the oldest settled ones first — and a shell with no row at
+   * all is known by its items. Without them, the roster's own row, the kind of
+   * a row being the roster's fact. It changes two things — the empty copy (a
+   * shell prints output, it does not "report"), and the shell variant of a
+   * tool row's output pane, which is the whole content of this view rather
+   * than a detail hidden under a label.
    */
   const drilledRow =
-    agentId === undefined ? undefined : (roster ?? []).find((candidate) => candidate.id === agentId);
+    agentId === undefined
+      ? undefined
+      : drilledAgent !== undefined
+        ? (drilledAgent ?? undefined)
+        : (roster ?? []).find((candidate) => candidate.id === agentId);
   // A loop and a goal are background rows too, and never shells: they print
   // nothing — their work is rows of its own, which the empty copy points at.
   const drivesWork = drilledRow !== undefined && isLoopOrGoalRow(drilledRow);
-  const backgroundShell = drilledRow !== undefined && drilledRow.agentKind === "background" && !drivesWork;
+  const backgroundShell =
+    backgroundShellProp ?? (drilledRow !== undefined && drilledRow.agentKind === "background" && !drivesWork);
 
   /**
    * What an empty list says, and before which row. The thread's: "No messages
@@ -166,13 +176,18 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
   const notice = React.useMemo<EmptyNotice | null>(
     () =>
       agentId !== undefined
-        ? drillInEmptyNotice({ rows, agent: drilledRow, retentionDropped })
+        ? drillInEmptyNotice({
+            rows,
+            agent: drilledRow,
+            retentionDropped,
+            backgroundShell,
+            agentRemembered: drilledAgentRemembered
+          })
         : rows.length === 0 && !showLoadOlder && !showEmptyPanel
           ? { text: "No messages yet.", at: 0 }
           : null,
-    [agentId, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
+    [agentId, backgroundShell, drilledAgentRemembered, drilledRow, retentionDropped, rows, showEmptyPanel, showLoadOlder]
   );
-  const slots = React.useMemo(() => timelineSlots(rows, notice), [rows, notice]);
 
   const scrollerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -810,19 +825,23 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
               <LoadOlderRow loading={historyLoading} error={historyError} onLoad={loadOlder} />
             ) : null}
             {/* ONE keyed list, the empty notice spliced in at its place: a row
-                that crosses it never remounts (`timelineSlots`). */}
-            {slots.map((slot) =>
-              "row" in slot ? (
-                <TimelineRow key={slot.key} row={slot.row} enter={enterFlag(slot.row.id)} />
-              ) : (
+                that crosses it never remounts, and with no notice the rows are
+                mapped directly under the same keys (`timelineChildren`). */}
+            {timelineChildren(
+              rows,
+              notice,
+              (row, key) => (
+                <TimelineRow key={key} row={row} enter={enterFlag(row.id)} />
+              ),
+              (shown, key) => (
                 <div
-                  key={slot.key}
+                  key={key}
                   className={cn(
                     "mx-auto w-full max-w-3xl text-center text-sm italic text-neutral-600",
-                    slot.notice.at === 0 ? "py-12" : "py-4"
+                    shown.at === 0 ? "py-12" : "py-4"
                   )}
                 >
-                  {slot.notice.text}
+                  {shown.text}
                 </div>
               )
             )}
