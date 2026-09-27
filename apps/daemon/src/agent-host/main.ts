@@ -702,6 +702,9 @@ export async function startAgentHost(
     // `unref`'d, so this is about a deterministic stop rather than about the
     // process exiting — a sweep must not start while the log writers close.
     store.close();
+    // The provider cache's last write, queued before `snapshots.stop()`, lands
+    // before the stop resolves; the stopped registry queues none after it.
+    await snapshots.flush();
     await Promise.allSettled(consumers);
   };
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,6 +139,30 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
       probe.next = snapshotFor("claude", { version: "1.1.0" });
       await registry.refresh("claude");
       assert.deepEqual(changed, ["claude", "claude"]);
+    });
+  });
+
+  it("a probe that finishes after stop() persists nothing and never recreates the state directory", async () => {
+    // The host stops with a probe still in flight — the boot refresh, a
+    // per-cwd one — and its appdir may be gone the moment its stop resolves (a
+    // test's temp root): the late probe's write `mkdir -p`'d it back.
+    await withRegistry(async ({ registry, probe, stateDir }) => {
+      let release: () => void = () => undefined;
+      probe.gate = new Promise<void>((resolve) => {
+        release = () => resolve();
+      });
+      probe.next = snapshotFor("claude", { version: "2.0.0" });
+      const late = registry.refresh("claude");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(probe.calls, 1, "the probe is in flight");
+
+      registry.stop();
+      await rm(stateDir, { recursive: true, force: true });
+      release();
+      await late;
+      await registry.flush();
+
+      assert.equal(existsSync(stateDir), false, "a stopped registry writes nothing, and makes no directory");
     });
   });
 

@@ -288,6 +288,13 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
    * fires inside the host process only; this is what crosses the socket.
    */
   changeCount(): number;
+  /**
+   * Stop the background loop and every later write: a probe still in flight
+   * (the boot refresh, a per-cwd one) that finishes after this updates the
+   * in-memory snapshot and persists nothing — the host's appdir may be gone by
+   * then, and a write would `mkdir -p` it back. A write queued before still
+   * lands; `flush()` awaits it.
+   */
   stop(): void;
 }
 
@@ -494,6 +501,11 @@ export function createProviderSnapshotRegistry(
   };
 
   const persist = (): void => {
+    // A stopped registry writes nothing (see `stop()`): a late probe's write
+    // recreated a host-teardown test's deleted temp root, every run.
+    if (stopped) {
+      return;
+    }
     persistChain = persistChain
       .then(async () => {
         const providers: Record<string, { identity: PersistedIdentity; snapshot: ProviderSnapshot }> =
