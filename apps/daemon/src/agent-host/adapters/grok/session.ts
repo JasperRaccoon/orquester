@@ -393,7 +393,8 @@ export class GrokSession {
         stamp: options.stamp,
         uuid: options.uuid,
         activeTurnId: () => this.activeTurn?.turnId,
-        planHost: this.planHost()
+        planHost: this.planHost(),
+        launchNonce: this.launchId.slice(0, 8)
       },
       "pending"
     );

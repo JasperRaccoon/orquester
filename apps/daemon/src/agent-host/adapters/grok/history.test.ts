@@ -42,7 +42,8 @@ function historyFromCapture(file: string): ThreadSnapshot {
       stamp: stamps().stamp,
       uuid: () => "u",
       activeTurnId: () => undefined,
-      planHost: { platform: "linux", env: {} }
+      planHost: { platform: "linux", env: {} },
+      launchNonce: "history"
     },
     "session-1"
   );
@@ -174,7 +175,8 @@ test("a LIVE event never carries the historical marker", () => {
       stamp: stamps().stamp,
       uuid: () => "u",
       activeTurnId: () => "turn-1",
-      planHost: { platform: "linux", env: {} }
+      planHost: { platform: "linux", env: {} },
+      launchNonce: "history"
     },
     "session-1"
   );

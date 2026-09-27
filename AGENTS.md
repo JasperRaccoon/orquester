@@ -1474,14 +1474,19 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   with the reason, `completed` with its result); the session's end closes both, as the loop and the
   goal live in the CLI's process (whether a Stop's `session/cancel` stops either is not captured: a
   later fire or goal update notes itself on the ended row, and only the CLI re-creating a loop or
-  resuming a goal it ended itself opens a new run). A genuine `failed` status was not triggered: a
-  subagent's model is set only in the account home's `config.toml`, never written. Noise the
-  captures showed, silenced: a child's `skills-reload` / `workflows-reload` replies to requests the
-  CLI sent itself are not warnings (the ACP peer drops a reply to nothing that carries an id the
-  adapter names, `agentOwnReplyIds`); an MCP server's failure is said once until it recovers (the
-  CLI re-handshakes the thread's servers at every spawn); the self-resolved-approvals advisory is
-  said once, and only where approval cards were promised (never under `auto` / `full-access`, where
-  the CLI resolving its own interactions is the mode working).
+  resuming a goal it ended itself opens a new run). A run's launch id names the launch that numbered
+  it (`loop-run:<task>:<launch>:<run>`, `goal-run:<goal>:<launch>:<run>`, `<launch>` the first 8 hex
+  digits of the session's launch id): every launch counts runs from 1, and a loop or goal a later
+  launch reports again (a CLI restoring them on `session/load` — PLAUSIBLE, uncaptured) reused the
+  ended run's id, which the roster read as a late delivery, the row staying ended. A genuine
+  `failed` status was not triggered: a subagent's model is set only in the account home's
+  `config.toml`, never written. Noise the captures showed, silenced: a child's `skills-reload` /
+  `workflows-reload` replies to requests the CLI sent itself are not warnings (the ACP peer drops a
+  reply to nothing that carries an id the adapter names, `agentOwnReplyIds`); an MCP server's
+  failure is said once until it recovers (the CLI re-handshakes the thread's servers at every
+  spawn); the self-resolved-approvals advisory is said once, and only where approval cards were
+  promised (never under `auto` / `full-access`, where the CLI resolving its own interactions is the
+  mode working).
 - **What a Grok CLI starts outlives it. Its helpers are stopped at every end of its session; the
   work its agent started only when the USER ends the session — a deploy must never kill running
   work.** The CLI starts every child of its own — the MCP servers it boots from the host's

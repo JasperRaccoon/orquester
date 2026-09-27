@@ -1491,6 +1491,13 @@ docs), and the session's end closes it. The fire itself is the agent row the CLI
 across sessions, and whether a Stop's `session/cancel` deletes a loop (a later fire notes itself on
 the row the Stop closed).
 
+A run's launch id is `loop-run:<task id>:<launch>:<run>`, `<launch>` the session's own nonce (the
+first 8 hex digits of its launch id): every launch builds its normaliser afresh and numbers runs
+from 1, so a loop a LATER launch reports again — a `durable` loop the CLI restores on
+`session/load`, uncaptured, so PLAUSIBLE — opens a run the roster reopens its row for. Without the
+launch it reused the id of the run a deploy had ended, and the roster read the new start as a late
+delivery of that run: the row stayed ended while the loop fired (final review A, M4).
+
 ### 53. `/goal`: `goal_updated`, and a planner the CLI spawns
 
 Fixture 30. `/goal Create a file named goal.txt containing exactly: ok --budget 20000`, as a prompt.
@@ -1525,7 +1532,9 @@ goal active again after the CLI's own end is a new run of its row (a new launch 
 adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its progress notes
 itself on the ended row; a new goal ends the old one ("Replaced by a new goal"), with the token
 count the old one last reported itself — the replacing update counts the new goal's. Not captured: a
-goal that completes, pauses, resumes or fails.
+goal that completes, pauses, resumes or fails. A goal run's launch id carries the launch as a loop
+run's does (`goal-run:<goal id>:<launch>:<run>`, observation 52): a goal a later launch reports
+active again (PLAUSIBLE, uncaptured: a CLI restoring its goal on `session/load`) reopens its row.
 
 ### 54. The host's cancel of a question: the model hears "declined"; a Stop's cancel ends the turn
 

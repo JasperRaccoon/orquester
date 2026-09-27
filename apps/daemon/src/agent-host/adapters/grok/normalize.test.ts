@@ -54,7 +54,8 @@ function normalizer(turn: TurnCursor = { current: "turn-1" }): GrokNormalizer {
         return `u${counter}`;
       },
       activeTurnId: () => turn.current,
-      planHost: { platform: "linux", env: { GROK_HOME: "~/home" } }
+      planHost: { platform: "linux", env: { GROK_HOME: "~/home" } },
+      launchNonce: "launch-1"
     },
     SESSION
   );
@@ -1611,9 +1612,9 @@ test("the session's end closes a live loop and goal; a later fire notes itself, 
 
   // Re-created by the CLI, and resumed after the CLI's own end: new runs.
   const again = only(scheduler(grok, "scheduled_task_created"), "task.started");
-  assert.equal(again[0]?.payload.toolUseId, `loop-run:${LOOP_ID}:2`);
+  assert.equal(again[0]?.payload.toolUseId, `loop-run:${LOOP_ID}:launch-1:2`);
   const resumed = only(goalUpdate(grok, {}), "task.started");
-  assert.equal(resumed[0]?.payload.toolUseId, `goal-run:${GOAL_ID}:2`);
+  assert.equal(resumed[0]?.payload.toolUseId, `goal-run:${GOAL_ID}:launch-1:2`);
 });
 
 test("a goal ends by the status it leaves active in: completed with its summary, cleared stopped, a new goal replacing it", () => {
