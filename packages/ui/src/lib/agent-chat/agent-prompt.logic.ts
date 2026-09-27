@@ -27,7 +27,7 @@
 
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
 
-import { itemsForAgent } from "./entries.logic";
+import { agentItemFilter } from "./entries.logic";
 
 /** What the prompt row says of the prompt beside its text. */
 export interface AgentPrompt {
@@ -95,48 +95,51 @@ function launchPromptMessage(launch: ThreadActivityItem, agentId: string): Threa
   return message;
 }
 
+/** One agent's drill-in window, as {@link drillInWindow} reads it. */
+export interface DrillInWindow {
+  /** Its own items (`itemsForAgent`'s rule, {@link agentItemFilter}), each launch's prompt just before its place. */
+  readonly items: ThreadItem[];
+  /** When its latest launch started: the newest `task.started` naming it, prompt or not. */
+  readonly latestLaunchAt: string | null;
+}
+
 /**
- * One agent's drill-in items: its own ({@link itemsForAgent}), in order, with
- * the prompt of each launch that carries one just before the launch's place.
- * A launch delivered twice is one prompt, the first: the same launch id
- * (`payload.toolUseId`), or — for a start that names none — the same prompt.
+ * One agent's drill-in window, in ONE pass over the thread's items (AGENTS.md:
+ * never add per-event work that walks the window): its own items, in order,
+ * with the prompt of each launch that carries one just before the launch's
+ * place, and the time of its latest launch (where a live run starts when the
+ * roster names none). A launch delivered twice is one prompt, the first: the
+ * same launch id (`payload.toolUseId`), or — for a start that names none — the
+ * same prompt.
  */
-export function drillInItems(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
-  const own = itemsForAgent(items, agentId);
-  let prompts: Map<ThreadItem, ThreadMessageItem> | null = null;
+export function drillInWindow(items: readonly ThreadItem[], agentId: string): DrillInWindow {
+  const owns = agentItemFilter(items, agentId);
+  const merged: ThreadItem[] = [];
   const launches = new Set<string>();
+  let latestLaunchAt: string | null = null;
   for (const item of items) {
     const launch = launchOf(item, agentId);
-    if (launch === null) {
-      continue;
+    if (launch !== null) {
+      if (latestLaunchAt === null || launch.createdAt > latestLaunchAt) {
+        latestLaunchAt = launch.createdAt;
+      }
+      const message = launchPromptMessage(launch, agentId);
+      if (message !== null) {
+        // One prompt per launch: its launch id; a start that names none (an
+        // older log) is keyed by what it says, so a re-emitted one is still
+        // one prompt.
+        const launchId = asRecord(launch.payload)?.toolUseId;
+        const key =
+          typeof launchId === "string" && launchId.length > 0 ? `launch:${launchId}` : `prompt:${message.text}`;
+        if (!launches.has(key)) {
+          launches.add(key);
+          merged.push(message);
+        }
+      }
     }
-    const message = launchPromptMessage(launch, agentId);
-    if (message === null) {
-      continue;
-    }
-    // One prompt per launch: its launch id; a start that names none (an older
-    // log) is keyed by what it says, so a re-emitted one is still one prompt.
-    const launchId = asRecord(launch.payload)?.toolUseId;
-    const key = typeof launchId === "string" && launchId.length > 0 ? `launch:${launchId}` : `prompt:${message.text}`;
-    if (launches.has(key)) {
-      continue;
-    }
-    launches.add(key);
-    (prompts ??= new Map()).set(item, message);
-  }
-  if (prompts === null) {
-    return own;
-  }
-  const owned = new Set<ThreadItem>(own);
-  const merged: ThreadItem[] = [];
-  for (const item of items) {
-    const prompt = prompts.get(item);
-    if (prompt !== undefined) {
-      merged.push(prompt);
-    }
-    if (owned.has(item)) {
+    if (owns(item)) {
       merged.push(item);
     }
   }
-  return merged;
+  return { items: merged, latestLaunchAt };
 }

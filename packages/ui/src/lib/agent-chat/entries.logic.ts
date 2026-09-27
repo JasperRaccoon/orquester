@@ -1167,15 +1167,16 @@ export function splitThreadItems(
 }
 
 /**
- * The per-agent drill-in view: that agent's own items, in order (§7.6) — and
- * an older log's unstamped output chunks of this agent's calls, which are its
- * own too (see `callOwnersOf`).
+ * Whether an item of `items` is `agentId`'s own: stamped with it, or an older
+ * log's unstamped output chunk of one of its calls (see `callOwnersOf`). One
+ * test per window, so a caller walking the window for more than the agent's
+ * items (the drill-in's launches) does it in the same pass.
  */
-export function itemsForAgent(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
+export function agentItemFilter(items: readonly ThreadItem[], agentId: string): (item: ThreadItem) => boolean {
   // Built at the first unstamped chunk; the parent's own output is one, so
   // nearly always.
   let callOwners: Map<string, string> | undefined;
-  return items.filter((item) => {
+  return (item) => {
     if (item.agentId === agentId) {
       return true;
     }
@@ -1184,7 +1185,16 @@ export function itemsForAgent(items: readonly ThreadItem[], agentId: string): Th
     }
     callOwners ??= callOwnersOf(items);
     return inheritedChunkOwner(item, callOwners) === agentId;
-  });
+  };
+}
+
+/**
+ * The per-agent drill-in view: that agent's own items, in order (§7.6) — and
+ * an older log's unstamped output chunks of this agent's calls, which are its
+ * own too (see `callOwnersOf`).
+ */
+export function itemsForAgent(items: readonly ThreadItem[], agentId: string): ThreadItem[] {
+  return items.filter(agentItemFilter(items, agentId));
 }
 
 // ---------------------------------------------------------------------------

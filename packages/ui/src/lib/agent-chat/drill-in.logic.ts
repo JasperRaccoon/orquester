@@ -1,9 +1,10 @@
 /**
  * Agent chat — the drill-in's rows: one subagent's own timeline (§7.6).
  *
- * Its items filtered by `agentId` (`itemsForAgent`), each launch's prompt at
- * its place (`drillInItems`, `agent-prompt.logic.ts` — "its prompt at the
- * top"), through the very same three layers as the parent's timeline —
+ * Its items filtered by `agentId` (`itemsForAgent`'s rule), each launch's
+ * prompt at its place, both in one pass over the window (`drillInWindow`,
+ * `agent-prompt.logic.ts` — "its prompt at the top"), through the very same
+ * three layers as the parent's timeline —
  * entries, rows, stable rows — held
  * between renders so a streamed token in the child's timeline changes one row
  * object, exactly as in the parent. `useAgentChatDrillIn` (hooks.ts) holds the
@@ -31,7 +32,7 @@
 
 import type { MessageStreamingContext, RuntimeSubagent, ThreadItem } from "@orquester/api/agent-chat";
 
-import { agentPromptOf, drillInItems } from "./agent-prompt.logic";
+import { agentPromptOf, drillInWindow } from "./agent-prompt.logic";
 import {
   deriveTimelineEntriesFromItems,
   EMPTY_TIMELINE_PROJECTION,
@@ -147,25 +148,6 @@ export function isDrillInAgentLive(
 }
 
 /**
- * When the agent's latest launch started: the newest `task.started` naming it
- * (`payload.taskId`), whoever owns the row — Claude's launch is the PARENT's
- * row, the other adapters stamp it with the agent. Null when none is held.
- */
-export function latestLaunchAt(items: readonly ThreadItem[], agentId: string): string | null {
-  let latest: string | null = null;
-  for (const item of items) {
-    if (item.kind !== "activity" || item.activityKind !== "task.started") {
-      continue;
-    }
-    const payload = item.payload as { taskId?: unknown } | null;
-    if (payload?.taskId === agentId && (latest === null || item.createdAt > latest)) {
-      latest = item.createdAt;
-    }
-  }
-  return latest;
-}
-
-/**
  * Where a live agent's current run begins in its entries: the first row at or
  * after the run's start that is not a launch's prompt — the prompt heads the
  * run, so its working row follows it. Nothing known of the start — every row
@@ -189,9 +171,11 @@ export function projectAgentDrillIn(
   // A different child is a different timeline: never reuse the previous
   // agent's projection as the fast path's baseline.
   const held = previous.agentId === agentId ? previous : null;
+  // ONE pass over the window: its own items, each launch's prompt at its
+  // place, and its latest launch (`agent-prompt.logic.ts`).
+  const window = drillInWindow(input.items, agentId);
   const timeline = deriveTimelineEntriesFromItems(
-    // Its own items, each launch's prompt at its place (`agent-prompt.logic.ts`).
-    drillInItems(input.items, agentId),
+    window.items,
     held?.timeline ?? null,
     // The agent's own rows are agent-internal to the parent, not to itself.
     { ownerAgentId: agentId }
@@ -208,7 +192,7 @@ export function projectAgentDrillIn(
     }
   }
   const live = isDrillInAgentLive(agentId, input.agent, input.messageStreaming);
-  const runStartedAt = live ? (input.agent?.startedAt ?? latestLaunchAt(input.items, agentId)) : null;
+  const runStartedAt = live ? (input.agent?.startedAt ?? window.latestLaunchAt) : null;
   // The rows derivation compares these sets by identity, so the pair is held
   // while its members stay the same: a fresh pair per projection sent every
   // streamed token down a full rebuild instead of the streamed-text fast path.
