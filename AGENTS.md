@@ -968,10 +968,10 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   alone listed no files in the GUI's row or the MCP's entry) —
   except a call no row of the window anchors (`anchorsCall`,
   `packages/api/src/agent-chat/call-anchor.ts`: every row of it turnless and ownerless — what a
-  rewind leaves of a woken Claude parent's call, rule (6) below), which no view shows and which a
-  closer would bring back as a failed row after every host start; then for every task the roster
-  shows `pending`/`running`/`waiting` (any agent kind — `idle` is left alone, as the fold's
-  session-death rule leaves it) a `task.completed {status: "stopped"}` with its latest row's
+  rewind leaves of a Claude parent call a later turn adopted, rule (6) below), which no view shows
+  and which a closer would bring back as a failed row after every host start; then for every task
+  the roster shows `pending`/`running`/`waiting` (any agent kind — `idle` is left alone, as the
+  fold's session-death rule leaves it) a `task.completed {status: "stopped"}` with its latest row's
   linkage, the roster's `agentKind`, and its start's owner and turn (a rewind keeps or drops a row
   by its turn: a stop on any other turn could go while the start stays, and the agent read running
   again). Calls come before tasks, so a background shell's item closes before its task, and every

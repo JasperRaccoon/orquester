@@ -768,7 +768,7 @@ describe("goals §5.7 — the lease runs out with the host still up", () => {
 
   it("…even while the pause's own update trails: the release asks the provider, which holds the goal paused", async () => {
     // Codex's update of a set trails its reply (fixtures README observation
-    // 20): the release runs right behind the pause, before the fold reads
+    // 23): the release runs right behind the pause, before the fold reads
     // `paused` — and the fold's `active` must not pass for a goal going on.
     const { host, codex } = codexHost();
     const threadId = await continuingGoal(host, { running: false });

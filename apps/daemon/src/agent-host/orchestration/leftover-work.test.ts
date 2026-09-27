@@ -535,11 +535,13 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.deepEqual([entry?.tool?.status, entry?.tool?.changedFiles], ["failed", files], "the MCP's entry lists them");
   });
 
-  it("leaves alone an open call no row of the window anchors — the woken call a rewind left — and closes one a row anchors", () => {
-    // A woken Claude parent streams its call before the synthetic turn its own
-    // message opens: its start and an early input update carry no turn and no
-    // owner. The turn adopts the call with one update on it, and a rewind of
-    // that turn takes that update and the call's completion with it
+  it("leaves alone an open call no row of the window anchors — what a rewind left of an adopted call — and closes one a row anchors", () => {
+    // A Claude parent call registered while no turn is open — the tail of a
+    // message an interrupt's turn end left streaming, or, in a log written
+    // before a woken parent's first message was held for its turn, any woken
+    // call — writes its start and an early input update with no turn and no
+    // owner. The next turn adopts the call with one update on it, and a rewind
+    // of that turn takes that update and the call's completion with it
     // (`reduceReverted` keeps turnless rows): what is left is open, and no
     // view shows it. A closer would anchor it and bring it back, failed.
     const bash = (command?: string) => ({ toolName: "Bash", input: command === undefined ? {} : { command } });

@@ -669,8 +669,9 @@ to the end of the log, and "Load older" then lost every row between its first ch
 reads as streaming only while a live session runs its turn or its agent is still at work (§7.3,
 `isMessageStreaming`), so a stream no process can continue reads as settled. After the closings the
 same load names the launches an older host never wrote: an OpenCode or Codex agent launched before
-the relaunch fix gets one `task.started` naming `legacy-launch:<taskId>` once it is settled, so its
-next relaunch reopens it (§7.6).*
+the relaunch fix, or a Grok agent the 2026-09-24 goals build started from a `subagent_spawned` no
+spawn call explained, gets one `task.started` naming `legacy-launch:<taskId>` once it is settled, so
+its next relaunch reopens it (§7.6).*
 
 ### 3.4 Session restart policy
 
@@ -4526,8 +4527,10 @@ row of a run retention never drops: a status row would reopen the agent only unt
 dropped that row, and the old end would read again mid-run. An agent first launched by a host
 older than this change carries no launch id, and no relaunch from a terminal state could reopen
 it — so a thread's first load names one for it rather than weaken the guard: every settled
-OpenCode or Codex agent with no launch id on any start gets one appended `task.started` naming
-`legacy-launch:<taskId>`, on its first start's turn and owner, with its newest row's linkage and
+OpenCode or Codex agent with no launch id on any start — and every such Grok agent, which the
+2026-09-24 goals build started from a `subagent_spawned` no spawn call explained — gets one
+appended `task.started` naming `legacy-launch:<taskId>`, on its first start's turn and owner, with
+its newest row's linkage and
 the roster's own `updatedAt` for it as the row's `createdAt`/`updatedAt` (the event itself is
 stamped with the load's time), so the roster reads exactly as before and the agent's spawn row
 takes it in; the next relaunch names a different id, and reopens it. An `idle`

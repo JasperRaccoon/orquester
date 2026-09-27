@@ -1126,10 +1126,11 @@ test("the parent view builds no entry from a chunk alone, stamped or not", () =>
 });
 
 test("a call whose rows are all turnless, ownerless and unclosed is no entry — what a rewind of the turn they preceded left", () => {
-  // A woken Claude parent streams a call before the synthetic turn its own message opens: the call's start and an early
-  // input update go out turnless, and its rows from the turn's opening on — the update that adopts it first — carry
-  // it, which a rewind removes, leaving the turnless ones behind. The GUI hides them (the start superseded, the
-  // in-progress update a neutral row).
+  // A Claude parent call registered while no turn is open — the tail of a message an interrupt's turn end left
+  // streaming, or, in a log written before a woken parent's first message was held for its turn, any woken call —
+  // sends its start and an early input update out turnless, and its rows from the next turn's opening on — the update
+  // that adopts it first — carry that turn, which a rewind removes, leaving the turnless ones behind. The GUI hides
+  // them (the start superseded, the in-progress update a neutral row).
   const call = (activityKind: string, status: string, turnId: string | null, over: Record<string, unknown> = {}) =>
     activity(activityKind, { itemType: "command_execution", toolUseId: "call-1", title: "Command run", status, data: { command: "cat out.txt" }, ...over }, { turnId, tone: "tool" });
   const prompt = message("user", "look around", { turnId: "t1", id: "u1" });
@@ -1141,7 +1142,7 @@ test("a call whose rows are all turnless, ownerless and unclosed is no entry —
   assert.deepEqual(tools([prompt, start, early]), [], "nor with its early input update");
   assert.deepEqual(tools([prompt, early]), [], "nor the update alone");
   // Live, the turn that opens adopts the call with one update on that turn (the Claude normaliser's `beginTurn`): the
-  // woken call's shape while it runs — start, early update, the adopting update — is the running call's entry.
+  // adopted call's shape while it runs — start, early update, the adopting update — is the running call's entry.
   assert.deepEqual(tools([prompt, start, early, call("tool.updated", "inProgress", "t1")]).map((e) => [e.tool!.status, e.tool!.command]), [["inProgress", "cat out.txt"]]);
   // A row of the call that closes it makes it the call's entry too, as before.
   assert.deepEqual(tools([prompt, start, early, call("tool.completed", "completed", "t1")]).map((e) => e.tool!.status), ["completed"]);

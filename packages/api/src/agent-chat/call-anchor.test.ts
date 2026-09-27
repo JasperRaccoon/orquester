@@ -40,7 +40,8 @@ test("a row anchors its call by its turn, by an owner on the row or on its paylo
 });
 
 test("a turnless, ownerless opening row or chunk anchors nothing — a blank owner is no owner", () => {
-  // What a woken Claude parent writes before the synthetic turn its own message opens.
+  // What a Claude parent call writes before the next turn adopts it: an interrupted message's tail, or any woken
+  // call in a log written before a woken parent's first message was held for its turn.
   assert.equal(anchorsCall(row("tool.started")), false);
   assert.equal(anchorsCall(row("tool.updated")), false);
   assert.equal(anchorsCall(row("tool.output")), false);

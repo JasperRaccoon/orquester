@@ -2,16 +2,20 @@
  * Agent chat — whether a tool call is anyone's to show: one rule for every
  * reader of a call's rows.
  *
- * A Claude parent call can start before the synthetic turn its own message
- * opens: what it emits before that turn opens — its start and any early input
- * update — carries no turn and no owner. The turn adopts the call as it opens,
- * with one update on it (the Claude normaliser's `adoptedToolEvent`), so a
- * running call always has a row that names its turn. A rewind of that turn
- * removes that row with the rest, its completion too, and keeps the turnless
- * ones (`reduceReverted` drops a removed turn's rows, never a turnless row):
- * those are then all there is of the call, open, and it ran in a turn that no
- * longer exists. So is a woken call no turn ever adopted, its session stopped
- * first.
+ * A Claude parent call can start while no turn is open: in the tail of a
+ * message that was still streaming when an interrupt ended its turn. (A woken
+ * parent's first message is held and replayed into the next turn to open —
+ * the normaliser's `preTurnStream` — so its calls start on that turn.) What
+ * such a call emits before the next turn opens — its start and any early
+ * input update — carries no turn and no owner. The turn adopts the call as it
+ * opens, with one update on it (the Claude normaliser's `adoptedToolEvent`),
+ * so a running call always has a row that names its turn. A rewind of that
+ * turn removes that row with the rest, its completion too, and keeps the
+ * turnless ones (`reduceReverted` drops a removed turn's rows, never a
+ * turnless row): those are then all there is of the call, open, and it ran in
+ * a turn that no longer exists. So is such a call no turn ever adopted, its
+ * session stopped first. A log written before that hold has such turnless
+ * starts for every woken call too.
  *
  * A row of a call ({@link CALL_ROW_KINDS}) ANCHORS it ({@link anchorsCall})
  * when it names a turn, when an agent owns it (a non-blank `agentId` on the

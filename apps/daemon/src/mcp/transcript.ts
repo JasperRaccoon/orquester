@@ -446,13 +446,15 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     const ownerOf = (item: ThreadItem): string | undefined => item.agentId || inheritedOwner(item);
     const inScope = (item: ThreadItem): boolean => (opts.agentId ? ownerOf(item) === opts.agentId : !ownerOf(item) || isAgentAnchor(item));
     // A call whose rows in the view are all turnless, ownerless and unclosed is no entry, as the GUI's timeline shows it
-    // none: a Claude parent call can start before the synthetic turn its own message opens, and what it emits before
-    // that turn opens — its start and any early input update — stays turnless. The turn adopts the call as it opens,
-    // with one update on it (the Claude normaliser's `adoptedToolEvent`), so a running call always has a row that
-    // carries its turn; a rewind of that turn removes it with the rest, leaving the turnless rows as all there is of the
-    // call, which the GUI hides (the start as superseded, `startIsCallRow` in packages/ui entries.logic.ts; an update
-    // still in progress as a neutral row) — no running call, and a host's first load writes it no closer either. The
-    // calls a row of the view anchors — by its turn, its owner, or as the call's close (`anchorsCall`, the one rule in
+    // none: a Claude parent call can start while no turn is open (the tail of a message an interrupt's turn end left
+    // streaming — a woken parent's first message is held for the next turn to open, so its calls start on it —
+    // and, in a log written before that hold, every woken call), and what it emits before the next turn opens — its
+    // start and any early input update — stays turnless. The turn adopts the call as it opens, with one update on it
+    // (the Claude normaliser's `adoptedToolEvent`), so a running call always has a row that carries its turn; a rewind
+    // of that turn removes it with the rest, leaving the turnless rows as all there is of the call, which the GUI
+    // hides (the start as superseded, `startIsCallRow` in packages/ui entries.logic.ts; an update still in progress
+    // as a neutral row) — no running call, and a host's first load writes it no closer either. The calls a row of the
+    // view anchors — by its turn, its owner, or as the call's close (`anchorsCall`, the one rule in
     // `@orquester/api`'s call-anchor.ts):
     const anchoredCalls = new Set<string>();
     for (const item of snap.items) {

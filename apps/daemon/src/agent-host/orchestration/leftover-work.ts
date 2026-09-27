@@ -59,12 +59,15 @@
  *   stored as `data: {}` beside them, and a closer that copied the data alone
  *   listed no files — the GUI's row and the MCP's entry read them there.
  *   **Except a call no row of the window anchors** ({@link anchorsCall}:
- *   every row of it turnless and ownerless) — what a rewind leaves of a woken
- *   Claude parent's call, its start and early input update, or a woken call
- *   no turn ever adopted. No view shows it (`@orquester/api`'s
- *   `call-anchor.ts`, the rule the GUI and the MCP hide it by), and a closer
- *   would anchor it: the call would come back as a failed row after any host
- *   start. It stays open in the fold, under the open-work caps like any unit.
+ *   every row of it turnless and ownerless) — what a rewind leaves of a Claude
+ *   parent call a later turn adopted, its start and early input update (the
+ *   tail of a message an interrupt's turn end left streaming; in a log written
+ *   before a woken parent's first message was held for its turn, any woken
+ *   call), or such a call no turn ever adopted. No view shows it
+ *   (`@orquester/api`'s `call-anchor.ts`, the rule the GUI and the MCP hide it
+ *   by), and a closer would anchor it: the call would come back as a failed row
+ *   after any host start. It stays open in the fold, under the open-work caps
+ *   like any unit.
  * - **Every task the roster shows active** — `pending`, `running`, `waiting`,
  *   the statuses the fold's session-death rule interrupts, any agent kind —
  *   gets a `task.completed {status: "stopped"}`. `idle` is left alone, as that
