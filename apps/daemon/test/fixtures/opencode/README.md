@@ -1033,9 +1033,11 @@ after them. Busy — confirmed — the child is RELAUNCHED under the relaunch co
 `task.started` naming a new launch id, `opencode-revive:<callID>:<n>`, which every row of the
 reopened run names while the provider's call stays the one its part is matched by. A grandchild is
 relaunched the same way: its launch is its child's own `task` call. A run whose start named no
-launch (a log from before every start named one) gets a seed first, naming its first run's (its
-call, else `opencode-child:<session id>`): the roster reopens only on a changed launch, and reads
-the seed as a late delivery. The roster reopens the row, running, with the Stop's end and summary
+launch would get a seed first, naming its first run's launch (its call, else
+`opencode-child:<session id>`): the roster reopens only on a changed launch, and reads the seed as a
+late delivery. The branch is defensive, unreachable today: every start the adapter writes names a
+launch and its records never outlive the host, so an older log's runs are the host's first load's
+(`legacyLaunchStarts`). The roster reopens the row, running, with the Stop's end and summary
 cleared; the liveness registry counts it; the adapter's live set holds it again, so a later Stop or
 the exit closes it `stopped`; and its own idle and answer end it `completed` with its result, once.
 The roster reads it running only while the thread's session reads live, so the Stop now returns the

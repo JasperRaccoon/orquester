@@ -1267,10 +1267,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   answer; a child no part has named yet starts under `opencode-child:<session id>`, its start alone
   — rows name the call once a part names it, so the timeline hides the call behind the agent; a call
   resuming it (`task_id`) is never taken for its launch, and relaunches it once it settled; and a
-  run whose start named no launch (a log from before) gets a seed naming its first run's before the
-  relaunch, since the roster reopens only on a changed launch. The roster reopens the row — running,
-  the Stop's end and summary cleared — liveness counts it, it is back in the live set (a later Stop
-  or the exit closes it `stopped`), and its own idle and answer end it `completed` with its result,
+  run whose start named none would get a seed naming its first run's before the relaunch, as the
+  roster reopens only on a changed launch — defensive, unreachable today: every start this adapter
+  writes names one (`startLaunchId`) and its records never outlive the host, so an older log's runs
+  are the host's first load's (`legacyLaunchStarts`). The roster reopens the row — running, the
+  Stop's end and summary cleared — liveness counts it, it is back in the live set (a later Stop or
+  the exit closes it `stopped`), and its own idle and answer end it `completed` with its result,
   once. For the roster to read it running the session must read live after a Stop: `turn.aborted`
   folds to `stopped`, a dead session to the roster (every running row `interrupted`) and one the
   host refuses the next Stop on, so the Stop now returns it to `ready` (`session.state.changed`,

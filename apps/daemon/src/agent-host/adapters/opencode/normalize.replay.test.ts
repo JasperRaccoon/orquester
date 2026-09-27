@@ -1860,10 +1860,12 @@ test("a `task_id` call on a child no part named is no launch of its run: while i
   );
 });
 
-test("a revival whose run started with no launch id (an older log) seeds one first, so the roster reopens: running, then completed", async () => {
+test("a revival whose run started with no launch id seeds one first, so the roster reopens: running, then completed — the defensive branch", async () => {
   const run = liveSession("ses_parent");
-  // What a host from before every start named a launch left: a grandchild's
-  // start with none, in the log and in the adapter's own record of it.
+  // A record no start this adapter writes leaves — every one names a launch —
+  // built by hand: a grandchild's start with none, in the log and in the
+  // adapter's own record of it. Unreachable today (the host's first load
+  // names an older log's runs, `legacyLaunchStarts`); pinned all the same.
   run.state.relatedSessionIds.add("ses_gc");
   run.state.childAgents.set("ses_gc", {
     sessionId: "ses_gc",

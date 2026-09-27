@@ -583,9 +583,11 @@ export interface OpenCodeChildAgent {
   /**
    * The launch the run's start row named, as the adapter wrote it — the
    * provider's call, a relaunch's id, or `opencode-child:<session id>` for a
-   * child no part had named yet. Every start this adapter writes names one; a
-   * run whose start named none (a log from before) gets a seed first when it
-   * is relaunched, or the roster could not reopen it (`settleChildSurvival`).
+   * child no part had named yet. Every start this adapter writes names one
+   * (`emitTaskStarted` always sets it), so the seed `settleChildSurvival`
+   * would write for a run whose start named none is defensive and unreachable
+   * today: these records never outlive the host, and an older log's runs are
+   * the host's first load's (`legacyLaunchStarts`).
    */
   startLaunchId?: string;
   /**

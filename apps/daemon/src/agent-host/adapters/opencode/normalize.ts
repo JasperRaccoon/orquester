@@ -1353,12 +1353,14 @@ export function settleChildSurvival(
   agent.endedByAdapter = false;
   const out = new Emitter(state, ctx);
   if (agent.startLaunchId === undefined) {
-    // The run started with no launch named — a log from before every start
-    // named one — and the roster reopens a row only on a CHANGED launch: a
+    // Defensive, and unreachable today: every start this adapter writes names
+    // a launch (`emitTaskStarted` sets `startLaunchId`) and its records never
+    // outlive the host, so it never meets a run of an older log — those are
+    // the host's first load's (`legacyLaunchStarts`). Were a run's start to
+    // name none, the roster would reopen its row only on a CHANGED launch: a
     // seed naming the first run's own comes first — its call when a part has
     // named it since, else the child's own launch id — which the roster reads
-    // as a late delivery (the shape `legacyLaunchStarts` writes on a first
-    // load).
+    // as a late delivery (the shape `legacyLaunchStarts` writes).
     const linkage = childLinkage(agent);
     out.push({
       ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
