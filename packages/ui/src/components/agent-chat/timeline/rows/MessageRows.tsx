@@ -168,13 +168,6 @@ function RewindToHereButton({
 }
 
 /**
- * The only filled bubble in the timeline (§5.1 of the design reference).
- *
- * Right-aligned, capped at 80 %, no border, no avatar and no name label — the
- * asymmetry with the assistant's full-width, unbubbled output *is* the
- * conversation design.
- */
-/**
  * The text of a bubble, clamped past a few lines with a mask fade and a toggle
  * that names what it reveals (`shouldClampUserMessage`).
  */
@@ -206,6 +199,15 @@ function ClampedBubbleText({ text, showLabel }: { text: string; showLabel: strin
   );
 }
 
+/**
+ * The user's filled bubble (§5.1 of the design reference) — the one filled
+ * bubble in the timeline, which an agent's launch prompt reuses in its drill-in
+ * ({@link AgentPromptRow}): to the agent the prompt is its user turn.
+ *
+ * Right-aligned, capped at 80 %, no border, no avatar and no name label — the
+ * asymmetry with the assistant's full-width, unbubbled output *is* the
+ * conversation design.
+ */
 export const UserMessageRow = React.memo(function UserMessageRow({
   row
 }: {
