@@ -294,7 +294,9 @@ export interface ThreadActivityPayloadFields {
   prompt?: string;
   /**
    * The STORED prompt is itself cut, at `TASK_PROMPT_MAX_CHARS` (ingestion's
-   * bound at rest): no read has the rest.
+   * bound at rest): no read of THIS row has the rest. The launching call's
+   * completed row may — Claude's, Grok's and OpenCode's keep the call's whole
+   * input there, Codex's keeps none; `TASK_PROMPT_MAX_CHARS` says where.
    */
   promptTruncated?: boolean;
   /** True when the full payload was truncated and `GET …/items/:itemId` has more. */

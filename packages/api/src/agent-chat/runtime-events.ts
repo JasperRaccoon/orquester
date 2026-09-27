@@ -813,14 +813,19 @@ export interface TaskStartedPayload extends TaskAgentLinkage {
  * `GET …/items/:itemId`, returns the STORED value: the whole prompt when it
  * fit this cap, else its head marked `promptTruncated`.
  *
- * The rest of a prompt cut here is on no read of the start row. Where the
- * launching call keeps its whole input on its own completion row — the
- * `tool.completed` row whose `toolUseId` is the start's — that row's item
- * read holds it (the wire copy drops the call's input): Claude's `Agent` call
- * as `data.input.prompt`, Grok's `spawn_subagent` call as
- * `data.rawInput.prompt`, OpenCode's `task` part as `data.state.input.prompt`.
- * Codex keeps it on no row: its collab call's row holds a 180-character
- * `detail` preview.
+ * The rest of a prompt cut here is on no read of the start row. It survives
+ * only where the launching call's own rows keep the call's whole input:
+ * ingestion stores a `tool.completed` row whole (only a `tool.updated` row is
+ * slimmed at rest), and its item read serves it whole where the wire copy
+ * drops the call's input. So once the call has completed, its
+ * `tool.completed` row — the one whose `toolUseId` is the start's — holds the
+ * prompt: Claude's `Agent` call as `data.input.prompt`, Grok's
+ * `spawn_subagent` call as `data.rawInput.prompt`, OpenCode's `task` part as
+ * `data.state.input.prompt`. A row an adapter or a host writes to close a
+ * call nobody answered (a Stop's cut, a first load's closer) may not carry
+ * it. Codex keeps it on no row: its collab call's row holds a 180-character
+ * `detail` preview. The client reads none of these for a prompt: its prompt
+ * row says only that the start was kept.
  *
  * Bounded because an agent's start row is never evicted from the fold (it
  * anchors the agent's row): a fleet's prompts stay in memory, in the fold
