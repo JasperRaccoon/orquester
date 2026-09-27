@@ -69,9 +69,11 @@ import {
   isCutFinalOutput,
   mergeOpenCodeAssistantText,
   messageRoleForPart,
+  OPEN_CALLS_PER_CHILD_MAX,
   openTurn,
   stepTotalTokens,
   type OpenCodeChildAgent,
+  type OpenCodeOpenCall,
   type OpenCodeSessionState,
   type OpenCodeStepUsage,
   type OpenCodeTextPartState
@@ -97,8 +99,6 @@ export type NormalizerSignal =
   | { kind: "user-message-observed"; messageId: string }
   /** Full access: answer this ask `once`, never `always` (§4.3). */
   | { kind: "auto-reply-permission"; request: OpenCodePermissionRequest; raw: unknown }
-  /** `MessageAbortedError` — the abort acknowledgement arrived on the stream. */
-  | { kind: "abort-acknowledged" }
   /** The turn failed on a `session.error`; requests need a recovery sweep. */
   | { kind: "turn-failed"; message: string }
   /** A request event from a session whose ancestry is not yet known. */
@@ -914,12 +914,11 @@ function demux(
       const cancellation = state.cancellation;
 
       if (isAbortError(error)) {
+        // The Stop's own abort, answered on the stream: the Stop settles.
         if (cancellation !== undefined && cancellation.turnId === undefined) {
-          out.signal({ kind: "abort-acknowledged" });
           return;
         }
         if (activeTurnId !== undefined && cancellation?.turnId === activeTurnId) {
-          out.signal({ kind: "abort-acknowledged" });
           return;
         }
         if (
@@ -1219,6 +1218,69 @@ export function closeLiveChildAgents(
   return out.events;
 }
 
+/** What a rewind's closing rows say: the work ended with the branch it ran on. */
+export const REWIND_LEFT_BEHIND_REASON = "Stopped by a rewind.";
+
+/**
+ * A rewind forks the session and leaves its children behind
+ * (`rollbackThread` in `session.ts`): their work belongs to the abandoned
+ * branch, and once the thread is on the fork their frames — their ends
+ * included — are a foreign session's, which this adapter drops. Left alone, a
+ * child still working (a background run outliving its turn, a run the
+ * server's word relaunched after a Stop) stayed running in the roster, kept
+ * the liveness registry `working` — holding every code-only deploy's drain
+ * until the session exited — and no later Stop could close it. So every call a
+ * child still has open is closed `failed`, then every live run `stopped`
+ * ({@link closeLiveChildAgents}), each saying why — calls before tasks, as
+ * every teardown.
+ *
+ * The runs' rows ride no turn (none runs at a rewind: the host refuses one
+ * mid-turn), so no revert drops them — however the host's `thread.reverted`
+ * and these rows land against each other, and a relaunch's start rides no
+ * turn either. A call's closing row rides the newest turn its rows rode that
+ * the rewind keeps (`droppedTurnIds` names the ones it removes; a turnless row
+ * is kept): the timeline keys a call's row by its turn. A call whose rows all
+ * ride removed turns gets none — the revert drops those rows whichever lands
+ * first, and its closer could only survive as a lone failed row. (Without the
+ * host's list — a caller that predates it — every call closes on its newest.)
+ */
+export function closeChildWorkLeftBehind(
+  state: OpenCodeSessionState,
+  ctx: NormalizeContext,
+  reason: string,
+  droppedTurnIds: ReadonlySet<string> = new Set()
+): RuntimeEvent[] {
+  const out = new Emitter(state, ctx);
+  for (const agent of state.childAgents.values()) {
+    for (const [callId, call] of agent.openCalls ?? []) {
+      let kept: string | null | undefined;
+      for (let index = call.turns.length - 1; index >= 0 && kept === undefined; index -= 1) {
+        const turn = call.turns[index]!;
+        if (turn === null || !droppedTurnIds.has(turn)) {
+          kept = turn;
+        }
+      }
+      if (kept === undefined) {
+        continue;
+      }
+      out.push({
+        ...out.base({ turnId: kept ?? undefined, itemId: callId, agentId: agent.sessionId }),
+        type: "item.completed",
+        payload: {
+          itemType: call.itemType,
+          status: "failed",
+          title: call.title,
+          detail: reason,
+          agentId: agent.sessionId,
+          data: { tool: call.tool, toolUseId: callId }
+        }
+      });
+    }
+    agent.openCalls?.clear();
+  }
+  return [...out.events, ...closeLiveChildAgents(state, ctx, reason)];
+}
+
 /**
  * A child whose run the adapter ended itself reports that the run goes on —
  * its session says `busy`, or a frame of a live run arrives (`status` and
@@ -1304,12 +1366,14 @@ export function settleChildSurvival(
   agent.endedByAdapter = false;
   const out = new Emitter(state, ctx);
   if (agent.startLaunchId === undefined) {
-    // The run started with no launch named — a log from before every start
-    // named one — and the roster reopens a row only on a CHANGED launch: a
+    // Defensive, and unreachable today: every start this adapter writes names
+    // a launch (`emitTaskStarted` sets `startLaunchId`) and its records never
+    // outlive the host, so it never meets a run of an older log — those are
+    // the host's first load's (`legacyLaunchStarts`). Were a run's start to
+    // name none, the roster would reopen its row only on a CHANGED launch: a
     // seed naming the first run's own comes first — its call when a part has
     // named it since, else the child's own launch id — which the roster reads
-    // as a late delivery (the shape `legacyLaunchStarts` writes on a first
-    // load).
+    // as a late delivery (the shape `legacyLaunchStarts` writes).
     const linkage = childLinkage(agent);
     out.push({
       ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId }),
@@ -1845,6 +1909,7 @@ function demuxChild(
         // Output first: a completion closes the call's output buffer.
         emitCommandOutput(state, tool, turnId, raw, out, childSessionId);
         emitToolItem(tool, turnId, raw, out, childSessionId);
+        noteChildCall(agent, tool, turnId);
         if (tool.tool === "task") {
           // A child launching a subagent of its own: the call names the
           // grandchild as the parent's parts name a child — its launch, its
@@ -2207,10 +2272,7 @@ function emitToolItem(
   agentId?: string
 ): void {
   const itemType: CanonicalItemType = toToolLifecycleItemType(part.tool);
-  const title =
-    part.state.status === "running" || part.state.status === "completed"
-      ? (part.state.title ?? part.tool)
-      : part.tool;
+  const title = toolItemTitle(part);
   const detail = toolDetail(part);
   const status: RuntimeItemStatus =
     part.state.status === "error"
@@ -2253,6 +2315,48 @@ function emitToolItem(
       ...(cut ? { truncated: true } : {})
     }
   });
+}
+
+/** A tool part's row title: its own once it runs, else the tool's name. */
+function toolItemTitle(part: Extract<OpenCodePart, { type: "tool" }>): string {
+  return part.state.status === "running" || part.state.status === "completed"
+    ? (part.state.title ?? part.tool)
+    : part.tool;
+}
+
+/**
+ * Keep a child's call open on its record while its frames say it runs, and
+ * drop it at its terminal frame ({@link OpenCodeChildAgent.openCalls}) — what
+ * a rewind closes when it leaves the child behind.
+ */
+function noteChildCall(
+  agent: OpenCodeChildAgent,
+  part: Extract<OpenCodePart, { type: "tool" }>,
+  turnId: string | undefined
+): void {
+  const status = part.state.status;
+  if (status === "completed" || status === "error") {
+    agent.openCalls?.delete(part.callID);
+    return;
+  }
+  const calls: Map<string, OpenCodeOpenCall> = (agent.openCalls ??= new Map());
+  const turn = turnId ?? null;
+  const turns = (calls.get(part.callID)?.turns ?? []).filter((seen) => seen !== turn);
+  turns.push(turn);
+  // Re-inserted, so the oldest is the one the cap drops.
+  calls.delete(part.callID);
+  calls.set(part.callID, {
+    tool: part.tool,
+    itemType: toToolLifecycleItemType(part.tool),
+    title: toolItemTitle(part),
+    turns
+  });
+  if (calls.size > OPEN_CALLS_PER_CHILD_MAX) {
+    const oldest = calls.keys().next().value;
+    if (oldest !== undefined) {
+      calls.delete(oldest);
+    }
+  }
 }
 
 /**

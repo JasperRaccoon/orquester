@@ -1600,8 +1600,9 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   asker waited for good. It is now held while an interrupt is under way — a Stop from its first
   step, before its abort; a failed admission's abort — and until a run says `busy` again, then
   judged on the server's lists and session status: a live asker's is shown as any request is, a
-  gone asker's is rejected on the wire and writes nothing, and a read that fails shows the card
-  (`adapters/opencode/normalize.ts`, `session.ts`; fixtures README observation 29).*
+  gone asker's is rejected on the wire and writes nothing, and a read that fails decides nothing —
+  the card is shown unless the other read says the asker is gone (`adapters/opencode/normalize.ts`,
+  `session.ts`; fixtures README observation 29).*
 - **Child-session event routing.** Parent-session events pass; **child-session events pass only if
   they are permission or question events**, behind an ancestry-resolution retry loop (250 ms→5 s
   backoff; asked-events retry forever, terminal events give up after 5). This is the whole reason
@@ -1686,8 +1687,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   grandchild's launch is its child's own `task` call, which names it — and gives it its answer — as
   the parent's names a child; a child no call has named yet starts under
   `opencode-child:<session id>`, so every first start names a launch, and its rows name the call
-  once one does; and a relaunched run whose start named none (a log from before) gets a seed naming
-  its first run's first. The Grok adapter keeps its own end on a revival, its reports not confirmed
+  once one does; and a relaunched run whose start named none would get a seed naming its first run's
+  first — defensive, and unreachable today: every start the adapter writes names a launch and its
+  records never outlive the host, so the runs of older logs are the host's first load's
+  (`legacyLaunchStarts`). The Grok adapter keeps its own end on a revival, its reports not confirmed
   the same way.*
 - **Token usage** is accumulated per message part (`input + cache.read + cache.write` into input,
   `output + reasoning` into output) and settles `complete` only when the turn completed *and*

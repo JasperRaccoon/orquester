@@ -39,6 +39,8 @@ import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachmen
 import { OpenCodeHttpError, isOpenCodeNotFound, type OpenCodeClient } from "./http.ts";
 import {
   NormalizerEmitter,
+  REWIND_LEFT_BEHIND_REASON,
+  closeChildWorkLeftBehind,
   closeLiveChildAgents,
   emitTerminalPermission,
   emitTerminalQuestion,
@@ -246,8 +248,16 @@ export class OpenCodeThreadSession {
   /** The interrupts under way (`asInterrupt`), each settling when it ends. */
   private readonly interruptFlights = new Set<Promise<void>>();
   /**
-   * How many interrupts have begun. A judge compares it across its reads: one
-   * that began — and maybe already ended — while the server answered may have
+   * The descendant aborts under way that the end of a Stop whose abort
+   * request failed sent (`endFailedStopTurn`), each settling when it ends.
+   * That end closes the children first and aborts them after, outside
+   * `asInterrupt`, so a judge waits for these too (`abortsSettled`).
+   */
+  private readonly descendantAborts = new Set<Promise<void>>();
+  /**
+   * How many interrupts have begun, the descendant abort a failed Stop's end
+   * sends counted as one. A judge compares it across its reads: one that
+   * began — and maybe already ended — while the server answered may have
    * ended what was asked about, so that answer is stale.
    */
   private interruptsBegun = 0;
@@ -513,8 +523,8 @@ export class OpenCodeThreadSession {
   /**
    * Run `work` as an interrupt (`OpenCodeSessionState.interrupting`): from its
    * first step to its last, a request is held (`holdsRequests` in
-   * `normalize.ts`), and judged only once every interrupt is over
-   * (`interruptsSettled`) — the abort is what ends an asker, and a Stop's
+   * `normalize.ts`), and judged only once every abort is over
+   * (`abortsSettled`) — the abort is what ends an asker, and a Stop's
    * first step, withdrawing the parked cards, comes before it.
    */
   private async asInterrupt<T>(work: () => Promise<T>): Promise<T> {
@@ -542,6 +552,18 @@ export class OpenCodeThreadSession {
   private async interruptsSettled(): Promise<void> {
     while (this.interruptFlights.size > 0) {
       await Promise.all([...this.interruptFlights]);
+    }
+  }
+
+  /**
+   * Settles once no interrupt is in flight and no descendant abort a failed
+   * Stop's end sent is (`descendantAborts`), one that begins meanwhile
+   * included. The abort is what ends a child or an asker, so a judge asks the
+   * server about one only once every abort that may end it is over.
+   */
+  private async abortsSettled(): Promise<void> {
+    while (this.interruptFlights.size > 0 || this.descendantAborts.size > 0) {
+      await Promise.all([...this.interruptFlights, ...this.descendantAborts]);
     }
   }
 
@@ -744,13 +766,6 @@ export class OpenCodeThreadSession {
         void this.autoReplyOnce(signal.request, signal.raw);
         return;
       }
-      case "abort-acknowledged": {
-        this.state.cancellation?.acknowledge();
-        if (this.state.cancellation !== undefined) {
-          this.state.cancellation.acknowledged = true;
-        }
-        return;
-      }
       case "turn-failed": {
         this.failActiveTurn(signal.message);
         return;
@@ -799,7 +814,13 @@ export class OpenCodeThreadSession {
     }
     const cancellation = this.state.cancellation;
     if (cancellation !== undefined && cancellation.turnId === turnId) {
-      cancellation.deferredIdle = raw;
+      cancellation.deferredIdle = true;
+      return;
+    }
+    // A Stop of this turn failed before the stream said the run was over, and
+    // now it has: the turn ends as that Stop would have ended it.
+    if (this.state.failedStopTurnId === turnId) {
+      this.endFailedStopTurn(turnId);
       return;
     }
     const admission = this.state.promptAdmission;
@@ -1098,6 +1119,14 @@ export class OpenCodeThreadSession {
     if (this.state.activeTurnId !== turnId || this.state.promptGeneration !== generation) {
       return;
     }
+    // The run of a turn whose Stop failed is over — the server's status said
+    // so (Machine 2 after a reconnect, the admission's recovery): the turn
+    // ends as that Stop would have ended it, as when its idle says so
+    // (`onIdle`).
+    if (this.state.failedStopTurnId === turnId) {
+      this.endFailedStopTurn(turnId);
+      return;
+    }
     const usage = this.state.turnTokenUsage;
     const costUsd = usage?.costUsd ?? 0;
     const tokenUsage = takeTurnTokenUsage(this.state, true);
@@ -1127,12 +1156,6 @@ export class OpenCodeThreadSession {
   private failActiveTurn(message: string): void {
     const turnId = this.state.activeTurnId;
     this.cancelIdleReconciliation();
-    const cancellation = this.state.cancellation;
-    if (turnId !== undefined && cancellation?.turnId === turnId) {
-      cancellation.turnSettled = true;
-      cancellation.acknowledged = true;
-      cancellation.acknowledge();
-    }
     const tokenUsage = turnId !== undefined ? takeTurnTokenUsage(this.state, false) : undefined;
     this.state.activeTurnId = undefined;
     this.state.activeAgent = undefined;
@@ -1232,19 +1255,19 @@ export class OpenCodeThreadSession {
    * or after one before any run has said `busy` (`holdsRequests` in
    * `normalize.ts`). Its asker may be one the abort ended — its frame reached
    * the stream late — or one the abort never reached, which waits on it for
-   * good unless it is shown. So once the interrupt in flight is over, the
-   * server is asked (`askerWaits`): a request whose asker still waits is shown
-   * as any would be (`openHeldRequest`); one whose asker is gone writes no
-   * card and is rejected on the wire, which releases what an older server
-   * kept listed (fixtures README observation 11). A request answered
-   * elsewhere meanwhile is dropped from the hold by its terminal frame, and
-   * nothing is done here.
+   * good unless it is shown. So once every abort in flight is over — a failed
+   * Stop's end's too (`abortsSettled`) — the server is asked (`askerWaits`): a
+   * request whose asker still waits is shown as any would be
+   * (`openHeldRequest`); one whose asker is gone writes no card and is
+   * rejected on the wire, which releases what an older server kept listed
+   * (fixtures README observation 11). A request answered elsewhere meanwhile
+   * is dropped from the hold by its terminal frame, and nothing is done here.
    */
   private async judgeHeldRequest(held: OpenCodeHeldRequest, raw: unknown): Promise<void> {
     const requestId = held.request.id;
     for (let round = 0; ; round += 1) {
-      // The abort is what ends an asker: ask only once every interrupt is over.
-      await this.interruptsSettled();
+      // The abort is what ends an asker: ask only once every abort is over.
+      await this.abortsSettled();
       if (this.closed || !this.state.heldRequestIds.has(requestId)) {
         return;
       }
@@ -1287,10 +1310,12 @@ export class OpenCodeThreadSession {
    * ask whose fiber an abort interrupted (fixtures README observation 29) — or
    * when the asker's session runs nothing, so nothing can wait on it: an older
    * server keeps such an ask listed (fixture 06), idle. A read that fails
-   * decides nothing, and the request is shown: a card the user answers — a
-   * reply to a gone request settles locally (`respondToApproval`,
-   * `respondToUserInput`) — never a reject sent on their behalf, which 1.18.32
-   * applies to every other ask of that session too (`Permission.reply`).
+   * decides nothing: the request is shown unless the other read says its
+   * asker is gone. Shown, it is a card the user answers — a reply to a gone
+   * request settles locally (`respondToApproval`, `respondToUserInput`) —
+   * never a reject sent on their behalf without the server's word, which
+   * 1.18.32 applies to every other ask of that session too
+   * (`Permission.reply`).
    */
   private async askerWaits(held: OpenCodeHeldRequest): Promise<boolean> {
     const [listed, statuses] = await Promise.all([
@@ -1316,15 +1341,16 @@ export class OpenCodeThreadSession {
 
   /**
    * A child whose run the adapter ended reported that it goes on
-   * (`reportChildRun` in `normalize.ts`). Once every interrupt is over — the
-   * abort is what ends a child — the server says whether its session still
-   * runs, and check `checkId` settles it (`settleChildSurvival`): a survivor
-   * is relaunched. A read that fails relaunches it too: never let a deploy
-   * kill running work.
+   * (`reportChildRun` in `normalize.ts`). Once every abort that may end it is
+   * over — every interrupt, and the descendant abort a failed Stop's end
+   * sends (`abortsSettled`) — the server says whether its session still runs,
+   * and check `checkId` settles it (`settleChildSurvival`): a survivor is
+   * relaunched. A read that fails relaunches it too: never let a deploy kill
+   * running work.
    */
   private async judgeChildSurvival(childId: string, checkId: number): Promise<void> {
     for (let round = 0; ; round += 1) {
-      await this.interruptsSettled();
+      await this.abortsSettled();
       if (this.closed) {
         return;
       }
@@ -1333,8 +1359,8 @@ export class OpenCodeThreadSession {
       if (this.closed) {
         return;
       }
-      // A Stop that began while the server answered may have ended the child:
-      // that answer is stale.
+      // An abort that began while the server answered — a Stop's, or a failed
+      // Stop's end's — may have ended the child: that answer is stale.
       if (this.interruptsBegun !== interruptsBefore && round < 2) {
         continue;
       }
@@ -1662,6 +1688,13 @@ export class OpenCodeThreadSession {
       // finds the turn again in `GET /session/:id/message`, across a host
       // restart too (§5.5).
       const steeringTurnId = this.state.activeTurnId;
+      if (steeringTurnId !== undefined && steeringTurnId === this.state.failedStopTurnId) {
+        // A steer into the turn a failed Stop left running is the user taking
+        // it back: that Stop is over. The run's end completes the turn as any
+        // (its children run on), and a later Stop is a fresh one — even if
+        // the server refuses this prompt, which leaves the run going as it was.
+        endInterruption(this.state);
+      }
       const messageId = mintOpenCodeMessageId();
       const turnId = steeringTurnId ?? messageId;
       // Claimed before it is sent: a reply to it is this turn's, never one
@@ -1960,7 +1993,15 @@ export class OpenCodeThreadSession {
    * **`turn.aborted`**, not `turn.completed`.
    *
    * Interrupt is **turn-scoped**: a Stop aimed at a turn that is no longer the
-   * active one is a no-op, so it cannot kill the next turn (§4.1).
+   * active one is a no-op, so it cannot kill the next turn (§4.1). So is a
+   * second Stop of a turn already interrupted — unless the first one's abort
+   * failed before the stream said the run was over (`failedStopTurnId`): the
+   * turn is still running on our books, and a retry is how the user stops it.
+   * An abort whose request fails AFTER the stream said so — the run's idle
+   * came while it was pending (`deferredIdle`) — ends the turn as any Stop
+   * does (`settleStop`), and so does the run's end when it comes after the
+   * failure: its idle, or the server's status (`endFailedStopTurn`). A steer
+   * into that turn takes it back instead (`sendTurn`).
    */
   async interruptTurn(turnId?: string): Promise<void> {
     // An interrupt already under way — another Stop, a failed admission's
@@ -1972,7 +2013,11 @@ export class OpenCodeThreadSession {
       return;
     }
     const target = turnId ?? activeTurnId;
-    if (target !== undefined && this.state.interruptedTurnId === target) {
+    if (
+      target !== undefined &&
+      this.state.interruptedTurnId === target &&
+      this.state.failedStopTurnId !== target
+    ) {
       return;
     }
 
@@ -1986,6 +2031,7 @@ export class OpenCodeThreadSession {
       if (target !== undefined) {
         this.state.interruptedTurnId = target;
       }
+      this.state.failedStopTurnId = undefined;
       this.state.reconcileIdleStatus = true;
       this.state.awaitingBusyAfterInterruption = false;
       const admission = this.state.promptAdmission;
@@ -1993,49 +2039,29 @@ export class OpenCodeThreadSession {
         admission.cancelled = true;
       }
 
-      const cancellation = makeCancellation(target);
+      const cancellation: OpenCodeCancellation = {
+        ...(target !== undefined ? { turnId: target } : {}),
+        deferredIdle: false
+      };
       this.state.cancellation = cancellation;
       try {
-        await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
-        cancellation.acknowledged = true;
-        cancellation.acknowledge();
-        await this.abortDescendants();
-        // §6.2: "`/interrupt` is also the only way to stop background work, and
-        // it stops all of it. It is addressed to the SESSION, not to a turn, so
-        // it is valid with no turn running." The descendant abort above already
-        // killed the children provider-side; closing their roster rows is what
-        // lets `backgroundLiveness` drop to null — without it the client's Stop
-        // button stays on "Stopping…" forever. Runs on EVERY interrupt, with or
-        // without an active turn, and is idempotent.
-        this.closeChildAgents("interrupted");
-        const tokenUsage = takeTurnTokenUsage(this.state, false);
-        if (target !== undefined && this.state.activeTurnId === target) {
-          this.state.activeTurnId = undefined;
-          this.state.activeAgent = undefined;
-          this.state.activeVariant = undefined;
-          this.state.promptAdmission = undefined;
-          this.updateRecord({ status: "ready" }, { activeTurnId: true });
-          this.emit({
-            ...this.base({ turnId: target }),
-            type: "turn.aborted",
-            payload: { reason: "interrupted", tokenUsage }
-          });
-          // The Stop ended a turn, not the session: OpenCode's lives on, and
-          // so may a run the abort never reached. `turn.aborted` alone reads
-          // `stopped` — a session the roster reads as dead (every running row
-          // `interrupted`, a child relaunched on the server's word included)
-          // and the host refuses a later Stop on — so it goes back to
-          // `ready`, as Claude's and Grok's do after every settled turn.
-          this.emit({
-            ...this.base({ turnId: target }),
-            type: "session.state.changed",
-            payload: { state: "ready", reason: "turn:interrupted" }
-          });
+        try {
+          await this.abortSession(AGENT_HOST_DEADLINES.submitMs);
+        } catch (error) {
+          // The abort's request failed. If the stream has already said the
+          // run is over — its idle came while the request was pending — the
+          // Stop did its work: it ends the turn below as any Stop does.
+          // Otherwise the turn is still the thread's, and the user's next Stop
+          // of it tries again rather than finding it interrupted.
+          if (!cancellation.deferredIdle) {
+            if (target !== undefined && this.state.activeTurnId === target) {
+              this.state.failedStopTurnId = target;
+            }
+            throw error;
+          }
         }
-        cancellation.complete();
-      } catch (error) {
-        cancellation.complete(error);
-        throw error;
+        await this.abortDescendants();
+        this.settleStop(target);
       } finally {
         if (this.state.cancellation === cancellation) {
           this.state.cancellation = undefined;
@@ -2044,10 +2070,91 @@ export class OpenCodeThreadSession {
     });
   }
 
+  /**
+   * The run of a turn whose Stop failed is over — its idle came, or the
+   * server's status says so (Machine 2): the turn ends as that Stop would have
+   * ended it (`settleStop`), then its children are aborted on the server, as
+   * the Stop would have. And that end is the idle after the interrupt
+   * (`idleAfterInterrupt`): nothing of that run follows it, so the next
+   * `busy` is a new run's (`endInterruptionAtNewRun`). An idle frame counts
+   * only while the interruption lingers or an interrupt is under way
+   * (`noteIdleAfterInterrupt`), and this one came while the stopped turn was
+   * still the thread's: a lone `session.idle` (1.18.5's abort shape) or a
+   * reconnect's status poll is the only word there is, and left uncounted it
+   * kept the next woken run dropped and took the next turn's own abort for
+   * the Stop's echo. A turn the user took back by a steer is no longer the
+   * failed Stop's (`sendTurn`), and ends as any turn does.
+   *
+   * Unlike a Stop's, this abort comes after the children are closed, and
+   * outside `asInterrupt`: it counts as an interrupt that begins
+   * (`interruptsBegun`), and the judges wait for it (`descendantAborts`,
+   * `abortsSettled`). A report of a child it is aborting, or an ask of one,
+   * that arrives meanwhile is judged once it is over — or asked about again,
+   * when the server answered while it began. Judged at once, the server's
+   * `busy` from before that abort relaunched the child for a moment, until
+   * the abort's own frames ended it again, and showed a card for an ask it
+   * then ended.
+   */
+  private endFailedStopTurn(turnId: string): void {
+    this.state.failedStopTurnId = undefined;
+    this.cancelIdleReconciliation();
+    this.settleStop(turnId);
+    this.state.idleAfterInterrupt = true;
+    this.interruptsBegun += 1;
+    const aborting = this.abortDescendants().catch(() => undefined);
+    this.descendantAborts.add(aborting);
+    void aborting.then(() => {
+      this.descendantAborts.delete(aborting);
+    });
+  }
+
+  /**
+   * What a Stop does once its abort took: every child closed and the turn
+   * `turn.aborted`, the session back to `ready`.
+   *
+   * §6.2: "`/interrupt` is also the only way to stop background work, and it
+   * stops all of it. It is addressed to the SESSION, not to a turn, so it is
+   * valid with no turn running." The descendant abort before this already
+   * killed the children provider-side; closing their roster rows is what lets
+   * `backgroundLiveness` drop to null — without it the client's Stop button
+   * stays on "Stopping…" forever. Runs on EVERY interrupt, with or without an
+   * active turn, and is idempotent.
+   */
+  private settleStop(target: string | undefined): void {
+    this.closeChildAgents("interrupted");
+    const tokenUsage = takeTurnTokenUsage(this.state, false);
+    if (target !== undefined && this.state.activeTurnId === target) {
+      this.state.activeTurnId = undefined;
+      this.state.activeAgent = undefined;
+      this.state.activeVariant = undefined;
+      this.state.promptAdmission = undefined;
+      this.updateRecord({ status: "ready" }, { activeTurnId: true });
+      this.emit({
+        ...this.base({ turnId: target }),
+        type: "turn.aborted",
+        payload: { reason: "interrupted", tokenUsage }
+      });
+      // The Stop ended a turn, not the session: OpenCode's lives on, and so
+      // may a run the abort never reached. `turn.aborted` alone reads
+      // `stopped` — a session the roster reads as dead (every running row
+      // `interrupted`, a child relaunched on the server's word included) and
+      // the host refuses a later Stop on — so it goes back to `ready`, as
+      // Claude's and Grok's do after every settled turn.
+      this.emit({
+        ...this.base({ turnId: target }),
+        type: "session.state.changed",
+        payload: { state: "ready", reason: "turn:interrupted" }
+      });
+    }
+  }
+
   /** `POST /session/<nonexistent>/abort` answers `200 true` — it proves nothing. */
-  private async abortSession(timeoutMs: number): Promise<void> {
+  private async abortSession(
+    timeoutMs: number,
+    sessionId: string = this.state.openCodeSessionId
+  ): Promise<void> {
     await this.client
-      .post<unknown>(openCodeRoutes.abort(this.state.openCodeSessionId), { timeoutMs })
+      .post<unknown>(openCodeRoutes.abort(sessionId), { timeoutMs })
       .catch((error: unknown) => {
         if (isOpenCodeNotFound(error)) {
           return;
@@ -2056,8 +2163,8 @@ export class OpenCodeThreadSession {
       });
   }
 
-  private async abortDescendants(): Promise<void> {
-    const visited = new Set([this.state.openCodeSessionId]);
+  private async abortDescendants(rootId: string = this.state.openCodeSessionId): Promise<void> {
+    const visited = new Set([rootId]);
     const visit = async (sessionId: string, abortIt: boolean): Promise<void> => {
       if (abortIt) {
         await withDeadline(
@@ -2090,7 +2197,7 @@ export class OpenCodeThreadSession {
     };
     // The whole fleet interrupt is bounded, however many children there are:
     // the runaway-fleet case is precisely when Stop has to work (§3.1).
-    await withDeadline(visit(this.state.openCodeSessionId, false), {
+    await withDeadline(visit(rootId, false), {
       label: "opencode descendant abort",
       timeoutMs: AGENT_HOST_DEADLINES.interruptAllMs
     }).catch(() => undefined);
@@ -2292,6 +2399,23 @@ export class OpenCodeThreadSession {
 
       this.rememberFork(list, forked);
       await this.settlePendingRequests().catch(() => undefined);
+      // The fork leaves the source session's children behind, and their work
+      // with the abandoned branch: closed on our books first — every open
+      // call, then every live run — while their frames are still ours to
+      // read; then aborted on the server, the source session first so it
+      // cannot start another while the tree is read (as a stop does), once
+      // the re-point has made every frame of theirs — the aborts' own
+      // included — a foreign session's.
+      const abandoned =
+        this.state.childAgents.size > 0 ? this.state.openCodeSessionId : undefined;
+      for (const event of closeChildWorkLeftBehind(
+        this.state,
+        this.normalizeContext(),
+        REWIND_LEFT_BEHIND_REASON,
+        new Set(target?.droppedTurnIds ?? [])
+      )) {
+        this.emit(event);
+      }
       repointSession(this.state, fork.id);
       // Every prompt the fork holds is the past, re-minted: a copied reply
       // whose frame reaches the stream after this — one its run never
@@ -2300,6 +2424,10 @@ export class OpenCodeThreadSession {
         if (entry?.info?.role === "user" && typeof entry.info.id === "string") {
           claimPrompt(this.state, entry.info.id);
         }
+      }
+      if (abandoned !== undefined) {
+        await this.abortSession(1_000, abandoned).catch(() => undefined);
+        await this.abortDescendants(abandoned);
       }
       this.updateRecord({ status: "ready" }, { activeTurnId: true });
       this.emit({
@@ -2384,26 +2512,6 @@ function addRelated(state: OpenCodeSessionState, sessionId: string): void {
   if (state.activeTurnId !== undefined && state.turnTokenUsage !== undefined) {
     state.turnTokenUsage.hasSubagents = true;
   }
-}
-
-function makeCancellation(turnId: string | undefined): OpenCodeCancellation {
-  const ack = deferred<void>();
-  const done = deferred<void>();
-  return {
-    ...(turnId !== undefined ? { turnId } : {}),
-    acknowledged: false,
-    turnSettled: false,
-    acknowledgment: ack.promise,
-    acknowledge: () => ack.resolve(),
-    completion: done.promise,
-    complete: (error?: unknown) => {
-      if (error !== undefined) {
-        done.reject(error);
-      } else {
-        done.resolve();
-      }
-    }
-  };
 }
 
 /**

@@ -594,7 +594,7 @@ test("05: a rejected question resolves with no answers", () => {
   assert.deepEqual(resolved.at(-1)?.payload.answers, {});
 });
 
-test("06: an abort arrives as MessageAbortedError and is signalled, not surfaced as an error", () => {
+test("06: an abort arrives as MessageAbortedError, the Stop's own answer on the stream — never surfaced as an error", () => {
   const records = readFixture("06-abort-with-permission-pending.ndjson");
   const parent = sessionIds(records)[0] ?? "";
   const state = createSessionState({
@@ -605,15 +605,7 @@ test("06: an abort arrives as MessageAbortedError and is signalled, not surfaced
   });
   // Model the runtime: a turn is live and an interrupt is in flight.
   state.activeTurnId = "turn-1";
-  state.cancellation = {
-    turnId: "turn-1",
-    acknowledged: false,
-    turnSettled: false,
-    acknowledgment: Promise.resolve(),
-    acknowledge: () => undefined,
-    completion: Promise.resolve(),
-    complete: () => undefined
-  };
+  state.cancellation = { turnId: "turn-1", deferredIdle: false };
   let counter = 0;
   const ctx = { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "now" };
   const signals: NormalizerSignal[] = [];
@@ -630,12 +622,12 @@ test("06: an abort arrives as MessageAbortedError and is signalled, not surfaced
     events.push(...result.events);
     signals.push(...result.signals);
   }
-  assert.ok(signals.some((signal) => signal.kind === "abort-acknowledged"));
   assert.deepEqual(
     eventsOfType(events, "runtime.error"),
     [],
     "an acknowledged abort must not become a runtime.error"
   );
+  assert.ok(!signals.some((signal) => signal.kind === "turn-failed"), "nor fail the turn: the Stop settles it");
   // `session.idle` is the ONLY idle signal after an abort (observation 6).
   assert.ok(signals.some((signal) => signal.kind === "session-idle"));
 });
@@ -1860,10 +1852,12 @@ test("a `task_id` call on a child no part named is no launch of its run: while i
   );
 });
 
-test("a revival whose run started with no launch id (an older log) seeds one first, so the roster reopens: running, then completed", async () => {
+test("a revival whose run started with no launch id seeds one first, so the roster reopens: running, then completed — the defensive branch", async () => {
   const run = liveSession("ses_parent");
-  // What a host from before every start named a launch left: a grandchild's
-  // start with none, in the log and in the adapter's own record of it.
+  // A record no start this adapter writes leaves — every one names a launch —
+  // built by hand: a grandchild's start with none, in the log and in the
+  // adapter's own record of it. Unreachable today (the host's first load
+  // names an older log's runs, `legacyLaunchStarts`); pinned all the same.
   run.state.relatedSessionIds.add("ses_gc");
   run.state.childAgents.set("ses_gc", {
     sessionId: "ses_gc",

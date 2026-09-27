@@ -1247,11 +1247,12 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   the abort — and a failed admission's abort, which now leaves the same lingering state a Stop
   does), or after it before any run says `busy` (`interruptionLingers`, the windows the parent's
   output is dropped in), is held (`holdsRequests`) and judged once every interrupt is over
-  (`judgeHeldRequest`, `interruptsSettled`): asked again if another interrupt began while the server
+  (`judgeHeldRequest`, `abortsSettled`): asked again if another interrupt began while the server
   answered (`interruptsBegun`) — a Stop that starts and ends during the reads makes their answer
   stale; listed by the server and its session busy — the card, as any (a child's question on no
   turn), or full access's `once`; unlisted or its session idle (an older server's orphan) — no card,
-  a reject on the wire, and no row when it closes. A read that fails shows the card: a reject would
+  a reject on the wire, and no row when it closes. A read that fails decides nothing: the card is
+  shown unless the other read says the asker is gone — without the server's word a reject would
   answer for the user, and 1.18.32's `Permission.reply` rejects every other ask of that session with
   it. (7) A child the adapter closed itself (a Stop, a failed admission's abort, a failed turn:
   `closeLiveChildAgents` marks `endedByAdapter`, as does its launching call's abort cleanup
@@ -1269,10 +1270,12 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   answer; a child no part has named yet starts under `opencode-child:<session id>`, its start alone
   — rows name the call once a part names it, so the timeline hides the call behind the agent; a call
   resuming it (`task_id`) is never taken for its launch, and relaunches it once it settled; and a
-  run whose start named no launch (a log from before) gets a seed naming its first run's before the
-  relaunch, since the roster reopens only on a changed launch. The roster reopens the row — running,
-  the Stop's end and summary cleared — liveness counts it, it is back in the live set (a later Stop
-  or the exit closes it `stopped`), and its own idle and answer end it `completed` with its result,
+  run whose start named none would get a seed naming its first run's before the relaunch, as the
+  roster reopens only on a changed launch — defensive, unreachable today: every start this adapter
+  writes names one (`startLaunchId`) and its records never outlive the host, so an older log's runs
+  are the host's first load's (`legacyLaunchStarts`). The roster reopens the row — running, the
+  Stop's end and summary cleared — liveness counts it, it is back in the live set (a later Stop or
+  the exit closes it `stopped`), and its own idle and answer end it `completed` with its result,
   once. For the roster to read it running the session must read live after a Stop: `turn.aborted`
   folds to `stopped`, a dead session to the roster (every running row `interrupted`) and one the
   host refuses the next Stop on, so the Stop now returns it to `ready` (`session.state.changed`,
@@ -1283,7 +1286,36 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   frames: nothing, and only a `busy` asks again. The child's own idle voids a check in flight; a
   read that fails relaunches it too (the drain outranks a duplicate row). The Grok adapter keeps its
   adapter-written end on a revival (a late delivery, status-less rows): its reports are the CLI's
-  own listings and frames, not confirmed by a status read like this one.
+  own listings and frames, not confirmed by a status read like this one. (8) A rewind ends the
+  children the fork leaves behind (`closeChildWorkLeftBehind`, from `rollbackThread`). The fork is a
+  new session holding copies of the source's messages (README observation 17), and a child's parent
+  is the source — whose frames, once the thread is on the fork, are a foreign session's and are
+  dropped: a child still working (a background run outliving its turn, a run relaunched after a
+  Stop, whose start rides no turn a revert could drop) stayed `running` in the roster, kept liveness
+  `working` — holding every code-only deploy's drain until the session exited — and no Stop could
+  close it. Before the re-point every call a child still has open is closed `failed` — on the newest
+  turn its rows rode that the rewind keeps, and not at all when only removed turns carried it (the
+  host's revert drops those rows, and a closer there could only survive as a lone failed row) — then
+  every live run `stopped`, each "Stopped by a rewind."; a run's closer rides no turn, so no revert
+  drops it, whichever of the host's `thread.reverted` and these rows lands first. After it the
+  source session, then its tree (`abortDescendants`), is aborted on the server, their frames — the
+  aborts' own — already a foreign session's. (9) A Stop whose `POST …/abort` failed still ends the
+  turn once the stream or the server says the run is over — `turn.aborted`, the session back to
+  `ready`, as the Stop ends it — whether the run's idle came while the request was pending
+  (`deferredIdle`) or after it failed (`failedStopTurnId`: two idle frames, or 1.18.5's lone
+  `session.idle`), or a reconnect's status poll said so (Machine 2; `endFailedStopTurn`). That end
+  counts as the idle after the interrupt (`idleAfterInterrupt`), so the next `busy` is a new run's:
+  uncounted, a lone idle or the poll kept the next woken run dropped and took the next turn's own
+  abort for the Stop's echo. Until then the turn is still the thread's, and the next Stop of it asks
+  the server again; a steer into it is the user taking it back — the failed Stop is over, the run's
+  end completes the turn as any, and its children run on. An end after the failure
+  (`endFailedStopTurn`) closes the children before it aborts them, outside the interrupt, so that
+  abort counts as one (`interruptsBegun`) and the judges wait for it (`descendantAborts`,
+  `abortsSettled`): judged at once, a child's report in between relaunched it for a moment on the
+  server's `busy` from before the abort, and an ask it then ended got a card. A second Stop used to
+  find the turn already interrupted and do nothing, and an idle that came while the abort was
+  pending was parked where nothing read it: the turn stayed active — the thread reading working,
+  every deploy's drain held — and no Stop could end it.
 - **Grok: shells are live work; a subagent is its call, the CLI's `subagent_*` reports and its child
   session's own frames; the CLI's own prompts get turns; a run nobody hears from stops counting
   after an hour.** Captured on 2026-09-25 (fixtures 15–23, observations 37–47 of the Grok fixtures

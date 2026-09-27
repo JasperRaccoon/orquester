@@ -13,7 +13,12 @@
  * without a server.
  */
 
-import type { RuntimeMode, RuntimeTaskStatus, TurnTokenUsage } from "@orquester/api/agent-chat";
+import type {
+  CanonicalItemType,
+  RuntimeMode,
+  RuntimeTaskStatus,
+  TurnTokenUsage
+} from "@orquester/api/agent-chat";
 
 import type {
   OpenCodeMessageRole,
@@ -578,11 +583,40 @@ export interface OpenCodeChildAgent {
   /**
    * The launch the run's start row named, as the adapter wrote it — the
    * provider's call, a relaunch's id, or `opencode-child:<session id>` for a
-   * child no part had named yet. Every start this adapter writes names one; a
-   * run whose start named none (a log from before) gets a seed first when it
-   * is relaunched, or the roster could not reopen it (`settleChildSurvival`).
+   * child no part had named yet. Every start this adapter writes names one
+   * (`emitTaskStarted` always sets it), so the seed `settleChildSurvival`
+   * would write for a run whose start named none is defensive and unreachable
+   * today: these records never outlive the host, and an older log's runs are
+   * the host's first load's (`legacyLaunchStarts`).
    */
   startLaunchId?: string;
+  /**
+   * The child's calls still open — a `pending` or `running` frame and no
+   * terminal one yet — keyed by call id, each as its newest row was written.
+   * Only a rewind reads it (`closeChildWorkLeftBehind` in `normalize.ts`): once
+   * the thread is on the fork, the child's frames are a foreign session's and
+   * are dropped, so the ones that would close these never land. The newest
+   * {@link OPEN_CALLS_PER_CHILD_MAX}.
+   */
+  openCalls?: Map<string, OpenCodeOpenCall>;
+}
+
+/** How many open calls a child's record keeps ({@link OpenCodeChildAgent.openCalls}). */
+export const OPEN_CALLS_PER_CHILD_MAX = 64;
+
+/** A child's call still open, as its newest row named it — what its closing row repeats. */
+export interface OpenCodeOpenCall {
+  tool: string;
+  itemType: CanonicalItemType;
+  title: string;
+  /**
+   * Every turn its rows rode (`null`: none), the newest last. The timeline
+   * keys a call's row by its turn, so its closing row rides the newest of
+   * these a rewind keeps — never a turn the rewind removes: the host's revert
+   * drops that turn's rows, and a closer there would survive, if it landed
+   * after the revert, only as a lone failed row.
+   */
+  turns: (string | null)[];
 }
 
 /**
@@ -598,14 +632,13 @@ export interface OpenCodeOutputMark {
 export interface OpenCodeCancellation {
   /** `undefined` = a session-wide stop rather than one turn's interrupt. */
   turnId?: string;
-  acknowledged: boolean;
-  turnSettled: boolean;
-  deferredIdle?: unknown;
-  /** Resolves once the abort has been acknowledged (HTTP reply or abort error). */
-  acknowledgment: Promise<void>;
-  acknowledge: () => void;
-  completion: Promise<void>;
-  complete: (error?: unknown) => void;
+  /**
+   * The turn's idle came while the abort was pending (`onIdle` in
+   * `session.ts` defers it to the Stop): the stream has said the run is over,
+   * so an abort whose own request then fails still ends the turn as a Stop
+   * does.
+   */
+  deferredIdle: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +699,17 @@ export interface OpenCodeSessionState {
    */
   interrupting: boolean;
   interruptedTurnId?: string;
+  /**
+   * The turn a Stop failed to end: its `POST …/abort` failed before the
+   * stream said the run was over, so the turn is still the thread's. A Stop
+   * of the turn already interrupted is otherwise nothing (`interruptTurn`);
+   * this one may be tried again — and the run's end, when the stream or the
+   * server says so (its idle; Machine 2's status poll), ends the turn as the
+   * Stop would have (`endFailedStopTurn`). A steer into the turn takes it
+   * back, which ends the interruption (`sendTurn`). Cleared when an interrupt
+   * begins, when the turn so ends and when the interruption ends.
+   */
+  failedStopTurnId?: string;
   reconcileIdleStatus: boolean;
   awaitingBusyAfterInterruption: boolean;
   /**
@@ -820,6 +864,7 @@ export function repointSession(state: OpenCodeSessionState, sessionId: string): 
  */
 export function endInterruption(state: OpenCodeSessionState): void {
   state.interruptedTurnId = undefined;
+  state.failedStopTurnId = undefined;
   state.reconcileIdleStatus = false;
   state.awaitingBusyAfterInterruption = false;
   state.idleAfterInterrupt = false;
