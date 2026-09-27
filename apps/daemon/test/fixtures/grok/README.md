@@ -1560,6 +1560,17 @@ running at a deploy (as before 2026-09-26), never killed early. After the adapte
 CLI's group, `serena` ran on under init this time (in 24 `jira-cloud` did too; the others end on
 their stdin's end) — a helper, swept by its recorded session.
 
+The CLI says so before its open answers, too: `_x.ai/mcp/servers_updated` (t=489) and
+`init_progress {total: 5, connected: 0}` (t=645) precede the `session/new` answer (t=717). While
+the session is not announced, every such report — and `initialized`, `server_status` — records the
+CLI's children as helpers (`GrokSession.recordHelpersWhileOpening`), so a CLI that dies before its
+open answers leaves none unswept: the recording after the answer came too late for it, and its
+exit then swept nothing. Whether every server's process exists by the first report is not captured
+(the harness listed the children only once the open answered): each later report records again,
+adding what it finds. Any end before the session is announced — the CLI's death, the host's
+teardown, a stop — records the children as helpers too, never as the user's work: nothing of the
+user's has run.
+
 ### 56. agent-browser's daemon leaves its MCP server's session — the helper sweep spares the shared browser
 
 Not an ACP capture: a probe run on 2026-09-26 (the harness's `ab-probe-2026-09-26.mjs`, isolated

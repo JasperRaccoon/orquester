@@ -1494,8 +1494,12 @@ adapter. Nothing waits on a sleep: wait on a receipt, on `ThreadStore.drain()` /
   scan still finds, each pid identified by its `/proc` starttime on both sides of the environment
   read and again before each signal, a live session leader against the one recorded — the kill
   guard's rule: never a recycled pid; a zombie is gone. Two kinds, two rules. **The CLI's own
-  helpers** — its children the moment `session/new` / `session/load` answered, which are its MCP
-  servers (fixture 31: all four existed then, none of the user's work had run) — are swept at EVERY
+  helpers** — its children while its session opens, which are its MCP servers (fixture 31: all four
+  existed as `session/new` answered, none of the user's work had run), recorded as the CLI reports
+  them booting (`_x.ai/mcp/servers_updated`, `init_progress`, `server_status`: before `session/new`
+  answers, so a CLI that dies first leaves none unswept), once the open answered, and at any end
+  before the session was announced (every child a helper then, never the user's work: a host
+  teardown during the open used to record them as work and leave them running) — are swept at EVERY
   end: a restart of a thread that goes on (an account, permission-mode or cwd change — Grok switches
   models in-session), the host's teardown (a drain-restart's included), the CLI's own exit (a crash,
   an open that failed), the user's stop. The host's teardown waits for them: both of its `stopAll()`

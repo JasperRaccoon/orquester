@@ -50,6 +50,8 @@ interface Rig {
   mark: string;
   /** The thread `t1`'s `leftover-work.json`: what its launches left running for a later user end. */
   leftoverWork: string;
+  /** Resolves when the adapter logs a message matching `pattern`, at any level. */
+  logged(pattern: RegExp): Promise<void>;
 }
 
 /**
@@ -80,8 +82,18 @@ async function rig(
 
   const controller = new AbortController();
   let ids = 0;
+  const logs: string[] = [];
+  const logWaiters: Array<{ pattern: RegExp; resolve: () => void }> = [];
+  const log = (message: string): void => {
+    logs.push(message);
+    for (let index = logWaiters.length - 1; index >= 0; index -= 1) {
+      if (logWaiters[index].pattern.test(message)) {
+        logWaiters.splice(index, 1)[0].resolve();
+      }
+    }
+  };
   const context: AdapterContext = {
-    logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+    logger: { debug: log, info: log, warn: log, error: log },
     clock: { now: () => new Date(0), nowIso: () => "2026-09-21T00:00:00.000Z" },
     ids: {
       eventId: () => `e${(ids += 1)}`,
@@ -156,7 +168,15 @@ async function rig(
     },
     cwd,
     mark,
-    leftoverWork
+    leftoverWork,
+    logged: (pattern) =>
+      new Promise<void>((resolve) => {
+        if (logs.some((message) => pattern.test(message))) {
+          resolve();
+          return;
+        }
+        logWaiters.push({ pattern, resolve });
+      })
   };
   openRigs.push(built);
   return built;
@@ -1677,6 +1697,79 @@ test("a session that fails to open stops everything its CLI started", { skip: pr
       /Path not found/
     );
     assert.deepEqual(processesWith("GROK_RIG_MARK", r.mark), [], "nothing of the launch is left running");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
+/** Resolve when `promise` settles or `ms` has passed, whichever is first; the timer never outlives it. */
+async function within(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    promise.then(
+      () => undefined,
+      () => undefined
+    ),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    })
+  ]);
+  clearTimeout(timer);
+}
+
+test("a host teardown while the session opens sweeps the CLI's helpers — never remembered as the user's work", { skip: process.platform !== "linux" }, async () => {
+  // `session/new` never answers: its MCP servers are up, the session is not
+  // announced, and nothing of the user's can have run — every child is a
+  // helper, the failed-open rule. Recorded as work, a deploy during the open
+  // left the helper running and remembered it for the user's next end.
+  const r = await rig({ scenario: "leftover-open-hang" });
+  try {
+    const opening = start(r);
+    opening.catch(() => undefined);
+    await r.waitFor(
+      (event) =>
+        event.type === "runtime.warning" &&
+        String((event.payload as { message?: unknown }).message).includes("helper started"),
+      "the helper's start"
+    );
+    assert.equal(leftovers(r).helper.length, 1, "the helper runs");
+    // The host's teardown: its abort, then its own `stopAll()`.
+    await r.dispose();
+    await assert.rejects(opening);
+    assert.deepEqual(leftovers(r).helper, [], "swept as the helper it is");
+    assert.deepEqual(await readLeftoverWork(r.leftoverWork), [], "and never remembered as the user's work");
+    assert.deepEqual(lifecycleRows(r.events), [], "a session that never opened reports no life of its own");
+  } finally {
+    reap(r);
+    await r.dispose();
+  }
+});
+
+test("a CLI that dies while its session opens takes the helpers it booted with it", { skip: process.platform !== "linux" }, async () => {
+  // The CLI reports its MCP servers booting before `session/new` answers
+  // (fixture 31), and dies before it answers: only a recording made off that
+  // report, while it lived, ties the helper to it.
+  const r = await rig({ scenario: "leftover-open-crash" });
+  try {
+    const opening = start(r);
+    opening.catch(() => undefined);
+    // Bounded, so a host that never records them fails on the assertions
+    // below rather than on a timeout.
+    await within(r.logged(/recorded the agent's helpers/), 3_000);
+    assert.equal(leftovers(r).helper.length, 1, "the helper runs");
+    const cli = processesWith("GROK_RIG_MARK", r.mark).filter((pid) => {
+      try {
+        return readFileSync(`/proc/${pid}/cmdline`, "latin1").includes("mock-grok.mjs");
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(cli.length, 1, "the CLI runs");
+    process.kill(cli[0]!, "SIGKILL");
+    await assert.rejects(opening);
+    assert.deepEqual(leftovers(r).helper, [], "its exit swept the helper it booted");
+    assert.deepEqual(lifecycleRows(r.events), [], "the open's rejection is its whole report");
   } finally {
     reap(r);
     await r.dispose();
