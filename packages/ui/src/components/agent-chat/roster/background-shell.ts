@@ -26,6 +26,10 @@
  * ordinary `work` row, so `WorkRow` renders it with the same `ToolEntryRow`
  * as every other tool call — including `joinLifecycleDetails`, which folds the
  * `tool.output` chunks into the owning row's output.
+ *
+ * The drill-in holds it ({@link projectBackgroundShell}): the thread's items
+ * change on every token of any stream, and a row rebuilt for each of them
+ * joined the shell's whole output again every time.
  */
 
 import type { ThreadActivityItem, ThreadItem } from "@orquester/api/agent-chat";
@@ -112,11 +116,16 @@ export function backgroundShellEntries(
   items: readonly ThreadItem[],
   agentId: string
 ): WorkLogEntry[] {
+  return shellEntriesOf(itemsForAgent(items, agentId), agentId);
+}
+
+/** {@link backgroundShellEntries}, from the shell's own items (`itemsForAgent`). */
+function shellEntriesOf(own: readonly ThreadItem[], agentId: string): WorkLogEntry[] {
   const entries: WorkLogEntry[] = [];
   const lifecycleRowByCallId = new Map<string, number>();
   let taskEntryAt: number | undefined;
 
-  for (const item of itemsForAgent(items, agentId)) {
+  for (const item of own) {
     if (item.kind !== "activity") continue;
     const activity = item as ThreadActivityItem;
     const payload = asRecord(activity.payload);
@@ -187,7 +196,12 @@ export function backgroundShellRows(
   agentId: string,
   fallbackTitle?: string
 ): AgentChatTimelineRow[] {
-  const groupedEntries = backgroundShellEntries(items, agentId);
+  return shellRowsOf(itemsForAgent(items, agentId), agentId, fallbackTitle);
+}
+
+/** {@link backgroundShellRows}, from the shell's own items (`itemsForAgent`). */
+function shellRowsOf(own: readonly ThreadItem[], agentId: string, fallbackTitle?: string): AgentChatTimelineRow[] {
+  const groupedEntries = shellEntriesOf(own, agentId);
   if (groupedEntries.length === 0) return [];
   const given = fallbackTitle?.trim() ?? "";
   const title = given === agentId ? "" : given;
@@ -204,6 +218,56 @@ export function backgroundShellRows(
       ...(!framed && title.length > 0 ? { displayLabel: title } : {})
     }
   ];
+}
+
+/** A shell's drill-in rows, with what they were derived from. */
+export interface BackgroundShellProjection {
+  readonly agentId: string;
+  readonly title: string | undefined;
+  /** The shell's own items (`itemsForAgent`): everything its rows read but the title. */
+  readonly own: readonly ThreadItem[];
+  readonly rows: AgentChatTimelineRow[];
+}
+
+/**
+ * {@link backgroundShellRows}, held: `previous` itself while the shell's own
+ * items are the same objects, in the same order, under the same title. The
+ * thread's items change on every token of any stream — the parent's answer,
+ * another agent's thought — and a row rebuilt for each of them made `WorkRow`
+ * join the shell's whole output again every time (a dev server's log: ~0.8 ms
+ * and a fresh ~780 KiB string per token, final review C's M1). A chunk of the
+ * shell's own, or a row the store replaced, is a new item: the rows are
+ * derived again. What the rows are held with is what they read, so a held row
+ * is exactly the row a fresh derivation would make.
+ */
+export function projectBackgroundShell(
+  previous: BackgroundShellProjection | null,
+  items: readonly ThreadItem[],
+  agentId: string,
+  fallbackTitle?: string
+): BackgroundShellProjection {
+  const own = itemsForAgent(items, agentId);
+  if (
+    previous !== null &&
+    previous.agentId === agentId &&
+    previous.title === fallbackTitle &&
+    sameItems(previous.own, own)
+  ) {
+    return previous;
+  }
+  return { agentId, title: fallbackTitle, own, rows: shellRowsOf(own, agentId, fallbackTitle) };
+}
+
+function sameItems(left: readonly ThreadItem[], right: readonly ThreadItem[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**

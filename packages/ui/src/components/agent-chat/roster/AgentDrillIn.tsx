@@ -62,7 +62,11 @@ import { useAgentChatDrillIn } from "../../../lib/agent-chat/hooks";
 import type { AgentDrillInProps, TimelineScrollPosition } from "../contracts";
 import { ChatTimeline } from "../timeline/ChatTimeline";
 import { ElapsedTicker, StatusDot } from "../primitives";
-import { backgroundShellDisclosureIds, backgroundShellRows } from "./background-shell";
+import {
+  backgroundShellDisclosureIds,
+  projectBackgroundShell,
+  type BackgroundShellProjection
+} from "./background-shell";
 import { drillInTimelineCallbacks } from "./drill-in-callbacks";
 import { drillInOpening } from "./drill-in-memory";
 import { rosterRowIcon } from "./AgentRosterRow";
@@ -127,15 +131,20 @@ export function AgentDrillIn({
   // shell (`live.rows` is null) — because its drill-in is one row, its
   // command, and the shared projection would fold it behind the turn its
   // chunks rode. See `background-shell.ts`. The shell's roster title names its
-  // row once no frame of its call is left to name it.
+  // row once no frame of its call is left to name it. Held while the shell's
+  // own items are unchanged (`projectBackgroundShell`): a token of any other
+  // stream in the thread keeps the row object, so `WorkRow` never joins the
+  // shell's whole output again for it — and the row ids and disclosures below,
+  // derived from these rows, are held with them.
   const shellTitle = agent?.title;
-  const shellRows = React.useMemo(
-    () =>
-      live.rows === null && rowsOverride === undefined
-        ? backgroundShellRows(live.items, agentId, shellTitle)
-        : null,
-    [live.rows, live.items, rowsOverride, agentId, shellTitle]
-  );
+  const shellProjection = React.useRef<BackgroundShellProjection | null>(null);
+  const shellRows = React.useMemo(() => {
+    if (live.rows !== null || rowsOverride !== undefined) {
+      return null;
+    }
+    shellProjection.current = projectBackgroundShell(shellProjection.current, live.items, agentId, shellTitle);
+    return shellProjection.current.rows;
+  }, [live.rows, live.items, rowsOverride, agentId, shellTitle]);
   // The hook is the source, and the ONLY projection: the timeline renders
   // these rows as they are. The prop overrides it for a host that already
   // holds the rows (and for tests, which have no store).

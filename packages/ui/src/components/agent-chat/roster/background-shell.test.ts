@@ -4,7 +4,7 @@ import type { ThreadItem } from "@orquester/api/agent-chat";
 
 import { omitSupersededLifecycleMarkers } from "../../../lib/agent-chat/presentation.logic";
 import { joinLifecycleDetails } from "../timeline/row-chrome";
-import { backgroundShellDisclosureIds, backgroundShellRows } from "./background-shell";
+import { backgroundShellDisclosureIds, backgroundShellRows, projectBackgroundShell } from "./background-shell";
 
 const TASK = "task-bg-1";
 const TOOL = `bgshell:${TASK}`;
@@ -265,4 +265,65 @@ test("a Grok monitor's latest line is its output", () => {
   const entry = rows[0]?.kind === "work" ? rows[0].groupedEntries : [];
   assert.equal(entry.length, 1);
   assert.equal(entry[0]?.detail, "build 3 passed");
+});
+
+/**
+ * A shell's drill-in is held while its OWN items are unchanged (final review C, M1). The thread's items
+ * change on every token of any stream — the parent's answer, another agent's thought — and the shell's
+ * one row, rebuilt each time, made `WorkRow` join its whole output again (~780 KiB for a dev server's
+ * log) on every one of them.
+ */
+function parentAnswer(text: string): ThreadItem {
+  return {
+    kind: "message",
+    id: "parent-answer",
+    role: "assistant",
+    text,
+    turnId: "turn-1",
+    streaming: true,
+    createdAt: "2026-09-21T10:05:00.000Z",
+    updatedAt: "2026-09-21T10:05:00.000Z"
+  } as ThreadItem;
+}
+
+test("a token of any other stream leaves the shell's projection, and its row object, as they were", () => {
+  const shell = [started(), output("ready\n", "c1"), output("GET / 200\n", "c2")];
+  const first = projectBackgroundShell(null, [...shell, parentAnswer("The")], TASK, "run the suite");
+  const second = projectBackgroundShell(first, [...shell, parentAnswer("The server")], TASK, "run the suite");
+  assert.equal(second, first, "the same projection");
+  assert.equal(second.rows[0], first.rows[0], "the same row object: WorkRow's memo holds, its output is not joined again");
+  const otherAgent = activity(
+    "tool.output",
+    { toolUseId: "call-other", streamKind: "command_output", delta: "elsewhere\n" },
+    { agentId: "agent-2", id: "other-chunk" }
+  );
+  const third = projectBackgroundShell(second, [...shell, parentAnswer("The server is up"), otherAgent], TASK, "run the suite");
+  assert.equal(third.rows, first.rows, "another agent's output is not this shell's either");
+});
+
+test("a chunk of the shell's own still moves its row, to exactly what a fresh projection derives", () => {
+  const shell = [started(), output("ready\n", "c1")];
+  const first = projectBackgroundShell(null, shell, TASK, "run the suite");
+  const grown = [...shell, output("GET / 200\n", "c2")];
+  const next = projectBackgroundShell(first, grown, TASK, "run the suite");
+  assert.notEqual(next.rows[0], first.rows[0], "a new row: the output grew");
+  assert.deepEqual(next.rows, backgroundShellRows(grown, TASK, "run the suite"));
+  const row = next.rows[0]!;
+  const joined = row.kind === "work" ? joinLifecycleDetails(row.groupedEntries) : [];
+  assert.ok(joined.some((entry) => entry.detail?.includes("GET / 200")), "the new chunk is its output");
+});
+
+test("a row replaced in place, a new title or another shell derive the rows again", () => {
+  const shell = [grokShell("task.started", { detail: "npm run dev" }, "gs-start")];
+  const first = projectBackgroundShell(null, shell, "sh1", "npm run dev");
+  const ended = grokShell("task.completed", { status: "completed", summary: "ready in 300ms", exitCode: 0 }, "gs-end");
+  const settled = projectBackgroundShell(first, [...shell, ended], "sh1", "npm run dev");
+  assert.notEqual(settled.rows, first.rows, "its end is its own row");
+  const replaced = projectBackgroundShell(settled, [shell[0]!, { ...ended }], "sh1", "npm run dev");
+  assert.notEqual(replaced.rows, settled.rows, "a row the store replaced is a change, even with the same id");
+  assert.deepEqual(replaced.rows, settled.rows, "to the same content");
+  const retitled = projectBackgroundShell(replaced, [shell[0]!, { ...ended }], "sh1", "the dev server");
+  assert.notEqual(retitled.rows, replaced.rows, "the roster title labels the row");
+  const other = projectBackgroundShell(retitled, [shell[0]!, { ...ended }], TASK, "run the suite");
+  assert.deepEqual(other.rows, [], "another shell never reads this one's projection");
 });
