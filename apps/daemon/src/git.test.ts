@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { GitStatusResponse } from "@orquester/api";
+import { GIT_WORKING_DIFF_DEFAULT_MAX_BYTES, GIT_WORKING_DIFF_MAX_BYTES } from "@orquester/api";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { GitError, GitService, GitWatcher, passesGitEventFilter } from "./git";
+import {
+  GitError,
+  GitService,
+  GitWatcher,
+  WORKING_DIFF_UNTRACKED_MAX,
+  passesGitEventFilter,
+  workingDiffMaxBytes
+} from "./git";
 
 const exec = promisify(execFile);
 
@@ -536,6 +544,306 @@ test("a stash sha mismatch is a 409 against real git, and drops nothing", async 
 
     await git.stashDrop(dir, stash.index, stash.sha);
     assert.equal((await git.stashList(dir)).length, 0, "the matching sha still works");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Working diff (a saved prompt's {diff}) -------------------------------------
+
+test("workingDiffMaxBytes parses an integer, defaults, and clamps", () => {
+  assert.equal(workingDiffMaxBytes(undefined), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+  assert.equal(workingDiffMaxBytes(""), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+  assert.equal(workingDiffMaxBytes("lots"), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+  assert.equal(workingDiffMaxBytes(Number.NaN), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+  assert.equal(workingDiffMaxBytes("1000"), 1000);
+  assert.equal(workingDiffMaxBytes("1000.9"), 1000);
+  assert.equal(workingDiffMaxBytes(1000.9), 1000);
+  assert.equal(workingDiffMaxBytes("0"), 1);
+  assert.equal(workingDiffMaxBytes("-5"), 1);
+  assert.equal(workingDiffMaxBytes(String(GIT_WORKING_DIFF_MAX_BYTES + 1)), GIT_WORKING_DIFF_MAX_BYTES);
+  assert.equal(workingDiffMaxBytes(Number.POSITIVE_INFINITY), GIT_WORKING_DIFF_MAX_BYTES);
+});
+
+test("working diff reads a bounded amount, and a capped read that overflows is a cut, not a failure", async () => {
+  const calls: { args: string[]; maxBuffer: number }[] = [];
+  const git = new GitService({
+    runner: async (_file, args, options) => {
+      calls.push({ args, maxBuffer: options.maxBuffer });
+      if (args[0] === "rev-parse") return { stdout: args.includes("--is-inside-work-tree") ? "true\n" : "abc\n", stderr: "" };
+      if (args[0] === "ls-files") return { stdout: nul("a.txt", "dir/b.txt"), stderr: "" };
+      // What node's execFile rejects with once git outruns maxBuffer.
+      throw Object.assign(new Error("stdout maxBuffer length exceeded"), {
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        stdout: "diff --git a/x b/x\n+one\n+tw",
+        stderr: ""
+      });
+    }
+  });
+
+  const result = await git.workingDiff("/repo", 100);
+  assert.deepEqual(result, {
+    isRepo: true,
+    diff: "diff --git a/x b/x\n+one\n",
+    truncated: true,
+    untracked: ["a.txt", "dir/b.txt"]
+  });
+  const diff = calls.find((call) => call.args.includes("diff"));
+  assert.deepEqual(diff?.args, [
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+    "-c",
+    "diff.relative=false",
+    "-c",
+    "diff.srcPrefix=a/",
+    "-c",
+    "diff.dstPrefix=b/",
+    "diff",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "HEAD",
+    "--",
+    "."
+  ]);
+  assert.equal(diff?.maxBuffer, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES + 1, "a small cap still reads a bounded amount");
+
+  await git.workingDiff("/repo", GIT_WORKING_DIFF_MAX_BYTES + 99);
+  const diffs = calls.filter((call) => call.args.includes("diff"));
+  assert.equal(diffs[1]?.maxBuffer, GIT_WORKING_DIFF_MAX_BYTES + 1, "the cap is clamped before it sizes the read");
+  assert.ok(
+    calls.filter((call) => call.args[0] === "ls-files").every((call) => call.maxBuffer <= 8 * 1024 * 1024),
+    "the untracked listing is a bounded read too"
+  );
+});
+
+test("an overflow on a read that did not ask for a cap is still an error", async () => {
+  const git = new GitService({
+    runner: async (_file, args) => {
+      if (args[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
+      throw Object.assign(new Error("stdout maxBuffer length exceeded"), {
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        stdout: "partial",
+        stderr: ""
+      });
+    }
+  });
+  await assert.rejects(git.status("/repo"), (error: unknown) => {
+    assert.ok(error instanceof GitError, `expected a GitError, got ${String(error)}`);
+    return true;
+  });
+});
+
+test("working diff of a directory that is not a repo is isRepo:false, never an error", async (t) => {
+  const dir = await tempDir();
+  try {
+    const inside = await exec("git", ["rev-parse", "--is-inside-work-tree"], { cwd: dir }).then(
+      () => true,
+      () => false
+    );
+    if (inside) {
+      t.skip("the temp dir is itself inside a git work tree on this machine");
+      return;
+    }
+    assert.deepEqual(await new GitService().workingDiff(dir, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES), {
+      isRepo: false,
+      diff: "",
+      truncated: false,
+      untracked: []
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff of a clean repo is an empty patch with nothing untracked", async () => {
+  const dir = await tempRepo();
+  try {
+    assert.deepEqual(await new GitService().workingDiff(dir, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES), {
+      isRepo: true,
+      diff: "",
+      truncated: false,
+      untracked: []
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff: staged and unstaged changes in ONE patch against HEAD; untracked files listed, not patched", async () => {
+  const dir = await tempRepo();
+  try {
+    const git = (...args: string[]) => exec("git", args, { cwd: dir });
+    await writeFile(join(dir, "gone.txt"), "doomed\n");
+    await git("add", "gone.txt");
+    await git("commit", "-qm", "second");
+
+    await writeFile(join(dir, "kept.txt"), "one\nunstaged edit\n"); // unstaged
+    await git("rm", "-q", "gone.txt"); // staged deletion
+    await writeFile(join(dir, "staged.txt"), "brand new\n");
+    await git("add", "staged.txt"); // staged add…
+    await writeFile(join(dir, "staged.txt"), "brand new\nedited after staging\n"); // …then edited again
+    await mkdir(join(dir, "notes"));
+    await writeFile(join(dir, "notes", "todo.md"), "untracked\n");
+    await writeFile(join(dir, ".gitignore"), "*.log\n");
+    await writeFile(join(dir, "debug.log"), "ignored\n");
+
+    const result = await new GitService().workingDiff(dir, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+    assert.equal(result.isRepo, true);
+    assert.equal(result.truncated, false);
+    assert.match(result.diff, /^diff --git a\/kept\.txt b\/kept\.txt$/m);
+    assert.match(result.diff, /^\+unstaged edit$/m);
+    assert.match(result.diff, /^deleted file mode 100644$/m);
+    assert.match(result.diff, /^-doomed$/m);
+    // One entry for staged.txt, carrying the working tree's content — staged and
+    // unstaged together, never twice.
+    assert.equal(result.diff.match(/^diff --git a\/staged\.txt b\/staged\.txt$/gm)?.length, 1);
+    assert.match(result.diff, /^@@ -0,0 \+1,2 @@\n\+brand new\n\+edited after staging$/m);
+    assert.doesNotMatch(result.diff, /todo\.md|debug\.log/, "untracked files are listed, not patched");
+    assert.deepEqual([...result.untracked].sort(), [".gitignore", "notes/todo.md"], "ignored files are left out");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff before the first commit is against the empty tree", async () => {
+  const dir = await tempDir();
+  try {
+    const git = (...args: string[]) =>
+      exec("git", args, { cwd: dir, env: { ...process.env, HOME: dir, GIT_CONFIG_GLOBAL: "/dev/null" } });
+    await git("init", "-q", "-b", "main");
+    await writeFile(join(dir, "a.txt"), "one\n");
+    await git("add", "a.txt");
+    await writeFile(join(dir, "a.txt"), "one\ntwo\n");
+    await writeFile(join(dir, "b.txt"), "not added\n");
+
+    const result = await new GitService().workingDiff(dir, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+    assert.equal(result.isRepo, true);
+    assert.equal(result.truncated, false);
+    assert.match(result.diff, /^diff --git a\/a\.txt b\/a\.txt\nnew file mode 100644$/m);
+    assert.match(result.diff, /^@@ -0,0 \+1,2 @@\n\+one\n\+two$/m, "the working tree's content, whole");
+    assert.deepEqual(result.untracked, ["b.txt"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff cuts a long patch at the last whole line within maxBytes, never mid-character", async () => {
+  const dir = await tempRepo();
+  try {
+    // Multi-byte text, so a plain byte cut would land inside a character.
+    const lines = Array.from({ length: 400 }, (_, i) => `línea ${i} — ünïcödé ✓`);
+    await writeFile(join(dir, "kept.txt"), `${lines.join("\n")}\n`);
+    const git = new GitService();
+    const whole = await git.workingDiff(dir, GIT_WORKING_DIFF_MAX_BYTES);
+    assert.equal(whole.truncated, false);
+    const wholeBytes = Buffer.byteLength(whole.diff);
+
+    for (const maxBytes of [1, 1000, 1001, 1002, 1003, 4096, wholeBytes - 1]) {
+      const cut = await git.workingDiff(dir, maxBytes);
+      assert.equal(cut.truncated, true, `${maxBytes}: truncated`);
+      assert.ok(Buffer.byteLength(cut.diff) <= maxBytes, `${maxBytes}: within the cap`);
+      assert.ok(whole.diff.startsWith(cut.diff), `${maxBytes}: a prefix of the whole patch`);
+      assert.ok(cut.diff === "" || cut.diff.endsWith("\n"), `${maxBytes}: ends on a line boundary`);
+      assert.ok(!cut.diff.includes("�"), `${maxBytes}: no broken character`);
+      // Nothing that would have fit was left out: the next line would not have.
+      const next = whole.diff.slice(cut.diff.length).split("\n")[0] ?? "";
+      assert.ok(Buffer.byteLength(cut.diff) + Buffer.byteLength(next) + 1 > maxBytes, `${maxBytes}: kept all that fits`);
+    }
+    // Exactly its own size fits whole.
+    assert.deepEqual(await git.workingDiff(dir, wholeBytes), whole);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff stops git once a huge patch has written enough, and still cuts cleanly", async () => {
+  const dir = await tempRepo();
+  try {
+    // Well past the read floor (default cap + 1), so node really does kill git.
+    const big = Array.from({ length: 12_000 }, (_, i) => `line ${i} ${"x".repeat(40)}`).join("\n");
+    await writeFile(join(dir, "kept.txt"), `${big}\n`);
+    const git = new GitService();
+    const whole = await git.workingDiff(dir, GIT_WORKING_DIFF_MAX_BYTES);
+    assert.ok(Buffer.byteLength(whole.diff) > GIT_WORKING_DIFF_DEFAULT_MAX_BYTES * 2, "the fixture is big enough");
+
+    const cut = await git.workingDiff(dir, 10_000);
+    assert.equal(cut.truncated, true);
+    assert.ok(Buffer.byteLength(cut.diff) <= 10_000);
+    assert.ok(cut.diff.endsWith("\n"));
+    assert.ok(whole.diff.startsWith(cut.diff), "a clean prefix of the whole patch");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff lists at most WORKING_DIFF_UNTRACKED_MAX untracked files", async () => {
+  const dir = await tempRepo();
+  try {
+    await mkdir(join(dir, "many"));
+    for (let i = 0; i < WORKING_DIFF_UNTRACKED_MAX + 3; i++) {
+      await writeFile(join(dir, "many", `f${i}.txt`), "");
+    }
+    const result = await new GitService().workingDiff(dir, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+    assert.equal(result.untracked.length, WORKING_DIFF_UNTRACKED_MAX);
+    assert.ok(result.untracked.every((path) => path.startsWith("many/f")), "repo-relative paths");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff of a project inside a larger checkout stays within the project", async () => {
+  const dir = await tempRepo();
+  try {
+    const git = (...args: string[]) => exec("git", args, { cwd: dir });
+    await mkdir(join(dir, "site"));
+    await writeFile(join(dir, "site", "page.txt"), "v1\n");
+    await git("add", "site/page.txt");
+    await git("commit", "-qm", "site");
+
+    await writeFile(join(dir, "kept.txt"), "outside the project\n");
+    await writeFile(join(dir, "stray.txt"), "untracked, outside\n");
+    await writeFile(join(dir, "site", "page.txt"), "v2\n");
+    await writeFile(join(dir, "site", "new.txt"), "untracked, inside\n");
+
+    const result = await new GitService().workingDiff(join(dir, "site"), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+    assert.match(result.diff, /^diff --git a\/site\/page\.txt b\/site\/page\.txt$/m, "paths stay repo-relative");
+    assert.doesNotMatch(result.diff, /kept\.txt|outside the project/, "nothing outside the project");
+    assert.deepEqual(result.untracked, ["site/new.txt"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("working diff ignores the user's own diff config: no quoting, a/ b/ prefixes, repo-relative paths", async () => {
+  const dir = await tempRepo();
+  try {
+    const git = (...args: string[]) => exec("git", args, { cwd: dir });
+    await mkdir(join(dir, "site"));
+    await writeFile(join(dir, "site", "naïve-café.txt"), "v1\n");
+    await git("add", "-A");
+    await git("commit", "-qm", "site");
+    // Every setting that reshapes a patch's headers, set the hostile way.
+    for (const [key, value] of [
+      ["core.quotePath", "true"],
+      ["diff.noprefix", "true"],
+      ["diff.mnemonicPrefix", "true"],
+      ["diff.relative", "true"]
+    ]) {
+      await git("config", key, value);
+    }
+    await writeFile(join(dir, "site", "naïve-café.txt"), "v2\n");
+    await writeFile(join(dir, "site", "新しい.txt"), "untracked\n");
+
+    const result = await new GitService().workingDiff(join(dir, "site"), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+    assert.match(result.diff, /^diff --git a\/site\/naïve-café\.txt b\/site\/naïve-café\.txt$/m);
+    assert.match(result.diff, /^--- a\/site\/naïve-café\.txt\n\+\+\+ b\/site\/naïve-café\.txt$/m);
+    assert.doesNotMatch(result.diff, /\\303/, "no C-quoted bytes");
+    assert.deepEqual(result.untracked, ["site/新しい.txt"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

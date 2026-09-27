@@ -16,6 +16,7 @@ import type {
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
+  CreateSavedPromptRequest,
   CreateSessionRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
@@ -41,6 +42,7 @@ import type {
   GitStashEntry,
   GitStatusChangedPayload,
   GitStatusResponse,
+  GitWorkingDiffResponse,
   HealthResponse,
   ImportAgentAccountRequest,
   KillProcessErrorResponse,
@@ -63,6 +65,8 @@ import type {
   RenameSessionRequest,
   RepoSummary,
   ReorderSessionsRequest,
+  SavedPrompt,
+  SavedPromptListResponse,
   ServerInfoResponse,
   SetAgentAccountDefaultsRequest,
   SetProtectArchivedRequest,
@@ -77,6 +81,7 @@ import type {
   SystemProcessesResponse,
   SystemResourcesResponse,
   UpdateProjectRequest,
+  UpdateSavedPromptRequest,
   UpdateTodoRequest,
   UpdateWorkspaceRequest,
   UsageAccount,
@@ -99,6 +104,7 @@ import { registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService } from "./recent-projects";
+import { SavedPromptError, SavedPromptsService, publishSavedPromptEvents } from "./saved-prompts.ts";
 import { detectRepoId } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
@@ -110,7 +116,7 @@ import { AccountError, AccountsService } from "./accounts";
 import { AgentAccountsService } from "./agent-accounts.ts";
 import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
-import { GitError, GitService, GitWatcher, passesGitEventFilter } from "./git";
+import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
 import { createClaudeSource, createCodexSource, createGrokSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
@@ -181,6 +187,7 @@ import {
   recentProjectsPath,
   remotesConfigPath,
   resolveDaemonPaths,
+  savedPromptsPath,
   sessionsIndexPath,
   tmuxSocketPath,
   todosIndexPath,
@@ -237,6 +244,8 @@ interface ResolvedPaths {
   todosIndexFile: string;
   /** <appdir>/daemon/recent-projects.json — the shared recent-projects list. */
   recentProjectsFile: string;
+  /** <appdir>/daemon/saved-prompts.json — the shared saved-prompt library. */
+  savedPromptsFile: string;
   /** <appdir>/daemon/push.json — Web Push VAPID keypair + subscriptions (0600). */
   pushConfigFile: string;
   workspacesDir: string;
@@ -368,6 +377,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     browserProfilesDir: browserProfilesDir(paths.baseDir),
     todosIndexFile: todosIndexPath(paths.baseDir),
     recentProjectsFile: recentProjectsPath(paths.baseDir),
+    savedPromptsFile: savedPromptsPath(paths.baseDir),
     pushConfigFile: pushConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
     keysDir: keysDir(paths.baseDir),
@@ -536,6 +546,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     () => readWorkspacesMeta(resolved.workspacesMetaFile)
   );
   await recentProjects.load();
+  // The saved-prompt library (the right rail). A first run seeds the starter
+  // prompts; a file it cannot read is moved aside, never written over.
+  const savedPrompts = new SavedPromptsService({
+    file: resolved.savedPromptsFile,
+    // Getters: PUT /api/config/daemon reassigns both in place, and the routes
+    // read them per request — a startup copy would 400 every project prompt.
+    workspacesDir: () => resolved.workspacesDir,
+    fsRoot: () => resolved.fsRoot,
+    logger: console
+  });
+  await savedPrompts.load();
   // Push a project's git status to whoever is looking at it. The watcher polls
   // ONLY projects with a live `/events?project=…` subscriber and only emits on a
   // real change, so an unwatched (or idle) repo costs nothing.
@@ -800,6 +821,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster.publish("projects", "recentProjects.changed", list)
   );
 
+  // Saved prompts → event bus (channel "saved-prompts"): every change, cascades
+  // included, as `savedPrompt.upserted` (the whole prompt) / `savedPrompt.deleted`.
+  publishSavedPromptEvents(savedPrompts, broadcaster);
+
   // Server-side browser tabs (Design Mode). Chromium resolves through the
   // registry's probed browser entries; no bundled download. Only CDP-speaking
   // (Chromium-family) browsers can drive puppeteer-core — see CHROMIUM_FAMILY_IDS.
@@ -911,7 +936,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // fresh, bounded live-catalog probe.
   const validateModel: ValidateModel = (entryId, model) => cliproxy.validateModel(entryId, model);
   const services: Services = {
-    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat
+    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat
   };
 
   // Boot the managed proxy AFTER reattach (adoption must see the final session
@@ -1748,6 +1773,8 @@ interface Services {
   todos: TodoListManager;
   /** Daemon-owned recent-projects list, shared by every connected client. */
   recentProjects: RecentProjectsService;
+  /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
+  savedPrompts: SavedPromptsService;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   push: PushService;
@@ -2384,10 +2411,13 @@ export function createServer(
       sessions.closeByProjectPrefix(target);
       // Cascade-close this project's browser tabs (kills its Chromium too).
       await services.browsers.closeForProject(target);
-      // Cascade-delete this project's to-do lists (match `target`, the raw-join
-      // path used as the list refKey — not the realpath `safe`).
-      await todos.deleteByProjectPath(target);
       await rm(safe, { recursive: true, force: true });
+      // Only now that the directory is gone: cascade-delete this project's
+      // to-do lists (match `target`, the raw-join path used as the list refKey
+      // — not the realpath `safe`) and its saved prompts (the same spelling). A
+      // failed rm must not leave the project on disk with its data deleted.
+      await todos.deleteByProjectPath(target);
+      await services.savedPrompts.deleteForProject(target);
 
       // Prune the archive flag so a recreated same-name project starts fresh
       // (mirrors the workspace delete pruning its whole meta entry). Non-fatal:
@@ -2422,15 +2452,19 @@ export function createServer(
       // join), not `safe`: stored projectPaths use the raw join form, so matching
       // the realpath would miss every session under a symlinked workspace root.
       sessions.closeByProjectPrefix(target);
-      // Cascade-delete the workspace's own to-do lists AND every list under a
-      // project inside it (`workspace` = name refKey; `target` = raw-join path).
-      await todos.deleteByWorkspace(workspace, target);
       // Drop the git includeIf binding BEFORE removing the tree: unbindWorkspace
       // realpaths the dir to rebuild the same matcher bindWorkspace used, so it
       // must run while the dir still exists (on macOS the literal /tmp path and
       // its /private/tmp realpath differ — a post-rm fallback wouldn't match).
       await services.accounts.unbindWorkspace(target).catch(() => undefined);
       await rm(safe, { recursive: true, force: true });
+      // Only now that the tree is gone: cascade-delete the workspace's own to-do
+      // lists AND every list under a project inside it (`workspace` = name
+      // refKey; `target` = raw-join path), and the saved prompts of every
+      // project inside it. A failed rm must not leave the projects on disk with
+      // their data deleted.
+      await todos.deleteByWorkspace(workspace, target);
+      await services.savedPrompts.deleteForWorkspace(target);
       // Non-fatal, same as the project delete above: the tree is already gone,
       // so a corrupt workspaces.json must not report a 500 for a delete that
       // actually succeeded.
@@ -3204,6 +3238,25 @@ export function createServer(
       try {
         const safe = await assertInsideFsRoot(resolved.fsRoot, path);
         return await git.status(safe);
+      } catch (error) {
+        return gitError(reply, error);
+      }
+    }
+  );
+
+  // The project's uncommitted changes as ONE patch, cut to `maxBytes` (a saved
+  // prompt's `{diff}`), plus its untracked files. isRepo:false — never an
+  // error — for non-repos, like status.
+  app.get<{ Querystring: { path?: string; maxBytes?: string } }>(
+    "/api/git/working-diff",
+    async (request, reply): Promise<GitWorkingDiffResponse | void> => {
+      const { path, maxBytes } = request.query;
+      if (!path) {
+        return reply.code(400).send({ code: "INVALID_REQUEST", message: "path required." });
+      }
+      try {
+        const safe = await assertInsideFsRoot(resolved.fsRoot, path);
+        return await git.workingDiff(safe, workingDiffMaxBytes(typeof maxBytes === "string" ? maxBytes : undefined));
       } catch (error) {
         return gitError(reply, error);
       }
@@ -4189,6 +4242,66 @@ export function createServer(
     }
   });
 
+  // Saved prompts — the right rail's library, global and per project (channel
+  // "saved-prompts"). Allowed on both transports like /api/todos (no secret
+  // returned). Refusals are SavedPromptError's own status + { code, message }:
+  // 400 INVALID_REQUEST / INVALID_PROJECT_PATH, 404 SAVED_PROMPT_NOT_FOUND,
+  // 409 SAVED_PROMPTS_FULL. A missing `projectPath` lists the global prompts only.
+  app.get<{ Querystring: { projectPath?: string } }>(
+    "/api/saved-prompts",
+    async (request, reply): Promise<SavedPromptListResponse | void> => {
+      const { projectPath } = request.query;
+      try {
+        return { prompts: await services.savedPrompts.list(projectPath ? projectPath : null) };
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Body: CreateSavedPromptRequest }>(
+    "/api/saved-prompts",
+    async (request, reply): Promise<SavedPrompt | void> => {
+      try {
+        return reply.code(201).send(await services.savedPrompts.create(request.body));
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+
+  app.put<{ Params: { id: string }; Body: UpdateSavedPromptRequest }>(
+    "/api/saved-prompts/:id",
+    async (request, reply): Promise<SavedPrompt | void> => {
+      try {
+        return await services.savedPrompts.update(request.params.id, request.body);
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/saved-prompts/:id", async (request, reply): Promise<void> => {
+    try {
+      await services.savedPrompts.delete(request.params.id);
+      return reply.code(204).send();
+    } catch (error) {
+      return savedPromptError(reply, error);
+    }
+  });
+
+  // An Insert or a Send used the prompt: `lastUsedAt` now, `useCount` + 1. No body.
+  app.post<{ Params: { id: string } }>(
+    "/api/saved-prompts/:id/used",
+    async (request, reply): Promise<SavedPrompt | void> => {
+      try {
+        return await services.savedPrompts.markUsed(request.params.id);
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+
   // Web Push (PWA attention notifications). Allowed on both transports like
   // /api/sessions and /api/accounts — the response never carries the VAPID
   // private key (only the public key + a count). The bearer-auth hook gates
@@ -4935,6 +5048,19 @@ function gitError(reply: FastifyReply, error: unknown): void {
   const status = error instanceof GitError ? error.status : 500;
   const message = error instanceof Error ? error.message : "Git operation failed.";
   void reply.code(status).send({ code: "GIT_ERROR", message });
+}
+
+/**
+ * Map a saved-prompt route failure to the wire: a `SavedPromptError` carries
+ * its own status and code; anything else is an unexpected 500.
+ */
+function savedPromptError(reply: FastifyReply, error: unknown): void {
+  if (error instanceof SavedPromptError) {
+    void reply.code(error.status).send({ code: error.code, message: error.message });
+    return;
+  }
+  const message = error instanceof Error ? error.message : "Saved prompt operation failed.";
+  void reply.code(500).send({ code: "SAVED_PROMPTS_ERROR", message });
 }
 
 /**

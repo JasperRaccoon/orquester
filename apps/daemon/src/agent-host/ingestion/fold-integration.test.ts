@@ -433,6 +433,43 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     assert.equal(rows[0]!.summary, "Testing");
   });
 
+  it("goal progress rows collapse into one, and the goal follows every replacement", async () => {
+    // The same rules the `task.progress` row above lives by: one row, at the
+    // place the first tick took, carrying the newest state — and the fold
+    // derives the thread's goal from the row even when it replaces in place.
+    const { ingestion, sink } = harness();
+    const goal = { objective: "Make CI green", status: "active" as const };
+    await ingestion.ingest(runtimeEvent("thread.goal.updated", { goal, change: "set" }));
+    for (const rounds of [1, 2, 3]) {
+      await ingestion.ingest(
+        runtimeEvent("thread.goal.updated", { goal: { ...goal, rounds }, change: "progress" })
+      );
+      await ingestion.ingest(
+        runtimeEvent("item.started", { itemType: "command_execution", title: `step ${rounds}` }, {
+          itemId: `call-${rounds}`,
+          eventId: `tool-${rounds}`
+        })
+      );
+    }
+    await ingestion.drain();
+    const state = fold(sink.events());
+    const goalRows = activities(state).filter((row) => row.activityKind === "goal.updated");
+    assert.deepEqual(
+      goalRows.map((row) => row.id).filter((id) => id.startsWith("goal-progress:")),
+      [`goal-progress:${THREAD_ID}`],
+      "one progress row, however many ticks"
+    );
+    assert.equal(goalRows.length, 2, "the set row and the one progress row");
+    assert.equal(state.goal?.rounds, 3, "the goal follows the in-place replacement");
+    // Ordering: replaced in place, at the first tick's position — before the
+    // first tool row, not after the last.
+    const ids = activities(state).map((row) => row.id);
+    assert.ok(
+      ids.indexOf(`goal-progress:${THREAD_ID}`) < ids.indexOf("tool-1"),
+      "the row keeps the position its first tick took"
+    );
+  });
+
   it("the compaction marker keeps its token counts through the fold", async () => {
     const { ingestion, sink } = harness();
     await ingestion.ingest(
@@ -1104,7 +1141,7 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
     );
   });
 
-  it("a woken parent's call rides its synthetic turn — adopted by one row on it while it runs — and a rewind to before that turn removes it", async () => {
+  it("a woken parent's call rides its synthetic turn — its held stream replayed into it — and a rewind to before that turn removes it", async () => {
     const normalizer = new ClaudeNormalizer({
       threadId: THREAD_ID,
       clock: fixedClock(),
@@ -1131,7 +1168,8 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
     const stream = (event: Record<string, unknown>): void => feed({ type: "stream_event", parent_tool_use_id: null, event });
     feed(result);
     // Woken between prompts, the parent streams a tool_use — its start and an early input update — BEFORE the
-    // complete frame that opens its synthetic turn.
+    // complete frame that opens its synthetic turn. The normaliser holds that message (`preTurnStream`) and
+    // replays it into the turn the frame opens, so every row of the call rides that turn.
     stream({ type: "message_start", message: { id: "msg_wake", role: "assistant", content: [], usage: {} } });
     stream({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_P", name: "Bash", input: {} } });
     stream({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"command":"cat out.txt"}' } });
@@ -1173,30 +1211,29 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
         .map((entry) => [entry.tool!.status, entry.tool!.command]);
     };
 
-    // While it runs — its result still to come — the adoption is the call's one row on the turn, so it is the running
-    // call it is, for the MCP as for the GUI's live run.
+    // While it runs — its result still to come — the call's start and input update are on the turn, so it is the
+    // running call it is, for the MCP as for the GUI's live run; nothing of it is turnless, so no adoption row.
     const live = await folded(events.slice(0, opened));
     const synthetic = live.turns.find((turn) => turn.turnId !== "turn-1")?.turnId;
     assert.ok(synthetic, "the woken parent's answer is a turn of its own");
     assert.deepEqual(rowsOf(live), [
-      ["tool.started", null],
-      ["tool.updated", null],
+      ["tool.started", synthetic],
       ["tool.updated", synthetic]
     ]);
     assert.deepEqual(entriesOf(live), [["inProgress", "cat out.txt"]]);
 
     const state = await folded(events);
     assert.deepEqual(rowsOf(state), [
-      ["tool.started", null],
-      ["tool.updated", null],
+      ["tool.started", synthetic],
       ["tool.updated", synthetic],
       ["tool.output", synthetic],
       ["tool.completed", synthetic]
     ]);
     assert.deepEqual(entriesOf(state), [["completed", "cat out.txt"]]);
 
-    // Rewind to turn 1: the synthetic turn goes, and the call with it. What it emitted before the turn existed — its
-    // start and its early input update — stays, as it always has, and is no running call.
+    // Rewind to turn 1: the synthetic turn goes, and the whole call with it — nothing of it was written before the
+    // turn existed. (A log written before the hold keeps a woken call's turnless start and early update past such a
+    // rewind; the read side leaves those alone, `anchorsCall`.)
     const reverted = applyDomainEvent(state, {
       seq: state.seq + 1,
       eventId: "revert",
@@ -1208,15 +1245,11 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
       type: "thread.reverted",
       payload: { turnCount: 1 }
     });
-    assert.deepEqual(rowsOf(reverted), [
-      ["tool.started", null],
-      ["tool.updated", null]
-    ]);
+    assert.deepEqual(rowsOf(reverted), []);
     assert.deepEqual(entriesOf(reverted), []);
 
-    // The next host start — a deploy's drain-restart is enough — closes what a dead process left open, but not this
-    // call: no row of it anchors it (`anchorsCall`), and a closer would, bringing it back as a failed row in the MCP's
-    // transcript and in the GUI's timeline, which shows the closer in place of the start.
+    // The next host start — a deploy's drain-restart is enough — closes what a dead process left open, and finds
+    // nothing of this call to close: no closer brings it back as a failed row.
     let closingIds = 0;
     const closings = leftoverWorkClosings(reverted, {
       now: "2026-09-21T11:00:00.000Z",
@@ -1238,10 +1271,7 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
         }),
       reverted
     );
-    assert.deepEqual(rowsOf(reloaded), [
-      ["tool.started", null],
-      ["tool.updated", null]
-    ]);
+    assert.deepEqual(rowsOf(reloaded), []);
     assert.deepEqual(entriesOf(reloaded), []);
   });
 });

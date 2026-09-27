@@ -784,8 +784,9 @@ Plus these standalone notifications: `_x.ai/models/update`, `_x.ai/settings/upda
 (observations 39, 41). A subagent's child session speaks on this channel too, under its own id
 (observation 38). *Captured on 2026-09-26:* `goal_updated` on this channel (observation 53), and the
 scheduler's `scheduled_task_created` / `_fired` / `_deleted` — methods of their own again,
-`_x.ai/scheduled_task_*` (observation 52). Every other `sessionUpdate` nobody has captured stays a
-`runtime.warning`.
+`_x.ai/scheduled_task_*` (observation 52). *Read off 1.0.3 goal sessions (2026-09-24) and named by
+the 1.0.34 binary, not captured:* `retry_state` and `compaction_checkpoint` (observation 58). Every
+other `sessionUpdate` nobody has captured stays a `runtime.warning`.
 
 T3 registers three of these (`ask_user_question`, `exit_plan_mode`, `prompt_complete`) and drops the
 rest. Several are genuinely useful — `turn_completed` (usage), `background_tasks` (roster),
@@ -1558,20 +1559,20 @@ every few seconds while its planner ran:
   "idle", …}` — every id and text emptied — in a turn of its own with no model call.
 
 Before 2026-09-26 every update was an "unmapped" warning — eleven in this short run. The adapter
-makes the goal a roster row typed `goal` (the roster's `goal` kind, titled by its objective; inert
-to the liveness registry, as a loop is; its turns and planner hold the drain on their own): started
-when a goal turns `active`, a progress note in place on each change of phase, planning, last event,
-deliverables or rounds — never on a token tick alone — carrying the goal's own token count, and
-ended when it leaves `active`: `budget_limited` → `stopped`, "Token budget reached: 48386 of 20000
-tokens"; `paused` and `cleared` → `stopped`; `completed` → `completed` with its result summary; the
-session's end closes it as it closes a loop, saying why (observation 52). A
-goal active again after the CLI's own end is a new run of its row (a new launch id); after the
-adapter's (a Stop — whether its `session/cancel` stops a goal is not captured), its progress notes
-itself on the ended row; a new goal ends the old one ("Replaced by a new goal"), with the token
-count the old one last reported itself — the replacing update counts the new goal's. Not captured: a
-goal that completes, pauses, resumes or fails. A goal run's launch id carries the launch as a loop
-run's does (`goal-run:<goal id>:<launch>:<run>`, observation 52): a goal a later launch reports
-active again (PLAUSIBLE, uncaptured: a CLI restoring its goal on `session/load`) reopens its row.
+mirrors the goal as the thread's goal (`goal.ts`, goals spec §6.3; observation 57 is the 1.0.3
+evidence it was first built on): `thread.goal.updated` rows the fold reads — `set` on
+`goal_created` (the frame's `token_budget` with it), no row for a token tick alone (a hidden
+`progress` only when its state moved, throttled), `limited` on `budget_exceeded`, and `cleared` on
+`/goal clear`'s frame, which names no goal and no event: its `status: "cleared"` is read as the same
+level 1.0.3's `goal_cleared` was (`previous`, the goal as the thread showed it). Its planner is an
+agent row of its own. Not captured: a goal that completes, pauses, resumes or fails (observation 57
+covers `complete` and the verification verdicts on 1.0.3), nor whether a goal whose workers run in
+the background spans the wake turns of observation 40.
+
+(The 2026-09-26 build made the goal a roster row typed `goal`, started when it turned `active`, noted
+in place and ended when it left `active`. The 2026-09-27 merge with the goals work replaced that with
+the thread's goal: one goal surface for every provider. Rows that build wrote still read as the
+roster's `goal` kind, and nothing writes one any more.)
 
 ### 54. The host's cancel of a question: the model hears "declined"; a Stop's cancel ends the turn
 
@@ -1661,6 +1662,162 @@ exactly as the round-1 "never a process that daemonized away" rule meant. Serena
 its language servers (fixture 24's listing: the TypeScript server leads a session of its own under
 serena). A helper that only `setpgid`ed a host-shared daemon would stay in its session and be swept;
 none was seen.
+
+### 57. `/goal` reports on the private channel as `goal_updated` — the whole state, every time
+
+Not in the capture set when it was written: read-only inspection (2026-09-24) of a real goal session
+on this host — three goals run to completion in one session, on 2026-08-31, so
+written by **`grok 1.0.3`**, the only binary installed then (`~/.grok/bin/grok-1.0.3`; `1.0.34`
+arrived 2026-09-21) — through the CLI's own `sessions/<cwd>/<id>/updates.jsonl` (119
+`goal_updated` rows), `goal/state.json` and `chat_history.jsonl`. The `strings` of the 1.0.34
+binary name the same update and fields (`goal_updated`, `verifying_completion`,
+`last_classifier_verdict`, …). The goal adapter code is `adapters/grok/goal.ts` (goals spec §6.3);
+its tests build their frames on this shape with invented text.
+
+**Where it travels.** `updates.jsonl` is what `session/load` replays, verbatim: `06`'s six replayed
+frames are the first six rows of that session's `updates.jsonl` — `update` and `_meta` identical
+but for the added `isReplay` — each persisted under the method it is replayed with. In the 1.0.3
+goal session every private row is persisted as `_x.ai/session/update`, goal rows included, so a
+load of THAT session replays them (`_meta.isReplay: true`) under the replay name; live they ride
+the private channel like every other private update (observations 10, 28). The adapter treats the
+two alike — a frame that is not a replay is live, whichever name carried it.
+
+**Whether 1.0.34 persists `goal_updated` is unverified.** No 1.0.34 goal session on this host was
+read for its persisted rows (fixture 30 is live traffic only), and 1.0.34 does not persist and send
+the same sets (observation 58: `compaction_checkpoint`
+persisted, not sent live). So the one comparison after a load speaks only on EVIDENCE: a load that
+replays no goal row emits nothing, because a false `cleared` would hide a paused or blocked goal
+after every restart; after a load, `cleared` needs a replayed `goal_cleared` (on 1.0.34, a replayed
+`status: "cleared"` frame), or replayed rows
+proving another goal, or a finished one, as the adapter's rules decide. A FRESH `session/new` is
+different: it has no goal by definition, so a thread still showing an unfinished goal is `cleared`
+— as the Claude adapter treats a cursor-less new session.
+
+**The shape** (strings elided, key order as sent):
+
+```json
+{"sessionUpdate":"goal_updated","goal_id":"7c991580-…","objective":"…","status":"active",
+ "phase":"executing","tokens_used":1951592,"elapsed_ms":3253451,"total_deliverables":0,
+ "completed_deliverables":0,"total_worker_rounds":1,"total_verify_rounds":0,"token_baseline":15509,
+ "finished_subagent_tokens":1633215,"last_event":"worker_completed","last_event_detail":"…",
+ "last_event_timestamp":"2026-08-31T12:10:48.176452626+00:00","classifier_runs_attempted":1,
+ "classifier_max_runs":6,"verifying_completion":true}
+```
+
+- **The WHOLE goal, on every frame**, and a frame whenever anything moves: `tokens_used`,
+  `elapsed_ms`, `finished_subagent_tokens` and an occasional `live_*` block
+  (`live_subagent_tokens`, `live_context_pct`, `live_turn_count`, `live_tool_call_count`) change on
+  nearly every row. 4 of the 119 are byte-identical repeats of the goal row before them.
+- **`last_event` is sticky**: it names the last event, repeated with the same
+  `last_event_timestamp` on every frame until the next one (`goal_created` stayed on 15–29 rows per
+  goal while it planned and ran its first round). An event is new when the pair changes. Observed:
+  `goal_created`, `worker_completed`, `goal_completed`.
+- **Statuses observed: `active`, `complete`; phases: `executing`, `idle`.** Planning is not a
+  phase — it is a `planning: true` flag on `executing` frames. `total_verify_rounds` stayed `0`
+  throughout, even across verifications.
+- **Verification is a flag and a verdict, and the verdict goes stale.** After round *n* the frame
+  carries `classifier_runs_attempted: n` and `verifying_completion: true`; when the verifier
+  returns, `verifying_completion` disappears and `last_classifier_verdict`
+  (`not_achieved`|`achieved`) plus `last_classifier_details_path` (`…/goal-classifier-<id>-<n>.md`)
+  arrive. `achieved` comes with `last_event: goal_completed`, `status: complete`, `phase: idle`.
+  After a `not_achieved`, the next round's `worker_completed` frames carry the PREVIOUS round's
+  verdict and details path with `verifying_completion: true` again — reading the verdict there would
+  count one failed verification twice.
+- **`last_event_detail` is the worker's own summary** of its round (up to 500 characters here), not
+  the verifier's reason; it is absent once the goal completes. So a `checked` row — a new
+  `not_achieved` verdict — reads `Verification: not achieved (attempt <n> of <max>)`, and keeps
+  reading it on the frames that repeat that verdict; the summary is the `lastCheck` of `progress`
+  and `blocked` rows only. A verdict is identified by its report file,
+  `last_classifier_details_path`, never by `classifier_runs_attempted`, which moves when the NEXT
+  run starts.
+- **No `created_at` and no `token_budget` on the frames.** `goal/state.json` has both (`token_budget:
+  null` here); the adapter takes the set time from the `goal_created` event's timestamp.
+
+**The replayed goal message is not what was typed.** The goal's user turn is persisted — and so
+replayed — as a ~6 KB block, and the goal's `goal_updated` rows precede it in the log:
+
+```
+<system-reminder>
+A goal has been set: <objective>
+
+You are working directly on this goal across multiple turns. Deliver
+EVERYTHING the user asked for yourself — …
+Plan: <GROK_HOME>/sessions/<cwd>/<id>/goal/plan.md
+…
+Start now.
+</system-reminder>
+```
+
+The objective in the block equals `goal_updated.objective` byte for byte (3 of 3). The history
+projection renders it as `/goal <objective>` and never the block.
+
+The goal session's other private traffic — about 120 more rows — is observation 58.
+
+**1.0.34, captured since (fixture 30, observation 53).** The same update, live on
+`_x.ai/session_notification`: `token_budget` on every frame of a goal set with `--budget`,
+`planning: true` while its planner runs, `status: "budget_limited"` with `last_event:
+"budget_exceeded"` and `phase: "idle"`, and `/goal clear` answered in a turn of its own, with no model
+call, as `{goal_id: "", objective: "", status: "cleared", phase: "idle", …}` — every id and text
+emptied and NO `last_event`: the `goal_cleared` event the binary names never came. The tracker reads
+that status as the same level `goal_cleared` is (`goal.ts`); read as an ordinary frame it had no
+objective and was dropped, and the thread kept showing the budget-limited goal the user had cleared.
+
+### 58. A goal run's other private traffic: subagents, retries, checkpoints, finished shells
+
+Same evidence as observation 57 (the 1.0.3 goal session: 47 `subagent_spawned`, 47
+`subagent_finished`, 25 `retry_state`, 2 `compaction_checkpoint`, 2 `task_completed`), plus every
+other session under `~/.grok/sessions` (86; `retry_state` in 48 of them, 163 rows). None of the five
+was in a capture then (the subagent and shell kinds are since: observations 37–51), and before they
+were mapped each one reached the unmapped fallback — a goal run wrote ~120 `runtime.warning` rows. The `strings` of both installed binaries, 1.0.34 included, name
+all five. `retry_state` and `compaction_checkpoint` are mapped in `normalize.ts`; the subagents and
+the shells follow the captured mapping of observations 37–51 (`subagents.ts`, `background-tasks.ts`);
+tests `xai-updates.test.ts`, frames shaped on these rows.
+
+- **`subagent_spawned` / `subagent_finished`: the shapes the 2026-09-25 captures record** (observations
+  37, 43, 50), plus what only these rows show. Every id spawns once and finishes once;
+  `subagent_id` always equals `child_session_id`. A goal runs a `goal plan writer`, `explore`
+  workers, one to three `goal achievement skeptic`s per verification and a `goal summarizer` — the
+  engine's own agents, spawned with no `spawn_subagent` call, so each starts under its own id
+  (`subagent_type` `general-purpose`/`explore`, and a `role` present only on `explore`, which the
+  adapter prefers to the type). A RESUMED subagent is a new id with `effective_context_source:
+  "resumed"` and `resumed_from: <old id>`: with no call behind it, the adapter relaunches the source's
+  row under the new id (observation 43's rule), so its answer is that agent's result — left ended, the
+  resumed run's end read as a late report and was dropped. `subagent_finished` carries `status`
+  (`completed`, or `cancelled` with `error: "Subagent was cancelled"` → `stopped`), `output` (up to
+  ~14 KB → `summary`), `tool_calls`/`duration_ms`/`tokens_used` (→ `usage`) and `will_wake`. A worker
+  the MODEL launched comes from a `spawn_subagent` call (`rawInput.run_in_background: true`,
+  `rawInput.task_id: null`) whose completing update names it in its result text (`Subagent started in
+  background.\nsubagent_id: <id>\n…`, in `rawOutput.text` and the content); the call starts its agent
+  at its first frame, keyed by the call (observation 37). The two orders are mixed: for 14 of the 27
+  the call's result landed BEFORE `subagent_spawned` (rows 2090–2098 before 2100–2118, 3320–3323
+  before 3325–3333, row 188 before 199), for 13 after it — and two launches of one description ran in
+  parallel. So a spawn joins its launch by the id the launch's answer named, else the oldest launch of
+  its description whose answer named no child yet; a launch a spawn already took learns no id from its
+  answer, so no call ever becomes two children's.
+- **`retry_state` → one `session.state.changed {running}` per retry episode, mid-turn only.** Every
+  row is `type: "retrying"`, `max_retries: 15`, `attempt` 1–6; `attempt` counts one request's retries
+  and can continue past partial output (`retrying:1`, thought chunks, `retrying:2`), so an episode
+  ends when the count restarts. Reasons were transport errors and 500s; every episode recovered —
+  its next frame was model output, at most 180 s later. Claude's `api_retry` precedent: a heartbeat,
+  not a row, never a warning; ingestion folds it into the state the turn already has, and the host's
+  watchdog sees activity. Between turns it is nothing: an idle session must not read as running.
+- **`compaction_checkpoint` → known, no row.** The CLI's rewind checkpoint for the compaction
+  boundary (`checkpoint_file: compaction_checkpoints/<id>.json`), written 1–36 ms BEFORE
+  `auto_compact_completed`, which already carries the boundary (observation 21). In `10`'s 1.0.34
+  capture it was not even sent live — the capture has `auto_compact_completed` alone, while that
+  session's persisted `updates.jsonl` has the checkpoint just before it — so there it reached a
+  client only through a replay.
+- **`task_completed` → `task.completed` for the background shell it names** — what observation 39
+  captured on 1.0.34 since. The whole snapshot of
+  a shell `task_backgrounded` started (11 rows in 4 sessions, each id matching an earlier
+  `task_backgrounded`): `exit_code` 0 → `completed`, another code → `failed`, `explicitly_killed`
+  (with `signal: "killed"`, `exit_code: null`) → `stopped`, plus `output`, `block_waited`,
+  `will_wake`. Every one was for a shell a turn waited on (`block_waited: true`, 6), that woke the
+  agent (`will_wake: true`, 4) or that the agent killed (2) — consistent with observation 29's
+  detached `sleep 25` producing none. A shell this session never showed, or already closed, is
+  nothing; a later `background_tasks` snapshot still listing a finished shell does not reopen it.
+- **Replayed** rows of all five are held back like every other replayed row: nothing is emitted and
+  nothing becomes live.
 
 ## Reproducing
 

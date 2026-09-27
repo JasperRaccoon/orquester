@@ -10,6 +10,7 @@
 
 import {
   buildPlanImplementationPrompt,
+  isGoalCommandText,
   MAX_TURN_ATTACHMENTS,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
@@ -18,6 +19,7 @@ import {
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
+import { blockedProviderCommandMessage } from "./composer-menu";
 import { imageOrdinal, imagePlaceholder } from "./composer-images";
 import { parseStandaloneComposerSlashCommand } from "./composer-trigger";
 import type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
@@ -92,15 +94,32 @@ export function composerSubmissionIntentForEnter(input: {
  * send follows the preference, and holding the mod key with Enter does the
  * opposite for that one message.
  *
+ * **A command the host applies itself is never queued** (`hostCommand`): a
+ * typed `/goal …` where the host parses `/goal` ({@link isHostGoalCommandText},
+ * goals §5.1) starts no turn and never reaches the model, so holding it behind
+ * the running turn — a Pause held until the goal's own turn ends — would only
+ * defeat it. The same rule as the goal chip's actions (goals §8.2).
+ *
  * *T3: `ChatView.tsx:7629-7658` — the XOR.*
  */
 export function resolveFollowUpDisposition(input: {
   followUpBehavior: FollowUpBehavior;
   intent: ComposerSubmissionIntent;
   isRunning: boolean;
+  hostCommand?: boolean;
 }): "send" | "queue" {
-  if (!input.isRunning) return "send";
+  if (!input.isRunning || input.hostCommand === true) return "send";
   return (input.followUpBehavior === "queue") !== (input.intent === "alternate") ? "queue" : "send";
+}
+
+/**
+ * A typed `/goal …` the HOST parses — the host's own recognition rule
+ * (`isGoalCommandText`, goals §5.1) — on an adapter whose
+ * `capabilities.goals.command` is `"host"` (Codex). Where the provider parses
+ * `/goal` itself (Claude, Grok) it is an ordinary prompt and queues like one.
+ */
+export function isHostGoalCommandText(text: string, hostParsesGoal: boolean): boolean {
+  return hostParsesGoal && isGoalCommandText(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +396,149 @@ export function composerStatusText(input: {
   return over === null ? input.notice : `${input.notice} ${over}`;
 }
 
+/** Why nothing can be sent while a revert rewrites the thread (§7.5). */
+export const REVERT_RUNNING_REASON = "A revert is running.";
+
+/** Why nothing can be sent while an approval or a question is docked (§7.5). */
+export const PENDING_REQUEST_REASON = "Answer the request above first.";
+
+/**
+ * Whether an open approval or question card holds a send back.
+ *
+ * Everything waits for the card — except a `/goal …` the HOST applies itself
+ * ({@link isHostGoalCommandText}, goals §5.1): the host needs no such guard
+ * (it starts no turn for it), and Pause or Clear is exactly what a user
+ * reaches for while an approval waits. Where the provider parses `/goal`
+ * (Claude, Grok) it is an ordinary prompt and waits like one.
+ */
+export function pendingRequestBlocksSend(input: {
+  hasPendingRequest: boolean;
+  text: string;
+  hostParsesGoal: boolean;
+}): boolean {
+  return input.hasPendingRequest && !isHostGoalCommandText(input.text, input.hostParsesGoal);
+}
+
+/**
+ * Why a message another surface hands the composer cannot be sent now, or
+ * `null` when it can — the goal chip's actions (goals §8.2), which go through
+ * the composer's own send path so they are the user's message.
+ *
+ * The composer's own guards, minus the draft's: the text is the caller's, so
+ * uploads still in the tray and the plan follow-up do not apply, and the draft
+ * is never touched. One send at a time, whoever started it.
+ */
+export function externalSendRefusal(input: {
+  text: string;
+  reverting: boolean;
+  sending: boolean;
+  hasPendingRequest: boolean;
+  /** The thread's adapter, for the provider-command refusals (§4.6.5(c)). */
+  adapterId: string | undefined;
+  /** `capabilities.goals.command === "host"` — see {@link pendingRequestBlocksSend}. */
+  hostParsesGoal?: boolean | undefined;
+}): string | null {
+  if (input.reverting) return REVERT_RUNNING_REASON;
+  if (input.sending) return "A message is still being sent.";
+  if (
+    pendingRequestBlocksSend({
+      hasPendingRequest: input.hasPendingRequest,
+      text: input.text,
+      hostParsesGoal: input.hostParsesGoal === true
+    })
+  ) {
+    return PENDING_REQUEST_REASON;
+  }
+  if (input.text.trim().length === 0) return "Nothing to send.";
+  return (
+    blockedProviderCommandMessage(input.adapterId, input.text) ??
+    composerSubmissionValidationMessage({ prompt: input.text, submissionTarget: "provider-turn" })
+  );
+}
+
+/**
+ * What the composer does with a message another surface hands it (a goal chip
+ * action, goals §8.2): send `text` — and clear its notice, exactly as its own
+ * submit does on a send it accepts — or send nothing and say why.
+ */
+export function planExternalSend(
+  input: Parameters<typeof externalSendRefusal>[0]
+): { text: string; notice: null } | { text: null; notice: string } {
+  const refusal = externalSendRefusal(input);
+  return refusal === null ? { text: input.text.trim(), notice: null } : { text: null, notice: refusal };
+}
+
+/** A second identical queue from the rail inside this window is a double click's twin. */
+export const EXTERNAL_QUEUE_TWIN_MS = 1_000;
+
+/** Why the rail's second, identical Send was not queued again. */
+export const ALREADY_QUEUED_REASON = "Already queued — it sends when the current turn finishes.";
+
+/**
+ * What the composer does with a message the right rail hands it to SEND —
+ * exactly what Enter does with that text as the whole draft (§7.4):
+ *
+ * - `plan-mode`: a bare `/plan` or `/default` where the plan toggle shows is
+ *   the mode switch, never a message (`swallowsStandalonePlanCommand`);
+ * - `refuse`: the send guards (`externalSendRefusal` over the TRIMMED text —
+ *   a revert, a send in flight, an open card, the provider-command refusals,
+ *   the length bound);
+ * - `queue` / `send`: the follow-up preference while a turn runs
+ *   (`resolveFollowUpDisposition`, the foreground intent; a host-parsed
+ *   `/goal` is never queued) — and a queue that repeats the rail's previous
+ *   one within {@link EXTERNAL_QUEUE_TWIN_MS} is refused: Enter clears the
+ *   draft it sends, a button does not, so a double click would queue twice.
+ */
+export type ExternalSubmitPlan =
+  | { kind: "refuse"; reason: string }
+  | { kind: "plan-mode"; mode: "plan" | "default" }
+  | { kind: "queue"; text: string }
+  | { kind: "send"; text: string };
+
+export function planExternalSubmit(input: {
+  text: string;
+  reverting: boolean;
+  sending: boolean;
+  hasPendingRequest: boolean;
+  adapterId: string | undefined;
+  hostParsesGoal: boolean;
+  showPlanModeToggle: boolean;
+  followUpBehavior: FollowUpBehavior;
+  isTurnActive: boolean;
+  /** The last message the rail queued here, and when. */
+  lastQueued: { text: string; at: number } | null;
+  now: number;
+}): ExternalSubmitPlan {
+  const text = input.text.trim();
+  const mode = swallowsStandalonePlanCommand({
+    text,
+    showPlanModeToggle: input.showPlanModeToggle,
+    attachmentCount: 0
+  });
+  if (mode !== null) return { kind: "plan-mode", mode };
+  const refusal = externalSendRefusal({
+    text,
+    reverting: input.reverting,
+    sending: input.sending,
+    hasPendingRequest: input.hasPendingRequest,
+    adapterId: input.adapterId,
+    hostParsesGoal: input.hostParsesGoal
+  });
+  if (refusal !== null) return { kind: "refuse", reason: refusal };
+  const disposition = resolveFollowUpDisposition({
+    followUpBehavior: input.followUpBehavior,
+    intent: "foreground",
+    isRunning: input.isTurnActive,
+    hostCommand: isHostGoalCommandText(text, input.hostParsesGoal)
+  });
+  if (disposition === "send") return { kind: "send", text };
+  const twin = input.lastQueued;
+  if (twin !== null && twin.text === text && input.now - twin.at < EXTERNAL_QUEUE_TWIN_MS) {
+    return { kind: "refuse", reason: ALREADY_QUEUED_REASON };
+  }
+  return { kind: "queue", text };
+}
+
 /** A draft with neither text nor a finished attachment has nothing to send. */
 export function hasSendableContent(input: {
   text: string;
@@ -441,7 +603,8 @@ export function resolvePlanFollowUpSubmission(input: {
  *    outcome that writes the draft. It holds the user's own words from a
  *    plain send or a Refine, and `null` from an Implement, whose prompt the
  *    composer generated. The draft is then left as it is and the plan stays
- *    actionable.
+ *    actionable. It is `null` too for a message another surface handed over
+ *    (a goal chip action, goals §8.2), which never came from the draft.
  */
 export type ComposerSendOutcome =
   | { kind: "sent" }
@@ -486,7 +649,9 @@ export function implementationTextResolver<Proposal>(input: {
  * A failed send puts the user's own words back into the draft, never a
  * resolved prompt. Written into the draft, the prompt would turn the primary
  * button into a plan-mode "Refine" that carries the implementation prefix.
- * Left out, the plan stays actionable and Implement is pressed again.
+ * Left out, the plan stays actionable and Implement is pressed again. Nor does
+ * a failed goal chip action come back (`returnToDraftOnFailure: false`): it
+ * would glue a command onto whatever the user is typing.
  *
  * `send` is the transport (the store's `sendTurn`), passed in so every branch
  * is testable without a renderer. It is told when the text is a resolved
@@ -497,6 +662,11 @@ export function implementationTextResolver<Proposal>(input: {
 export async function sendComposerTurn(input: {
   text: string;
   resolveText?: () => Promise<string>;
+  /**
+   * `false` for a message another surface handed over (a goal chip action,
+   * goals §8.2): a failure then writes nothing back, its notice alone.
+   */
+  returnToDraftOnFailure?: boolean;
   send: (text: string, options: { generatedPrompt: boolean }) => Promise<void>;
 }): Promise<ComposerSendOutcome> {
   let text = input.text;
@@ -521,7 +691,7 @@ export async function sendComposerTurn(input: {
   } catch (error) {
     return {
       kind: "failed",
-      text: input.resolveText ? null : text,
+      text: input.resolveText || input.returnToDraftOnFailure === false ? null : text,
       notice: error instanceof Error ? error.message : "Could not send the message."
     };
   }

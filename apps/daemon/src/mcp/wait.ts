@@ -177,12 +177,19 @@ export type TurnOutcome = "completed" | "needs-input" | "plan-ready" | "interrup
 
 function turnOutcome(s: SessionSummary, baseline: TurnBaseline): TurnOutcome | null {
   if (s.hasPendingApprovals || s.hasPendingUserInput) return "needs-input";
+  const rung = resolveChatActivity(s).rung;
+  // Goals §4.7: a goal the provider continues by itself (Codex) starts its next turn within milliseconds of the last
+  // one settling, and the host reports it continuing through the 60 s grace after that, and through a restart's owed
+  // resume, where the session may read `error`. A host poll in that gap shows a new settled turn, or an error, while
+  // the work goes on: the ladder says working and holds its error rung back, so the wait goes on as well — until the
+  // goal stops (paused, blocked, achieved…) or the timeout.
+  if (rung === "goal-continuing") return null;
   const lt = s.latestTurn ?? null;
   // Not the turn the wait started from: another one, or — for a steer into a running turn — that turn, now settled.
   const isNew = lt !== null && (lt.turnId !== baseline.turnId || (baseline.running && lt.completedAt !== baseline.completedAt));
   // plan-ready waits for a new turn too: the summary moves only on the host poll, so the
   // first reads after implement_plan posts still show the very plan being implemented.
-  if (isNew && resolveChatActivity(s).rung === "plan-ready") return "plan-ready";
+  if (isNew && rung === "plan-ready") return "plan-ready";
   if (s.chatSessionStatus === "error") return "failed";
   if (!lt || !isNew || !SETTLED_TURN_STATES.has(lt.state)) return null;
   if (lt.state === "completed") return "completed";

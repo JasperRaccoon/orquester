@@ -11,7 +11,8 @@ The Orquester MCP lets an external agent — a Claude Code session, Claude Deskt
 through `POST /mcp` what a person does in the chat GUI: open, resume, configure and close chat
 sessions of Claude Code (including `claudex`/`claudemix`), Codex, OpenCode and Grok; pick the
 model, effort, permission mode, plan mode and account; send messages with images or files and get
-the reply back in the same call; answer the agent's questions and tool approvals; read status,
+the reply back in the same call; set, follow and pause an agent's own goal; answer the agent's
+questions and tool approvals; read status,
 transcripts, a tool call's whole output, subagents and per-turn diffs; search the text of every
 chat; wait until a session needs attention; and read quota and estimated cost. The shared todo lists
 and sandboxed file reads are there too. That is **31 tools** (§6).
@@ -287,13 +288,14 @@ Tools that return a session return one of these two shapes.
   status: "working" | "waiting" | "idle",
   attention: "needs-input" | "finished" | "bell" | null,
   needsAttentionAt: ISO | null,
-  reason: "approval" | "question" | "plan-ready" | "error" | "starting" | "running"
+  reason: "approval" | "question" | "plan-ready" | "error" | "starting" | "running" | "goal-continuing"
         | "background-working" | "monitoring" | "completed" | "new" | "exited" | null,
   chat?: { sessionStatus: "idle" | "starting" | "ready" | "running" | "stopped" | "error",
            accountId,                        // "system" for the daemon's own login
            latestTurn: { turnId, state, startedAt, completedAt } | null,
            pending: { approvals: boolean, questions: boolean },
-           planReady: boolean, backgroundLiveness: "working" | "monitoring" | null },
+           planReady: boolean, backgroundLiveness: "working" | "monitoring" | null,
+           goal: { objective /* ≤ 200 characters */, status, continuing: boolean, heldForUpdate?: true } | null },
   terminal?: { status: "running" | "exited", exitCode?, legacyAgent? }
 }
 ```
@@ -301,6 +303,21 @@ Tools that return a session return one of these two shapes.
 `status`, `attention` and `needsAttentionAt` are the daemon's own values — what the tab strip and
 the Attention Center show. `reason` says why: the rung of the chat activity ladder the GUI uses,
 plus `"new"` for a chat tab that has never run a turn and `"exited"` for an exited terminal.
+
+`chat.goal` is the agent's own goal while it is unfinished — what the GUI's goal chip and tab
+marker show (`null` once it is achieved, fails or is cleared). `status` is `"active" | "paused" |
+"blocked" | "budget-limited" | "usage-limited" | "complete" | "failed"`: a paused, blocked or
+limited goal reads like any settled session — `reason: "completed"`, or `"error"` when a failed
+turn is what blocked it — and `goal.status` tells them apart. `continuing: true` means the agent
+starts the goal's turns by itself (Codex): the tab reads `working`, `reason: "goal-continuing"`,
+even between two of its turns. `heldForUpdate: true` — beside `status: "paused"` and
+`continuing: true` — means an Orquester update paused the goal between two of its turns so the
+agent host could restart, and the host sets it going again by itself once it has: there is nothing
+to resume, and the tab keeps reading `working`. Any `/goal` but `/goal status`, `interrupt_session`
+or `stop_session` takes the goal back from the update — nothing resumes it by itself then — and the
+command does what it says: `/goal pause` keeps it paused, `/goal resume` sets it going again (and
+the update waits for it). `status`, `reason`, `continuing` and `heldForUpdate` come from the
+daemon's poll of the agent host, so they can trail a command by up to 1.5 s.
 
 `SessionDetail` — `get_session`, and every tool that changes a session — is the `SessionView`
 plus:
@@ -310,7 +327,17 @@ chat: { …SessionView.chat,
         model, options: { [id]: string | boolean }, runtimeMode, home: "system" | "account" | "cliproxy",
         accountLabel?, activeTurnId: string | null, turnCount, lastError?, continueAfterRestart: boolean,
         contextWindow?: { usedTokens, maxTokens?, percentUsed? /* ≤ 100 */, compactsAutomatically? },
-        supports: { planMode, rollback, compaction, backgroundTasks } },
+        goal: { objective /* ≤ 4 000 characters */, status, continuing, phase? /* ≤ 200 */, rounds?,
+                lastCheck? /* ≤ 2 000 */, tokensUsed?, tokenBudget?: number | null, elapsedMs?, setAt?,
+                updatedAt } | null,      // the thread's goal as the GUI's chip reads it — an unfinished one, and a
+                                         // finished one the agent still reports (Codex and Grok report a met goal as
+                                         // "complete"); null once cleared, or when the agent reports the end as no goal
+                                         // (a Claude goal met or failed). continuing is true beside no other status
+                                         // but a paused goal an Orquester update holds (heldForUpdate: true).
+                                         // Each fact only when reported.
+        supports: { planMode, rollback, compaction, backgroundTasks,
+                    goals: { command: "provider" | "host", actions: ("continue" | "pause" | "resume" | "clear")[],
+                             continuesAcrossTurns } | null } },
 pending: { approvals: PendingApprovalView[], questions: PendingQuestionView[] },
 plan?: { planId, markdown /* ≤ 16 384 characters; fewer when cut by bytes to fit the result */,
          truncated, actionable },
@@ -336,8 +363,12 @@ SubagentView        = { id, kind, agentKind: "agent" | "background", title /* �
 ```
 
 `lastReply` is the main agent's answer: its assistant messages in that turn, joined, with Codex's
-commentary (its running "I'll do X next" narration, which the GUI shows as narration, never as the
-answer) left out.
+commentary (its running "I'll do X next" narration, which the GUI shows as narration, not as the
+answer) left out — unless the turn has no other message at all (interrupted, ended on a tool, a
+Codex goal turn ended by Stop): then it is the turn's last commentary, which is where the GUI's
+turn ends too. On a Claude thread, the copy of a turn's opening paragraph that older hosts wrote
+again at the turn's end, which an old log still holds, is left out as the GUI leaves it out (the
+opening itself stays).
 `contextWindow.percentUsed` stops at 100, like the GUI's ring; `usedTokens` stays as reported.
 `plan.actionable` is judged on the thread itself — the latest plan, until a message implements it —
 so it is right at once, while `chat.planReady` and `reason: "plan-ready"`, the tab strip's values,
@@ -361,7 +392,8 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
   modelsTruncated?, modelCount?,                      // only when models were left out to fit
   effortOptionId,                                     // "effort" | "variant" | "reasoningEffort"
   runtimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"], defaultRuntimeMode: "full-access",
-  supports: { planMode, rollback, compaction, backgroundTasks, contextWindow },
+  supports: { planMode, rollback, compaction, backgroundTasks, contextWindow,
+              goals: { command: "provider" | "host", actions, continuesAcrossTurns } | null },
   accounts: [{ id, label, email, plan, needsReauth, isDefault }],   // { id: "system", label: "System" } first
   defaultAccountId }
 ```
@@ -374,7 +406,10 @@ menu offers it; each of its models carries the options of the Claude catalogue's
 the chips the composer shows for a proxy model; `claudemix` runs the Claude main loop through the
 proxy, so its `models` are Claude's. For both, `accounts` are the accounts seeded into the proxy.
 `models: []` means the catalogue is still being probed — retry shortly. `auth.status: "unknown"` is
-not a sign-in problem; only `"unauthenticated"` is. The list fits one result. Over it, the
+not a sign-in problem; only `"unauthenticated"` is. `supports.goals` is how the agent's own goals
+work: `command: "host"` (Codex) — Orquester runs `/goal` itself (§6 Messages) — or `"provider"`
+(Claude, Grok) — `/goal` is the CLI's own; `actions` are what the GUI's goal chip offers;
+`continuesAcrossTurns` means the agent starts a goal's turns by itself. `null`: no goals (OpenCode). The list fits one result. Over it, the
 non-default models of the largest catalogues first lose their `options` (then marked
 `optionsOmitted: true`). Only then do whole models go, from the end of a catalogue's list, the
 largest catalogue first (`modelsTruncated: true`, `modelCount` = all of them). An agent's header
@@ -474,9 +509,23 @@ and its default model (the flagged one, else the first) are never shed.
   (`applied: []`).
   An account switch takes effect on the next message and needs an idle session — no turn, no
   pending request, no background work (`SESSION_BUSY` otherwise); OpenCode has no per-session
-  account. If a write fails after others landed, the error's `detail` carries `applied`.
+  account. While a Codex goal continues (`chat.goal.continuing`) the session never goes idle — the
+  agent starts the goal's next turn by itself — so the switch is refused first, before anything is
+  written, with `SESSION_BUSY` `Pause the goal before switching accounts: interrupt_session pauses
+  it and stops the running turn (or send_message "/goal pause", then let the turn finish).` — a
+  pause alone stops only the NEXT goal turn, never the one running. A mid-turn model or permission
+  change under a continuing goal gets the same advice. A goal an Orquester update holds
+  (`chat.goal.heldForUpdate`) refuses the switch too, with `The goal is held for an Orquester update
+  and resumes by itself once the agent host has restarted, when it continues again. Take it back
+  first — send_message "/goal pause" keeps it paused — then switch accounts.` (waiting never opens
+  the switch: the resumed goal continues). It starts no next turn, so a mid-turn model or
+  permission change under it gets the plain turn advice. If a write fails after others landed,
+  the error's `detail` carries `applied`.
 - **`interrupt_session`** — interrupts the running turn (its pending requests are cancelled); with
-  no turn running, stops every live subagent, background shell and watch loop.
+  no turn running, stops every live subagent, background shell and watch loop. On an agent that
+  continues a goal by itself (Codex), Stop pauses the goal first — an interrupt alone would let the
+  goal's next turn start at once — so the goal reads `paused` afterwards; `send_message
+  "/goal resume"` picks it up again.
 - **`stop_session`** — stops the provider process but keeps the tab, its history and its resume
   cursor; the next `send_message` resumes the conversation. A session whose `chat.sessionStatus` is
   `error` refuses messages and every other command except `revert_session`, so this is how you
@@ -513,7 +562,13 @@ and its default model (the flagged one, else the first) are never shed.
   answers `SESSION_NOT_FOUND` (`Session "<id>" was closed while rewinding.`, `detail: {seq}`). Any
   error after the command was accepted carries its `seq` in `detail`.
 - **`compact_session`** — asks the agent to compact its context window. The host refuses while a
-  turn runs (`COMPACTION_UNAVAILABLE`) and on an empty conversation (`COMMAND_REJECTED`).
+  turn runs (`COMPACTION_UNAVAILABLE`) and on an empty conversation (`COMMAND_REJECTED`). Under a
+  continuing Codex goal a turn is nearly always running, and the refusal says `Pause the goal before
+  compacting.` instead: `interrupt_session` (it pauses the goal and stops the turn), compact, then
+  `send_message "/goal resume"`. A `/goal pause` alone lets the running turn finish first. A goal
+  an Orquester update holds (`chat.goal.heldForUpdate`) is paused already and starts no next turn,
+  so while its final turn runs the refusal is the plain one (`Context compaction is unavailable
+  while a provider turn is running.`): wait for that turn, then compact.
 
 ### Search
 
@@ -573,31 +628,59 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `send_message` | `sessionId`, `text?`, `attachments?` (≤ 8, §9), `planMode? = false`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | `{seq, outcome, turnId?, reply?, replyTruncated?, pending?, session}` | The composer's Send (Enter during a turn steers it) |
+| `send_message` | `sessionId`, `text?`, `attachments?` (≤ 8, §9), `planMode? = false`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | `{seq, outcome, turnId?, reply?, replyTruncated?, answer?, answerTruncated?, hint?, pending?, session}` | The composer's Send (Enter during a turn steers it) |
 | `implement_plan` | `sessionId`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | Same as `send_message` | The plan card's **Implement** button |
 | `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `beforeTurn?` (2 to `turnCount` + 1), `agentId?` (non-empty), `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, olderTurns, coveredTurns: [from, to] \| null, unavailableTurns?: [from, to], truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline, "Load older" included; a subagent's drill-in |
 
 - **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
   attachment. It is refused with `PENDING_REQUEST` while a question or an approval is open — the
   message names each one and the tool that answers it, like the GUI's "answer the request above
-  first" — and with `SESSION_BUSY` while the session is in `error` (`stop_session` first).
+  first"; a Codex `/goal` (below) is the one message that goes through, as it does in the GUI —
+  and with `SESSION_BUSY` while the session is in `error` (`stop_session` first).
   `planMode: true` needs an agent with the plan toggle (`supports.planMode`); OpenCode's plan agent
   is a model option instead, `update_session {options: {"agent": "plan"}}`. Attachments are
   validated and uploaded first; a refused one fails the call before anything is sent. While a turn
   is running, the message **steers** it (as Enter does mid-turn in the GUI) and `turnId` is that
   turn's. `wait: false` returns `outcome: "sent"` with the receipt. `wait: true` blocks as §8
   describes and returns the `outcome`; once the turn has settled, `reply` — the main agent's answer
-  (Codex's commentary narration left out) from the turn this message started or steered, never an
+  (Codex's commentary narration left out while the turn has anything else — see `lastReply`) from
+  the turn this message started or steered, never an
   earlier turn's but for one rare race (§8) — at most 16 384 characters, fewer when the result would
   pass the cap (cut by bytes, on a character boundary), `replyTruncated: true` when cut, and
   `read_transcript` has the rest; and `pending` while a question or an approval is open. When
   `reply` is present, `session.lastReply` is left out: it is the same text.
 
   Text that starts with `/` is forwarded to the agent as typed, and its CLI decides what the
-  command does; the one exception is Grok's `/always-approve`, refused with `INVALID_COMMAND`
-  (change `runtimeMode` with `update_session` instead). A message that is just `/compact`, with no
-  attachments, is the host's own compaction — what `compact_session` asks for. The MCP cannot list
-  an agent's slash commands or skills.
+  command does; the exceptions are Grok's `/always-approve`, refused with `INVALID_COMMAND`
+  (change `runtimeMode` with `update_session` instead), and Codex's `/goal` (next paragraph). A
+  message that is just `/compact`, with no attachments, is the host's own compaction — what
+  `compact_session` asks for. The MCP cannot list an agent's slash commands or skills.
+
+  **Goals.** Claude, Codex and Grok run goals of their own; Orquester shows them and never runs a
+  loop itself. On Claude and Grok `/goal <objective>` is the CLI's own command and an ordinary
+  turn, waited on like any other (Claude checks the goal whenever a turn ends with nothing running
+  in the background; Grok works the whole goal inside the prompt that set it, though its own wake
+  prompts — a background subagent's end, say — are turns of their own). On **Codex** the host runs
+  `/goal` itself — `/goal <objective>`, `/goal` or `/goal status`, `/goal pause`, `/goal resume`,
+  `/goal clear`, `/goal edit <objective>` (`supports.goals.command: "host"`): it records the
+  message, starts **no** turn, and answers in a row. With `wait: true` the call waits for that
+  answer — up to 15 s once the session is up (the host starts it first when there is none, after
+  `stop_session` or a restart), never past `timeoutMs` — and returns `outcome: "goal"` with
+  `answer`: the goal's new state (`Goal set: …`, `Goal paused`, …, one line per row when a command
+  writes several — replacing a goal writes `Goal cleared: …`, then `Goal set: …`) or the status
+  `/goal` asked for; or `outcome: "failed"` with why (`Goal command failed: …`). `answer` is at most
+  8 KiB of UTF-8, `answerTruncated: true` when cut. No `turnId`, no `reply`. A command that changes
+  nothing writes no row: a pause of a paused goal or a resume of an active one — which the call
+  sees coming, and waits only half a second for — or an edit to the same objective. Then it comes
+  back without `answer` and with a `hint`; `session.chat.goal` always shows the goal as it stands.
+  A row an Orquester update writes on a goal it holds (`Goal paused for an Orquester update. …`, or
+  that the goal could not be resumed after it) answers no `/goal`, and is never taken for one.
+  A set goal then runs turns by itself — `wait_for_session` reports it once it stops. A `/goal`
+  with attachments is refused (`INVALID_ARGUMENT`, before anything is uploaded), and one the host
+  cannot parse — an objective over 4 000 characters, a bare `/goal edit` — with `INVALID_COMMAND`,
+  as is any while a compaction runs. While the agent's capabilities cannot be read, any `/goal` is
+  refused (`INVALID_ARGUMENT`, "can't be routed … Retry shortly"): whether the host or the agent
+  takes it is theirs to say.
 - **`implement_plan`** — sends exactly what the GUI's Implement button sends: the line
   `PLEASE IMPLEMENT THIS PLAN:` followed by the latest proposed plan, in default (not plan) mode.
   A plan too long for the thread snapshot (`plan.truncated: true`) is read back in full first, as
@@ -772,8 +855,12 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   - A hook that failed is an `error` row ("Hook failed") and one cancelled a `warning` row ("Hook
     cancelled"); a hook's start, its progress and a successful run are not rows.
   - An `assistant` row with `commentary: true` is narration between tool calls (Codex's
-    commentary), never the turn's answer: `lastReply` and `send_message`'s `reply` leave it out,
-    and it is not the "final reply" a shed always keeps.
+    commentary), not the turn's answer while the turn has one: `lastReply` and `send_message`'s
+    `reply` leave it out, and it is not the "final reply" a shed always keeps. A turn with no other
+    message ends on its last commentary, as in the GUI: that is its answer and the row a shed keeps.
+  - On a Claude thread, the copy of a turn's opening paragraph that older hosts wrote again at the
+    turn's end, which an old log still holds, is no row of the parent view, as the GUI leaves it
+    out; the opening itself stays, and a drill-in shows its subagent's messages as they are.
   - A `compaction` row's `state` is `compacting` (still running), `compacted` or
     `compaction-failed`. An old log's marker — one with no state, or the older
     `thread.state.changed` spelling — reads `compacted`, as the GUI shows it. A subagent compacting
@@ -782,7 +869,7 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
 ```
 TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt, agentId?, …by kind:
   "user"         text, attachments?: [{ name, type }]
-  "assistant"    text, commentary?: true              /* narration between tool calls, never the answer */
+  "assistant"    text, commentary?: true              /* narration between tool calls, not the answer while the turn has one */
   "reasoning"    text                                                       (include "reasoning")
   "tool"         tool: { type, title, status, command?, detail?, changedFiles? }, outputItemId?
                                                   (include "tools"; one entry per tool call, its latest state;
@@ -797,7 +884,12 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
   "changes"      files: [{ path, additions, deletions }]    (one per turn, from its checkpoint; parent view only)
   "compaction"   state /* compacting | compacted | compaction-failed */, beforeTokens?, afterTokens?
                                                   (include "activity"; never a subagent's own in the parent view)
-  "error" | "warning" | "info"   text             (include "activity"; a failed hook is an error, a cancelled one a warning) }
+  "error" | "warning" | "info"   text             (include "activity"; a failed hook is an error, a cancelled one a warning;
+                                                   a goal's rows as the GUI shows them — set, checked, paused, resumed,
+                                                   blocked, limited, achieved, cleared, a Codex /goal's answer, and an
+                                                   Orquester update's notes on a goal it held — are
+                                                   info, a goal that can't be met and a failed /goal errors; a goal's
+                                                   progress ticks never show) }
 ```
 
 ### Tool output
@@ -1084,7 +1176,8 @@ list_agents { "agent": "claude" }
       "effortOptionId": "effort",
       "runtimeModes": [ "approval-required", "auto-accept-edits", "auto", "full-access" ],
       "defaultRuntimeMode": "full-access",
-      "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true, "contextWindow": true },
+      "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true, "contextWindow": true,
+                    "goals": { "command": "provider", "actions": [ "continue", "clear" ], "continuesAcrossTurns": false } },
       "accounts": [ { "id": "system", "label": "System", "email": null, "plan": null, "needsReauth": false, "isDefault": true } ],
       "defaultAccountId": "system" } ] }
 
@@ -1100,9 +1193,11 @@ create_session { "project": "myws/api", "agent": "claude", "model": "opus",
       "chat": {
         "sessionStatus": "idle", "accountId": "system", "latestTurn": null,
         "pending": { "approvals": false, "questions": false }, "planReady": false, "backgroundLiveness": null,
+        "goal": null,
         "model": "opus", "options": { "effort": "high" }, "runtimeMode": "auto-accept-edits", "home": "system",
         "accountLabel": "System", "activeTurnId": null, "turnCount": 0, "continueAfterRestart": false,
-        "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true } },
+        "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true,
+                      "goals": { "command": "provider", "actions": [ "continue", "clear" ], "continuesAcrossTurns": false } } },
       "pending": { "approvals": [], "questions": [] },
       "subagents": [] } }
 
@@ -1226,10 +1321,11 @@ event:
 |---|---|---|
 | `needs-input` | The agent opened a question or a tool approval; `pending` has it. A Codex async question does not stop the turn, so the turn may still be running — `session` says so. | `answer_question`, `resolve_approval` or `dismiss_question`, then `wait_for_session` |
 | `plan-ready` | The turn ended with a proposed plan (`session.plan`, `actionable: true`). | `implement_plan`, or refine with `send_message {planMode: true}` |
-| `failed` | The session went into `error` (`session.chat.lastError`), or the turn failed. | `read_transcript` for the error; a session in `error` needs `stop_session` before the next message |
+| `failed` | The session went into `error` (`session.chat.lastError`), or the turn failed — or a Codex `/goal` failed, and `answer` says why. | `read_transcript` for the error; a session in `error` needs `stop_session` before the next message |
 | `completed` | The turn finished; `reply` has the main agent's answer. | — |
 | `interrupted` | The turn was interrupted or cancelled. | — |
 | `timeout` | `timeoutMs` passed first. **The turn keeps running.** | `get_session`, or `wait_for_session` (below) |
+| `goal` | Codex only: the message was a `/goal` the host ran itself (§6 Messages) — no turn started; `answer` has the host's answer, or `hint` says why none came. | `get_session` (`chat.goal`); after `/goal <objective>`, `wait_for_session` |
 | `sent` | Only with `wait: false`: the message was accepted. | `wait_for_session` |
 
 - Only this message's turn counts: the turn it started, or — for a message sent into a running
@@ -1240,6 +1336,12 @@ event:
   `interrupted`, its `turnId` and its partial reply — although the message opened the next turn.
   To catch it, compare `turnId` with `session.chat.latestTurn`: a different turn there is the one
   the message opened.
+- While a Codex goal continues, the agent starts the goal's turns by itself, one after another:
+  a turn that settles is not the end of the work (the ladder's `goal-continuing` rung, which also
+  outranks an error the goal outlives). A message sent then waits until the goal stops — paused,
+  blocked, limited, achieved — or until `timeoutMs`. A `timeout` with `session.chat.goal.continuing:
+  true` says the goal is still at work (`reason` then reads `"running"` during a goal turn,
+  `"goal-continuing"` between two).
 - If the session is closed while you wait, the call fails with `SESSION_NOT_FOUND`.
 - After a `timeout`, a bare `wait_for_session` only reports attention raised after that call. Pass
   an `after` from before the turn could settle — the running turn's
@@ -1258,7 +1360,9 @@ event:
   something new happens: another approval or question opens (even if the previous one was answered
   in the same moment), or another turn settles — one that settled since the daemon's previous poll
   of the agent host (every 1.5 s). A rewind with `revert_session`, or the history a resumed
-  conversation replays, lands on turns that settled earlier and does not move it. A terminal tab
+  conversation replays, lands on turns that settled earlier and does not move it. While a Codex
+  goal continues, its settled turns raise nothing — the tab stays `working`, `reason:
+  "goal-continuing"` — and the goal stopping raises `finished` with a fresh stamp. A terminal tab
   rings (`bell`) or exits (`finished`).
 - **When it returns:** at once if a watched session already qualifies; otherwise when the first one
   does, or at `timeoutMs`. After the first hit it waits 300 ms and looks again, so sessions flagged
@@ -1383,7 +1487,7 @@ still not for polling loops.
 | `SESSION_NOT_FOUND` | No open tab has that id (closed, or a typo) — `list_sessions`. A wait on one session fails with it as soon as that session closes. So does `revert_session` when the session closes while it waits for the rewind. |
 | `NOT_A_CHAT_SESSION` | The tool needs a chat tab; terminal tabs can only be listed and closed. |
 | `PENDING_REQUEST` | The agent is waiting on a question or an approval; the message names each request and the tool that answers it. |
-| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), the session is in `error` (`stop_session`, then send again), or the project already has 24 running sessions (`close_session` some). |
+| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`; while a Codex goal continues, an account switch needs the goal paused and its turn over: `interrupt_session` does both), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), the session is in `error` (`stop_session`, then send again), or the project already has 24 running sessions (`close_session` some). |
 | `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only `stop_session` and `revert_session` through (`send_message` and `implement_plan` say `SESSION_BUSY` instead). `stop_session`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from `revert_session`, for one. |
 | `INVALID_ARGUMENT` naming an agent, model or option | Take the values from `list_agents`. "Still loading … models" means the catalogue is being probed — retry shortly. `<model> takes no options` (Claude's `haiku`) — send it without `options`. A model marked `optionsOmitted` has options: `list_agents {agent, model}`. |
 | `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, an empty string, a missing required field, or an argument name the tool does not have (`Unrecognized key(s)`). The message names each bad field (at most five) and why; `tools/list` describes every parameter. |

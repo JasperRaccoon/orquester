@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, commandOutputText, foldThread, slimActivityPayload, toThreadSnapshot, type DomainEvent, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
-import { activity, message, snapshot, stamp, turn } from "./fixtures.ts";
+import { buildPlanImplementationPrompt, commandOutputText, foldThread, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, slimActivityPayload, toThreadSnapshot, type DomainEvent, type ThreadActivityItem, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
+import { activity, head, message, snapshot, stamp, turn } from "./fixtures.ts";
 import { mergeHistoryPages } from "./history.ts";
 import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, transcriptRange, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
 
@@ -16,11 +16,11 @@ const roomOf = (r: TranscriptResult, maxChars: number): number => maxChars - TRA
 const contentOf = (rows: readonly unknown[]): number => Buffer.byteLength(JSON.stringify(rows), "utf8") - 2;
 /** The subagent list's cap once a result is over: what the unshed entries (`e` bytes) leave, never less than its share. */
 const rosterCap = (room: number, e: number): number => Math.max(Math.floor(room * ROSTER_SHARE), room - e);
-/** The row a shed never drops: the latest turn's final reply (never a commentary row), else that turn's newest row. */
+/** The row a shed never drops: the latest turn's final reply, else that turn's last commentary row, else its newest row. */
 const sparedOf = (entries: readonly TranscriptEntry[]): TranscriptEntry | undefined => {
   const turns = entries.flatMap((e) => (e.turn === null ? [] : [e.turn]));
-  const own = entries.filter((e) => e.turn === (turns.length ? Math.max(...turns) : null));
-  return [...own].reverse().find((e) => e.kind === "assistant" && !e.commentary) ?? own.at(-1);
+  const own = [...entries.filter((e) => e.turn === (turns.length ? Math.max(...turns) : null))].reverse();
+  return own.find((e) => e.kind === "assistant" && !e.commentary) ?? own.find((e) => e.kind === "assistant") ?? own[0];
 };
 const hasRow = (r: TranscriptResult, row: TranscriptEntry): boolean => r.entries.some((e) => e.createdAt === row.createdAt && e.kind === row.kind);
 /** The roster row a second pass would bring back next: the last one dropped (live rows drop last, the newest last). */
@@ -565,7 +565,8 @@ test("a randomized probe (fixed seed): whole when it fits, else within the reser
     assert.equal(JSON.stringify(transcriptEntries(snap, { turns: window, include: ALL, maxChars: snug })), JSON.stringify(whole), `${where}: whole at maxChars ${snug}`);
     const tight = transcriptEntries(snap, { turns: window, include: ALL, maxChars: wholeSize - 1 });
     assert.ok(tight.truncated && budgetSize(tight) <= wholeSize - 1 - TRANSCRIPT_HINT_BYTES, `${where}: trimmed at maxChars ${wholeSize - 1}`);
-    // The spared row — the latest turn's final reply, else its newest row — always stays (a minimal row always fits here).
+    // The spared row — the latest turn's final reply, else its last commentary, else its newest row — always stays (a
+    // minimal row always fits here).
     const spared = sparedOf(whole.entries)!;
     assert.ok(hasRow(r, spared), `${where}: the spared row stays`);
     const present = r.entries.flatMap((e) => (e.turn === null ? [] : [e.turn]));
@@ -1186,19 +1187,43 @@ test("a commentary message is an assistant row marked commentary: true; the turn
   assert.ok(!("commentary" in assistant[1]!) && !("commentary" in assistant[2]!), "no commentary field on an answer");
 });
 
-test("a commentary row is never the spared reply: a running turn's shed keeps its newest row instead", () => {
-  // The turn is still at work: narration, then a call with a long command, and no answer yet.
+test("a turn with no answer is spared on its last commentary row, as the GUI ends such a turn: the shed keeps the narration, cut to fit, over the newer tool row", () => {
+  // The turn is still at work (or was interrupted there): narration, then a call with a long command, and no answer.
+  const narration = `I'll run the migration now. ${"Checking the schema first. ".repeat(60)}`;
   const items = [
     message("user", "Run the migration and report.", { turnId: "t1" }),
-    message("assistant", `I'll run the migration now. ${"Checking the schema first. ".repeat(60)}`, { turnId: "t1", messageKind: "commentary" }),
+    message("assistant", narration, { turnId: "t1", messageKind: "commentary" }),
     activity("tool.started", { itemType: "command_execution", toolUseId: "m", title: "Migrate", status: "inProgress", command: `pnpm migrate ${"--table t ".repeat(150)}` }, { turnId: "t1", tone: "tool" })
   ];
   const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
   assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  assert.deepEqual(r.entries.map((e) => e.kind), ["tool"], "the newest row stays, cut to fit; the narration goes");
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.commentary]), [["assistant", true]], "the narration stays, cut to fit; the tool row goes");
+  assert.ok(r.entries[0]!.text!.endsWith("…") && narration.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the narration");
   // With an answer, the answer is the spared row as before.
   const answered = transcriptEntries(snapshot({ items: [...items, message("assistant", "Migrated 12 tables.", { turnId: "t1", messageKind: "answer" })] }), { turns: 5, include: ALL, maxChars: 2_000 });
   assert.ok(answered.entries.some((e) => e.kind === "assistant" && e.text === "Migrated 12 tables."), "the answer stays");
+  assert.ok(!answered.entries.some((e) => e.commentary), "and the narration goes before it");
+});
+
+test("the spared commentary is the latest turn's LAST: an earlier one, a newer tool row and an older turn's answer all go before it", () => {
+  // Turn 1 answered; turn 2, the latest, narrated twice and was interrupted in a call, never answering.
+  const first = `Two tests fail on empty lines. ${"Reading the tokenizer. ".repeat(40)}`;
+  const last = `Fixing the tokenizer next. ${"It drops a trailing newline. ".repeat(60)}`; // alone over the budget: cut to fit
+  const items = [
+    message("user", "Why does the parser fail?", { turnId: "t1" }), message("assistant", "It skips empty lines.", { turnId: "t1" }),
+    message("user", "Fix it.", { turnId: "t2" }),
+    message("assistant", first, { turnId: "t2", messageKind: "commentary" }),
+    activity("tool.completed", { itemType: "command_execution", toolUseId: "p", title: "pnpm test", status: "completed", command: "pnpm test", detail: "2 failed" }, { turnId: "t2", tone: "tool" }),
+    message("assistant", last, { turnId: "t2", messageKind: "commentary" }),
+    activity("tool.started", { itemType: "command_execution", toolUseId: "l", title: "pnpm lint", status: "inProgress", command: "pnpm lint" }, { turnId: "t2", tone: "tool" })
+  ];
+  const turns = [turn(), turn({ turnId: "t2", turnCount: 2, state: "interrupted", requestedAt: items[2]!.createdAt, startedAt: items[2]!.createdAt, completedAt: items.at(-1)!.createdAt })];
+  const snap = snapshot({ items, turns });
+  assert.equal(sparedOf(transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 }).entries)?.text, last);
+  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(r.truncated && budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `trimmed within the budget (${budgetSize(r)})`);
+  assert.deepEqual(r.entries.map((e) => [e.turn, e.kind, e.commentary]), [[2, "assistant", true]], "every other row goes, the newest one included");
+  assert.ok(r.entries[0]!.text!.endsWith("…") && last.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the LAST narration");
 });
 
 test("compaction rows follow the shared rule: no state is settled, the legacy marker counts, a subagent's own stays out of the parent view", () => {
@@ -1226,4 +1251,114 @@ test("compaction rows follow the shared rule: no state is settled, the legacy ma
   assert.deepEqual(sub.entries.map((e) => [e.kind, e.state, e.agentId]), [["compaction", "compacted", "sub-1"]]);
   const lean = transcriptEntries(snap, { turns: 5, include: new Set(["tools"]), maxChars: 100_000 });
   assert.ok(!lean.entries.some((e) => e.kind === "compaction"), "compaction rows are activity rows: include \"activity\"");
+});
+
+test("goal rows read as the GUI's timeline shows them: each change a line of its own, labelled by its summary, in log order; the progress tick is none", () => {
+  const goal = { objective: "Make the build green", status: "active" };
+  const update = (payload: unknown, summary: string, over: Partial<ThreadActivityItem> = {}) => activity(GOAL_ACTIVITY_KIND, payload, { turnId: "t1", summary, ...over });
+  const items = [
+    message("user", "/goal Make the build green", { turnId: "t1" }),
+    update({ goal, change: "set" }, "Goal set: Make the build green"),
+    // The goal's heartbeat: written under one stable id per thread and replaced in place, never a row.
+    update({ goal: { ...goal, rounds: 2 }, change: "progress" }, "Goal progress", { id: "goal-progress:c1" }),
+    update({ goal: { ...goal, rounds: 2, lastCheck: "2 tests still fail" }, change: "checked" }, "Goal check 2: not met — 2 tests still fail"),
+    update({ goal: { ...goal, status: "paused" }, change: "paused" }, "Goal paused"),
+    // The answer to a host-run `/goal status` (Codex).
+    activity(GOAL_STATUS_ACTIVITY_KIND, {}, { turnId: "t1", summary: "Goal paused: Make the build green — 1,234 tokens, 1m" }),
+    update({ goal, change: "resumed" }, "Goal resumed"),
+    update({ goal: { ...goal, status: "complete", rounds: 3 }, change: "achieved" }, "Goal achieved: Make the build green"),
+    update({ goal: null, change: "cleared", previous: { ...goal, status: "complete" } }, "Goal cleared: Make the build green"),
+    message("assistant", "The build is green.", { turnId: "t1" })
+  ];
+  const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [
+    ["user", "/goal Make the build green"],
+    ["info", "Goal set: Make the build green"],
+    ["info", "Goal check 2: not met — 2 tests still fail"],
+    ["info", "Goal paused"],
+    ["info", "Goal paused: Make the build green — 1,234 tokens, 1m"],
+    ["info", "Goal resumed"],
+    ["info", "Goal achieved: Make the build green"],
+    ["info", "Goal cleared: Make the build green"],
+    ["assistant", "The build is green."]
+  ]);
+  assert.ok(r.entries.every((e) => e.turn === 1 && e.turnId === "t1"), "numbered like every other row");
+  const lean = transcriptEntries(snapshot({ items }), { turns: 5, include: new Set(["tools"]), maxChars: 100_000 });
+  assert.deepEqual(lean.entries.map((e) => e.kind), ["user", "assistant"], "goal rows are activity rows: include \"activity\"");
+});
+
+test("a goal that can't be met and a failed /goal command are error rows with the GUI's text; a goal row the GUI cannot read is still a line of its own", () => {
+  const items = [
+    message("user", "Keep going until the API ships.", { turnId: "t1" }),
+    activity(GOAL_ACTIVITY_KIND, { goal: null, change: "failed", previous: { objective: "Ship the API", status: "failed", lastCheck: "the upstream has no such endpoint" } },
+      { turnId: "t1", tone: "error", summary: "Goal can't be met: the upstream has no such endpoint" }),
+    activity(GOAL_COMMAND_FAILED_ACTIVITY_KIND, { detail: "codex app-server is not running" }, { turnId: "t1", tone: "error", summary: "Goal command failed" }),
+    // A newer host's change this reader does not know: the GUI shows it as its generic row, with its summary.
+    activity(GOAL_ACTIVITY_KIND, { goal: { objective: "Ship the API", status: "active" }, change: "rescoped" }, { turnId: "t1", summary: "Goal rescoped: Ship the API" }),
+    // Hidden only when it parses: a progress row the GUI cannot read is its generic row too.
+    activity(GOAL_ACTIVITY_KIND, { goal: { status: "active" }, change: "progress" }, { turnId: "t1", summary: "Goal progress" })
+  ];
+  const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [
+    ["user", "Keep going until the API ships."],
+    ["error", "Goal can't be met: the upstream has no such endpoint"],
+    ["error", "Goal command failed: codex app-server is not running"],
+    ["info", "Goal rescoped: Ship the API"],
+    ["info", "Goal progress"]
+  ]);
+  const lean = transcriptEntries(snapshot({ items }), { turns: 5, include: new Set(["tools"]), maxChars: 100_000 });
+  assert.deepEqual(lean.entries.map((e) => e.kind), ["user"], "error-toned goal rows are activity rows too");
+});
+
+// ---- An old Claude log's re-emitted opening paragraph (spec §7.3): no row of the parent view, as the GUI leaves it out. ----
+
+const OPENING = "The subagent finished; merging its findings.";
+const ANSWER = "Merged: the parser now skips empty lines.";
+/**
+ * A CLI-started turn as a host before the pre-turn-stream fix wrote it: its opening paragraph again at `result`, under a
+ * new id. `over` stamps every assistant message of it — a subagent's own turn.
+ */
+const reEmittedTurn = (over: { agentId?: string } = {}): ThreadItem[] => [
+  message("user", "go", { turnId: "t1" }),
+  message("assistant", OPENING, { turnId: "t1", id: "m-open", ...over }),
+  activity("tool.completed", { itemType: "command_execution", toolUseId: "tu1", title: "Run pnpm check", status: "completed" }, { turnId: "t1", tone: "tool" }),
+  message("assistant", ANSWER, { turnId: "t1", id: "m-answer", ...over }),
+  message("assistant", OPENING, { turnId: "t1", id: "m-copy", ...over })
+];
+const assistantTexts = (r: TranscriptResult): (string | undefined)[] => r.entries.filter((e) => e.kind === "assistant").map((e) => e.text);
+
+test("the parent view of a Claude thread has no row for a re-emitted opening paragraph: the first occurrence stays where it was said", () => {
+  const r = transcriptEntries(snapshot({ items: reEmittedTurn() }), { turns: 5, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "go"], ["assistant", OPENING], ["tool", undefined], ["assistant", ANSWER]]);
+  // So a shed spares the turn's real answer, never the copy: a budget for one row keeps the answer.
+  const long = (text: string): string => `${text} ${"x".repeat(900)}`;
+  const tight = snapshot({ items: [
+    message("user", "go", { turnId: "t1" }), message("assistant", long(OPENING), { turnId: "t1", id: "l-open" }),
+    message("assistant", long(ANSWER), { turnId: "t1", id: "l-answer" }), message("assistant", long(OPENING), { turnId: "t1", id: "l-copy" })
+  ] });
+  const shed = transcriptEntries(tight, { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(shed.truncated && budgetSize(shed) <= 2_000 - TRANSCRIPT_HINT_BYTES, `trimmed within the budget (${budgetSize(shed)})`);
+  assert.deepEqual(assistantTexts(shed), [long(ANSWER)]);
+});
+
+test("a drill-in and a Codex thread keep every message: only a Claude thread's parent view drops a copy, as in the GUI", () => {
+  // A subagent's own turn with the same shape: its drill-in shows its messages as they are, on a Claude thread too.
+  const roster = [{ id: "task-1", kind: "subagent", agentKind: "agent", title: "Explore", status: "completed" } as never];
+  const sub = snapshot({ items: [activity("task.started", { taskId: "task-1", title: "Explore", agentKind: "agent", status: "running" }, { turnId: "t1" }), ...reEmittedTurn({ agentId: "task-1" })], roster });
+  assert.deepEqual(assistantTexts(transcriptEntries(sub, { turns: 5, agentId: "task-1", include: ALL, maxChars: 100_000 })), [OPENING, ANSWER, OPENING]);
+  assert.deepEqual(assistantTexts(transcriptEntries(sub, { turns: 5, include: ALL, maxChars: 100_000 })), [], "the subagent's messages stay out of the parent view, as ever");
+  // Only a Claude log holds such a copy: a Codex thread's repeat is its own words.
+  const codex = snapshot({ head: head({ adapter: "codex", refId: "codex" }), items: reEmittedTurn() });
+  assert.deepEqual(assistantTexts(transcriptEntries(codex, { turns: 5, include: ALL, maxChars: 100_000 })), [OPENING, ANSWER, OPENING]);
+});
+
+test("a read with older pages merged under the window counts the copies over all of it: the opening a page brought back finds the copy", () => {
+  const [prompt, open, tool, answer, copy] = reEmittedTurn();
+  // The window starts mid-turn, the opening evicted: it compares with its own first message, where the copy is none.
+  const window = snapshot({ items: [tool, answer, copy] });
+  assert.deepEqual(assistantTexts(transcriptEntries(window, { turns: 5, include: ALL, maxChars: 100_000 })), [ANSWER, OPENING]);
+  // read_transcript's page merged under it (history.ts) holds the turn's start: now the copy is found, and has no row.
+  const merged = mergeHistoryPages(window, [{ items: [prompt, open], checkpoints: [] }]);
+  const r = transcriptEntries(merged, { turns: 5, include: ALL, maxChars: 100_000, windowItems: window.items });
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "go"], ["assistant", OPENING], ["tool", undefined], ["assistant", ANSWER]]);
 });

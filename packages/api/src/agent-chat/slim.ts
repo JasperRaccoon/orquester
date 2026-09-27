@@ -33,6 +33,9 @@
  * (§7.6) and the presentation resolver (§7.2) read the task linkage bundle
  * and {@link ThreadActivityPayloadFields} straight off the top level of a
  * SLIMMED payload, so stripping there would empty the roster on the wire.
+ * The same holds for a `goal.updated` row's `goal`, `change` and `previous`
+ * (goals §4.3): the client folds the thread's goal off the slimmed row
+ * (goals §4.4), so they must reach it whole.
  */
 
 /**

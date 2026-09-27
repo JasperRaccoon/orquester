@@ -88,7 +88,7 @@ File: `agentChatThreadStatePath(appdir, id)` = `threads/<id>/state.json`, atomic
 
 ```ts
 interface FoldSnapshotFile {
-  version: number;          // FOLD_SNAPSHOT_VERSION: 1 at this design; 4 today
+  version: number;          // FOLD_SNAPSHOT_VERSION: 1 at this design; 5 today
   threadId: string;
   seq: number;              // state.seq at write time
   logBytes: number;         // byte length of events.ndjson right after the last folded event
@@ -156,6 +156,8 @@ turns(thread_id TEXT, turn_id TEXT, ordinal INTEGER, user_message_id TEXT, reque
 items(thread_id TEXT, item_id TEXT, seq INTEGER, byte_offset INTEGER, byte_length INTEGER, PRIMARY KEY(thread_id, item_id))
 message_docs(thread_id TEXT, message_id TEXT, seq INTEGER, first_seq INTEGER, first_byte INTEGER,
              first_length INTEGER, PRIMARY KEY(thread_id, message_id))   -- keyed side of messages_fts + span
+             -- built (schema 5): + role, agent_id, turn_id, created_at; INDEX message_docs_prompts
+             --   (thread_id, first_seq) WHERE role = 'user' AND agent_id IS NULL
 markers(thread_id TEXT, seq INTEGER, kind TEXT, PRIMARY KEY(thread_id, seq))          -- context-compaction rows
 messages_fts   FTS5(text, thread_id UNINDEXED, message_id UNINDEXED, turn_id UNINDEXED, role UNINDEXED, seq UNINDEXED, at UNINDEXED)
 activities_fts FTS5(text, thread_id UNINDEXED, activity_id UNINDEXED, turn_id UNINDEXED, kind UNINDEXED, seq UNINDEXED, at UNINDEXED)
@@ -210,6 +212,20 @@ positions and text with them, but not their page (below). The index records no r
 `revert_seq`, the latest revert's own line), so no rule at query time could find it: the clip is
 stored in `turns`, no statement changed, and `INDEX_SCHEMA_VERSION` went 3 → 4 so that a version-3
 file, whose ranges may still reach past a cut, is rebuilt from the logs at the deploy.
+
+*Built (schema 5, the merge of 2026-09-27):* a parallel build had taken 4 for a different change —
+the right rail's prompt list (`GET …/prompts`): `message_docs` gained each message's author (`role`,
+and `agent_id`, NULL for the parent's own, both from the first line), its latest `turn_id` and its
+first `created_at`, with the partial index `message_docs_prompts` over the parent's user rows, and
+a revert that judges user messages by the fold's own `retainMessagesAfterRevert` rule instead of by
+position (`dropRevertedUserMessages`: kept with a retained turn or claimed by one as its prompt,
+then the fold's restoring pass; the truncation spares `role = 'user'`). The merged indexer derives
+both halves, so neither build's version-4 file is its own — the prompts build's fits every
+statement but may hold ranges reaching past a cut; the clipping build's has none of the new columns
+— and `INDEX_SCHEMA_VERSION` went to 5: one more rebuild at the deploy, in the background. One gap
+between the two halves: the fold's restoring pass can keep a turn-less prompt that lies inside a
+revert's cut, and history planning never replays that pass (below), so such a prompt is in search
+and the prompt list but on no "Load older" page.
 
 *Built (follow-ups 2026-09-24):* a kept turn's late rows past a revert's cut stay in "Load older",
 at query time, with no index change. The gaps between the clipped ranges are a revert's cut and

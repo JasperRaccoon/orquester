@@ -162,7 +162,10 @@ type MutableAgent = {
 /**
  * The kind a task type names outright, sticky for its row: a spawn batch, and
  * the two rows that drive work rather than do it — a provider's scheduled
- * prompt (`scheduled`, a Grok `/loop`) and its autonomous goal (`goal`).
+ * prompt (`scheduled`, a Grok `/loop`) and, read-only, an autonomous goal
+ * (`goal`): no adapter writes that task type since 2026-09-27 (a Grok goal is
+ * the thread's goal, goals §6.3), but a 2026-09-26/27 build did, and its logs
+ * must still fold to this kind rather than to a background shell.
  */
 function kindOfTaskType(taskType: unknown): "subagent_batch" | "loop" | "goal" | undefined {
   switch (taskType) {

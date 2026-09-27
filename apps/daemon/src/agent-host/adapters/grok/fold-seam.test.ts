@@ -711,12 +711,13 @@ test("25 through the fold: a Stop while the spawn's own card is pending ends the
   assert.deepEqual([end?.payload.status, end?.payload.summary], ["stopped", "Stopped before it started."]);
 });
 
-test("a loop and a goal a later launch reports again reopen their rows: each launch numbers its own runs", async () => {
-  // PLAUSIBLE, not captured: a CLI restoring a durable loop or its goal on
-  // `session/load` reports them to a new launch, whose normaliser numbers
-  // their runs from 1 again. Without the launch in their launch ids those
-  // were the ids of the runs a deploy had ended, and the roster read each new
-  // start as a late delivery of an ended run: the rows stayed ended.
+test("a loop a later launch reports again reopens its row: each launch numbers its own runs", async () => {
+  // PLAUSIBLE, not captured: a CLI restoring a durable loop on `session/load`
+  // reports it to a new launch, whose normaliser numbers its runs from 1
+  // again. Without the launch in its launch ids those were the ids of the
+  // runs a deploy had ended, and the roster read each new start as a late
+  // delivery of an ended run: the row stayed ended. A goal is no roster row:
+  // the goal a later launch reports is the thread's goal.
   const LOOP = "01a0de9b-e17c-7fa0-83dc-a436461e59b5";
   const GOAL = "18745eb4-3b61-4f0c-9a5e-4dc7dd2087ed";
   const loopReport = (grok: GrokNormalizer, sessionUpdate: string): RuntimeEvent[] =>
@@ -744,18 +745,22 @@ test("a loop and a goal a later launch reports again reopen their rows: each lau
   ];
   const s = seam();
   await s.feed(live(s.grok));
-  await s.feed([...loopReport(s.grok, "scheduled_task_created"), ...goalReport(s.grok)]);
-  // A deploy: the session's end closes both.
+  await s.feed(loopReport(s.grok, "scheduled_task_created"));
+  // A deploy: the session's end closes it.
   await s.feed(s.grok.stopBackgroundTasks());
   const ended = s.state().roster;
   assert.notEqual(ended.find((entry) => entry.id === LOOP)?.status, "running");
-  // The next launch hears the loop fire and the goal active.
+  // The next launch hears the loop fire.
   const next = s.launch("launch-2");
   await s.feed(live(next));
-  await s.feed([...loopReport(next, "scheduled_task_fired"), ...goalReport(next)]);
+  await s.feed(loopReport(next, "scheduled_task_fired"));
   const roster = s.state().roster;
   assert.equal(roster.find((entry) => entry.id === LOOP)?.status, "running", "the loop is live again");
-  assert.equal(roster.find((entry) => entry.id === `goal:${GOAL}`)?.status, "running", "and so is the goal");
+  // The goal the next launch reports is the thread's goal, never a roster row.
+  await s.feed(goalReport(next));
+  assert.equal(s.state().goal?.status, "active");
+  assert.equal(s.state().goal?.objective, "Create goal.txt");
+  assert.equal(s.state().roster.some((entry) => entry.id === `goal:${GOAL}`), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1081,16 +1086,30 @@ test("29 through the fold: the loop is a background roster row, live until delet
   assert.equal(ended?.result, "Deleted");
 });
 
-test("30 through the fold: the goal is a background row, its budget's end its result", async () => {
-  const GOAL = "goal:18745eb4-3b61-4f0c-9a5e-4dc7dd2087ed";
+test("30 through the fold: the thread's goal is set, stopped by its budget, then cleared; no roster row", async () => {
+  // Fixture 30 (observations 53 and 57): the goal is the thread's goal —
+  // `thread.goal.updated` rows the fold reads — never a roster row. 1.0.34's
+  // `/goal clear` frame names no goal and no event (status `cleared`).
   const s = captureSeam("30-goal.ndjson");
+  const limited = s.events.findIndex(
+    (event) => event.type === "thread.goal.updated" && (event.payload as { change: string }).change === "limited"
+  );
+  assert.ok(limited > 0, "the budget_limited frame is a goal row");
+  await s.feedThrough(limited);
+  const atBudget = s.state().goal;
+  assert.equal(atBudget?.objective, "Create a file named goal.txt containing exactly: ok");
+  assert.equal(atBudget?.status, "budget-limited");
+  assert.equal(atBudget?.tokensUsed, 48_386);
+  assert.equal(atBudget?.tokenBudget, 20_000);
   await s.feedThrough(s.events.length);
-  const goal = s.state().roster.find((entry) => entry.id === GOAL);
-  assert.equal(goal?.agentKind, "background");
-  assert.equal(goal?.kind, "goal", "a goal row, never a shell's");
-  assert.equal(goal?.status, "interrupted");
-  assert.equal(goal?.title, "Create a file named goal.txt containing exactly: ok");
-  assert.equal(goal?.result, "Token budget reached: 48386 of 20000 tokens");
-  assert.equal(goal?.usage?.totalTokens, 48_386);
+  const state = s.state();
+  assert.equal(state.goal, null, "the /goal clear frame clears it");
+  assert.deepEqual(
+    state.activities
+      .filter((row) => row.activityKind === "goal.updated")
+      .map((row) => (row.payload as { change: string }).change),
+    ["set", "limited", "cleared"]
+  );
+  assert.equal(state.roster.some((entry) => entry.id.startsWith("goal:")), false, "the goal is no roster row");
   assert.equal(s.liveness.liveness(THREAD), null);
 });

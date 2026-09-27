@@ -4,6 +4,7 @@ import { TriangleAlert, X } from "lucide-react";
 import { cn } from "../../../lib/cn";
 import type { AgentChatActions, DisclosureState } from "../../../lib/agent-chat/contracts";
 import { isActiveChatTab } from "../../../lib/agent-chat-active-tab";
+import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { resolveChatShortcut } from "../../../lib/agent-chat/keybindings.logic";
 import { isLoopOrGoalRow } from "../../../lib/agent-chat/roster.logic";
 import { peekThreadStore } from "../../../lib/agent-chat/store";
@@ -759,6 +760,8 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.defaultPrevented) return;
       if (!isActiveChatTab(sessionId)) return;
+      // A key typed into the right rail's panel or a modal dialog is theirs.
+      if (insideKeyboardSurface(event.target)) return;
       const command = resolveChatShortcut(event);
       if (command?.kind !== "scroll-to-end") return;
       const node = scrollerRef.current;

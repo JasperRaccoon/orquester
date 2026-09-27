@@ -19,6 +19,7 @@ import {
   isToolLifecycleItemType,
   type CanonicalItemType,
   type CanonicalRequestType,
+  type GoalUpdatedPayload,
   type ItemLifecyclePayload,
   type RuntimeContentStreamKind,
   type RuntimeErrorClass,
@@ -30,6 +31,7 @@ import {
 
 import type { CodexProtocol, ServerNotificationMethod } from "./_generated/index.ts";
 import { childItemId, notificationThreadId, routeCodexChildNotification } from "./child-routing.ts";
+import { CodexGoalTracker, agentGoalFromCodex } from "./goal.ts";
 import { classifyItem, type ClassifiedItem, type CodexThreadItem } from "./items.ts";
 import { usageWindowsFromRateLimits, CodexUsageTracker } from "./usage.ts";
 
@@ -55,6 +57,13 @@ export interface CodexNormaliserOptions {
    * collab-child traffic (`child-routing.ts`).
    */
   ownThreadId?: () => string | null;
+  /**
+   * The thread's goal as this session knows it (goals §6). The session owns
+   * it — it seeds it from the fold, weighs the resume snapshot with it and
+   * feeds it the responses to its own goal requests — and shares it here, as
+   * it shares `usage`. A replay test gets a fresh one.
+   */
+  goals?: CodexGoalTracker;
 }
 
 /**
@@ -113,6 +122,7 @@ const COLLAB_PROMPT_MEMORY = 256;
 export class CodexNormaliser {
   private readonly usage: CodexUsageTracker;
   private readonly ownThreadId: () => string | null;
+  private readonly goals: CodexGoalTracker;
   /** `turn/diff/updated` is cumulative and repeats; de-duplicate on content. */
   private lastDiff: string | null = null;
   /** itemId → canonical item type, while the item is still `inProgress`. */
@@ -196,6 +206,7 @@ export class CodexNormaliser {
   constructor(options: CodexNormaliserOptions) {
     this.usage = options.usage;
     this.ownThreadId = options.ownThreadId ?? ((): string | null => null);
+    this.goals = options.goals ?? new CodexGoalTracker();
   }
 
   get currentTurnId(): string | null {
@@ -233,6 +244,19 @@ export class CodexNormaliser {
     this.turnEffort = effort ?? null;
     this.lastTurnError = null;
     this.usage.beginTurn(turnId);
+  }
+
+  /**
+   * The thread's settings moved without a turn (`thread/settings/update`,
+   * goals §4.6): the turns Codex starts next — a goal's — run on them, so
+   * their `turn.started` names them. An effort left out is left as it was, as
+   * the provider leaves it.
+   */
+  noteThreadSettings(model: string, effort?: string): void {
+    this.turnModel = model;
+    if (effort !== undefined) {
+      this.turnEffort = effort;
+    }
   }
 
   /** Called when the session settles a turn outside the protocol (child death). */
@@ -345,22 +369,10 @@ export class CodexNormaliser {
       if (turnId !== undefined && itemTurn !== undefined && itemTurn !== turnId) {
         continue;
       }
-      this.openItems.delete(itemId);
-      this.openItemTurns.delete(itemId);
       if (itemType === "collab_agent_tool_call") {
         this.abandonCall(itemId);
       }
-      events.push({
-        type: "item.completed",
-        payload: { itemType, status },
-        ...(itemTurn !== undefined ? { turnId: itemTurn } : {}),
-        itemId,
-        providerRefs: {
-          ...(itemTurn !== undefined ? { providerTurnId: itemTurn } : {}),
-          providerItemId: itemId
-        },
-        ...(raw !== undefined ? { raw } : {})
-      });
+      events.push(this.closeOpenItem(itemId, itemType, status, raw));
     }
     if (turnId === undefined) {
       events.push(...this.closeChildItems(status, () => true, raw));
@@ -399,6 +411,68 @@ export class CodexNormaliser {
       });
     }
     return events;
+  }
+
+  /**
+   * Close an `agentMessage` the provider ABANDONED, the moment the next item of
+   * its turn starts (fixtures README observation 22).
+   *
+   * Codex can stream part of an `agentMessage`, drop that sampling attempt and
+   * restate it as a NEW item: no `item/completed` ever arrives for the first,
+   * and its own rollout does not keep it. Left open, it stays the turn's
+   * active message segment in ingestion, so the restatement's deltas were
+   * appended to it — under the abandoned id and with the abandoned phase. A
+   * regenerated `final_answer` glued onto `commentary` is never picked as the
+   * turn's answer, and the turn folds away with its answer inside.
+   *
+   * Scoped to `assistant_message` items of the SAME turn. Tool calls do
+   * overlap (05 starts three `exec_command` items back to back), and another
+   * turn's items are that turn's own settle to close. No other item ever
+   * starts while an `agentMessage` is open — across the capture set this
+   * fires only on 05's abandoned attempt — so it cannot cut a message that is
+   * still being written. The close is the text-less one `closeOpenItems`
+   * writes at `turn/completed`, only earlier: ingestion closes what was
+   * streamed and never re-emits it.
+   */
+  private closeAbandonedMessages(
+    turnId: string,
+    startingItemId: string,
+    raw: RuntimeEventRaw
+  ): RuntimeEventDraft[] {
+    const events: RuntimeEventDraft[] = [];
+    for (const [itemId, itemType] of [...this.openItems.entries()]) {
+      if (
+        itemType === "assistant_message" &&
+        itemId !== startingItemId &&
+        this.openItemTurns.get(itemId) === turnId
+      ) {
+        events.push(this.closeOpenItem(itemId, itemType, "completed", raw));
+      }
+    }
+    return events;
+  }
+
+  /** Forget one open item and write the text-less `item.completed` that closes it. */
+  private closeOpenItem(
+    itemId: string,
+    itemType: CanonicalItemType,
+    status: "completed" | "failed",
+    raw?: RuntimeEventRaw
+  ): RuntimeEventDraft {
+    const itemTurn = this.openItemTurns.get(itemId);
+    this.openItems.delete(itemId);
+    this.openItemTurns.delete(itemId);
+    return {
+      type: "item.completed",
+      payload: { itemType, status },
+      ...(itemTurn !== undefined ? { turnId: itemTurn } : {}),
+      itemId,
+      providerRefs: {
+        ...(itemTurn !== undefined ? { providerTurnId: itemTurn } : {}),
+        providerItemId: itemId
+      },
+      ...(raw !== undefined ? { raw } : {})
+    };
   }
 
   /**
@@ -829,6 +903,38 @@ export class CodexNormaliser {
         ];
       }
 
+      // ----------------------------------------------------------------- goals
+      //
+      // The provider's own goal (goals §6.2.1): after every set, on the model's
+      // `create_goal` / `update_goal`, on progress flushes and at turn stop —
+      // and once as a snapshot after every `thread/resume`, which is the
+      // `cleared` fixture 07 records. The tracker names the change and decides
+      // whether it is news; a collab child's goal never reaches here, it is
+      // child chatter (`child-routing.ts`).
+      case "thread/goal/updated": {
+        const p = params as CodexProtocol.v2.ThreadGoalUpdatedNotification;
+        const goal = agentGoalFromCodex(p.goal);
+        if (goal === null) {
+          // A status this build does not know: surfaced, never folded as a
+          // clear and never dropped (§10). The tracked goal stays as it was,
+          // but the provider did speak — counted, and a snapshot it was is over.
+          this.goals.unreadable();
+          return [
+            {
+              type: "runtime.warning",
+              payload: { message: "Unrecognised codex goal", detail: p.goal },
+              raw: raw()
+            }
+          ];
+        }
+        return goalUpdatedEvents(this.goals.notified(goal), {
+          turnId: p.turnId,
+          raw: raw()
+        });
+      }
+      case "thread/goal/cleared":
+        return goalUpdatedEvents(this.goals.notified(null), { raw: raw() });
+
       // ------------------------------------------------------- handled, no arm
       //
       // Every method below is KNOWN and deliberately produces no runtime event.
@@ -837,8 +943,6 @@ export class CodexNormaliser {
       // breaks this switch instead of silently disappearing.
       case "thread/settings/updated": // sticky thread config; read by the session, not the timeline
       case "thread/reverted": // §5.5 revert is host-orchestrated; the ack adds nothing
-      case "thread/goal/updated":
-      case "thread/goal/cleared": // arrives unprompted after every resume
       case "thread/queue/changed":
       case "thread/project/updated":
       case "thread/environment/connected":
@@ -917,6 +1021,13 @@ export class CodexNormaliser {
     const item = p.item as CodexThreadItem;
     const classified = classifyItem(item);
     const events: RuntimeEventDraft[] = [];
+
+    // A message still open when the next item of its turn starts is one the
+    // provider abandoned (observation 22). It closes FIRST, or the next
+    // message's text lands in it.
+    if (phase === "started") {
+      events.push(...this.closeAbandonedMessages(p.turnId, item.id, raw));
+    }
 
     if (classified.unknownType !== undefined) {
       events.push({
@@ -1661,6 +1772,36 @@ export function providerRequestKind(
     default:
       return "permission";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Goals (goals §4.2, §6.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `thread.goal.updated` for a change the tracker decided is news, or
+ * nothing when it decided none is. `turnId` is the provider's — a progress
+ * flush or a turn-stop update names its turn, a set or a snapshot names none.
+ * A row taken from a response to one of our own requests carries no `raw`:
+ * the frame is in `raw.ndjson` either way, and it is not a notification.
+ */
+export function goalUpdatedEvents(
+  payload: GoalUpdatedPayload | null,
+  options: { turnId?: string | null; raw?: RuntimeEventRaw } = {}
+): RuntimeEventDraft[] {
+  if (payload === null) {
+    return [];
+  }
+  const turnId =
+    typeof options.turnId === "string" && options.turnId.length > 0 ? options.turnId : undefined;
+  return [
+    {
+      type: "thread.goal.updated",
+      payload,
+      ...(turnId !== undefined ? { turnId, providerRefs: { providerTurnId: turnId } } : {}),
+      ...(options.raw !== undefined ? { raw: options.raw } : {})
+    }
+  ];
 }
 
 // ---------------------------------------------------------------------------

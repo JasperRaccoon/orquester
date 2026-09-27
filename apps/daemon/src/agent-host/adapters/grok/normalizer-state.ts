@@ -13,10 +13,10 @@
  * permission-denied flag.
  */
 
-import type { RuntimeEvent, RuntimeEventRaw, RuntimeEventRawSource } from "@orquester/api/agent-chat";
+import type { AgentGoal, RuntimeEvent, RuntimeEventRaw, RuntimeEventRawSource } from "@orquester/api/agent-chat";
 
 import type { BackgroundTrack, ENDED_TASKS_REMEMBERED, EndedTask } from "./background-tasks.ts";
-import type { GoalTrack, goalUpdated, LoopTrack, scheduledTask } from "./loops-goals.ts";
+import type { LoopTrack, scheduledTask } from "./loops.ts";
 import type { GrokNormalizer } from "./normalize.ts";
 import type { PlanPathHost } from "./plan.ts";
 import type { ChildSession, subagentFromToolCall, SubagentLaunch, SubagentTrack } from "./subagents.ts";
@@ -40,18 +40,27 @@ export interface GrokNormalizerDeps {
   readonly planHost: PlanPathHost;
   /**
    * This launch's nonce — the session passes the first 8 hex digits of its
-   * launch id. Loop and goal runs are numbered by the normaliser, which every
-   * launch builds afresh, so their launch ids carry it: a loop or a goal a
-   * later launch reports again (a CLI restoring them on `session/load`) opens
-   * a run the roster reopens its row for, never a late delivery of the run a
-   * deploy ended (`loops-goals.ts`).
+   * launch id. Loop runs are numbered by the normaliser, which every launch
+   * builds afresh, so their launch ids carry it: a loop a later launch
+   * reports again (a CLI restoring it on `session/load`) opens a run the
+   * roster reopens its row for, never a late delivery of the run a deploy
+   * ended (`loops.ts`).
    */
   readonly launchNonce: string;
+  /**
+   * The goal the thread shows (`StartSessionInput.knownGoal`, goals §5.3), so
+   * a goal row goes out only for a real change (goals §6).
+   */
+  readonly knownGoal?: AgentGoal | null;
+  /** The clock the goal `progress` throttle reads (goals §6). Default `Date.now`. */
+  now?(): number;
+  /** Frames this adapter drops on purpose say why here, never in a warning. */
+  debug?(message: string, detail?: unknown): void;
 }
 
 /**
  * What the normaliser's functions share: the work it tracks — tool calls,
- * background tasks, loops, the goal, subagents and their child sessions — and
+ * background tasks, loops, subagents and their child sessions — and
  * the assistant segmentation and plan-mode state around it. One per
  * normaliser ({@link createNormalizerState}), held by `GrokNormalizer`.
  */
@@ -62,6 +71,8 @@ export interface GrokNormalizerState {
   readonly runtimeId: string;
   nextSegmentIndex: number;
   activeAssistantItemId: string | undefined;
+  /** The `_meta.promptId` of the chunk that opened the active segment, when it named one. */
+  activeAssistantPromptId: string | undefined;
   assistantUpdatesOpen: boolean;
 
   readonly tools: Map<string, ToolTrack>;
@@ -83,8 +94,6 @@ export interface GrokNormalizerState {
   readonly endedTasks: Map<string, EndedTask>;
   /** Scheduled prompts, by scheduler task id; see {@link scheduledTask}. */
   readonly loops: Map<string, LoopTrack>;
-  /** The session's goal; see {@link goalUpdated}. */
-  goal: GoalTrack | undefined;
   /** Roster agents, by task id; see {@link subagentFromToolCall}. */
   readonly subagents: Map<string, SubagentTrack>;
   /** `spawn_subagent` calls, by call id. */
@@ -126,13 +135,13 @@ export function createNormalizerState(deps: GrokNormalizerDeps, sessionId: strin
     runtimeId: `${sessionId}:${deps.uuid()}`,
     nextSegmentIndex: 0,
     activeAssistantItemId: undefined,
+    activeAssistantPromptId: undefined,
     assistantUpdatesOpen: false,
     tools: new Map<string, ToolTrack>(),
     finishedCalls: new Map<string, FinishedCall>(),
     tasks: new Map<string, BackgroundTrack>(),
     endedTasks: new Map<string, EndedTask>(),
     loops: new Map<string, LoopTrack>(),
-    goal: undefined,
     subagents: new Map<string, SubagentTrack>(),
     subagentLaunches: new Map<string, SubagentLaunch>(),
     subagentIds: new Map<string, string>(),

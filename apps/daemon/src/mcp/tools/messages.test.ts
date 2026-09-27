@@ -827,3 +827,227 @@ test("read_transcript: a subagent of an older turn is known by the rows a page b
   // Unknown anywhere, it is still refused.
   await assert.rejects(tool("read_transcript").run(readArgs({ turns: 5, agentId: "task-none" }), h.ctx), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });
+
+// ---------------------------------------------------------------------------
+// Goals §5.1: a `/goal` the host runs itself (Codex) starts no turn and answers in a row
+// ---------------------------------------------------------------------------
+
+const codexRegistry = { ...registry, agents: [...registry.agents, { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } }] };
+const codexProviders = { ...providers, providers: [...providers.providers, { id: "codex", refIds: ["codex"], installed: true, version: "0.155.1", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models: [],
+  capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" }, goals: { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true } } }] };
+const goalStatusRow = () => activity("goal.status", {}, { summary: "Goal: Ship the parser (active, 2 rounds)" });
+
+/** A Codex tab whose thread reads `before` until a turn is posted, then `after(input)`; `bodies` records every POST. */
+async function goalHarness(before: ThreadSnapshotPayload, after: (input: string) => ThreadSnapshotPayload, over = {}) {
+  const h = await harness([chatSummary({ refId: "codex", title: "Codex", ...over })], before);
+  h.api.on("GET", "/api/registry", { status: 200, body: codexRegistry }).on("GET", "/api/agent/providers", { status: 200, body: codexProviders });
+  const bodies: Record<string, unknown>[] = [];
+  let posted: string | null = null;
+  h.api.on("POST", "/api/sessions/c1/turn", ({ body }) => { bodies.push(body as Record<string, unknown>); posted = (body as { input: string }).input; return { status: 200, body: { seq: 30 } }; });
+  const at = (snap: ThreadSnapshotPayload) => ({ status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, adapter: "codex" as const, refId: "codex", projectPath: h.projectPath, cwd: h.projectPath } } } });
+  h.api.on("GET", "/api/sessions/c1/thread", () => at(posted === null ? before : after(posted)));
+  return { ...h, bodies };
+}
+
+test("goals §5.1: a Codex /goal status runs on the host — no turn wait, and the status row is the answer", async (t) => {
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), goalStatusRow()] })); t.after(h.close);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "  /goal status ", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  assert.deepEqual(h.bodies, [{ commandId: h.bodies[0]!.commandId, input: "/goal status", interactionMode: "default" }], "posted as the composer posts it: a turn");
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, "Goal: Ship the parser (active, 2 rounds)");
+  assert.equal(r.turnId, undefined, "no turn started, and no agent read the message");
+  assert.equal(r.reply, undefined);
+  assert.equal(r.seq, 30);
+});
+
+test("goals §5.1: a goal update answers /goal <objective>, with the rest of the same command", async (t) => {
+  const cleared = activity("goal.updated", { goal: null, change: "cleared", previous: { objective: "Old goal", status: "active" } }, { summary: "Goal cleared: Old goal" });
+  const set = activity("goal.updated", { goal: { objective: "Ship it", status: "active" }, change: "set" }, { summary: "Goal set: Ship it" });
+  let phase = 1;
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), cleared, ...(phase === 2 ? [set] : [])] })); t.after(h.close);
+  let now = Date.parse("2026-09-22T12:00:00.000Z");
+  const p = tool("send_message").run({ sessionId: "c1", text: "/goal Ship it", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
+  const settled = settledFlag(p);
+  await ticks(10);
+  assert.equal(settled(), false, "an update alone waits for its siblings");
+  // Replacing a goal writes "cleared", then "set": the second lands inside the settle window.
+  phase = 2;
+  now += 600;
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ refId: "codex" }), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, "Goal cleared: Old goal\nGoal set: Ship it");
+});
+
+test("goals §5.1: a failed goal command is outcome failed, and the answer says why", async (t) => {
+  const failed = activity("goal.command.failed", { detail: "codex: thread/goal/set timed out" }, { summary: "Goal command failed", tone: "error" });
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), failed] })); t.after(h.close);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  assert.equal(r.outcome, "failed");
+  assert.equal(r.answer, "Goal command failed: codex: thread/goal/set timed out");
+});
+
+test("goals §5.1: only rows after the command's own message answer it, and a hidden progress tick never does", async (t) => {
+  // An update that landed between the check and the post answers another command (or none).
+  const achieved = activity("goal.updated", { goal: { objective: "Old", status: "complete" }, change: "achieved" }, { summary: "Goal achieved: Old" });
+  const progress = activity("goal.updated", { goal: { objective: "Ship it", status: "active" }, change: "progress" }, { id: "goal-progress:c1", summary: "Goal progress" });
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [achieved, message("user", input), progress, goalStatusRow()] })); t.after(h.close);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, "Goal: Ship the parser (active, 2 rounds)");
+});
+
+test("goals §5.1: a command that writes no row comes back without an answer once the wait runs out", async (t) => {
+  // Pausing a paused goal changes nothing, so nothing is written: the goal as it stands is in session.chat.
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input)] })); t.after(h.close);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: racing() });
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, undefined);
+  assert.match(String(r.hint), /^No answer came: the command changed nothing/, "an empty-handed return says why, and where to look");
+  assert.equal(h.bodies.length, 1);
+});
+
+test("goals §5.1: wait:false posts a host /goal and returns sent, as for any message", async (t) => {
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), goalStatusRow()] })); t.after(h.close);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal clear", planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx);
+  assert.equal(r.outcome, "sent");
+  assert.equal(r.answer, undefined);
+  assert.equal(h.bodies.length, 1);
+});
+
+test("goals §5.1: an open request holds back every message but a /goal the host runs", async (t) => {
+  const asked = snapshot({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [] } });
+  const h = await goalHarness(asked, (input) => snapshot({ ...asked, items: [message("user", input), activity("goal.updated", { goal: { objective: "Ship it", status: "paused" }, change: "paused" }, { summary: "Goal paused" })] }), { hasPendingApprovals: true, chatSessionStatus: "running" });
+  t.after(h.close);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: racing() });
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, "Goal paused");
+  assert.equal((r.pending as { approvals: { requestId: string }[] }).approvals[0]!.requestId, "r1", "the request is still open, and reported");
+  // A prompt still waits for the card, on the same tab.
+  await assert.rejects(tool("send_message").run({ sessionId: "c1", text: "hi", planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
+  assert.equal(h.bodies.length, 1);
+  // Where the provider parses /goal (Claude), it is a prompt like any other.
+  const claude = await harness([chatSummary({ hasPendingApprovals: true })], asked); t.after(claude.close);
+  await assert.rejects(tool("send_message").run({ sessionId: "c1", text: "/goal Ship it", planMode: false, wait: false, timeoutMs: 1_000 }, claude.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
+});
+
+test("goals §5.1: a /goal whose route cannot be told — the capabilities unread — is refused, as plan mode is", async (t) => {
+  // Sent as a prompt, the host might run it as a command while the call waited on a turn that never starts.
+  const blind = await goalHarness(snapshot(), () => snapshot()); t.after(blind.close);
+  blind.api.on("GET", "/api/agent/providers", { status: 503, body: { code: "HOST_UNAVAILABLE", message: "down" } });
+  await assert.rejects(tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, blind.ctx),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "A /goal can't be routed for codex right now: its capabilities could not be read. Retry shortly.");
+  assert.equal(blind.bodies.length, 0, "nothing was sent");
+  // Any other text is unaffected: it needs no route.
+  blind.api.on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...snapshot(), head: { ...snapshot().head, adapter: "codex", refId: "codex", projectPath: blind.projectPath, cwd: blind.projectPath } } } });
+  assert.equal((await tool("send_message").run({ sessionId: "c1", text: "hi", planMode: false, wait: false, timeoutMs: 1_000 }, blind.ctx)).outcome, "sent");
+});
+
+test("goals §5.1: a host /goal with attachments is refused before anything is uploaded or posted", async (t) => {
+  const h = await goalHarness(snapshot(), () => snapshot()); t.after(h.close);
+  await assert.rejects(
+    tool("send_message").run({ sessionId: "c1", text: "/goal Ship it", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }], planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx),
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "A goal can't include attachments."
+  );
+  assert.equal(h.api.uploads.length, 0);
+  assert.equal(h.bodies.length, 0);
+});
+
+test("goals §5.1: on Claude a /goal is an ordinary prompt, waited on as a turn", async (t) => {
+  const h = await harness(); t.after(h.close);
+  const after = snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })], items: [message("user", "/goal Ship it", { turnId: "t2" }), message("assistant", "Goal set: Ship it", { turnId: "t2" })] });
+  let posted = false;
+  h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq: 8 } }; });
+  h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: posted ? { ...after, head: { ...after.head, projectPath: h.projectPath, cwd: h.projectPath } } : snapshot() } }));
+  const p = tool("send_message").run({ sessionId: "c1", text: "/goal Ship it", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
+  await tick();
+  h.api.emit(busEvent("session.updated", { ...done(), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "completed");
+  assert.equal(r.turnId, "t2");
+  assert.equal(r.reply, "Goal set: Ship it");
+  assert.equal(r.answer, undefined);
+});
+
+test("goals §5.1: the answer window runs from when the session is up — a cold session's start never eats it", async (t) => {
+  // After stop_session the host starts the session before it runs the command: 20 s of that are not the answer's wait.
+  let phase: "starting" | "answered" = "starting";
+  const statusRow = goalStatusRow();
+  const h = await goalHarness(snapshot({ head: head({ session: { status: "stopped", activeTurnId: null } }) }), (input) =>
+    phase === "starting"
+      ? snapshot({ head: head({ session: { status: "starting", activeTurnId: null } }), items: [message("user", input)] })
+      : snapshot({ items: [message("user", input), statusRow] }), { chatSessionStatus: "stopped" }); t.after(h.close);
+  let now = Date.parse("2026-09-22T12:00:00.000Z");
+  const p = tool("send_message").run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
+  const settled = settledFlag(p);
+  await ticks(10);
+  now += 20_000;
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ refId: "codex", chatSessionStatus: "starting" }), projectPath: h.projectPath }));
+  await ticks(10);
+  assert.equal(settled(), false, "still starting: the window has not begun");
+  phase = "answered";
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ refId: "codex" }), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, "Goal: Ship the parser (active, 2 rounds)");
+});
+
+test("goals §5.1: a pause of a paused goal, or a resume of an active one, waits a settle's worth, not the whole window", async (t) => {
+  const run = async (text: string, status: "active" | "paused") => {
+    const checked = snapshot({ goal: { objective: "Ship it", status, updatedAt: stamp(3) } });
+    const h = await goalHarness(checked, (input) => snapshot({ ...checked, items: [message("user", input)] }));
+    let now = Date.parse("2026-09-22T12:00:00.000Z");
+    const abort = new AbortController();
+    const p = tool("send_message").run({ sessionId: "c1", text, planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, signal: abort.signal, now: () => now });
+    const settled = settledFlag(p);
+    await ticks(10);
+    now += 1_000;
+    h.api.emit(busEvent("session.updated", { ...chatSummary({ refId: "codex" }), projectPath: h.projectPath }));
+    await ticks(10);
+    return { h, p, settled, abort };
+  };
+  for (const [text, status] of [["/goal pause", "paused"], ["/goal RESUME", "active"]] as const) {
+    const { h, p, settled } = await run(text, status); t.after(h.close);
+    assert.equal(settled(), true, `${text} on a ${status} goal: the host writes nothing, and the call does not sit out 15 s`);
+    const r = await p;
+    assert.equal(r.outcome, "goal"); assert.equal(r.answer, undefined); assert.ok(r.hint);
+  }
+  // The same pause on an active goal changes it: a second in, the call is still waiting for the host's row. (The
+  // client going away ends that wait, as it ends every wait: no timer outlives the test.)
+  const live = await run("/goal pause", "active"); t.after(live.h.close);
+  assert.equal(live.settled(), false);
+  live.abort.abort();
+  assert.equal((await live.p).outcome, "goal");
+});
+
+test("goals §5.1: an answer is cut by bytes, and says so, so the result keeps its cap", async (t) => {
+  // A status quoting a 4 000-character objective in three-byte characters, and a detail beside it.
+  const huge = activity("goal.status", {}, { summary: `Goal: ${"語".repeat(20_000)}` });
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), huge] })); t.after(h.close);
+  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answerTruncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(r.answer), "utf8") - 2 <= 8_192);
+  assert.ok((r.answer as string).startsWith("Goal: 語語"));
+  assert.ok(resultBytes(r) <= MAX_RESULT_BYTES);
+});
+
+test("goals §5.7: a deploy's hold row is no answer: /goal status settles on its own status row", async (t) => {
+  // The host writes one `goal.status` row when it holds a goal for a deploy; it can land between the command and
+  // its answer.
+  const held = activity("goal.status", { heldForUpdate: true }, { summary: "Goal paused for an Orquester update. It resumes by itself once the agent host has restarted." });
+  let phase = 1;
+  const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), held, ...(phase === 2 ? [goalStatusRow()] : [])] })); t.after(h.close);
+  let now = Date.parse("2026-09-22T12:00:00.000Z");
+  const p = tool("send_message").run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
+  const settled = settledFlag(p);
+  await ticks(10);
+  assert.equal(settled(), false, "the hold's row settled nothing");
+  phase = 2;
+  now += 200;
+  h.api.emit(busEvent("session.updated", { ...chatSummary({ refId: "codex" }), projectPath: h.projectPath }));
+  const r = await p;
+  assert.equal(r.outcome, "goal");
+  assert.equal(r.answer, "Goal: Ship the parser (active, 2 rounds)");
+});
+

@@ -6,6 +6,7 @@ import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
+import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -121,6 +122,7 @@ import type {
   UsageResponse,
   UsageTokensResponse
 } from "@orquester/api";
+import { SAVED_PROMPTS_CHANNEL } from "@orquester/api";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -1647,6 +1649,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       clearStoredHash(api.connection.endpoint);
       clearStoredUsername(api.connection.endpoint);
       invalidateProjectIndex();
+      resetSavedPrompts();
       set({
         api: apiWithCredential(api, ""),
         connectionStatus: "error",
@@ -1686,8 +1689,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     stopReconnect();
     closeEvents();
     // The verified project index is daemon-scoped too, and it lives outside the
-    // store (module cache) — reset it by hand with the rest.
+    // store (module cache) — reset it by hand with the rest. So are the saved
+    // prompts (`lib/saved-prompts/store.ts`).
     invalidateProjectIndex();
+    resetSavedPrompts();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
       api: new ApiClient(connection, buildTransporter(connection)),
@@ -3137,6 +3142,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         const { id } = event.payload as { id: string };
         set((state) => removeBrowser(state, id));
       }
+      return;
+    }
+    if (event.channel === SAVED_PROMPTS_CHANNEL) {
+      // The right rail's saved prompts live in their own module store; every
+      // client's change lands there (idempotently — a mutation's own answer
+      // may already have applied it, and a malformed payload is ignored).
+      applySavedPromptEvent(event);
       return;
     }
     if (event.channel !== "sessions") {

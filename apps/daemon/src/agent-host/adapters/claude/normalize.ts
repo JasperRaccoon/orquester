@@ -19,6 +19,8 @@
  */
 
 import type {
+  AgentGoal,
+  AgentGoalChange,
   ApprovalDecision,
   ApprovalOption,
   CanonicalItemType,
@@ -36,6 +38,7 @@ import type {
   TaskAgentLinkage,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
+import { isUnfinishedGoal } from "@orquester/api/agent-chat";
 import type { SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Clock, IdGen } from "../../adapter.ts";
@@ -56,6 +59,22 @@ import {
   tryParseJsonRecord
 } from "./classify.ts";
 import type { ClaudeTurnBoundary } from "./cursor.ts";
+import {
+  ClaudeGoalTracker,
+  GOAL_COMMAND_NAME,
+  GOAL_WAITING_BACKGROUND_PHASE,
+  endedGoal,
+  goalEndingOf,
+  localCommandOutputText,
+  matchGoalStopHookFeedback,
+  parseActiveGoalValue,
+  parseGoalCheckIn,
+  parseGoalCommandOutput,
+  reviseGoal,
+  type ClaudeGoalDecision,
+  type ClaudeGoalStatusRow,
+  type ClaudeTranscriptGoal
+} from "./goal.ts";
 import {
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
@@ -89,6 +108,8 @@ interface AssistantTextBlockState {
 
 /** Cap on buffered nested frames awaiting an owner (see `pendingNested`). */
 const MAX_PENDING_NESTED_FRAMES = 600;
+
+type StreamEventMessage = Extract<SDKMessage, { type: "stream_event" }>;
 
 interface ToolInFlight {
   itemId: string;
@@ -175,19 +196,6 @@ export interface ClaudeTurnState {
    * (live thread 8b9a20c2, seq 710/862/873/882 share one item id).
    */
   assistantTextBlocks: Map<string, AssistantTextBlockState>;
-  /**
-   * The content blocks each API message streamed, in stream order, keyed by
-   * the `message_start` id. The CLI then emits one complete `assistant`
-   * frame PER BLOCK, each carrying `content: [thatBlock]` — so a block's
-   * position in its frame is always 0, never its stream index. The k-th
-   * per-block frame for a message is its k-th streamed block; this is the
-   * join (`backfillAssistantTextFromSnapshot`).
-   */
-  streamedBlocks: Map<string, Array<{ index: number; type: string }>>;
-  /** Id of the message currently streaming (`message_start`), for `streamedBlocks`. */
-  currentStreamMessageId: string | null;
-  /** How many per-block frames of each message have been matched so far. */
-  snapshotBlockCursor: Map<string, number>;
   assistantTextBlockOrder: AssistantTextBlockState[];
   capturedProposedPlanKeys: Set<string>;
   latestAssistantUsage: unknown;
@@ -221,6 +229,28 @@ export interface NormalizerOptions {
    * hands it over (§4.5 "background shells").
    */
   onBackgroundShell?: (change: BackgroundShellChange) => void;
+  /**
+   * The goal the host's fold holds when this session starts (goals §5.3): the
+   * tracker is seeded from it, so a provider repeating it is no news (§6).
+   */
+  knownGoal?: AgentGoal | null;
+  /**
+   * A goal was set, replaced or restored: rows the transcript already holds
+   * belong to an earlier run, so the session moves its read position to the
+   * end (goals §6.1.4, "start at the set point").
+   */
+  onGoalSetPoint?: () => void;
+  /**
+   * `active_goal: null` — the goal is gone, and only the transcript says
+   * whether it was met, impossible or cleared (goals §6.1.6). The normaliser
+   * never touches the filesystem; the session reads it.
+   */
+  onGoalTranscriptCheck?: () => void;
+  /**
+   * A `progress` update was throttled (goals §6): the session flushes it with
+   * {@link ClaudeNormalizer.flushGoalProgress} at `dueAtMs`.
+   */
+  onGoalProgressDeferred?: (dueAtMs: number) => void;
 }
 
 /** What {@link NormalizerOptions.onBackgroundShell} reports. */
@@ -303,6 +333,9 @@ const CLAUDE_TASK_PATCH_STATUS: Record<string, RuntimeTaskStatus> = {
 const RAW_SDK_MESSAGE: RuntimeEventRawSource = "claude.sdk.message";
 const RAW_SDK_PERMISSION: RuntimeEventRawSource = "claude.sdk.permission";
 
+/** The model id the CLI stamps on every message it wrote itself rather than streamed. */
+const SYNTHETIC_MODEL = "<synthetic>";
+
 /**
  * Wire-only frames that are real but absent from the SDK's exported union, so
  * they cannot be switch cases. `command_lifecycle` alone is two or three
@@ -329,6 +362,41 @@ export class ClaudeNormalizer {
   lastAssistantUuid: string | undefined;
 
   turnState: ClaudeTurnState | undefined;
+  /**
+   * The parent API message that began streaming while NO turn was open, held
+   * frame by frame and replayed into whichever turn opens next (`beginTurn`).
+   * A turn the CLI starts by itself (a background task or subagent finished)
+   * streams its first message BEFORE the complete `assistant` frame that
+   * opens the synthetic turn, and `sendTurn` can land mid-message too.
+   * Dropping those frames lost the `message_start` join key: the text block
+   * streamed as `?:1` while its per-block frame looked for `msg_…:0`, a
+   * snapshot-only twin was minted and left open, and `completeTurn` flushed it
+   * at `result` — the opening paragraph printed again BELOW the final summary,
+   * where the timeline took it for the turn's answer and folded the real one
+   * away (live thread 19976137, seq 38664/38963; 160 turns across three
+   * threads). A text-first opening message had no twin but still surfaced only
+   * at `result`, after everything the turn said since, and every such turn
+   * lost its opening thinking.
+   */
+  private preTurnStream: { frames: StreamEventMessage[] } | undefined;
+  /**
+   * The stream join, scoped to the MESSAGE rather than the turn: the parent
+   * message streaming now (`message_start`), the content blocks it streamed in
+   * stream order, and how many of its per-block `assistant` frames were
+   * matched so far. The CLI emits one complete frame PER BLOCK, each carrying
+   * `content: [thatBlock]` — so a block's position in its frame is always 0,
+   * never its stream index; the k-th per-block frame of a message is its k-th
+   * streamed block (`backfillAssistantTextFromSnapshot`). A message can
+   * outlive the turn it started in: `sendTurn` settles a stale synthetic turn
+   * and opens the user's while the CLI's own message is still streaming. A
+   * join kept on the turn was reset under it — the block's per-block frame
+   * found nothing, minted a twin, and `result` flushed the twin below the
+   * user's answer. Pruned to the new message at each parent `message_start`:
+   * a message's per-block frames all precede its stop.
+   */
+  private streamMessageId: string | null = null;
+  private readonly streamedBlocks = new Map<string, Array<{ index: number; type: string }>>();
+  private readonly snapshotBlockCursor = new Map<string, number>();
 
   private threadStartedEmitted = false;
   private lastSessionState: RuntimeSessionState | undefined;
@@ -390,11 +458,26 @@ export class ClaudeNormalizer {
    */
   readonly turnBoundaries: ClaudeTurnBoundary[] = [];
 
+  /** The CLI's `/goal`, as this session has reported it (goals §6.1). */
+  readonly goals: ClaudeGoalTracker;
+  /**
+   * Bumped whenever a goal is set, replaced or restored. A transcript read is
+   * applied only if no goal (re)started since it was asked for: a met row of
+   * a goal's PREVIOUS run must never end the run that just began.
+   */
+  private goalEpochCount = 0;
+
   constructor(options: NormalizerOptions) {
     this.threadId = options.threadId;
     this.clock = options.clock;
     this.ids = options.ids;
     this.options = options;
+    this.goals = new ClaudeGoalTracker({ clock: options.clock, knownGoal: options.knownGoal ?? null });
+  }
+
+  /** See {@link goalEpochCount}; the session captures it when it schedules a read. */
+  get goalEpoch(): number {
+    return this.goalEpochCount;
   }
 
   // -------------------------------------------------------------------------
@@ -703,6 +786,11 @@ export class ClaudeNormalizer {
     synthetic?: boolean;
     anchorUuid?: string;
   }): RuntimeEvent[] {
+    // A synthetic turn still open is settled first, exactly as `sendTurn`
+    // settles one it finds at entry: the CLI can open one DURING `sendTurn`'s
+    // own awaits (model, mode, skill discovery). Overwritten, it never settled
+    // and its open items never closed.
+    const settled = this.turnState?.synthetic === true ? this.completeTurn("completed") : [];
     const turn: ClaudeTurnState = {
       turnId: input.turnId,
       startedAt: this.clock.nowIso(),
@@ -710,9 +798,6 @@ export class ClaudeNormalizer {
       items: [],
       assistantTextBlocks: new Map(),
       assistantTextBlockOrder: [],
-      streamedBlocks: new Map(),
-      currentStreamMessageId: null,
-      snapshotBlockCursor: new Map(),
       capturedProposedPlanKeys: new Set(),
       latestAssistantUsage: undefined,
       compactedSinceLatestAssistantUsage: false,
@@ -726,13 +811,16 @@ export class ClaudeNormalizer {
     // A turn that opens adopts every in-flight call with neither an owner nor a
     // turn: a parent call streamed while none was open. A woken parent (each
     // background agent that finishes wakes it) streams before the complete
-    // frame that opens its synthetic turn, and a user's message sent in that
-    // window opens THEIR turn first. Either way everything the call emits from
-    // here rides the turn that opened under it, so the turn's fold holds it
-    // and a rewind to before the turn removes it; what it emitted before (its
-    // start, an early input update) stays turnless. Only such a stream can
-    // have registered one — the parent's calls are settled at every turn end —
-    // and a subagent's call is its own: it never joins a parent turn.
+    // frame that opens its synthetic turn, but that message is HELD and
+    // replayed below (`replayPreTurnStream`), so its calls start on the turn
+    // that opens — the synthetic one, or a user's turn sent in that window.
+    // What is left to adopt is a call registered outside a held message: the
+    // tail of a message whose turn an interrupt ended while it still
+    // streamed. Everything such a call emits from here rides the turn that
+    // opened under it, so the turn's fold holds it and a rewind to before the
+    // turn removes it; what it emitted before (its start, an early input
+    // update) stays turnless. The parent's calls are settled at every turn
+    // end, and a subagent's call is its own: it never joins a parent turn.
     const adopted: ToolInFlight[] = [];
     for (const tool of this.inFlightTools.values()) {
       if (tool.agentId === undefined && tool.turnId === undefined) {
@@ -744,6 +832,7 @@ export class ClaudeNormalizer {
     this.turnStartMessageIds.push(anchorUuid);
     this.turnBoundaries.push({ turnId: input.turnId, uuid: anchorUuid });
     const events: RuntimeEvent[] = [
+      ...settled,
       {
         ...this.base({ turnId: input.turnId }),
         type: "turn.started",
@@ -755,17 +844,21 @@ export class ClaudeNormalizer {
     ];
     events.push(...this.sessionStateChanged("running", "turn:started"));
     events.push(...adopted.map((tool) => this.adoptedToolEvent(tool)));
+    events.push(...this.replayPreTurnStream());
     return events;
   }
 
   /**
    * The one update that tells a call's adoption (`beginTurn`): its state so
-   * far, on the turn that adopted it. The frame that opens a synthetic turn
-   * emits nothing for a call its stream already started, and the call's next
-   * rows come only with its result — a foreground `npm test` runs for minutes
-   * — so without this a running call's rows are all turnless: the MCP builds
-   * no entry for such a call (a rewind's leftover) and the GUI's live run
-   * holds only rows of the running turn. The shape is the call's own input
+   * far, on the turn that adopted it. A woken parent's first message is held
+   * and replayed into the turn that opens (`preTurnStream`), so its calls
+   * start on that turn; what is left to adopt is a parent call registered
+   * with no turn OUTSIDE a held message — the tail of a message whose turn an
+   * interrupt ended while it still streamed. The turn that opens emits
+   * nothing for it, and the call's next rows come only with its result — a
+   * foreground `npm test` runs for minutes — so without this a running call's
+   * rows are all turnless: the MCP builds no entry for such a call (a rewind's
+   * leftover) and the GUI's live run holds only rows of the running turn. The shape is the call's own input
    * update's; an input that has not parsed whole yet (the JSON streams, and a
    * `Write` can take seconds) is named by the tool alone, as the GUI reads a
    * start's "Write: {}".
@@ -788,6 +881,50 @@ export class ClaudeNormalizer {
         data: { toolName: tool.toolName, input: tool.input }
       }
     };
+  }
+
+  /**
+   * Hold a parent stream frame that arrived with no turn open (see
+   * `preTurnStream`). Only a message whose `message_start` was itself held is
+   * kept: the tail of a stream that began inside a turn — an interrupt's
+   * leftovers — is processed exactly as before. Returns whether it was held.
+   */
+  private holdPreTurnFrame(message: StreamEventMessage): boolean {
+    const type = message.event.type;
+    if (type === "message_start") {
+      this.preTurnStream = { frames: [message] };
+      return true;
+    }
+    const held = this.preTurnStream;
+    if (held === undefined) {
+      return false;
+    }
+    if (type === "message_stop") {
+      // A message that ended with no turn claiming it has no turn to join.
+      this.preTurnStream = undefined;
+      return false;
+    }
+    // Consecutive deltas of one block ride one frame, so a held message grows
+    // with its content — which the model's output limit bounds — and never
+    // with its frame count: a long first thinking block is thousands of them.
+    const last = held.frames.at(-1);
+    const merged = last !== undefined ? mergeDeltaFrames(last, message) : undefined;
+    if (merged !== undefined) {
+      held.frames[held.frames.length - 1] = merged;
+      return true;
+    }
+    held.frames.push(message);
+    return true;
+  }
+
+  /** Feed the held message into the turn that just opened (see `preTurnStream`). */
+  private replayPreTurnStream(): RuntimeEvent[] {
+    const held = this.preTurnStream;
+    this.preTurnStream = undefined;
+    if (held === undefined) {
+      return [];
+    }
+    return held.frames.flatMap((frame) => this.handleStreamEvent(frame));
   }
 
   /**
@@ -832,6 +969,8 @@ export class ClaudeNormalizer {
       // stream failure with no turn in flight. Keep the usage emission, drop
       // the lifecycle event — an untargeted `turn.completed` carries no turnId
       // and the projection would flip a turn that never existed (§4.5).
+      // A message still held for a turn that never opened ends with it.
+      this.preTurnStream = undefined;
       events.push(...this.emitThreadTokenUsage(usageSnapshot, "claude/result", result ?? { status }));
       return events;
     }
@@ -897,8 +1036,13 @@ export class ClaudeNormalizer {
   /** Every live task closed `stopped`, for a session that is going away (§3.1). */
   closeLiveTasks(): RuntimeEvent[] {
     // Frames of a subagent that was never named have nowhere to go once the
-    // turn is over; they must not outlive it.
+    // turn is over; they must not outlive it. Nor may a parent message still
+    // waiting for its turn, or the join of a stream that is going away.
     this.dropPendingNested();
+    this.preTurnStream = undefined;
+    this.streamMessageId = null;
+    this.streamedBlocks.clear();
+    this.snapshotBlockCursor.clear();
     // A session that is going away is not compacting either — and a boundary
     // still waiting for its summary must be released, never dropped.
     this.compacting = false;
@@ -1038,6 +1182,14 @@ export class ClaudeNormalizer {
     events.push(...this.releasePendingCompaction());
 
     const rawType = (message as { type?: unknown }).type;
+    if (rawType === "active_goal") {
+      // Declared by the SDK (`SDKActiveGoalMessage`) but only in its stdout
+      // union, never in `SDKMessage`, so it cannot be a switch case — and it
+      // is not bookkeeping to drop: it IS the goal (goals §6.1.6). It reached
+      // the default arm's `runtime.warning` before.
+      events.push(...this.handleActiveGoal(message));
+      return events;
+    }
     if (typeof rawType === "string" && UNDECLARED_TOP_LEVEL_TYPES.has(rawType)) {
       // Wire-only bookkeeping with no user-facing lifecycle.
       return events;
@@ -1250,15 +1402,13 @@ export class ClaudeNormalizer {
   // stream_event
   // -------------------------------------------------------------------------
 
-  private handleStreamEvent(
-    message: Extract<SDKMessage, { type: "stream_event" }>
-  ): RuntimeEvent[] {
+  private handleStreamEvent(message: StreamEventMessage): RuntimeEvent[] {
     const events: RuntimeEvent[] = [];
     const event = message.event;
     const parentToolUseId = message.parent_tool_use_id ?? undefined;
 
     // A NESTED stream frame is dropped whole. Every piece of state this
-    // method keeps — `currentStreamMessageId`, `assistantTextBlocks` keyed by
+    // method keeps — `streamMessageId`, `assistantTextBlocks` keyed by
     // `(messageId, index)`, `inFlightTools` keyed by the bare content index —
     // belongs to the PARENT's message, and a subagent's indexes restart at 0
     // just like the parent's: a nested `content_block_stop {index: 0}` closed
@@ -1273,15 +1423,22 @@ export class ClaudeNormalizer {
       return events;
     }
 
+    // A message streaming before its turn opens waits for it (`preTurnStream`).
+    if (this.turnState === undefined && this.holdPreTurnFrame(message)) {
+      return events;
+    }
+
     if (event.type === "message_start") {
-      // The join key for the per-block `assistant` frames that follow.
+      // The join key for the per-block `assistant` frames that follow; the
+      // previous message's frames all preceded its stop, so its join goes.
       const started = (event as { message?: { id?: unknown } }).message;
-      const turn = this.turnState;
-      if (turn && typeof started?.id === "string") {
-        turn.currentStreamMessageId = started.id;
-        if (!turn.streamedBlocks.has(started.id)) {
-          turn.streamedBlocks.set(started.id, []);
+      if (typeof started?.id === "string") {
+        if (!this.streamedBlocks.has(started.id)) {
+          this.streamedBlocks.clear();
+          this.snapshotBlockCursor.clear();
+          this.streamedBlocks.set(started.id, []);
         }
+        this.streamMessageId = started.id;
       }
       return events;
     }
@@ -1307,9 +1464,8 @@ export class ClaudeNormalizer {
     }
 
     if (event.type === "content_block_stop") {
-      const turn = this.turnState;
-      const block = turn?.assistantTextBlocks.get(
-        textBlockKey(turn.currentStreamMessageId, event.index)
+      const block = this.turnState?.assistantTextBlocks.get(
+        textBlockKey(this.streamMessageId, event.index)
       );
       if (block) {
         block.streamClosed = true;
@@ -1361,10 +1517,7 @@ export class ClaudeNormalizer {
         });
         return events;
       }
-      const block = this.ensureAssistantTextBlock(
-        this.turnState.currentStreamMessageId,
-        event.index
-      );
+      const block = this.ensureAssistantTextBlock(this.streamMessageId, event.index);
       if (block) {
         block.state.emittedTextDelta = true;
         events.push(...block.events);
@@ -1474,15 +1627,14 @@ export class ClaudeNormalizer {
     // Only the parent's own stream reaches here: `handleStreamEvent` drops
     // every frame carrying a `parent_tool_use_id`.
     const block = event.content_block;
-    if (this.turnState?.currentStreamMessageId) {
-      const turn = this.turnState;
-      const list = turn.streamedBlocks.get(turn.currentStreamMessageId!) ?? [];
+    if (this.streamMessageId !== null) {
+      const list = this.streamedBlocks.get(this.streamMessageId) ?? [];
       list.push({ index: event.index, type: typeof block.type === "string" ? block.type : "unknown" });
-      turn.streamedBlocks.set(turn.currentStreamMessageId!, list);
+      this.streamedBlocks.set(this.streamMessageId, list);
     }
     if (block.type === "text") {
       const entry = this.ensureAssistantTextBlock(
-        this.turnState?.currentStreamMessageId ?? null,
+        this.streamMessageId,
         event.index,
         {
           fallbackText: typeof (block as { text?: unknown }).text === "string" ? block.text : ""
@@ -1643,6 +1795,10 @@ export class ClaudeNormalizer {
   private handleUserMessage(
     message: Extract<SDKMessage, { type: "user" }>
   ): RuntimeEvent[] {
+    const goalFrame = this.goalUserFrame(message);
+    if (goalFrame !== undefined) {
+      return goalFrame;
+    }
     const events: RuntimeEvent[] = [];
     const nestedParent = message.parent_tool_use_id ?? undefined;
     let nestedOwner: string | undefined;
@@ -1982,7 +2138,19 @@ export class ClaudeNormalizer {
         turn.latestAssistantUsage = usage;
         turn.compactedSinceLatestAssistantUsage = false;
       }
-      events.push(...this.backfillAssistantTextFromSnapshot(message));
+      // A message the CLI wrote itself — a local command's output (`/goal`'s
+      // "Goal set: …" above all), an API error it phrased — never streams and
+      // never will, so it is complete the moment it arrives. Parked for the
+      // `result` like a snapshot, it stayed invisible until the whole turn
+      // ended: for a `/goal`, until the whole goal run was over (goals §6.1.1).
+      events.push(
+        ...this.backfillAssistantTextFromSnapshot(message, {
+          complete: message.message?.model === SYNTHETIC_MODEL
+        })
+      );
+      // After its text: the row says what the CLI printed, the goal row what
+      // it means (goals §6.1.2).
+      events.push(...this.goalCommandEvents(message));
     }
 
     this.lastAssistantUuid = message.uuid;
@@ -1992,10 +2160,12 @@ export class ClaudeNormalizer {
   /**
    * A text block that never streamed (no `includePartialMessages`, or a block
    * the stream closed before the deltas arrived) is backfilled from the
-   * assistant snapshot so it is never an empty bubble.
+   * assistant snapshot so it is never an empty bubble. With `complete` the
+   * block is also finished here, text and all, instead of at the `result`.
    */
   private backfillAssistantTextFromSnapshot(
-    message: Extract<SDKMessage, { type: "assistant" }>
+    message: Extract<SDKMessage, { type: "assistant" }>,
+    options?: { complete?: boolean }
   ): RuntimeEvent[] {
     const turn = this.turnState;
     const content: unknown = message.message?.content;
@@ -2012,18 +2182,17 @@ export class ClaudeNormalizer {
     // by array position, which IS the stream index there.
     const messageId = (message.message as { id?: unknown } | undefined)?.id;
     const streamed =
-      typeof messageId === "string" ? turn.streamedBlocks.get(messageId) : undefined;
+      typeof messageId === "string" ? this.streamedBlocks.get(messageId) : undefined;
     const perBlockFrame = content.length === 1 && streamed !== undefined && streamed.length > 0;
     // The frame's own id is the join key. A frame with no id at all (not a
     // shape this CLI emits) falls back to the message that is streaming.
-    const blockMessageId =
-      typeof messageId === "string" ? messageId : turn.currentStreamMessageId;
+    const blockMessageId = typeof messageId === "string" ? messageId : this.streamMessageId;
     let index = 0;
     for (const entry of content) {
       let streamIndex = index;
       if (perBlockFrame && typeof messageId === "string") {
-        const cursor = turn.snapshotBlockCursor.get(messageId) ?? 0;
-        turn.snapshotBlockCursor.set(messageId, cursor + 1);
+        const cursor = this.snapshotBlockCursor.get(messageId) ?? 0;
+        this.snapshotBlockCursor.set(messageId, cursor + 1);
         const candidate = streamed[cursor];
         const blockType =
           entry !== null && typeof entry === "object"
@@ -2059,6 +2228,15 @@ export class ClaudeNormalizer {
       });
       if (created) {
         events.push(...created.events);
+        if (options?.complete === true) {
+          events.push(
+            ...this.completeAssistantTextBlock(created.state, {
+              force: true,
+              method: "claude/assistant",
+              payload: message
+            })
+          );
+        }
       }
       index += 1;
     }
@@ -3327,6 +3505,472 @@ export class ClaudeNormalizer {
   }
 
   // -------------------------------------------------------------------------
+  // Goals (goals §6.1)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The `/goal` command's own output (goals §6.1.2): the `<synthetic>` frame
+   * whose `local_command_run.command` is `goal`. Its text has already been
+   * rendered (§6.1.1); this is what it means for the goal. A refusal, and any
+   * other text, means nothing.
+   */
+  private goalCommandEvents(message: Extract<SDKMessage, { type: "assistant" }>): RuntimeEvent[] {
+    const run = (message as { local_command_run?: unknown }).local_command_run;
+    if (
+      run === null ||
+      typeof run !== "object" ||
+      (run as { command?: unknown }).command !== GOAL_COMMAND_NAME
+    ) {
+      return [];
+    }
+    const text = localCommandOutputText(
+      (message.message as { content?: unknown } | undefined)?.content,
+      (message as { local_command_source?: unknown }).local_command_source
+    );
+    if (text === undefined) {
+      return [];
+    }
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    const output = parseGoalCommandOutput(text, running?.objective);
+    const turnId = this.activeTurnId;
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/assistant/goal",
+      messageType: "assistant",
+      payload: message
+    };
+    switch (output.kind) {
+      case "set":
+        return this.goalEvents({
+          change: running !== null && running.objective !== output.objective ? "replaced" : "set",
+          goal: {
+            objective: output.objective,
+            status: "active",
+            rounds: 0,
+            setAt: this.clock.nowIso()
+          },
+          turnId,
+          raw,
+          source: "stdout"
+        });
+      case "cleared":
+        return this.goalEvents({
+          change: "cleared",
+          goal: null,
+          previous:
+            running !== null && running.objective === output.objective
+              ? endedGoal(running, "cleared")
+              : { objective: output.objective, status: "active" },
+          turnId,
+          raw,
+          source: "stdout"
+        });
+      case "none":
+        // The CLI has no goal. Only news when this session thought it had one.
+        return running === null
+          ? []
+          : this.goalEvents({
+              change: "cleared",
+              goal: null,
+              previous: endedGoal(running, "cleared"),
+              turnId,
+              raw,
+              source: "stdout"
+            });
+      case "active":
+        if (running === null || running.objective !== output.objective) {
+          return this.goalEvents({
+            change: "restored",
+            goal: {
+              objective: output.objective,
+              status: "active",
+              rounds: output.rounds,
+              ...(output.lastCheck !== undefined ? { lastCheck: output.lastCheck } : {})
+            },
+            turnId,
+            raw,
+            source: "stdout"
+          });
+        }
+        return this.goalEvents({
+          change: "progress",
+          goal: reviseGoal(running, { rounds: output.rounds, lastCheck: output.lastCheck ?? null }),
+          turnId,
+          raw,
+          source: "stdout"
+        });
+      case "other":
+        return [];
+      default: {
+        const exhaustive: never = output;
+        void exhaustive;
+        return [];
+      }
+    }
+  }
+
+  /**
+   * The CLI's goal frames among the `user` messages (goals §6.1.3): a
+   * main-thread, `isSynthetic`, plain-string body. `undefined` for anything
+   * else — including another hook's Stop-hook feedback — which keeps the
+   * ordinary handling. Neither frame is ever a conversation item: the
+   * check-in and a check's verdict are the CLI talking to its model.
+   */
+  private goalUserFrame(message: Extract<SDKMessage, { type: "user" }>): RuntimeEvent[] | undefined {
+    if (
+      message.isSynthetic !== true ||
+      (message.parent_tool_use_id !== null && message.parent_tool_use_id !== undefined)
+    ) {
+      return undefined;
+    }
+    const content: unknown = (message.message as { content?: unknown } | undefined)?.content;
+    if (typeof content !== "string") {
+      return undefined;
+    }
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/user/goal",
+      messageType: "user",
+      payload: message
+    };
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    const checkIn = parseGoalCheckIn(content);
+    if (checkIn !== undefined) {
+      // The evaluation was deferred for background work, long enough for the
+      // CLI to nudge the model about it.
+      if (running === null) {
+        return [];
+      }
+      return this.goalEvents({
+        change: "progress",
+        goal: reviseGoal(running, {
+          phase: checkIn.backgroundRunning ? GOAL_WAITING_BACKGROUND_PHASE : null
+        }),
+        turnId: this.activeTurnId,
+        raw,
+        source: "stdout"
+      });
+    }
+    if (running === null) {
+      return undefined;
+    }
+    const feedback = matchGoalStopHookFeedback(content, running.objective);
+    if (feedback === undefined) {
+      return undefined;
+    }
+    // A "not met" check: the turn goes on, one round more.
+    return this.goalEvents({
+      change: "checked",
+      goal: reviseGoal(running, {
+        rounds: (running.rounds ?? 0) + 1,
+        lastCheck: feedback.reason.length > 0 ? feedback.reason : null,
+        phase: null
+      }),
+      turnId: this.activeTurnId,
+      raw,
+      source: "stdout"
+    });
+  }
+
+  /**
+   * `active_goal` (goals §6.1.6). Only a remote-mode CLI writes it, but it is
+   * the goal whenever it comes: a value moves the tracked goal (`checked` when
+   * a new round brought a verdict), names a goal this session did not know
+   * (`restored`), or — `null` — says the goal is gone, which only the
+   * transcript can say more about.
+   */
+  private handleActiveGoal(message: SDKMessage): RuntimeEvent[] {
+    const value = parseActiveGoalValue((message as { value?: unknown }).value);
+    if (value === undefined) {
+      return [];
+    }
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    if (value === null) {
+      if (running !== null) {
+        this.options.onGoalTranscriptCheck?.();
+      }
+      return [];
+    }
+    const turnId = this.activeTurnId;
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/active_goal",
+      messageType: "active_goal",
+      payload: message
+    };
+    if (running === null || running.objective !== value.condition) {
+      return this.goalEvents({
+        change: "restored",
+        goal: {
+          objective: value.condition,
+          status: "active",
+          rounds: value.iterations,
+          ...(value.lastReason !== undefined ? { lastCheck: value.lastReason } : {}),
+          ...(value.setAt !== undefined ? { setAt: value.setAt } : {})
+        },
+        turnId,
+        raw,
+        source: "stdout"
+      });
+    }
+    const checked = value.iterations > (running.rounds ?? 0) && value.lastReason !== undefined;
+    return this.goalEvents({
+      change: checked ? "checked" : "progress",
+      goal: reviseGoal(running, {
+        rounds: value.iterations,
+        lastCheck: value.lastReason ?? null,
+        ...(checked ? { phase: null } : {})
+      }),
+      turnId,
+      raw,
+      source: "stdout"
+    });
+  }
+
+  /**
+   * What the CLI's transcript said after a turn ended (goals §6.1.4): a met,
+   * impossible or error-cleared row of the running goal ends it, and — at a
+   * turn end — a goal still running is `waiting-background` exactly while
+   * background work was live when the turn ended, because the CLI skips the
+   * evaluation then. `epoch` is {@link goalEpoch} as it was when the read was
+   * asked for; a goal (re)started since makes the whole read moot.
+   */
+  applyGoalTranscriptRows(
+    rows: readonly ClaudeGoalStatusRow[],
+    input: { turnId?: string; backgroundLive: boolean; atTurnEnd: boolean; epoch?: number }
+  ): RuntimeEvent[] {
+    if (input.epoch !== undefined && input.epoch !== this.goalEpochCount) {
+      return [];
+    }
+    const events: RuntimeEvent[] = [];
+    for (const row of rows) {
+      const tracked = this.goals.goal;
+      if (tracked === null || !isUnfinishedGoal(tracked)) {
+        break;
+      }
+      const ending = row.condition === tracked.objective ? goalEndingOf(row) : undefined;
+      if (ending === undefined) {
+        // A set or post-compaction sentinel, or a check stdout already told.
+        continue;
+      }
+      events.push(
+        ...this.goalEvents({
+          change: ending,
+          goal: null,
+          previous: endedGoal(tracked, ending, row),
+          turnId: input.turnId,
+          raw: {
+            source: RAW_SDK_MESSAGE,
+            method: "claude/transcript/goal_status",
+            payload: row
+          },
+          source: "transcript"
+        })
+      );
+    }
+    const tracked = this.goals.goal;
+    if (input.atTurnEnd && tracked !== null && isUnfinishedGoal(tracked)) {
+      const phase = input.backgroundLive ? GOAL_WAITING_BACKGROUND_PHASE : undefined;
+      if (tracked.phase !== phase) {
+        events.push(
+          ...this.goalEvents({
+            change: "progress",
+            goal: reviseGoal(tracked, { phase: phase ?? null }),
+            turnId: input.turnId,
+            raw: {
+              source: RAW_SDK_MESSAGE,
+              method: "claude/goal/turn-end",
+              payload: { backgroundLive: input.backgroundLive }
+            },
+            source: "transcript"
+          })
+        );
+      }
+    }
+    return events;
+  }
+
+  /**
+   * A resumed session's goal, against the fold's (goals §6.1.5). `--resume`
+   * re-arms whatever the transcript's last `goal_status` row left running and
+   * says nothing about it, so the comparison is the only news there will be:
+   * a goal the CLI re-arms but the fold lacks is `restored`; the fold's goal
+   * that the transcript ended is `achieved`/`failed`/`cleared`; the fold's
+   * goal with no row at all is `cleared`. None of it belongs to a turn.
+   */
+  reconcileTranscriptGoal(found: ClaudeTranscriptGoal, options?: { epoch?: number }): RuntimeEvent[] {
+    if (options?.epoch !== undefined && options.epoch !== this.goalEpochCount) {
+      return [];
+    }
+    const tracked = this.goals.goal;
+    const running = tracked !== null && isUnfinishedGoal(tracked) ? tracked : null;
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/transcript/restore",
+      payload: found
+    };
+    switch (found.kind) {
+      case "active":
+        if (running === null || running.objective !== found.objective) {
+          return this.goalEvents({
+            change: "restored",
+            goal: { objective: found.objective, status: "active", rounds: 0 },
+            turnId: undefined,
+            raw,
+            source: "transcript"
+          });
+        }
+        // The same goal — in a new process, which has nothing in the
+        // background, so a waiting phase from the last one is stale.
+        return running.phase === GOAL_WAITING_BACKGROUND_PHASE
+          ? this.goalEvents({
+              change: "progress",
+              goal: reviseGoal(running, { phase: null }),
+              turnId: undefined,
+              raw,
+              source: "transcript"
+            })
+          : [];
+      case "ended": {
+        if (running === null) {
+          return [];
+        }
+        const ending =
+          found.row.condition === running.objective ? (goalEndingOf(found.row) ?? "cleared") : "cleared";
+        return this.goalEvents({
+          change: ending,
+          goal: null,
+          previous: endedGoal(running, ending, ending === "cleared" ? undefined : found.row),
+          turnId: undefined,
+          raw,
+          source: "transcript"
+        });
+      }
+      case "none":
+        return running === null
+          ? []
+          : this.goalEvents({
+              change: "cleared",
+              goal: null,
+              previous: endedGoal(running, "cleared"),
+              turnId: undefined,
+              raw,
+              source: "transcript"
+            });
+      default: {
+        const exhaustive: never = found;
+        void exhaustive;
+        return [];
+      }
+    }
+  }
+
+  /** A throttled `progress`, once it is due (goals §6). */
+  flushGoalProgress(): RuntimeEvent[] {
+    return this.goalDecisionEvents(this.goals.flushProgress(), this.activeTurnId, {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/goal/progress",
+      payload: { goal: this.goals.goal }
+    });
+  }
+
+  /**
+   * The goal as this session ends (goals §6): the CLI's background work dies
+   * with its process, so a `waiting-background` phase is dropped, and a
+   * `progress` the throttle was holding goes out — both NOW, unthrottled,
+   * because the flush timer goes with the session. The session's teardown
+   * calls this before `session.exited`, which nothing may follow.
+   */
+  goalAtSessionEnd(): RuntimeEvent[] {
+    const tracked = this.goals.goal;
+    if (tracked === null || !isUnfinishedGoal(tracked)) {
+      return [];
+    }
+    return this.goalEvents({
+      change: "progress",
+      goal:
+        tracked.phase === GOAL_WAITING_BACKGROUND_PHASE ? reviseGoal(tracked, { phase: null }) : tracked,
+      turnId: undefined,
+      raw: {
+        source: RAW_SDK_MESSAGE,
+        method: "claude/goal/session-end",
+        payload: { goal: tracked }
+      },
+      source: "session",
+      immediate: true
+    });
+  }
+
+  /**
+   * Every goal update goes through here: the tracker decides, this builds.
+   * `turnId` is explicit — a frame's update belongs to the turn in flight, a
+   * transcript read's to the turn that ended, a resume's to none.
+   *
+   * `source` says where the news came from. A goal update the CLI's
+   * **stdout** caused — one that went out, or a run that starts — is the
+   * latest word about the goal, so every transcript read asked for before it
+   * is moot ({@link goalEpoch}): a slow resume scan must never resurrect a
+   * goal the user has just cleared. A stdout frame that changed nothing, or
+   * a progress the throttle holds back, is not news and moves nothing — it
+   * must not void a verdict re-read still owed. A stdout set, replace or
+   * restore starts a run, judged from here on (`onGoalSetPoint`). What the
+   * **transcript** says moves neither: it IS the read, and the resume scan's
+   * `restored` FOUND the CLI's run, whose set point its end already is.
+   */
+  private goalEvents(input: {
+    change: AgentGoalChange;
+    goal: AgentGoal | null;
+    previous?: AgentGoal;
+    turnId: string | undefined;
+    raw: RuntimeEventRaw;
+    source: "stdout" | "transcript" | "session";
+    immediate?: boolean;
+  }): RuntimeEvent[] {
+    const decision = this.goals.apply(input.change, input.goal, input.previous, {
+      ...(input.immediate === true ? { immediate: true } : {})
+    });
+    if (input.source === "stdout") {
+      const startsRun =
+        input.change === "set" || input.change === "replaced" || input.change === "restored";
+      // Only real news moves the epoch: a frame that changed nothing (the
+      // same check-in again) must not void a read still owed — the turn-end
+      // re-read waiting for a verdict above all — and a progress the throttle
+      // holds back is not news until it goes out.
+      if (startsRun || decision.kind === "emit") {
+        this.goalEpochCount += 1;
+      }
+      if (startsRun) {
+        this.options.onGoalSetPoint?.();
+      }
+    }
+    return this.goalDecisionEvents(decision, input.turnId, input.raw);
+  }
+
+  private goalDecisionEvents(
+    decision: ClaudeGoalDecision,
+    turnId: string | undefined,
+    raw: RuntimeEventRaw
+  ): RuntimeEvent[] {
+    if (decision.kind === "deferred") {
+      this.options.onGoalProgressDeferred?.(decision.dueAtMs);
+      return [];
+    }
+    if (decision.kind === "unchanged") {
+      return [];
+    }
+    return [
+      {
+        ...this.base({ turnId, raw }),
+        type: "thread.goal.updated",
+        payload: decision.payload
+      }
+    ];
+  }
+
+  // -------------------------------------------------------------------------
   // Token usage plumbing
   // -------------------------------------------------------------------------
 
@@ -3541,6 +4185,46 @@ export function extractExitPlanModePlan(
 /** `assistantTextBlocks` key: the owning API message, then the content index. */
 function textBlockKey(messageId: string | null | undefined, index: number): string {
   return `${messageId ?? "?"}:${index}`;
+}
+
+/** The text field each mergeable delta kind carries. */
+const MERGEABLE_DELTA_FIELDS: Readonly<Record<string, string>> = {
+  text_delta: "text",
+  thinking_delta: "thinking",
+  input_json_delta: "partial_json"
+};
+
+/**
+ * Two consecutive deltas of the same block and kind as ONE frame, or
+ * `undefined` when they cannot merge. Replaying the merged frame emits exactly
+ * what the two would have, joined (see `preTurnStream`).
+ */
+function mergeDeltaFrames(
+  previous: StreamEventMessage,
+  next: StreamEventMessage
+): StreamEventMessage | undefined {
+  const before = previous.event as { type?: unknown; index?: unknown; delta?: Record<string, unknown> };
+  const after = next.event as { type?: unknown; index?: unknown; delta?: Record<string, unknown> };
+  if (
+    before.type !== "content_block_delta" ||
+    after.type !== "content_block_delta" ||
+    before.index !== after.index ||
+    before.delta === undefined ||
+    after.delta === undefined ||
+    before.delta.type !== after.delta.type
+  ) {
+    return undefined;
+  }
+  const field = MERGEABLE_DELTA_FIELDS[String(before.delta.type)];
+  const head = field !== undefined ? before.delta[field] : undefined;
+  const tail = field !== undefined ? after.delta[field] : undefined;
+  if (field === undefined || typeof head !== "string" || typeof tail !== "string") {
+    return undefined;
+  }
+  return {
+    ...previous,
+    event: { ...before, delta: { ...before.delta, [field]: head + tail } }
+  } as StreamEventMessage;
 }
 
 /** The shell item's fixed title; the command itself rides `detail`. */

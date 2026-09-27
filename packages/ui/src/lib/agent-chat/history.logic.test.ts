@@ -1120,6 +1120,18 @@ describe("rowIdForTurn", () => {
     const rows = rowsOf([message("user", "one", { id: "u1" })]);
     assert.equal(rowIdForTurn(rows, "t7", "u7"), null);
   });
+
+  it("a goal marker is a row its turn owns (goals §8.4)", () => {
+    const rows = rowsOf([
+      message("user", "other", { id: "u0" }),
+      activity(
+        "goal.updated",
+        { goal: { objective: "Make CI green", status: "active" }, change: "set" },
+        { id: "g1", turnId: "t1", tone: "info", summary: "Goal set: Make CI green", createdAt: stamp(20) }
+      )
+    ]);
+    assert.equal(rowIdForTurn(rows, "t1", null), "g1");
+  });
 });
 
 describe("historyErrorMessage", () => {
@@ -1209,6 +1221,33 @@ describe("page rows above the live window", () => {
     const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, withPages(input, [older, page]));
 
     assert.deepEqual(ids(mergeTimelineRows(rows, live)), ["u0", "u1", "a1", "u2", "a2", "u3", "a3"]);
+  });
+
+  it("drops an old Claude log's re-emitted copy from the history rows when the store asks", () => {
+    // The pages are where the copies older hosts wrote live (AGENTS.md "A turn
+    // the CLI starts by itself…"); the store asks for the repair on a Claude
+    // thread, exactly as it does for the window.
+    const { input } = conversation();
+    const opening = "All checks are now clean.";
+    const page = historyPage({
+      items: [
+        message("user", "go", { id: "u9", createdAt: stamp(1) }),
+        message("assistant", opening, { id: "o9", turnId: "t9", createdAt: stamp(2) }),
+        message("assistant", "The real answer.", { id: "f9", turnId: "t9", createdAt: stamp(3) }),
+        message("assistant", opening, { id: "c9", turnId: "t9", createdAt: stamp(4) })
+      ]
+    });
+    const project = (dropRepeatedAssistantMessages: boolean) =>
+      projectHistoryRows(EMPTY_HISTORY_ROWS, { ...withPages(input, [page]), dropRepeatedAssistantMessages }).rows;
+    const answerOf = (rows: readonly AgentChatTimelineRow[]) =>
+      rows.flatMap((row) =>
+        (row.kind === "message" && row.showAssistantMeta) || row.kind === "assistant-meta" ? [row.message.id] : []
+      );
+
+    const repaired = project(true);
+    assert.deepEqual(answerOf(repaired), ["f9"], "the real answer closes the turn");
+    assert.ok(!ids(repaired).includes("c9"), "the copy is gone");
+    assert.deepEqual(answerOf(project(false)), ["c9"], "unrepaired, the copy would be the answer");
   });
 
   it("hands the live rows back untouched when no page is loaded", () => {

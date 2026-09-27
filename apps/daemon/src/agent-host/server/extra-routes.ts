@@ -28,8 +28,9 @@ export const agentHostExtraRoutes = {
     `${thread(threadId)}/attachments/${encodeURIComponent(attachmentId)}`,
 
   /**
-   * The six derived `SessionSummary` fields of §6.4. `backgroundLiveness` is
-   * in-memory in the host, so the daemon cannot compute it from the log.
+   * The seven derived `SessionSummary` fields of §6.4 (goals §4.7 added
+   * `goal`). `backgroundLiveness` is in-memory in the host, so the daemon
+   * cannot compute it from the log.
    */
   summary: (threadId: string): string => `${thread(threadId)}/summary`
 } as const;
@@ -48,7 +49,7 @@ export interface AgentHostPendingRequest {
 }
 
 /**
- * `GET …/summary`. The six §6.4 fields the daemon hangs on `SessionSummary`,
+ * `GET …/summary`. The seven §6.4 fields the daemon hangs on `SessionSummary`,
  * plus the open requests behind two of those booleans.
  */
 export interface AgentHostThreadSummary extends AgentChatSessionSummaryFields {

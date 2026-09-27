@@ -48,6 +48,7 @@ export {
 } from "./RewindControl";
 
 export {
+  COMPOSER_NOT_MOUNTED_REASON,
   composerHandle,
   focusComposer,
   insertComposerText,
@@ -56,7 +57,9 @@ export {
   restoreComposerFailedSend,
   returnComposerMessage,
   stageComposerAttachment,
-  type ComposerHandle
+  submitComposerText,
+  type ComposerHandle,
+  type ComposerSubmitResult
 } from "./composer-bridge";
 
 export {
@@ -84,6 +87,7 @@ export {
   compactCommandAvailable,
   formatSkillDisplayName,
   isProviderSkillUserInvocable,
+  menuItemAction,
   menuItemReplacement,
   providerCommandDescription,
   providerCommandsForSlashMenu,

@@ -567,7 +567,13 @@ export async function startAgentHost(
     isAllowedCwd,
     onStop: async (): Promise<AgentHostStopResponse> => {
       // The intentional stop of §3.3: write every continuation marker for a
-      // running thread with a usable cursor before acknowledging the request.
+      // running thread with a usable cursor — where its project opted in — and,
+      // goals §5.5, the goal resume mark (`resumeGoalAfterRestart`) for every
+      // thread whose goal is continuing on a live session with a usable cursor,
+      // no opt-in needed, so the next host resumes its session after the gate —
+      // all before acknowledging the request. Marking also tells the host it is
+      // going away: a goal resume still owed from the previous boot keeps its
+      // mark rather than start a provider child now.
       // Teardown starts from `afterStopResponse` below; scheduling it here as
       // a microtask raced the route's own `sendJson()` and produced the socket
       // hang-up that forced the 2026-09-23 deploy handover.
@@ -611,6 +617,9 @@ export async function startAgentHost(
       );
     } catch (error) {
       logger.warn("agent-host: the thread index is unavailable", error);
+      // Settled as unavailable: left unopened, it would answer "catching up"
+      // for the life of the host.
+      threadIndex.open(createUnavailableThreadIndex());
       return;
     }
     void catchUpThreadIndex(threadIndex).catch((error: unknown) => {
@@ -631,29 +640,38 @@ export async function startAgentHost(
    */
   const catchUpThreadIndex = async (index: ThreadIndex): Promise<void> => {
     if (!index.available) return;
-    let threadIds: string[];
+    // Begun before the first await, so no read can find the file open and the
+    // walk not started: until a thread's own catch-up has run, a thread the
+    // index is behind on reads `catching-up` (the prompt list answers
+    // `catchingUp`), not as complete or as left behind.
+    const sweep = index.beginCatchUpSweep();
     try {
-      threadIds = await store.listThreads();
-    } catch (error) {
-      logger.warn("agent-host: the thread index catch-up could not list threads", error);
-      return;
-    }
-    for (const threadId of threadIds) {
-      if (stopping) return;
+      let threadIds: string[];
       try {
-        const head = await store.loadHead(threadId);
-        if (head === null) continue;
-        await index.catchUp({
-          threadId,
-          projectPath: head.projectPath,
-          title: head.title,
-          logSeq: await store.lastSeq(threadId),
-          read: (cursor) => store.readEventsFrom(threadId, cursor)
-        });
+        threadIds = await store.listThreads();
       } catch (error) {
-        if (stopping) return;
-        logger.warn(`agent-host: the thread index catch-up failed for ${threadId}`, error);
+        logger.warn("agent-host: the thread index catch-up could not list threads", error);
+        return;
       }
+      for (const threadId of threadIds) {
+        if (stopping) return;
+        try {
+          const head = await store.loadHead(threadId);
+          if (head === null) continue;
+          await index.catchUp({
+            threadId,
+            projectPath: head.projectPath,
+            title: head.title,
+            logSeq: await store.lastSeq(threadId),
+            read: (cursor) => store.readEventsFrom(threadId, cursor)
+          });
+        } catch (error) {
+          if (stopping) return;
+          logger.warn(`agent-host: the thread index catch-up failed for ${threadId}`, error);
+        }
+      }
+    } finally {
+      sweep.end();
     }
   };
 
@@ -831,6 +849,15 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
     latestRevertSeq: (threadId) => target.latestRevertSeq(threadId),
     turnByPrompt: (threadId, messageId) => target.turnByPrompt(threadId, messageId),
     search: (input) => target.search(input),
+    // Before the file opens, every thread is catching up: it opens on the
+    // loop's next turn, and its catch-up starts right after.
+    coverage: (threadId, logSeq) =>
+      opened
+        ? target.coverage(threadId, logSeq)
+        : Promise.resolve(closed ? "unavailable" : "catching-up"),
+    beginCatchUpSweep: () => target.beginCatchUpSweep(),
+    prompts: (threadId, input) => target.prompts(threadId, input),
+    prompt: (threadId, messageId) => target.prompt(threadId, messageId),
     stop: async (): Promise<void> => {
       // Like `close`: an index opened after this is closed on arrival.
       closed = true;

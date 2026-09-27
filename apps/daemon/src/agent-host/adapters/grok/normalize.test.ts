@@ -1547,11 +1547,11 @@ test("a child session's listing never ends the parent's tasks", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Loops and goals (fixtures 29, 30): the teardown and a second run
+// Loops (fixture 29): the teardown and a second run. A goal (fixture 30) is
+// the thread's goal, not a roster row: `goal.test.ts`.
 // ---------------------------------------------------------------------------
 
 const LOOP_ID = "01a0de9b-e17c-7fa0-83dc-a436461e59b5";
-const GOAL_ID = "18745eb4-3b61-4f0c-9a5e-4dc7dd2087ed";
 
 /** One scheduler report, shaped as fixture 29 records it. */
 function scheduler(grok: GrokNormalizer, sessionUpdate: string, extra: Record<string, unknown> = {}): RuntimeEvent[] {
@@ -1568,117 +1568,41 @@ function scheduler(grok: GrokNormalizer, sessionUpdate: string, extra: Record<st
   });
 }
 
-/** One `goal_updated`, shaped as fixture 30 records it. */
-function goalUpdate(grok: GrokNormalizer, fields: Record<string, unknown>): RuntimeEvent[] {
-  return grok.handleXaiNotification("_x.ai/session_notification", {
-    sessionId: SESSION,
-    update: {
-      sessionUpdate: "goal_updated",
-      goal_id: GOAL_ID,
-      objective: "Create goal.txt",
-      status: "active",
-      phase: "executing",
-      token_budget: 20000,
-      tokens_used: 0,
-      ...fields
-    }
-  });
-}
-
-test("the session's end closes a live loop and goal; a later fire notes itself, the CLI re-creating it is a new run", () => {
+test("the session's end closes a live loop; a later fire notes itself, the CLI re-creating it is a new run", () => {
   const grok = normalizer();
   assert.deepEqual(statuses(scheduler(grok, "scheduled_task_created")), [["task.started", LOOP_ID, undefined]]);
-  assert.deepEqual(statuses(goalUpdate(grok, {})), [["task.started", `goal:${GOAL_ID}`, undefined]]);
 
   const closed = only(grok.stopBackgroundTasks(), "task.completed");
   assert.deepEqual(
     closed.map((event) => [event.payload.taskId, event.payload.status]),
-    [
-      [LOOP_ID, "stopped"],
-      [`goal:${GOAL_ID}`, "stopped"]
-    ]
+    [[LOOP_ID, "stopped"]]
   );
 
   // The process lived on (a Stop): the CLI's later reports note themselves on
-  // the ended rows — no start, which would reopen a row the user just stopped
-  // — and their ends end nothing twice.
+  // the ended row — no start, which would reopen a row the user just stopped
+  // — and its end ends nothing twice.
   assert.deepEqual(statuses(scheduler(grok, "scheduled_task_fired", { subagent_id: "sub-1" })), [
     ["task.progress", LOOP_ID, undefined]
   ]);
   assert.deepEqual(scheduler(grok, "scheduled_task_deleted", { reason: "deleted" }), []);
-  assert.deepEqual(goalUpdate(grok, {}), [], "an unchanged active tick after the adapter's end: nothing");
-  assert.deepEqual(statuses(goalUpdate(grok, { planning: true })), [["task.progress", `goal:${GOAL_ID}`, undefined]]);
-  assert.deepEqual(goalUpdate(grok, { status: "paused" }), [], "the CLI's own end, after the adapter's: no row");
 
-  // Re-created by the CLI, and resumed after the CLI's own end: new runs.
+  // Re-created by the CLI: a new run.
   const again = only(scheduler(grok, "scheduled_task_created"), "task.started");
   assert.equal(again[0]?.payload.toolUseId, `loop-run:${LOOP_ID}:launch-1:2`);
-  const resumed = only(goalUpdate(grok, {}), "task.started");
-  assert.equal(resumed[0]?.payload.toolUseId, `goal-run:${GOAL_ID}:launch-1:2`);
 });
 
-test("an end the user did not choose says why on a live loop's and goal's closing rows; the user's end and a Stop say nothing", () => {
-  // A deploy, a restart or the CLI's exit ends a `/loop` and a `/goal` — they
-  // live in the CLI — and a bare "Stopped" read as if the user had pressed it.
+test("an end the user did not choose says why on a live loop's closing row; the user's end and a Stop say nothing", () => {
+  // A deploy, a restart or the CLI's exit ends a `/loop` — it lives in the
+  // CLI — and a bare "Stopped" read as if the user had pressed it.
   for (const note of ["Ended when the agent host stopped.", "Ended when the session restarted.", undefined]) {
     const grok = normalizer();
     scheduler(grok, "scheduled_task_created");
-    goalUpdate(grok, {});
     const closed = only(grok.stopBackgroundTasks(note === undefined ? {} : { ended: note }), "task.completed");
     assert.deepEqual(
       closed.map((event) => [event.payload.taskId, event.payload.status, event.payload.summary]),
-      [
-        [LOOP_ID, "stopped", note],
-        [`goal:${GOAL_ID}`, "stopped", note]
-      ]
+      [[LOOP_ID, "stopped", note]]
     );
   }
-});
-
-test("a goal ends by the status it leaves active in: completed with its summary, cleared stopped, a new goal replacing it", () => {
-  const grok = normalizer();
-  goalUpdate(grok, {});
-  const done = only(goalUpdate(grok, { status: "completed", result_summary: "goal.txt holds ok" }), "task.completed");
-  assert.deepEqual(done.map((event) => [event.payload.status, event.payload.summary]), [["completed", "goal.txt holds ok"]]);
-
-  const other = normalizer();
-  goalUpdate(other, {});
-  // `/goal clear` empties every id and text (fixture 30).
-  const cleared = only(goalUpdate(other, { goal_id: "", objective: "", status: "cleared", phase: "idle" }), "task.completed");
-  assert.deepEqual(cleared.map((event) => [event.payload.status, event.payload.summary]), [["stopped", "Cleared"]]);
-
-  const third = normalizer();
-  goalUpdate(third, {});
-  const replaced = goalUpdate(third, { goal_id: "another-goal", objective: "Something else" });
-  assert.deepEqual(statuses(replaced), [
-    ["task.completed", `goal:${GOAL_ID}`, "stopped"],
-    ["task.started", "goal:another-goal", undefined]
-  ]);
-});
-
-test("a goal a new one replaces ends with its OWN token count, never the new goal's", () => {
-  const grok = normalizer();
-  goalUpdate(grok, {});
-  goalUpdate(grok, { tokens_used: 4200, last_event: "worker_round" });
-  goalUpdate(grok, { tokens_used: 4800 });
-  const replaced = only(
-    goalUpdate(grok, { goal_id: "another-goal", objective: "Something else", tokens_used: 0 }),
-    "task.completed"
-  );
-  assert.deepEqual(
-    replaced.map((event) => [event.payload.taskId, event.payload.summary, event.payload.usage]),
-    [[`goal:${GOAL_ID}`, "Replaced by a new goal", { totalTokens: 4800 }]],
-    "the replaced goal's own latest count"
-  );
-
-  // One that never reported a count carries none rather than the new goal's.
-  const quiet = normalizer();
-  goalUpdate(quiet, { tokens_used: undefined });
-  const second = only(
-    goalUpdate(quiet, { goal_id: "another-goal", objective: "Something else", tokens_used: 900 }),
-    "task.completed"
-  );
-  assert.deepEqual(second.map((event) => event.payload.usage), [undefined]);
 });
 
 test("a loop's deletion by expiry completes it; a report of a loop never seen created starts its row first", () => {

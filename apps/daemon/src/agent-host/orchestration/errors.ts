@@ -28,7 +28,9 @@ const STATUS_BY_CODE: Readonly<Record<AgentChatErrorCode, number>> = {
   // `GET …/items/:itemId/output` alone: no such item, or it names no tool
   // call. Its own code, so a route miss on an older host (a generic 404
   // `THREAD_NOT_FOUND`) can be told apart. A read, never recorded.
-  ITEM_NOT_FOUND: 404
+  ITEM_NOT_FOUND: 404,
+  // `GET …/prompts/:messageId` alone, for the same reason. A read, never recorded.
+  PROMPT_NOT_FOUND: 404
 };
 
 /**

@@ -48,8 +48,8 @@ function reset(): void {
  * attachments and chips, streamed reasoning and answer text, a tool row updated
  * in place, a subagent with its own rows and message, a background shell, a
  * resolved approval (the tombstone), an open approval, an async question, a
- * compaction marker, a settled turn with usage, a checkpoint, and a second
- * turn still streaming.
+ * compaction marker, a provider goal (goals §4.4), a settled turn with usage,
+ * a checkpoint, and a second turn still streaming.
  */
 function richLog(): DomainEvent[] {
   reset();
@@ -233,6 +233,22 @@ function richLog(): DomainEvent[] {
         { id: "compaction-1", turnId: "T-1" }
       )
     }),
+    ev("thread.activity-appended", {
+      activity: activity(
+        "goal.updated",
+        {
+          goal: {
+            objective: "Make CI green",
+            status: "active",
+            rounds: 1,
+            lastCheck: "lint still fails",
+            tokenBudget: null
+          },
+          change: "checked"
+        },
+        { id: "goal-1", turnId: "T-1" }
+      )
+    }),
     ev("thread.session-set", {
       session: session("ready", null),
       turn: {
@@ -334,6 +350,9 @@ test("the rich log really populates every part of the fold", () => {
   assert.equal(state.roster[0]?.usage?.totalTokens, 1200);
   assert.deepEqual([...state.closedRequestIds], ["req-closed"]);
   assert.equal(state.closedRequestAt?.size, 1);
+  assert.equal(state.goal?.objective, "Make CI green");
+  assert.equal(state.goal?.tokenBudget, null);
+  assert.equal(typeof state.goal?.updatedAt, "string");
   assert.ok(
     state.items.some((item) => item.kind === "message" && item.streaming),
     "a message is mid-stream"
@@ -361,6 +380,7 @@ test("the serialized form is plain JSON: no Map, no Set, no derived list, no cac
     "closedRequestAt",
     "closedRequestIds",
     "deleted",
+    "goal",
     "head",
     "items",
     "pending",
@@ -437,6 +457,32 @@ test("a head carrying the §3.3 continuation marker round-trips", () => {
     }
   };
   assert.deepEqual(throughDisk(marked), marked);
+});
+
+test("a head carrying the goals §5.5 resume marker round-trips", () => {
+  const state = foldThread(richLog());
+  const marked: ThreadFoldState = {
+    ...state,
+    head: { ...state.head!, resumeGoalAfterRestart: true }
+  };
+  assert.deepEqual(throughDisk(marked), marked);
+  // A head without one — every head an older build wrote — still restores.
+  assert.equal(throughDisk(state)?.head?.resumeGoalAfterRestart, undefined);
+});
+
+test("a head carrying the goals §5.7 hold marker round-trips", () => {
+  const state = foldThread(richLog());
+  const held: ThreadFoldState = {
+    ...state,
+    head: { ...state.head!, goalHeldForHandover: true }
+  };
+  assert.deepEqual(throughDisk(held), held);
+  const both: ThreadFoldState = {
+    ...state,
+    head: { ...state.head!, resumeGoalAfterRestart: true, goalHeldForHandover: true }
+  };
+  assert.deepEqual(throughDisk(both), both);
+  assert.equal(throughDisk(state)?.head?.goalHeldForHandover, undefined);
 });
 
 // --- snapshot + tail ≡ the whole log -----------------------------------------
@@ -623,6 +669,8 @@ test("a field of the wrong shape anywhere in the state is rejected", () => {
     ["a model selection without a model", (copy) => (copy.head.modelSelection.model = 1)],
     ["a malformed continuation marker", (copy) => (copy.head.continueAfterRestart = { prepared: true })],
     ["a continuation stamp that is not a string", (copy) => (copy.head.continueAfterRestart = { turnId: "T-2", markedAt: 7 })],
+    ["a goal-resume marker that is not `true`", (copy) => (copy.head.resumeGoalAfterRestart = false)],
+    ["a goal-hold marker that is not `true`", (copy) => (copy.head.goalHeldForHandover = "yes")],
     ["a head folded to another seq than the state", (copy) => (copy.head.seq = copy.seq + 1)]
   ];
   for (const [label, corrupt] of corruptions) {
@@ -844,4 +892,154 @@ test("the serialized state type is what serializeFoldState returns", () => {
   // Compile-time pin: the file's `state` is exactly the serializer's output.
   const state: SerializedFoldState = serializeFoldState(foldThread(richLog()));
   assert.equal(state.seq, foldThread(richLog()).seq);
+});
+
+// --- the goal (goals §4.4) -------------------------------------------------------
+//
+// The goal is the provider's state, derived by the fold; a stored goal the fold
+// could not have written is doubt, and doubt is a cache miss: the host refolds
+// from `events.ndjson` (AGENTS.md, "the fold snapshot and the thread index are
+// caches, never authorities").
+
+test("a valid goal round-trips exactly, through the file too", () => {
+  const state = foldThread(richLog());
+  assert.ok(state.goal !== null && state.goal !== undefined, "the rich log sets a goal");
+  const restored = throughDisk(state);
+  assert.deepEqual(restored.goal, state.goal);
+  // Byte for byte, key order included: the determinism suites compare files.
+  assert.equal(
+    JSON.stringify(serializeFoldState(restored)),
+    JSON.stringify(serializeFoldState(state))
+  );
+  const parsed = parseFoldSnapshotFile(onDisk(snapshotFile(state)), THREAD_ID);
+  assert.ok(parsed !== null);
+  assert.deepEqual(deserializeFoldState(parsed.state)?.goal, state.goal);
+});
+
+test("goal: null is a thread with no goal — accepted, and written for every state that has none", () => {
+  reset();
+  const none = foldThread([created()]);
+  assert.equal(none.goal, null);
+  assert.equal(serializeFoldState(none).goal, null);
+  assert.equal(throughDisk(none).goal, null);
+  assert.notEqual(parseFoldSnapshotFile(onDisk(snapshotFile(none)), THREAD_ID), null);
+
+  // A state built before goals has no field at all: the file still says null,
+  // so every file this build writes carries the key.
+  const { goal: _goal, ...legacy } = foldThread(richLog());
+  const serialized = serializeFoldState(legacy);
+  assert.equal(serialized.goal, null);
+  assert.equal(throughDisk(legacy).goal, null);
+});
+
+test("a missing goal key rejects the snapshot: a cache miss", () => {
+  const state = foldThread(richLog());
+  const copy = serializedCopy(state);
+  delete copy.goal;
+  assert.equal(deserializeFoldState(copy), null);
+  const file = onDisk(snapshotFile(state));
+  delete file.state.goal;
+  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null, "no file this build writes lacks it");
+});
+
+test("a stored goal that is neither null nor a valid ThreadGoal rejects the snapshot: a cache miss", () => {
+  const state = foldThread(richLog());
+  const corruptions: Array<[string, (goal: Record<string, any>) => void]> = [
+    ["an unknown status", (goal) => (goal.status = "done")],
+    ["a provider's own status spelling", (goal) => (goal.status = "budgetLimited")],
+    ["an empty objective", (goal) => (goal.objective = "")],
+    ["a numeric objective", (goal) => (goal.objective = 5)],
+    ["no objective", (goal) => delete goal.objective],
+    ["no updatedAt", (goal) => delete goal.updatedAt],
+    ["a numeric updatedAt", (goal) => (goal.updatedAt = 5)],
+    // Values the fold's parser drops: a goal the fold never writes.
+    ["a negative round count", (goal) => (goal.rounds = -1)],
+    ["a round count spelled as a string", (goal) => (goal.rounds = "1")],
+    ["a budget spelled as a string", (goal) => (goal.tokenBudget = "100")],
+    ["an empty last check", (goal) => (goal.lastCheck = "")],
+    ["a field the goal does not have", (goal) => (goal.verdict = "achieved")]
+  ];
+  for (const [label, corrupt] of corruptions) {
+    const copy = serializedCopy(state);
+    corrupt(copy.goal);
+    assert.equal(deserializeFoldState(copy), null, label);
+    const file = onDisk(snapshotFile(state));
+    corrupt(file.state.goal);
+    assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null, `${label} (the file)`);
+  }
+  for (const value of ["Make CI green", 5, true, [], {}, { updatedAt: "2026-09-24T00:00:00.000Z" }]) {
+    const copy = serializedCopy(state);
+    copy.goal = value;
+    assert.equal(deserializeFoldState(copy), null, JSON.stringify(value));
+  }
+});
+
+test("a version-4 state.json is discarded whichever build wrote it: the goal build's and the open-work build's 4 are different folds", () => {
+  reset();
+  // Two builds took version 4 for two different fold changes: the goal build
+  // derives a goal but keeps no opening row of running work; the open-work
+  // build keeps it but writes no `goal` key. The merge of both is 5.
+  const opening = activity(
+    "tool.started",
+    { itemType: "command_execution", toolUseId: "build", title: "npm run build" },
+    { id: "build-start", tone: "tool" }
+  );
+  const events: DomainEvent[] = [
+    created(),
+    ev("thread.activity-appended", {
+      activity: activity("goal.updated", { goal: { objective: "Ship", status: "active" }, change: "set" }, { id: "goal-1" })
+    }),
+    ev("thread.activity-appended", { activity: opening })
+  ];
+  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
+    events.push(
+      ev("thread.activity-appended", {
+        activity: activity("tool.output", { toolUseId: "build", streamKind: "command_output", delta: `line ${index}\n` }, {
+          id: `chunk-${index}`,
+          tone: "tool"
+        })
+      })
+    );
+  }
+  const whole = foldThread(events);
+  assert.equal(whole.goal?.objective, "Ship");
+  assert.equal(whole.activities[0]?.id, "build-start");
+
+  // What the goal build folded: the same log with the opening's call blanked,
+  // as the version-3 test above reads it — the same trims, nothing kept open.
+  const asGoalBuildRead = events.map((event) =>
+    event.type === "thread.activity-appended" && event.payload.activity === opening
+      ? { ...event, payload: { activity: { ...opening, payload: { itemType: "command_execution", toolUseId: "" } } } }
+      : event
+  );
+  let probe = createEmptyThreadState();
+  const firstTrim = asGoalBuildRead.findIndex((event) => {
+    probe = applyDomainEvent(probe, event);
+    return itemsDroppedByRetention(probe).length > 0;
+  });
+  assert.ok(firstTrim > 0);
+  const split = firstTrim + 10;
+  const goalBuildState = foldThread(asGoalBuildRead.slice(0, split));
+  assert.equal(goalBuildState.goal?.objective, "Ship");
+  assert.ok(!goalBuildState.items.some((item) => item.id === "build-start"), "the goal build had evicted it");
+
+  assert.ok(FOLD_SNAPSHOT_VERSION > 4, "neither build's 4 is this fold");
+  const goalBuildFile = onDisk(snapshotFile(goalBuildState, { version: 4 }));
+  assert.equal(parseFoldSnapshotFile(goalBuildFile, THREAD_ID), null);
+  assert.notEqual(
+    parseFoldSnapshotFile({ ...goalBuildFile, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
+    null,
+    "the stamp is all that refuses the goal build's file: trusted, it would carry the eviction forward"
+  );
+
+  const openWorkBuildFile = onDisk(snapshotFile(foldThread(events.slice(0, split)), { version: 4 }));
+  delete openWorkBuildFile.state.goal;
+  assert.equal(parseFoldSnapshotFile(openWorkBuildFile, THREAD_ID), null);
+  assert.equal(
+    parseFoldSnapshotFile({ ...openWorkBuildFile, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
+    null,
+    "the open-work build's file has no goal key, which the goal check refuses as well"
+  );
+  // This build's own snapshot of the same prefix folds forward to the whole log.
+  assert.deepEqual(foldOnto(throughDisk(foldThread(events.slice(0, split))), events.slice(split)), whole);
 });

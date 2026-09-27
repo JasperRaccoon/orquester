@@ -124,7 +124,9 @@ export function driveCapture(
   const open = (id: string): void => {
     turn.current = id;
     turns.push(id);
-    grok.beginTurn();
+    // As the session's `openTurn` does: a bubble no chunk named a prompt for
+    // is closed at a prompt's dispatch.
+    events.push(...grok.beginTurn());
     events.push(grok.event("turn.started", {}, id));
   };
   const isParent = (id: unknown): boolean => isParentSessionId(sessionId, id);

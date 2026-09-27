@@ -320,61 +320,126 @@ describe("thread index file", () => {
     assert.deepEqual(markers, [{ seq: seqOf("legacy"), kind: "compacted" }]);
   });
 
-  it("rebuilds a version-3 file — a surviving turn's range left reaching past a revert's cut — and re-derives it", async () => {
-    // Turn 1's capture landed after turn 2 began, stretching turn 1's range
-    // over turn 2's first lines; a rewind to turn 1 then removed turn 2.
-    // Version 3 left turn 1 reaching into turn 2's lines, and history
-    // planning served them again; version 4 clips it at the cut.
-    const log = new TestLog();
-    log.append(
-      created(), // 1
-      userMessage("u1", "first"), // 2
-      turnStart("u1"), // 3
-      session("running", "t1"), // 4
-      done("a1", "t1", "answer one"), // 5
-      session("ready", null, "t1"), // 6
-      userMessage("u2", "second"), // 7
-      turnStart("u2"), // 8
-      session("running", "t2"), // 9
-      checkpoint("t1", 1), // 10 — names t1
-      done("a2", "t2", "answer two"), // 11
-      session("ready", null, "t2"), // 12
-      reverted(1) // 13
-    );
-    const catchUp = {
-      threadId: log.threadId,
-      projectPath: "/w/p",
-      title: "T",
-      logSeq: log.lastSeq,
-      read: log.readEventsFrom
-    };
-    const first = createThreadIndex({ filePath, logger: recordingLogger() });
-    await first.catchUp(catchUp);
-    const clipped = first.turnByOrdinal(log.threadId, 1);
-    first.close();
-    assert.deepEqual([clipped?.lastSeq, clipped?.endByte], [6, log.at(7).byteOffset]);
-    // What version 3 left behind: the same statements, turn 1 still stretched.
-    const writable = new Database(filePath);
-    writable
-      .prepare("UPDATE turns SET last_seq = 10, end_byte = ? WHERE thread_id = ? AND turn_id = 't1'")
-      .run(log.endOf(10), log.threadId);
-    writable.prepare("UPDATE meta SET value = '3' WHERE key = 'schema_version'").run();
-    writable.close();
+  // Version 3, and version 4 as the prompts build wrote it: the same
+  // statements, but no `clipAtCut` — turn 1 still stretched past the cut.
+  for (const version of ["3", "4"]) {
+    it(`rebuilds a version-${version} file — a surviving turn's range left reaching past a revert's cut — and re-derives it`, async () => {
+      // Turn 1's capture landed after turn 2 began, stretching turn 1's range
+      // over turn 2's first lines; a rewind to turn 1 then removed turn 2.
+      // Such a file left turn 1 reaching into turn 2's lines, and history
+      // planning served them again; this version clips it at the cut.
+      const log = new TestLog();
+      log.append(
+        created(), // 1
+        userMessage("u1", "first"), // 2
+        turnStart("u1"), // 3
+        session("running", "t1"), // 4
+        done("a1", "t1", "answer one"), // 5
+        session("ready", null, "t1"), // 6
+        userMessage("u2", "second"), // 7
+        turnStart("u2"), // 8
+        session("running", "t2"), // 9
+        checkpoint("t1", 1), // 10 — names t1
+        done("a2", "t2", "answer two"), // 11
+        session("ready", null, "t2"), // 12
+        reverted(1) // 13
+      );
+      const catchUp = {
+        threadId: log.threadId,
+        projectPath: "/w/p",
+        title: "T",
+        logSeq: log.lastSeq,
+        read: log.readEventsFrom
+      };
+      const first = createThreadIndex({ filePath, logger: recordingLogger() });
+      await first.catchUp(catchUp);
+      const clipped = first.turnByOrdinal(log.threadId, 1);
+      first.close();
+      assert.deepEqual([clipped?.lastSeq, clipped?.endByte], [6, log.at(7).byteOffset]);
+      // What such a build left behind: the same statements, turn 1 still stretched.
+      const writable = new Database(filePath);
+      writable
+        .prepare("UPDATE turns SET last_seq = 10, end_byte = ? WHERE thread_id = ? AND turn_id = 't1'")
+        .run(log.endOf(10), log.threadId);
+      writable.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(version);
+      writable.close();
 
-    const logger = recordingLogger();
-    const second = createThreadIndex({ filePath, logger });
-    assert.notEqual(INDEX_SCHEMA_VERSION, 3, "the premise: v3 is another version");
-    assert.equal(second.available, true);
-    assert.equal(second.cursor(log.threadId), null, "nothing of the version-3 file is trusted");
-    assert.ok(
-      logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
-      "rebuilt by the version check"
-    );
-    // The boot catch-up re-derives the thread from its log, clipped.
-    await second.catchUp(catchUp);
-    assert.deepEqual(second.turnByOrdinal(log.threadId, 1), clipped);
-    second.close();
-  });
+      const logger = recordingLogger();
+      const second = createThreadIndex({ filePath, logger });
+      assert.notEqual(String(INDEX_SCHEMA_VERSION), version, `the premise: v${version} is another version`);
+      assert.equal(second.available, true);
+      assert.equal(second.cursor(log.threadId), null, `nothing of the version-${version} file is trusted`);
+      assert.ok(
+        logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
+        "rebuilt by the version check"
+      );
+      // The boot catch-up re-derives the thread from its log, clipped.
+      await second.catchUp(catchUp);
+      assert.deepEqual(second.turnByOrdinal(log.threadId, 1), clipped);
+      second.close();
+    });
+  }
+
+  // Version 3, and version 4 as the clipping build wrote it: no author, turn
+  // or stamp columns on `message_docs`, no `message_docs_prompts`.
+  for (const version of ["3", "4"]) {
+    it(`rebuilds a version-${version} file — message_docs without its author, turn and stamp — as another version`, async () => {
+      createThreadIndex({ filePath, logger: recordingLogger() }).close();
+      const writable = new Database(filePath);
+      writable.exec(`
+        DROP INDEX message_docs_prompts;
+        ALTER TABLE message_docs DROP COLUMN role;
+        ALTER TABLE message_docs DROP COLUMN agent_id;
+        ALTER TABLE message_docs DROP COLUMN turn_id;
+        ALTER TABLE message_docs DROP COLUMN created_at;
+      `);
+      writable.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(version);
+      writable.close();
+
+      const logger = recordingLogger();
+      const index = createThreadIndex({ filePath, logger });
+      assert.equal(index.available, true);
+      const log = new TestLog();
+      index.observe({
+        threadId: log.threadId,
+        projectPath: "/w/p",
+        title: "T",
+        ...log.append(created(), userMessage("u1", "hello"), userMessage("sub", "brief", null, "a-1"))
+      });
+      await index.drain();
+      assert.deepEqual(
+        index.prompts(log.threadId, { limit: 5 })?.prompts.map((entry) => entry.messageId),
+        ["u1"]
+      );
+      index.close();
+
+      const { authors, indexes } = inspect((db) => ({
+        authors: db
+          .prepare(
+            "SELECT message_id, role, agent_id, turn_id, created_at FROM message_docs ORDER BY first_seq"
+          )
+          .all(),
+        indexes: (db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'message_docs'")
+          .all() as Array<{ name: string }>).map((row) => row.name)
+      }));
+      assert.notEqual(String(INDEX_SCHEMA_VERSION), version, `the premise: v${version} is another version`);
+      assert.deepEqual(authors, [
+        { message_id: "u1", role: "user", agent_id: null, turn_id: null, created_at: log.event(2).occurredAt },
+        { message_id: "sub", role: "user", agent_id: "a-1", turn_id: null, created_at: log.event(3).occurredAt }
+      ]);
+      assert.ok(indexes.includes("message_docs_prompts"));
+      assert.ok(
+        logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
+        "rebuilt by the version check"
+      );
+      assert.equal(
+        logger.entries.some((entry) => /does not fit this build/.test(entry.message)),
+        false,
+        "never got as far as preparing statements against it"
+      );
+    });
+  }
 
   it("runs unavailable when the file can be neither opened nor recreated", () => {
     const logger = recordingLogger();

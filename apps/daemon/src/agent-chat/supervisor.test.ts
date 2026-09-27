@@ -6,10 +6,13 @@ import { test } from "node:test";
 import { AGENT_HOST_PROTOCOL_VERSION, AGENT_HOST_SERVICE_SESSION } from "../agent-host/host-protocol.ts";
 import {
   AgentHostSupervisor,
+  LEGACY_GOAL_TURN_BOUNDARY_MS,
   MAX_RESPAWNS,
   UNREACHABLE_PROBES_BEFORE_RESTART,
   UNREACHABLE_PROBES_BEFORE_RESTART_BUSY,
   buildAgentHostEnv,
+  legacyGoalTurnOf,
+  type LegacyGoalTurn,
   type ProbeOutcome,
   type SupervisorTmux
 } from "./supervisor.ts";
@@ -44,6 +47,30 @@ interface Harness {
   hostExitsAfterPolls: number | null;
   /** Whether the service session still existed at the moment it was killed. */
   killedSessionWasAlive: boolean | null;
+  /** Agent goals §5.7: `POST /goals/hold` requests that reached the fake host. */
+  holdRequests: number;
+  /**
+   * What the fake host answers a hold request; absent = holds nothing. May
+   * throw synchronously or reject, as a failed request does.
+   */
+  holdHook?: () => Promise<readonly string[] | null>;
+  /** Agent goals §5.7 legacy handover: what the fake host's snapshot says of a thread's running turn (absent = unreadable). */
+  legacyTurns: Record<string, LegacyGoalTurn>;
+  /** Every thread whose snapshot the supervisor read. */
+  inspections: string[];
+  /** What the daemon's own tab records name as each thread's adapter (absent = unknown). */
+  threadAdapters: Record<string, string>;
+  /** Every thread whose session the supervisor stopped. */
+  sessionStops: string[];
+  /** Makes the next session stops throw, as a failed request does. */
+  sessionStopThrows: boolean;
+  /** Every `POST /goals/resume-sessions` body, and what the fake host answers. */
+  resumeCalls: string[][];
+  resumeHook?: (threadIds: readonly string[]) => Promise<readonly string[] | null>;
+  /** The injected clock, read. */
+  now(): number;
+  /** Every line the supervisor logged. */
+  logs: Array<{ level: "log" | "warn" | "error"; text: string }>;
   cleanup(): Promise<void>;
 }
 
@@ -119,6 +146,15 @@ async function makeHarness(
     providerRevisions: 0,
     hostExitsAfterPolls: null,
     killedSessionWasAlive: null,
+    holdRequests: 0,
+    legacyTurns: {},
+    inspections: [],
+    threadAdapters: {},
+    sessionStops: [],
+    sessionStopThrows: false,
+    resumeCalls: [],
+    now: () => clock,
+    logs: [],
     advance: (ms) => {
       clock += ms;
     },
@@ -183,6 +219,33 @@ async function makeHarness(
       ...(opts.daemonBackground ? { backgroundWorkThreadIds: opts.daemonBackground } : {}),
       requestStop: async () => {
         harness.stopRequests++;
+      },
+      // Not `async`: a hook that throws synchronously must reach the
+      // supervisor as a synchronous throw.
+      requestHoldGoals: () => {
+        harness.holdRequests++;
+        harness.order.push("hold");
+        return harness.holdHook ? harness.holdHook() : Promise.resolve([]);
+      },
+      inspectLegacyGoalTurn: async (threadId) => {
+        harness.inspections.push(threadId);
+        return harness.legacyTurns[threadId] ?? null;
+      },
+      threadAdapter: (threadId) => harness.threadAdapters[threadId] ?? null,
+      stopThreadSession: async (threadId) => {
+        if (harness.sessionStopThrows) throw new Error("agent host answered 503 to the session stop");
+        harness.sessionStops.push(threadId);
+        harness.order.push(`stop-session:${threadId}`);
+      },
+      resumeGoalSessions: (threadIds) => {
+        harness.resumeCalls.push([...threadIds]);
+        harness.order.push("resume-sessions");
+        return harness.resumeHook ? harness.resumeHook(threadIds) : Promise.resolve([...threadIds]);
+      },
+      logger: {
+        log: (...a) => harness.logs.push({ level: "log", text: a.map(String).join(" ") }),
+        warn: (...a) => harness.logs.push({ level: "warn", text: a.map(String).join(" ") }),
+        error: (...a) => harness.logs.push({ level: "error", text: a.map(String).join(" ") })
       },
       tmux,
       spawnDirect: (_bin, args) => {
@@ -737,6 +800,502 @@ test("a host with only background work gets the same extra patience as a busy on
   }
   assert.equal(h.spawns.length, 1);
   await h.cleanup();
+});
+
+// Agent goals §5.7: a continuing Codex goal starts its next turn within
+// milliseconds of the last, so a deploy's drain used to wait out the whole
+// goal — possibly hours. While the drain is blocked the supervisor asks the
+// host to hold its continuing goals between two turns, and keeps asking: the
+// hold is a lease the host drops once the asking stops.
+
+/** The supervisor's goal-hold lines at one level. */
+function goalHoldLogs(h: Harness, level: "log" | "warn" = "log"): string[] {
+  return h.logs.filter((line) => line.level === level && /goal/.test(line.text)).map((line) => line.text);
+}
+
+test("agent goals §5.7: every blocked drain evaluation asks the host to hold its continuing goals", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let active: string[] = ["thread-G"];
+  let background: string[] = ["thread-F"];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active, background })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.holdRequests, 1, "boot adoption's own evaluation asks at once");
+  assert.deepEqual(h.order.slice(-2), ["probe", "hold"], "asked only after a FRESH probe found the drain blocked");
+  // A fleet in another tab blocks the drain too; whether goals are all that is
+  // in the way is the host's call, so the daemon asks whatever the blocker.
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 2, "the 15 s health tick renews the lease");
+  background = [];
+  h.supervisor.handleTurnSettled();
+  // Queued behind the settled turn's transition: awaiting it proves both ran.
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 4, "a settled turn, or ended background work, renews it too");
+  assert.equal(h.spawns.length, 0, "nothing was cut while the drain was blocked");
+  // The held goal's running turn settles and no next one starts: drained.
+  active = [];
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1, "the drain went ahead");
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.equal(h.holdRequests, 4, "a drained host is restarted, never asked to hold");
+  await h.cleanup();
+});
+
+test("agent goals §5.7: no hold is asked for without a deploy waiting, or on a drained host", async () => {
+  // Busy, but nothing is waiting on it.
+  const idle = await makeHarness([healthy({ active: ["thread-G"] })], { seedToken: "tok", tmux: true });
+  await idle.supervisor.init();
+  await idle.supervisor.checkHealth();
+  idle.supervisor.handleTurnSettled();
+  await idle.supervisor.checkHealth();
+  assert.equal(idle.holdRequests, 0, "no version restart is pending");
+  await idle.cleanup();
+
+  // A deploy is waiting on a host that is already drained: the restart goes ahead.
+  const drained = await makeHarness([], { seedToken: "tok", tmux: true });
+  drained.probeHook = mismatchUntilReplaced(drained);
+  await drained.supervisor.init();
+  assert.equal(drained.spawns.length, 1);
+  assert.equal(drained.holdRequests, 0);
+  await drained.cleanup();
+});
+
+test("agent goals §5.7: a manual restart never asks for a hold, even with a deploy's restart pending", async () => {
+  // `POST /api/agent-host/stop` restarts at once; the host's `/stop` writes the
+  // §5.5 resume marks that carry a continuing goal across it.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = mismatchUntilReplaced(h, ["thread-G"]);
+  await h.supervisor.init();
+  assert.equal(h.holdRequests, 1, "the blocked boot evaluation asked");
+  await h.supervisor.restartNow();
+  assert.equal(h.stopRequests, 1);
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.holdRequests, 1, "the manual restart itself asked nothing");
+  await h.cleanup();
+});
+
+test("agent goals §5.7: a failing hold request never stops the drain, and is logged once per reason", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let active: string[] = ["thread-G"];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active })
+      : healthy({ instance: "host-2" });
+  let answer: () => Promise<readonly string[] | null> = () =>
+    Promise.reject(new Error("agent host request timed out"));
+  h.holdHook = () => answer();
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "healthy", "a failed hold never fails boot adoption");
+  await h.supervisor.checkHealth();
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 4, "every blocked evaluation still asks");
+  assert.equal(goalHoldLogs(h, "warn").length, 1, "logged once, not on every tick");
+
+  // A new reason is news — a synchronous throw included.
+  const refused = (): never => {
+    throw new Error("agent host answered 503 to the goal hold");
+  };
+  answer = refused;
+  await h.supervisor.checkHealth();
+  await h.supervisor.checkHealth();
+  assert.equal(goalHoldLogs(h, "warn").length, 2);
+  // So is the same reason again after an answer in between.
+  answer = async () => [];
+  await h.supervisor.checkHealth();
+  answer = refused;
+  await h.supervisor.checkHealth();
+  assert.equal(goalHoldLogs(h, "warn").length, 3);
+
+  // The goal's turn settles with the hold still failing: the drain goes ahead.
+  active = [];
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1);
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.deepEqual(
+    h.logs.filter((line) => line.level === "error"),
+    [],
+    "no hold failure ever escaped a transition"
+  );
+  await h.cleanup();
+});
+
+test("agent goals §5.7: a host that predates the route is not asked again, but another instance is", async () => {
+  // The deploy that ships §5.7 finds a host without the route: its route-miss
+  // 404 reads `null`, and that deploy waits as it always did.
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let instance = "host-1";
+  h.probeHook = () =>
+    healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-G"], instance });
+  let answer: readonly string[] | null = null;
+  h.holdHook = async () => answer;
+  await h.supervisor.init();
+  await h.supervisor.checkHealth();
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 1, "asked once, then remembered");
+  assert.equal(goalHoldLogs(h).filter((line) => /predates/.test(line)).length, 1, "and said once");
+  // Another instance — adopted in place, still stale, still busy — may know it.
+  instance = "host-1b";
+  answer = ["thread-G"];
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 2);
+  assert.ok(goalHoldLogs(h).includes("agent host holding 1 continuing goal(s) for the restart"));
+  await h.cleanup();
+});
+
+test("agent goals §5.7: the held set is logged when it changes, never per tick", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = () => healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-G"] });
+  let held: readonly string[] = [];
+  h.holdHook = async () => held;
+  await h.supervisor.init();
+  assert.deepEqual(goalHoldLogs(h), [], "nothing held is nothing to say");
+  held = ["thread-G"];
+  await h.supervisor.checkHealth();
+  await h.supervisor.checkHealth();
+  held = ["thread-H", "thread-G"];
+  await h.supervisor.checkHealth();
+  held = ["thread-G", "thread-H", "thread-G"]; // the same set, another spelling
+  await h.supervisor.checkHealth();
+  // The user took both back (`/goal …`, a Stop): the host holds nothing now.
+  held = [];
+  await h.supervisor.checkHealth();
+  await h.supervisor.checkHealth();
+  assert.deepEqual(goalHoldLogs(h), [
+    "agent host holding 1 continuing goal(s) for the restart",
+    "agent host holding 2 continuing goal(s) for the restart",
+    "agent host no longer holding goals for the restart"
+  ]);
+  await h.cleanup();
+});
+
+test("agent goals §5.7: boot adoption never waits for the hold — the daemon listens while the host answers", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = () => healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-G"] });
+  let answer!: (held: readonly string[]) => void;
+  h.holdHook = () =>
+    new Promise((resolve) => {
+      answer = resolve;
+    });
+  await h.supervisor.init();
+  assert.equal(h.supervisor.status().state, "healthy", "adopted with the hold still unanswered");
+  assert.equal(h.holdRequests, 1, "the request went out");
+  // While it is in flight, evaluations ask nothing new: one request at a time.
+  await h.supervisor.checkHealth();
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 1, "never a second request beside the first");
+  answer(["thread-G"]);
+  await h.supervisor.goalHoldSettled();
+  assert.ok(
+    goalHoldLogs(h).includes("agent host holding 1 continuing goal(s) for the restart"),
+    "the late answer is still read"
+  );
+  await h.supervisor.checkHealth();
+  assert.equal(h.holdRequests, 2, "the next evaluation renews it");
+  await h.cleanup();
+});
+
+test("agent goals §5.7: a restart may overtake a hold in flight, and its late answer is dropped without a word", async () => {
+  // The host keeps a hold's mark when a stop overtakes it (orchestrator
+  // `holdGoal`), so the restart never waits for the answer.
+  for (const late of ["answer", "failure"] as const) {
+    const h = await makeHarness([], { seedToken: "tok", tmux: true });
+    let active: string[] = ["thread-G"];
+    h.probeHook = () =>
+      h.spawns.length === 0
+        ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active })
+        : healthy({ instance: "host-2" });
+    let settle!: () => void;
+    h.holdHook = () =>
+      new Promise((resolve, reject) => {
+        settle = () => (late === "answer" ? resolve(["thread-G"]) : reject(new Error("socket closed")));
+      });
+    await h.supervisor.init();
+    active = [];
+    h.supervisor.handleTurnSettled();
+    await h.supervisor.checkHealth();
+    assert.equal(h.stopRequests, 1, `${late}: the drained host is restarted with the hold unanswered`);
+    assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+    settle();
+    await h.supervisor.goalHoldSettled();
+    assert.deepEqual(goalHoldLogs(h), [], `${late}: nothing said about a host that is gone`);
+    assert.deepEqual(goalHoldLogs(h, "warn"), [], `${late}: no failure either`);
+    await h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Agent goals §5.7 — a host from before the goal hold
+// ---------------------------------------------------------------------------
+
+/**
+ * The deploy that ships §5.7 finds a host without the hold route (its 404
+ * reads `null`) whose drain `threads` block, each running a Codex goal's turn.
+ */
+async function legacyGoalHost(threads: string[]): Promise<{ h: Harness; setActive(ids: string[]): void }> {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  let active = [...threads];
+  // As the host does: a stopped session's turn settles at once.
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({
+          version: AGENT_HOST_PROTOCOL_VERSION + 1,
+          active: active.filter((id) => !h.sessionStops.includes(id)),
+          background: []
+        })
+      : healthy({ instance: "host-2", background: [] });
+  h.holdHook = async () => null;
+  await h.supervisor.init();
+  await h.supervisor.goalHoldSettled();
+  return {
+    h,
+    setActive: (ids) => {
+      active = [...ids];
+    }
+  };
+}
+
+/** A Codex goal's continuation, started `ageMs` ago on the harness clock. */
+let legacyTurnSeq = 0;
+const goalTurn = (h: Harness, ageMs: number): LegacyGoalTurn => ({
+  goalLoop: true,
+  turnId: `turn-${(legacyTurnSeq += 1)}`,
+  startedAt: h.now() - ageMs
+});
+
+test("agent goals §5.7, an older host: a Codex goal loop is stopped at its turn boundary, and the next host resumes its session", async () => {
+  const { h, setActive } = await legacyGoalHost(["thread-G"]);
+  assert.equal(h.sessionStops.length, 0, "boot adoption only learns the host predates the hold");
+  // The goal's turn is mid-way: left to finish.
+  h.legacyTurns["thread-G"] = goalTurn(h, LEGACY_GOAL_TURN_BOUNDARY_MS + 1_000);
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.sessionStops, [], "a turn mid-way keeps running");
+  // It settles and Codex starts the next at once: the settled turn's own
+  // evaluation stops it seconds into it. That stop settles the goal's turn, so
+  // the evaluation queued behind it (the health tick) finds the host drained
+  // and replaces it — then hands the new host the stopped session.
+  h.legacyTurns["thread-G"] = goalTurn(h, 2_000);
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.sessionStops, ["thread-G"]);
+  assert.equal(
+    h.logs.filter((line) => /stopped Codex goal thread-G's session at a turn boundary/.test(line.text)).length,
+    1,
+    "said once, by thread"
+  );
+  assert.ok(
+    h.order.indexOf("stop-session:thread-G") < h.order.lastIndexOf("spawn"),
+    "the session stop came first"
+  );
+  assert.equal(h.stopRequests, 1);
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.deepEqual(h.resumeCalls, [["thread-G"]]);
+  assert.ok(
+    h.order.indexOf("resume-sessions") > h.order.lastIndexOf("spawn"),
+    "on the replacement, never the old host"
+  );
+  assert.deepEqual(h.sessionStops, ["thread-G"], "never stopped twice");
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.resumeCalls, [["thread-G"]], "handed over once");
+  setActive([]);
+  await h.cleanup();
+});
+
+test("agent goals §5.7, an older host: two goal loops are each stopped at their OWN boundary", async () => {
+  const { h, setActive } = await legacyGoalHost(["thread-A", "thread-B"]);
+  h.legacyTurns["thread-A"] = goalTurn(h, 1_000);
+  h.legacyTurns["thread-B"] = goalTurn(h, LEGACY_GOAL_TURN_BOUNDARY_MS * 3);
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.sessionStops, ["thread-A"], "B is mid-turn");
+  setActive(["thread-B"]);
+  h.legacyTurns["thread-B"] = goalTurn(h, 500);
+  h.supervisor.handleTurnSettled();
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.sessionStops, ["thread-A", "thread-B"]);
+  setActive([]);
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.resumeCalls, [["thread-A", "thread-B"]]);
+  await h.cleanup();
+});
+
+test("agent goals §5.7, an older host: anything else in the way stops nothing, and the deploy waits as before", async () => {
+  // A user's turn beside the goal: not a goal loop.
+  const beside = await legacyGoalHost(["thread-G", "thread-U"]);
+  beside.h.legacyTurns["thread-G"] = goalTurn(beside.h, 1_000);
+  beside.h.legacyTurns["thread-U"] = { goalLoop: false, turnId: "turn-u", startedAt: beside.h.now() - 1_000 };
+  await beside.h.supervisor.checkHealth();
+  assert.deepEqual(beside.h.sessionStops, [], "a turn a user started keeps the drain waiting anyway");
+  await beside.h.cleanup();
+
+  // A thread the daemon's own records name as Claude cannot be a Codex goal:
+  // not even a snapshot is read.
+  const claude = await legacyGoalHost(["thread-G", "thread-C"]);
+  claude.h.threadAdapters["thread-C"] = "claude";
+  claude.h.threadAdapters["thread-G"] = "codex";
+  claude.h.legacyTurns["thread-G"] = goalTurn(claude.h, 1_000);
+  await claude.h.supervisor.checkHealth();
+  assert.deepEqual(claude.h.inspections, [], "no snapshot read beside a Claude turn");
+  assert.deepEqual(claude.h.sessionStops, []);
+  await claude.h.cleanup();
+
+  // A thread whose snapshot cannot be read is never guessed at.
+  const unread = await legacyGoalHost(["thread-G", "thread-X"]);
+  unread.h.legacyTurns["thread-G"] = goalTurn(unread.h, 1_000);
+  await unread.h.supervisor.checkHealth();
+  assert.deepEqual(unread.h.sessionStops, []);
+  await unread.h.cleanup();
+
+  // Background work anywhere.
+  const busy = await makeHarness([], { seedToken: "tok", tmux: true });
+  busy.probeHook = () =>
+    healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-G"], background: ["thread-F"] });
+  busy.holdHook = async () => null;
+  await busy.supervisor.init();
+  await busy.supervisor.goalHoldSettled();
+  busy.legacyTurns["thread-G"] = goalTurn(busy, 1_000);
+  await busy.supervisor.checkHealth();
+  assert.deepEqual(busy.sessionStops, [], "a fleet elsewhere keeps the drain waiting");
+  await busy.cleanup();
+
+  // A host that answers the hold is held, never stopped.
+  const modern = await makeHarness([], { seedToken: "tok", tmux: true });
+  modern.probeHook = () => healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active: ["thread-G"], background: [] });
+  await modern.supervisor.init();
+  await modern.supervisor.goalHoldSettled();
+  modern.legacyTurns["thread-G"] = goalTurn(modern, 1_000);
+  await modern.supervisor.checkHealth();
+  assert.deepEqual(modern.sessionStops, []);
+  await modern.cleanup();
+});
+
+test("agent goals §5.7, an older host: a stop that fails is tried again and handed over all the same; a hand-over the new host cannot take is asked again", async () => {
+  const { h, setActive } = await legacyGoalHost(["thread-G", "thread-H"]);
+  const g = goalTurn(h, 1_000);
+  const hTurn = goalTurn(h, 1_000);
+  h.legacyTurns["thread-G"] = g;
+  h.legacyTurns["thread-H"] = hTurn;
+  h.sessionStopThrows = true;
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.sessionStops, [], "nothing stopped");
+  assert.equal(
+    h.logs.filter((line) => line.level === "warn" && /could not stop Codex goal/.test(line.text)).length,
+    2,
+    "each failure said"
+  );
+  // The same turns, still young: tried again.
+  h.sessionStopThrows = false;
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.sessionStops, ["thread-G", "thread-H"]);
+  // The replacement is up but cannot take them yet: asked again on the next tick.
+  let refuse = true;
+  h.resumeHook = async (ids) => {
+    if (refuse) throw new Error("agent host answered 503 to the goal session resume");
+    return [...ids];
+  };
+  setActive([]);
+  await h.supervisor.checkHealth();
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.equal(h.resumeCalls.length, 1, "asked once the replacement was adopted");
+  refuse = false;
+  await h.supervisor.checkHealth();
+  assert.deepEqual(h.resumeCalls, [["thread-G", "thread-H"], ["thread-G", "thread-H"]]);
+  await h.supervisor.checkHealth();
+  assert.equal(h.resumeCalls.length, 2, "taken: never asked again");
+  await h.cleanup();
+});
+
+test("agent goals §5.7, an older host: a stop whose reply is lost may still have landed — its thread is handed over", async () => {
+  const { h, setActive } = await legacyGoalHost(["thread-G"]);
+  h.legacyTurns["thread-G"] = goalTurn(h, 1_000);
+  // The host committed the stop, then the reply never came.
+  h.sessionStopThrows = true;
+  await h.supervisor.checkHealth();
+  setActive([]);
+  await h.supervisor.checkHealth();
+  assert.equal(h.supervisor.status().hostInstanceId, "host-2");
+  assert.deepEqual(h.resumeCalls, [["thread-G"]], "resumed on the replacement all the same");
+  await h.cleanup();
+});
+
+test("legacyGoalTurnOf: a Codex turn with no user message behind it, started as the one before ended, is a goal loop", () => {
+  // What `GET /threads/:id/thread` answers, the old host and this one alike.
+  const snapshot = (overrides: {
+    adapter?: string;
+    turns?: Array<Record<string, unknown>>;
+    activeTurnId?: string | null;
+    pending?: Record<string, unknown>;
+  }): unknown => ({
+    kind: "snapshot",
+    thread: {
+      head: {
+        adapter: overrides.adapter ?? "codex",
+        session: { status: "running", activeTurnId: overrides.activeTurnId === undefined ? "t3" : overrides.activeTurnId }
+      },
+      turns: overrides.turns ?? [
+        { turnId: "t1", state: "completed", userMessageId: "m1", startedAt: "2026-09-25T10:00:00.000Z", completedAt: "2026-09-25T10:00:59.000Z" },
+        { turnId: "t2", state: "completed", startedAt: "2026-09-25T10:00:59.050Z", completedAt: "2026-09-25T10:01:59.000Z" },
+        { turnId: "t3", state: "running", startedAt: "2026-09-25T10:01:59.040Z" }
+      ],
+      pending: overrides.pending ?? { approvals: [], userInputs: [] }
+    }
+  });
+  assert.deepEqual(legacyGoalTurnOf(snapshot({})), {
+    goalLoop: true,
+    turnId: "t3",
+    startedAt: Date.parse("2026-09-25T10:01:59.040Z")
+  });
+  assert.equal(legacyGoalTurnOf(snapshot({ adapter: "claude" }))?.goalLoop, false, "Codex only");
+  assert.equal(
+    legacyGoalTurnOf(snapshot({ activeTurnId: "t2", turns: [
+      { turnId: "t1", state: "completed", userMessageId: "m1", completedAt: "2026-09-25T10:00:59.000Z" },
+      { turnId: "t2", state: "running", startedAt: "2026-09-25T10:00:59.050Z" }
+    ] }))?.goalLoop,
+    false,
+    "the first turn after a user's is not a loop yet"
+  );
+  assert.equal(
+    legacyGoalTurnOf(snapshot({ turns: [
+      { turnId: "t2", state: "completed", completedAt: "2026-09-25T10:01:59.000Z" },
+      { turnId: "t3", state: "running", userMessageId: "m3", startedAt: "2026-09-25T10:01:59.040Z" }
+    ] }))?.goalLoop,
+    false,
+    "a turn a user message opened"
+  );
+  assert.equal(
+    legacyGoalTurnOf(snapshot({ turns: [
+      { turnId: "t2", state: "completed", completedAt: "2026-09-25T10:01:59.000Z" },
+      { turnId: "t3", state: "running", startedAt: "2026-09-25T10:02:09.000Z" }
+    ] }))?.goalLoop,
+    false,
+    "started seconds after the last one ended: a /compact typed after a goal turn, not Codex continuing"
+  );
+  assert.equal(
+    legacyGoalTurnOf(snapshot({ turns: [
+      { turnId: "t2", state: "completed" },
+      { turnId: "t3", state: "running", startedAt: "2026-09-25T10:01:59.040Z" }
+    ] }))?.goalLoop,
+    false,
+    "no end to measure the gap from"
+  );
+  assert.equal(
+    legacyGoalTurnOf(snapshot({ pending: { approvals: [{ requestId: "r1" }], userInputs: [] } }))?.goalLoop,
+    false,
+    "an open approval waits for the user"
+  );
+  assert.equal(legacyGoalTurnOf(snapshot({ activeTurnId: null })), null, "nothing running");
+  assert.equal(legacyGoalTurnOf(snapshot({ activeTurnId: "gone" }))?.goalLoop, false, "a turn the window lost");
+  const bare = (snapshot({}) as { thread: unknown }).thread;
+  assert.equal(legacyGoalTurnOf(bare), null, "only the host's own envelope is read");
+  for (const junk of [null, "x", [], { kind: "events" }, { kind: "snapshot", thread: null }, { kind: "snapshot", thread: { head: 7 } }]) {
+    assert.equal(legacyGoalTurnOf(junk), null, JSON.stringify(junk));
+  }
 });
 
 test("the token is regenerated AFTER the old session is killed, never before", async () => {

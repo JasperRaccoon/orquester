@@ -1144,11 +1144,40 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
     assert.deepEqual(launchesOf(state), []);
   });
 
-  it("gives none on a Claude or Grok thread, whose agents always launched with an id", () => {
-    for (const adapter of ["claude", "grok"] as const) {
-      const state = foldAs(adapter, [...turn("turn-1"), ...legacyOpenCodeChild("task-1", "turn-1")]);
-      assert.deepEqual(launchesOf(state), [], adapter);
-    }
+  it("gives none on a Claude thread, whose agents always launched with an id", () => {
+    const state = foldAs("claude", [...turn("turn-1"), ...legacyOpenCodeChild("task-1", "turn-1")]);
+    assert.deepEqual(launchesOf(state), []);
+  });
+
+  it("names a settled Grok agent the goals build started with none — a `subagent_spawned` no spawn call explained", () => {
+    // The 2026-09-24 goals build keyed such an agent by its subagent id and
+    // wrote no launch id: every goal-engine planner, worker, skeptic and
+    // summarizer. After the merge replaces that host, a relaunch must reopen it.
+    const state = foldAs("grok", [
+      ...turn("turn-1"),
+      row("start:g1", "task.started", {
+        taskId: "g1",
+        taskType: "subagent",
+        agentKind: "agent",
+        agentId: "g1",
+        title: "goal plan writer"
+      }, { turnId: "turn-1", agentId: "g1", ...at(1) }),
+      row("done:g1", "task.completed", {
+        taskId: "g1",
+        status: "completed",
+        taskType: "subagent",
+        agentKind: "agent",
+        agentId: "g1",
+        title: "goal plan writer"
+      }, { turnId: "turn-1", agentId: "g1", ...at(4) })
+    ]);
+    const launches = launchesOf(state);
+    assert.deepEqual(
+      launches.map((row) => [(row.payload as Record<string, unknown>).taskId, (row.payload as Record<string, unknown>).toolUseId, row.turnId]),
+      [["g1", "legacy-launch:g1", "turn-1"]]
+    );
+    const after = appliedRows(state, launches);
+    assert.deepEqual(rosterOf(after), rosterOf(state), "it reads completed, exactly as before");
   });
 
   it("keeps the rows a capped roster lists: stamped with the roster's own `updatedAt`, never the load's time", () => {

@@ -107,6 +107,13 @@ established the facts the design rests on. File references are to that commit.
 | Catalogues | `GET /api/registry` (`chat.adapter`), `GET /api/agent/providers` (models + `optionDescriptors`, capabilities), `GET /api/agent-accounts`, `GET /api/cliproxy` + `/api/cliproxy/models` (claudex/claudemix launch models), `GET /api/agents/conversations?path=` | |
 | Usage | `GET /api/usage[?refresh=1]` (`UsageResponse` with `accounts[]`, `system`, `scopedWindows`), `GET /api/usage/tokens` (Cost tab) | `usage.changed` on the bus. |
 
+*Built (2026-09-24, merged with agent goals — `2026-09-24-agent-goals-design.md`): the summary
+carries a seventh chat field, `goal {objective, status, continuing}` (only while the goal is
+unfinished), and the ladder a `goal-continuing` rung; the snapshot carries the fold's `goal`, and a
+provider's capabilities `goals`. What the tools do with them — a Codex `/goal` run by the host with no
+turn wait, goal rows in `read_transcript`, `chat.goal` and `supports.goals` in the views, the waits
+and the account switch under a continuing goal — is in `docs/orquester-mcp.md` and AGENTS.md.*
+
 Facts that shape specific tools (each cited where used): a chat `SessionSummary.status` is always
 `"running"` (the real state is `chatSessionStatus`); the chat model/mode live only on the thread
 head (`GET …/thread`), not on the summary; a turn ends when `thread.session-set` leaves
@@ -175,7 +182,7 @@ above (the attachment upload and the bus subscription) are on the seam.
 ### 4.3 Waiting without polling
 
 Two tools block (`send_message` with `wait`, `wait_for_session`). They wait on the **same signal
-the Attention Center reads**: the six chat summary fields and `activity`, delivered on the bus. A
+the Attention Center reads**: the six chat summary fields (*Built:* seven — goals added `goal`) and `activity`, delivered on the bus. A
 wait registers a `DaemonApi.subscribe` listener for its duration, evaluates its predicate on every
 `session.updated` / `session.activity` / `session.closed` for the watched ids, and re-reads
 `GET /api/sessions` every 10 s as a safety net (the host poll idles while the host is unhealthy).

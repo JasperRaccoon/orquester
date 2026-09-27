@@ -4,7 +4,10 @@ import assert from "node:assert/strict";
 import {
   activeChatSessionIdFor,
   activeChatTab,
+  chatTabSwitchDismisses,
+  dismissWhenChatTabLeaves,
   isActiveChatTab,
+  ownChatSessionOf,
   releaseActiveChatTab,
   setActiveChatTab,
   subscribeActiveChatTab
@@ -98,4 +101,52 @@ test("a legacy `agent` terminal record is a PTY tab, never a chat tab", () => {
     activeChatSessionIdFor([{ id: "t5", type: "terminal", sessionId: "legacy" }], "t5"),
     null
   );
+});
+
+// ---------------------------------------------------------------------------
+// Micro-fix: a chat tab's popover closes when the tab is LEFT, never when its
+// own tab is activated (a click in an unfocused grid cell activates the very
+// tab the popover belongs to, in the same commit that opened it).
+// ---------------------------------------------------------------------------
+
+test("the dismiss decision: activating the popover's own tab keeps it open; any other tab closes it", () => {
+  assert.equal(chatTabSwitchDismisses("s1", "s1"), false, "its own tab became the active one");
+  assert.equal(chatTabSwitchDismisses("s1", "s2"), true, "another thread is on screen");
+  assert.equal(chatTabSwitchDismisses("s1", null), true, "no chat tab is on screen");
+  assert.equal(
+    chatTabSwitchDismisses(null, "s1"),
+    true,
+    "an owner nobody knows closes on any change, as before"
+  );
+});
+
+test("a popover subscribed while its unfocused grid cell is being activated stays open", () => {
+  setActiveChatTab("other");
+  let dismissed = 0;
+  const stop = dismissWhenChatTabLeaves("s1")(() => {
+    dismissed += 1;
+  });
+  // MainView publishes the activation in a PARENT effect, after the child
+  // popover already subscribed.
+  setActiveChatTab("s1");
+  assert.equal(dismissed, 0, "activating its own tab must not close it");
+  setActiveChatTab("s2");
+  assert.equal(dismissed, 1, "switching to another tab closes it");
+  stop();
+  setActiveChatTab("s1");
+  setActiveChatTab("s3");
+  assert.equal(dismissed, 1, "and an unsubscribed popover hears nothing");
+  setActiveChatTab(null);
+});
+
+test("a popover finds its own thread from where its trigger sits", () => {
+  const inChat = {
+    closest: (selector: string) =>
+      selector === "[data-agent-chat]" ? { getAttribute: (name: string) => (name === "data-agent-chat" ? "s1" : null) } : null
+  };
+  assert.equal(ownChatSessionOf(inChat), "s1");
+  assert.equal(ownChatSessionOf({ closest: () => null }), null, "outside any chat view");
+  assert.equal(ownChatSessionOf(null), null, "not mounted");
+  const empty = { closest: () => ({ getAttribute: () => "" }) };
+  assert.equal(ownChatSessionOf(empty), null, "an empty id is no id");
 });

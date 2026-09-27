@@ -25,7 +25,9 @@
  * `subagents.ts` (spawn calls, the `subagent_*` reports, child sessions,
  * `resume_from`), `background-tasks.ts` (shells and monitors: snapshots, the
  * CLI's reports, poll and kill answers, ended-task memory and revival) and
- * `loops-goals.ts` (scheduled prompts and the goal).
+ * `loops.ts` (scheduled prompts). The session's goal is the thread's goal:
+ * `GrokGoalTracker` (`goal.ts`, goals §6.3), a class this one holds, as it
+ * holds the replayed history.
  *
  * §10's rule is enforced two ways: the ACP `session/update` switch ends in
  * `satisfies never`, so a protocol release that adds a variant is a TYPE
@@ -51,7 +53,6 @@ import type {
 import type {
   XaiAskUserQuestionParams,
   XaiBackgroundTask,
-  XaiGoalUpdatedUpdate,
   XaiSessionUpdate,
   XaiSubagentFinishedUpdate,
   XaiSubagentProgressUpdate,
@@ -68,12 +69,14 @@ import {
   taskCompleted,
   type TaskScope
 } from "./background-tasks.ts";
+import { GrokGoalTracker } from "./goal.ts";
 import { GrokHistoryCollector } from "./history.ts";
-import { goalLinkage, goalUpdated, loopLinkage, scheduledTask } from "./loops-goals.ts";
+import { loopLinkage, scheduledTask } from "./loops.ts";
 import {
   ACP_RAW_SOURCE,
   createNormalizerState,
   event,
+  textArgument,
   XAI_RAW_SOURCE,
   type GrokNormalizerDeps,
   type GrokNormalizerState
@@ -153,7 +156,13 @@ const KNOWN_XAI_UPDATES = new Set([
   "scheduled_task_created",
   "scheduled_task_fired",
   "scheduled_task_deleted",
-  "goal_updated"
+  "goal_updated",
+  // A goal run's other private traffic, read off 1.0.3 sessions and named by
+  // the 1.0.34 binary (fixtures README observation 58): a transport retry is
+  // a heartbeat (`retryState`), and a compaction checkpoint precedes the
+  // `auto_compact_completed` that carries the boundary.
+  "retry_state",
+  "compaction_checkpoint"
 ]);
 
 export class GrokNormalizer {
@@ -170,6 +179,15 @@ export class GrokNormalizer {
    * seen can still be reconstructed through `projectHistory` (E6).
    */
   private readonly history = new GrokHistoryCollector();
+
+  /**
+   * The provider's goal, live and replayed (goals §6.3): the THREAD's goal
+   * (`thread.goal.updated`), never a roster row.
+   */
+  private readonly goals: GrokGoalTracker;
+
+  /** The open retry episode's last attempt; `undefined` when none is open. */
+  private retryAttempt: number | undefined;
 
   private readonly hooks = new Map<string, string>();
 
@@ -203,6 +221,11 @@ export class GrokNormalizer {
 
   constructor(deps: GrokNormalizerDeps, sessionId: string) {
     this.state = createNormalizerState(deps, sessionId);
+    this.goals = new GrokGoalTracker({
+      ...(deps.knownGoal === undefined ? {} : { knownGoal: deps.knownGoal }),
+      now: deps.now ?? Date.now,
+      ...(deps.debug === undefined ? {} : { debug: deps.debug })
+    });
   }
 
   // ------------------------------------------------------------------ state
@@ -293,11 +316,30 @@ export class GrokNormalizer {
     return this.permissionDenied;
   }
 
-  /** A new turn begins: open the assistant stream and drop the plan fallback. */
-  beginTurn(): void {
+  /**
+   * A prompt is dispatched — a new turn, a CLI prompt's own turn, or a steer:
+   * open the assistant stream, and make sure the next prompt's text cannot
+   * land in the bubble a previous prompt left open.
+   *
+   * That is what a STEER needs: it reuses the running turn, and ACP's
+   * `agent_message_chunk` names no message. Left open, the steered reply
+   * streamed into the cancelled prompt's bubble, which keeps its first
+   * position, so the answer sat ABOVE the user's steer. A segment opened by a
+   * chunk that named its prompt stays open here: the next prompt's first chunk
+   * closes it (`contentDelta`, `segments.ts`), so a chunk the cancelled prompt
+   * flushes after the cancel still joins its own bubble. One with no prompt id
+   * to compare is closed now, as T3 closes the active segment on every
+   * dispatch (`AcpSessionRuntime.ts:1033-1034`). Returns the text-less
+   * `item.completed` for the session to emit — empty when nothing was closed.
+   */
+  beginTurn(): RuntimeEvent[] {
+    const closed =
+      this.state.activeAssistantPromptId === undefined ? closeAssistantSegment(this.state) : [];
     this.state.assistantUpdatesOpen = true;
     this.permissionDenied = false;
+    this.retryAttempt = undefined;
     this.resetTurnUsage();
+    return closed;
   }
 
   /**
@@ -318,6 +360,7 @@ export class GrokNormalizer {
    */
   endTurn(): RuntimeEvent[] {
     this.state.assistantUpdatesOpen = false;
+    this.retryAttempt = undefined;
     const events = closeAssistantSegment(this.state);
     const turnId = this.state.deps.activeTurnId();
     for (const child of this.state.children.values()) {
@@ -338,7 +381,8 @@ export class GrokNormalizer {
    * timeline rather than restore it — and `session/load` replays only a
    * fraction anyway (39 events produced, 5 replayed), so it could never be a
    * reconstruction. A replayed `turn_completed` is still read for its usage
-   * block (see {@link handleXaiNotification}); nothing else is.
+   * block, and a replayed `goal_updated` for the goal it leaves (see
+   * {@link handleXaiNotification}); nothing else is.
    */
   handleSessionUpdate(params: SessionNotification): RuntimeEvent[] {
     const child = this.childSessionOf(params.sessionId);
@@ -555,9 +599,26 @@ export class GrokNormalizer {
       // for one it has not, `projectHistory` rebuilds it from here.
       this.history.observeXaiUpdate(update as Record<string, unknown>);
       this.absorbReplayUsage(update);
+      if (update.sessionUpdate === "goal_updated") {
+        // Goals §6.3 item 4: a replayed goal is the past. It is remembered as
+        // the provider's state and compared ONCE, by `reconcileGoal`, when
+        // the load has completed — never emitted as it arrives.
+        this.goals.replayed(update);
+      }
       return [];
     }
     return this.handleXaiUpdate(method, update, params);
+  }
+
+  /**
+   * Goals §6.3 item 4: once the session is up, the provider's goal against
+   * the goal the thread shows. At most one `thread.goal.updated`, live. A
+   * fresh session (`"new"`) has no goal; a load (`"load"`) that replayed no
+   * goal row is no evidence of anything ({@link GrokGoalTracker.reconcile}).
+   */
+  reconcileGoal(opened: "new" | "load"): RuntimeEvent[] {
+    const payload = this.goals.reconcile(opened);
+    return payload === null ? [] : [this.event("thread.goal.updated", payload)];
   }
 
   private absorbReplayUsage(update: XaiSessionUpdate): void {
@@ -690,8 +751,20 @@ export class GrokNormalizer {
       case "scheduled_task_fired":
       case "scheduled_task_deleted":
         return scheduledTask(this.state, update as unknown as Record<string, unknown>, raw);
-      case "goal_updated":
-        return goalUpdated(this.state, update as unknown as XaiGoalUpdatedUpdate, raw);
+      case "goal_updated": {
+        // Goals §6.3: the whole goal, on every change and whenever its
+        // counters move. Whatever method carried it — a frame that is not a
+        // replay is live — it becomes at most one goal row, never a warning.
+        const payload = this.goals.live(update);
+        return payload === null ? [] : [this.event("thread.goal.updated", payload, undefined, raw)];
+      }
+      case "retry_state":
+        return this.retryState(update as unknown as Record<string, unknown>, raw);
+      case "compaction_checkpoint":
+        // The CLI's own rewind checkpoint at the compaction boundary, written
+        // 1–36 ms BEFORE `auto_compact_completed`, which carries the boundary
+        // itself (observation 58). A row here would mark one compaction twice.
+        return [];
       default: {
         const name = (update as { sessionUpdate: string }).sessionUpdate;
         if (KNOWN_XAI_UPDATES.has(name)) {
@@ -815,10 +888,12 @@ export class GrokNormalizer {
    * `leftRunning` is said on a shell's or a monitor's row when its PROCESS
    * outlives this end — a deploy, a restart or a crash ends the session
    * without the user, and only the user's end sweeps the work
-   * (`GrokSession.stop`): a subagent, a loop and a goal live in the CLI and
-   * end with it. `ended` is said on a live loop's and goal's row at such an
-   * end — "Ended when the agent host stopped", say — which a bare "Stopped"
-   * read as the user's doing; the user's end and a Stop say nothing.
+   * (`GrokSession.stop`): a subagent and a loop live in the CLI and end with
+   * it. `ended` is said on a live loop's row at such an end — "Ended when the
+   * agent host stopped", say — which a bare "Stopped" read as the user's
+   * doing; the user's end and a Stop say nothing. The session's goal is no
+   * row of its own: the thread's goal stays as the provider last reported
+   * it, and the next session's `reconcileGoal` compares (goals §6.3 item 4).
    *
    * These are the adapter's own ends, not the CLI's: fixture 21 shows a
    * session-scoped Stop's `session/cancel` cancelling a background subagent
@@ -850,30 +925,18 @@ export class GrokNormalizer {
         )
       );
     }
-    // A loop and a goal live in the CLI's process: its exit ends them (a loop
-    // made `durable` would be the CLI's to bring back, not captured). After a
-    // Stop that leaves the process up — whether its `session/cancel` stops
-    // either is not captured — the CLI's later reports note themselves on the
-    // ended rows (a fire, a goal's progress), and only the CLI re-creating a
-    // loop or resuming a goal it ended itself opens a new run
-    // ({@link scheduledTask}, {@link goalUpdated}).
+    // A loop lives in the CLI's process: its exit ends it (a loop made
+    // `durable` would be the CLI's to bring back, not captured). After a Stop
+    // that leaves the process up — whether its `session/cancel` stops a loop
+    // is not captured — the CLI's later fires note themselves on the ended
+    // row, and only the CLI re-creating it opens a new run
+    // ({@link scheduledTask}).
     const why = ended === undefined ? {} : { summary: ended };
     for (const loop of this.state.loops.values()) {
       if (loop.live) {
         loop.live = false;
         events.push(this.event("task.completed", { ...loopLinkage(loop), status: "stopped", ...why }, loop.turnId));
       }
-    }
-    if (this.state.goal?.live === true) {
-      this.state.goal.live = false;
-      this.state.goal.endedBy = "adapter";
-      events.push(
-        this.event(
-          "task.completed",
-          { ...goalLinkage(this.state.goal), status: "stopped", ...why },
-          this.state.goal.turnId
-        )
-      );
     }
     for (const track of this.state.subagents.values()) {
       if (!track.live) {
@@ -934,6 +997,50 @@ export class GrokNormalizer {
       }
     }
     return events;
+  }
+
+  // ---------------------------------------------------------------- retries
+
+  /**
+   * `retry_state` — the CLI retrying a failed model request, attempt `n` of
+   * `max_retries` (15). Claude's `api_retry` precedent: a transport retry is a
+   * heartbeat, never a timeline row and never a warning. So it is
+   * `session.state.changed {running}`, which ingestion folds into the state
+   * the turn already has — nothing is written — while the host's turn
+   * watchdog sees the activity. ONE per retry episode: an episode is one
+   * request's attempts and ends when a later frame restarts the count (each
+   * observed episode recovered, its next frame model output, within 3
+   * minutes). Between turns it is nothing: an idle session must not read as
+   * running, and a background agent's failure reports itself when it ends.
+   * The parent's only: a child session's retry is its own request's
+   * (`childXaiUpdate` drops it as known), and its liveness rides
+   * `subagent_progress` (fixtures README observation 58).
+   */
+  private retryState(update: Record<string, unknown>, raw: RuntimeEventRaw): RuntimeEvent[] {
+    const turnId = this.state.deps.activeTurnId();
+    if (turnId === undefined) {
+      return [];
+    }
+    const attempt = nonNegativeCount(update["attempt"]) ?? 1;
+    const fresh = this.retryAttempt === undefined || attempt <= this.retryAttempt;
+    this.retryAttempt = attempt;
+    if (!fresh) {
+      return [];
+    }
+    const max = nonNegativeCount(update["max_retries"]);
+    const reason = textArgument(update, "reason");
+    return [
+      this.event(
+        "session.state.changed",
+        {
+          state: "running",
+          reason: `retry_state:${attempt}${max === undefined ? "" : `/${max}`}`,
+          ...(reason === undefined ? {} : { detail: { reason } })
+        },
+        turnId,
+        raw
+      )
+    ];
   }
 
   // ------------------------------------------------------------- requests
@@ -1071,6 +1178,11 @@ export class GrokNormalizer {
   ): RuntimeEvent {
     return event(this.state, type, payload, turnId, raw);
   }
+}
+
+/** A finite count ≥ 0, or `undefined`. */
+function nonNegativeCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 /** An event on the turn given — with `null`, on none at all, whatever turn is open. */

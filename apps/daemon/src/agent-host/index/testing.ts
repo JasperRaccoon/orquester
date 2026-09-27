@@ -184,10 +184,23 @@ export function created(projectPath = "/w/p", title = "New thread"): Draft {
   };
 }
 
-export function userMessage(messageId: string, text: string, turnId: string | null = null): Draft {
+export function userMessage(
+  messageId: string,
+  text: string,
+  turnId: string | null = null,
+  /** The owning subagent, stamped on the message as ingestion stamps one. */
+  agentId?: string
+): Draft {
   return {
     type: "thread.message-sent",
-    payload: { messageId, role: "user", text, streaming: false, turnId }
+    payload: {
+      messageId,
+      role: "user",
+      text,
+      streaming: false,
+      turnId,
+      ...(agentId !== undefined ? { agentId } : {})
+    }
   };
 }
 

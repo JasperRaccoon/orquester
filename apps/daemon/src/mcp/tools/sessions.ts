@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type RegistryResponse, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes, isSettledConversationCompaction, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
+import { agentChatRoutes, isSettledConversationCompaction, parseThreadGoal, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { resolveProject } from "../addressing.ts";
 import { conversationLaunch, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
@@ -29,8 +29,35 @@ function isTurnActive(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
   return status === "starting" || status === "running" || activeTurnId !== null;
 }
 
+/**
+ * The goal continues (goals §4.7): the summary's `continuing` — the host's own predicate, grace included — while the
+ * thread just read still holds the goal `active`. The summary trails the host by up to one poll (right after a
+ * `/goal pause` it can still say continuing), and the host reports a goal continuing only while it is active — or while
+ * an Orquester update holds it ({@link goalHeldForUpdate}).
+ */
+function goalContinuing(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
+  return (s.goal?.continuing === true && parseThreadGoal(snap.goal)?.status === "active") || goalHeldForUpdate(s, snap);
+}
+
+/**
+ * Goals §5.7: an Orquester update holds the goal — paused between two of its turns, and set going again by the agent
+ * host itself once it has restarted. The host reports it `paused` and continuing, and the thread just read holds it
+ * `paused`: the GUI's "paused for update" (`isGoalHeldForUpdate`).
+ */
+function goalHeldForUpdate(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
+  return s.goal?.continuing === true && s.goal.status === "paused" && parseThreadGoal(snap.goal)?.status === "paused";
+}
+
 /** The GUI's `canSwitchChatAccount` / the host's `identitySwitchRefusal`; the host stays authoritative. */
 function switchRefusal(s: SessionSummary, snap: ThreadSnapshotPayload): string | null {
+  // Goals §5.7: the host refuses the switch while it holds the goal, which it will set going again by itself — and
+  // then it continues, and is refused anyway: waiting never opens the switch. Any `/goal` but `status` takes the goal
+  // back from the hold and leaves it paused, and a paused goal may switch (the host's `GOAL_HELD_SWITCH_REFUSAL`).
+  if (goalHeldForUpdate(s, snap)) return "The goal is held for an Orquester update and resumes by itself once the agent host has restarted, when it continues again. Take it back first — send_message \"/goal pause\" keeps it paused — then switch accounts.";
+  // Goals §5.5, ahead of the turn check as on the host: between a continuing goal's turns idle never comes, so "wait for
+  // the turn" is advice that never comes true — and a switch let through between two of them would be the host's 409
+  // only after the other fields were written. A `/goal pause` only stops the NEXT turn; interrupt_session stops both.
+  if (goalContinuing(s, snap)) return "Pause the goal before switching accounts: interrupt_session pauses it and stops the running turn (or send_message \"/goal pause\", then let the turn finish).";
   if (isTurnActive(s, snap)) return "Wait for the agent to finish the current turn before switching accounts.";
   if (s.hasPendingApprovals || s.hasPendingUserInput || snap.pending.approvals.length > 0 || snap.pending.userInputs.length > 0) return "Answer the agent's open request before switching accounts.";
   if (s.backgroundLiveness) return "Wait for the background work to finish before switching accounts.";
@@ -249,7 +276,7 @@ const createSession = defineTool({
 const updateSession = defineTool({
   name: "update_session",
   title: "Update session settings",
-  description: "Change what the composer bar holds — model, options (effort…), permission mode, account — and/or rename the tab. Model/permission changes restart a live agent session and are refused while a turn runs unless force:true; an account switch applies on the next message and needs an idle session.",
+  description: "Change what the composer bar holds — model, options (effort…), permission mode, account — and/or rename the tab. Model/permission changes restart a live agent session and are refused while a turn runs unless force:true; an account switch applies on the next message, needs an idle session and is refused while a goal continues.",
   input: {
     sessionId: sessionIdField,
     title: z.string().min(1).max(300).optional().describe("New tab title."),
@@ -291,7 +318,12 @@ const updateSession = defineTool({
     // Only a real change restarts the agent, so only a real change is refused mid-turn: a field that already holds its
     // value is skipped below and cuts nothing.
     if (modeFields.length && isTurnActive(summary, snap) && !args.force) {
-      throw new ToolError("SESSION_BUSY", "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, interrupt_session, or pass force:true.");
+      // Under a continuing goal the next turn starts as this one ends (goals §4.7): waiting never helps, and a
+      // `/goal pause` alone lets this turn run to its end — interrupt_session pauses the goal and stops the turn. A goal
+      // an Orquester update holds (§5.7) starts no next turn here: waiting does help.
+      throw new ToolError("SESSION_BUSY", goalContinuing(summary, snap) && !goalHeldForUpdate(summary, snap)
+        ? "A goal turn is running, and the goal starts the next one by itself; changing the model or permission mode restarts the agent and would cut it. interrupt_session pauses the goal and stops the turn — or pass force:true."
+        : "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, interrupt_session, or pass force:true.");
     }
     // The tab record spells the system identity as an absent id; the wire spells it "system".
     const switchAccount = accountId !== undefined && accountId !== (summary.accountId || SYSTEM_ACCOUNT_ID);
@@ -325,7 +357,7 @@ const updateSession = defineTool({
 const interruptSession = defineTool({
   name: "interrupt_session",
   title: "Interrupt",
-  description: "The GUI's Stop: interrupts the running turn (its pending requests are cancelled); with no turn running, stops every live subagent, background shell and watch loop.",
+  description: "The GUI's Stop: interrupts the running turn (its pending requests are cancelled); with no turn running, stops every live subagent, background shell and watch loop. On an agent that continues a goal by itself (Codex), Stop pauses the goal first; resume it with send_message \"/goal resume\".",
   input: { sessionId: sessionIdField },
   // Not idempotent: a retry after the turn has stopped goes on to stop the background work.
   annotations: MUTATING,
@@ -533,7 +565,7 @@ const revertSession = defineTool({
 const compactSession = defineTool({
   name: "compact_session",
   title: "Compact context",
-  description: "Ask the agent to compact its context window (the GUI's 'Compact context'). Refused while a turn runs or on an empty conversation.",
+  description: "Ask the agent to compact its context window (the GUI's 'Compact context'). Refused on an empty conversation and while a turn runs — while a Codex goal continues, with \"Pause the goal before compacting.\": interrupt_session pauses it and stops the turn. A goal an Orquester update holds (heldForUpdate) starts no next turn, so it gets the plain refusal: wait for the turn.",
   input: { sessionId: sessionIdField },
   // Not idempotent: a retry compacts again.
   annotations: MUTATING,

@@ -9,8 +9,9 @@
  * extensions in both spellings. The generic transport lives in `acp/`; the
  * per-thread machinery in `session.ts`; the frame→event translation in
  * `normalize.ts`, the modules it routes to (`segments.ts`, `tool-calls.ts`,
- * `subagents.ts`, `background-tasks.ts`, `loops-goals.ts`) and the state they
- * share (`normalizer-state.ts`); the probe in `probe.ts`.
+ * `subagents.ts`, `background-tasks.ts`, `loops.ts`) and the state they
+ * share (`normalizer-state.ts`), with the session's goal mirrored by
+ * `goal.ts`; the probe in `probe.ts`.
  *
  * Where this adapter deviates from spec §4.5, it is because the CLI installed
  * on this host behaves differently and the fixtures prove it. Each deviation
@@ -84,13 +85,24 @@ const ADAPTER_ID: AgentAdapterId = "grok";
  *
  * `supportsConversationRollback: false` stays too: there is no provider-side
  * rollback, and §5.5 step 2 refuses before anything is touched.
+ *
+ * `goals` (goals §4.5): `/goal …` is forwarded and the CLI parses it; the goal
+ * runs inside the prompt that set it (fixture 30), and the CLI never continues
+ * a goal across turns by itself (`continuesAcrossTurns: false`) — the prompts
+ * it starts on its own (fixtures README observation 40) are turns of their
+ * own; and `/goal status|pause|resume|clear` are prompts like any other.
+ * Grok would queue a second prompt behind the running one (fixtures README
+ * observation 19), but a steer cancels the running prompt first — the whole
+ * goal run, which Grok then reports paused (read off 1.0.3, not captured) —
+ * so the chip offers only resume and clear, and nothing while a turn runs.
  */
 export const GROK_CAPABILITIES: AdapterCapabilities = {
   sessionModelSwitch: "in-session",
   supportsConversationRollback: false,
   showPlanModeToggle: false,
   reportsContextWindow: true,
-  compaction: { type: "slash-command", command: "/compact" }
+  compaction: { type: "slash-command", command: "/compact" },
+  goals: { command: "provider", actions: ["resume", "clear"], continuesAcrossTurns: false }
 };
 
 /**
@@ -270,6 +282,11 @@ class GrokAdapter implements AgentAdapter {
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       ...(input.resumeCursor === undefined ? {} : { resumeCursor: input.resumeCursor }),
+      // Goals §5.3. `carryGoal` needs nothing here: a Grok goal lives in the
+      // session's own files, which every account home shares, so a load
+      // under the new account replays it like any other.
+      knownGoal: input.knownGoal ?? null,
+      now: () => this.context.clock.now().getTime(),
       command,
       env,
       clientInfo: { name: "orquester", version: "1" },

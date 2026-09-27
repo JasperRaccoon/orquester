@@ -10,9 +10,10 @@
  * **Activity-group boundaries are mechanical** (§7.3): a group starts at the
  * first reasoning row or plain tool row of a turn and runs until a non-grouping
  * entry, a turn-id change, or a row the user collapsed out. Errors, answered
- * questions, subagent-spawn rows and compaction markers are hoisted out as
- * their own rows — an error must never hide inside a collapsed summary line —
- * and a run with no reasoning row is a plain tool group, not an activity group.
+ * questions, subagent-spawn rows, compaction markers and a goal's own rows
+ * (goals §8.4) are hoisted out as their own rows — an error must never hide
+ * inside a collapsed summary line — and a run with no reasoning row is a plain
+ * tool group, not an activity group.
  *
  * `isRowUnchanged` is hand-written per variant on purpose: React 18 with no
  * compiler means identity preservation is the whole performance story, and a
@@ -35,7 +36,9 @@
  */
 
 import {
+  GOAL_STATUS_ACTIVITY_KIND,
   isMessageStreaming,
+  isProviderInternalUserText,
   isSettledTurnState,
   NOTHING_STREAMS,
   startedTurns,
@@ -206,21 +209,11 @@ export function isCompactCommandMessage(message: ThreadMessageItem): boolean {
  * starts in the transcript), so they render as bubbles — but "rewind to here"
  * would return one of them to the composer as the user's own prompt, which
  * is never what a rewind means. Withheld, like the verbatim `/compact`.
+ * The prefix list is `@orquester/api`'s (`isProviderInternalUserText`), the
+ * one the right rail's prompt history filters by too.
  */
-const PROVIDER_INTERNAL_USER_PREFIXES = [
-  "<command-name>",
-  "<local-command-stdout>",
-  "<local-command-caveat>",
-  "<task-notification>",
-  "<system-reminder>"
-] as const;
-
 export function isProviderInternalUserMessage(message: ThreadMessageItem): boolean {
-  if (message.role !== "user") {
-    return false;
-  }
-  const text = message.text.trimStart();
-  return PROVIDER_INTERNAL_USER_PREFIXES.some((prefix) => text.startsWith(prefix));
+  return message.role === "user" && isProviderInternalUserText(message.text);
 }
 
 /**
@@ -242,7 +235,8 @@ export function isGroupingEntry(entry: TimelineEntry): boolean {
     entry.entry.questionAnswer === undefined &&
     entry.entry.sourceActivityKind !== "context-compaction" &&
     entry.entry.sourceActivityKind !== "thread.state.changed" &&
-    entry.entry.tone !== "error"
+    entry.entry.tone !== "error" &&
+    !isGoalEntry(entry)
   );
 }
 
@@ -251,6 +245,24 @@ function isCompactionEntry(entry: TimelineEntry): boolean {
     entry.kind === "work" &&
     (entry.entry.sourceActivityKind === "context-compaction" ||
       entry.entry.sourceActivityKind === "thread.state.changed")
+  );
+}
+
+/** A goal's landmark (goals §8.4): its own `goal-marker` row, like a compaction. */
+function isGoalMarkerEntry(entry: TimelineEntry): boolean {
+  return entry.kind === "work" && entry.entry.goal !== undefined;
+}
+
+/**
+ * A goal's own row — a marker, or the host's answer to a `/goal` (goals §5.1,
+ * §8.4). Neither is ever grouped: a marker is a landmark, and a status answer
+ * is what the user just asked for, which must not hide inside a collapsed
+ * "Ran 3 commands" or a thinking group.
+ */
+function isGoalEntry(entry: TimelineEntry): boolean {
+  return (
+    isGoalMarkerEntry(entry) ||
+    (entry.kind === "work" && entry.entry.sourceActivityKind === GOAL_STATUS_ACTIVITY_KIND)
   );
 }
 
@@ -284,6 +296,7 @@ function deriveTerminalAssistantMessageIds(
   foldKeys: readonly (string | null)[]
 ): Set<string> {
   const lastByResponseKey = new Map<string, string>();
+  const lastCommentaryByResponseKey = new Map<string, string>();
   let nullTurnIndex = 0;
   for (const [position, entry] of entries.entries()) {
     if (entry.kind !== "message") {
@@ -294,15 +307,27 @@ function deriveTerminalAssistantMessageIds(
       nullTurnIndex += 1;
       continue;
     }
-    // Commentary is never the turn's answer, so it can never be the terminal
-    // message whose metadata row closes the response.
-    if (message.role !== "assistant" || isCommentaryAssistantMessage(message)) {
+    if (message.role !== "assistant") {
       continue;
     }
-    lastByResponseKey.set(
-      message.turnId ? `turn:${foldKeys[position] ?? message.turnId}` : `unkeyed:${nullTurnIndex}`,
-      message.id
-    );
+    const responseKey = message.turnId
+      ? `turn:${foldKeys[position] ?? message.turnId}`
+      : `unkeyed:${nullTurnIndex}`;
+    // Commentary is not the turn's answer while the turn has one, so it
+    // cannot be the terminal message whose metadata row closes the response.
+    if (isCommentaryAssistantMessage(message)) {
+      lastCommentaryByResponseKey.set(responseKey, message.id);
+      continue;
+    }
+    lastByResponseKey.set(responseKey, message.id);
+  }
+  // A turn with no final answer at all (interrupted, or ended on a tool) ends
+  // on its last commentary, as in T3. With no terminal message the fold hid
+  // every word of the turn behind "Worked for".
+  for (const [responseKey, messageId] of lastCommentaryByResponseKey) {
+    if (!lastByResponseKey.has(responseKey)) {
+      lastByResponseKey.set(responseKey, messageId);
+    }
   }
   return new Set(lastByResponseKey.values());
 }
@@ -666,11 +691,14 @@ function deriveTurnFolds(input: {
     const terminalIndex = group.terminalEntry
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
       : group.entries.length;
-    // Thinking blocks do not count towards "one trailing activity".
+    // Thinking blocks do not count towards "one trailing activity", and
+    // neither does a goal marker: it is never folded, so it must not change
+    // what else is.
     const trailingEntryCount = group.entries.filter(
       (candidate, candidateIndex) =>
         candidateIndex > terminalIndex &&
-        !(candidate.kind === "message" && isGroupMessage(candidate.message))
+        !(candidate.kind === "message" && isGroupMessage(candidate.message)) &&
+        !isGoalMarkerEntry(candidate)
     ).length;
 
     for (const [index, entry] of group.entries.entries()) {
@@ -686,10 +714,14 @@ function deriveTurnFolds(input: {
       if (!isCompaction && !isReasoning && index > terminalIndex && !isSingleTrailingActivity) {
         continue;
       }
-      // User input and subagent batches stay visible after their turn settles.
+      // User input and subagent batches stay visible after their turn settles,
+      // and so do a goal's markers (goals §8.4): the story of the goal — set,
+      // checked, achieved — outlives the work it drove.
       if (
         entry.kind === "work" &&
-        (entry.entry.questionAnswer !== undefined || entry.entry.agentSpawn !== undefined)
+        (entry.entry.questionAnswer !== undefined ||
+          entry.entry.agentSpawn !== undefined ||
+          entry.entry.goal !== undefined)
       ) {
         continue;
       }
@@ -1057,6 +1089,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       entry.kind !== "work" ||
       entry.entry.questionAnswer !== undefined ||
       isCompactionEntry(entry) ||
+      isGoalEntry(entry) ||
       entry.entry.tone === "error"
     ) {
       break;
@@ -1272,14 +1305,37 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       continue;
     }
 
+    // ── Goal marker (goals §8.4) ──────────────────────────────────────────
+    if (timelineEntry.kind === "work" && timelineEntry.entry.goal !== undefined) {
+      const goal = timelineEntry.entry.goal;
+      // Only an ending has a cost worth a line; the counters of a set or a
+      // check are the chip's to show, live.
+      const ended = goal.change === "achieved" || goal.change === "failed";
+      rows.push({
+        kind: "goal-marker",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        turnId: timelineEntry.entry.turnId,
+        label: timelineEntry.entry.label,
+        change: goal.change,
+        ...(goal.objective !== undefined ? { objective: goal.objective } : {}),
+        ...(ended && goal.rounds !== undefined ? { rounds: goal.rounds } : {}),
+        ...(ended && goal.elapsedMs !== undefined ? { elapsedMs: goal.elapsedMs } : {}),
+        ...(ended && goal.tokensUsed !== undefined ? { tokensUsed: goal.tokensUsed } : {})
+      });
+      continue;
+    }
+
     // ── Work rows ─────────────────────────────────────────────────────────
     if (timelineEntry.kind === "work") {
-      // Hoisted: an error, an answered question and a spawn row are their own
-      // rows — an error must never hide inside a collapsed summary (§7.3).
+      // Hoisted: an error, an answered question, a spawn row and a host
+      // `/goal` answer are their own rows — an error must never hide inside a
+      // collapsed summary (§7.3), nor an answer the user just asked for.
       if (
         timelineEntry.entry.agentSpawn !== undefined ||
         timelineEntry.entry.questionAnswer !== undefined ||
-        timelineEntry.entry.tone === "error"
+        timelineEntry.entry.tone === "error" ||
+        isGoalEntry(timelineEntry)
       ) {
         const spawn = timelineEntry.entry.agentSpawn;
         if (spawn && entryBelongsToActiveTurn(timelineEntry, index)) {
@@ -1307,6 +1363,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           nextEntry.entry.agentSpawn !== undefined ||
           nextEntry.entry.questionAnswer !== undefined ||
           isCompactionEntry(nextEntry) ||
+          isGoalEntry(nextEntry) ||
           nextEntry.entry.tone === "error" ||
           activeWorkEntryIds.has(nextEntry.id) ||
           collapsedEntryIds.has(nextEntry.id) ||
@@ -1865,6 +1922,19 @@ export function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow)
         a.afterTokens === other.afterTokens &&
         a.failed === other.failed &&
         a.detail === other.detail
+      );
+    }
+    case "goal-marker": {
+      const other = b as typeof a;
+      return (
+        a.createdAt === other.createdAt &&
+        a.turnId === other.turnId &&
+        a.label === other.label &&
+        a.change === other.change &&
+        a.objective === other.objective &&
+        a.rounds === other.rounds &&
+        a.elapsedMs === other.elapsedMs &&
+        a.tokensUsed === other.tokensUsed
       );
     }
     case "turn-diff": {

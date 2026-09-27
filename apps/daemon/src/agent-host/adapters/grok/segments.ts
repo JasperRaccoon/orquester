@@ -17,6 +17,7 @@ import {
   type GrokNormalizerState
 } from "./normalizer-state.ts";
 import type { ChildSession } from "./subagents.ts";
+import { promptIdOf } from "./xai-meta.ts";
 
 /**
  * A child's words: the agent's assistant message, a segment of its own
@@ -185,25 +186,43 @@ export function contentDelta(
   }
 
   const events: RuntimeEvent[] = [];
+  // Every chunk names the prompt that produced it (fixtures README 19), and
+  // one prompt's text is one bubble: a chunk from another prompt — the
+  // steered one after a cancel, or a CLI prompt's held frames joining our
+  // turn — closes the bubble before it opens its own.
+  const promptId = promptIdOf(params._meta);
+  if (
+    state.activeAssistantItemId !== undefined &&
+    promptId !== undefined &&
+    state.activeAssistantPromptId !== undefined &&
+    promptId !== state.activeAssistantPromptId
+  ) {
+    events.push(...closeAssistantSegment(state));
+  }
   if (state.activeAssistantItemId === undefined && content.text.trim().length === 0) {
     // Whitespace never OPENS a segment (it would produce an empty bubble for
     // a provider that flushes a trailing newline) but is kept inside one.
-    return [];
+    return events;
   }
-  const itemId = ensureAssistantSegment(state, events);
+  const itemId = ensureAssistantSegment(state, events, promptId);
   events.push(
     eventWithItem(state, "content.delta", { streamKind, delta: content.text }, itemId, raw)
   );
   return events;
 }
 
-function ensureAssistantSegment(state: GrokNormalizerState, events: RuntimeEvent[]): string {
+function ensureAssistantSegment(
+  state: GrokNormalizerState,
+  events: RuntimeEvent[],
+  promptId?: string
+): string {
   if (state.activeAssistantItemId !== undefined) {
     return state.activeAssistantItemId;
   }
   const itemId = `assistant:${state.runtimeId}:segment:${state.nextSegmentIndex}`;
   state.nextSegmentIndex += 1;
   state.activeAssistantItemId = itemId;
+  state.activeAssistantPromptId = promptId;
   events.push(
     eventWithItem(state, "item.started", { itemType: "assistant_message", status: "inProgress" }, itemId)
   );
@@ -216,6 +235,7 @@ export function closeAssistantSegment(state: GrokNormalizerState): RuntimeEvent[
     return [];
   }
   state.activeAssistantItemId = undefined;
+  state.activeAssistantPromptId = undefined;
   return [
     eventWithItem(state, "item.completed", { itemType: "assistant_message", status: "completed" }, itemId)
   ];

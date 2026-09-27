@@ -31,6 +31,7 @@ import {
   ACTIVE_SUBAGENT_STATUSES,
   DEFAULT_INTERACTION_MODE,
   messageStreamingContext,
+  repairsReEmittedAssistantCopies,
   THREAD_HISTORY_DEFAULT_TURNS,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
@@ -608,7 +609,14 @@ function deriveBackgroundLiveness(
 }
 
 function project(state: InternalState): InternalState {
-  const timeline0 = deriveTimelineEntriesFromItems(state.slice.entries, state.timeline);
+  // Only a Claude log can hold the re-emitted opening paragraphs older hosts
+  // wrote (`reEmittedAssistantCopies`); nothing else is second-guessed, and
+  // `repairsReEmittedAssistantCopies` decides it, for the MCP too. The window,
+  // its row timeline and the history pages all ask the same way.
+  const repair = repairsReEmittedAssistantCopies(state.slice.head?.adapter)
+    ? ({ dropRepeatedAssistantMessages: true } as const)
+    : undefined;
+  const timeline0 = deriveTimelineEntriesFromItems(state.slice.entries, state.timeline, repair);
   const contextWindowEntry = latestContextWindowActivity(timeline0.activities);
   const backgroundLiveness = deriveBackgroundLiveness(state.slice.roster);
   const contextWindow = contextWindowEntry?.usage ?? null;
@@ -669,7 +677,7 @@ function project(state: InternalState): InternalState {
   const rowTimeline =
     historyItems.ids.size === 0 || liveSplit.rowItems === slice.entries
       ? timeline
-      : deriveTimelineEntriesFromItems(liveSplit.rowItems, state.rowTimeline);
+      : deriveTimelineEntriesFromItems(liveSplit.rowItems, state.rowTimeline, repair);
   const runningTurnId = slice.head?.session.activeTurnId ?? null;
   // Whether a message can still be streaming: the rule, never the bare flag a
   // dead host or an unclosed agent left `true` for good. Memoised by the
@@ -723,7 +731,8 @@ function project(state: InternalState): InternalState {
     activeTurnStartedAt,
     activeTurnHeaderHere: activeTurnHeaderInHistory,
     liveAgentTaskIds: sets.liveAgentTaskIds,
-    messageStreaming
+    messageStreaming,
+    dropRepeatedAssistantMessages: repair !== undefined
   });
   const rowsProjection = deriveTimelineRowsWithState(
     {

@@ -11,6 +11,8 @@
  * provider capability change without changing the persisted shape.
  */
 
+import type { GoalUpdatedPayload } from "./goal.ts";
+
 // ---------------------------------------------------------------------------
 // Envelope (§4.2)
 // ---------------------------------------------------------------------------
@@ -304,11 +306,13 @@ export const MONITOR_TASK_TYPES: ReadonlySet<string> = new Set([
 
 /**
  * Task types that are neither agents nor watch loops: plan-mode bookkeeping,
- * and a provider's scheduled prompt (`scheduled`, a Grok `/loop`) or
- * autonomous goal (`goal`, a Grok `/goal`), which run nothing of their own —
- * their fires, turns and subagents are the work, and each is live on its own
- * rows. A row of these types is background, never live work: a week-long loop
- * must not hold a deploy's drain between its fires.
+ * and a provider's scheduled prompt (`scheduled`, a Grok `/loop`) — and
+ * `goal`, the task type a 2026-09-26/27 build gave a Grok `/goal` before the
+ * goal became the thread's goal (goals §6.3); no adapter emits it since, and it
+ * stays here so nothing such a row names can ever read as live work. These
+ * run nothing of their own — their fires, turns and subagents are the work,
+ * and each is live on its own rows. A row of these types is background, never
+ * live work: a week-long loop must not hold a deploy's drain between its fires.
  */
 export const INERT_TASK_TYPES: ReadonlySet<string> = new Set(["plan", "dream", "scheduled", "goal"]);
 
@@ -970,6 +974,13 @@ export type RuntimeThreadTokenUsageUpdatedEvent = Ev<
   "thread.token-usage.updated",
   ThreadTokenUsageUpdatedPayload
 >;
+/**
+ * The provider's goal moved (goals §4.2). The payload is the WHOLE current
+ * goal, never a patch. Not transient — every update is written to
+ * `raw.ndjson` — and ingestion coalesces nothing: an adapter throttles its own
+ * `change: "progress"` updates (goals §6).
+ */
+export type RuntimeThreadGoalUpdatedEvent = Ev<"thread.goal.updated", GoalUpdatedPayload>;
 export type RuntimeTurnStartedEvent = Ev<"turn.started", TurnStartedPayload>;
 export type RuntimeTurnCompletedEvent = Ev<"turn.completed", TurnCompletedPayload>;
 export type RuntimeTurnAbortedEvent = Ev<"turn.aborted", TurnAbortedPayload>;
@@ -1027,6 +1038,7 @@ export type RuntimeEvent =
   | RuntimeThreadStateChangedEvent
   | RuntimeThreadMetadataUpdatedEvent
   | RuntimeThreadTokenUsageUpdatedEvent
+  | RuntimeThreadGoalUpdatedEvent
   | RuntimeTurnStartedEvent
   | RuntimeTurnCompletedEvent
   | RuntimeTurnAbortedEvent

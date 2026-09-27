@@ -278,3 +278,44 @@ test("a single-session attention wait is scoped by its sessionId alone, so no se
   const both = () => waitForAttention(api, { sessionId: "c1", select: () => true, after: stamp(5), timeoutMs: 5_000, signal, now });
   assert.equal(typeof both, "function", "never called: the type is what refuses it");
 });
+
+test("waitForTurn: while the host reports a goal continuing, a new settled turn is a pause between two goal turns — the wait goes on until the goal stops", async () => {
+  const goal = (status: "active" | "paused", continuing: boolean) => ({ goal: { objective: "Make the build green", status, continuing } });
+  const idle = chatSummary();
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [idle] });
+  const p = waitForTurn(api, "c1", turnBaseline(idle), { timeoutMs: 5_000, signal: new AbortController().signal, now });
+  await new Promise((r) => setImmediate(r));
+  api.emit(busEvent("session.updated", running(goal("active", true))));
+  // A host poll between two goal turns: t2 settled, and Codex starts t3 by itself.
+  api.emit(busEvent("session.updated", done(goal("active", true))));
+  api.emit(busEvent("session.updated", running({ latestTurn: { turnId: "t3", state: "running", startedAt: stamp(4), completedAt: null }, ...goal("active", true) })));
+  const t3 = { turnId: "t3", state: "completed" as const, startedAt: stamp(4), completedAt: stamp(5) };
+  api.emit(busEvent("session.updated", done({ latestTurn: t3, ...goal("active", true) })));
+  let ended = false;
+  void p.then(() => { ended = true; });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(ended, false, "no outcome while the goal continues");
+  api.emit(busEvent("session.updated", done({ latestTurn: t3, ...goal("paused", false) })));
+  const r = await p;
+  assert.equal(r.outcome, "completed");
+  assert.deepEqual([r.summary?.latestTurn?.turnId, r.summary?.goal?.status], ["t3", "paused"], "the summary is the one where the goal stopped");
+  // What needs the caller still ends the wait at once, goal or not.
+  const asked = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [done({ hasPendingUserInput: true, ...goal("active", true) })] });
+  assert.equal((await waitForTurn(asked, "c1", turnBaseline(idle), { timeoutMs: 5_000, signal: new AbortController().signal, now })).outcome, "needs-input");
+});
+
+test("waitForTurn: an errored session whose goal the host still reports continuing (a restart's owed resume) is not failed until the goal stops continuing", async () => {
+  const goal = (continuing: boolean) => ({ goal: { objective: "Make the build green", status: "active" as const, continuing } });
+  const base = turnBaseline(chatSummary());
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary({ chatSessionStatus: "error", ...goal(true) })] });
+  const p = waitForTurn(api, "c1", base, { timeoutMs: 5_000, signal: new AbortController().signal, now });
+  let ended = false;
+  void p.then(() => { ended = true; });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(ended, false, "the ladder holds its error rung back, and so does the wait");
+  // The resume failed: the host clears its mark, the goal is still active in the provider's store, and it no longer continues.
+  api.emit(busEvent("session.updated", chatSummary({ chatSessionStatus: "error", ...goal(false) })));
+  const r = await p;
+  assert.equal(r.outcome, "failed");
+  assert.equal(r.summary?.goal?.continuing, false);
+});

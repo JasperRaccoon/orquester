@@ -24,11 +24,22 @@ import {
   MAX_TURN_INPUT_CHARS,
   type AccountHome,
   type AgentAdapterId,
+  type AgentGoal,
+  type GoalUpdatedPayload,
   type RuntimeEvent,
   type RuntimeMode
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
+import { createIngestion } from "../../ingestion/index.ts";
+import {
+  FakeClock,
+  FakeTimers,
+  RecordingLiveness,
+  RecordingSink,
+  counterIdGen,
+  settle
+} from "../../ingestion/test-harness.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { readLeftoverWork } from "../../support/leftover-work.ts";
 import { createGrokAdapter, GROK_CAPABILITIES, isBlockedGrokCommand } from "./index.ts";
@@ -198,7 +209,12 @@ function home(dir: string): AccountHome {
 
 async function start(
   r: Rig,
-  overrides: { runtimeMode?: RuntimeMode; resumeCursor?: unknown; threadId?: string } = {}
+  overrides: {
+    runtimeMode?: RuntimeMode;
+    resumeCursor?: unknown;
+    threadId?: string;
+    knownGoal?: AgentGoal | null;
+  } = {}
 ): Promise<void> {
   await r.adapter.startSession({
     threadId: overrides.threadId ?? "t1",
@@ -206,9 +222,31 @@ async function start(
     home: home(r.cwd),
     modelSelection: { model: "grok-4.6" },
     runtimeMode: overrides.runtimeMode ?? "approval-required",
-    ...(overrides.resumeCursor === undefined ? {} : { resumeCursor: overrides.resumeCursor })
+    ...(overrides.resumeCursor === undefined ? {} : { resumeCursor: overrides.resumeCursor }),
+    ...(overrides.knownGoal === undefined ? {} : { knownGoal: overrides.knownGoal })
   });
 }
+
+/** Every `thread.goal.updated` payload emitted so far, in order. */
+function goalUpdates(r: Rig): GoalUpdatedPayload[] {
+  return r.events
+    .filter(
+      (event): event is Extract<RuntimeEvent, { type: "thread.goal.updated" }> =>
+        event.type === "thread.goal.updated"
+    )
+    .map((event) => event.payload);
+}
+
+/** The goal the mock's `session/load` replays last (see `testing/mock-grok.mjs`). */
+const MOCK_REPLAYED_GOAL: AgentGoal = {
+  objective: "Audit every request handler for cross-clinic data access and fix each hole",
+  status: "active",
+  goalId: "3f6b2c1e-8a4d-4f0b-9c2e-7d5a1b9e0c44",
+  phase: "executing",
+  rounds: 1,
+  lastCheck: "Round one: the handlers were inventoried."
+};
+const MOCK_SESSION_CURSOR = { schemaVersion: 1, sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0" };
 
 // ---------------------------------------------------------------------------
 
@@ -218,6 +256,13 @@ test("the adapter declares the capabilities the reality check demands", () => {
   assert.equal(GROK_CAPABILITIES.supportsConversationRollback, false);
   assert.deepEqual(GROK_CAPABILITIES.compaction, { type: "slash-command", command: "/compact" });
   assert.equal(GROK_CAPABILITIES.sessionModelSwitch, "in-session");
+  // Goals §4.5: the CLI parses `/goal …` itself; its goal runs inside one turn,
+  // so it never starts a turn of its own, and pause is not a chip action.
+  assert.deepEqual(GROK_CAPABILITIES.goals, {
+    command: "provider",
+    actions: ["resume", "clear"],
+    continuesAcrossTurns: false
+  });
 });
 
 test("a missing binary is refused with a message, not a hang", async () => {
@@ -900,6 +945,127 @@ test("a steer settles the turn from the STEERED prompt, not the cancelled one", 
     "exactly one terminal row"
   );
   assert.equal(r.events.filter((event) => event.type === "turn.started").length, 1);
+  await r.dispose();
+});
+
+test("a steer closes the cancelled prompt's bubble: the steered reply is a new assistant item", async () => {
+  // ACP's `agent_message_chunk` names no message, so the normaliser's segment
+  // is the only thing that tells two prompts' text apart. A steer re-opened
+  // the stream without closing that segment, so the steered reply streamed
+  // into the bubble the cancelled prompt was writing — one "oneDONE" message,
+  // which keeps its first position and so rendered ABOVE the user's steer.
+  // T3 closes the active segment on every prompt dispatch
+  // (`AcpSessionRuntime.ts:1033-1034`).
+  const r = await rig({ scenario: "steer" });
+  await start(r);
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "count to twenty",
+    attachments: [],
+    interactionMode: "default"
+  });
+  const before = (await r.waitFor(
+    (event) => event.type === "content.delta" && event.payload.delta === "one",
+    "the first prompt streaming"
+  )) as Extract<RuntimeEvent, { type: "content.delta" }>;
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "stop and say DONE",
+    attachments: [],
+    interactionMode: "default"
+  });
+  const after = (await r.waitFor(
+    (event) => event.type === "content.delta" && event.payload.delta === "DONE",
+    "the steered prompt streaming"
+  )) as Extract<RuntimeEvent, { type: "content.delta" }>;
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.drain();
+
+  assert.ok(before.itemId !== undefined && after.itemId !== undefined, "both deltas name their item");
+  assert.notEqual(after.itemId, before.itemId, "the steered reply opens a new assistant segment");
+  const closedAt = r.events.findIndex(
+    (event) =>
+      event.type === "item.completed" &&
+      event.payload.itemType === "assistant_message" &&
+      event.itemId === before.itemId
+  );
+  assert.ok(closedAt !== -1, "the cancelled prompt's bubble is completed");
+  assert.ok(
+    closedAt < r.events.indexOf(after),
+    "the cancelled prompt's bubble is completed BEFORE the steered reply streams"
+  );
+
+  // Through ingestion: two messages in arrival order, never one "oneDONE".
+  const clock = new FakeClock("2026-09-24T12:00:00.000Z");
+  const timers = new FakeTimers(clock);
+  const sink = new RecordingSink();
+  const ingestion = createIngestion({
+    sink: sink.sink,
+    liveness: new RecordingLiveness(),
+    clock,
+    idGen: counterIdGen("d"),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer
+  });
+  for (const event of r.events) {
+    clock.advance(30);
+    await ingestion.ingest(event);
+  }
+  timers.advance(1000);
+  await ingestion.drain();
+  await settle();
+  const texts = new Map<string, string>();
+  for (const event of sink.messages()) {
+    if (event.payload.role !== "assistant") continue;
+    texts.set(event.payload.messageId, `${texts.get(event.payload.messageId) ?? ""}${event.payload.text}`);
+  }
+  assert.deepEqual(
+    [...texts.values()],
+    ["one", "DONE"],
+    "the steered reply is its own message, after the cancelled prompt's"
+  );
+  await r.dispose();
+});
+
+test("a chunk the cancelled prompt sends after the steer stays in ITS bubble, never the steered reply's", async () => {
+  // The cancelled prompt may flush a last chunk after `session/cancel`, and
+  // on an unchanged model and mode nothing waits between the cancel and the
+  // steered prompt's dispatch, so no dispatch-time boundary can keep it out
+  // of the next bubble. Its `_meta.promptId` can: every chunk carries the
+  // prompt that produced it (fixtures README 19; 08 shows two distinct ids).
+  const r = await rig({ scenario: "steer-tail" });
+  await start(r);
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "count to twenty",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor(
+    (event) => event.type === "content.delta" && event.payload.delta === "one",
+    "the first prompt streaming"
+  );
+  await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "stop and say DONE",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.drain();
+
+  const textByItem = new Map<string, string>();
+  for (const event of r.events) {
+    if (event.type === "content.delta" && event.payload.streamKind === "assistant_text") {
+      const key = event.itemId ?? "";
+      textByItem.set(key, `${textByItem.get(key) ?? ""}${event.payload.delta}`);
+    }
+  }
+  assert.deepEqual(
+    [...textByItem.values()],
+    ["one two", "DONE"],
+    "the tail joins the cancelled prompt's bubble; the steered reply is its own"
+  );
   await r.dispose();
 });
 
@@ -1856,6 +2022,128 @@ test("a CLI that dies while its session opens takes the helpers it booted with i
     reap(r);
     await r.dispose();
   }
+});
+
+test("goals: live goal frames on every private-channel spelling become goal rows, never warnings", async () => {
+  // Goals §6.3 item 1, through the real peer: the mock sends the goal's
+  // frames on `_x.ai/session_notification`, bare `x.ai/session_notification`
+  // and — live, not a replay — `_x.ai/session/update`.
+  const r = await rig({ scenario: "goal" });
+  await start(r);
+  const { turnId } = await r.adapter.sendTurn({
+    threadId: "t1",
+    input: "/goal Audit every request handler for cross-clinic data access and fix each hole",
+    attachments: [],
+    interactionMode: "default"
+  });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+
+  assert.deepEqual(
+    goalUpdates(r).map((payload) => [payload.change, payload.goal?.status, payload.goal?.rounds]),
+    [
+      ["set", "active", 0],
+      ["progress", "active", 1],
+      ["achieved", "complete", 1]
+    ]
+  );
+  const rows = r.events.filter((event) => event.type === "thread.goal.updated");
+  assert.equal(
+    rows.every((event) => event.turnId === turnId),
+    true,
+    "the goal runs inside the turn that set it"
+  );
+  assert.equal(
+    r.events.some(
+      (event) => event.type === "runtime.warning" && /unmapped|goal/i.test(event.payload.message)
+    ),
+    false,
+    "goal_updated — and the rest of a goal run's private traffic — is recognised, never a warning"
+  );
+  // The goal engine's planner is an agent on the roster (fixtures README
+  // observation 58), and the retry is a heartbeat, not a row.
+  assert.deepEqual(
+    r.events
+      .filter(
+        (event): event is Extract<RuntimeEvent, { type: "task.started" | "task.completed" }> =>
+          event.type === "task.started" || event.type === "task.completed"
+      )
+      .map((event) => [event.type, event.payload.taskId, event.payload.taskType, event.payload.title]),
+    [
+      ["task.started", "01a05789-0cc0-7563-9e4f-4b4b576928cc", "subagent", "goal plan writer"],
+      ["task.completed", "01a05789-0cc0-7563-9e4f-4b4b576928cc", "subagent", "goal plan writer"]
+    ]
+  );
+  assert.equal(
+    r.events.filter(
+      (event) =>
+        event.type === "session.state.changed" && event.payload.reason === "retry_state:1/15"
+    ).length,
+    1
+  );
+  await r.dispose();
+});
+
+test("goals: a load replays the goal silently, then restores it once, after the session is up", async () => {
+  const r = await rig({ scenario: "goal" });
+  await start(r, { resumeCursor: MOCK_SESSION_CURSOR, knownGoal: null });
+  await r.waitFor((event) => event.type === "thread.goal.updated", "the restored goal");
+  await r.drain();
+
+  const updates = goalUpdates(r);
+  assert.equal(updates.length, 1, "at most one update after a load");
+  assert.equal(updates[0].change, "restored");
+  assert.deepEqual(
+    { ...updates[0].goal, tokensUsed: undefined, elapsedMs: undefined, setAt: undefined },
+    { ...MOCK_REPLAYED_GOAL, tokensUsed: undefined, elapsedMs: undefined, setAt: undefined }
+  );
+  const order = r.events.map((event) => event.type);
+  assert.ok(
+    order.indexOf("thread.goal.updated") > order.indexOf("thread.started"),
+    "compared once the load has completed, never while it replays"
+  );
+  // The replayed goal reminder never reaches the live stream.
+  assert.equal(
+    r.events.some((event) => JSON.stringify(event).includes("A goal has been set")),
+    false
+  );
+  await r.dispose();
+});
+
+test("goals: a load whose goal the thread already shows emits no goal row", async () => {
+  const r = await rig({ scenario: "goal" });
+  await start(r, { resumeCursor: MOCK_SESSION_CURSOR, knownGoal: MOCK_REPLAYED_GOAL });
+  await r.waitFor((event) => event.type === "thread.started", "thread.started");
+  await r.drain();
+  assert.deepEqual(goalUpdates(r), []);
+  await r.dispose();
+});
+
+test("goals: a load that replays no goal row leaves the thread's unfinished goal alone", async () => {
+  // Absence of replayed evidence is not a clear: whether 1.0.34 persists
+  // `goal_updated` rows is unverified live, and a false `cleared` would hide a
+  // paused or blocked goal after every restart.
+  const r = await rig({ scenario: "happy" });
+  await start(r, {
+    resumeCursor: MOCK_SESSION_CURSOR,
+    knownGoal: { ...MOCK_REPLAYED_GOAL, status: "paused" }
+  });
+  await r.waitFor((event) => event.type === "thread.started", "thread.started");
+  await r.drain();
+  assert.deepEqual(goalUpdates(r), []);
+  await r.dispose();
+});
+
+test("goals: a fresh session (session/new) clears the unfinished goal the thread still shows", async () => {
+  // A brand-new Grok session has no goal by definition — unlike a load, whose
+  // replay may simply not carry goal rows.
+  const r = await rig({ scenario: "happy" });
+  await start(r, { knownGoal: MOCK_REPLAYED_GOAL });
+  await r.waitFor((event) => event.type === "thread.goal.updated", "the cleared goal");
+  await r.drain();
+  assert.deepEqual(goalUpdates(r), [{ goal: null, change: "cleared", previous: MOCK_REPLAYED_GOAL }]);
+  const order = r.events.map((event) => event.type);
+  assert.ok(order.indexOf("thread.goal.updated") > order.indexOf("thread.started"));
+  await r.dispose();
 });
 
 test("teardown: no provider child outlives the suite", async () => {

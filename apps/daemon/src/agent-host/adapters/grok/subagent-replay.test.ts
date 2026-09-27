@@ -477,7 +477,7 @@ test("17 resume_from: the relaunch's start carries the resume's own prompt, neve
   assert.match(String(starts[1]?.payload.prompt), /^Now run the shell command `echo resumed-ok`/);
 });
 
-test("no shell, monitor, loop, goal or CLI-spawned agent start carries a prompt", () => {
+test("no shell, monitor, loop or CLI-spawned agent start (a loop's fire, a goal's planner) carries a prompt", () => {
   for (const file of [
     "16-subagent-background-poll.ndjson",
     "18-subagent-kill.ndjson",

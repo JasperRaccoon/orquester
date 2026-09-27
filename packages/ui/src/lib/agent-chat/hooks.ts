@@ -117,6 +117,21 @@ export const useAgentChatThread: UseAgentChatThread = (sessionId) => {
   );
 };
 
+/**
+ * ONE value of a thread's state, for a surface OUTSIDE the chat view (the
+ * right rail's History) that must not re-render on every streamed token.
+ * `select` must return a stable value — a field of the state, or a
+ * derivation memoised on its inputs: a fresh object on every call re-renders
+ * on every store update. Retains the thread's store as the other hooks do.
+ */
+export function useAgentChatThreadSelector<T>(
+  sessionId: string,
+  select: (state: AgentChatThreadState) => T
+): T {
+  const store = useThreadStore(sessionId);
+  return useThreadState(store, select);
+}
+
 export const useAgentChatRoster: UseAgentChatRoster = (sessionId) => {
   const store = useThreadStore(sessionId);
   const agents = useThreadState(store, (state) => state.slice.roster);
@@ -193,7 +208,8 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
       // the settled turn is in the snapshot (fix-wave E1). The status line
       // reads any non-null value as "a turn is running", so `null` is the
       // whole signal that it stopped.
-      turnStartedAt: turnStartedAt(latestTurn, slice.sessionStatus)
+      turnStartedAt: turnStartedAt(latestTurn, slice.sessionStatus),
+      isCompacting
     };
   }, [slice, rows, snapshot, isCompacting]);
 };

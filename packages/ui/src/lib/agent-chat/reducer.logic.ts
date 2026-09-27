@@ -17,6 +17,7 @@ import {
   createEmptyThreadState,
   DEFAULT_INTERACTION_MODE,
   isSettledTurnState,
+  parseThreadGoal,
   type AgentChatStreamFrame,
   type DomainEvent,
   type PendingRequests,
@@ -107,7 +108,8 @@ export function emptySlice(sessionId: string): AgentChatThreadSlice {
     queue: [],
     respondingRequestIds: [],
     errorBanner: null,
-    history: EMPTY_HISTORY
+    history: EMPTY_HISTORY,
+    goal: null
   };
 }
 
@@ -154,6 +156,10 @@ const requestIdOf = (activity: ThreadActivityItem): string | null => {
  *
  * No position index: the fold keeps its caches beside the state and builds
  * them from `items` on first use.
+ *
+ * The goal is adopted as the host folded it, validated field-wise (goals
+ * §4.4): a snapshot from a host that predates goals has none, and one that
+ * does not parse is none — either way `null` until the next goal row.
  */
 export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState {
   const closedRequestIds = new Set<string>();
@@ -184,6 +190,7 @@ export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFo
     checkpoints: snapshot.checkpoints,
     pending: snapshot.pending,
     roster: snapshot.roster,
+    goal: parseThreadGoal(snapshot.goal),
     closedRequestIds,
     closedRequestAt,
     seq: snapshot.seq,
@@ -213,6 +220,9 @@ export function projectSlice(
 ): AgentChatThreadSlice {
   const turnStatus = latestTurnState(fold);
   const sessionStatus = fold.head?.session.status ?? null;
+  // Goals §8.1: the fold's own goal object. A fold built before the field
+  // existed has none (`undefined` reads as `null`, goals §4.4).
+  const goal = fold.goal ?? null;
   if (
     previous.head === fold.head &&
     previous.entries === fold.items &&
@@ -222,7 +232,8 @@ export function projectSlice(
     previous.roster === fold.roster &&
     previous.seq === fold.seq &&
     previous.turnStatus === turnStatus &&
-    previous.sessionStatus === sessionStatus
+    previous.sessionStatus === sessionStatus &&
+    previous.goal === goal
   ) {
     return previous;
   }
@@ -236,7 +247,8 @@ export function projectSlice(
     roster: fold.roster,
     seq: fold.seq,
     turnStatus,
-    sessionStatus
+    sessionStatus,
+    goal
   };
 }
 

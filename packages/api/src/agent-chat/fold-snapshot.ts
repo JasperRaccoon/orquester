@@ -40,13 +40,19 @@
  * `tokenUsage`, a message's attachment and context records, a model
  * selection's options): the log would reproduce whatever they hold, so a
  * stricter check could only reject a state the log itself folds to. Closed
- * string unions are checked as strings for the same reason.
+ * string unions are checked as strings for the same reason. The goal is the
+ * opposite case (goals §4.4): the fold does not copy it but BUILDS it, with
+ * the goal parser, so it is checked against that parser — `null`, or a goal
+ * parsing gives back unchanged — and anything else, a missing key included,
+ * rejects the file like any other malformed field.
  *
  * No Node APIs: `@orquester/api` is shared with the browser client.
  */
 
 import type { ModelSelection } from "./adapter-types.ts";
 import type { FoldEvictions, ThreadFoldState } from "./fold.ts";
+import { parseThreadGoal } from "./goal.ts";
+import type { ThreadGoal } from "./goal.ts";
 import type {
   ApprovalOption,
   TaskRunHandles,
@@ -81,7 +87,7 @@ import type {
  * `seq`; a bumped version makes the next load discard it and fold from byte 0,
  * once.
  */
-export const FOLD_SNAPSHOT_VERSION = 4;
+export const FOLD_SNAPSHOT_VERSION = 5;
 
 // 2: batch retention (design `2026-09-23-fold-performance-design.md`) — the
 // window now grows past each limit by its slack before a trim, so a state
@@ -92,14 +98,22 @@ export const FOLD_SNAPSHOT_VERSION = 4;
 // (`isCompactionActivity`). Version 2 read it as an ordinary parent row: a
 // state it folded may have evicted the marker for good, and trimmed at other
 // steps, the marker having counted toward the parent's trigger.
-// 4: the trim keeps the opening row of running work (`open-work.ts`) — a tool
-// call no row has closed, a background task with no `task.completed` — for the
-// 16 most recently active among those each window's cut would drop, and under
-// the ceiling across agents the 64 most recently active among the openings
-// that survived their own window (`OPEN_WORK_RETENTION_LIMIT`). Version 3
-// dropped it like any row, so a state it folded may lack the opening row of a
-// call still running, and holds other rows at the steps where the kept row now
-// leaves less to drop.
+// 4: taken twice, by two builds for two different fold changes, so neither
+// build's version-4 state.json is this build's — (a) the trim keeps the
+// opening row of running work (`open-work.ts`) — a tool call no row has
+// closed, a background task with no `task.completed` — for the 16 most
+// recently active among those each window's cut would drop, and under the
+// ceiling across agents the 64 most recently active among the openings that
+// survived their own window (`OPEN_WORK_RETENTION_LIMIT`); version 3 dropped
+// it like any row, so a state it folded may lack the opening row of a call
+// still running, and holds other rows at the steps where the kept row now
+// leaves less to drop; (b) the fold derives the thread's `goal` from its
+// `goal.updated` rows (goals §4.4) — a field a version-3 state never carries,
+// whatever its log holds.
+// 5: the merge of both 4s (2026-09-27). A goal build's version-4 file carries
+// `goal` but was trimmed without (a), and would parse here as current; an
+// open-work build's carries no `goal` key (which `isStoredGoal` refuses
+// anyway). Both are refolded once.
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from
@@ -112,6 +126,11 @@ export interface SerializedFoldState {
   checkpoints: Checkpoint[];
   pending: PendingRequests;
   roster: RuntimeSubagent[];
+  /**
+   * Always written — `null` when the thread has no goal, and for a state built
+   * before goals — so a file without it is not one this build wrote.
+   */
+  goal: ThreadGoal | null;
   closedRequestIds: string[];
   /** `[requestId, resolvedAt]`; absent exactly when the state had no stamp map. */
   closedRequestAt?: Array<[string, string]>;
@@ -148,6 +167,7 @@ export function serializeFoldState(state: ThreadFoldState): SerializedFoldState 
     checkpoints: state.checkpoints,
     pending: state.pending,
     roster: state.roster,
+    goal: state.goal ?? null,
     closedRequestIds: [...state.closedRequestIds],
     ...(state.closedRequestAt !== undefined
       ? { closedRequestAt: [...state.closedRequestAt] }
@@ -179,6 +199,7 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
     checkpoints,
     pending,
     roster,
+    goal,
     closedRequestIds,
     closedRequestAt,
     seq,
@@ -189,6 +210,9 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
     return null;
   }
   if (evicted !== undefined && !isFoldEvictions(evicted)) {
+    return null;
+  }
+  if (!isStoredGoal(goal)) {
     return null;
   }
   if (head !== null && !(isThreadHead(head) && head.seq === seq)) {
@@ -215,6 +239,7 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
     checkpoints,
     pending,
     roster,
+    goal,
     closedRequestIds: new Set(closedRequestIds),
     ...(closedRequestAt !== undefined ? { closedRequestAt: new Map(closedRequestAt) } : {}),
     seq,
@@ -223,6 +248,28 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
       ? { evicted: { activities: evicted.activities, messages: evicted.messages } }
       : {})
   };
+}
+
+/**
+ * The stored goal (goals §4.4): `null`, or exactly a goal the fold could hold.
+ * The fold builds its goal with the goal parser (`fold.ts`, `goalAfterActivity`),
+ * so the parser is the check: a stored goal is valid when parsing gives back
+ * every field it has and no other — nothing dropped, nothing added. Anything
+ * else is doubt, and doubt discards the snapshot: the host refolds the log.
+ */
+function isStoredGoal(value: unknown): value is ThreadGoal | null {
+  if (value === null) {
+    return true;
+  }
+  const parsed = parseThreadGoal(value);
+  if (parsed === null || !isRecord(value)) {
+    return false;
+  }
+  const fields = Object.entries(parsed);
+  return (
+    fields.length === Object.keys(value).length &&
+    fields.every(([field, fieldValue]) => value[field] === fieldValue)
+  );
 }
 
 function isFoldEvictions(value: unknown): value is FoldEvictions {
@@ -330,6 +377,10 @@ function literal(expected: string): Check {
   return (value) => value === expected;
 }
 
+function isTrue(value: unknown): value is true {
+  return value === true;
+}
+
 function isListOf<T>(value: unknown, check: (entry: unknown) => entry is T): value is T[] {
   return Array.isArray(value) && value.every((entry) => check(entry));
 }
@@ -391,6 +442,10 @@ const isThreadHead = shaped<ThreadHead>({
   turnCount: isNumber,
   seq: isSequence,
   continueAfterRestart: optional(isContinueAfterRestart),
+  // Goals §5.5 and §5.7. Head-only state, so a fold's own head never holds
+  // either; only the shape is checked, as for the other marker.
+  resumeGoalAfterRestart: optional(isTrue),
+  goalHeldForHandover: optional(isTrue),
   createdAt: isString,
   updatedAt: isString
 });

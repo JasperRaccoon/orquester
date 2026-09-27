@@ -79,6 +79,11 @@ export class CodexRpcError extends Error {
   readonly code: number;
   readonly method: string;
   readonly data: unknown;
+  /**
+   * The peer's own words, without our `<method> failed:` prefix — what a
+   * refusal the user caused is shown as ("…: no goal exists", goals §6.2.3).
+   */
+  readonly providerMessage: string;
 
   constructor(method: string, error: CodexRpcErrorShape) {
     super(`${method} failed: ${error.message}`);
@@ -86,6 +91,7 @@ export class CodexRpcError extends Error {
     this.code = error.code;
     this.method = method;
     this.data = error.data;
+    this.providerMessage = error.message;
   }
 }
 

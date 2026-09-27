@@ -121,6 +121,15 @@ export function toolProgressActivityId(threadId: string, taskId: string): string
   return `tool-progress:${threadId}:${taskId}`;
 }
 
+/**
+ * The goal's hidden `progress` row (goals §4.3, §8.4): one per thread, like a
+ * task's progress row. Each tick replaces it in place rather than spending a
+ * slot of the 500-row parent window, and the fold still takes the goal from it.
+ */
+export function goalProgressActivityId(threadId: string): string {
+  return `goal-progress:${threadId}`;
+}
+
 export function proposedPlanActivityId(planId: string): string {
   return `proposed-plan:${planId}`;
 }

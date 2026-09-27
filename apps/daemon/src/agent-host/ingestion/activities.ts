@@ -28,12 +28,20 @@
  *   at rest by `TASK_PROMPT_MAX_CHARS` alone — never by the 180-character
  *   detail cap, which makes a preview, where the drill-in shows the prompt
  *   itself (§7.6);
+ * - `thread.goal.updated` becomes one `goal.updated` row carrying its payload
+ *   verbatim — a hidden `progress` tick under one stable id per thread,
+ *   replaced in place — and a goal event replayed from history becomes none
+ *   (goals §4.3);
  * - `auth.status` and `account.rate-limits.updated` are not thread facts and
  *   produce nothing (§6.3 updates the provider snapshot instead).
  */
 
 import {
+  GOAL_ACTIVITY_KIND,
   classifyTaskAgentKind,
+  goalActivitySummary,
+  isHiddenGoalChange,
+  isHistoricalRuntimeEvent,
   isToolLifecycleItemType,
   TASK_PROMPT_MAX_CHARS,
   type ProviderRequestKind,
@@ -44,6 +52,7 @@ import {
 
 import { cancelledRequestActivity } from "../orchestration/events.ts";
 import {
+  goalProgressActivityId,
   taskProgressActivityId,
   taskUsageActivityId,
   toolProgressActivityId
@@ -775,6 +784,32 @@ export function runtimeEventToActivities(
           activityKind: "context-window.updated",
           summary: "Context window updated",
           payload: { ...usage }
+        })
+      ];
+    }
+
+    case "thread.goal.updated": {
+      // Never projected from history (goals §4.3): a replayed goal is the
+      // past, and the fold would take it for the provider's current state.
+      // The adapters already hold replayed goals back (goals §6); this is the
+      // second guard.
+      if (isHistoricalRuntimeEvent(event)) {
+        return [];
+      }
+      const { goal, change, previous } = event.payload;
+      return [
+        makeActivity(event, {
+          // A hidden `progress` tick is the goal's latest state, not history:
+          // one stable id per thread, so the fold replaces the row in place
+          // (the `task-progress:` rule). Every other change is a row of its own.
+          id: isHiddenGoalChange(change) ? goalProgressActivityId(event.threadId) : event.eventId,
+          tone: change === "failed" ? "error" : "info",
+          activityKind: GOAL_ACTIVITY_KIND,
+          summary: goalActivitySummary(event.payload),
+          // Verbatim: the fold derives the thread's goal from exactly this, and
+          // the summary alone is shortened. No `agentId` — a goal is the
+          // thread's, never a subagent's.
+          payload: { goal, change, ...(previous !== undefined ? { previous } : {}) }
         })
       ];
     }

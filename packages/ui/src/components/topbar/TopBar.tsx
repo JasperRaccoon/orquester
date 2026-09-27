@@ -8,6 +8,7 @@ import { ViewModeToggle } from "./ViewModeToggle";
 import { UsageWidget } from "./UsageWidget";
 import { openCommandPalette } from "../command-palette";
 import { WindowControls } from "../layout/WindowControls";
+import { RightRailSheetButton } from "../right-rail";
 import { IconButton } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { useOrquester } from "../../context/orquester-context";
@@ -39,7 +40,8 @@ const SettingsButton: React.FC = () => {
 /**
  * Desktop: a single titlebar row (project switcher · tabs · new tab | usage ·
  * settings · window controls). Mobile: a two-row header (menu · project · usage
- * · settings) then a tab row (current tab switcher · new tab).
+ * · settings) then a tab row (current tab switcher · prompts & history · new
+ * tab).
  */
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
@@ -70,6 +72,8 @@ export const TopBar: React.FC = () => {
           <div className="flex h-11 items-center gap-1 border-t border-neutral-800 px-2">
             <TabSwitcher />
             <div className="flex-1" />
+            {/* The right rail's panels, as a sheet — a phone has no rail. */}
+            {ctx.kind === "project" && <RightRailSheetButton projectPath={ctx.project.path} />}
             <NewTabMenu />
           </div>
         )}

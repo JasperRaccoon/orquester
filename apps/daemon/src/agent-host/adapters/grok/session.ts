@@ -14,6 +14,7 @@
 
 import type {
   AccountHome,
+  AgentGoal,
   ApprovalDecision,
   ModelSelection,
   ProviderSession,
@@ -161,6 +162,13 @@ export interface GrokSessionOptions {
   runtimeMode: RuntimeMode;
   modelSelection: ModelSelection;
   resumeCursor?: unknown;
+  /**
+   * The goal the thread shows (goals §5.3). The load's replayed goal is
+   * compared with it once, and live goal frames against what it becomes.
+   */
+  knownGoal?: AgentGoal | null;
+  /** The clock the goal `progress` throttle reads (goals §6). Default `Date.now`. */
+  now?(): number;
   command: string;
   env: Record<string, string>;
   clientInfo: { name: string; version: string };
@@ -194,9 +202,10 @@ export interface GrokSessionOptions {
 export type GrokSessionEndCause = "restart" | "host";
 
 /**
- * The line a live `/loop`'s or `/goal`'s closing row says when an end the
- * user did not choose takes it — they live in the CLI, which such an end
- * stops — where a bare "Stopped" read as the user's doing.
+ * The line a live `/loop`'s closing row says when an end the user did not
+ * choose takes it — it lives in the CLI, which such an end stops — where a
+ * bare "Stopped" read as the user's doing. (A `/goal` is no row: it is the
+ * thread's goal, `goal.ts`.)
  */
 export function endedNote(cause: GrokSessionEndCause | "exit"): string {
   const when =
@@ -409,7 +418,10 @@ export class GrokSession {
         uuid: options.uuid,
         activeTurnId: () => this.activeTurn?.turnId,
         planHost: this.planHost(),
-        launchNonce: this.launchId.slice(0, 8)
+        launchNonce: this.launchId.slice(0, 8),
+        knownGoal: options.knownGoal ?? null,
+        ...(options.now === undefined ? {} : { now: options.now }),
+        debug: (message, detail) => options.logger.debug(message, detail)
       },
       "pending"
     );
@@ -602,6 +614,12 @@ export class GrokSession {
         })
       );
     }
+    // Goals §6.3 item 4: `session/load` has replayed every goal row the CLI
+    // persisted — silently — and answered, so the goal it left is compared
+    // with the one the thread shows now, once. A load that replayed no goal
+    // row is no evidence and changes nothing; a FRESH session has no goal by
+    // definition, so an unfinished goal the thread still shows is cleared.
+    this.emitAll(this.normalizer.reconcileGoal(cursor === null ? "new" : "load"));
   }
 
   private async openNewSession(): Promise<NewSessionResponse> {
@@ -1018,9 +1036,9 @@ export class GrokSession {
         // The superseded prompt's calls: the cancel cut them, and the CLI
         // answers none of them ({@link GrokNormalizer.cutTurnCalls}).
         this.emitAll(this.normalizer.cutTurnCalls("Cancelled: a new message was sent."));
-        // Re-open the assistant stream: `endTurn()` may have closed it, and a
-        // closed stream silently drops every chunk the steered prompt streams.
-        this.normalizer.beginTurn();
+        // The assistant stream re-opens at the steered prompt's DISPATCH,
+        // below — not here, so a chunk the cancelled prompt flushes in between
+        // still joins its own bubble.
       } else {
         this.openTurn({ turnId, epoch, settled: false, interrupted: false });
       }
@@ -1038,6 +1056,17 @@ export class GrokSession {
       // the text already names — the composer inserts it at upload time (§7.4).
       const text = appendAttachmentPathLines(input.text, input.attachments ?? []);
       const prompt = [{ type: "text" as const, text }];
+      if (steering) {
+        // Re-open the assistant stream at the steered prompt's DISPATCH, as
+        // T3's `prompt()` does (`AcpSessionRuntime.ts:1033-1034`): `endTurn()`
+        // may have closed it, which silently drops every chunk the steered
+        // prompt streams. The cancelled prompt's bubble ends where the next
+        // prompt's first chunk names a different `_meta.promptId` (the
+        // normaliser's `contentDelta`), so a chunk it flushes after the cancel
+        // still joins its own bubble; only a bubble with no prompt id is
+        // closed here.
+        this.emitAll(this.normalizer.beginTurn());
+      }
       const promise = this.peer().request<PromptResponse>(
         "session/prompt",
         { sessionId: this.acpSessionId, prompt },
@@ -1202,7 +1231,7 @@ export class GrokSession {
   private openTurn(turn: ActiveTurn): void {
     this.activeTurn = turn;
     this.normalizer.clearPlanFallback();
-    this.normalizer.beginTurn();
+    this.emitAll(this.normalizer.beginTurn());
     this.status = "running";
     this.touch();
     this.emitEvent(this.normalizer.event("session.state.changed", { state: "running" }, turn.turnId));
@@ -2037,7 +2066,7 @@ export class GrokSession {
 
   /**
    * A shell's or a monitor's start (the only task rows stamped `background`
-   * here — a subagent, a loop and a goal live in the CLI): new user work, in
+   * here — a subagent and a loop live in the CLI): new user work, in
    * a session of its own, recorded while the CLI can still be read
    * ({@link recordTaskWork}).
    */

@@ -435,10 +435,13 @@ function taskCloser(agent: RuntimeSubagent, rows: TaskRows, input: LeftoverWorkI
  * first `task.started`: OpenCode started a child's run at its own
  * `session.created`, before the parent's `task` part named it, and Codex's
  * `subAgentActivity started` carried no `codex-launch:` id (both until the
- * relaunch fix, 2026-09-24). Claude's starts always name the launching
- * `tool_use_id`, and Grok surfaced no agents at all before it did so with ids.
+ * relaunch fix, 2026-09-24) — and Grok's did too in the 2026-09-24 goals
+ * build: a `subagent_spawned` no spawn call explained started under its id
+ * with none (every goal-engine planner, worker, skeptic and summarizer), and
+ * the merge (2026-09-27) replaces that build's host on the machine that ran
+ * it. Claude's starts always name the launching `tool_use_id`.
  */
-const LEGACY_LAUNCH_ADAPTERS: ReadonlySet<AgentAdapterId> = new Set(["opencode", "codex"]);
+const LEGACY_LAUNCH_ADAPTERS: ReadonlySet<AgentAdapterId> = new Set(["opencode", "codex", "grok"]);
 
 /** The launch id a first load gives an agent an older host launched with none. */
 export function legacyLaunchId(taskId: string): string {

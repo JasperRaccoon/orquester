@@ -1,6 +1,7 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
 import type {
   AgentAdapterId,
+  AgentChatGoalSummary,
   BackgroundLiveness as AgentChatBackgroundLiveness,
   CreateAgentChatSessionFields,
   LatestTurnSummary as AgentChatLatestTurnSummary,
@@ -21,6 +22,7 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
  */
 export * from "./agent-chat/index.ts";
 export * from "./cliproxy-launch-models.ts";
+export * from "./saved-prompts.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -513,6 +515,30 @@ export interface GitDiffResponse {
   diff: string;
   binary: boolean;
 }
+
+/**
+ * `GET /api/git/working-diff?path=&maxBytes=` — the project's uncommitted
+ * changes as ONE patch (a saved prompt's `{diff}`). `isRepo:false` — never an
+ * error — for a non-repo, like `/api/git/status`.
+ */
+export interface GitWorkingDiffResponse {
+  isRepo: boolean;
+  /**
+   * Staged and unstaged changes against HEAD (`git diff HEAD`; against the
+   * empty tree before the first commit), `--no-color --no-ext-diff`, cut at a
+   * line boundary within `maxBytes`. `""` when the tree is clean.
+   */
+  diff: string;
+  /** True when `diff` was cut. */
+  truncated: boolean;
+  /** Untracked, non-ignored files — not in the patch — repo-relative. */
+  untracked: string[];
+}
+
+/** `maxBytes` when the query names none. */
+export const GIT_WORKING_DIFF_DEFAULT_MAX_BYTES = 64 * 1024;
+/** `maxBytes` is clamped to `[1, GIT_WORKING_DIFF_MAX_BYTES]`. */
+export const GIT_WORKING_DIFF_MAX_BYTES = 512 * 1024;
 
 export interface GitLogEntry {
   sha: string;
@@ -1249,11 +1275,12 @@ export interface SessionSummary {
   legacyAgentTerminal?: boolean;
 
   // --- agent chat (kind "agent-chat") -------------------------------------
-  // The six derived fields of the chat design spec §6.4 / §7.1, so the tab
-  // strip, Attention Center, command palette and push gate render a chat tab's
-  // status without opening a thread stream. This list is the contract those
-  // surfaces read; no surface may invent a name for one of them. Absent for
-  // every other kind and for persisted records.
+  // The seven derived fields of the chat design spec §6.4 / §7.1 (and the
+  // goals spec §4.7 for `goal`), so the tab strip, Attention Center, command
+  // palette and push gate render a chat tab's status without opening a thread
+  // stream. This list is the contract those surfaces read; no surface may
+  // invent a name for one of them. Absent for every other kind and for
+  // persisted records.
 
   /** A tool/command approval is open and needs a decision. */
   hasPendingApprovals?: boolean;
@@ -1271,6 +1298,11 @@ export interface SessionSummary {
   latestTurn?: AgentChatLatestTurnSummary | null;
   /** The session status from the thread head (§5.1). */
   chatSessionStatus?: AgentChatThreadSessionStatus;
+  /**
+   * The thread's unfinished goal — objective, status and whether the provider
+   * keeps starting turns for it — or null when it has none (goals §4.7).
+   */
+  goal?: AgentChatGoalSummary | null;
 }
 
 export interface CreateSessionRequest {

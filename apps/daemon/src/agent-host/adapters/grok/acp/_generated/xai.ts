@@ -124,7 +124,7 @@ export const XAI_EXTENSION_CATALOG: ReadonlyArray<XaiExtensionEntry> = [
     observed: true,
     observedSpelling: "underscore",
     observedWrapped: false,
-    note: "The private live event channel. Carries turn_completed, response_completed, hook_*, pending_interaction, background_tasks, tool_call_delta_chunk, model_changed, auto_compact_completed, last_turn_summary, session_summary_generated, (2026-09-25) subagent_spawned / subagent_progress / subagent_finished, and (2026-09-26) goal_updated. A subagent's child session speaks on it too, under the child's own sessionId.",
+    note: "The private live event channel. Carries turn_completed, response_completed, hook_*, pending_interaction, background_tasks, tool_call_delta_chunk, model_changed, auto_compact_completed, last_turn_summary, session_summary_generated, (2026-09-25) subagent_spawned / subagent_progress / subagent_finished, (2026-09-26) goal_updated, and — read off 1.0.3 sessions, named by the 1.0.34 binary — retry_state and compaction_checkpoint (README 57-58). A subagent's child session speaks on it too, under the child's own sessionId.",
   },
   {
     method: "x.ai/session/update",
@@ -436,7 +436,111 @@ export type XaiSessionUpdate =
     }
   | { readonly sessionUpdate: "last_turn_summary"; readonly summary: string; readonly prompt_id?: string }
   | { readonly sessionUpdate: "session_summary_generated"; readonly session_summary: string }
+  | XaiGoalUpdate
+  | XaiSubagentSpawnedUpdate
+  | XaiSubagentProgressUpdate
+  | XaiSubagentFinishedUpdate
+  | XaiRetryState
+  | XaiCompactionCheckpoint
   | { readonly sessionUpdate: string; readonly [key: string]: unknown };
+
+/**
+ * `goal_updated` — the WHOLE state of the session's `/goal`, on every change
+ * and again whenever its counters move; byte-identical repeats happen
+ * (fixtures README observation 57). Shaped on a real goal session's persisted
+ * `updates.jsonl`, written by 1.0.3 — 119 rows, which `session/load` replays
+ * under `_x.ai/session/update` — and on 1.0.34's live frames on
+ * `_x.ai/session_notification` (fixture 30, observation 53): `token_budget` on
+ * every frame when the goal was set with one, `planning: true` while its
+ * planner runs, `status: "budget_limited"` with `last_event:
+ * "budget_exceeded"`, and `/goal clear` as `status: "cleared"` with `goal_id`
+ * and `objective` emptied and NO `last_event`. The adapter reads it field by
+ * field (`../../goal.ts`), never through this type.
+ */
+export interface XaiGoalUpdate {
+  readonly sessionUpdate: "goal_updated";
+  readonly goal_id: string;
+  readonly objective: string;
+  /**
+   * Observed `active`, `complete` (1.0.3), `budget_limited` and `cleared`
+   * (1.0.34); the binary also names the `*_paused` family and `blocked`.
+   */
+  readonly status: string;
+  /** Observed `executing`, `idle`. */
+  readonly phase: string;
+  readonly tokens_used: number;
+  readonly elapsed_ms: number;
+  readonly total_deliverables: number;
+  readonly completed_deliverables: number;
+  readonly total_worker_rounds: number;
+  readonly total_verify_rounds: number;
+  readonly token_baseline: number;
+  readonly finished_subagent_tokens: number;
+  /**
+   * Sticky: it names the LAST event, repeated on every frame until the next
+   * one. Observed `goal_created`, `worker_completed`, `goal_completed`; the
+   * rest are named by the binary (goals §3.3).
+   */
+  readonly last_event:
+    | "goal_created"
+    | "planning_completed"
+    | "planning_failed"
+    | "worker_started"
+    | "worker_completed"
+    | "worker_failed"
+    | "context_rotated"
+    | "goal_paused"
+    | "goal_resumed"
+    | "goal_completed"
+    | "goal_cleared"
+    | "budget_exceeded"
+    | "premature_stop_detected"
+    | (string & {});
+  /** RFC 3339 with nanoseconds, e.g. `2026-08-31T11:16:34.622415836+00:00`. */
+  readonly last_event_timestamp: string;
+  readonly last_event_detail?: string;
+  readonly planning?: boolean;
+  /** While set, `last_classifier_verdict` is still the PREVIOUS verification's. */
+  readonly verifying_completion?: boolean;
+  readonly classifier_runs_attempted?: number;
+  readonly classifier_max_runs?: number;
+  readonly last_classifier_verdict?: "not_achieved" | "achieved" | (string & {});
+  readonly last_classifier_details_path?: string;
+  readonly token_budget?: number | null;
+  readonly live_subagent_tokens?: number;
+  readonly live_context_pct?: number;
+  readonly live_turn_count?: number;
+  readonly live_tool_call_count?: number;
+}
+
+// Two more kinds of a goal run's private traffic (fixtures README observation
+// 58): not in the capture set, shaped on the rows of 1.0.3 sessions on this
+// host, and named by the 1.0.34 binary. The adapter reads each field by field
+// (`../../normalize.ts`), never through these types. The run's subagents and
+// shells are the captured vocabulary below (`XaiSubagent*Update`,
+// `XaiTaskCompletedParams`).
+
+/** The CLI retrying a failed model request; `attempt` restarts at 1 for the next request. */
+export interface XaiRetryState {
+  readonly sessionUpdate: "retry_state";
+  /** Only `retrying` observed. */
+  readonly type: string;
+  readonly attempt: number;
+  /** 15 in every observed row. */
+  readonly max_retries: number;
+  readonly reason: string;
+}
+
+/** The CLI's rewind checkpoint at a compaction boundary, just before `auto_compact_completed`. */
+export interface XaiCompactionCheckpoint {
+  readonly sessionUpdate: "compaction_checkpoint";
+  readonly checkpoint_id: string;
+  readonly prompt_index_at_compaction: number;
+  /** Relative to the session directory: `compaction_checkpoints/<id>.json`. */
+  readonly checkpoint_file: string;
+  readonly schema_version: number;
+  readonly created_at: string;
+}
 
 /** `_x.ai/task_backgrounded` params. */
 export interface XaiTaskBackgroundedParams {
@@ -546,35 +650,6 @@ export interface XaiScheduledTaskParams {
 }
 
 /**
- * `goal_updated` on the parent's `_x.ai/session_notification` (fixture 30):
- * an autonomous goal's state, restated whole at every change — and every few
- * seconds while its planner or worker runs. `status` was `active`, then
- * `budget_limited` once its token budget ran out, and `cleared` (every id and
- * text emptied) after `/goal clear`.
- */
-export interface XaiGoalUpdatedUpdate {
-  readonly sessionUpdate: "goal_updated";
-  readonly goal_id: string;
-  readonly objective: string;
-  readonly status: "active" | "budget_limited" | "cleared" | (string & {});
-  /** `executing`, `idle`, … */
-  readonly phase?: string;
-  readonly planning?: boolean;
-  readonly token_budget?: number;
-  readonly tokens_used?: number;
-  readonly elapsed_ms?: number;
-  readonly total_deliverables?: number;
-  readonly completed_deliverables?: number;
-  readonly total_worker_rounds?: number;
-  readonly total_verify_rounds?: number;
-  /** `goal_created`, `budget_exceeded`, … */
-  readonly last_event?: string;
-  readonly last_event_timestamp?: string;
-  readonly result_summary?: string;
-  readonly pause_message?: string;
-}
-
-/**
  * `subagent_spawned` on the parent's `_x.ai/session_notification` (fixtures
  * 15–23). `subagent_id` equals `child_session_id`: the child's own frames
  * arrive under that session id. A `resume_from` launch spawns a NEW id,
@@ -587,11 +662,16 @@ export interface XaiSubagentSpawnedUpdate {
   readonly parent_session_id?: string;
   readonly parent_prompt_id?: string;
   readonly child_session_id?: string;
+  /** Captured: `general-purpose`; 1.0.3 goal sessions also `explore` (observation 58). */
   readonly subagent_type?: string;
   readonly description?: string;
   /** `"new"`, or `"resumed"` with `resumed_from`. */
   readonly effective_context_source?: string;
   readonly resumed_from?: string;
+  /** 1.0.3 goal sessions only, on `explore` agents (observation 58). */
+  readonly role?: string;
+  /** 1.0.3 goal sessions, e.g. `read-only` (observation 58). */
+  readonly capability_mode?: string;
   readonly model?: string;
   readonly agentAddress?: string;
 }

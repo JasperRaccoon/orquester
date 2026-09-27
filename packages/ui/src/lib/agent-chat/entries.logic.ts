@@ -32,10 +32,12 @@ import {
   isAgentOwnedActivity,
   isCompactionActivity,
   isPlanImplementationMessage,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
+  reEmittedAssistantCopies
 } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
+import { goalMarkerOf, goalUpdateOf, isHiddenGoalActivity } from "./goal.logic";
 import { normalizeCompactToolLabel } from "./presentation.logic";
 
 // ---------------------------------------------------------------------------
@@ -360,6 +362,14 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
         ? { summaryTruncated: true }
         : {})
     };
+  }
+
+  // Goals §8.4: a goal update is a marker, read through the shared parser. A
+  // row that does not parse gets no `goal` and stays the generic row, with the
+  // summary the host wrote (goals §9).
+  const goalUpdate = goalUpdateOf(activity);
+  if (goalUpdate !== null) {
+    entry.goal = goalMarkerOf(goalUpdate);
   }
 
   // §3.4's account switch: ids only, the label resolves at render time.
@@ -853,6 +863,11 @@ export function deriveWorkLogEntries(
     if (activity.activityKind === "tool.started" && !startIsCallRow(activity, supersededCalls)) {
       continue;
     }
+    // Goals §8.4: `progress` is the goal's heartbeat — it keeps the chip
+    // current and is not narrative.
+    if (isHiddenGoalActivity(activity)) {
+      continue;
+    }
     if (activity.activityKind === "task.started" && !isAgentTaskStartedActivity(activity)) {
       continue;
     }
@@ -1094,6 +1109,16 @@ export interface SplitThreadItems {
 
 const isMessage = (item: ThreadItem): item is ThreadMessageItem => item.kind === "message";
 
+export interface SplitThreadItemsOptions {
+  /**
+   * Drop the re-emitted assistant copies an old Claude log holds
+   * (`reEmittedAssistantCopies`, `@orquester/api/agent-chat` — the one rule
+   * the MCP applies too). Claude threads only: the store asks
+   * `repairsReEmittedAssistantCopies` with the thread head's adapter.
+   */
+  readonly dropRepeatedAssistantMessages?: boolean;
+}
+
 /**
  * Split the fold's items into the three source arrays the timeline merges.
  *
@@ -1107,17 +1132,23 @@ const isMessage = (item: ThreadItem): item is ThreadMessageItem => item.kind ===
  */
 export function splitThreadItems(
   items: readonly ThreadItem[],
-  ownerAgentId?: string
+  ownerAgentId?: string,
+  options?: SplitThreadItemsOptions
 ): SplitThreadItems {
   const messages: ThreadMessageItem[] = [];
   const activities: ThreadActivityItem[] = [];
   const plansById = new Map<string, ProposedPlanEntry>();
   const planBuffers = new Map<string, string>();
+  const reEmitted =
+    options?.dropRepeatedAssistantMessages === true ? reEmittedAssistantCopies(items, ownerAgentId) : null;
 
   for (const item of items) {
     if (isMessage(item)) {
       const owner = item.agentId !== undefined && item.agentId.length > 0 ? item.agentId : undefined;
       if (owner !== ownerAgentId) {
+        continue;
+      }
+      if (reEmitted !== null && reEmitted.has(item.id)) {
         continue;
       }
       messages.push(item);
@@ -1421,6 +1452,8 @@ export interface ThreadTimelineProjection extends TimelineEntriesProjection {
   readonly activities: readonly ThreadActivityItem[];
   /** Set on a drill-in projection; part of the work-entries memo key. */
   readonly ownerAgentId?: string;
+  /** Set when re-emitted copies were dropped; part of the memo key. */
+  readonly dropsRepeatedAssistantMessages?: boolean;
 }
 
 function sameByIdentity<T>(left: readonly T[], right: readonly T[]): boolean {
@@ -1466,13 +1499,19 @@ function samePlans(left: readonly ProposedPlanEntry[], right: readonly ProposedP
 export function deriveTimelineEntriesFromItems(
   items: readonly ThreadItem[],
   previous: ThreadTimelineProjection | null = null,
-  options?: DeriveWorkLogOptions
+  options?: DeriveWorkLogOptions & SplitThreadItemsOptions
 ): ThreadTimelineProjection {
   const ownerAgentId = options?.ownerAgentId;
-  if (previous !== null && previous.items === items && previous.ownerAgentId === ownerAgentId) {
+  const dropsRepeats = options?.dropRepeatedAssistantMessages === true;
+  if (
+    previous !== null &&
+    previous.items === items &&
+    previous.ownerAgentId === ownerAgentId &&
+    (previous.dropsRepeatedAssistantMessages === true) === dropsRepeats
+  ) {
     return previous;
   }
-  const split = splitThreadItems(items, ownerAgentId);
+  const split = splitThreadItems(items, ownerAgentId, options);
   const activities =
     previous !== null && sameByIdentity(previous.activities, split.activities)
       ? previous.activities
@@ -1495,7 +1534,8 @@ export function deriveTimelineEntriesFromItems(
     ...projection,
     items,
     activities,
-    ...(ownerAgentId !== undefined ? { ownerAgentId } : {})
+    ...(ownerAgentId !== undefined ? { ownerAgentId } : {}),
+    ...(dropsRepeats ? { dropsRepeatedAssistantMessages: true } : {})
   };
 }
 

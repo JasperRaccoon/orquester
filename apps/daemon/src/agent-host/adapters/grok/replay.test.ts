@@ -408,6 +408,8 @@ test("the emitted types stay inside the documented union", () => {
     "task.progress",
     "task.started",
     "task.updated",
+    // Fixture 30's `goal_updated` frames: the thread's goal (goals §6.3).
+    "thread.goal.updated",
     "thread.metadata.updated",
     "thread.state.changed",
     "thread.token-usage.updated",

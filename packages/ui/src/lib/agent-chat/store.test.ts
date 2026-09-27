@@ -268,6 +268,37 @@ describe("the per-thread slice", () => {
     assert.equal(state().slice.contextWindow?.usedTokens, 42);
   });
 
+  it("drops a Claude log's re-emitted copy and leaves another provider's repeat alone", async () => {
+    // Older hosts wrote a CLI-started Claude turn's opening paragraph twice
+    // (live thread 19976137, seq 38664/38963); only a Claude thread asks for
+    // the repair, because Codex narration may legitimately repeat itself.
+    for (const adapter of ["claude", "codex"] as const) {
+      const { fake, state } = await store();
+      fake.push({
+        kind: "snapshot",
+        thread: snapshot({
+          head: head({ adapter }),
+          seq: 2,
+          items: [
+            message("assistant", "Running the tests again.", { turnId: "t1", id: "m-a" }),
+            message("assistant", "Running the tests again.", { turnId: "t1", id: "m-b" })
+          ]
+        })
+      });
+      const rows = state().rows;
+      const shown = rows.flatMap((row) => (row.kind === "message" ? [row.message.id] : []));
+      const folded = rows.some((row) => row.kind === "turn-fold");
+      if (adapter === "claude") {
+        assert.deepEqual(shown, ["m-a"], "the copy is gone");
+        assert.equal(folded, false, "and with it the only thing there was to fold");
+      } else {
+        // Both are real: the settled turn folds the first behind the second.
+        assert.deepEqual(shown, ["m-b"]);
+        assert.equal(folded, true);
+      }
+    }
+  });
+
   it("preserves row identity across a streamed token", async () => {
     const { fake, state } = await store();
     const user = message("user", "hi", { createdAt: stamp(1) });
@@ -330,6 +361,65 @@ describe("the per-thread slice", () => {
       event: ev("thread.session-set", { session: { status: "stopped", activeTurnId: null } }, { seq: 6 })
     });
     assert.equal(answer("a2")?.streaming, undefined, "no process is left to finish it");
+  });
+});
+
+describe("the thread's goal (goals §8.1)", () => {
+  it("is on the slice the hooks read — the snapshot's, then every live goal row", async () => {
+    const { fake, state } = await store();
+    assert.equal(state().slice.goal, null, "a thread with no snapshot yet has none");
+
+    fake.push({
+      kind: "snapshot",
+      thread: snapshot({
+        seq: 2,
+        goal: { objective: "Make CI green", status: "active", rounds: 1, updatedAt: stamp(2) }
+      })
+    });
+    assert.equal(state().slice.goal?.objective, "Make CI green");
+
+    fake.push({
+      kind: "event",
+      seq: 3,
+      event: ev(
+        "thread.activity-appended",
+        {
+          activity: activity(
+            "goal.updated",
+            { goal: { objective: "Make CI green", status: "active", rounds: 2 }, change: "checked" },
+            { tone: "info", summary: "Goal check 2: not met", turnId: "t1" }
+          )
+        },
+        { seq: 3 }
+      )
+    });
+    assert.equal(state().slice.goal?.rounds, 2);
+    assert.ok(
+      state().rows.some((row) => row.kind === "goal-marker"),
+      "and the same row is the timeline's marker"
+    );
+
+    fake.push({
+      kind: "event",
+      seq: 4,
+      event: ev(
+        "thread.activity-appended",
+        {
+          activity: activity(
+            "goal.updated",
+            { goal: { objective: "Make CI green", status: "active", rounds: 2, phase: "executing" }, change: "progress" },
+            { tone: "info", summary: "Goal progress", turnId: "t1" }
+          )
+        },
+        { seq: 4 }
+      )
+    });
+    assert.equal(state().slice.goal?.phase, "executing", "progress moves the goal…");
+    assert.equal(
+      state().rows.filter((row) => row.kind === "goal-marker").length,
+      1,
+      "…and adds no row"
+    );
   });
 });
 
@@ -1317,6 +1407,8 @@ describe("a send outlives its store generation", () => {
       },
       focusAtEnd: () => {},
       openControl: () => {},
+      sendText: () => false,
+      submitText: () => ({ ok: false, reason: "not in this test" }),
       restoreFailedSend: () => false
     });
     return { live, inserted, unregister };

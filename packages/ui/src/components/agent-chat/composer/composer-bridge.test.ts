@@ -8,13 +8,20 @@ import {
   registerComposerHandle,
   restoreComposerFailedSend,
   returnComposerMessage,
+  sendComposerText,
   stageComposerAttachment,
+  submitComposerText,
+  COMPOSER_NOT_MOUNTED_REASON,
   type ComposerHandle
 } from "./composer-bridge.ts";
 import type { StagedAttachment } from "./ComposerAttachments";
 import type { FailedSendRestore } from "./composer-submission";
 
-function fakeHandle(log: string[], stageResult = true, showsThread = true): ComposerHandle {
+function fakeHandle(
+  log: string[],
+  stageResult = true,
+  { sendResult = true, showsThread = true }: { sendResult?: boolean; showsThread?: boolean } = {}
+): ComposerHandle {
   return {
     insertText: (text, mode) => log.push(`insert:${mode ?? "cursor"}:${text}`),
     stageAttachment: (ref) => {
@@ -27,6 +34,14 @@ function fakeHandle(log: string[], stageResult = true, showsThread = true): Comp
     },
     focusAtEnd: () => log.push("focus"),
     openControl: (command) => log.push(`open:${command}`),
+    sendText: (text) => {
+      log.push(`send:${text}`);
+      return sendResult;
+    },
+    submitText: (text) => {
+      log.push(`submit:${text}`);
+      return sendResult ? { ok: true, disposition: "sent" } : { ok: false, reason: "refused" };
+    },
     restoreFailedSend: (restore) => {
       log.push(`restore:${restore.outcome.notice}`);
       return showsThread;
@@ -91,7 +106,7 @@ test("a failed send is refused when no composer shows its thread, so the caller 
   assert.equal(restoreComposerFailedSend("never-mounted", FAILED), false);
   // A composer can refuse too: it no longer shows the thread its handle names.
   const log: string[] = [];
-  const unregister = registerComposerHandle("s6", fakeHandle(log, true, false));
+  const unregister = registerComposerHandle("s6", fakeHandle(log, true, { showsThread: false }));
   assert.equal(restoreComposerFailedSend("s6", FAILED), false);
   unregister();
 });
@@ -127,4 +142,43 @@ test("a stale unregister cannot drop the handle that replaced it", () => {
   assert.deepEqual(first, []);
   unregisterSecond();
   assert.equal(composerHandle("s2"), null);
+});
+
+test("goals §8.2: a chip action is sent BY the mounted composer, never around it", () => {
+  const log: string[] = [];
+  const unregister = registerComposerHandle("s5", fakeHandle(log));
+  assert.equal(sendComposerText("s5", "/goal pause"), true);
+  assert.deepEqual(log, ["send:/goal pause"], "the composer's own send path, and nothing else");
+  unregister();
+});
+
+test("goals §8.2: a refused or unmounted send reports false", () => {
+  // The composer says why in its own notice; the caller only learns it did not go.
+  const log: string[] = [];
+  const unregister = registerComposerHandle("s6", fakeHandle(log, true, { sendResult: false }));
+  assert.equal(sendComposerText("s6", "/goal clear"), false);
+  unregister();
+  assert.equal(sendComposerText("never-mounted", "/goal clear"), false);
+});
+
+test("the right rail's submit reaches the mounted composer and answers its result", () => {
+  const log: string[] = [];
+  const unregister = registerComposerHandle("rail", fakeHandle(log));
+  assert.deepEqual(submitComposerText("rail", "review this"), { ok: true, disposition: "sent" });
+  assert.deepEqual(log, ["submit:review this"]);
+  unregister();
+});
+
+test("the right rail's submit says why when the composer refuses it", () => {
+  const log: string[] = [];
+  const unregister = registerComposerHandle("rail-refused", fakeHandle(log, true, { sendResult: false }));
+  assert.deepEqual(submitComposerText("rail-refused", "x"), { ok: false, reason: "refused" });
+  unregister();
+});
+
+test("the right rail's submit to a thread with no composer is refused, never dropped silently", () => {
+  assert.deepEqual(submitComposerText("never-mounted", "x"), {
+    ok: false,
+    reason: COMPOSER_NOT_MOUNTED_REASON
+  });
 });

@@ -11,6 +11,11 @@
  */
 
 import { SYSTEM_ACCOUNT_ID, type AgentAccount } from "@orquester/api";
+import type {
+  AdapterGoalSupport,
+  AgentGoal,
+  ThreadSessionStatus
+} from "@orquester/api/agent-chat";
 
 /**
  * Which managed-account family a launcher draws its accounts from.
@@ -110,13 +115,135 @@ export interface ChatAccountSwitchState {
    * identity runs the message.
    */
   isSending: boolean;
+  /**
+   * The thread's goal is continuing — {@link isGoalContinuing} (goals §5.5),
+   * a goal a deploy holds included (§5.7). Absent reads as no.
+   *
+   * *Added with agent goals; additive.*
+   */
+  goalContinuing?: boolean;
+  /**
+   * The thread's goal is HELD for an Orquester update — `isGoalHeldForUpdate`
+   * (`goal.logic.ts`, goals §5.7), the goal chip's "paused for update". It
+   * closes the chip like a continuing goal, but its pause is the deploy's,
+   * so the reason names the hold instead of asking for a pause. Absent reads
+   * as no.
+   *
+   * *Added with the held goal's own refusal; additive.*
+   */
+  goalHeldForUpdate?: boolean;
+  /**
+   * The provider is compacting the conversation (the store's
+   * `isCompacting`). The host refuses a switch for it first, ahead of a
+   * continuing goal. Absent reads as no.
+   *
+   * *Added with agent goals (fix round 2); additive.*
+   */
+  compacting?: boolean;
 }
+
+/**
+ * Goals §5.5, §5.7: the goal is **continuing** — the provider will start the
+ * thread's next turn by itself, so the gaps between its turns are not idle.
+ *
+ * The host computes exactly this for the tab summary
+ * (`SessionSummary.goal.continuing`), and whenever the view has that verdict
+ * it wins: `null` there means the host holds no unfinished goal for the
+ * thread. Without one — a host that predates the field, a summary not yet
+ * received, a malformed one — a coarser form of the host's predicate, with no
+ * running-turn or grace check, in the host's order:
+ *
+ *  - First a goal a deploy HELD (goals §5.7, the head's
+ *    `goalHeldForHandover`; the host's `goalHeld`): paused between two of its
+ *    turns so the drain could go ahead, and set going again by the next host,
+ *    so it continues whatever the session says — on an adapter that continues
+ *    across turns (Codex), and only while the goal reads `paused` (or still
+ *    `active`, the pause's update on its way). One that ended, blocked or hit
+ *    a limit during its final turn is set going by nobody.
+ *  - Then an `active` goal on such an adapter with a provider session that is
+ *    live (`starting`/`ready`/`running`) or a head marked for a resume after a
+ *    restart (`resumeGoalAfterRestart`).
+ *
+ * A stopped or errored session starts nothing, so it may switch — unless one
+ * of those marks is still pending (after a handover it may read `stopped` or
+ * `error`), which reads as continuing. Any other paused goal may switch, and
+ * so may a blocked or limited one, and Claude's and Grok's, which run inside
+ * turns the user sends. Both marks are head-only state, refreshed by a
+ * snapshot and never live — which is why the summary's verdict, when there is
+ * one, still wins over them: a hold the user ended can outlive its mark here.
+ */
+export function isGoalContinuing(input: {
+  /** `SessionSummary.goal` for this thread — wire data, read field-wise. */
+  summaryGoal?: unknown;
+  /** The fold's goal. */
+  goal: AgentGoal | null | undefined;
+  /** The adapter's `capabilities.goals`. */
+  support: AdapterGoalSupport | null | undefined;
+  /** The head's session status. */
+  sessionStatus: ThreadSessionStatus | null | undefined;
+  /** The head carries `resumeGoalAfterRestart` (a deploy handover's mark). */
+  resumeGoalAfterRestart?: boolean;
+  /**
+   * The head carries `goalHeldForHandover` (goals §5.7: a deploy's drain
+   * holds the goal between its turns, and the next host resumes it).
+   *
+   * *Added with the deploy hold; additive.*
+   */
+  goalHeldForHandover?: boolean;
+}): boolean {
+  const summary = input.summaryGoal;
+  if (summary === null) return false;
+  if (typeof summary === "object" && summary !== undefined && !Array.isArray(summary)) {
+    const continuing = (summary as { continuing?: unknown }).continuing;
+    if (typeof continuing === "boolean") return continuing;
+  }
+  const status = input.goal?.status;
+  const continuesAcrossTurns = input.support?.continuesAcrossTurns === true;
+  if (
+    input.goalHeldForHandover === true &&
+    continuesAcrossTurns &&
+    (status === "paused" || status === "active")
+  ) {
+    return true;
+  }
+  const live =
+    input.sessionStatus === "starting" ||
+    input.sessionStatus === "ready" ||
+    input.sessionStatus === "running";
+  return (
+    status === "active" &&
+    continuesAcrossTurns &&
+    (live || input.resumeGoalAfterRestart === true)
+  );
+}
+
+/** The host's own words for goals §5.5's refusal (`identitySwitchRefusal`). */
+export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching accounts.";
+
+/**
+ * The host's own words for a goal held for an Orquester update (goals §5.7,
+ * `identitySwitchRefusal`): paused already, set going again by the next agent
+ * host, and taken back — paused for good — by the user's own `/goal pause`.
+ */
+export const GOAL_HELD_SWITCH_REFUSAL =
+  "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts.";
+
+/** The host's own words for a switch refused during a compaction (`identitySwitchRefusal`). */
+export const COMPACTION_SWITCH_REFUSAL =
+  "Wait for the context compaction to finish before switching accounts.";
 
 /**
  * The client half of §3.4's identity gate, mirroring
  * `identitySwitchRefusal` on the host — the daemon is authoritative and
  * answers 409, this only decides whether the chip is offered. One clause the
  * host cannot mirror: a send the client has not finished posting.
+ *
+ * A continuing goal closes it too (goals §5.5): a turn the provider starts
+ * under the old account would be killed by the next message's account
+ * restart. Pausing the goal opens it again, and the host re-creates the goal
+ * on the new account (`carryGoal`). So does a goal a deploy holds (§5.7) —
+ * continuing as well, and checked on its own as the host checks it, so a
+ * reason the chip names is always a closed chip's.
  */
 export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
   return (
@@ -126,8 +253,27 @@ export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
     !state.reverting &&
     state.connection === "synchronized" &&
     !state.backgroundLive &&
-    !state.isSending
+    !state.isSending &&
+    state.goalContinuing !== true &&
+    state.goalHeldForUpdate !== true &&
+    state.compacting !== true
   );
+}
+
+/**
+ * The reason the chip names, in the host's own order and words
+ * (`identitySwitchRefusal`), so the chip and a refused switch never disagree:
+ * a running compaction first, then a goal held for an Orquester update —
+ * paused already, so it names the hold and the `/goal pause` that takes it
+ * back (goals §5.7) — then a continuing goal, which only a pause ends
+ * (§5.5); between its turns idle never comes, so both outrank a running
+ * turn. `null` otherwise, where the chip's own "available when the agent is
+ * idle" is the truth.
+ */
+export function chatAccountSwitchRefusal(state: ChatAccountSwitchState): string | null {
+  if (state.compacting === true) return COMPACTION_SWITCH_REFUSAL;
+  if (state.goalHeldForUpdate === true) return GOAL_HELD_SWITCH_REFUSAL;
+  return state.goalContinuing === true ? GOAL_CONTINUING_SWITCH_REFUSAL : null;
 }
 
 /**

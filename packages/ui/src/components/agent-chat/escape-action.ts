@@ -51,7 +51,8 @@ export interface ChatEscapeInput {
    * `anotherLayerOwnsTheKeyboard()`: the auth prompt, Settings, a
    * close-confirm, the palette, and every open `Modal`, `BottomSheet`,
    * `Dropdown`, `ContextMenu` and `ComposerPopover` (`lib/open-layers.ts`) —
-   * this thread's own output viewer and context meter among them.
+   * this thread's own output viewer and context meter among them — and the
+   * right rail's dock while focus is inside it (`useDockKeyboardLayer`).
    */
   blockingLayerOpen: boolean;
   /**

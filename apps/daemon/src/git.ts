@@ -9,8 +9,10 @@ import type {
   GitLogEntry,
   GitOpResult,
   GitStashEntry,
-  GitStatusResponse
+  GitStatusResponse,
+  GitWorkingDiffResponse
 } from "@orquester/api";
+import { GIT_WORKING_DIFF_DEFAULT_MAX_BYTES, GIT_WORKING_DIFF_MAX_BYTES } from "@orquester/api";
 import { execFile } from "node:child_process";
 import { lstat, open, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -83,12 +85,17 @@ export class GitService {
    * those (needed for `git diff --no-index`, which exits 1 when a diff exists,
    * and for `git log` in a repo with no commits); otherwise we throw a
    * GitError(500) preferring `.stderr`.
+   *
+   * `maxBuffer` makes a read CAPPED rather than fallible: once git has written
+   * that much, node kills it and we resolve with what arrived and
+   * `overflowed: true` — so an arbitrarily large output never has to fit in
+   * memory, and the caller decides what "cut" means.
    */
   private async exec(
     cwd: string,
     args: string[],
-    opts?: { timeout?: number; allowFail?: boolean; remote?: boolean }
-  ): Promise<{ stdout: string; stderr: string; code: number }> {
+    opts?: { timeout?: number; allowFail?: boolean; remote?: boolean; maxBuffer?: number }
+  ): Promise<{ stdout: string; stderr: string; code: number; overflowed?: boolean }> {
     const env = {
       ...process.env,
       HOME: this.home,
@@ -99,12 +106,15 @@ export class GitService {
       const { stdout, stderr } = await this.runner("git", args, {
         cwd,
         env,
-        maxBuffer: 64 * 1024 * 1024,
+        maxBuffer: opts?.maxBuffer ?? 64 * 1024 * 1024,
         timeout: opts?.timeout
       });
       return { stdout, stderr, code: 0 };
     } catch (error) {
       const e = error as { stdout?: string; stderr?: string; code?: number };
+      if (opts?.maxBuffer !== undefined && (error as { code?: unknown }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+        return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", code: 0, overflowed: true };
+      }
       if (opts?.allowFail) {
         return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", code: e.code ?? 1 };
       }
@@ -321,6 +331,75 @@ export class GitService {
       { allowFail: true }
     );
     return code === 0 && nulRecords(stdout).some((record) => record.startsWith("??"));
+  }
+
+  /**
+   * The project's uncommitted changes as ONE patch — a saved prompt's `{diff}`
+   * — plus the untracked files a patch cannot carry. `isRepo:false` (never an
+   * error) for a non-repo dir, like `status`.
+   *
+   * - The patch is the working tree against HEAD, staged and unstaged together
+   *   (`git diff HEAD`). Before the first commit HEAD does not resolve, so it
+   *   is the working tree against the EMPTY tree: every tracked file whole, as
+   *   the first commit would add it. `--no-ext-diff --no-textconv` keep the
+   *   user's diff drivers out of it — a patch, not a rendering — and
+   *   {@link WORKING_DIFF_CONFIG} their quoting, prefix and relative-path
+   *   settings.
+   * - Both reads are scoped to the project dir (`-- .`). That is the whole repo
+   *   when the project is the repo root; when it is not (a project inside a
+   *   larger checkout, a home directory under version control), nothing from
+   *   outside the project reaches the prompt. Paths stay repo-relative.
+   * - The patch is cut at the last line boundary within `maxBytes` UTF-8
+   *   bytes, and git is stopped once it has written enough, so a huge diff
+   *   costs a bounded read. `untracked` holds at most
+   *   {@link WORKING_DIFF_UNTRACKED_MAX} paths.
+   */
+  async workingDiff(cwd: string, maxBytes: number): Promise<GitWorkingDiffResponse> {
+    if (!(await this.isRepo(cwd))) {
+      return { isRepo: false, diff: "", truncated: false, untracked: [] };
+    }
+    const cap = workingDiffMaxBytes(maxBytes);
+    const head = await this.exec(cwd, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], {
+      allowFail: true
+    });
+    const base = head.code === 0 ? "HEAD" : await this.emptyTree(cwd);
+    const [patch, others] = await Promise.all([
+      this.exec(
+        cwd,
+        [...WORKING_DIFF_CONFIG, "diff", "--no-color", "--no-ext-diff", "--no-textconv", base, "--", "."],
+        {
+          // One byte past the cap tells a cut patch from one that fits exactly. The
+          // floor is for stderr, which gets the same allowance: a warning must not
+          // be what stops git under a tiny cap.
+          maxBuffer: Math.max(cap, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES) + 1
+        }
+      ),
+      this.exec(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--full-name", "--", "."], {
+        maxBuffer: UNTRACKED_LIST_READ_BYTES
+      })
+    ]);
+    const { text, truncated } = cutAtLineBoundary(patch.stdout, cap, patch.overflowed === true);
+    // The last NUL field is the empty tail after the final terminator — or, when
+    // the read was cut, a partial path. Dropped either way.
+    const untracked = others.stdout
+      .split("\0")
+      .slice(0, -1)
+      .filter((path) => path.length > 0)
+      .slice(0, WORKING_DIFF_UNTRACKED_MAX);
+    return { isRepo: true, diff: text, truncated, untracked };
+  }
+
+  /**
+   * The empty tree's id in this repo's object format (SHA-1 or SHA-256) — what
+   * an unborn HEAD is diffed against. git resolves the empty tree without it
+   * being stored; the SHA-1 constant is the fallback if `hash-object` fails.
+   */
+  private async emptyTree(cwd: string): Promise<string> {
+    const { stdout, code } = await this.exec(cwd, ["hash-object", "-t", "tree", "/dev/null"], {
+      allowFail: true
+    });
+    const id = stdout.trim();
+    return code === 0 && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(id) ? id : EMPTY_TREE_SHA1;
   }
 
   /**
@@ -736,6 +815,69 @@ export class GitService {
       return { ok: true, output: combine(stdout, stderr) };
     });
   }
+}
+
+/** The empty tree's SHA-1 id. */
+const EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/**
+ * `-c` pins for `workingDiff`'s patch, so the daemon user's own git config
+ * cannot reshape what a prompt receives: paths never C-quoted
+ * (`core.quotePath` would escape every non-ASCII name), the standard `a/`/`b/`
+ * prefixes (`diff.noprefix`, `diff.mnemonicPrefix`, and git ≥ 2.45's
+ * `diff.srcPrefix`/`diff.dstPrefix` — an older git ignores a key it does not
+ * know), and repo-relative paths (`diff.relative`).
+ */
+export const WORKING_DIFF_CONFIG: readonly string[] = [
+  "-c",
+  "core.quotePath=false",
+  "-c",
+  "diff.noprefix=false",
+  "-c",
+  "diff.mnemonicPrefix=false",
+  "-c",
+  "diff.relative=false",
+  "-c",
+  "diff.srcPrefix=a/",
+  "-c",
+  "diff.dstPrefix=b/"
+];
+
+/** `workingDiff`'s `untracked` is capped here: a prompt wants a list, not an un-ignored build dir's inventory. */
+export const WORKING_DIFF_UNTRACKED_MAX = 1000;
+
+/** The untracked listing's read cap: room for the capped count of PATH_MAX-long paths, and no more. */
+const UNTRACKED_LIST_READ_BYTES = WORKING_DIFF_UNTRACKED_MAX * 4097;
+
+/**
+ * The `maxBytes` of a working-diff request: an integer (read like `parseInt`),
+ * `GIT_WORKING_DIFF_DEFAULT_MAX_BYTES` when absent or unreadable, clamped to
+ * `[1, GIT_WORKING_DIFF_MAX_BYTES]`.
+ */
+export function workingDiffMaxBytes(raw: string | number | undefined): number {
+  const value =
+    typeof raw === "number" ? Math.trunc(raw) : raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+  if (Number.isNaN(value)) {
+    return GIT_WORKING_DIFF_DEFAULT_MAX_BYTES;
+  }
+  return Math.min(Math.max(value, 1), GIT_WORKING_DIFF_MAX_BYTES);
+}
+
+/**
+ * `text` cut to at most `maxBytes` UTF-8 bytes, at the last line boundary that
+ * fits: never mid-line, so never mid-character either (a newline byte is never
+ * part of a multi-byte sequence). `cut` says the text was already shortened
+ * upstream — a capped read — so its tail may be a partial line even when it
+ * now fits.
+ */
+function cutAtLineBoundary(text: string, maxBytes: number, cut: boolean): { text: string; truncated: boolean } {
+  const bytes = Buffer.from(text, "utf8");
+  if (!cut && bytes.length <= maxBytes) {
+    return { text, truncated: false };
+  }
+  const window = bytes.subarray(0, maxBytes);
+  const end = window.lastIndexOf(0x0a);
+  return { text: end === -1 ? "" : window.subarray(0, end + 1).toString("utf8"), truncated: true };
 }
 
 /** Map a git status letter (porcelain XY or name-status) to a GitFileStatus. */

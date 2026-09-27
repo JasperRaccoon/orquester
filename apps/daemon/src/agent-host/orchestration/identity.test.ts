@@ -11,7 +11,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { createScriptedAdapter, createTestHost, type TestHost } from "./testing/index.ts";
-import { identitySwitchRefusal, type IdentitySwitchState } from "./session-policy.ts";
+import {
+  GOAL_CONTINUING_SWITCH_REFUSAL,
+  GOAL_HELD_SWITCH_REFUSAL,
+  identitySwitchRefusal,
+  type IdentitySwitchState
+} from "./session-policy.ts";
 
 let commandSeq = 0;
 const cmd = (): string => `id-${(commandSeq += 1)}`;
@@ -334,7 +339,9 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
     pendingRequestCount: 0,
     queuedTurnCount: 0,
     compacting: false,
-    backgroundLive: false
+    backgroundLive: false,
+    goalContinuing: false,
+    goalHeldForUpdate: false
   };
 
   it("passes only when nothing is in flight", () => {
@@ -352,7 +359,9 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
       { ...idle, pendingRequestCount: 1 },
       { ...idle, queuedTurnCount: 1 },
       { ...idle, compacting: true },
-      { ...idle, backgroundLive: true }
+      { ...idle, backgroundLive: true },
+      { ...idle, goalContinuing: true },
+      { ...idle, goalContinuing: true, goalHeldForUpdate: true }
     ]) {
       assert.ok(identitySwitchRefusal(state), `refused: ${JSON.stringify(state)}`);
     }
@@ -363,5 +372,50 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
       identitySwitchRefusal({ ...idle, compacting: true, status: "running" }) ?? "",
       /compaction/i
     );
+  });
+
+  it("refuses a continuing goal in the words the composer mirror shows (goals §5.5)", () => {
+    assert.equal(
+      identitySwitchRefusal({ ...idle, goalContinuing: true }),
+      "Pause the goal before switching accounts."
+    );
+    // Between a continuing goal's turns idle never comes, so the goal's reason
+    // outranks the running turn; a compaction must still finish first, because
+    // a goal command waits for it too.
+    assert.equal(
+      identitySwitchRefusal({ ...idle, goalContinuing: true, status: "running", activeTurnId: "t" }),
+      "Pause the goal before switching accounts."
+    );
+    assert.match(
+      identitySwitchRefusal({ ...idle, goalContinuing: true, compacting: true }) ?? "",
+      /compaction/i
+    );
+    assert.equal(GOAL_CONTINUING_SWITCH_REFUSAL, "Pause the goal before switching accounts.");
+  });
+
+  it("names a goal held for an Orquester update in words of its own, in the continuing goal's slot (goals §5.7)", () => {
+    // It is paused already, and the next host sets it going again by itself:
+    // "pause the goal" would be advice it has had. The composer mirror
+    // (`account-switch.ts`) pins the same words.
+    assert.equal(
+      GOAL_HELD_SWITCH_REFUSAL,
+      "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts."
+    );
+    const held = { ...idle, goalContinuing: true, goalHeldForUpdate: true };
+    assert.equal(identitySwitchRefusal(held), GOAL_HELD_SWITCH_REFUSAL);
+    // Its final turn may still run: the hold's words still come first — once
+    // the user has taken the goal back, the turn check speaks for itself.
+    assert.equal(
+      identitySwitchRefusal({ ...held, status: "running", activeTurnId: "t" }),
+      GOAL_HELD_SWITCH_REFUSAL
+    );
+    assert.equal(
+      identitySwitchRefusal({ ...held, pendingRequestCount: 1, backgroundLive: true }),
+      GOAL_HELD_SWITCH_REFUSAL
+    );
+    // Behind a running compaction, as the continuing goal is.
+    assert.match(identitySwitchRefusal({ ...held, compacting: true }) ?? "", /compaction/i);
+    // Taken back by the user's `/goal pause`: neither held nor continuing.
+    assert.equal(identitySwitchRefusal({ ...held, goalContinuing: false, goalHeldForUpdate: false }), null);
   });
 });

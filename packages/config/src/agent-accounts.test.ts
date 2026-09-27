@@ -10,7 +10,8 @@ import {
 test("createDefaultAgentAccounts is empty with null defaults", () => {
   const d = createDefaultAgentAccounts();
   assert.deepEqual(d.accounts, []);
-  assert.deepEqual(d.defaults, { claude: null, codex: null });
+  // Grok is the third managed account family (AGENTS.md, the model proxy's Grok bullet).
+  assert.deepEqual(d.defaults, { claude: null, codex: null, grok: null });
 });
 
 test("parseAgentAccounts fills defaults and coerces missing fields", () => {
@@ -20,7 +21,7 @@ test("parseAgentAccounts fills defaults and coerces missing fields", () => {
   assert.equal(parsed.accounts[0].email, null);
   assert.equal(parsed.accounts[0].plan, null);
   assert.equal(parsed.accounts[0].needsReauth, false);
-  assert.deepEqual(parsed.defaults, { claude: null, codex: null });
+  assert.deepEqual(parsed.defaults, { claude: null, codex: null, grok: null });
 });
 
 test("parseAgentAccounts rejects an unknown agent", () => {

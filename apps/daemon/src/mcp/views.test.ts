@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt, type AgentGoalStatus } from "@orquester/api/agent-chat";
+import { resolveChatActivity } from "../agent-chat/activity-ladder.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { MAX_RESULT_BYTES, ok, resultBytes } from "./result.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "./fixtures.ts";
@@ -18,6 +19,7 @@ test("sessionReason: every ladder rung, plus new and exited", () => {
   assert.equal(sessionReason(chatSummary({ hasActionableProposedPlan: true })), "plan-ready");
   assert.equal(sessionReason(chatSummary({ backgroundLiveness: "working" })), "background-working");
   assert.equal(sessionReason(chatSummary({ backgroundLiveness: "monitoring" })), "monitoring");
+  assert.equal(sessionReason(chatSummary({ goal: { objective: "Migrate the parser", status: "active", continuing: true } })), "goal-continuing");
   assert.equal(sessionReason(chatSummary()), "completed");
   assert.equal(sessionReason(chatSummary({ chatSessionStatus: "idle", latestTurn: null })), "new");
   assert.equal(sessionReason(shellSummary({ status: "exited", exitCode: 0 })), "exited");
@@ -29,7 +31,7 @@ test("sessionView projects a chat summary and a terminal summary", () => {
   assert.equal(chat.kind, "chat"); assert.equal(chat.adapter, "claude"); assert.equal(chat.agent, "claude");
   assert.deepEqual(chat.project, { workspace: "acme", name: "api", path: "/w/acme/api" });
   assert.equal(chat.status, "idle"); assert.equal(chat.attention, "finished"); assert.equal(chat.needsAttentionAt, stamp(1)); assert.equal(chat.reason, "completed");
-  assert.deepEqual(chat.chat, { sessionStatus: "ready", accountId: "acc-1", latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(0), completedAt: stamp(1) }, pending: { approvals: false, questions: false }, planReady: false, backgroundLiveness: null });
+  assert.deepEqual(chat.chat, { sessionStatus: "ready", accountId: "acc-1", latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(0), completedAt: stamp(1) }, pending: { approvals: false, questions: false }, planReady: false, backgroundLiveness: null, goal: null });
   assert.equal(chat.terminal, undefined);
   const system = sessionView(chatSummary(), ctx);
   assert.equal(system.chat?.accountId, "system");
@@ -57,7 +59,8 @@ test("sessionDetail merges the head, context window, pending requests, plan, ros
   assert.equal(d.chat.model, "claude-fable-5-1[1m]"); assert.deepEqual(d.chat.options, { effort: "high" }); assert.equal(d.chat.runtimeMode, "full-access");
   assert.equal(d.chat.home, "account"); assert.equal(d.chat.accountLabel, "jasperclaude"); assert.equal(d.chat.lastError, "boom"); assert.equal(d.chat.turnCount, 2, "two started turns (t1, t2) — counted by order, not by head.turnCount or checkpoints"); assert.equal(d.chat.continueAfterRestart, true);
   assert.deepEqual(d.chat.contextWindow, { usedTokens: 50_000, maxTokens: 200_000, percentUsed: 25, compactsAutomatically: true });
-  assert.deepEqual(d.chat.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true });
+  assert.deepEqual(d.chat.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, goals: null });
+  assert.equal(d.chat.goal, null, "a snapshot without a goal");
   assert.equal(d.pending.approvals[0].requestId, "r1"); assert.deepEqual(d.pending.approvals[0].tool, { name: "Bash", input: { command: "rm -rf build" } });
   assert.deepEqual(d.pending.approvals[0].decisions.map((x) => x.decision), ["accept", "acceptForSession", "decline", "cancel"]);
   assert.equal(d.pending.questions[0].responseMode, "blocking"); assert.equal(d.pending.questions[0].questions[0].index, 1); assert.equal(d.pending.questions[0].questions[0].isSecret, true); assert.equal(d.pending.questions[0].questions[0].allowCustomAnswer, true);
@@ -135,7 +138,7 @@ test("buildViewContext reads a degraded providers body field-wise, as list_agent
     assert.deepEqual([...c.adapterByRefId], [["claude", "claude"], ["codex", "codex"]], `${label}: the registry still reads`);
     // get_session, send_message and create_session build their detail through it: a degraded body reads as "no capabilities".
     const d = await chatDetail(api, "c1");
-    assert.deepEqual(d.chat.supports, expected.length ? { planMode: true, rollback: true, compaction: false, backgroundTasks: false } : { planMode: false, rollback: false, compaction: false, backgroundTasks: false }, `${label}: supports`);
+    assert.deepEqual(d.chat.supports, expected.length ? { planMode: true, rollback: true, compaction: false, backgroundTasks: false, goals: null } : { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null }, `${label}: supports`);
   }
 });
 
@@ -165,7 +168,7 @@ test("the context meter's percentUsed is clamped to 100, as the GUI's ring is; t
   assert.equal(sessionDetail(chatSummary(), at, ctx).chat.contextWindow?.percentUsed, 100);
 });
 
-test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) is left out, as the GUI never takes it for the answer", () => {
+test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) is left out while the turn has an answer", () => {
   const codex = snapshot({ items: [
     message("user", "fix the parser", { turnId: "t1" }),
     message("assistant", "I'll look at the failing test first.", { turnId: "t1", messageKind: "commentary" }),
@@ -176,9 +179,22 @@ test("lastReply is the turn's answer: Codex commentary (the fold's messageKind) 
   // Without a phase (Claude, an older Codex) every assistant message of the turn is its answer, as before.
   const claude = snapshot({ items: [message("assistant", "Looking.", { turnId: "t1" }), message("assistant", "Done.", { turnId: "t1" })] });
   assert.equal(lastReply(claude)?.text, "Looking.\n\nDone.");
-  // A turn cut before its answer said nothing that answers: its narration is not passed off as a reply.
-  const cut = snapshot({ turns: [turn({ state: "interrupted" })], items: [message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" })] });
-  assert.equal(lastReply(cut)?.text, "");
+});
+
+test("a turn with no answer at all ends on its last commentary, as the GUI's timeline does; a subagent's commentary never counts", () => {
+  // Interrupted before its answer (and every Codex goal turn the goal-aware Stop paused, then interrupted).
+  const cut = snapshot({ turns: [turn({ state: "interrupted" })], items: [
+    message("user", "fix the parser", { turnId: "t1" }),
+    message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" }),
+    message("assistant", "Two tests fail on empty lines; fixing the tokenizer next.", { turnId: "t1", messageKind: "commentary" })
+  ] });
+  assert.deepEqual(lastReply(cut), { turnId: "t1", text: "Two tests fail on empty lines; fixing the tokenizer next.", truncated: false, completedAt: stamp(1) }, "the last commentary alone, never the narration joined");
+  // A subagent narrates inside the parent's turn: its commentary is its own, never the parent's last word.
+  const sub = (text: string) => message("assistant", text, { turnId: "t1", messageKind: "commentary", agentId: "task-9" });
+  assert.equal(lastReply(snapshot({ items: [message("assistant", "I'll start with the tests.", { turnId: "t1", messageKind: "commentary" }), sub("Reading the tokenizer.")] }))?.text, "I'll start with the tests.");
+  assert.equal(lastReply(snapshot({ items: [message("user", "fix the parser", { turnId: "t1" }), sub("Reading the tokenizer.")] }))?.text, "", "only a subagent spoke");
+  // An answer, however short, wins over any amount of narration.
+  assert.equal(lastReply(snapshot({ items: [message("assistant", "Fixed.", { turnId: "t1" }), message("assistant", "Checking once more.", { turnId: "t1", messageKind: "commentary" })] }))?.text, "Fixed.");
 });
 
 // ---- Final fix wave F2 (M3): one rule decides whether a plan is actionable, judged on the snapshot. ----
@@ -307,4 +323,201 @@ test("a plan and a reply of 16 384 wide characters pass the cap on their own: th
   // Nothing is cut that fits.
   const small = detailOf("# Plan", "Done.", false);
   assert.deepEqual([small.plan, small.lastReply?.text, small.lastReply?.truncated], [{ planId: "p1", markdown: "# Plan", truncated: false, actionable: true }, "Done.", false]);
+});
+
+// ---- Goals: the provider's goal on a session view and a session detail (goals §4.7). ----
+
+/** `text` as clipText cuts it to `max` code points: the head, then "…". */
+const clipped = (text: string, max: number) => `${[...text].slice(0, max - 1).join("")}…`;
+
+test("chat.goal is the summary's unfinished goal, its objective cut to 200 code points ending in \"…\"; a session without one reads null", () => {
+  const long = "é".repeat(150) + "🙂".repeat(100); // 250 code points
+  const v = sessionView(chatSummary({ goal: { objective: long, status: "active", continuing: false } }), ctx);
+  assert.deepEqual(v.chat?.goal, { objective: clipped(long, 200), status: "active", continuing: false });
+  assert.equal([...v.chat!.goal!.objective].length, 200, "cut on a code point, never inside a surrogate pair");
+  assert.deepEqual(sessionView(chatSummary({ goal: { objective: "Ship it", status: "active", continuing: false } }), ctx).chat?.goal, { objective: "Ship it", status: "active", continuing: false }, "a short objective is whole");
+  assert.equal(sessionView(chatSummary(), ctx).chat?.goal, null, "no goal field (a daemon from before goals)");
+  assert.equal(sessionView(chatSummary({ goal: null }), ctx).chat?.goal, null);
+});
+
+test("chat.goal tells a goal that stopped short from a finished session, which reason alone cannot: every settled turn reads \"completed\"", () => {
+  for (const status of ["paused", "blocked", "budget-limited", "usage-limited"] as const) {
+    const v = sessionView(chatSummary({ goal: { objective: "Ship it", status, continuing: false } }), ctx);
+    assert.deepEqual([v.reason, v.chat?.goal?.status], ["completed", status], status);
+  }
+});
+
+test("chat.goal reads the summary defensively, as the GUI's tab marker does: a finished goal, or one without a usable objective or status, is null", () => {
+  const unread: [string, unknown][] = [
+    ["complete", { objective: "Ship it", status: "complete", continuing: false }], ["failed", { objective: "Ship it", status: "failed", continuing: false }],
+    ["an empty objective", { objective: "", status: "active", continuing: true }], ["no objective", { status: "active", continuing: true }],
+    ["an unknown status", { objective: "Ship it", status: "done", continuing: false }], ["a string", "Ship it"], ["a list", [{ objective: "Ship it", status: "active", continuing: false }]]
+  ];
+  for (const [label, goal] of unread) assert.equal(sessionView(chatSummary({ goal: goal as never }), ctx).chat?.goal, null, label);
+  assert.deepEqual(sessionView(chatSummary({ goal: { objective: "Ship it", status: "active", continuing: "yes" } as never }), ctx).chat?.goal, { objective: "Ship it", status: "active", continuing: false }, "continuing counts only when it is really true");
+});
+
+test("goal-continuing: between two turns of a goal the provider continues by itself, a settled turn reads working — the ladder's own rung — with no finished stamp", () => {
+  const summary = chatSummary({ refId: "codex", goal: { objective: "Migrate the parser", status: "active", continuing: true } });
+  // The activity the daemon stamps from the same ladder (AgentChatSummaryService.applyFields).
+  const { state, attention } = resolveChatActivity(summary);
+  const v = sessionView({ ...summary, activity: { state, attention, lastOutputAt: null, needsAttentionAt: null } }, ctx);
+  assert.deepEqual([v.reason, v.status, v.attention, v.needsAttentionAt], ["goal-continuing", "working", null, null]);
+  assert.equal(v.chat?.latestTurn?.state, "completed", "the turn itself settled");
+  assert.deepEqual(v.chat?.goal, { objective: "Migrate the parser", status: "active", continuing: true });
+  // The same settled turn without the host's word is finished.
+  assert.equal(sessionReason(chatSummary({ goal: { objective: "Migrate the parser", status: "active", continuing: false } })), "completed");
+});
+
+test("the detail's goal is the fold's, a finished one too while the provider's last update carries it, with every fact the provider reported and nothing else; list_sessions shows only an unfinished one", () => {
+  // Codex and Grok report a met goal as `complete` and keep it.
+  const done = { objective: "Make the suite green", status: "complete", goalId: "g-7", rounds: 3, lastCheck: "All 412 tests pass.", tokensUsed: 120_000, tokenBudget: 500_000, elapsedMs: 754_000, setAt: stamp(0), updatedAt: stamp(9) } as const;
+  // The host drops a finished goal from the summary (goals §4.7), so nothing says it continues.
+  const d = sessionDetail(chatSummary({ goal: null }), snapshot({ goal: done }), ctx);
+  assert.deepEqual(d.chat.goal, { objective: "Make the suite green", status: "complete", continuing: false, rounds: 3, lastCheck: "All 412 tests pass.", tokensUsed: 120_000, tokenBudget: 500_000, elapsedMs: 754_000, setAt: stamp(0), updatedAt: stamp(9) }, "the provider's own goal id is left out");
+  assert.equal(d.reason, "completed");
+  assert.equal(sessionView(chatSummary({ goal: null }), ctx).chat?.goal, null);
+});
+
+test("the detail's goal is continuing on the summary's word, and get_session's supports carry the provider's goal surface", () => {
+  const codexGoals = { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true } as const;
+  const codexCtx: ViewContext = { ...ctx, capabilitiesByAdapter: new Map([["codex", { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" }, goals: codexGoals }]]) };
+  const goal = { objective: "Migrate the parser", status: "active", phase: "executing", tokensUsed: 40_000, tokenBudget: null, updatedAt: stamp(4) } as const;
+  const snap = snapshot({ head: head({ adapter: "codex", refId: "codex" }), goal });
+  const summary = (continuing: boolean) => chatSummary({ refId: "codex", goal: { objective: goal.objective, status: "active", continuing } });
+  const d = sessionDetail(summary(true), snap, codexCtx);
+  assert.deepEqual(d.chat.goal, { objective: "Migrate the parser", status: "active", continuing: true, phase: "executing", tokensUsed: 40_000, tokenBudget: null, updatedAt: stamp(4) }, "a budget the provider cleared stays null; an unreported fact is absent");
+  assert.equal(d.reason, "goal-continuing");
+  assert.deepEqual(d.chat.supports.goals, codexGoals);
+  assert.equal(sessionDetail(summary(false), snap, codexCtx).chat.goal?.continuing, false);
+  assert.equal(sessionDetail(chatSummary({ refId: "codex" }), snap, codexCtx).chat.goal?.continuing, false, "a summary without the field");
+});
+
+test("a stale summary's continuing never outlives the snapshot's goal: only an active goal continues, as the host's own predicate has it", () => {
+  // Right after send_message "/goal pause": the snapshot says paused, while the summary, one host poll behind, still says continuing.
+  const stale = chatSummary({ refId: "codex", goal: { objective: "Migrate the parser", status: "active", continuing: true } });
+  const detailWith = (status: AgentGoalStatus) => sessionDetail(stale, snapshot({ head: head({ adapter: "codex", refId: "codex" }), goal: { objective: "Migrate the parser", status, updatedAt: stamp(6) } }), ctx);
+  assert.deepEqual(detailWith("paused").chat.goal, { objective: "Migrate the parser", status: "paused", continuing: false, updatedAt: stamp(6) });
+  for (const status of ["blocked", "budget-limited", "usage-limited", "complete", "failed"] as const) assert.equal(detailWith(status).chat.goal?.continuing, false, status);
+  assert.equal(detailWith("active").chat.goal?.continuing, true);
+});
+
+test("goals §5.7: a goal an Orquester update holds reads paused, continuing and heldForUpdate — in a list and in a detail, the GUI's \"paused for update\"", () => {
+  // The host's own reading of a hold: `paused`, and continuing — its predicate needs an `active` goal otherwise.
+  const held = chatSummary({ refId: "codex", goal: { objective: "Migrate the parser", status: "paused", continuing: true } });
+  // The activity the daemon stamps from the same ladder (AgentChatSummaryService.applyFields).
+  const { state, attention } = resolveChatActivity(held);
+  const view = sessionView({ ...held, activity: { state, attention, lastOutputAt: null, needsAttentionAt: null } }, ctx);
+  assert.deepEqual(view.chat?.goal, { objective: "Migrate the parser", status: "paused", continuing: true, heldForUpdate: true });
+  assert.deepEqual([view.reason, view.status, view.attention], ["goal-continuing", "working", null], "the tab reads working: no finished stamp mid-deploy");
+  const detailWith = (summary: typeof held, status: AgentGoalStatus) =>
+    sessionDetail(summary, snapshot({ head: head({ adapter: "codex", refId: "codex" }), goal: { objective: "Migrate the parser", status, updatedAt: stamp(6) } }), ctx).chat.goal;
+  assert.deepEqual(detailWith(held, "paused"), { objective: "Migrate the parser", status: "paused", continuing: true, heldForUpdate: true, updatedAt: stamp(6) });
+  // Set going again since the summary was read: the goal continues, held no longer.
+  assert.deepEqual(detailWith(held, "active"), { objective: "Migrate the parser", status: "active", continuing: true, updatedAt: stamp(6) });
+  // Ended, blocked or limited during its final turn: nothing continues and nothing is held.
+  for (const status of ["blocked", "budget-limited", "usage-limited", "complete", "failed"] as const) {
+    assert.deepEqual(detailWith(held, status), { objective: "Migrate the parser", status, continuing: false, updatedAt: stamp(6) }, status);
+  }
+  // The user's own pause is never a hold, in a list or a detail.
+  const userPaused = chatSummary({ refId: "codex", goal: { objective: "Migrate the parser", status: "paused", continuing: false } });
+  assert.deepEqual(sessionView(userPaused, ctx).chat?.goal, { objective: "Migrate the parser", status: "paused", continuing: false });
+  assert.deepEqual(detailWith(userPaused, "paused"), { objective: "Migrate the parser", status: "paused", continuing: false, updatedAt: stamp(6) });
+});
+
+test("a snapshot without a goal reads null even while a stale summary still names one: Claude reports a met goal as no goal", () => {
+  // Claude's last goal row was `achieved`: `goal: null`, the ended goal only as `previous`, which the fold does not keep.
+  const stale = chatSummary({ goal: { objective: "Make the suite green", status: "active", continuing: false } });
+  assert.equal(sessionDetail(stale, snapshot({ goal: null }), ctx).chat.goal, null);
+});
+
+test("the detail's goal is null when the snapshot's does not read, whatever the summary says, and from a host that predates goals; a mistyped fact is dropped", () => {
+  const summary = chatSummary({ goal: { objective: "Ship it", status: "active", continuing: true } });
+  const unread: [string, unknown][] = [
+    ["no updatedAt", { objective: "Ship it", status: "active" }], ["an unknown status", { objective: "Ship it", status: "done", updatedAt: stamp(3) }],
+    ["an empty objective", { objective: "", status: "active", updatedAt: stamp(3) }], ["an objective that is no string", { objective: 7, status: "active", updatedAt: stamp(3) }],
+    ["a string", "Ship it"], ["a list", [{ objective: "Ship it", status: "active", updatedAt: stamp(3) }]], ["null", null]
+  ];
+  for (const [label, goal] of unread) assert.equal(sessionDetail(summary, snapshot({ goal: goal as never }), ctx).chat.goal, null, label);
+  assert.equal(sessionDetail(summary, snapshot(), ctx).chat.goal, null, "an older host's snapshot has no goal field");
+  const mistyped = { objective: "Ship it", status: "active", rounds: -1, tokensUsed: "many", lastCheck: "", elapsedMs: Number.NaN, updatedAt: stamp(3) };
+  assert.deepEqual(sessionDetail(summary, snapshot({ goal: mistyped as never }), ctx).chat.goal, { objective: "Ship it", status: "active", continuing: true, updatedAt: stamp(3) });
+});
+
+test("the detail's goal text is cut in code points, ending in \"…\": an objective at 4 000, a last check at 2 000, a phase at 200; an objective at the limit stays whole", () => {
+  const objective = "o".repeat(2_500) + "🙂".repeat(2_500); // 5 000 code points
+  const lastCheck = "c".repeat(1_000) + "漢".repeat(1_500); // 2 500
+  const phase = "p".repeat(300);
+  const g = sessionDetail(chatSummary(), snapshot({ goal: { objective, status: "blocked", phase, lastCheck, updatedAt: stamp(5) } }), ctx).chat.goal!;
+  assert.deepEqual(g, { objective: clipped(objective, 4_000), status: "blocked", continuing: false, phase: clipped(phase, 200), lastCheck: clipped(lastCheck, 2_000), updatedAt: stamp(5) });
+  assert.deepEqual([[...g.objective].length, [...g.lastCheck!].length, [...g.phase!].length], [4_000, 2_000, 200]);
+  const longest = "🙂".repeat(4_000); // Claude's and Codex's own limit, in code points
+  assert.equal(sessionDetail(chatSummary(), snapshot({ goal: { objective: longest, status: "active", updatedAt: stamp(5) } }), ctx).chat.goal?.objective, longest);
+});
+
+test("a goal at its caps stays whole beside a 16 KB plan and reply and a large request: fitDetail cuts the reply, then the plan, to make room, never the goal", () => {
+  const goal = { objective: "😀".repeat(5_000), status: "active", phase: "😀".repeat(300), rounds: 12, lastCheck: "😀".repeat(2_500), tokensUsed: 1_000_000, tokenBudget: 2_000_000, elapsedMs: 3_600_000, setAt: stamp(0), updatedAt: stamp(9) } as const;
+  const plan = "漢".repeat(16_384);
+  const reply = "😀".repeat(16_384);
+  const request = "確認".repeat(2_048);
+  const detailOf = (withGoal: boolean, planText: string, replyText: string) => sessionDetail(chatSummary({ hasPendingApprovals: true }), snapshot({
+    items: [message("user", "go", { turnId: "t1" }), message("assistant", replyText, { turnId: "t1" }), activity("turn.proposed.completed", { planId: "p1", planMarkdown: planText }),
+      activity("approval.requested", { requestId: "r1", requestKind: "command", detail: request, args: { toolName: "Bash", input: { command: request } } }, { tone: "approval" })],
+    pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5), detail: request }], userInputs: [] },
+    ...(withGoal ? { goal } : {})
+  }), ctx);
+  const d = detailOf(true, plan, reply);
+  assert.ok(resultBytes(d) <= SESSION_DETAIL_BYTES, `${resultBytes(d)} bytes`);
+  assert.deepEqual(ok({ session: d }).structuredContent, { session: d }, "never cut by ok()'s last resort");
+  // Every other field whole, the goal included: exactly the detail of the same session with texts that need no cut.
+  assert.deepEqual(blankTexts(d), blankTexts(detailOf(true, "# short", "short")));
+  assert.equal([...d.chat.goal!.objective].length, 4_000);
+  assert.deepEqual([d.lastReply!.text, d.lastReply!.truncated, d.plan!.truncated], ["", true, true]);
+  assert.ok(headOf(d.plan!.markdown, plan) && d.plan!.markdown.length > 0, "the plan keeps a head");
+  assert.ok(detailOf(false, plan, reply).plan!.markdown.length > d.plan!.markdown.length, "the goal's room comes out of the plan");
+});
+
+// ---- An old Claude log's re-emitted opening paragraph (spec §7.3): left out of the reply, as the GUI leaves it out. ----
+
+const OPENING = "The subagent finished; merging its findings.";
+const ANSWER = "Merged: the parser now skips empty lines.";
+/** A CLI-started turn as a host before the pre-turn-stream fix wrote it: its opening paragraph again at `result`, under a new id. */
+const reEmittedTurn = () => [
+  message("assistant", OPENING, { turnId: "t1", id: "m-open" }),
+  activity("tool.completed", { itemType: "command_execution", toolUseId: "tu1", title: "Run pnpm check", status: "completed" }, { turnId: "t1", tone: "tool" }),
+  message("assistant", ANSWER, { turnId: "t1", id: "m-answer" }),
+  message("assistant", OPENING, { turnId: "t1", id: "m-copy" })
+];
+
+test("lastReply leaves out a Claude thread's re-emitted opening paragraph, as the GUI's timeline does; a Codex thread keeps the same items whole", () => {
+  const items = reEmittedTurn();
+  const claude = snapshot({ items });
+  assert.deepEqual(lastReply(claude), { turnId: "t1", text: `${OPENING}\n\n${ANSWER}`, truncated: false, completedAt: stamp(1) }, "the opening stays where it was said, and the reply ends on the answer");
+  // get_session's lastReply, and so send_message's reply, is that same answer.
+  assert.equal(sessionDetail(chatSummary(), claude, ctx).lastReply?.text, `${OPENING}\n\n${ANSWER}`);
+  // Only a Claude log holds such a copy: a Codex thread's repeat is its own words.
+  const codex = snapshot({ head: head({ adapter: "codex", refId: "codex" }), items });
+  assert.equal(lastReply(codex)?.text, `${OPENING}\n\n${ANSWER}\n\n${OPENING}`);
+  assert.equal(sessionDetail(chatSummary({ refId: "codex" }), codex, ctx).lastReply?.text, `${OPENING}\n\n${ANSWER}\n\n${OPENING}`);
+  // A turn whose opening paragraph was all it said: the reply is that paragraph, once.
+  const alone = snapshot({ items: [message("assistant", OPENING, { turnId: "t1", id: "m-open" }), message("assistant", OPENING, { turnId: "t1", id: "m-copy" })] });
+  assert.equal(lastReply(alone)?.text, OPENING);
+});
+
+test("a Claude turn whose final answer repeats a message other than its opening is untouched, and so is a repeat of the opening that more of its turn follows", () => {
+  // A goal run is ONE turn of many rounds, and two of them can end on the same words: the later one is the turn's answer.
+  const rounds = snapshot({ items: [
+    message("assistant", "Working through the failing checks.", { turnId: "t1", id: "m-open" }),
+    message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-1" }),
+    activity("goal.updated", { goal: { objective: "Make CI green", status: "active", rounds: 1 }, change: "checked" }, { turnId: "t1" }),
+    message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-2" })
+  ] });
+  assert.equal(lastReply(rounds)?.text, "Working through the failing checks.\n\nAll checks pass.\n\nAll checks pass.");
+  // The copy was flushed at `result`: a repeat of the opening that the turn goes on after is the agent's own words.
+  const again = snapshot({ items: [
+    message("assistant", "Running the tests again.", { turnId: "t1", id: "m-open" }),
+    message("assistant", "Running the tests again.", { turnId: "t1", id: "m-again" }),
+    message("assistant", "All green: 212 passing.", { turnId: "t1", id: "m-answer" })
+  ] });
+  assert.equal(lastReply(again)?.text, "Running the tests again.\n\nRunning the tests again.\n\nAll green: 212 passing.");
 });

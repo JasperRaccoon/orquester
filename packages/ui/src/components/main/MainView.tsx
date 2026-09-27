@@ -310,6 +310,7 @@ export const MainView: React.FC = () => {
                     sessionId={tab.id}
                     status={tabSession(tab)!.status}
                     backgroundLiveness={tabSession(tab)!.backgroundLiveness}
+                    goal={tabSession(tab)!.goal}
                   />
                 ) : null}
                 <button

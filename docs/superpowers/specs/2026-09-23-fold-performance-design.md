@@ -246,7 +246,9 @@ trim drops it, onto the history bridge out of log order, as an answered question
 snapshot-only history fallback (`apps/daemon/src/mcp/history.ts`: `keptWhateverItsAge`,
 `agentWindowOldestTurn`) passes over every open opening as a row kept whatever its age. A state
 folded by version 3 may lack the opening row of work still running, and trimmed at other steps, so
-`FOLD_SNAPSHOT_VERSION` went to 4: each log is re-folded once, as for 3.
+`FOLD_SNAPSHOT_VERSION` went to 4: each log is re-folded once, as for 3. (5 since the merge of
+2026-09-27: the goals build had taken 4 for its own fold change, the thread's `goal`, so neither
+build's version-4 `state.json` is the merged fold's.)
 
 Checked against the reference model in `fold.retention.test.ts` — it gained the rule, written
 independently — over a long-call log and a ceiling-shaped one, through JSON at every split point in

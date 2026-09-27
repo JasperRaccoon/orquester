@@ -125,6 +125,15 @@ export interface SubagentLaunch {
    * frames and its end are that agent's, never a second agent's.
    */
   cutBeforeSpawn: boolean;
+  /**
+   * The call's answer named its child's id ({@link learnSubagentIds}) before
+   * any `subagent_spawned` joined it: that child is known by id, so a spawn
+   * naming another id never takes this launch by its description
+   * ({@link unjoinedLaunch}). Two launches of one description run in
+   * parallel in real goal sessions, answered before their spawns (1.0.3,
+   * fixtures README observation 58).
+   */
+  reported: boolean;
 }
 
 /**
@@ -384,7 +393,8 @@ function launchSubagent(
     detached: false,
     settled: false,
     joined: false,
-    cutBeforeSpawn: false
+    cutBeforeSpawn: false,
+    reported: false
   };
   state.subagentLaunches.set(toolCallId, launch);
   evictOldest(state.subagentLaunches, SUBAGENTS_REMEMBERED);
@@ -551,15 +561,21 @@ export function subagentSpawned(
   const description = textArgument(record, "description");
   const resumedFrom = textArgument(record, "resumed_from");
   const events: RuntimeEvent[] = [];
-  let taskId =
-    state.subagentIds.get(subagentId.toLowerCase()) ??
-    (resumedFrom === undefined ? undefined : state.subagentIds.get(resumedFrom.toLowerCase())) ??
-    unjoinedLaunch(state, description)?.taskId;
+  let taskId = state.subagentIds.get(subagentId.toLowerCase());
+  let resumed = false;
+  if (taskId === undefined && resumedFrom !== undefined) {
+    taskId = state.subagentIds.get(resumedFrom.toLowerCase());
+    resumed = taskId !== undefined;
+  }
+  taskId ??= unjoinedLaunch(state, description)?.taskId;
   if (taskId === undefined) {
     taskId = subagentId;
     events.push(...startUnlaunchedSubagent(state, subagentId, record, raw));
   }
   const track = state.subagents.get(taskId);
+  if (resumed && track !== undefined && !track.live) {
+    events.push(...relaunchResumedSubagent(state, track, subagentId, raw));
+  }
   const launch = track === undefined ? undefined : state.subagentLaunches.get(track.toolUseId);
   if (launch !== undefined) {
     launch.joined = true;
@@ -578,6 +594,47 @@ export function subagentSpawned(
 }
 
 /**
+ * A resume the CLI ran by itself — `subagent_spawned {resumed_from}` with no
+ * `spawn_subagent` call of this session's behind it, as a goal's engine
+ * resumes a skeptic (1.0.3 goal sessions, fixtures README observation 58) —
+ * of an agent whose run had ended: a new run of the SAME task under a new
+ * launch id, the resume's own subagent id (the relaunch contract, observation
+ * 43), so the roster reopens its row and the run's rows and end are recorded.
+ * Left ended, the resumed run's frames joined an ended agent and its answer
+ * was read as a late report of the run before it — dropped. A model's resume
+ * was already relaunched by its call's first frame, and finds the run live.
+ */
+function relaunchResumedSubagent(
+  state: GrokNormalizerState,
+  track: SubagentTrack,
+  subagentId: string,
+  raw: RuntimeEventRaw
+): RuntimeEvent[] {
+  track.toolUseId = subagentId;
+  track.owner = subagentId;
+  track.live = true;
+  track.backgrounded = true;
+  track.turnId = state.deps.activeTurnId();
+  track.endedBy = undefined;
+  track.listed = false;
+  track.revived = false;
+  state.subagents.delete(track.taskId);
+  state.subagents.set(track.taskId, track);
+  if (track.turnId !== undefined) {
+    state.lastSubagentTurnId = track.turnId;
+  }
+  return [
+    event(
+      state,
+      "task.started",
+      { ...subagentLinkage(track), description: track.description, isBackgrounded: true },
+      track.turnId,
+      raw
+    )
+  ];
+}
+
+/**
  * The oldest live launch no `subagent_spawned` has named yet — a matching
  * description first — or one a Stop cut before it could ({@link
  * SubagentLaunch.cutBeforeSpawn}).
@@ -585,7 +642,11 @@ export function subagentSpawned(
 function unjoinedLaunch(state: GrokNormalizerState, description: string | undefined): SubagentLaunch | undefined {
   let oldest: SubagentLaunch | undefined;
   for (const launch of state.subagentLaunches.values()) {
-    if (launch.joined || (state.subagents.get(launch.taskId)?.live !== true && !launch.cutBeforeSpawn)) {
+    if (
+      launch.joined ||
+      launch.reported ||
+      (state.subagents.get(launch.taskId)?.live !== true && !launch.cutBeforeSpawn)
+    ) {
       continue;
     }
     if (description !== undefined && launch.description === description) {
@@ -607,8 +668,11 @@ function startUnlaunchedSubagent(
   record: Record<string, unknown>,
   raw: RuntimeEventRaw
 ): RuntimeEvent[] {
-  const role = textArgument(record, "subagent_type");
+  // 1.0.3's goal sessions name an explore agent's `role` (fixtures README
+  // observation 58); the 1.0.34 captures carry `subagent_type` alone.
+  const role = textArgument(record, "role") ?? textArgument(record, "subagent_type");
   const title = textArgument(record, "description") ?? role ?? "Subagent";
+  const model = textArgument(record, "model");
   const track: SubagentTrack = {
     taskId: subagentId,
     toolUseId: subagentId,
@@ -616,6 +680,7 @@ function startUnlaunchedSubagent(
     title,
     description: title,
     ...(role === undefined ? {} : { role }),
+    ...(model === undefined ? {} : { model }),
     live: true,
     backgrounded: true,
     turnId: state.deps.activeTurnId(),
@@ -624,6 +689,12 @@ function startUnlaunchedSubagent(
   };
   state.subagents.set(subagentId, track);
   evictOldest(state.subagents, SUBAGENTS_REMEMBERED, (entry) => !entry.live);
+  // Spawned while a turn runs — a goal's planner inside the `/goal` prompt —
+  // it is that turn's subagent (`TurnTokenUsage.hasSubagents`); a loop's fire
+  // between turns counts for none.
+  if (track.turnId !== undefined) {
+    state.lastSubagentTurnId = track.turnId;
+  }
   return [
     event(
       state,
@@ -726,13 +797,21 @@ export function subagentFinished(
  * prose that may quote any id. Never taken: an id the launch's own input
  * named (a prompt quoting another agent's), the session's own id, a live
  * shell's (whose snapshot rows must stay the shell's), and an id an earlier
- * launch reported first.
+ * launch reported first. Nothing is taken for a launch a spawn already
+ * joined: its child's id was remembered by that join, and a description
+ * join can be wrong — two launches of one description in parallel — so an
+ * id its answer names may be the OTHER launch's child, and taken here it made
+ * one agent of both children (the other launch's agent never started, its
+ * child's end was dropped).
  */
 function learnSubagentIds(
   state: GrokNormalizerState,
   launch: SubagentLaunch,
   update: Extract<SessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>
 ): void {
+  if (launch.joined) {
+    return;
+  }
   const usable = (id: string): boolean =>
     !launch.inputIds.has(id) &&
     id !== state.sessionId &&
@@ -743,6 +822,7 @@ function learnSubagentIds(
   const ids = structured.length > 0 ? structured : uuidsIn(update.content).filter(usable);
   for (const id of ids.slice(0, IDS_PER_LAUNCH)) {
     rememberSubagentId(state, id, launch.taskId);
+    launch.reported = true;
   }
 }
 

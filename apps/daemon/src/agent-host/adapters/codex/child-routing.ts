@@ -67,7 +67,10 @@ export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
  * rows of its drill-in.
  *
  * *T3: `CodexSessionRuntime.ts:1097-1119`* — less the three call
- * notifications above that T3 drops.
+ * notifications above that T3 drops, plus the two goal notifications,
+ * which T3 does not map at all: a collab child has the goal tools too, a goal
+ * it sets is announced on its own thread id, and the parent maps every goal
+ * notification onto the thread's one goal (goals §6.2).
  */
 export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "item/agentMessage/delta",
@@ -82,7 +85,9 @@ export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "thread/archived",
   "thread/unarchived",
   "thread/compacted",
-  "thread/started"
+  "thread/started",
+  "thread/goal/updated",
+  "thread/goal/cleared"
 ]);
 
 /**

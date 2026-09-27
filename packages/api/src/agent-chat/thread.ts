@@ -19,6 +19,7 @@ import type {
   ProviderSessionStatus,
   RuntimeMode
 } from "./adapter-types.ts";
+import type { AgentGoal, AgentGoalChange, ThreadGoal } from "./goal.ts";
 import type {
   ApprovalOption,
   CanonicalRequestType,
@@ -105,6 +106,37 @@ export interface ThreadHead {
   turnCount: number;
   seq: number;
   continueAfterRestart?: ContinueAfterRestart;
+  /**
+   * Goals §5.5: the deploy handover found this thread's goal CONTINUING —
+   * active on a provider that starts its own turns (Codex) — with a usable
+   * resume cursor. The next host resumes the provider session once its gate is
+   * open, WITHOUT sending a turn, so the provider continues the goal by
+   * itself, and then clears this. Needs no per-project opt-in: setting a goal
+   * is the user's opt-in to autonomous work. Head-only state like
+   * {@link continueAfterRestart}: no domain event carries it, and an older
+   * build ignores it.
+   */
+  resumeGoalAfterRestart?: true;
+  /**
+   * Goals §5.7: a deploy's drain HELD this thread's continuing goal — the host
+   * paused it between two of its turns so the drain could go ahead — and the
+   * goal is owed a resume. Written just BEFORE the pause is sent, and cleared
+   * again when the pause does not land, so a crash between the two leaves a
+   * mark rather than a paused goal nobody resumes. Whichever host acts on it
+   * next resumes the provider session as for {@link resumeGoalAfterRestart}
+   * and then RESUMES THE GOAL, a paused one not continuing by itself — only
+   * while the PROVIDER still holds it `paused` (asked, since the fold can
+   * trail it): one achieved, cleared, blocked or limited meanwhile is not set
+   * going again, and one going already needs nothing. The holding host
+   * clears it itself when it lets go of the goal — the hold lease runs out,
+   * or the goal sat idle behind other work for `GOAL_HOLD_IDLE_MS` — and a
+   * user's own action on the goal clears it with nothing resumed. Head-only
+   * state like {@link continueAfterRestart}; an older build ignores it, and
+   * then resumes neither the session nor the goal (a held goal reads
+   * `paused` at the handover, so {@link resumeGoalAfterRestart} is not
+   * written for it): the goal stays paused until the user resumes it.
+   */
+  goalHeldForHandover?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -310,6 +342,14 @@ export interface ThreadActivityPayloadFields {
   promptTruncated?: boolean;
   /** True when the full payload was truncated and `GET …/items/:itemId` has more. */
   truncated?: boolean;
+  /**
+   * The three fields of a `goal.updated` row (goals §4.3) — its whole
+   * `GoalUpdatedPayload`, on the snapshot, the live stream and history pages
+   * alike. Read them through `parseGoalUpdatedPayload`, never raw.
+   */
+  goal?: AgentGoal | null;
+  change?: AgentGoalChange;
+  previous?: AgentGoal;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,10 +554,13 @@ export interface RuntimeSubagent {
   id: string;
   /**
    * `loop` and `goal` are rows that DRIVE work rather than do it: a provider's
-   * scheduled prompt (task type `scheduled`, a Grok `/loop`) and its
-   * autonomous goal (`goal`, a Grok `/goal`). Their fires, turns and agents
-   * are the work, each on rows of its own; these are background rows, never
-   * shells, and never counted as work (`deriveAgentPanelModel`).
+   * scheduled prompt (task type `scheduled`, a Grok `/loop`) and, legacy only,
+   * an autonomous goal (`goal`). Their fires, turns and agents are the work,
+   * each on rows of its own; these are background rows, never shells, and
+   * never counted as work (`deriveAgentPanelModel`). No adapter writes a
+   * `goal` row since 2026-09-27: a Grok `/goal` is the thread's goal
+   * (`goal.ts`, goals §6.3); the kind only reads the rows a 2026-09-26/27
+   * build wrote, which logs keep.
    */
   kind: "subagent" | "subagent_batch" | "workflow" | "workflow_agent" | "loop" | "goal";
   /** `"background"` rows are listed too (§7.6, differs from T3). */
@@ -628,6 +671,12 @@ export interface ThreadSnapshotPayload {
    * before. See `ThreadHistoryBounds` in `wire.ts`.
    */
   history?: ThreadHistoryBounds;
+  /**
+   * The provider's goal as the fold holds it (goals §4.4), `null` when the
+   * thread has none. Absent from a host that predates goals; a client reads
+   * that as `null` and shows no goal until the drain-restart.
+   */
+  goal?: ThreadGoal | null;
 }
 
 /**

@@ -1,13 +1,13 @@
 import { z } from "zod";
 import type { SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildPlanImplementationPrompt, MAX_TURN_INPUT_CHARS, startedTurns, type AttachmentRef, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, startedTurns, type AttachmentRef, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { supportsFrom } from "../agents.ts";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
 import { readOlderHistory, unavailableHint } from "../history.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
-import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
+import { fitJsonBytes, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { proposedPlan, transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
@@ -22,6 +22,23 @@ const MAX_TRANSCRIPT_CHARS = 55_000;
  * normally ends the wait first.
  */
 const STALE_RECHECK_MS = 2_000;
+/**
+ * How long send_message waits for the answer to a `/goal` the host runs itself (goals §5.1), counted from when the
+ * session is up — the host starts one first when there is none (after stop_session, a host restart, an account
+ * switch) — and never past the call's `timeoutMs`: Codex's own deadline for the command (`CODEX_GOAL_COMMAND_MS`,
+ * 10 s) with room to spare. A command that changes nothing — a pause of a paused goal — writes no row.
+ */
+const GOAL_ANSWER_WAIT_MS = 15_000;
+/**
+ * Once a goal update has landed, how long the rest of the same command gets: replacing a goal writes "cleared", then
+ * "set". Also the whole window of a command the goal already makes a no-op (`goalCommandChangesNothing`).
+ */
+const GOAL_ANSWER_SETTLE_MS = 500;
+/** How soon the thread is read again when nothing about the session moved: a status answer moves no summary field. */
+const GOAL_ANSWER_RECHECK_MS = 1_000;
+/** The most an answer takes, in UTF-8 bytes of its JSON: a status quotes an objective of up to 4 000 characters. */
+const GOAL_ANSWER_BYTES = 8_192;
+const GOAL_NO_ANSWER_HINT = "No answer came: the command changed nothing (the goal was already so), or the host is still on it. session.chat.goal is the goal as it stands; read_transcript shows an answer that lands later.";
 const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
 /** get_session sheds subagent rows too when its detail would pass the cap (views.ts), so this promises no full roster. */
 const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session may list more of it.";
@@ -52,10 +69,16 @@ const waitFields = {
   timeoutMs: z.number().int().min(1_000).max(MAX_WAIT_MS).default(120_000).describe("How long to wait, in ms (max 600000). On timeout the turn keeps running.")
 };
 
-/** The send preconditions the GUI applies (spec §7.4), and the snapshot they were checked on. */
-async function readyToSend(api: DaemonApi, summary: SessionSummary): Promise<ThreadSnapshotPayload> {
+/**
+ * The send preconditions the GUI applies (spec §7.4), and the snapshot they were checked on. An open request holds back
+ * every message but a `/goal` the host runs itself (`hostGoal`), as the composer's `pendingRequestBlocksSend` has it:
+ * that one starts no turn, so it cannot steer the agent past the request — and pausing or clearing the goal is what a
+ * user may want most while an approval waits.
+ */
+async function readyToSend(api: DaemonApi, summary: SessionSummary, opts: { hostGoal?: boolean } = {}): Promise<ThreadSnapshotPayload> {
   if (summary.chatSessionStatus === "error") throw new ToolError("SESSION_BUSY", "This session's agent is in an error state. Call stop_session first, then send again.");
   const snap = await readThread(api, summary.id);
+  if (opts.hostGoal) return snap;
   const { approvals, userInputs } = snap.pending;
   if (approvals.length || userInputs.length) {
     const open = [
@@ -68,7 +91,7 @@ async function readyToSend(api: DaemonApi, summary: SessionSummary): Promise<Thr
 }
 
 type TurnBody = { input: string; attachments?: AttachmentRef[]; interactionMode: "default" | "plan" };
-type SendResult = { seq: number; outcome: TurnOutcome | "sent"; turnId?: string; reply?: string; replyTruncated?: boolean; pending?: SessionDetail["pending"]; session: SessionDetail };
+type SendResult = { seq: number; outcome: TurnOutcome | "sent" | "goal"; turnId?: string; reply?: string; replyTruncated?: boolean; answer?: string; answerTruncated?: true; hint?: string; pending?: SessionDetail["pending"]; session: SessionDetail };
 
 /**
  * Post the turn (§7.4) and, with `wait`, block per §9.1; the result is read from the fresh snapshot. `checked` is the
@@ -170,10 +193,141 @@ function sendResult(seq: number, outcome: SendResult["outcome"], session: Sessio
   return { seq, outcome, turnId, reply: lastReply.text, ...(lastReply.truncated ? { replyTruncated: true } : {}), ...(pending ? { pending } : {}), session: rest };
 }
 
+/**
+ * A `/goal` the host runs itself (goals §5.1, Codex): posted as the composer posts it, as a turn, and the host records
+ * the message, starts NO turn and answers in a row — so there is no turn to wait for, and a turn wait would sit out its
+ * whole timeout and then call the command a turn still running. With `wait`, the call waits for that answer instead
+ * (`awaitGoalAnswer`): `outcome: "failed"` when the command failed, `"goal"` otherwise, with `answer` whenever a row
+ * came and `hint` when none did. No `turnId` and no `reply`: the host records the message inside a running turn, but
+ * no agent read it.
+ */
+async function dispatchGoalCommand(ctx: ToolContext, sessionId: string, checked: ThreadSnapshotPayload, input: string, interactionMode: TurnBody["interactionMode"], wait: boolean, timeoutMs: number): Promise<SendResult> {
+  // Every row the send was checked on: the answer is written after them.
+  const seen = new Set(checked.items.map((item) => item.id));
+  const windowMs = goalCommandChangesNothing(input, parseThreadGoal(checked.goal)) ? GOAL_ANSWER_SETTLE_MS : GOAL_ANSWER_WAIT_MS;
+  const { seq } = await sendCommand(ctx.api, sessionId, "turn", { input, interactionMode });
+  const answer = wait ? await awaitGoalAnswer(ctx, sessionId, input, seen, { timeoutMs, windowMs }) : null;
+  const session = await chatDetail(ctx.api, sessionId);
+  const pending = session.pending.approvals.length || session.pending.questions.length ? session.pending : undefined;
+  // Cut by bytes, never beside a detail that already fills the cap: fitDetail cannot shrink an answer.
+  const text = answer ? fitJsonBytes(answer.text, GOAL_ANSWER_BYTES) : null;
+  const head = {
+    seq, outcome: !wait ? "sent" as const : answer?.failed ? "failed" as const : "goal" as const,
+    ...(text ? { answer: text.text, ...(text.truncated ? { answerTruncated: true as const } : {}) } : wait ? { hint: GOAL_NO_ANSWER_HINT } : {}),
+    ...(pending ? { pending } : {})
+  };
+  // As sendResult fits it: beside `pending`, returned twice, the detail can pass the cap, so it is fitted again in what
+  // the rest leaves — `{…, "session":{}}` less the two bytes of that empty object.
+  return { ...head, session: fitDetail(session, MAX_RESULT_BYTES - (resultBytes({ ...head, session: {} }) - 2)) };
+}
+
+/**
+ * Whether the goal the send was checked on makes this command one the host answers with no row (goals §5.1): a pause
+ * of a paused goal, a resume of an active one — the argument read whole, in any case, as the host's parser reads it.
+ * Its answer window is then a settle's worth, in case the goal moved meanwhile, rather than GOAL_ANSWER_WAIT_MS.
+ */
+function goalCommandChangesNothing(input: string, goal: ThreadGoal | null): boolean {
+  const argument = input.trim().slice("/goal".length).trim().toLowerCase();
+  return (argument === "pause" && goal?.status === "paused") || (argument === "resume" && goal?.status === "active");
+}
+
+/** A row answering a host `/goal`, and whether it settles the command. */
+interface GoalAnswerRow { text: string; failed: boolean; settles: boolean }
+
+/**
+ * The rows a host `/goal` wrote, in log order: those after its own message — the last user message not in `seen` with
+ * the command's text, or, when the window no longer shows it, every row not in `seen`. Three kinds answer (goals §5.1):
+ * the status it asked for (`goal.status`) and why it failed (`goal.command.failed`), which the host appends LAST, once
+ * the provider has answered, so either settles the command; and the goal's new state — a `goal.updated` row the GUI
+ * shows, never a hidden `progress` tick — which can still have siblings on their way.
+ */
+function goalAnswerRows(items: readonly ThreadItem[], input: string, seen: ReadonlySet<string>): GoalAnswerRow[] {
+  let from = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i]!;
+    if (item.kind === "message" && item.role === "user" && !seen.has(item.id) && item.text === input) { from = i + 1; break; }
+  }
+  const rows: GoalAnswerRow[] = [];
+  for (const item of items.slice(from)) {
+    if (item.kind !== "activity" || seen.has(item.id)) continue;
+    if (item.activityKind === GOAL_COMMAND_FAILED_ACTIVITY_KIND) {
+      const detail = (item.payload as { detail?: unknown } | null)?.detail;
+      rows.push({ text: typeof detail === "string" && detail ? `${item.summary}: ${detail}` : item.summary, failed: true, settles: true });
+    } else if (item.activityKind === GOAL_STATUS_ACTIVITY_KIND) {
+      // A deploy's hold writes one of these too (goals §5.7, `heldForUpdate`): it answers nobody's `/goal`.
+      if ((item.payload as { heldForUpdate?: unknown } | null)?.heldForUpdate === true) continue;
+      rows.push({ text: item.summary, failed: false, settles: true });
+    } else if (item.activityKind === GOAL_ACTIVITY_KIND) {
+      // A row whose payload does not parse is still shown, by the GUI and by read_transcript.
+      const update = parseGoalUpdatedPayload(item.payload);
+      if (update === null || !isHiddenGoalChange(update.change)) rows.push({ text: item.summary, failed: false, settles: false });
+    }
+  }
+  return rows;
+}
+
+/**
+ * Wait for a host `/goal`'s answer (`goalAnswerRows`): done at a status or a failure row, or GOAL_ANSWER_SETTLE_MS after
+ * the first goal update, so the rest of the same command is read with it. The window (`windowMs`) runs while the
+ * session is up — the host starts one first when there is none, and a restart starts the window again — and the call's
+ * `timeoutMs` bounds everything. The thread is read again on each bus event about the session, else every
+ * GOAL_ANSWER_RECHECK_MS: a status answer moves no field of the summary. null when no row came.
+ */
+async function awaitGoalAnswer(ctx: ToolContext, sessionId: string, input: string, seen: ReadonlySet<string>, opts: { timeoutMs: number; windowMs: number }): Promise<{ text: string; failed: boolean } | null> {
+  // Elapsed time as wait.ts counts it, for every bound alike: the larger of the caller's clock and the monotonic one.
+  const mark = () => ({ clock: ctx.now(), mono: performance.now() });
+  const since = (at: { clock: number; mono: number }) => Math.max(ctx.now() - at.clock, performance.now() - at.mono);
+  const started = mark();
+  const answerOf = (rows: readonly GoalAnswerRow[]) => (rows.length === 0 ? null : { text: rows.map((r) => r.text).join("\n"), failed: rows.some((r) => r.failed) });
+  let events = 0;
+  let closed = false;
+  let wake: (() => void) | null = null;
+  const off = ctx.api.subscribe((event) => {
+    if (event.channel !== "sessions" || (event.payload as { id?: unknown } | null)?.id !== sessionId) return;
+    events += 1;
+    if (event.type === "session.closed") closed = true;
+    const w = wake;
+    wake = null;
+    w?.();
+  });
+  // Since when the session has been up, and since when the first goal update has been in.
+  let up: { clock: number; mono: number } | null = null;
+  let settling: { clock: number; mono: number } | null = null;
+  try {
+    for (;;) {
+      if (closed) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while waiting.`);
+      const heard = events;
+      const snap = await readThread(ctx.api, sessionId);
+      const rows = goalAnswerRows(snap.items, input, seen);
+      if (rows.some((r) => r.settles)) return answerOf(rows);
+      const status = snap.head.session.status;
+      up = status === "ready" || status === "running" ? (up ?? mark()) : null;
+      if (rows.length > 0 && settling === null) settling = mark();
+      const left = Math.min(
+        opts.timeoutMs - since(started),
+        up === null ? Infinity : opts.windowMs - since(up),
+        settling === null ? Infinity : GOAL_ANSWER_SETTLE_MS - since(settling)
+      );
+      if (left <= 0 || ctx.signal.aborted) return answerOf(rows);
+      // Nothing about the session moved during that read: wait until something does, or look again shortly.
+      if (events === heard) {
+        await new Promise<void>((resolve) => {
+          const resume = () => { clearTimeout(timer); ctx.signal.removeEventListener("abort", resume); wake = null; resolve(); };
+          const timer = setTimeout(resume, Math.min(left, GOAL_ANSWER_RECHECK_MS));
+          ctx.signal.addEventListener("abort", resume, { once: true });
+          wake = resume;
+        });
+      }
+    }
+  } finally {
+    off();
+  }
+}
+
 const sendMessage = defineTool({
   name: "send_message",
   title: "Send a message",
-  description: "Send a message to a chat session (with optional image/file attachments, optionally in plan mode). With wait:true (default) it returns the agent's reply, or the question/approval it stopped on. While a turn is running the message steers it.",
+  description: "Send a message to a chat session (with optional image/file attachments, optionally in plan mode). With wait:true (default) it returns the agent's reply, or the question/approval it stopped on. While a turn is running the message steers it. On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its `answer`.",
   input: {
     sessionId: sessionIdField,
     text: z.string().optional().describe("The message. Required unless attachments are given."),
@@ -187,11 +341,20 @@ const sendMessage = defineTool({
     const text = (args.text ?? "").trim();
     if (!text && !args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A message needs text or at least one attachment.");
     if (text.length > MAX_TURN_INPUT_CHARS) throw new ToolError("INVALID_ARGUMENT", `The message is ${text.length} characters; the limit is ${MAX_TURN_INPUT_CHARS}.`);
-    const checked = await readyToSend(ctx.api, summary);
+    // goals §5.1: where the HOST runs goals (Codex), `/goal …` is a goal command and never a prompt — the host's rule and
+    // the composer's (`isGoalCommandText`, `capabilities.goals.command`).
+    const goalText = isGoalCommandText(text);
+    const view = goalText || args.planMode ? await buildViewContext(ctx.api) : null;
+    const adapter = view?.adapterByRefId.get(summary.refId);
+    const caps = adapter ? view?.capabilitiesByAdapter.get(adapter) : undefined;
+    // Where a /goal goes is the agent's capabilities' to say: unread, the host might run it as a command while this call
+    // waited on a turn that never starts — so it is refused, as plan mode is when they cannot be read.
+    if (goalText && !caps) throw new ToolError("INVALID_ARGUMENT", `A /goal can't be routed for ${summary.refId} right now: its capabilities could not be read. Retry shortly.`);
+    const hostGoal = goalText && parseGoalSupport(caps?.goals)?.command === "host";
+    // The host refuses it too (`parseHostGoalCommand`), but only once the files are uploaded: refused here, none are.
+    if (hostGoal && args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A goal can't include attachments.");
+    const checked = await readyToSend(ctx.api, summary, { hostGoal });
     if (args.planMode) {
-      const view = await buildViewContext(ctx.api);
-      const adapter = view.adapterByRefId.get(summary.refId);
-      const caps = adapter ? view.capabilitiesByAdapter.get(adapter) : undefined;
       // The gate get_session reports as supports.planMode: capabilities that could not be read are no plan mode.
       if (!supportsFrom(caps).planMode) {
         throw new ToolError("INVALID_ARGUMENT", caps
@@ -199,6 +362,7 @@ const sendMessage = defineTool({
           : `Plan mode can't be confirmed for ${summary.refId} right now: its capabilities could not be read. Retry shortly, or send without planMode.`);
       }
     }
+    if (hostGoal) return dispatchGoalCommand(ctx, args.sessionId, checked, text, args.planMode ? "plan" : "default", args.wait, args.timeoutMs);
     const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, args.sessionId, args.attachments) : [];
     return dispatchTurn(ctx, args.sessionId, checked, { input: text, attachments, interactionMode: args.planMode ? "plan" : "default" }, args.wait, args.timeoutMs);
   }

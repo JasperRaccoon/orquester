@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeDaemonApi } from "./testing.ts";
 import { stamp } from "./fixtures.ts";
-import { conversationLaunch, EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, nameList, resolveModelSelection, validateAccountId, type AgentView } from "./agents.ts";
+import { conversationLaunch, EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, nameList, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "./agents.ts";
 
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", version: "2.1.280", chat: { adapter: "claude" } },
@@ -44,7 +44,7 @@ test("loadAgents lists only chat-capable entries with models, options, accounts 
   assert.deepEqual(claude.models[0].options[0], { id: "effort", label: "Effort", type: "select", values: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] });
   assert.deepEqual(claude.models[0].options[1], { id: "thinking", label: "Thinking", type: "boolean" });
   assert.equal(claude.effortOptionId, "effort");
-  assert.deepEqual(claude.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, contextWindow: true });
+  assert.deepEqual(claude.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, goals: null, contextWindow: true });
   assert.deepEqual(claude.accounts, [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: false }, { id: "acc-1", label: "jasperclaude", email: null, plan: "max", needsReauth: false, isDefault: true }]);
   assert.equal(claude.defaultAccountId, "acc-1");
   const grok = agents[2];
@@ -144,6 +144,25 @@ test("supports.rollback is offered only on an explicit true: an absent flag read
   assert.equal((await loadAgents(withCaps({ ...caps, supportsConversationRollback: true })))[0].supports.rollback, true);
 });
 
+test("supports.goals is the provider's goal surface read through parseGoalSupport: a Codex-like block rides list_agents, a malformed one and a row without capabilities read null", async () => {
+  const codexGoals = { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true };
+  const codexCaps = { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" }, promptlessTurnContinuation: true };
+  const codexRow = (capabilities?: unknown) => ({ id: "codex", refIds: ["codex"], installed: true, version: "0.130.0", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models: [], ...(capabilities === undefined ? {} : { capabilities }) });
+  const withCodex = (row: unknown) => api()
+    .on("GET", "/api/registry", { status: 200, body: { ...registry, agents: [...registry.agents, { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } }] } })
+    .on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [...providers.providers, row] } });
+  const codexOf = async (row: unknown) => findAgent(await loadAgents(withCodex(row)), "codex");
+  assert.deepEqual((await codexOf(codexRow({ ...codexCaps, goals: codexGoals }))).supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: false, goals: codexGoals, contextWindow: true });
+  // Only the actions this build knows: a newer host's extra one is left out.
+  assert.deepEqual((await codexOf(codexRow({ ...codexCaps, goals: { ...codexGoals, actions: ["pause", "teleport", "clear"] } }))).supports.goals, { command: "host", actions: ["pause", "clear"], continuesAcrossTurns: true });
+  const malformed: [string, unknown][] = [["an unknown command", { ...codexGoals, command: "server" }], ["actions not a list", { ...codexGoals, actions: "pause" }], ["continuesAcrossTurns not a boolean", { ...codexGoals, continuesAcrossTurns: "yes" }], ["a string", "all"], ["null", null], ["a list", [codexGoals]]];
+  for (const [label, goals] of malformed) assert.equal((await codexOf(codexRow({ ...codexCaps, goals }))).supports.goals, null, label);
+  assert.equal((await codexOf(codexRow(codexCaps))).supports.goals, null, "no goals block: an older host's row, or OpenCode's");
+  assert.equal((await codexOf(codexRow())).supports.goals, null, "a row without capabilities");
+  assert.equal((await codexOf(codexRow("all"))).supports.goals, null, "capabilities that are no object");
+  assert.deepEqual(supportsFrom(undefined), { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null }, "no provider snapshot at all");
+});
+
 test("an empty model never wins: an empty current or input model resolves like an omitted one, and its options are validated", async () => {
   const claude = (await loadAgents(api()))[0];
   assert.deepEqual(resolveModelSelection(claude, { options: { effort: "high" }, current: { model: "", options: [] } }), { model: "default", options: [{ id: "effort", value: "high" }] });
@@ -199,10 +218,10 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
   const agents = await loadAgents(degraded);
   const claude = findAgent(agents, "claude");
   assert.deepEqual([claude.models, claude.auth, claude.installed, claude.status], [[], { status: "unknown" }, true, "ready"]);
-  assert.deepEqual(claude.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, contextWindow: false });
+  assert.deepEqual(claude.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null, contextWindow: false });
   const grok = findAgent(agents, "grok");
   assert.deepEqual([grok.auth, grok.installed, grok.status, grok.message, grok.version], [{ status: "unknown" }, false, "unknown", undefined, null]);
-  assert.deepEqual(grok.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, contextWindow: false }, "a flag counts only when it is really true");
+  assert.deepEqual(grok.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null, contextWindow: false }, "a flag counts only when it is really true");
   assert.deepEqual(grok.models.map((m) => [m.slug, m.options]), [
     ["grok-4.6", [{ id: "fast", label: "Fast", type: "boolean" }, { id: "tier", label: "Tier", type: "select", values: [{ id: "flex", label: "Flex" }] }]],
     ["grok-mini", []]

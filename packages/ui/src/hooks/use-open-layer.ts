@@ -14,8 +14,9 @@ import { openLayerEffect } from "../lib/open-layers";
  * listener refuses the key therefore leaves all of that dead until something
  * else closes it. `ComposerPopover`'s listener refuses while its trigger has
  * no layout box; it is safe only because it also closes whenever the visible
- * chat tab changes, which is when a trigger loses its box. A layer that cannot
- * take its Escape must close, or pass `open: false`.
+ * chat tab moves away from its own thread (`dismissWhenChatTabLeaves`), which
+ * is when a trigger loses its box. A layer that cannot take its Escape must
+ * close, or pass `open: false`.
  *
  * An effect of its own, keyed on `open` alone: a layer's Escape listener
  * re-binds whenever its `onClose` changes identity, and the registration must

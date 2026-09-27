@@ -6,6 +6,7 @@ import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
 import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
+import { insideKeyboardOwner } from "../../../lib/keyboard-surfaces";
 import { BannerCard, ChatIconButton, DisclosureChevron, DisclosurePanel, Kbd } from "../primitives";
 import { isChatTabListenerActive } from "../composer/tab-visibility";
 import {
@@ -205,11 +206,20 @@ export function QuestionCard({
   // Digits 1–9 pick an option. Whether one does is `questionShortcutOption`'s
   // call, pure and tested: never from a hidden tab (Q2-2 — one `1` answered
   // the question in EVERY open chat tab), under an open layer, while typing or
-  // under a modifier. This gathers the facts. The collapsed opt-out is
+  // under a modifier — and the listener's first line keeps a digit typed inside
+  // a surface, a menu or a listbox for its owner. This gathers the facts. The collapsed opt-out is
   // deliberate: those numbers are off screen.
   React.useEffect(() => {
     if (!activeQuestion || isResponding || isCollapsed) return;
     const handler = (event: KeyboardEvent) => {
+      // A digit typed inside a surface that owns its keys — a modal dialog or
+      // sheet, a menu or listbox, the right rail's panel — is that surface's:
+      // a button focused there must never answer this question, which cannot
+      // be undone (`lib/keyboard-surfaces.ts`). The union with the layer gate
+      // below: a layer whose focus stayed outside it (a menu's trigger) and a
+      // non-modal dialog panel (the goal popover) are caught by the layer, a
+      // surface that holds no layer by its target.
+      if (insideKeyboardOwner(event.target)) return;
       const target = event.target;
       const index = questionShortcutOption({
         key: event.key,

@@ -22,6 +22,7 @@
 import React from "react";
 import { Minimize2 } from "lucide-react";
 import { cn } from "../../../lib/cn";
+import { dismissWhenChatTabLeaves } from "../../../lib/agent-chat-active-tab";
 import { Button } from "../../ui/button";
 import { Dropdown } from "../../ui/dropdown";
 import { MeterRing } from "../primitives";
@@ -33,6 +34,12 @@ import {
 } from "./context-meter";
 
 export interface ContextMeterProps {
+  /**
+   * The thread the meter belongs to: its popover (whose Compact button acts
+   * on this thread) closes when this thread's tab is left — never when it is
+   * activated. Absent: on any tab change.
+   */
+  sessionId?: string | null;
   model: ContextMeterModel;
   /** Names the model in the auto-compaction sentence when no threshold is reported. */
   modelLabel?: string | null;
@@ -42,6 +49,7 @@ export interface ContextMeterProps {
 }
 
 export function ContextMeter({
+  sessionId,
   model,
   modelLabel = null,
   onCompact,
@@ -50,6 +58,8 @@ export function ContextMeter({
 }: ContextMeterProps): React.ReactElement {
   const percent = formatMeterPercent(model.usedPercentage);
   const overloaded = isMeterOverloaded(model.usedPercentage);
+  // One identity per thread: the Dropdown's dismiss effect is keyed on it.
+  const dismissOn = React.useMemo(() => dismissWhenChatTabLeaves(sessionId ?? null), [sessionId]);
   const label =
     percent === null
       ? `Context window: ${formatContextTokens(model.usedTokens)} tokens used`
@@ -67,6 +77,10 @@ export function ContextMeter({
       openOnHover
       hoverOpenDelay={150}
       hoverCloseDelay={150}
+      // The repo's focus ring on the trigger `<button>` itself.
+      triggerClassName="rounded-full focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+      // Its Compact button is bound to this thread: close when the tab is left.
+      dismissOn={dismissOn}
       trigger={
         <span
           className={cn(

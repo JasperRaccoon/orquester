@@ -1,5 +1,5 @@
 import { proxyLaunchModels, type AgentAccountsResponse, type AgentConversationSummary, type CliProxyStatus, type RegistryEntry, type RegistryResponse } from "@orquester/api";
-import { agentChatRoutes, DEFAULT_RUNTIME_MODE, RUNTIME_MODES, type AdapterCapabilities, type AgentAdapterId, type ModelSelection, type ProviderModel, type RuntimeMode } from "@orquester/api/agent-chat";
+import { agentChatRoutes, DEFAULT_RUNTIME_MODE, parseGoalSupport, RUNTIME_MODES, type AdapterCapabilities, type AdapterGoalSupport, type AgentAdapterId, type ModelSelection, type ProviderModel, type RuntimeMode } from "@orquester/api/agent-chat";
 import { proxyAccountFamily } from "../agent-chat/service.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
@@ -9,9 +9,11 @@ export const EFFORT_OPTION_IDS: Record<AgentAdapterId, string> = { claude: "effo
 export interface AgentModelOptionView { id: string; label: string; type: "select" | "boolean"; description?: string; values?: { id: string; label: string; description?: string; isDefault?: boolean }[] }
 export interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; providerLabel?: string; options: AgentModelOptionView[] }
 export interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
+/** What an agent supports, as list_agents and get_session both report it (`supportsFrom`). */
+export interface AgentSupports { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; goals: AdapterGoalSupport | null }
 /** `disabledReason` is the registry's own (e.g. "proxy down"), present only on a disabled agent the daemon knows the reason for. */
 export interface AgentView { id: string; name: string; adapter: AgentAdapterId; enabled: boolean; disabledReason?: string; installed: boolean; version: string | null; status: string; message?: string; auth: { status: string; label?: string; email?: string };
-  models: AgentModelView[]; effortOptionId: string; runtimeModes: readonly RuntimeMode[]; defaultRuntimeMode: RuntimeMode; supports: { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; contextWindow: boolean }; accounts: AgentAccountView[]; defaultAccountId: string }
+  models: AgentModelView[]; effortOptionId: string; runtimeModes: readonly RuntimeMode[]; defaultRuntimeMode: RuntimeMode; supports: AgentSupports & { contextWindow: boolean }; accounts: AgentAccountView[]; defaultAccountId: string }
 
 export function isProxyAgent(refId: string): boolean {
   return proxyAccountFamily(refId) !== null;
@@ -39,10 +41,12 @@ export function conversationLaunch(row: Pick<AgentConversationSummary, "agentRef
 
 /**
  * The capability flags list_agents and get_session both report. No snapshot, or an absent flag, reads false — and so
- * does a mistyped one (an older host's row): a flag counts only when it is really `true`.
+ * does a mistyped one (an older host's row): a flag counts only when it is really `true`. `goals` is the provider's goal
+ * surface — how `/goal` is taken, the chip's actions, whether the provider starts turns by itself — read the same way
+ * (`parseGoalSupport`): a block that does not read is `null`, as every flag here reads false.
  */
-export function supportsFrom(caps: AdapterCapabilities | undefined): { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean } {
-  return { planMode: caps?.showPlanModeToggle === true, rollback: caps?.supportsConversationRollback === true, compaction: isRecord(caps?.compaction), backgroundTasks: caps?.supportsBackgroundTasks === true };
+export function supportsFrom(caps: AdapterCapabilities | undefined): AgentSupports {
+  return { planMode: caps?.showPlanModeToggle === true, rollback: caps?.supportsConversationRollback === true, compaction: isRecord(caps?.compaction), backgroundTasks: caps?.supportsBackgroundTasks === true, goals: parseGoalSupport(caps?.goals) };
 }
 
 type Raw = Record<string, unknown>;

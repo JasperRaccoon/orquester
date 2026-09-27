@@ -1,9 +1,12 @@
-import { ACTIVE_SUBAGENT_STATUSES, anchorsCall, CALL_ROW_KINDS, commandDisplayDetail, compactionMarkerState, isAgentOwnedActivity, isCompactionActivity, isPlanImplementationMessage, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { ACTIVE_SUBAGENT_STATUSES, anchorsCall, CALL_ROW_KINDS, commandDisplayDetail, compactionMarkerState, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isAgentOwnedActivity, isCompactionActivity, isHiddenGoalChange, isPlanImplementationMessage, parseGoalUpdatedPayload, reEmittedAssistantCopies, repairsReEmittedAssistantCopies, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { capText } from "./result.ts";
 
 export type TranscriptInclude = "reasoning" | "tools" | "activity";
 export interface TranscriptEntry { turn: number | null; turnId: string | null; kind: "user" | "assistant" | "reasoning" | "tool" | "approval" | "question" | "subagent" | "plan" | "changes" | "compaction" | "error" | "warning" | "info"; createdAt: string; agentId?: string; text?: string;
-  /** On an assistant row only: the provider marked it narration between tool calls (Codex's commentary), never the turn's answer. */
+  /**
+   * On an assistant row only: the provider marked it narration between tool calls (Codex's commentary), never the
+   * turn's answer while the turn has one; a turn with none ends on its last commentary, as the GUI's timeline does.
+   */
   commentary?: true;
   attachments?: { name: string; type: string }[]; tool?: { type: string; title: string; status: string; command?: string; detail?: string; changedFiles?: string[] };
   /**
@@ -70,6 +73,25 @@ const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "t
 // A hook's start and progress are provider bookkeeping, as its successful completion is (below); the GUI keeps only
 // a completion that failed or was cancelled.
 const SKIPPED_ACTIVITY = new Set(["tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
+/**
+ * A line of its own in the GUI's timeline, read as its summary: an `info` entry. An account switch, a model reroute —
+ * and every goal row the GUI shows (goals §8.4; `isHiddenGoalRow` is the one it does not): the provider's goal updates,
+ * set to cleared, and a host `/goal`'s answer. One with the error tone — a goal that can't be met, a `/goal` command
+ * that failed — is an error row first, as the GUI draws it.
+ */
+const INFO_ACTIVITY = new Set(["session.identity-changed", "model.rerouted", GOAL_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND]);
+
+/**
+ * The goal row the GUI never shows, whatever else it shows (goals §8.4): a `progress` tick, the goal's heartbeat —
+ * written under one stable id per thread (`goal-progress:<threadId>`) and replaced in place, it is the goal's latest
+ * state, not the conversation. Hidden only when its payload parses, as in the GUI: a goal row it cannot read is its
+ * generic row there, summary and all (goals §9), and an `info` entry here.
+ */
+function isHiddenGoalRow(a: ThreadActivityItem): boolean {
+  if (a.activityKind !== GOAL_ACTIVITY_KIND) return false;
+  const update = parseGoalUpdatedPayload(a.payload);
+  return update !== null && isHiddenGoalChange(update.change);
+}
 
 /** A tool's `detail` after the second shed: at most this many characters, the cut marked by the trailing "…". */
 const SHED_DETAIL_CHARS = 200;
@@ -246,19 +268,23 @@ function cutRow(entry: TranscriptEntry, need: number): { row: TranscriptEntry; s
 }
 
 /**
- * The row a shed never drops: the latest turn's final assistant reply, else that turn's newest row. A commentary row
- * is narration, never the reply (the GUI never takes it for the turn's answer).
+ * The row a shed never drops: the latest turn's final assistant reply, else that turn's last commentary row, else that
+ * turn's newest row. Commentary is narration, not the reply, while the turn has one; a turn with none — interrupted,
+ * ended on a tool — ends on its last commentary, as the GUI's timeline does (`deriveTerminalAssistantMessageIds`).
  */
 function sparedIndex(rows: readonly TranscriptEntry[]): number {
   let latest: number | null = null;
   for (const e of rows) if (e.turn !== null && (latest === null || e.turn > latest)) latest = e.turn;
+  let commentary = -1;
   let newest = -1;
   for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (rows[i]!.turn !== latest) continue;
-    if (rows[i]!.kind === "assistant" && !rows[i]!.commentary) return i;
+    const e = rows[i]!;
+    if (e.turn !== latest) continue;
+    if (e.kind === "assistant" && !e.commentary) return i;
+    if (e.kind === "assistant" && commentary < 0) commentary = i;
     if (newest < 0) newest = i;
   }
-  return newest;
+  return commentary >= 0 ? commentary : newest;
 }
 
 /** The turns the rows present belong to, first and last; null when none belongs to one. */
@@ -402,6 +428,10 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   const roster = new Map(snap.roster.map((r) => [r.id, r]));
   const latestPlan = proposedPlan(opts.windowItems ?? snap.items);
   const actionablePlan = latestPlan?.actionable ? latestPlan.item.id : null;
+  // An old Claude log's re-emitted opening paragraphs (`reEmittedAssistantCopies`, `@orquester/api/agent-chat`) are no
+  // row of the parent view, as the GUI's timeline leaves them out; counted over every item this read holds, the window
+  // and any older page merged under it (history.ts). A drill-in shows its agent's messages as they are, as the GUI's does.
+  const copies = !opts.agentId && repairsReEmittedAssistantCopies(snap.head.adapter) ? reEmittedAssistantCopies(snap.items) : null;
   const build = (): TranscriptEntry[] => {
     const selected = new Set(ordered.slice(start - 1, end).map((t) => t.turnId));
     // A row with no turn — a turn the host never started: its message, its failure — belongs to the range by its time:
@@ -477,6 +507,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       if (!inTurns(item)) continue;
       if (item.kind === "message") {
         if (item.role === "reasoning" && !opts.include.has("reasoning")) continue;
+        if (copies?.has(item.id)) continue;
         const e = base(item, item.role === "user" ? "user" : item.role === "assistant" ? "assistant" : "reasoning");
         e.text = item.text;
         if (item.role === "assistant" && item.messageKind === "commentary") e.commentary = true;
@@ -486,7 +517,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       }
       const a = item as ThreadActivityItem;
       const p = (a.payload ?? {}) as P;
-      if (SKIPPED_ACTIVITY.has(a.activityKind)) continue;
+      if (SKIPPED_ACTIVITY.has(a.activityKind) || isHiddenGoalRow(a)) continue;
       if (TOOL_KINDS.has(a.activityKind)) {
         if (!opts.include.has("tools")) continue;
         const key = str(p.toolUseId) ?? a.id;
@@ -569,7 +600,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       // A hook that failed is an error row (its tone), one cancelled — or ending any other way — a warning row.
       if (a.tone === "error") { const e = base(a, "error"); e.text = rowText(a, p); entries.push(e); continue; }
       if (a.activityKind === "runtime.warning" || a.activityKind === "hook.completed") { const e = base(a, "warning"); e.text = rowText(a, p); entries.push(e); continue; }
-      if (a.activityKind === "session.identity-changed" || a.activityKind === "model.rerouted") { const e = base(a, "info"); e.text = a.summary; entries.push(e); }
+      if (INFO_ACTIVITY.has(a.activityKind)) { const e = base(a, "info"); e.text = a.summary; entries.push(e); }
     }
     // A command whose output was streamed — a background shell's, a running command's so far — has it in no item's
     // data: the host joins the chunks (`GET …/items/:itemId/output`), and read_tool_output resolves the call from any of

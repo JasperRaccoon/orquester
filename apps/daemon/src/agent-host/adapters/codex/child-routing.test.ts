@@ -195,6 +195,38 @@ describe("a collab child never hijacks the parent's turn", () => {
     assert.deepEqual(events, [], "dropped, not folded onto the parent");
   });
 
+  it("a child's own goal never becomes the parent's (goals §6.2)", () => {
+    // Collab children get the goal tools too (only review subagents do not),
+    // and a tool-set goal is announced on the CHILD's thread id.
+    const { normaliser } = make();
+    const goal = {
+      threadId: CHILD,
+      objective: "the child's own objective",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: 1_789_950_000,
+      updatedAt: 1_789_950_000
+    };
+    assert.deepEqual(
+      normaliser.notification("thread/goal/updated" as never, {
+        threadId: CHILD,
+        turnId: "child-turn",
+        goal
+      }),
+      []
+    );
+    assert.deepEqual(normaliser.notification("thread/goal/cleared" as never, { threadId: CHILD }), []);
+    // …and the parent's goal is still unset: its first update is `set`.
+    const [own] = normaliser.notification("thread/goal/updated" as never, {
+      threadId: PARENT,
+      turnId: null,
+      goal: { ...goal, threadId: PARENT, objective: "the parent's objective" }
+    });
+    assert.equal((own?.payload as { change?: string } | undefined)?.change, "set");
+  });
+
   it("a child's thread/started does not emit a second thread.started", () => {
     const { normaliser } = make();
     const events = normaliser.notification("thread/started" as never, {
@@ -330,6 +362,138 @@ describe("in-progress items are closed when a turn settles (R3 finding 1)", () =
     const events = normaliser.closeOpenItems("failed");
     assert.equal(events.length, 2);
     assert.deepEqual(normaliser.openItemIds(), []);
+  });
+});
+
+describe("an abandoned agentMessage is closed by the next item of its turn (fixtures README obs. 22)", () => {
+  const startMessage = (threadId: string, turnId: string, itemId: string): unknown => ({
+    item: {
+      type: "agentMessage",
+      id: itemId,
+      text: "",
+      phase: "commentary",
+      memoryCitation: null,
+      delivery: null,
+      questions: null
+    },
+    threadId,
+    turnId,
+    startedAtMs: 0
+  });
+  const startCommand = (threadId: string, turnId: string, itemId: string): unknown => ({
+    item: {
+      type: "commandExecution",
+      id: itemId,
+      pluginId: null,
+      scriptPath: null,
+      command: "ls",
+      cwd: "/tmp",
+      processId: null,
+      source: "agent",
+      status: "inProgress",
+      commandActions: [],
+      aggregatedOutput: null,
+      exitCode: null,
+      durationMs: null
+    },
+    threadId,
+    turnId,
+    startedAtMs: 0
+  });
+
+  it("a new message of the same turn closes the abandoned one first, text-less", () => {
+    const { normaliser } = make();
+    normaliser.notification("item/started" as never, startMessage(PARENT, "t1", "msg_a"));
+    const events = normaliser.notification(
+      "item/started" as never,
+      startMessage(PARENT, "t1", "msg_b")
+    );
+    assert.deepEqual(
+      events.map((event) => [event.type, event.itemId]),
+      [
+        ["item.completed", "msg_a"],
+        ["item.started", "msg_b"]
+      ],
+      "the abandoned message closes BEFORE the next one opens"
+    );
+    // Exactly what `closeOpenItems` writes for it at `turn/completed`: no
+    // text, so ingestion only closes what was streamed and never re-emits it.
+    assert.deepEqual(events[0]!.payload, { itemType: "assistant_message", status: "completed" });
+    assert.equal(events[0]!.turnId, "t1");
+    assert.deepEqual(normaliser.openItemIds(), ["msg_b"]);
+  });
+
+  it("any new item of the turn closes it — a tool call too", () => {
+    const { normaliser } = make();
+    normaliser.notification("item/started" as never, startMessage(PARENT, "t1", "msg_a"));
+    const events = normaliser.notification(
+      "item/started" as never,
+      startCommand(PARENT, "t1", "call_1")
+    );
+    assert.deepEqual(
+      events.map((event) => [event.type, event.itemId]),
+      [
+        ["item.completed", "msg_a"],
+        ["item.started", "call_1"]
+      ]
+    );
+  });
+
+  it("never closes an open TOOL item — parallel calls overlap", () => {
+    // 05 starts three exec_command calls back to back before any completes.
+    const { normaliser } = make();
+    normaliser.notification("item/started" as never, startCommand(PARENT, "t1", "call_1"));
+    const events = normaliser.notification(
+      "item/started" as never,
+      startCommand(PARENT, "t1", "call_2")
+    );
+    assert.deepEqual(
+      events.map((event) => event.type),
+      ["item.started"]
+    );
+    assert.deepEqual(normaliser.openItemIds(), ["call_1", "call_2"]);
+  });
+
+  it("leaves another turn's message to that turn's own settle", () => {
+    const { normaliser } = make();
+    normaliser.notification("item/started" as never, startMessage(PARENT, "t1", "msg_a"));
+    const events = normaliser.notification(
+      "item/started" as never,
+      startMessage(PARENT, "t2", "msg_b")
+    );
+    assert.deepEqual(
+      events.map((event) => event.type),
+      ["item.started"]
+    );
+    assert.deepEqual(normaliser.openItemIds(), ["msg_a", "msg_b"]);
+  });
+
+  it("a repeated item/started for the same message closes nothing", () => {
+    const { normaliser } = make();
+    normaliser.notification("item/started" as never, startMessage(PARENT, "t1", "msg_a"));
+    const events = normaliser.notification(
+      "item/started" as never,
+      startMessage(PARENT, "t1", "msg_a")
+    );
+    assert.deepEqual(
+      events.map((event) => event.type),
+      ["item.started"]
+    );
+    assert.deepEqual(normaliser.openItemIds(), ["msg_a"]);
+  });
+
+  it("a collab child's item never closes the parent's message", () => {
+    const { normaliser } = make();
+    normaliser.notification("item/started" as never, startMessage(PARENT, "t1", "msg_a"));
+    const events = normaliser.notification(
+      "item/started" as never,
+      startMessage(CHILD, "t1", "msg_child")
+    );
+    assert.ok(
+      events.every((event) => event.type !== "item.completed"),
+      "a child's traffic is task rows, never the parent's items"
+    );
+    assert.deepEqual(normaliser.openItemIds(), ["msg_a"]);
   });
 });
 

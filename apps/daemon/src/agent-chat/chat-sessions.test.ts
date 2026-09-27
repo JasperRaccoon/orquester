@@ -177,6 +177,35 @@ test("the derived §6.4 fields publish only when one actually moved", () => {
   assert.equal(updates[1].hasPendingApprovals, true);
 });
 
+test("the goal rides the tab and republishes only when it moves (goals §4.7)", () => {
+  const chat = chatManager();
+  seed(chat, "t1", 0);
+  const updates: SessionSummary[] = [];
+  chat.lifecycle.on("updated", (s: SessionSummary) => updates.push(s));
+  const goal = { objective: "ship it", status: "active" as const, continuing: true };
+
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "ready", goal }));
+  assert.deepEqual(chat.get("t1")?.goal, goal);
+  assert.equal(
+    chat.applyFields("t1", { chatSessionStatus: "ready", goal: { ...goal } }),
+    null,
+    "an equal goal from the next poll is no churn"
+  );
+  for (const next of [
+    { ...goal, continuing: false },
+    { ...goal, continuing: false, status: "paused" as const },
+    { ...goal, continuing: false, status: "paused" as const, objective: "ship v2" },
+    null
+  ]) {
+    assert.ok(chat.applyFields("t1", { chatSessionStatus: "ready", goal: next }), JSON.stringify(next));
+    assert.deepEqual(chat.get("t1")?.goal, next);
+  }
+  assert.equal(updates.length, 5);
+  // An older host that does not report the field says "no goal" too.
+  assert.equal(chat.applyFields("t1", { chatSessionStatus: "ready" }), null, "null and absent are one fact");
+  assert.equal(chat.get("t1")?.goal ?? null, null);
+});
+
 // --- the router: one list, one order, across both kinds ---------------------
 
 class FakePty implements ISessionManager {

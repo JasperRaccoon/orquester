@@ -10,6 +10,13 @@ export interface AdaptiveMenuProps {
   width?: string;
   /** Heading shown on the mobile bottom sheet. */
   title?: string;
+  /**
+   * Desktop only: the dropdown takes focus when it opens (its first item) and
+   * gives it back to the trigger when it closes from the keyboard or from one
+   * of its items — `Dropdown`'s `focusOnOpen`. Off by default, so every
+   * existing menu keeps its focus behaviour.
+   */
+  focusOnOpen?: boolean;
 }
 
 /**
@@ -22,14 +29,15 @@ export const AdaptiveMenu: React.FC<AdaptiveMenuProps> = ({
   children,
   align,
   width,
-  title
+  title,
+  focusOnOpen
 }) => {
   const isDesktop = useIsDesktop();
   const [open, setOpen] = useState(false);
 
   if (isDesktop) {
     return (
-      <Dropdown trigger={trigger} align={align} width={width}>
+      <Dropdown trigger={trigger} align={align} width={width} focusOnOpen={focusOnOpen}>
         {children}
       </Dropdown>
     );

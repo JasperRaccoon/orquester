@@ -58,7 +58,12 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
   compaction: { type: "slash-command", command: "/compact" },
   // `query.backgroundTasks(toolUseId?)`: "the control-request equivalent of
   // pressing Ctrl+B in the terminal" (SDK 0.3.278 `sdk.d.ts`).
-  supportsBackgroundTasks: true
+  supportsBackgroundTasks: true,
+  // The CLI parses `/goal` itself, so it is forwarded verbatim. Its goal is a
+  // Stop hook that re-runs only at a turn end: "continue" nudges an idle goal
+  // on, and "clear" is `/goal clear`. There is no pause, and the CLI never
+  // starts a turn on its own (goals §4.5, §6.1.7).
+  goals: { command: "provider", actions: ["continue", "clear"], continuesAcrossTurns: false }
 };
 
 export interface ClaudeProbeResult {

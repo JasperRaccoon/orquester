@@ -1,7 +1,7 @@
 /**
  * The index's reads (design 2026-09-23 §C "History page", "Search"): paging by
- * cursor and by turn, the rewind gate, and search that can never be a query
- * syntax error.
+ * cursor and by turn, the rewind gate, search that can never be a query
+ * syntax error, and the thread's own prompts (the right rail's History).
  */
 
 import assert from "node:assert/strict";
@@ -10,10 +10,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { THREAD_SEARCH_MAX_RESULTS } from "@orquester/api/agent-chat";
+import {
+  THREAD_PROMPTS_DEFAULT_LIMIT,
+  THREAD_PROMPTS_MAX_LIMIT,
+  THREAD_PROMPT_TEXT_MAX_CHARS,
+  THREAD_SEARCH_MAX_RESULTS,
+  applyDomainEvent,
+  buildPlanImplementationPrompt,
+  createEmptyThreadState,
+  recallablePromptText,
+  type ThreadMessageItem,
+  type ThreadPromptEntry
+} from "@orquester/api/agent-chat";
 
-import { createThreadIndex, type IndexedTurn, type ThreadIndex } from "./index.ts";
-import { toFtsQuery } from "./queries.ts";
+import {
+  createThreadIndex,
+  createUnavailableThreadIndex,
+  type IndexedPrompt,
+  type IndexedPromptsPage,
+  type IndexedTurn,
+  type ThreadIndex
+} from "./index.ts";
+import { MAX_INDEXED_TEXT_CHARS } from "./indexer.ts";
+import {
+  PROMPTS_MIN_BATCH,
+  PROMPTS_SCAN_BUDGET,
+  decodePromptsCursor,
+  encodePromptsCursor,
+  readPromptsPage,
+  toFtsQuery,
+  type PromptCandidate
+} from "./queries.ts";
 import {
   activity,
   checkpoint,
@@ -24,6 +51,7 @@ import {
   legacyCompaction,
   liveTurn,
   recordingLogger,
+  replayedTurn,
   reverted,
   session,
   stampAt,
@@ -702,5 +730,687 @@ describe("thread index: message spans", () => {
     assert.notEqual(index.messageSpan(id, "a1"), null);
     assert.equal(index.messageSpan(id, "a2"), null);
     assert.equal(index.messageSpan(id, "u2"), null);
+  });
+});
+
+describe("thread index: the thread's prompts", () => {
+  /** The seq of the line that first named `messageId`. */
+  function seqOf(log: TestLog, messageId: string): number {
+    const event = log
+      .all()
+      .events.find(
+        (candidate) =>
+          candidate.type === "thread.message-sent" && candidate.payload.messageId === messageId
+      );
+    assert.ok(event !== undefined, `no message ${messageId}`);
+    return event.seq;
+  }
+
+  function page(
+    threadId: string,
+    input: { before?: string | null; limit?: number } = {}
+  ): IndexedPromptsPage {
+    const answer = index.prompts(threadId, {
+      limit: input.limit ?? THREAD_PROMPTS_DEFAULT_LIMIT,
+      ...(input.before !== undefined ? { before: input.before } : {})
+    });
+    assert.ok(answer !== null, "an open index answers");
+    return answer;
+  }
+
+  const ids = (answer: IndexedPromptsPage): string[] =>
+    answer.prompts.map((entry) => entry.messageId);
+
+  /** `prompt()`'s answer: the prompt, null for `absent`; a failed read fails the test. */
+  function promptOf(threadId: string, messageId: string): IndexedPrompt | null {
+    const lookup = index.prompt(threadId, messageId);
+    assert.notEqual(lookup.status, "failed", "an open index reads");
+    return lookup.status === "found" ? lookup.prompt : null;
+  }
+
+  it("lists the parent's prompts newest first, each with the turn it opened", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...[1, 2, 3].flatMap((n) => liveTurn({ n, prompt: `prompt number ${n}` }))
+    ]);
+    const answer = page(log.threadId);
+    assert.deepEqual(
+      answer.prompts,
+      [3, 2, 1].map(
+        (n): ThreadPromptEntry => ({
+          messageId: `u${n}`,
+          turnId: `t${n}`,
+          turnOrdinal: n,
+          rewindable: true,
+          text: `prompt number ${n}`,
+          truncated: false,
+          createdAt: stampAt(seqOf(log, `u${n}`)),
+          seq: seqOf(log, `u${n}`)
+        })
+      )
+    );
+    assert.equal(answer.before, null);
+  });
+
+  it("lists a steer on the turn it steered, and a prompt no turn has started yet, with no ordinal", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one", extra: [userMessage("steer", "and this too", "t1")] }),
+      userMessage("u2", "two"),
+      turnStart("u2")
+    ]);
+    assert.deepEqual(
+      page(log.threadId).prompts.map((entry) => [
+        entry.messageId,
+        entry.turnId,
+        entry.turnOrdinal,
+        entry.rewindable
+      ]),
+      [
+        ["u2", null, null, null],
+        ["steer", "t1", null, null],
+        ["u1", "t1", 1, true]
+      ]
+    );
+  });
+
+  it("a replayed prompt opens the replayed turn that names it", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      userMessage("user:h1", "from the transcript", "h1"),
+      replayedTurn("user:h1", "h1", stampAt(3)),
+      ...liveTurn({ n: 2, prompt: "live" })
+    ]);
+    assert.deepEqual(
+      page(log.threadId).prompts.map((entry) => [entry.messageId, entry.turnId, entry.turnOrdinal]),
+      [
+        ["u2", "t2", 2],
+        ["user:h1", "h1", 1]
+      ]
+    );
+  });
+
+  it("refuses what the user did not type, and strips image placeholders from what they did", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      userMessage("internal", "<task-notification>agent done</task-notification>"),
+      userMessage("command", "  <command-name>/clear</command-name>"),
+      userMessage("compact", " /compact "),
+      userMessage("implement", buildPlanImplementationPrompt("# Plan\n- a")),
+      userMessage("images", "[Image #1] [Image #2]"),
+      userMessage("blank", "   "),
+      userMessage("typed", "look at [Image #1] this one"),
+      userMessage("slash", "/goal pause"),
+      done("answer", null, "an assistant's text is never a prompt")
+    ]);
+    assert.deepEqual(
+      page(log.threadId).prompts.map((entry) => [entry.messageId, entry.text]),
+      [
+        ["slash", "/goal pause"],
+        ["typed", "look at this one"]
+      ]
+    );
+    for (const messageId of ["internal", "command", "compact", "implement", "images", "blank", "answer"]) {
+      assert.equal(promptOf(log.threadId, messageId), null, messageId);
+    }
+  });
+
+  it("never lists a subagent's user message; an empty owner is the parent's own", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      userMessage("parent", "mine"),
+      userMessage("owned", "the subagent's brief", null, "sub-1"),
+      userMessage("unowned", "also mine", null, ""),
+      // The author is the first line's, as the fold keeps it: a later line
+      // naming an owner, or none, moves neither message.
+      userMessage("parent", "mine, restated", null, "sub-2"),
+      userMessage("owned", "restated")
+    ]);
+    const id = log.threadId;
+    assert.deepEqual(
+      page(id).prompts.map((entry) => [entry.messageId, entry.text, entry.seq]),
+      [
+        ["unowned", "also mine", seqOf(log, "unowned")],
+        ["parent", "mine, restated", seqOf(log, "parent")]
+      ]
+    );
+    assert.equal(promptOf(id, "owned"), null);
+  });
+
+  it("a revert takes the reverted turns' prompts and their steers with it", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      ...liveTurn({ n: 2, prompt: "two", extra: [userMessage("steer-2", "steer two", "t2")] }),
+      ...liveTurn({ n: 3, prompt: "three" }),
+      reverted(1),
+      ...liveTurn({ n: 4, prompt: "four" })
+    ]);
+    const id = log.threadId;
+    assert.deepEqual(
+      page(id).prompts.map((entry) => [entry.messageId, entry.turnId, entry.turnOrdinal]),
+      [
+        ["u4", "t4", 2],
+        ["u1", "t1", 1]
+      ]
+    );
+    for (const messageId of ["u2", "steer-2", "u3"]) {
+      assert.equal(promptOf(id, messageId), null, messageId);
+    }
+  });
+
+  it("gives each prompt the history page's rewind rule for the turn it opened", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      ...liveTurn({ n: 2, prompt: "two", extra: [compaction("auto", "t2")] }),
+      ...liveTurn({ n: 3, prompt: "three" })
+    ]);
+    const id = log.threadId;
+    const entries = page(id).prompts;
+    assert.deepEqual(
+      entries.map((entry) => [entry.turnOrdinal, entry.rewindable]),
+      [
+        [3, true],
+        [2, false],
+        [1, false]
+      ]
+    );
+    for (const entry of entries) {
+      const turn = index.turnByOrdinal(id, entry.turnOrdinal!)!;
+      assert.equal(entry.rewindable, index.rewindable(id, turn), "one rule");
+    }
+  });
+
+  it("pages by its cursor, and refused rows never cost a page a slot", async () => {
+    const log = new TestLog();
+    const drafts: Draft[] = [created()];
+    for (let n = 1; n <= 7; n += 1) {
+      drafts.push(...liveTurn({ n, prompt: `prompt ${n}` }));
+      // Refused rows next to every prompt, and so at every page's boundary.
+      drafts.push(
+        userMessage(`notice-${n}`, `<task-notification>${n}</task-notification>`),
+        userMessage(`compact-${n}`, "/compact")
+      );
+    }
+    await indexed(log, drafts);
+    const id = log.threadId;
+
+    const first = page(id, { limit: 3 });
+    assert.deepEqual(ids(first), ["u7", "u6", "u5"]);
+    assert.equal(decodePromptsCursor(first.before!, id), seqOf(log, "u5"));
+    const second = page(id, { limit: 3, before: first.before });
+    assert.deepEqual(ids(second), ["u4", "u3", "u2"]);
+    assert.notEqual(second.before, null);
+    const third = page(id, { limit: 3, before: second.before });
+    assert.deepEqual(ids(third), ["u1"]);
+    assert.equal(third.before, null);
+
+    const whole = page(id, { limit: 7 });
+    assert.equal(whole.prompts.length, 7);
+    assert.equal(whole.before, null, "a page ending on the first prompt has nothing below it");
+  });
+
+  it("walks past more refused rows than one read holds, to fill the page and find the next", async () => {
+    const log = new TestLog();
+    const notices = (tag: string): Draft[] =>
+      Array.from({ length: 10 }, (_unused, n) =>
+        userMessage(`notice-${tag}-${n}`, "<task-notification>x</task-notification>")
+      );
+    await indexed(log, [
+      created(),
+      userMessage("p1", "one"),
+      ...notices("a"),
+      userMessage("p2", "two"),
+      ...notices("b"),
+      userMessage("p3", "three"),
+      ...notices("c")
+    ]);
+    const id = log.threadId;
+    const first = page(id, { limit: 2 });
+    assert.deepEqual(ids(first), ["p3", "p2"]);
+    assert.notEqual(first.before, null, "p1 lies ten refused rows further down");
+    const second = page(id, { limit: 2, before: first.before });
+    assert.deepEqual(ids(second), ["p1"]);
+    assert.equal(second.before, null);
+  });
+
+  it("clamps the limit to [1, THREAD_PROMPTS_MAX_LIMIT], and anything not a number is the default", async () => {
+    const log = new TestLog();
+    const drafts: Draft[] = [created()];
+    for (let n = 0; n < THREAD_PROMPTS_MAX_LIMIT + 5; n += 1) {
+      drafts.push(userMessage(`m${n}`, `prompt ${n}`));
+    }
+    await indexed(log, drafts);
+    const id = log.threadId;
+    assert.equal(page(id, { limit: 0 }).prompts.length, 1);
+    assert.equal(page(id, { limit: -7 }).prompts.length, 1);
+    assert.equal(page(id, { limit: 2.9 }).prompts.length, 2);
+    const max = page(id, { limit: 10_000 });
+    assert.equal(max.prompts.length, THREAD_PROMPTS_MAX_LIMIT);
+    assert.notEqual(max.before, null);
+    assert.equal(page(id, { limit: Number.NaN }).prompts.length, THREAD_PROMPTS_DEFAULT_LIMIT);
+    assert.equal(
+      page(id, { limit: Number.POSITIVE_INFINITY }).prompts.length,
+      THREAD_PROMPTS_DEFAULT_LIMIT
+    );
+  });
+
+  it("cuts an entry's text at THREAD_PROMPT_TEXT_MAX_CHARS, never inside a surrogate pair", async () => {
+    const max = THREAD_PROMPT_TEXT_MAX_CHARS;
+    const exact = "a".repeat(max);
+    const long = "b".repeat(max + 10);
+    const astral = `${"c".repeat(max - 1)}😀 tail`;
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      userMessage("exact", exact),
+      userMessage("long", long),
+      userMessage("astral", astral)
+    ]);
+    const id = log.threadId;
+    const byId = new Map(page(id).prompts.map((entry) => [entry.messageId, entry]));
+    assert.deepEqual([byId.get("exact")!.text, byId.get("exact")!.truncated], [exact, false]);
+    assert.deepEqual([byId.get("long")!.text, byId.get("long")!.truncated], ["b".repeat(max), true]);
+    assert.deepEqual(
+      [byId.get("astral")!.text, byId.get("astral")!.truncated],
+      ["c".repeat(max - 1), true],
+      "the pair is left out whole"
+    );
+    assert.equal(promptOf(id, "long")!.text, long, "by id, the whole text");
+    assert.equal(promptOf(id, "astral")!.text, astral);
+  });
+
+  it("reads a malformed or foreign cursor as a first page", async () => {
+    const log = new TestLog();
+    await indexed(log, [created(), ...[1, 2, 3].flatMap((n) => liveTurn({ n, prompt: `p${n}` }))]);
+    const id = log.threadId;
+    const firstPage = ids(page(id, { limit: 2 }));
+    assert.deepEqual(firstPage, ["u3", "u2"]);
+    const encode = (value: unknown): string =>
+      Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+    const valid = encodePromptsCursor(id, seqOf(log, "u2"));
+    for (const before of [
+      "",
+      "!! not base64 !!",
+      "abcde",
+      `${valid}=`,
+      encode({ t: id }),
+      encode({ t: id, s: 0 }),
+      encode({ t: id, s: -3 }),
+      encode({ t: id, s: 2.5 }),
+      encode({ t: id, s: "9" }),
+      encode([id, 9]),
+      encodePromptsCursor("another-thread", seqOf(log, "u2"))
+    ]) {
+      assert.deepEqual(ids(page(id, { limit: 2, before })), firstPage, before);
+    }
+    assert.deepEqual(ids(page(id, { limit: 2, before: valid })), ["u1"]);
+    // A cursor names a seq and nothing else: past the log's end, everything is older.
+    assert.deepEqual(ids(page(id, { limit: 2, before: encodePromptsCursor(id, 10_000) })), firstPage);
+    assert.equal(decodePromptsCursor(encodePromptsCursor(id, 42), id), 42);
+    assert.equal(decodePromptsCursor(encode({ t: id, s: 42, later: "field" }), id), 42);
+  });
+
+  it("answers a read it cannot make with null or failed — never an empty page; no prompts is an empty page", async () => {
+    const unavailable = createUnavailableThreadIndex();
+    assert.equal(unavailable.prompts("thread-1", { limit: 5 }), null);
+    assert.deepEqual(unavailable.prompt("thread-1", "u1"), { status: "failed" });
+    assert.equal(await unavailable.coverage("thread-1", 5), "unavailable");
+
+    const quiet = new TestLog("thread-quiet");
+    await indexed(quiet, [created(), done("a1", null, "an assistant speaks first")]);
+    assert.equal(await index.coverage(quiet.threadId, quiet.lastSeq), "complete");
+    assert.deepEqual(page(quiet.threadId), { prompts: [], before: null });
+
+    const log = new TestLog();
+    await indexed(log, [created(), userMessage("u1", "hello")]);
+    assert.deepEqual(ids(page(log.threadId)), ["u1"]);
+    index.close();
+    assert.equal(index.prompts(log.threadId, { limit: 5 }), null, "a closed index answers nothing");
+    assert.deepEqual(index.prompt(log.threadId, "u1"), { status: "failed" });
+    assert.equal(await index.coverage(log.threadId, log.lastSeq), "unavailable");
+  });
+
+  it("coverage: whole once every line is indexed; catching up while a catch-up will close the gap; behind when none will", async () => {
+    const catchUpOf = (log: TestLog): Promise<void> =>
+      index.catchUp({
+        threadId: log.threadId,
+        projectPath: "/w/p",
+        title: "Thread",
+        logSeq: log.lastSeq,
+        read: log.readEventsFrom
+      });
+    // Written while the index saw nothing of it — a rebuilt file.
+    const rebuilt = new TestLog("thread-rebuilt");
+    rebuilt.append(created(), ...liveTurn({ n: 1, prompt: "before the rebuild" }));
+    const unreached = new TestLog("thread-unreached");
+    unreached.append(created(), userMessage("x1", "never caught up"));
+    assert.equal(await index.coverage(rebuilt.threadId, rebuilt.lastSeq), "behind", "no catch-up is coming");
+
+    const sweep = index.beginCatchUpSweep();
+    assert.equal(await index.coverage(rebuilt.threadId, rebuilt.lastSeq), "catching-up", "the sweep has not reached it");
+    const running = catchUpOf(rebuilt);
+    assert.equal(await index.coverage(rebuilt.threadId, rebuilt.lastSeq), "catching-up", "its catch-up is queued");
+    await running;
+    assert.equal(await index.coverage(rebuilt.threadId, rebuilt.lastSeq), "complete");
+    assert.deepEqual(ids(page(rebuilt.threadId)), ["u1"]);
+
+    // A thread born during the sweep is indexed from its first line.
+    const born = new TestLog("thread-born");
+    await indexed(born, [created(), userMessage("b1", "new")]);
+    assert.equal(await index.coverage(born.threadId, born.lastSeq), "complete");
+    // A live append still queued is waited for — a moment's lag is no gap.
+    index.observe({
+      threadId: born.threadId,
+      projectPath: "/w/p",
+      title: "Thread",
+      ...born.append(userMessage("b2", "newer"))
+    });
+    assert.equal(await index.coverage(born.threadId, born.lastSeq), "complete");
+
+    assert.equal(await index.coverage(unreached.threadId, unreached.lastSeq), "catching-up");
+    sweep.end();
+    sweep.end();
+    assert.equal(await index.coverage(unreached.threadId, unreached.lastSeq), "behind", "the sweep is over");
+
+    // A live write the index cannot apply — a line it never got — leaves the
+    // thread behind for good: no catch-up will read it before a restart.
+    born.append(userMessage("b3", "lost"));
+    index.observe({
+      threadId: born.threadId,
+      projectPath: "/w/p",
+      title: "Thread",
+      ...born.append(userMessage("b4", "after the hole"))
+    });
+    assert.equal(await index.coverage(born.threadId, born.lastSeq), "behind");
+  });
+
+  it("prompt(): a listed prompt by id, with its line; null for anything the list would not show", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "  first prompt [Image #1] " }),
+      userMessage("owned", "brief", null, "sub-1"),
+      ...liveTurn({ n: 2, prompt: "second" }),
+      reverted(1)
+    ]);
+    const id = log.threadId;
+    const seq = seqOf(log, "u1");
+    assert.deepEqual(promptOf(id, "u1"), {
+      messageId: "u1",
+      text: "first prompt",
+      cut: false,
+      line: { seq, ...line(log, seq) },
+      lastSeq: seq
+    });
+    for (const messageId of ["a1", "owned", "u2", "nope", ""]) {
+      assert.equal(promptOf(id, messageId), null, messageId);
+    }
+    assert.equal(promptOf("other-thread", "u1"), null);
+  });
+
+  it("prompt(): says when the index's copy may be only the head of a longer prompt", async () => {
+    const whole = `${"x".repeat(MAX_INDEXED_TEXT_CHARS)} and more`;
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      userMessage("long", whole),
+      userMessage("below", "y".repeat(MAX_INDEXED_TEXT_CHARS - 2)),
+      userMessage("twice", "z".repeat(MAX_INDEXED_TEXT_CHARS + 1)),
+      userMessage("twice", "z".repeat(MAX_INDEXED_TEXT_CHARS + 2))
+    ]);
+    const id = log.threadId;
+    const long = promptOf(id, "long")!;
+    assert.equal(long.cut, true);
+    assert.equal(long.text, "x".repeat(MAX_INDEXED_TEXT_CHARS));
+    assert.equal(long.lastSeq, long.line.seq, "one line: the host can read it whole");
+    assert.equal(promptOf(id, "below")!.cut, false, "a copy below the cap is whole");
+    const twice = promptOf(id, "twice")!;
+    assert.equal(twice.cut, true);
+    assert.ok(twice.lastSeq > twice.line.seq, "written twice: no one line holds it");
+    assert.equal(page(id).prompts.find((entry) => entry.messageId === "long")!.truncated, true);
+  });
+
+  it("a rebuild from the log lists exactly what the live index listed", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one", extra: [userMessage("steer", "steer", "t1")] }),
+      userMessage("owned", "brief", null, "sub-1"),
+      ...liveTurn({ n: 2, prompt: "two", extra: [compaction("auto", "t2")] }),
+      ...liveTurn({ n: 3, prompt: "three" }),
+      reverted(2),
+      userMessage("u4", "pending"),
+      turnStart("u4")
+    ]);
+    const rebuilt = createThreadIndex({
+      filePath: join(dir, "rebuilt.sqlite"),
+      logger: recordingLogger()
+    });
+    try {
+      await rebuilt.catchUp({
+        threadId: log.threadId,
+        projectPath: "/w/p",
+        title: "Thread",
+        logSeq: log.lastSeq,
+        read: log.readEventsFrom
+      });
+      assert.deepEqual(rebuilt.prompts(log.threadId, { limit: 100 }), page(log.threadId));
+      assert.deepEqual(ids(page(log.threadId)), ["u4", "u2", "steer", "u1"]);
+    } finally {
+      rebuilt.close();
+    }
+  });
+
+  /** The prompts the fold itself still shows: its parent user messages the recall rule accepts. */
+  function foldedPromptIds(log: TestLog): string[] {
+    let state = createEmptyThreadState();
+    for (const event of log.all().events) {
+      state = applyDomainEvent(state, event);
+    }
+    return state.items
+      .filter(
+        (item): item is ThreadMessageItem =>
+          item.kind === "message" &&
+          item.role === "user" &&
+          (item.agentId === undefined || item.agentId.length === 0) &&
+          recallablePromptText(item.text) !== null
+      )
+      .map((item) => item.id);
+  }
+
+  it("a revert drops a turn-less prompt no turn claims, before the cut — as the fold does", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      // Sent while idle: the host starts no turn for it, and no turn claims it.
+      userMessage("goal-idle", "/goal pause"),
+      ...liveTurn({ n: 2, prompt: "two" }),
+      reverted(1)
+    ]);
+    assert.deepEqual(ids(page(log.threadId)), ["u1"]);
+    assert.deepEqual(foldedPromptIds(log), ["u1"], "the fold agrees");
+    assert.equal(promptOf(log.threadId, "goal-idle"), null);
+  });
+
+  it("…unless the fold's fallback restores it, for retained turns that have no prompt", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      // A turn the provider started by itself: no prompt claims it.
+      session("running", "p1"),
+      session("ready", null, "p1"),
+      userMessage("goal-idle", "/goal status"),
+      ...liveTurn({ n: 2, prompt: "two" }),
+      reverted(1)
+    ]);
+    assert.deepEqual(ids(page(log.threadId)), ["goal-idle"]);
+    assert.deepEqual(foldedPromptIds(log), ["goal-idle"], "the fold agrees");
+  });
+
+  it("a resumed thread's first live prompt, requested before the replay, goes with its turn", async () => {
+    // The live turn is numbered FIRST, but `openTurn` begins its range at its
+    // adoption, after the replay: the position of its prompt is before every
+    // removed row, and only the claim says whose it is.
+    const resumed = (): Draft[] => [
+      created(),
+      userMessage("u-live", "carry on"),
+      turnStart("u-live"),
+      userMessage("user:h1", "from the transcript", "h1"),
+      replayedTurn("user:h1", "h1", stampAt(4)),
+      session("running", "t-live"),
+      delta("a-live", "Carrying on.", "t-live"),
+      done("a-live", "t-live"),
+      session("ready", null, "t-live")
+    ];
+    const toZero = new TestLog("thread-to-zero");
+    await indexed(toZero, [...resumed(), reverted(0)]);
+    assert.deepEqual(ids(page(toZero.threadId)), []);
+    assert.deepEqual(foldedPromptIds(toZero), [], "the fold agrees");
+
+    const toOne = new TestLog("thread-to-one");
+    await indexed(toOne, [...resumed(), reverted(1)]);
+    assert.deepEqual(ids(page(toOne.threadId)), ["u-live"]);
+    assert.deepEqual(foldedPromptIds(toOne), ["u-live"], "the fold agrees");
+  });
+
+  it("lists after a revert exactly the prompts the fold keeps", async () => {
+    const scenarios: Array<{ name: string; drafts: Draft[] }> = [
+      {
+        name: "steers and a second revert",
+        drafts: [
+          created(),
+          ...liveTurn({ n: 1, prompt: "one", extra: [userMessage("s1", "steer one", "t1")] }),
+          ...liveTurn({ n: 2, prompt: "two", extra: [userMessage("s2", "steer two", "t2")] }),
+          userMessage("idle", "/goal pause"),
+          ...liveTurn({ n: 3, prompt: "three" }),
+          reverted(2),
+          ...liveTurn({ n: 4, prompt: "four" }),
+          reverted(1)
+        ]
+      },
+      {
+        name: "a send no turn ever started",
+        drafts: [
+          created(),
+          ...liveTurn({ n: 1, prompt: "one" }),
+          userMessage("u-refused", "never started"),
+          turnStart("u-refused"),
+          session("ready"),
+          ...liveTurn({ n: 2, prompt: "two" }),
+          reverted(1)
+        ]
+      },
+      {
+        name: "a revert to where it already is",
+        drafts: [
+          created(),
+          ...liveTurn({ n: 1, prompt: "one" }),
+          userMessage("idle", "/goal resume"),
+          reverted(1)
+        ]
+      }
+    ];
+    for (const { name, drafts } of scenarios) {
+      const log = new TestLog(`thread-${name.replaceAll(" ", "-")}`);
+      await indexed(log, drafts);
+      assert.deepEqual(ids(page(log.threadId)).sort(), foldedPromptIds(log).sort(), name);
+    }
+  });
+
+  it("reads max(limit + 1, PROMPTS_MIN_BATCH) rows at a time, and stops at its scan budget with a cursor", () => {
+    // One prompt under 3 000 rows the recall rule refuses.
+    const rows: PromptCandidate[] = [
+      { messageId: "p", seq: 1, text: "the one prompt", turnId: null, createdAt: stampAt(1) }
+    ];
+    for (let seq = 2; seq <= 3_001; seq += 1) {
+      rows.push({
+        messageId: `n${seq}`,
+        seq,
+        text: "<task-notification>done</task-notification>",
+        turnId: null,
+        createdAt: stampAt(seq)
+      });
+    }
+    rows.sort((left, right) => right.seq - left.seq);
+    const reads: number[] = [];
+    const source = {
+      olderThan(beforeSeq: number, count: number) {
+        reads.push(count);
+        const read = rows.filter((row) => row.seq < beforeSeq).slice(0, count);
+        return { candidates: read, scanned: read.length };
+      },
+      turnOpenedBy: () => null,
+      rewindable: () => true
+    };
+
+    const first = readPromptsPage("thread-1", { limit: 1 }, source);
+    assert.deepEqual(first.prompts, [], "the budget ran out first");
+    assert.equal(reads[0], PROMPTS_MIN_BATCH, "a page of one reads a whole batch");
+    assert.equal(
+      reads.reduce((sum, count) => sum + count, 0),
+      PROMPTS_SCAN_BUDGET,
+      "and walks exactly its budget"
+    );
+    assert.equal(decodePromptsCursor(first.before!, "thread-1"), 3_001 - PROMPTS_SCAN_BUDGET + 1);
+
+    const second = readPromptsPage("thread-1", { limit: 1, before: first.before }, source);
+    assert.deepEqual(second.prompts.map((entry) => entry.messageId), ["p"]);
+    assert.equal(second.before, null, "the thread is exhausted");
+
+    reads.length = 0;
+    readPromptsPage("thread-1", { limit: 500 }, source);
+    assert.equal(reads[0], 501, "a page bigger than the batch reads itself plus one");
+  });
+
+  it("counts a read by every row it scanned, placed or not, before it calls the thread exhausted", () => {
+    // Rows 300…1, newest first; of 300…45, only 250 can be placed.
+    const source = {
+      olderThan(beforeSeq: number, count: number) {
+        const seqs: number[] = [];
+        for (let seq = Math.min(300, beforeSeq - 1); seq >= 1 && seqs.length < count; seq -= 1) {
+          seqs.push(seq);
+        }
+        const candidates = seqs
+          .filter((seq) => seq <= 45 || seq === 250)
+          .map((seq) => ({
+            messageId: `m${seq}`,
+            seq,
+            text: `prompt ${seq}`,
+            turnId: null,
+            createdAt: stampAt(seq)
+          }));
+        return { candidates, scanned: seqs.length };
+      },
+      turnOpenedBy: () => null,
+      rewindable: () => true
+    };
+    const answer = readPromptsPage("thread-1", { limit: 3 }, source);
+    assert.deepEqual(
+      answer.prompts.map((entry) => entry.seq),
+      [250, 45, 44]
+    );
+    assert.equal(decodePromptsCursor(answer.before!, "thread-1"), 44, "there is more below");
+  });
+
+  it("walks past a user message that never had text, counting it", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      userMessage("p1", "older"),
+      userMessage("empty", ""),
+      userMessage("p2", "newer")
+    ]);
+    assert.deepEqual(ids(page(log.threadId)), ["p2", "p1"]);
+    assert.equal(promptOf(log.threadId, "empty"), null);
   });
 });

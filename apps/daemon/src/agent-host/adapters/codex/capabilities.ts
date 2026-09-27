@@ -24,6 +24,10 @@ export const CODEX_REF_IDS: readonly string[] = ["codex"] as const;
  *   `thread/revert`; `thread/rollback` itself is dead on every thread this CLI
  *   creates (fixtures README observation 7).
  * - `compaction: {type:"native"}` — `thread/compact/start`.
+ * - `goals` (goals §4.5) — the host parses `/goal` and this adapter maps it
+ *   onto `thread/goal/*` (`goalCommand`), because the app-server has no slash
+ *   commands of its own; the chip offers pause, resume and clear; and the
+ *   app-server starts the goal's turns by itself (`continuesAcrossTurns`).
  */
 export const CODEX_ADAPTER_CAPABILITIES: AdapterCapabilities = {
   sessionModelSwitch: "in-session",
@@ -31,5 +35,6 @@ export const CODEX_ADAPTER_CAPABILITIES: AdapterCapabilities = {
   supportsConversationRollback: true,
   showPlanModeToggle: true,
   reportsContextWindow: true,
-  compaction: { type: "native" }
+  compaction: { type: "native" },
+  goals: { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true }
 };

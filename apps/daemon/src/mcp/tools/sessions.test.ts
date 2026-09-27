@@ -353,6 +353,90 @@ test("update_session on a claudemix thread: the Claude catalogue applies, and an
   assert.deepEqual(mode, { modelSelection: { model: "opus", options: [{ id: "thinking", value: true }, { id: "effort", value: "high" }] } });
 });
 
+/** A goal as the summary names it, and as the thread snapshot holds it (the fold's goal, with the row's stamp). */
+const summaryGoal = (status: "active" | "paused", continuing: boolean) => ({ goal: { objective: "Make the build green", status, continuing } });
+const threadGoal = (status: "active" | "paused") => ({ goal: { objective: "Make the build green", status, updatedAt: stamp(3) } });
+const midTurnFields = { chatSessionStatus: "running" as const, latestTurn: { turnId: "t2", state: "running" as const, startedAt: stamp(2), completedAt: null } };
+const midTurnHead = { head: head({ session: { status: "running", activeTurnId: "t2" } }) };
+const GOAL_SWITCH_REFUSAL = "Pause the goal before switching accounts: interrupt_session pauses it and stops the running turn (or send_message \"/goal pause\", then let the turn finish).";
+const GOAL_MODE_REFUSAL = "A goal turn is running, and the goal starts the next one by itself; changing the model or permission mode restarts the agent and would cut it. interrupt_session pauses the goal and stops the turn — or pass force:true.";
+const TURN_MODE_REFUSAL = "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, interrupt_session, or pass force:true.";
+
+test("update_session: an account switch while a goal continues is refused with the host's advice before anything is written — mid-turn and between the goal's turns", async (t) => {
+  const midTurn = await harness([chatSummary({ ...midTurnFields, ...summaryGoal("active", true) })], snapshot({ ...midTurnHead, ...threadGoal("active") })); t.after(midTurn.close);
+  // Between two of the goal's turns: the latest one settled, the session ready — and the next turn is the provider's to start.
+  const between = await harness([chatSummary(summaryGoal("active", true))], snapshot(threadGoal("active"))); t.after(between.close);
+  const refused = (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === GOAL_SWITCH_REFUSAL;
+  for (const h of [midTurn, between]) {
+    h.api.on("PUT", "/api/sessions/c1", { status: 200, body: chatSummary({ title: "Renamed" }) }).on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 11 } }).on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
+    await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, h.ctx), refused);
+    // Beside a rename and a forced permission change: still refused before the first write.
+    await assert.rejects(tool("update_session").run({ sessionId: "c1", title: "Renamed", runtimeMode: "auto", accountId: "acc-1", force: true }, h.ctx), refused);
+    assert.ok(!h.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written");
+  }
+  // A goal that no longer continues (paused) is no bar: the host carries it to the new account's home.
+  const paused = await harness([chatSummary(summaryGoal("paused", false))], snapshot(threadGoal("paused"))); t.after(paused.close);
+  paused.api.on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
+  assert.deepEqual((await tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, paused.ctx)).applied, ["accountId"]);
+});
+
+test("update_session: a mid-turn model or permission change under a continuing goal advises interrupt_session, since waiting never helps", async (t) => {
+  const underGoal = await harness([chatSummary({ ...midTurnFields, ...summaryGoal("active", true) })], snapshot({ ...midTurnHead, ...threadGoal("active") })); t.after(underGoal.close);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", runtimeMode: "auto", force: false }, underGoal.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === GOAL_MODE_REFUSAL);
+  // Any other running turn keeps the advice it had.
+  const plain = await harness([chatSummary(midTurnFields)], snapshot(midTurnHead)); t.after(plain.close);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", runtimeMode: "auto", force: false }, plain.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === TURN_MODE_REFUSAL);
+  for (const h of [underGoal, plain]) assert.ok(!h.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written");
+});
+
+test("update_session: a summary still saying continuing after the goal was paused loses to the thread just read — the host needs an active goal to continue it", async (t) => {
+  // Right after a `/goal pause`: the summary trails the host by up to one poll, the snapshot already holds the paused goal.
+  const between = await harness([chatSummary(summaryGoal("active", true))], snapshot(threadGoal("paused"))); t.after(between.close);
+  between.api.on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
+  assert.deepEqual((await tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, between.ctx)).applied, ["accountId"], "no goal refusal: the switch applies");
+  // Mid-turn, the same stale summary gets the plain turn refusals: the goal starts no next turn now.
+  const midTurn = await harness([chatSummary({ ...midTurnFields, ...summaryGoal("active", true) })], snapshot({ ...midTurnHead, ...threadGoal("paused") })); t.after(midTurn.close);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", model: "haiku", force: false }, midTurn.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === TURN_MODE_REFUSAL);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, midTurn.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === "Wait for the agent to finish the current turn before switching accounts.");
+  assert.ok(!midTurn.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written mid-turn");
+  // A thread with no goal at all (cleared, or a host that predates goals) wins over the summary the same way.
+  const cleared = await harness([chatSummary(summaryGoal("active", true))], snapshot({ goal: null })); t.after(cleared.close);
+  cleared.api.on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 13 } });
+  assert.deepEqual((await tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, cleared.ctx)).applied, ["accountId"]);
+});
+
+test("update_session: a goal an Orquester update holds refuses the switch with its own advice before anything is written; mid-turn, a mode change is told to wait", async (t) => {
+  const HELD_SWITCH_REFUSAL = "The goal is held for an Orquester update and resumes by itself once the agent host has restarted, when it continues again. Take it back first — send_message \"/goal pause\" keeps it paused — then switch accounts.";
+  // Goals §5.7: the host reports a held goal `paused` and continuing, and refuses the switch itself.
+  const held = await harness([chatSummary(summaryGoal("paused", true))], snapshot(threadGoal("paused"))); t.after(held.close);
+  held.api.on("PUT", "/api/sessions/c1", { status: 200, body: chatSummary({ title: "Renamed" }) }).on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 12 } });
+  for (const args of [{ accountId: "acc-1" }, { title: "Renamed", accountId: "acc-1" }]) {
+    await assert.rejects(tool("update_session").run({ sessionId: "c1", ...args, force: false }, held.ctx),
+      (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === HELD_SWITCH_REFUSAL);
+  }
+  assert.ok(!held.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written");
+  // Its final turn still running: a held goal starts no next turn, so waiting helps — the plain turn advice.
+  const finalTurn = await harness([chatSummary({ ...midTurnFields, ...summaryGoal("paused", true) })], snapshot({ ...midTurnHead, ...threadGoal("paused") })); t.after(finalTurn.close);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", runtimeMode: "auto", force: false }, finalTurn.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === TURN_MODE_REFUSAL);
+  await assert.rejects(tool("update_session").run({ sessionId: "c1", accountId: "acc-1", force: false }, finalTurn.ctx),
+    (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && e.message === HELD_SWITCH_REFUSAL);
+  assert.ok(!finalTurn.api.calls.some((c) => c.method === "PUT" || c.method === "POST"), "nothing was written mid-turn");
+});
+
+test("the goal cases are in the descriptions: Stop pauses a continuing goal first, compaction and an account switch are refused while one continues", () => {
+  assert.match(tool("interrupt_session").description, /\(Codex\), Stop pauses the goal first/);
+  assert.match(tool("interrupt_session").description, /send_message "\/goal resume"/);
+  assert.match(tool("compact_session").description, /"Pause the goal before compacting\.": interrupt_session pauses it and stops the turn\./);
+  // Goals §5.7: the host gives a held goal the plain running-turn refusal, which the tool passes through.
+  assert.match(tool("compact_session").description, /Orquester update holds \(heldForUpdate\) starts no next turn, so it gets the plain refusal: wait for the turn\./);
+  assert.match(tool("update_session").description, /refused while a goal continues/);
+});
+
 test("update_session: a rename needs no catalogue entry; a write that fails mid-way reports only what landed", async (t) => {
   const retired = await harness([chatSummary({ refId: "retired-agent" })]); t.after(retired.close);
   retired.api.on("PUT", "/api/sessions/c1", { status: 200, body: chatSummary({ title: "Renamed" }) });

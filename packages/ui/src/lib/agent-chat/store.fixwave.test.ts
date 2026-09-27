@@ -520,6 +520,8 @@ describe("R7-5 — a returned queued message gives its attachments back as chips
       },
       focusAtEnd: () => {},
       openControl: () => {},
+      sendText: () => false,
+      submitText: () => ({ ok: false, reason: "refused" }),
       restoreFailedSend: () => false
     });
     return { returned, staged, inserted, unregister };

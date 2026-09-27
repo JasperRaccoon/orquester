@@ -10,6 +10,7 @@
  */
 
 export * from "./runtime-events.ts";
+export * from "./goal.ts";
 export * from "./adapter-types.ts";
 export * from "./domain-events.ts";
 export * from "./thread.ts";
@@ -24,6 +25,8 @@ export * from "./message-liveness.ts";
 export * from "./open-work.ts";
 export * from "./pending.ts";
 export * from "./plan.ts";
+export * from "./prompts.ts";
+export * from "./re-emitted.ts";
 export * from "./roster.ts";
 export * from "./slim.ts";
 export * from "./turn-state.ts";

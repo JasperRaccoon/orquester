@@ -390,6 +390,8 @@ describe("a reload never loses or duplicates a message", () => {
       returnMessage: () => [],
       focusAtEnd: () => {},
       openControl: () => {},
+      sendText: () => false,
+      submitText: () => ({ ok: false, reason: "not in this test" }),
       restoreFailedSend: (restore) => {
         restored.push(restore);
         return true;
@@ -454,6 +456,8 @@ describe("a reload never loses or duplicates a message", () => {
       returnMessage: () => [],
       focusAtEnd: () => {},
       openControl: () => {},
+      sendText: () => false,
+      submitText: () => ({ ok: false, reason: "not in this test" }),
       restoreFailedSend: (restore) => {
         restored.push(restore);
         return true;
@@ -1098,6 +1102,8 @@ describe("a reload never loses or duplicates a message", () => {
       returnMessage: () => [],
       focusAtEnd: () => {},
       openControl: () => {},
+      sendText: () => false,
+      submitText: () => ({ ok: false, reason: "not in this test" }),
       restoreFailedSend: () => {
         throw new Error("the composer could not take it");
       }
@@ -1131,6 +1137,8 @@ describe("a reload never loses or duplicates a message", () => {
       returnMessage: () => [],
       focusAtEnd: () => {},
       openControl: () => {},
+      sendText: () => false,
+      submitText: () => ({ ok: false, reason: "not in this test" }),
       restoreFailedSend: () => {
         throw new Error("the composer could not take it");
       }

@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { useOpenLayer } from "../../hooks/use-open-layer";
@@ -18,6 +18,35 @@ export interface ModalProps {
  */
 export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className }) => {
   useOpenLayer(open);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  // What had focus when the modal opened. Read while rendering, before the
+  // dialog mounts: a field inside it autofocuses before any effect runs.
+  const openerRef = useRef<HTMLElement | null>(null);
+  if (!open) {
+    openerRef.current = null;
+  } else if (openerRef.current === null && typeof document !== "undefined") {
+    const active = document.activeElement;
+    openerRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
+  }
+  // Give focus back to what opened the modal (the WAI-ARIA dialog pattern). A
+  // modal that closed leaving focus on <body> hands the next bare Escape to
+  // the visible chat, which interrupts its running turn. Decided a tick after
+  // the close: a StrictMode rehearsal leaves the dialog in place (nothing to
+  // do), a caller that moved focus on purpose keeps it, and an opener that is
+  // gone (the card a Delete removed) is not revived.
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const dialog = dialogRef.current;
+    const opener = openerRef.current;
+    return () => {
+      setTimeout(() => {
+        if (dialog?.isConnected) return;
+        const active = document.activeElement;
+        if (active !== null && active !== document.body) return;
+        if (opener?.isConnected) opener.focus({ preventScroll: true });
+      }, 0);
+    };
+  }, [open]);
   useEffect(() => {
     if (!open) {
       return;
@@ -37,6 +66,7 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className
       onMouseDown={onClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         onMouseDown={(e) => e.stopPropagation()}

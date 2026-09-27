@@ -68,6 +68,55 @@ export function subscribeActiveChatTab(
 }
 
 /**
+ * Whether a chat tab's popover closes when the visible chat tab becomes
+ * `activeSessionId`: only when its own thread (`ownSessionId`) is LEFT.
+ *
+ * A popover of a thread whose tab is being ACTIVATED stays open — and that is
+ * a common case, not an edge: in the grid view a click on a chip in an
+ * unfocused cell opens the popover AND activates the cell, and `MainView`
+ * publishes the activation in a parent effect that runs after the popover's
+ * own subscription in the same commit, so closing on any change opened it and
+ * shut it at once. An owner nobody knows (`null`) closes on any change.
+ */
+export function chatTabSwitchDismisses(
+  ownSessionId: string | null,
+  activeSessionId: string | null
+): boolean {
+  return ownSessionId === null || activeSessionId !== ownSessionId;
+}
+
+/**
+ * The `dismissOn` a chat tab's popover passes its `Dropdown` (or subscribes
+ * itself, as `ComposerPopover` does): `dismiss` runs when the visible chat tab
+ * moves away from `ownSessionId` ({@link chatTabSwitchDismisses}). Returns the
+ * unsubscribe.
+ */
+export function dismissWhenChatTabLeaves(
+  ownSessionId: string | null
+): (dismiss: () => void) => () => void {
+  return (dismiss) =>
+    subscribeActiveChatTab((activeSessionId) => {
+      if (chatTabSwitchDismisses(ownSessionId, activeSessionId)) {
+        dismiss();
+      }
+    });
+}
+
+/**
+ * The thread a popover belongs to, read from where its trigger sits: every
+ * chat surface renders inside `AgentChatView`'s root, which carries
+ * `data-agent-chat={sessionId}`. For a popover used across the composer, the
+ * timeline and the banners, this spares threading a session id through every
+ * caller. `null` when the trigger is not mounted or not in a chat view.
+ */
+export function ownChatSessionOf(
+  element: { closest(selector: string): { getAttribute(name: string): string | null } | null } | null | undefined
+): string | null {
+  const id = element?.closest("[data-agent-chat]")?.getAttribute("data-agent-chat") ?? null;
+  return id !== null && id.length > 0 ? id : null;
+}
+
+/**
  * Release the claim if this tab still holds it — for a tab unmounting (closed,
  * or its project navigated away from) while it was the visible one. Guarded on
  * identity: a fast switch unmounts the old tab *after* the new one claimed,

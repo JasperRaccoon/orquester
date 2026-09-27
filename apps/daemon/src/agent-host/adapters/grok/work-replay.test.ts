@@ -153,38 +153,39 @@ test("29 a loop never holds a deploy: only its fire's run is live work", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 30 — `/goal`: one roster row for the goal, ended by the status it left in
+// 30 — `/goal`: the thread's goal (goals §6.3), never a roster row
 // ---------------------------------------------------------------------------
 
-const GOAL = "goal:18745eb4-3b61-4f0c-9a5e-4dc7dd2087ed";
-
-test("30 a goal is a roster row: started when active, noted on a change of phase, ended by its budget", () => {
+test("30 the goal is the thread's goal: set, stopped by its budget, cleared by /goal clear", () => {
   const run = driveCapture("30-goal.ndjson");
   assert.deepEqual(warnings(run), [], "goal_updated is mapped, never a warning — eleven of them in one short run");
-  const rows = taskRows(run.events, GOAL);
-  const [started] = rows;
-  assert.equal(started?.type, "task.started");
-  assert.equal(started?.payload.taskType, "goal");
-  assert.equal(started?.payload.title, "Create a file named goal.txt containing exactly: ok", "the roster's goal kind names it");
-  assert.equal(started?.turnId, "turn-1");
-  const progress = only(rows, "task.progress");
-  assert.ok(progress.length >= 1 && progress.length < 9, "a note per change of phase, not per token tick");
-  assert.ok(progress.every((row) => (row.payload as { status?: string }).status === undefined));
-  assert.equal(progress[0]?.payload.summary, "Planning · 0 of 20000 tokens");
+  const goals = only(run.events, "thread.goal.updated");
   assert.deepEqual(
-    progress.map((row) => (row.payload as { usage?: unknown }).usage),
-    progress.map((row) => ({ totalTokens: Number(/(\d+) of \d+ tokens/.exec(String(row.payload.summary))?.[1]) })),
-    "each note carries the goal's own token count, for its row's metrics"
+    goals.map((event) => [event.payload.change, event.turnId, event.payload.goal?.status ?? null]),
+    [
+      ["set", "turn-1", "active"],
+      ["limited", "turn-1", "budget-limited"],
+      // 1.0.34's clear names no goal and no event: status `cleared`, every
+      // id and text emptied (observation 53) — read as the level it is.
+      ["cleared", "turn-2", null]
+    ],
+    "one row per change — a token tick alone is none"
   );
-  assert.deepEqual(
-    ends(run.events, GOAL),
-    [["stopped", "Token budget reached: 48386 of 20000 tokens"]],
-    "budget_limited ends it — resumable, so stopped, never failed; the later clear adds nothing"
+  const [set, limited, cleared] = goals;
+  assert.equal(set?.payload.goal?.objective, "Create a file named goal.txt containing exactly: ok");
+  assert.equal(set?.payload.goal?.tokenBudget, 20_000);
+  assert.equal(limited?.payload.goal?.tokensUsed, 48_386);
+  assert.equal(cleared?.payload.previous?.status, "budget-limited", "the goal as the thread showed it");
+  assert.equal(
+    run.events.some(
+      (event) => event.type.startsWith("task.") && String((event.payload as { taskId?: string }).taskId).startsWith("goal:")
+    ),
+    false,
+    "no roster row names the goal"
   );
-  assert.deepEqual(only(rows, "task.completed")[0]?.payload.usage, { totalTokens: 48_386 });
 });
 
-test("30 the goal's planner is the CLI's own subagent; the goal row itself holds no deploy", () => {
+test("30 the goal's planner is the CLI's own subagent; with it done, nothing of the goal holds a deploy", () => {
   const PLANNER = "01a0de9e-e2a1-7f31-a9be-c695a8111b2a";
   const run = driveCapture("30-goal.ndjson");
   assert.equal(taskRows(run.events, PLANNER)[0]?.payload.title, "goal plan writer");

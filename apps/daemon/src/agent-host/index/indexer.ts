@@ -32,7 +32,11 @@
  * event naming them, extends a range across a revert, because folding a
  * slice that holds the revert re-applies it against the slice's own, shorter
  * turn list. The reverted turns' bytes and the revert itself belong to
- * nobody, and nothing grows until the next turn starts.
+ * nobody, and nothing grows until the next turn starts. Their rows are
+ * truncated from the first removed turn's first line on — but the user
+ * messages, which a revert judges by the fold's own rule instead
+ * (`dropRevertedUserMessages`), so the prompt list drops what the timeline
+ * drops.
  *
  * Messages are indexed when they finish (`streaming: false`), with the fold's
  * own text rule; activities on every write (last write wins, like
@@ -72,9 +76,12 @@
 
 import type { DomainEvent, Turn } from "@orquester/api/agent-chat";
 import {
+  GOAL_ACTIVITY_KIND,
   applyTurnEvent,
   compactionMarkerState,
   isConversationCompactionActivity,
+  isHiddenGoalChange,
+  parseGoalUpdatedPayload,
   startedTurns
 } from "@orquester/api/agent-chat";
 
@@ -284,10 +291,18 @@ export function createThreadIndexer(input: {
     ),
     selectMessageText: db.prepare("SELECT text, role, at FROM messages_fts WHERE rowid = ?"),
     insertMessageDoc: db.prepare(
-      `INSERT INTO message_docs (thread_id, message_id, seq, first_seq, first_byte, first_length)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO message_docs (thread_id, message_id, seq, first_seq, first_byte, first_length,
+                                 role, agent_id, turn_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ),
-    updateMessageDoc: db.prepare("UPDATE message_docs SET seq = ? WHERE rowid = ?"),
+    updateMessageDoc: db.prepare("UPDATE message_docs SET seq = ?, turn_id = ? WHERE rowid = ?"),
+    deleteMessageDoc: db.prepare("DELETE FROM message_docs WHERE rowid = ?"),
+    // Every user message of the thread, whoever owns it: a revert judges them
+    // all, as the fold's `retainMessagesAfterRevert` does.
+    selectUserMessages: db.prepare(
+      `SELECT rowid AS doc, message_id, turn_id, created_at FROM message_docs
+       WHERE thread_id = ? AND role = 'user'`
+    ),
     deleteMessageFts: db.prepare("DELETE FROM messages_fts WHERE rowid = ?"),
     insertMessageFts: db.prepare(
       `INSERT INTO messages_fts (rowid, text, thread_id, message_id, turn_id, role, seq, at)
@@ -313,12 +328,16 @@ export function createThreadIndexer(input: {
     ),
     deleteMarkerAt: db.prepare("DELETE FROM markers WHERE thread_id = ? AND seq = ?"),
 
-    // A revert: everything at or after the first removed turn's first line.
+    // A revert: everything at or after the first removed turn's first line —
+    // but a user message, which the fold's own rule decides by turn and claim
+    // (`dropRevertedUserMessages`), never by position.
     truncateMessageFts: db.prepare(
       `DELETE FROM messages_fts WHERE rowid IN
-         (SELECT rowid FROM message_docs WHERE thread_id = ? AND seq >= ?)`
+         (SELECT rowid FROM message_docs WHERE thread_id = ? AND seq >= ? AND role <> 'user')`
     ),
-    truncateMessageDocs: db.prepare("DELETE FROM message_docs WHERE thread_id = ? AND seq >= ?"),
+    truncateMessageDocs: db.prepare(
+      "DELETE FROM message_docs WHERE thread_id = ? AND seq >= ? AND role <> 'user'"
+    ),
     truncateActivityFts: db.prepare(
       `DELETE FROM activities_fts WHERE rowid IN
          (SELECT rowid FROM items WHERE thread_id = ? AND seq >= ?)`
@@ -777,7 +796,7 @@ export function createThreadIndexer(input: {
     const next = foldTurns(memory, event);
 
     if (event.type === "thread.reverted") {
-      applyRevert(memory, prev, next, here, end);
+      applyRevert(memory, prev, next, here, end, event.payload.turnCount);
       batch.structural = true;
       return;
     }
@@ -804,14 +823,20 @@ export function createThreadIndexer(input: {
    * §5.5 by turn ORDER: the turn fold keeps the first `turnCount` started
    * turns, and every row from the first removed turn's first line on goes —
    * its turn rows, its text, its item positions, its markers — and so does
-   * every surviving turn's range past that line (`clipAtCut`).
+   * every surviving turn's range past that line (`clipAtCut`). User messages
+   * alone are decided the fold's way instead, by turn and by claim
+   * (`dropRevertedUserMessages`): position is not what the fold goes by, and
+   * a prompt can sit before the cut — an idle `/goal` no turn claims, a
+   * resumed thread's first live prompt, whose turn's range `openTurn` began
+   * after the replay — while the fold drops it.
    */
   function applyRevert(
     memory: ThreadMemory,
     prev: Turn[],
     next: Turn[],
     here: Position,
-    end: number
+    end: number,
+    turnCount: number
   ): void {
     const kept = new Set(startedTurns(next).map((turn) => turn.turnId));
     const seen = new Set<string>();
@@ -833,6 +858,16 @@ export function createThreadIndexer(input: {
         cut = { seq: span.firstSeq, byteOffset: span.firstByte };
       }
     }
+    // The fold's claims (`reduceReverted`): only a STARTED turn's prompt is
+    // judged — kept with a retained turn, dropped with a removed one.
+    const retainedPrompts = new Set<string>();
+    const droppedPrompts = new Set<string>();
+    for (const turn of prev) {
+      if (turn.turnId === null || turn.userMessageId === undefined) {
+        continue;
+      }
+      (kept.has(turn.turnId) ? retainedPrompts : droppedPrompts).add(turn.userMessageId);
+    }
 
     memory.rows = carryRows(memory, prev, next, here, end);
     memory.turns = next;
@@ -850,6 +885,12 @@ export function createThreadIndexer(input: {
     for (const turnId of removed) {
       sql.deleteTurn.run(threadId, turnId);
     }
+    // Whatever the cut: the fold judges the user messages on every revert.
+    dropRevertedUserMessages(memory, kept, {
+      retained: retainedPrompts,
+      dropped: droppedPrompts,
+      turnCount
+    });
     if (cut !== null) {
       // A stream's doc row may be among the deleted; none runs across an
       // idle-only revert anyway.
@@ -893,6 +934,76 @@ export function createThreadIndexer(input: {
         row.lastReference = null;
       }
     });
+  }
+
+  /**
+   * The user messages a revert keeps, decided exactly as the fold's
+   * `retainMessagesAfterRevert` decides them for the user role (`fold.ts`,
+   * T3's `retainThreadMessagesAfterRevert`), over every user message the
+   * index holds for the thread: a message naming a turn stays with that turn;
+   * a turn-less one stays when a retained turn claims it as its prompt; then,
+   * so the thread never shows fewer prompts than turns it reverted to, up to
+   * `turnCount` of the rest — turn-less, claimed by no removed turn — come
+   * back, oldest first. Everything else goes, text and span alike.
+   *
+   * Parity is with a fold of the WHOLE log. The live fold counts that last
+   * pass over its retained window, so on a thread longer than the window
+   * whose retained turns lack prompts (turns the provider started) the two
+   * can restore different turn-less messages; and a log with no started turn
+   * at all — numbered by checkpoints, before turns were recorded — keeps
+   * none here, having no checkpoints to count by.
+   */
+  function dropRevertedUserMessages(
+    memory: ThreadMemory,
+    retainedTurnIds: ReadonlySet<string>,
+    claims: { retained: ReadonlySet<string>; dropped: ReadonlySet<string>; turnCount: number }
+  ): void {
+    const messages = sql.selectUserMessages
+      .all(memory.threadId)
+      .map(toUserMessageRow)
+      .filter((row): row is UserMessageRow => row !== null);
+    const retained = new Set<number>();
+    for (const message of messages) {
+      if (
+        message.turnId !== null
+          ? retainedTurnIds.has(message.turnId)
+          : claims.retained.has(message.messageId)
+      ) {
+        retained.add(message.doc);
+      }
+    }
+    // The fold's own arithmetic, a NaN count included: it restores nothing.
+    const missing = Math.max(0, claims.turnCount - retained.size);
+    if (missing !== 0) {
+      const fallback = messages
+        .filter(
+          (message) =>
+            !retained.has(message.doc) &&
+            (message.turnId === null
+              ? !claims.dropped.has(message.messageId)
+              : retainedTurnIds.has(message.turnId))
+        )
+        .sort(
+          (left, right) =>
+            left.createdAt.localeCompare(right.createdAt) ||
+            left.messageId.localeCompare(right.messageId)
+        )
+        .slice(0, missing);
+      for (const message of fallback) {
+        retained.add(message.doc);
+      }
+    }
+    for (const message of messages) {
+      if (retained.has(message.doc)) {
+        continue;
+      }
+      sql.deleteMessageFts.run(message.doc);
+      sql.deleteMessageDoc.run(message.doc);
+      // Gone from the conversation: no turn may claim it after this.
+      if (memory.prompts.delete(message.messageId)) {
+        memory.inflightStale = true;
+      }
+    }
   }
 
   /** Write every started turn whose stored row is stale. */
@@ -978,7 +1089,11 @@ export function createThreadIndexer(input: {
 
   /**
    * Every `thread.message-sent` moves the message's span: the first line that
-   * names it creates its `message_docs` row, every later one advances `seq`.
+   * names it creates its `message_docs` row — with its author, `role` and the
+   * owning subagent, and its stamp, which no later line changes (the fold's
+   * rule: the merged row keeps its first event's) — and every later one
+   * advances `seq` and re-states `turn_id`, which the fold takes from the
+   * latest line.
    * Text follows the fold's rule (§5.1): a `streaming: true` row appends; a
    * `streaming: false` row with text replaces the body, with empty text keeps
    * it. A message streaming again after it finished continues from the text
@@ -996,18 +1111,20 @@ export function createThreadIndexer(input: {
     }
     const chunk = typeof payload.text === "string" ? payload.text : "";
     const threadId = memory.threadId;
+    // Every line re-states the message's turn, and the fold keeps the latest.
+    const turnId = toStringOrNull(payload.turnId);
 
     let stream = memory.streams.get(messageId);
     let rowid: number;
     let fresh = false;
     if (stream !== undefined) {
       rowid = stream.doc;
-      sql.updateMessageDoc.run(event.seq, rowid);
+      sql.updateMessageDoc.run(event.seq, turnId, rowid);
     } else {
       const doc = asRecord(sql.selectMessageDoc.get(threadId, messageId))?.doc;
       if (doc !== undefined) {
         rowid = Number(doc);
-        sql.updateMessageDoc.run(event.seq, rowid);
+        sql.updateMessageDoc.run(event.seq, turnId, rowid);
       } else {
         fresh = true;
         rowid = Number(
@@ -1017,7 +1134,11 @@ export function createThreadIndexer(input: {
             event.seq,
             event.seq,
             position.byteOffset,
-            position.byteLength
+            position.byteLength,
+            typeof payload.role === "string" ? payload.role : "",
+            messageOwner(payload.agentId),
+            turnId,
+            typeof event.occurredAt === "string" ? event.occurredAt : ""
           ).lastInsertRowid
         );
       }
@@ -1119,7 +1240,9 @@ export function createThreadIndexer(input: {
     }
 
     const kind = toStringOrNull(activity.activityKind) ?? "";
-    const text = activityText(activity);
+    // Its position above is indexed like any row's; its text only when anyone
+    // could be looking for it.
+    const text = isHiddenGoalRow(kind, activity.payload) ? "" : activityText(activity);
     if (text.length > 0) {
       sql.insertActivityFts.run(
         rowid,
@@ -1337,6 +1460,41 @@ export function createThreadIndexer(input: {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * `message_docs.agent_id`: the subagent a message belongs to, or null for the
+ * parent conversation's own — an empty id included, as the client's
+ * `splitThreadItems` and ingestion's `ownedBaseKey` both read one.
+ */
+function messageOwner(agentId: unknown): string | null {
+  return typeof agentId === "string" && agentId.length > 0 ? agentId : null;
+}
+
+/** A user message as a revert judges it (`dropRevertedUserMessages`). */
+interface UserMessageRow {
+  doc: number;
+  messageId: string;
+  turnId: string | null;
+  createdAt: string;
+}
+
+function toUserMessageRow(value: unknown): UserMessageRow | null {
+  const row = asRecord(value);
+  const doc = row?.doc;
+  if (
+    row === null ||
+    typeof row.message_id !== "string" ||
+    (typeof doc !== "number" && typeof doc !== "bigint")
+  ) {
+    return null;
+  }
+  return {
+    doc: Number(doc),
+    messageId: row.message_id,
+    turnId: toStringOrNull(row.turn_id),
+    createdAt: typeof row.created_at === "string" ? row.created_at : ""
+  };
+}
+
 /** Same rows, same order — the reducer merely returned a fresh array. */
 function sameTurns(prev: readonly Turn[], next: readonly Turn[]): boolean {
   return prev.length === next.length && prev.every((turn, index) => next[index] === turn);
@@ -1367,6 +1525,20 @@ function activityText(activity: Record<string, unknown>): string {
     }
   }
   return capText(parts.join("\n"));
+}
+
+/**
+ * A `goal.updated` row the timeline hides (goals §8.4: a `progress` tick). It
+ * reads "Goal progress" every time, so full-text indexing it only flooded the
+ * palette's search; its position is still indexed, as every row's is. A goal
+ * row whose payload does not parse is kept searchable, like any other row.
+ */
+function isHiddenGoalRow(kind: string, payload: unknown): boolean {
+  if (kind !== GOAL_ACTIVITY_KIND) {
+    return false;
+  }
+  const goalRow = parseGoalUpdatedPayload(payload);
+  return goalRow !== null && isHiddenGoalChange(goalRow.change);
 }
 
 /**

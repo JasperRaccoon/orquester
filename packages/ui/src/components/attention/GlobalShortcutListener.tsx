@@ -76,9 +76,11 @@ export function matchesPaletteToggle(event: ShortcutEventLike): boolean {
  *
  * The set is every layer that closes on Escape: the store's modals, the
  * palette, and whatever is registered as open (`lib/open-layers.ts` — every
- * `Modal`, `BottomSheet`, `Dropdown`, `ContextMenu` and `ComposerPopover`,
- * through `useOpenLayer`). Those close from their own `document` listeners,
- * which every `window` capture handler runs before, and the chat's Escape
+ * `Modal`, `BottomSheet`, `Dropdown`, `ContextMenu`, `ComposerPopover` and the
+ * `CommandPalette`, through `useOpenLayer`, and the right rail's dock while
+ * focus is inside it, `useDockKeyboardLayer`). Those close from their own
+ * `document` listeners, which every `window` capture handler runs before, and
+ * the chat's Escape
  * stops the event when it acts: a layer missing from this set lost its
  * Escape to it.
  *

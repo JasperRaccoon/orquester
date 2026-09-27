@@ -2,6 +2,7 @@ import React from "react";
 import { flushSync } from "react-dom";
 
 import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, startedTurns } from "@orquester/api/agent-chat";
+import type { GoalAction } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -9,12 +10,14 @@ import {
   canSwitchChatAccount,
   chatAccountLabel,
   chatAccountSelectionId,
-  chatAccountSwitchSupported
+  chatAccountSwitchRefusal,
+  chatAccountSwitchSupported,
+  isGoalContinuing
 } from "../../lib/agent-chat/account-switch";
+import { isGoalHeldForUpdate } from "../../lib/agent-chat/goal.logic";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
 import { Modal, ModalCloseButton } from "../ui";
-import { DiffView } from "../git/DiffView";
 import {
   useAgentChatPending,
   useAgentChatRoster,
@@ -33,6 +36,7 @@ import {
   focusComposer,
   insertComposerText,
   openComposerControl,
+  sendComposerText,
   stageComposerAttachment
 } from "./composer/composer-bridge";
 import { timelineSkillNames } from "./composer/composer-menu";
@@ -91,7 +95,9 @@ import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { FullOutputPane } from "./FullOutputPane";
 import { ChatStatusLine } from "./status/ChatStatusLine";
+import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-chip";
 import { ChatTimeline } from "./timeline/ChatTimeline";
+import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
 import {
   nextHeldTimeline,
   resolveThreadSwitchTimeline,
@@ -124,15 +130,15 @@ function dispatch(run: () => Promise<unknown>): void {
 }
 
 /**
- * The read-only overlay for a turn diff, or for one row's whole output: its
- * item's full, unslimmed payload, or a streamed command's output as the host
- * joins it (`readFullOutput`).
+ * The read-only overlay for one row's whole output: its item's full,
+ * unslimmed payload, or a streamed command's output as the host joins it
+ * (`readFullOutput`). A turn diff has its own, shared with the right rail's
+ * History (`TurnDiffModal`).
  */
 interface ChatViewerState {
-  kind: "diff" | "output";
+  kind: "output";
   title: string;
   loading: boolean;
-  diff?: string;
   text?: string;
   /** What the read says of `text` (`fullOutputNotes`): so far, its head, or only part of it. */
   notes?: readonly string[];
@@ -652,17 +658,82 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           shortLabel: shortAccountLabel
         })
       : null;
-  const accountSwitchEnabled =
-    !paintOnly &&
-    canSwitchChatAccount({
-      isTurnActive: turnActive,
-      hasPendingRequest: pending.totalCount > 0,
-      queuedCount: slice.queue.length,
-      reverting,
-      connection: slice.connection,
-      backgroundLive: session.backgroundLiveness != null,
-      isSending: sending
-    });
+  // The goal the status-line chip renders (goals §8.2).
+  const threadGoal = paintOnly ? null : slice.goal;
+  // Goals §5.7: a deploy's drain paused the goal between two of its turns and
+  // the next host resumes it — the fold reads `paused`, the tab reads working.
+  // The goal chip says so rather than showing the user's pause (its actions
+  // stay a paused goal's, Resume and Clear, since the user wins), and the
+  // account chip names the hold rather than asking for a pause it has had.
+  const goalHeldForUpdate = isGoalHeldForUpdate({
+    goal: threadGoal,
+    summaryGoal: session.goal,
+    goalHeldForHandover: slice.head?.goalHeldForHandover === true
+  });
+  // Goals §5.5: a goal the provider keeps working on by itself (Codex) holds
+  // the switch — its next turn would start under the old account and die on
+  // the restart — and the chip says to pause it rather than to wait. Only
+  // while it IS continuing: the host's verdict on the tab summary when there
+  // is one, else a coarser form of the host's predicate (`isGoalContinuing`).
+  // A stopped or errored session may switch, except one whose resume mark is
+  // still pending (after a handover it may read `stopped` or `error`), which
+  // reads as continuing — and so does a goal a deploy holds (§5.7), whose
+  // mark the head carries on a snapshot.
+  const accountSwitchState = {
+    isTurnActive: turnActive,
+    hasPendingRequest: pending.totalCount > 0,
+    queuedCount: slice.queue.length,
+    reverting,
+    connection: slice.connection,
+    backgroundLive: session.backgroundLiveness != null,
+    isSending: sending,
+    goalContinuing: isGoalContinuing({
+      summaryGoal: session.goal,
+      goal: slice.goal,
+      support: provider?.capabilities?.goals,
+      sessionStatus: slice.sessionStatus,
+      resumeGoalAfterRestart: slice.head?.resumeGoalAfterRestart === true,
+      goalHeldForHandover: slice.head?.goalHeldForHandover === true
+    }),
+    // A held goal is paused already: the chip names the hold, in the host's
+    // words, as the goal chip reads it.
+    goalHeldForUpdate,
+    // The host refuses a switch for a running compaction first (and the chip
+    // then names it, as the host would).
+    compacting: status.isCompacting
+  };
+  const accountSwitchEnabled = !paintOnly && canSwitchChatAccount(accountSwitchState);
+  const accountSwitchRefusal = paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState);
+
+  // --- the goal chip (goals §8.2) -------------------------------------------
+  // The chip shows whatever unfinished goal the fold holds; which actions its
+  // popover offers is the §8.2 matrix over the adapter's own goal block (none
+  // on OpenCode, or from a host that predates goals). "Background live" reads
+  // both copies — the roster this tab derives and the summary the daemon
+  // sends — so a nudge is withheld while either says work is still running.
+  const goalSupport = provider?.capabilities?.goals ?? null;
+  // `threadGoal` and `goalHeldForUpdate` are read above, beside the account
+  // chip, which names a held goal too.
+  const goalBackgroundLive = roster.backgroundLiveness !== null || session.backgroundLiveness != null;
+  const { goalActionList, goalNote } = React.useMemo(() => {
+    const input = {
+      goal: threadGoal,
+      support: goalSupport,
+      turnRunning: turnActive,
+      backgroundLive: goalBackgroundLive
+    };
+    return { goalActionList: goalActions(input), goalNote: goalActionsNote(input) };
+  }, [threadGoal, goalSupport, turnActive, goalBackgroundLive]);
+  // An action is the user's message, sent by the composer itself: its guards,
+  // the thread's mode and model, `/turn` (goals §8.2). A refusal is the
+  // composer's own notice, in the composer just below the chip.
+  const sendGoalAction = React.useCallback(
+    (action: GoalAction) => {
+      sendComposerText(sessionId, GOAL_ACTION_TEXT[action]);
+    },
+    [sessionId]
+  );
+
   const latestCheckpoint = slice.checkpoints.length
     ? slice.checkpoints[slice.checkpoints.length - 1]
     : null;
@@ -680,12 +751,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     tokensUsed: slice.contextWindow?.usedTokens ?? null,
     model: slice.head?.modelSelection.model ?? session.model ?? null
   };
-  // --- the read-only viewer for a turn diff / a full tool output -----------
-  // Both are §6.3 reads with no store slice behind them: the timeline asks,
-  // the shell fetches, and the answer is shown in the existing modal + diff
-  // view rather than folded back into the thread. Keeping them out of the
-  // slice is deliberate — a 200 KB unslimmed payload is something the user
-  // asked to look at once, not thread state every later render pays for.
+  // --- the read-only viewer for a full tool output --------------------------
+  // A §6.3 read with no store slice behind it: the timeline asks, the shell
+  // fetches, and the answer is shown in the app's modal rather than folded
+  // back into the thread. Keeping it out of the slice is deliberate — a 200 KB
+  // unslimmed payload is something the user asked to look at once, not thread
+  // state every later render pays for. A turn diff is `TurnDiffModal`'s.
   const [viewer, setViewer] = React.useState<ChatViewerState | null>(null);
   // One read at a time (`createViewerReads`): opening another, or closing the
   // viewer, retires the one in flight, whose answer is then dropped rather
@@ -696,33 +767,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     viewerReads.retire();
     setViewer(null);
   }, [viewerReads]);
+  // The turn diff is read and shown by `TurnDiffModal`, the one the right
+  // rail's History opens too.
+  const [turnDiff, setTurnDiff] = React.useState<TurnDiffRequest | null>(null);
   const openTurnDiff = React.useCallback(
-    (turnCount: number) => {
-      const signal = viewerReads.begin();
-      setViewer({ kind: "diff", title: `Turn ${turnCount}`, loading: true });
-      void api
-        .agentChatTurnDiff(sessionId, turnCount)
-        .then((response) => {
-          if (signal.aborted) return;
-          setViewer({
-            kind: "diff",
-            title: `Turn ${turnCount}`,
-            loading: false,
-            diff: response.diff
-          });
-        })
-        .catch((error: unknown) => {
-          if (signal.aborted) return;
-          setViewer({
-            kind: "diff",
-            title: `Turn ${turnCount}`,
-            loading: false,
-            error: errorText(error, "That turn's diff could not be read.")
-          });
-        });
-    },
-    [api, sessionId, viewerReads]
+    (turnCount: number) => setTurnDiff({ sessionId, turnCount }),
+    [sessionId]
   );
+  const closeTurnDiff = React.useCallback(() => setTurnDiff(null), []);
   const loadFullOutput = React.useCallback(
     (itemId: string, source?: FullOutputSource) => {
       const signal = viewerReads.begin();
@@ -764,6 +816,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     closeViewer();
     return () => viewerReads.retire();
   }, [closeViewer, sessionId, viewerReads]);
+  React.useEffect(() => setTurnDiff(null), [sessionId]);
 
   /**
    * Click-through from a changed-file row to the file browser.
@@ -931,6 +984,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onCompact={paintOnly ? noop : () => dispatch(() => actions.compact())}
                 latestCheckpoint={latestCheckpoint}
                 modelLabel={slice.head?.modelSelection.model ?? session.model ?? null}
+                goal={threadGoal}
+                goalHeldForUpdate={goalHeldForUpdate}
+                goalActions={goalActionList}
+                goalActionsNote={goalNote}
+                onGoalAction={paintOnly ? noop : sendGoalAction}
               />
             </div>
             {/* The dock overlaps the composer by 17px so the two read as ONE
@@ -983,6 +1041,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 accountOptions={accountOptions}
                 accountId={chatAccountSelectionId(threadAccountId)}
                 accountSwitchEnabled={accountSwitchEnabled}
+                accountSwitchRefusal={accountSwitchRefusal}
                 isTurnActive={!paintOnly && turnActive}
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
                 queue={slice.queue}
@@ -1048,12 +1107,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           <div className="min-h-0 flex-1 overflow-auto">
             {viewer?.error ? (
               <p className="px-4 py-6 text-sm text-danger">{viewer.error}</p>
-            ) : viewer?.kind === "diff" ? (
-              <DiffView
-                diff={viewer.diff ?? ""}
-                loading={viewer.loading}
-                emptyLabel="This turn changed no files."
-              />
             ) : (
               <FullOutputPane
                 loading={viewer?.loading ?? false}
@@ -1064,6 +1117,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           </div>
         </div>
       </Modal>
+      <TurnDiffModal request={turnDiff} onClose={closeTurnDiff} />
     </div>
   );
 }

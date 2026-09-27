@@ -16,6 +16,7 @@ import {
   providersStore,
   refreshProvider,
   resetProvidersStore,
+  sanitizeProviderSnapshot,
   setProviderSideEffects
 } from "./providers";
 import type { AgentChatTransport } from "./transport";
@@ -368,5 +369,76 @@ describe("R6 #11 — a provider row from an older host is repaired, never truste
       rows.map((row) => row.id),
       ["codex"]
     );
+  });
+});
+
+describe("goals §8.1 — `capabilities.goals` is validated field-wise; a malformed block is absent", () => {
+  const withGoals = (goals: unknown) =>
+    sanitizeProviderSnapshot({ id: "codex", refIds: ["codex"], capabilities: { ...capabilities, goals } })
+      ?.capabilities.goals;
+
+  it("keeps each adapter's block as the host wrote it (goals §4.5)", () => {
+    for (const block of [
+      { command: "provider", actions: ["continue", "clear"], continuesAcrossTurns: false },
+      { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true },
+      { command: "provider", actions: ["resume", "clear"], continuesAcrossTurns: false }
+    ]) {
+      assert.deepEqual(withGoals(block), block);
+    }
+  });
+
+  it("absent stays absent: no goal surface (OpenCode, and every host that predates goals)", () => {
+    const row = sanitizeProviderSnapshot({ id: "opencode", refIds: ["opencode"], capabilities });
+    assert.ok(row);
+    assert.equal("goals" in row.capabilities, false);
+    assert.equal(withGoals(undefined), undefined);
+  });
+
+  it("a block it cannot read is dropped whole — never half-trusted", () => {
+    for (const broken of [
+      null,
+      "host",
+      [],
+      { actions: ["clear"], continuesAcrossTurns: true },
+      { command: "cli", actions: ["clear"], continuesAcrossTurns: true },
+      { command: "host", continuesAcrossTurns: true },
+      { command: "host", actions: "clear", continuesAcrossTurns: true },
+      { command: "host", actions: ["clear"] },
+      { command: "host", actions: ["clear"], continuesAcrossTurns: "yes" }
+    ]) {
+      const row = sanitizeProviderSnapshot({
+        id: "codex",
+        refIds: ["codex"],
+        capabilities: { ...capabilities, goals: broken }
+      });
+      assert.ok(row, "the provider row itself survives");
+      assert.equal("goals" in row.capabilities, false, JSON.stringify(broken));
+      assert.equal(row.capabilities.showPlanModeToggle, true, "the rest of the block is untouched");
+    }
+  });
+
+  it("drops an action it does not know rather than the whole block — a newer host may add one", () => {
+    assert.deepEqual(
+      withGoals({
+        command: "host",
+        actions: ["pause", "edit", 7, null, "clear", "pause"],
+        continuesAcrossTurns: true
+      }),
+      { command: "host", actions: ["pause", "clear"], continuesAcrossTurns: true }
+    );
+  });
+
+  it("a row from the catalog read is repaired the same way", async () => {
+    await loadProviders(
+      transportServing([
+        provider({
+          capabilities: { ...capabilities, goals: { command: "host" } } as unknown as AdapterCapabilities
+        })
+      ]),
+      { force: true }
+    );
+    const [row] = providersStore.getState().providers;
+    assert.ok(row);
+    assert.equal(row.capabilities.goals, undefined);
   });
 });

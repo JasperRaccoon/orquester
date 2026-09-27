@@ -968,3 +968,192 @@ describe("an OpenCode child's own drill-in lists no spawn row for itself (item 4
     assert.ok(deriveWorkLogEntries(rows).some((entry) => entry.agentSpawn?.agentTaskIds.includes(CHILD)));
   });
 });
+
+describe("goal rows (goals §8.4)", () => {
+  const goal = { objective: "Make CI green", status: "active" };
+  const goalRow = (payload: unknown, summary: string, tone: "info" | "error" = "info") =>
+    activity("goal.updated", payload, { tone, summary, turnId: "t1" });
+
+  it("a goal update is a marker entry carrying its change, under the row's own summary", () => {
+    const entry = workLogEntryFromActivity(
+      goalRow({ goal: { ...goal, rounds: 2 }, change: "checked" }, "Goal check 2: not met — lint fails")
+    );
+    assert.equal(entry.label, "Goal check 2: not met — lint fails");
+    assert.deepEqual(entry.goal, { change: "checked", objective: "Make CI green", rounds: 2 });
+    assert.equal(entry.tone, "info");
+  });
+
+  it("an ended goal's marker carries what it cost, read off the goal that ended", () => {
+    const entry = workLogEntryFromActivity(
+      goalRow(
+        {
+          goal: null,
+          change: "failed",
+          previous: { ...goal, status: "failed", rounds: 5, elapsedMs: 60_000, lastCheck: "impossible" }
+        },
+        "Goal can't be met: impossible",
+        "error"
+      )
+    );
+    assert.deepEqual(entry.goal, {
+      change: "failed",
+      objective: "Make CI green",
+      rounds: 5,
+      elapsedMs: 60_000
+    });
+    assert.equal(entry.tone, "error");
+  });
+
+  it("drops `progress` from the work log and keeps every other change", () => {
+    const rows = [
+      goalRow({ goal, change: "set" }, "Goal set: Make CI green"),
+      goalRow({ goal: { ...goal, phase: "executing" }, change: "progress" }, "Goal progress"),
+      goalRow({ goal: { ...goal, status: "paused" }, change: "paused" }, "Goal paused"),
+      goalRow({ goal: null, change: "cleared", previous: goal }, "Goal cleared: Make CI green")
+    ];
+    assert.deepEqual(
+      deriveWorkLogEntries(rows).map((entry) => entry.label),
+      ["Goal set: Make CI green", "Goal paused", "Goal cleared: Make CI green"]
+    );
+  });
+
+  it("keeps a goal row it cannot read as the generic row, with its summary (goals §9)", () => {
+    const [entry] = deriveWorkLogEntries([
+      goalRow({ goal: null, change: "renamed" }, "Goal renamed")
+    ]);
+    assert.ok(entry, "never a silent drop");
+    assert.equal(entry.label, "Goal renamed");
+    assert.equal(entry.goal, undefined, "not a marker: nothing about it can be trusted");
+  });
+
+  it("a host `/goal` answer and a failed goal command are generic info and error rows", () => {
+    const [status, failed] = deriveWorkLogEntries([
+      activity("goal.status", { summary: "Goal active: Make CI green" }, {
+        tone: "info",
+        summary: "Goal active: Make CI green"
+      }),
+      activity("goal.command.failed", { detail: "no goal exists" }, {
+        tone: "error",
+        summary: "Goal command failed"
+      })
+    ]);
+    assert.equal(status?.label, "Goal active: Make CI green");
+    assert.equal(status?.tone, "info");
+    assert.equal(status?.goal, undefined);
+    assert.equal(failed?.tone, "error");
+    assert.equal(failed?.detail, "no goal exists", "the provider's own message rides the row");
+    assert.equal(failed?.goal, undefined);
+  });
+});
+
+describe("a re-emitted assistant message in an old log (§7.3)", () => {
+  // Hosts before the pre-turn-stream fix flushed a CLI-started Claude turn's
+  // opening paragraph AGAIN at `result`, under a new message id (live thread
+  // 19976137, seq 38664/38963). `events.ndjson` is never rewritten, so those
+  // logs keep the copy.
+  const opening = "All checks are now clean. I'll close out the ledger.";
+  // Only a Claude thread can hold such a copy, so only a Claude projection asks
+  // for the repair; the store sets it from the thread head's adapter.
+  const repair = { dropRepeatedAssistantMessages: true } as const;
+
+  it("drops the turn's last message when it repeats the turn's opening one, word for word", () => {
+    const items = [
+      message("user", "go"),
+      message("assistant", opening, { turnId: "t1", id: "m-open" }),
+      activity("tool.completed", { itemType: "command_execution", command: "ls" }, { turnId: "t1" }),
+      message("assistant", "Goal tracking is built.", { turnId: "t1", id: "m-final" }),
+      message("assistant", opening, { turnId: "t1", id: "m-copy" })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m1", "m-open", "m-final"],
+      "the first occurrence stays where it was said; the copy is gone"
+    );
+  });
+
+  it("keeps the same words in another turn, and a repeat that is still streaming", () => {
+    const items = [
+      message("assistant", "Done.", { turnId: "t1", id: "m-a" }),
+      message("assistant", "Done.", { turnId: "t2", id: "m-b" }),
+      message("assistant", "Done.", { turnId: "t2", id: "m-c", streaming: true })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-a", "m-b", "m-c"]
+    );
+  });
+
+  it("drops only a copy of the turn's OPENING message, at its end: a goal run's rounds may end on the same words", () => {
+    // A Claude goal run is one turn of many rounds; two of them can end "All checks pass." Dropping
+    // the later one would make the round before it the turn's answer. Only the opening paragraph was
+    // ever re-emitted, and its copy still goes.
+    const items = [
+      message("assistant", "Working through the failing checks.", { turnId: "t1", id: "m-open" }),
+      message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-1" }),
+      activity("goal.updated", { goal: { objective: "Make CI green", status: "active", rounds: 1 }, change: "checked" }, { turnId: "t1" }),
+      message("assistant", "All checks pass.", { turnId: "t1", id: "m-round-2" }),
+      message("assistant", "Working through the failing checks.", { turnId: "t1", id: "m-copy" })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-open", "m-round-1", "m-round-2"]
+    );
+  });
+
+  it("a repeat of the opening that is not the turn's last message is the agent's own words, and stays", () => {
+    // The copy was flushed at `result`: nothing of its turn ever follows it. A view that starts
+    // mid-turn compares with its own first message, so a repeat there must also be the last.
+    const items = [
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-first-in-view" }),
+      activity("tool.completed", { itemType: "command_execution", command: "npm test" }, { turnId: "t1" }),
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-again" }),
+      message("assistant", "All green: 212 passing.", { turnId: "t1", id: "m-answer" }),
+      message("assistant", "Running the tests again.", { turnId: "t2", id: "m-next-turn" }),
+      message("assistant", "Running the tests again.", { turnId: "t2", id: "m-streaming", streaming: true })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-first-in-view", "m-again", "m-answer", "m-next-turn", "m-streaming"],
+      "a repeat followed by more of its turn stays, and so does one whose turn is still streaming"
+    );
+  });
+
+  it("leaves every other provider's repeats alone: only a Claude log holds re-emitted copies", () => {
+    // Codex narration can legitimately say "Running the tests again." twice in
+    // one turn; nothing ever re-emitted a Codex, OpenCode or Grok message.
+    const items = [
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-a" }),
+      message("assistant", "Running the tests again.", { turnId: "t1", id: "m-b" })
+    ];
+    assert.deepEqual(splitThreadItems(items).messages.map((row) => row.id), ["m-a", "m-b"]);
+    assert.deepEqual(
+      deriveTimelineEntriesFromItems(items, null).messages.map((row) => row.id),
+      ["m-a", "m-b"]
+    );
+  });
+
+  it("a projection that starts repairing is rebuilt, not served from the unrepaired memo", () => {
+    const items = [
+      message("assistant", "Done.", { turnId: "t1", id: "m-a" }),
+      message("assistant", "Done.", { turnId: "t1", id: "m-b" })
+    ];
+    const plain = deriveTimelineEntriesFromItems(items, null);
+    const repaired = deriveTimelineEntriesFromItems(items, plain, repair);
+    assert.deepEqual(repaired.messages.map((row) => row.id), ["m-a"]);
+  });
+
+  it("compares one author's messages only: a subagent saying the parent's words is not a copy", () => {
+    const items = [
+      message("assistant", "Reading the brief.", { turnId: "t1", id: "m-parent" }),
+      message("assistant", "Reading the brief.", { turnId: "t1", id: "m-child", agentId: "ag1" })
+    ];
+    assert.deepEqual(
+      splitThreadItems(items, undefined, repair).messages.map((row) => row.id),
+      ["m-parent"]
+    );
+    assert.deepEqual(
+      splitThreadItems(itemsForAgent(items, "ag1"), "ag1", repair).messages.map((row) => row.id),
+      ["m-child"]
+    );
+  });
+});

@@ -11,10 +11,10 @@
  * `tool-progress:<taskId>`), streamed messages, message-mode questions
  * answered much later, approvals, compaction markers (and, in the legacy
  * tables only, an older log's `thread.state.changed` rows), turns that settle
- * or stop, and rewinds — so every retention class trims many times; and, in
- * the long-call tables only, tool calls and background shells that stay open
- * over many steps while they stream output chunks. The same seed always
- * writes the same log.
+ * or stop, rewinds, and — in the goal table only — provider goal updates, so
+ * every retention class trims many times; and, in the long-call tables only,
+ * tool calls and background shells that stay open over many steps while they
+ * stream output chunks. The same seed always writes the same log.
  */
 
 import { isDeepStrictEqual } from "node:util";
@@ -33,6 +33,7 @@ import {
 import type { ThreadFoldState } from "./fold.ts";
 import { deserializeFoldState, serializeFoldState } from "./fold-snapshot.ts";
 import { openWorkOf } from "./open-work.ts";
+import { GOAL_ACTIVITY_KIND } from "./goal.ts";
 import type { ThreadActivityItem, ThreadItem } from "./thread.ts";
 import {
   activity,
@@ -114,7 +115,13 @@ export type FleetAction =
   /** A streamed output chunk (`tool.output`) of an open call, usually one opened last. */
   | "chunk"
   /** An open call completes or is denied; a shell's call ends with its task. */
-  | "closeCall";
+  | "closeCall"
+  /**
+   * A provider goal update (goals §4.4): mostly one the fold adopts, sometimes
+   * a cleared goal, sometimes a row it must append without adopting. In no
+   * weight table but the goal one, so every other log stays what it was.
+   */
+  | "goal";
 
 export interface FleetLogOptions {
   readonly seed: number;
@@ -533,6 +540,35 @@ export function fleetLog(options: FleetLogOptions): DomainEvent[] {
         );
         break;
       }
+      case "goal": {
+        counter += 1;
+        const roll = random();
+        const statuses = ["active", "active", "paused", "blocked", "budget-limited", "complete"];
+        const payload =
+          roll < 0.15
+            ? { goal: null, change: "cleared", previous: { objective: `goal ${counter % 4}`, status: "active" } }
+            : roll < 0.3
+              ? // Does not parse: the row is appended, the goal stays.
+                { goal: { objective: "", status: "active" }, change: "set" }
+              : {
+                  goal: {
+                    objective: `goal ${counter % 4}`,
+                    status: statuses[Math.floor(random() * statuses.length)],
+                    rounds: Math.floor(random() * 4),
+                    ...(random() < 0.5 ? { lastCheck: `not yet ${step}` } : {}),
+                    ...(random() < 0.3 ? { tokenBudget: null } : {})
+                  },
+                  change: random() < 0.5 ? "set" : "checked"
+                };
+        appendRow(
+          activity(GOAL_ACTIVITY_KIND, payload, {
+            id: `goal-${counter}`,
+            // Some rows belong to no turn: a rewind never removes them.
+            turnId: random() < 0.2 ? null : turnId
+          })
+        );
+        break;
+      }
       case "chunk": {
         // Usually one of the calls opened last — a few streaming commands among
         // many a crash left open and quiet — else any open call.
@@ -706,6 +742,16 @@ export const LEAN_PARENT_WEIGHTS: Partial<Record<FleetAction, number>> = {
   agentRow: 1,
   message: 1,
   delta: 1
+};
+
+/**
+ * {@link LEAN_PARENT_WEIGHTS} with provider goal updates: goals set, checked,
+ * cleared and set again, rows the fold must not adopt, goal rows aged out by
+ * retention and removed by rewinds.
+ */
+export const GOAL_WEIGHTS: Partial<Record<FleetAction, number>> = {
+  ...LEAN_PARENT_WEIGHTS,
+  goal: 1.5
 };
 
 /**
