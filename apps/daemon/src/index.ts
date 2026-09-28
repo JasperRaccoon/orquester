@@ -116,6 +116,10 @@ import { WorkflowSecretsService } from "./workflows/secrets.ts";
 import { FileRunStore } from "./workflows/run-store.ts";
 import { WorkflowStateStore } from "./workflows/state-store.ts";
 import { registerWorkflowRoutes } from "./workflows/routes.ts";
+import { AgentProfileService, publishAgentProfileEvents } from "./agent-profile/service.ts";
+import { registerAgentProfileRoutes } from "./agent-profile/routes.ts";
+import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
+import { resolveAgentHomes } from "./agent-profile/homes.ts";
 import type { ValidationCatalog } from "./workflows/agent/validation-catalog.ts";
 import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
 import { createInternalDaemonApi } from "./chat-client/index.ts";
@@ -166,6 +170,7 @@ import {
   type WorkspacesConfig,
   accountsConfigPath,
   agentAccountsDir,
+  agentProfileImportsDir,
   agentAccountsFile,
   appConfigPath,
   browserProfilesDir,
@@ -878,6 +883,40 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // included, as `savedPrompt.upserted` (the whole prompt) / `savedPrompt.deleted`.
   publishSavedPromptEvents(savedPrompts, broadcaster);
 
+  // ---- Agent profile (agent profile spec §4.2) ------------------------------------------------
+  // The right rail's manager of each agent CLI's own global config. Built here, after
+  // `registry.init()` (an adapter takes its CLI's resolved bin) and `agentAccounts.init()` (Codex
+  // writes hook trust for every managed home). Its watchers are armed once the transports serve
+  // (`agentProfile.start()` below) and closed in `stop()`; changes go out on "agent-profile".
+  const agentProfileHomes = resolveAgentHomes(env, resolved.vars.userhome);
+  const agentProfile = new AgentProfileService({
+    adapters: createAgentProfileAdapters({
+      homes: agentProfileHomes,
+      appdir: paths.baseDir,
+      bin: (agent) => registry.get(agent)?.resolvedBin ?? null,
+      // OpenCode has no managed accounts; the other three list their family's homes.
+      accountHomes: async (agent) =>
+        agent === "opencode"
+          ? []
+          : agentAccounts
+              .list()
+              .accounts.filter((account) => account.agent === agent)
+              .map((account) => agentAccounts.homePath(agent, account.id)),
+      logger: console,
+      now: () => new Date()
+    }),
+    // Read per call: an install or update from Settings > Agents patches the entry in place.
+    agentInfo: (agent) => {
+      const entry = registry.get(agent);
+      const installed = Boolean(entry?.enabled && entry.resolvedBin);
+      return installed && entry?.version ? { installed, version: entry.version } : { installed };
+    },
+    homes: agentProfileHomes,
+    logger: console
+  });
+  publishAgentProfileEvents(agentProfile, broadcaster);
+  // ---- end agent profile ----------------------------------------------------------------------
+
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
   // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
   // (no names, no values). Run events are published by the engine itself.
@@ -959,6 +998,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
   const services: Services = {
     registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    agentProfile,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
@@ -1058,6 +1098,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
 
   await startHttp();
+  // Agent profile change detection (fs watchers on each installed agent's config), after boot.
+  agentProfile.start();
 
   const stop = async () => {
     usage.stop();
@@ -1068,6 +1110,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
+    // Agent profile: its watchers and debounce timers, then each adapter's long-lived helpers.
+    await agentProfile.stop().catch((error) => console.error("Agent profile stop failed", error));
     agentAccounts.stopRefresher();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
@@ -1146,6 +1190,8 @@ interface Services {
   recentProjects: RecentProjectsService;
   /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
   savedPrompts: SavedPromptsService;
+  /** Each agent CLI's own global config (agent profile spec §4): the right rail's Agent profile. */
+  agentProfile: AgentProfileService;
   /** Automated workflow definitions (workflows spec §3.1). */
   workflows: WorkflowService;
   /** Workflow secrets — names out, values only to the engine (§5.7). */
@@ -3673,6 +3719,13 @@ export function createServer(
         ? { path: join(resolved.workspacesDir, described.workspace, described.name), workspace: described.workspace }
         : null;
     }
+  });
+
+  // Agent profile (agent profile spec §8): each agent CLI's global config. Both transports; the
+  // bearer hook above gates HTTP. MCP secret values never leave the daemon.
+  registerAgentProfileRoutes(app, {
+    service: services.agentProfile,
+    importsDir: agentProfileImportsDir(resolved.baseDir)
   });
 
   // Web Push (PWA attention notifications). Allowed on both transports like
