@@ -615,7 +615,7 @@ test("plugins: toggle through [plugins] lists, install and uninstall through gro
   const cli = (await calls(fx)).filter((call) => call.args[0] === "plugin").map((call) => call.args);
   assert.deepEqual(cli, [
     ["plugin", "install", "gdrive@mkt", "--trust"],
-    ["plugin", "uninstall", "demo-plug", "--confirm"]
+    ["plugin", "uninstall", "demo-plug"]
   ]);
 });
 
@@ -749,4 +749,142 @@ test("watchPaths names every file and directory the snapshot reads", async (t) =
   ]) {
     assert.ok(paths.includes(expected), expected);
   }
+});
+
+test("a plugin installed together with others from one source is not deletable alone (grok would uninstall them all)", async (t) => {
+  const fx = await setup(t);
+  // What `grok plugin install <repo>` of a repo holding two plugins records (observed with 1.0.34).
+  const repoPath = join(fx.homes.grokHome, "installed-plugins/multi-ae6d97ee");
+  await write(
+    join(fx.homes.grokHome, "installed-plugins/registry.json"),
+    JSON.stringify({
+      version: 1,
+      repos: {
+        "demo-plug-f13f37e3": { path: fx.demoPluginPath, plugins: { "demo-plug": { version: "1.2.3" } } },
+        "multi-ae6d97ee": { path: repoPath, plugins: { alpha: { version: "1.0.0" }, beta: { version: "1.0.0" } } }
+      }
+    })
+  );
+  const state = JSON.parse(await readFile(fx.statePath, "utf8"));
+  state.inspect.plugins.push(
+    { name: "alpha", scope: "user", path: join(repoPath, "alpha"), enabled: true },
+    { name: "beta", scope: "user", path: join(repoPath, "beta"), enabled: true }
+  );
+  await writeFile(fx.statePath, JSON.stringify(state));
+
+  const alpha = await item(fx, "plugin:alpha");
+  assert.equal(alpha.deletable, false);
+  assert.ok(alpha.warnings.some((w) => w.code === "shared-install" && w.message.includes("beta")));
+  assert.equal((await item(fx, "plugin:beta")).deletable, false);
+  assert.equal((await item(fx, "plugin:demo-plug")).deletable, true, "a plugin alone in its install stays deletable");
+  await rejects(fx.adapter.remove(alpha.id, alpha.revision), "NOT_DELETABLE");
+  assert.deepEqual((await calls(fx)).filter((call) => call.args[0] === "plugin"), [], "grok was never asked to uninstall");
+  // Its switch still works, and affects it alone.
+  await fx.adapter.setEnabled(alpha.id, alpha.revision, true);
+  assert.deepEqual((parseToml(await config(fx)).plugins as Record<string, unknown>).enabled, ["demo-plug", "feature-dev", "alpha"]);
+});
+
+test("an MCP server's revision cannot be brute-forced into its secrets, yet still moves when one changes", async (t) => {
+  const fx = await setup(t);
+  const serena = await item(fx, "mcp:serena");
+  const table = (parseToml(await config(fx)).mcp_servers as Record<string, unknown>).serena;
+  // The revision is not a plain hash of the table: a guess at the secret could be checked against it.
+  assert.notEqual(serena.revision, contentHash({ content: table, enabled: true }));
+  await writeFile(join(fx.homes.grokHome, "config.toml"), (await config(fx)).replace(SERENA_SECRET, "rotated-secret-value"));
+  assert.notEqual((await item(fx, "mcp:serena")).revision, serena.revision);
+});
+
+test("create with replace over a symlinked skill or command replaces the link, never the shared target", async (t) => {
+  const fx = await setup(t);
+  // The owner linked Claude's skill and command into Grok's own directories.
+  const claudeSkill = join(fx.homes.claudeDir, "skills/claude-skill");
+  const claudeSkillText = await readFile(join(claudeSkill, "SKILL.md"), "utf8");
+  await write(join(claudeSkill, "reference.md"), "ref\n");
+  await symlink(claudeSkill, join(fx.homes.grokHome, "skills/linked-skill"));
+  const claudeCommand = join(fx.homes.claudeDir, "commands/shared.md");
+  await write(claudeCommand, "---\ndescription: Claude's\n---\nClaude's text\n");
+  await symlink(claudeCommand, join(fx.homes.grokHome, "commands/shared.md"));
+
+  await fx.adapter.create({ kind: "skill", document: { name: "linked-skill", frontmatter: { description: "Grok's" }, body: "Grok's\n" } }, { onConflict: "replace" });
+  await fx.adapter.create({ kind: "command", document: { name: "shared", frontmatter: {}, body: "Grok's command\n" } }, { onConflict: "replace" });
+
+  assert.equal(await readFile(join(claudeSkill, "SKILL.md"), "utf8"), claudeSkillText, "Claude's skill untouched");
+  assert.equal(await readFile(claudeCommand, "utf8"), "---\ndescription: Claude's\n---\nClaude's text\n", "Claude's command untouched");
+  const skillDir = join(fx.homes.grokHome, "skills/linked-skill");
+  assert.equal((await lstat(skillDir)).isDirectory(), true, "a real directory now");
+  assert.deepEqual(await readdir(skillDir), ["SKILL.md"], "no file of the old skill lingers");
+  assert.equal(await readFile(join(skillDir, "SKILL.md"), "utf8"), "---\nname: linked-skill\ndescription: Grok's\n---\nGrok's\n");
+  assert.equal((await lstat(join(fx.homes.grokHome, "commands/shared.md"))).isFile(), true);
+  assert.equal(await readFile(join(fx.homes.grokHome, "commands/shared.md"), "utf8"), "Grok's command\n");
+});
+
+test("turning off a hook whose identical copy is already stashed replaces that copy instead of refusing", async (t) => {
+  const fx = await setup(t);
+  const { itemIds } = await fx.adapter.create({ kind: "hook", hook: { event: "SessionStart", command: "echo hi" } }, { onConflict: "fail" });
+  const id = itemIds[0] as string;
+  await fx.adapter.setEnabled(id, (await item(fx, id)).revision, false);
+  // Put back by hand: the live handler hides its stashed twin.
+  const profilePath = join(fx.homes.grokHome, "hooks/profile.json");
+  const live = { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo hi" }] }] } };
+  await writeFile(profilePath, `${JSON.stringify(live, null, 2)}\n`);
+  assert.equal((await item(fx, id)).enabled, true);
+  await fx.adapter.setEnabled(id, (await item(fx, id)).revision, false);
+  assert.deepEqual(JSON.parse(await readFile(profilePath, "utf8")), { hooks: {} });
+  assert.equal((await fx.stash.list("grok")).length, 1);
+  await fx.adapter.setEnabled(id, (await item(fx, id)).revision, true);
+  assert.deepEqual(JSON.parse(await readFile(profilePath, "utf8")), live);
+});
+
+test("an inspect still running when a write lands is not cached: the next snapshot sees the write", async (t) => {
+  const fx = await setup(t);
+  // A runCli whose answers the test releases one by one.
+  const pending: { args: readonly string[]; answer: (stdout: string) => void }[] = [];
+  const arrived: (() => void)[] = [];
+  const nextCall = (): Promise<void> => new Promise((resolve) => arrived.push(resolve));
+  const adapter = new GrokProfileAdapter(
+    {
+      homes: fx.homes,
+      appdir: join(fx.root, "appdir"),
+      bin: "grok",
+      accountHomes: async () => [],
+      logger: { info: () => undefined, warn: () => undefined },
+      now: () => new Date(fx.clock.now)
+    },
+    {
+      backups: new ProfileBackups({ dir: agentProfileBackupsDir(join(fx.root, "appdir")) }),
+      stash: fx.stash,
+      runCli: (run) =>
+        new Promise((resolve) => {
+          pending.push({ args: run.args, answer: (stdout) => resolve({ code: 0, signal: null, stdout, stderr: "", timedOut: false }) });
+          arrived.shift()?.();
+        })
+    }
+  );
+  const before = JSON.parse(await readFile(fx.statePath, "utf8")).inspect;
+  const after = { ...before, plugins: [...before.plugins, { name: "gdrive", scope: "user", path: join(fx.homes.grokHome, "installed-plugins/gdrive-1"), enabled: true }] };
+  const answerNext = async (stdout: string): Promise<readonly string[]> => {
+    if (pending.length === 0) await nextCall();
+    const call = pending.shift()!;
+    call.answer(stdout);
+    return call.args;
+  };
+
+  // An install loads (one inspect), then runs grok for a while…
+  const install = adapter.create({ kind: "plugin", plugin: { plugin: "gdrive", marketplace: "mkt" } }, { onConflict: "fail" });
+  assert.deepEqual(await answerNext(JSON.stringify(before)), ["inspect", "--json"]);
+  if (pending.length === 0) await nextCall();
+  // …while a snapshot (its cache expired) starts another inspect that answers from before the install.
+  fx.clock.now += GROK_INSPECT_TTL_MS;
+  const stale = adapter.snapshot();
+  if (pending.length < 2) await nextCall();
+  assert.deepEqual(pending.map((call) => call.args[0]), ["plugin", "inspect"]);
+  pending.shift()!.answer("Installed 1 plugin(s) from mkt: gdrive\n");
+  await install;
+  pending.shift()!.answer(JSON.stringify(before));
+  await stale;
+
+  // The next snapshot must not reuse that pre-install answer.
+  const fresh = adapter.snapshot();
+  assert.deepEqual(await answerNext(JSON.stringify(after)), ["inspect", "--json"]);
+  assert.ok((await fresh).items.some((entry) => entry.id === "plugin:gdrive"));
 });

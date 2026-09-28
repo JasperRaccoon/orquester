@@ -112,6 +112,49 @@ test("a file that does not parse is refused, never overwritten", async (t) => {
     (error) => error instanceof AgentProfileError && error.code === "CONFIG_UNREADABLE"
   );
   assert.equal(await readFile(file, "utf8"), "{ not json");
+
+  // V8's SyntaxError quotes the text around a bad token: a hand-broken env value never reaches the message.
+  const broken = '{"mcpServers": {"jira": {"env": {"JIRA_API_TOKEN": sk-LEAKED-PLACEHOLDER}}}}';
+  await writeFile(file, broken);
+  await assert.rejects(
+    updateClaudeJsonMcpServers(file, (servers) => ((servers.x = { command: "x" }), undefined), { backups, agent: "claude" }),
+    (error) => {
+      assert.ok(error instanceof AgentProfileError && error.code === "CONFIG_UNREADABLE");
+      assert.ok(!error.message.includes("sk-LEAK"), error.message);
+      assert.match(error.message, /not valid JSON/);
+      return true;
+    }
+  );
+  assert.equal(await readFile(file, "utf8"), broken);
+});
+
+test("a lock taken over before the write is a conflict — never proper-lockfile's uncaught throw — and nothing is written", async (t) => {
+  const { file, backups } = await scratch(t);
+  const text = `${JSON.stringify(LIVE_STATE, null, 2)}\n`;
+  await writeFile(file, text);
+  // The lock directory "disappears" (another process judged it stale and took it):
+  // proper-lockfile's refresh timer stats it, and reports the lock compromised.
+  let gone = false;
+  const takenOverFs = {
+    ...fs,
+    stat: (path: string, callback: (error: NodeJS.ErrnoException | null, stats?: fs.Stats) => void) =>
+      gone && path.endsWith(".lock") ? callback(Object.assign(new Error("gone"), { code: "ENOENT" })) : fs.stat(path, callback)
+  };
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  await assert.rejects(
+    updateClaudeJsonMcpServers(
+      file,
+      (servers) => {
+        servers.jira = { type: "stdio", command: "node", args: [], env: {} };
+        gone = true;
+        t.mock.timers.tick(10_000);
+      },
+      { backups, agent: "claude", lockOptions: { fs: takenOverFs } }
+    ),
+    (error) => error instanceof AgentProfileError && error.code === "PROFILE_CONFLICT"
+  );
+  assert.equal(await readFile(file, "utf8"), text);
+  assert.deepEqual(await backups.list("claude"), []);
 });
 
 test("a missing file is created 0600 holding only mcpServers", async (t) => {

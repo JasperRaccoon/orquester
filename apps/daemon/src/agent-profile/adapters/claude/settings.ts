@@ -11,8 +11,10 @@
  *
  * Keys touched (and only field-wise):
  * - `deniedMcpServers` — `{serverName}` entries (MCP "off");
- * - `skillOverrides.<name>` — `"off"` (skill "off"; "on" deletes the key);
- * - `enabledPlugins.<id>` — `true | false` (plugin toggle);
+ * - `skillOverrides.<name>` — `"off"` (skill "off"; "on" deletes the key, or
+ *   writes back the `name-only` / `user-invocable-only` value "off" replaced);
+ * - `enabledPlugins.<id>` — `true | false` (plugin toggle; "on" writes back a
+ *   version-constraint list "off" replaced);
  * - `hooks.<Event>[group].hooks[handler]` — user hooks.
  */
 
@@ -26,9 +28,34 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Parses settings text; throws an `Error` naming the problem when it is not a JSON object. */
+/**
+ * A JSON parser's complaint without the text it quotes. V8's `SyntaxError`
+ * can echo a slice of the file (`Unexpected token 's', ..."TOKEN": sk-…"...`),
+ * and settings.json and `~/.claude.json` hold secrets (`env`, MCP env and
+ * headers): only the position may reach a `fileErrors` entry or an error.
+ */
+export function safeJsonError(error: unknown): string {
+  if (!(error instanceof SyntaxError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  const at = /line (\d+) column (\d+)/.exec(error.message);
+  if (at !== null) return `not valid JSON (line ${at[1]}, column ${at[2]})`;
+  const position = /position (\d+)/.exec(error.message);
+  return position !== null ? `not valid JSON (at character ${position[1]})` : "not valid JSON";
+}
+
+/** `JSON.parse`, throwing only {@link safeJsonError}'s text. */
+export function parseJsonText(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(safeJsonError(error));
+  }
+}
+
+/** Parses settings text; throws an `Error` naming the problem (never quoting the file) when it is not a JSON object. */
 export function parseSettings(text: string): SettingsDoc {
-  const parsed: unknown = JSON.parse(text);
+  const parsed = parseJsonText(text);
   if (!isRecord(parsed)) {
     throw new Error("the top level is not a JSON object");
   }
@@ -103,10 +130,16 @@ export function skillOverride(doc: SettingsDoc | null, name: string): string | u
   return typeof value === "string" ? value : undefined;
 }
 
-/** Off writes `"off"`; on deletes the key (not `"on"`), and an emptied map. */
-export function setSkillOverride(doc: SettingsDoc, name: string, enabled: boolean): void {
+/**
+ * Off writes `"off"`; on deletes the key (not `"on"`), and an emptied map —
+ * or, given `restore` (a `name-only` / `user-invocable-only` value the off
+ * replaced), writes that back.
+ */
+export function setSkillOverride(doc: SettingsDoc, name: string, enabled: boolean, restore?: string): void {
   const overrides = isRecord(doc.skillOverrides) ? { ...doc.skillOverrides } : {};
-  if (enabled) {
+  if (enabled && restore !== undefined) {
+    overrides[name] = restore;
+  } else if (enabled) {
     if (!(name in overrides)) return;
     delete overrides[name];
   } else {
@@ -138,9 +171,10 @@ export function isPluginEnabled(doc: SettingsDoc | null, id: string, defaultEnab
   return defaultEnabled !== false;
 }
 
-export function setPluginEnabled(doc: SettingsDoc, id: string, enabled: boolean): void {
+/** `value` is `false`, `true`, or a version-constraint list (which Claude reads as on). */
+export function setPluginEnabled(doc: SettingsDoc, id: string, value: boolean | unknown[]): void {
   const map = isRecord(doc.enabledPlugins) ? { ...doc.enabledPlugins } : {};
-  map[id] = enabled;
+  map[id] = value;
   doc.enabledPlugins = map;
 }
 

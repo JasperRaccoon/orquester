@@ -14,6 +14,7 @@
 import { lock, type LockOptions } from "proper-lockfile";
 import { profileErrors } from "../../errors.ts";
 import { type ProfileBackups, readTextIfExists, writeProfileFileVerified } from "../../infra/index.ts";
+import { isRecord, parseJsonText } from "./settings.ts";
 
 /** The lock settings Claude's own writers are compatible with (see the module header). */
 export const CLAUDE_JSON_LOCK_OPTIONS: LockOptions = {
@@ -24,13 +25,9 @@ export const CLAUDE_JSON_LOCK_OPTIONS: LockOptions = {
 
 export type ClaudeJsonDoc = Record<string, unknown>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Parses the file's text; throws an `Error` naming the problem when it is not a JSON object. */
+/** Parses the file's text; throws an `Error` naming the problem (never quoting the file) when it is not a JSON object. */
 export function parseClaudeJson(text: string): ClaudeJsonDoc {
-  const parsed: unknown = JSON.parse(text);
+  const parsed = parseJsonText(text);
   if (!isRecord(parsed)) {
     throw new Error("the top level is not a JSON object");
   }
@@ -72,7 +69,8 @@ export interface ClaudeJsonUpdateOptions {
  * leaves the servers unchanged. Answers whatever `mutate` answered.
  *
  * A file that does not parse is refused with 409 `CONFIG_UNREADABLE`; a lock
- * that cannot be taken in ~10 s is a 409 `PROFILE_CONFLICT`.
+ * that cannot be taken in ~10 s, or that was taken over before the write
+ * (compromised), is a 409 `PROFILE_CONFLICT`.
  */
 export async function updateClaudeJsonMcpServers<T>(
   path: string,
@@ -80,8 +78,19 @@ export async function updateClaudeJsonMcpServers<T>(
   options: ClaudeJsonUpdateOptions
 ): Promise<T> {
   let release: () => Promise<void>;
+  // proper-lockfile's default `onCompromised` THROWS from a timer — an
+  // uncaught exception that would end the daemon. Record it instead (as
+  // Claude's own writer logs it) and refuse to write.
+  let compromised = false;
   try {
-    release = await lock(path, { ...CLAUDE_JSON_LOCK_OPTIONS, lockfilePath: `${path}.lock`, ...options.lockOptions });
+    release = await lock(path, {
+      ...CLAUDE_JSON_LOCK_OPTIONS,
+      lockfilePath: `${path}.lock`,
+      ...options.lockOptions,
+      onCompromised: () => {
+        compromised = true;
+      }
+    });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ELOCKED") {
       throw profileErrors.conflict(`${path} stayed locked by a running Claude session. Try again in a moment.`);
@@ -102,6 +111,9 @@ export async function updateClaudeJsonMcpServers<T>(
     const result = mutate(servers);
     if (JSON.stringify(servers) === before) {
       return result;
+    }
+    if (compromised) {
+      throw profileErrors.conflict(`${path}'s lock was taken over by another process; nothing was written. Try again.`);
     }
     // Replace the one key in place: every other key, and their order, stays as parsed.
     const next: ClaudeJsonDoc = { ...doc, mcpServers: servers };
