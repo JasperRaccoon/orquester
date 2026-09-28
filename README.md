@@ -46,6 +46,7 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - Multiple managed Claude/Codex/Grok accounts — run different tabs under different subscriptions, with a default per agent.
 - Usage widget: rolling 5-hour and weekly quota gauges, reset countdowns, token counts and cost per day/model for Claude Code & Codex.
 - **Grok**: install xAI's **Grok Build** agent in one click, and link your Grok account with a device-code flow as a managed account — no API key, tokens stay on the host — with its weekly credit pool in the usage widget.
+- **Agent profile** (right rail): manage each agent's own global MCP servers, skills, plugins, marketplaces, hooks, slash commands and instruction file for Claude Code, Codex, Grok and OpenCode — add (write, import from Git, upload, or copy from another agent), edit, switch on/off and delete, without asking a session to edit config files. Writes go to the CLIs' native files and reach every managed account; secret env values never leave the host.
 
 ### 🌐 Browser tabs (Design Mode)
 - Per-project headless Chromium, screencast into a tab with full keyboard/mouse/touch forwarding and desktop ⇄ mobile viewport toggle.

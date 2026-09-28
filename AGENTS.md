@@ -23,7 +23,8 @@
 - **Agent host:** the separate process that runs chat-provider adapters and owns chat threads and their event logs.
 - **MCP:** the daemon's authenticated Model Context Protocol endpoint for external agents to operate chats, workflows, and related data; it does not provide terminal I/O.
 - **Workflow:** a daemon-owned graph of triggers and blocks that automates tasks within a project; a run is one execution of that graph.
-- **Right rail:** the side panel for saved prompts, chat history and checkpoints, and automated workflows.
+- **Right rail:** the side panel for saved prompts, chat history and checkpoints, automated workflows, and the agent profile.
+- **Agent profile:** the right-rail section that edits each agent CLI's own global config files (MCP servers, skills, plugins, marketplaces, hooks, commands, instruction file); the CLIs' files stay the only source of truth.
 
 ## Repository map
 
