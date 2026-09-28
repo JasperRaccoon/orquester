@@ -168,6 +168,12 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   private readonly recycleScheduled = new Set<string>();
   /** Every re-check and the server stop it started, until done (`recycleSettled`). */
   private readonly recycleWork = new Set<Promise<void>>();
+  /**
+   * Per thread: client operations running outside the prompt lock (`readThread`,
+   * and the start that brings a recycled thread back) — work a recycle must not
+   * stop the server under.
+   */
+  private readonly inFlight = new Map<string, number>();
 
   constructor(
     ctx: AdapterContext,
@@ -339,7 +345,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     if (
       // A reference no idle session accounts for: a probe, or a session starting.
       this.pool.refCount(projectDir) !== onServer.length ||
-      onServer.some(([, session]) => !session.isIdleForRecycle()) ||
+      onServer.some(([threadId, session]) => !session.isIdleForRecycle() || this.inFlight.has(threadId)) ||
       // The host has not taken the thread's latest events yet (a turn's end).
       this.queue.some((event) => threadIds.has(event.threadId))
     ) {
@@ -844,7 +850,11 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   }
 
   async interruptTurn(threadId: string, turnId?: string): Promise<void> {
-    await this.sessions.get(threadId)?.interruptTurn(turnId);
+    try {
+      await this.sessions.get(threadId)?.interruptTurn(turnId);
+    } finally {
+      this.noteSettled(threadId);
+    }
   }
 
   async respondToApproval(
@@ -866,15 +876,11 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   }
 
   async compact(threadId: string): Promise<void> {
-    try {
-      await this.require(threadId).compact();
-    } finally {
-      this.noteSettled(threadId);
-    }
+    await this.withSession(threadId, (session) => session.compact());
   }
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {
-    return await this.require(threadId).readThread();
+    return await this.withSession(threadId, (session) => session.readThread());
   }
 
   /**
@@ -907,15 +913,12 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     numTurns: number,
     target?: RollbackTarget
   ): Promise<ThreadSnapshot> {
-    const session = this.require(threadId);
-    if (!Number.isInteger(numTurns) || numTurns <= 0) {
-      throw new Error("OpenCode rollback needs a positive number of turns.");
-    }
-    try {
+    return await this.withSession(threadId, async (session) => {
+      if (!Number.isInteger(numTurns) || numTurns <= 0) {
+        throw new Error("OpenCode rollback needs a positive number of turns.");
+      }
       return await session.rollbackThread(numTurns, target);
-    } finally {
-      this.noteSettled(threadId);
-    }
+    });
   }
 
   async stopSession(threadId: string): Promise<void> {
@@ -939,6 +942,33 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     this.queueWaiters = [];
     for (const waiter of waiters) {
       waiter();
+    }
+  }
+
+  /**
+   * Runs `op` on the thread's live session. A thread whose idle session a
+   * server recycle let go of (agent profile §4.8) is brought back first, as
+   * `sendTurn`'s backstop does: the host calls `rollbackThread`, `compact` and
+   * `readThread` without an `ensureSession` of its own. The whole call counts
+   * as work in flight, so a recycle defers rather than stopping the server
+   * under it, and re-checks once it ends.
+   */
+  private async withSession<T>(threadId: string, op: (session: OpenCodeThreadSession) => Promise<T>): Promise<T> {
+    this.inFlight.set(threadId, (this.inFlight.get(threadId) ?? 0) + 1);
+    try {
+      const recycled = this.recycled.get(threadId);
+      if (!this.sessions.has(threadId) && recycled !== undefined) {
+        await this.startSession(recycled);
+      }
+      return await op(this.require(threadId));
+    } finally {
+      const left = (this.inFlight.get(threadId) ?? 1) - 1;
+      if (left > 0) {
+        this.inFlight.set(threadId, left);
+      } else {
+        this.inFlight.delete(threadId);
+      }
+      this.noteSettled(threadId);
     }
   }
 
