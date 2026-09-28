@@ -12,7 +12,7 @@
  * itself and nothing here can throw on what it reads.
  *
  * Stored under `orquester:right-rail` as
- * `{ "v": 1, "open": "prompts" | "history" | null, "width": <px> }`. (Earlier
+ * `{ "v": 1, "open": "prompts" | "history" | "workflows" | null, "width": <px> }`. (Earlier
  * bundles also wrote a `sheet` field, the mobile sheet's last tab: ignored now,
  * and gone at the next write.)
  * `v` is written for a future migration; this version reads any payload field
@@ -56,7 +56,7 @@ export const RIGHT_RAIL_DEFAULT_STATE: RightRailState = Object.freeze({
 });
 
 export function isRightRailPanelId(value: unknown): value is RightRailPanelId {
-  return value === "prompts" || value === "history";
+  return value === "prompts" || value === "history" || value === "workflows";
 }
 
 /* ── Clamps ─────────────────────────────────────────────────────────────── */
