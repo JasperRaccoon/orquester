@@ -25,6 +25,8 @@ import {
   derivePendingRequests,
   foldSubagentActivities,
   foldThread,
+  MESSAGE_RETENTION_LIMIT,
+  MESSAGE_RETENTION_SLACK,
   openWorkOf,
   THREAD_HISTORY_DEFAULT_TURNS,
   type ContinueAfterRestart,
@@ -3227,6 +3229,47 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     const second = await walkAsTheClient(host, index, threadId);
     assert.deepEqual(pagesHolding(second.pages, "user:note"), [], "then no page serves it");
     assertRewoundHistory(host.store, threadId, second.window, second.pages, ["r-2", "r-4"], new Set(["user:note"]));
+    await host.stop();
+  });
+
+  it("a page whose fold would evict a message beside its gap messages is served without its gap rows, and says so", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await providerTurn(host, threadId, "r-1", 560);
+    // More answers than a fold retains (2 000 plus its slack of 200), after r-1's last activity: every one of
+    // them lies in the block the first page folds, beside the cut.
+    const answers = MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK + 100;
+    await host.orchestrator.ingestionSink(
+      threadId,
+      Array.from({ length: answers }, (_, i) =>
+        sunk(threadId, "thread.message-sent", {
+          messageId: `answer:r-1:${i}`,
+          role: "assistant",
+          text: `answer ${i}`,
+          streaming: false,
+          turnId: "r-1"
+        })
+      )
+    );
+    await plainTurn(host, threadId, "r-2", 30);
+    // In the cut, restored by the fallback: the block's one gap row, a message — no gap activity arms the
+    // activity guard.
+    await idlePrompt(host, threadId, "user:note");
+    await rewind(host, threadId, 1);
+    assert.equal(foldKeeps(host, threadId, "user:note"), true, "the fold's fallback pass restores the note");
+    const { pages } = await walkAsTheClient(host, index, threadId);
+    assert.ok(
+      pages.some((page) => page.items.some((item) => item.id === `answer:r-1:${answers - 1}`)),
+      "a page folds the answers"
+    );
+    assert.deepEqual(pagesHolding(pages, "user:note"), [], "that page goes without its gap message");
+    assert.ok(
+      host.logger.entries.some(
+        (entry) => entry.level === "warn" && entry.message.includes("cannot fold its gap rows whole")
+      ),
+      "the host says a page went without them"
+    );
     await host.stop();
   });
 });
