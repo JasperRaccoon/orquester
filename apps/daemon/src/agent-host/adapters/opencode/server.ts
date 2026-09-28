@@ -139,6 +139,17 @@ export interface OpenCodeServerPoolOptions {
   /** Test seam; `undefined` means "generate one". */
   serverPassword?: string | null;
   fetchImpl?: typeof fetch;
+  /**
+   * Test seam: start the project's server without spawning `opencode serve`
+   * (the adapter's recycle tests hand back a fake child over a fake transport).
+   */
+  startServer?: (projectDir: string) => Promise<OpenCodeStartedServer>;
+  /**
+   * A reference to this project's server was dropped. The adapter re-checks a
+   * recycle it had to defer (agent profile §4.8): a snapshot probe holding the
+   * server is in-flight work too.
+   */
+  onRelease?: (projectDir: string) => void;
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
 }
@@ -152,12 +163,15 @@ interface PoolEntry {
   closing?: Promise<void>;
 }
 
-interface Started {
+/** A started server: what the pool keeps of it (`startServer`'s answer). */
+export interface OpenCodeStartedServer {
   url: string;
   version: string;
   serverPassword: string | undefined;
-  child: ProviderChild;
+  child: Pick<ProviderChild, "pid" | "exited" | "hasExited" | "kill">;
 }
+
+type Started = OpenCodeStartedServer;
 
 /**
  * One `opencode serve` per project directory, ref-counted by its threads and
@@ -176,6 +190,14 @@ export class OpenCodeServerPool {
    * A r1, m4).
    */
   private readonly stopping = new Set<Promise<void>>();
+  /**
+   * Agent profile §4.8: a recycled server's stop, per project, until its child
+   * is gone. The project's next start waits for it, so one project never has
+   * two `opencode serve` opening the same data directory at once (a server and
+   * the CLI inventory doing exactly that fail with `database is locked`, see
+   * `index.ts`).
+   */
+  private readonly retiring = new Map<string, Promise<void>>();
   private readonly options: OpenCodeServerPoolOptions;
   private readonly hostname: string;
   private readonly idleCloseMs: number;
@@ -242,6 +264,62 @@ export class OpenCodeServerPool {
   isWarm(projectDir: string): boolean {
     const entry = this.entries.get(projectDir);
     return entry?.started !== undefined && !entry.started.child.hasExited();
+  }
+
+  /** Whether this project's server is still being started. */
+  isStarting(projectDir: string): boolean {
+    return this.entries.get(projectDir)?.starting !== undefined;
+  }
+
+  /** References held on this project's server: its threads' sessions and any probe in flight. */
+  refCount(projectDir: string): number {
+    return this.entries.get(projectDir)?.refs ?? 0;
+  }
+
+  /** Every project with a server started or starting. */
+  projects(): string[] {
+    return [...this.entries.values()]
+      .filter((entry) => entry.started !== undefined || entry.starting !== undefined)
+      .map((entry) => entry.projectDir);
+  }
+
+  /**
+   * Agent profile §4.8: stop this project's server now, so the next acquire
+   * starts a fresh one — `opencode serve` reads its global config once, at
+   * start, and keeps it for its whole life. Only a server nobody holds is
+   * stopped: null when a reference is held, a start is under way, or nothing
+   * runs (a dead child's entry is dropped). Resolves once the child is gone;
+   * the project's next start waits for that (`retiring`), and so does
+   * `stopAll`.
+   */
+  recycle(projectDir: string): Promise<void> | null {
+    const entry = this.entries.get(projectDir);
+    if (entry === undefined || entry.refs > 0 || entry.starting !== undefined) {
+      return null;
+    }
+    this.entries.delete(projectDir);
+    if (entry.idleTimer !== undefined) {
+      this.clearTimer(entry.idleTimer);
+      entry.idleTimer = undefined;
+    }
+    const started = entry.started;
+    entry.started = undefined;
+    if (started === undefined || started.child.hasExited()) {
+      return null;
+    }
+    const stop = started.child.kill().then(
+      () => undefined,
+      () => undefined
+    );
+    this.retiring.set(projectDir, stop);
+    this.stopping.add(stop);
+    void stop.then(() => {
+      this.stopping.delete(stop);
+      if (this.retiring.get(projectDir) === stop) {
+        this.retiring.delete(projectDir);
+      }
+    });
+    return stop;
   }
 
   /** Every live server, for the host's own diagnostics. */
@@ -325,6 +403,7 @@ export class OpenCodeServerPool {
 
   private release(entry: PoolEntry): void {
     entry.refs = Math.max(0, entry.refs - 1);
+    this.options.onRelease?.(entry.projectDir);
     if (entry.refs > 0 || entry.idleTimer !== undefined) {
       return;
     }
@@ -346,6 +425,10 @@ export class OpenCodeServerPool {
   }
 
   private async start(projectDir: string): Promise<Started> {
+    await this.retiring.get(projectDir);
+    if (this.options.startServer !== undefined) {
+      return await this.options.startServer(projectDir);
+    }
     const bin = await this.options.resolveBin();
     const port = await probeFreePort(this.hostname);
     const password =

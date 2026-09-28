@@ -691,6 +691,12 @@ export interface Orchestrator {
    */
   resumeGoalSessionsAfterHandover(threadIds: readonly string[]): Promise<string[]>;
 
+  /**
+   * Agent profile §4.8, `POST /opencode/recycle-idle`: the OpenCode adapter's
+   * `recycleIdleServers`, or nothing recycled when no adapter serves it.
+   */
+  recycleIdleOpenCodeServers(): Promise<{ recycled: number; deferred: number }>;
+
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
   clearContinuationMarkers(threadIds: readonly string[]): Promise<void>;
@@ -6671,6 +6677,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     backgroundWorkThreadIds,
     holdContinuingGoals,
     resumeGoalSessionsAfterHandover,
+    recycleIdleOpenCodeServers: async () =>
+      (await options.adapters.get("opencode")?.recycleIdleServers?.()) ?? { recycled: 0, deferred: 0 },
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,
