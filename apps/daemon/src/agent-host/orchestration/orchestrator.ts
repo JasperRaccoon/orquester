@@ -1578,6 +1578,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const desired = desiredShapeFor(head);
     const pendingTurnStart = opts.pendingTurnStart === true;
 
+    // A session the thread reads as `error` is never reused: a message sent
+    // into it (the one command `decide` lets through) restarts it from the
+    // cursor. Its provider is usually gone already (a host restart); one that
+    // still runs is stopped first — as a restart, never the user's end, so what
+    // its agent left running survives, as it does every other restart.
+    if (currentSession(runtime).status === "error") {
+      runtime.bound = null;
+      if (adapter.hasSession(runtime.id)) {
+        try {
+          await adapter.stopSession(runtime.id);
+        } catch (error) {
+          logger.warn("agent-host: failed to stop an errored session before restarting it", error);
+        }
+      }
+    }
+
     const bound = runtime.bound;
     if (bound && adapter.hasSession(runtime.id) && bound.session.status !== "stopped") {
       const decision = decideSessionRestart({
@@ -2890,9 +2906,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
     // 409 for any command against a thread in `error` except `/session/stop`
     // and `/revert` — without that carve-out a wedged session is unrecoverable.
+    // A new message is let through too, unless the log itself is unreadable:
+    // its send path restarts the errored session from the persisted cursor
+    // (`ensureSession`), which is what "Send a new message to continue" — the
+    // notice a restart that could not continue a turn writes — promises. Before,
+    // the user had to stop a session that was already dead, or close the tab.
     if (
       (session.status === "error" || runtime.parseError !== null) &&
-      !COMMANDS_ALLOWED_IN_ERROR_STATE.has(name)
+      !COMMANDS_ALLOWED_IN_ERROR_STATE.has(name) &&
+      !(name === "turn" && runtime.parseError === null)
     ) {
       throw commandRejected(
         "This thread's session is in an error state. Stop the session or rewind to continue."

@@ -112,6 +112,7 @@ export function ChatBannerDock({
   respondingRequestIds,
   backgroundLiveness,
   liveAgentCount,
+  liveShellCount = 0,
   stopping,
   actionableProposedPlan,
   onApprove,
@@ -203,6 +204,7 @@ export function ChatBannerDock({
           <BackgroundLivenessBanner
             liveness={backgroundLiveness}
             liveAgentCount={liveAgentCount}
+            liveShellCount={liveShellCount}
             stopping={stopping}
             onStop={onStopBackgroundWork}
           />
@@ -234,6 +236,7 @@ export function ChatBannerDock({
     exitingNoticeId,
     isTurnWorking,
     liveAgentCount,
+    liveShellCount,
     notices,
     onStopBackgroundWork,
     sessionId,

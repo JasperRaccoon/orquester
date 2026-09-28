@@ -9,6 +9,7 @@
  */
 
 import type { ApprovalOption, BackgroundLiveness, ProviderRequestKind } from "@orquester/api/agent-chat";
+import { workingLivenessTitle } from "../../../lib/agent-chat/roster.logic";
 
 // ---------------------------------------------------------------------------
 // Stack order (§7.5)
@@ -134,18 +135,19 @@ export function approvalDetailIsProse(kind: ProviderRequestKind): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * "N agents working" — or "Background work" when the live agent count is zero
- * — for `working`; "Monitoring" for `monitoring`.
+ * "N agents working" — "N agents and M shells running" when shells run beside
+ * them, "M shells running" alone, "Background work" when nothing is named —
+ * for `working`; "Monitoring" for `monitoring`. {@link workingLivenessTitle}.
  *
  * *T3: `ChatView.tsx:6270-6277`.*
  */
 export function backgroundLivenessTitle(
   liveness: BackgroundLiveness,
-  liveAgentCount: number
+  liveAgentCount: number,
+  liveShellCount = 0
 ): string {
   if (liveness !== "working") return "Monitoring";
-  if (liveAgentCount <= 0) return "Background work";
-  return `${liveAgentCount} ${liveAgentCount === 1 ? "agent" : "agents"} working`;
+  return workingLivenessTitle(liveAgentCount, liveShellCount);
 }
 
 /**
