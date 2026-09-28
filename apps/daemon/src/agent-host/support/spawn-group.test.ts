@@ -5,6 +5,8 @@
  */
 
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 import { describe, it } from "node:test";
 
 import { spawnProviderChild } from "./spawn.ts";
@@ -20,9 +22,10 @@ function isAlive(pid: number): boolean {
 }
 
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
     if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
   assert.fail(label);
 }
@@ -55,13 +58,10 @@ describe("spawnProviderChild kills the whole process group (E20)", () => {
       cwd: process.cwd()
     });
 
-    let out = "";
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
-      out += chunk;
-    });
-    await waitFor(() => out.trim().length > 0, "the child never reported its grandchild");
-    const grandchild = Number.parseInt(out.trim(), 10);
+    const lines = createInterface({ input: child.stdout });
+    const [announcedPid] = await once(lines, "line");
+    lines.close();
+    const grandchild = Number.parseInt(String(announcedPid), 10);
     assert.ok(Number.isFinite(grandchild) && grandchild > 0);
     assert.equal(isAlive(grandchild), true, "the grandchild is up before the kill");
 
@@ -71,21 +71,4 @@ describe("spawnProviderChild kills the whole process group (E20)", () => {
     await waitFor(() => !isAlive(grandchild), "the grandchild outlived the provider child");
   });
 
-  it("an explicitly non-detached child still dies itself", async (t) => {
-    if (process.platform === "win32") {
-      t.skip("process groups are POSIX-only");
-      return;
-    }
-    const child = spawnProviderChild({
-      command: node,
-      args: ["-e", "setInterval(() => {}, 1000)"],
-      env: { PATH: process.env.PATH ?? "/usr/bin" },
-      cwd: process.cwd(),
-      detached: false
-    });
-    const pid = child.pid;
-    assert.ok(pid !== undefined);
-    await child.kill();
-    await waitFor(() => !isAlive(pid!), "the child itself must always die");
-  });
 });

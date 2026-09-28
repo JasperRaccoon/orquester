@@ -25,8 +25,6 @@ export interface WorkflowNotifierDeps {
   push: WorkflowPushSender | null;
   clock: Pick<Clock, "now">;
   logger?: WorkflowLogger;
-  /** Per workflow and kind. Default 60 s. */
-  debounceMs?: number;
 }
 
 const MAX_BODY = 240;
@@ -41,12 +39,10 @@ function formatDuration(ms: number | undefined): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export function createWorkflowNotifier(deps: WorkflowNotifierDeps): WorkflowNotifier & { sent: WorkflowPushPayload[] } {
-  const debounceMs = deps.debounceMs ?? 60_000;
+export function createWorkflowNotifier(deps: WorkflowNotifierDeps): WorkflowNotifier {
+  const debounceMs = 60_000;
   const last = new Map<string, number>();
-  const sent: WorkflowPushPayload[] = [];
   return {
-    sent,
     runFinished(run: WorkflowRunSummary, workflow: Workflow): void {
       // A test run's user is watching; a child run's failure is its parent's to report.
       if (run.test || run.parentRunId !== undefined) return;
@@ -69,8 +65,6 @@ export function createWorkflowNotifier(deps: WorkflowNotifierDeps): WorkflowNoti
         workflowId: workflow.id,
         runId: run.id
       };
-      sent.push(payload);
-      if (sent.length > 50) sent.shift();
       if (!deps.push) return;
       deps.push.notifyWorkflowRun(payload).catch((error: unknown) => {
         deps.logger?.warn("workflow push failed", { error: error instanceof Error ? error.message : String(error) });

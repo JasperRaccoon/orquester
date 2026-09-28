@@ -1,25 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AccountCooldown } from "@orquester/config";
 import { WorkflowStateStore } from "../state-store.ts";
-import { buildCooldown, cooldownUntil, createCooldownStore } from "./cooldowns.ts";
+import { cooldownUntil, createCooldownStore } from "./cooldowns.ts";
 
 const NOW = new Date("2026-09-28T12:00:00.000Z");
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const at = (ms: number): string => new Date(NOW.getTime() + ms).toISOString();
 
-function memoryStore(): { store: WorkflowStateStore; writes: string[] } {
-  const writes: string[] = [];
-  const store = new WorkflowStateStore({ path: "/nowhere/workflow-state.json", write: async (_path, content) => void writes.push(content) });
-  return { store, writes };
-}
-
 const cd = (untilMs: number, reason: AccountCooldown["reason"] = "usage_limit"): AccountCooldown => ({ until: at(untilMs), reason, setAt: at(0) });
 
-test("the cooldown store keys <family>:<accountId>, serves only active ones and prunes expired on write", async () => {
+test("the cooldown store keys <family>:<accountId>, serves only active ones and prunes expired on write", async (t) => {
   let now = NOW;
-  const { store, writes } = memoryStore();
+  const root = await mkdtemp(join(tmpdir(), "orq-cooldowns-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "state.json");
+  const store = new WorkflowStateStore({ path });
   const cooldowns = createCooldownStore(store, { now: () => now });
   await cooldowns.set("claude", "a1", cd(HOUR));
   await cooldowns.set("codex", "system", cd(3 * HOUR, "auth"));
@@ -31,12 +31,10 @@ test("the cooldown store keys <family>:<accountId>, serves only active ones and 
   now = new Date(NOW.getTime() + 2 * HOUR);
   assert.equal(cooldowns.get("claude", "a1"), null, "expired");
   assert.deepEqual(Object.keys(cooldowns.list()), ["codex:system"]);
-  assert.ok(store.get().cooldowns["claude:a1"], "still on file until the next write");
 
   await cooldowns.set("grok", "g1", cd(5 * HOUR));
   assert.deepEqual(Object.keys(store.get().cooldowns).sort(), ["codex:system", "grok:g1"]);
-  assert.equal(writes.length, 3);
-  assert.deepEqual(Object.keys(JSON.parse(writes.at(-1)!).cooldowns).sort(), ["codex:system", "grok:g1"]);
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(path, "utf8")).cooldowns).sort(), ["codex:system", "grok:g1"]);
 });
 
 test("cooldownUntil: resetsAt, else the burnt window's reset, else an hour; auth always an hour", () => {
@@ -48,16 +46,6 @@ test("cooldownUntil: resetsAt, else the burnt window's reset, else an hour; auth
   assert.equal(cooldownUntil({ ...base, usageResetAt: at(9 * DAY) }).toISOString(), at(HOUR));
   assert.equal(cooldownUntil(base).toISOString(), at(HOUR));
   assert.equal(cooldownUntil({ now: NOW, reason: "auth", resetsAt: at(3 * HOUR) }).toISOString(), at(HOUR));
-});
-
-test("buildCooldown makes the persisted record", () => {
-  assert.deepEqual(buildCooldown({ now: NOW, reason: "usage_limit", resetsAt: at(2 * HOUR), detail: "Claude usage limit reached." }), {
-    until: at(2 * HOUR),
-    reason: "usage_limit",
-    setAt: at(0),
-    detail: "Claude usage limit reached."
-  });
-  assert.deepEqual(buildCooldown({ now: NOW, reason: "auth" }), { until: at(HOUR), reason: "auth", setAt: at(0) });
 });
 
 test("cooldownUntil: a limit with no known reset escalates per strike (1 h, 2 h, 4 h at most); a known reset never does", () => {

@@ -20,26 +20,24 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { codeStampsDiffer } from "../agent-host/support/code-stamp.ts";
 import {
-  AGENT_HOST_HEALTH_INTERVAL_MS,
   AGENT_HOST_PREPARED_TIMEOUT_MS,
   AGENT_HOST_PROTOCOL_VERSION,
   AGENT_HOST_SERVICE_SESSION,
-  agentHostRoutes,
   type AgentHostHealthResponse
 } from "../agent-host/host-protocol.ts";
 
 /** Path of the host entry point, resolved from this module, never from cwd. */
-export const AGENT_HOST_MAIN = fileURLToPath(new URL("../agent-host/main.ts", import.meta.url));
+const AGENT_HOST_MAIN = fileURLToPath(new URL("../agent-host/main.ts", import.meta.url));
 
 /** Spawn→readiness poll interval. The gate can take a moment to open. */
-export const SPAWN_PROBE_INTERVAL_MS = 250;
+const SPAWN_PROBE_INTERVAL_MS = 250;
 
 /** Exponential backoff base between supervised respawn attempts. */
-export const RESPAWN_BACKOFF_BASE_MS = 2_000;
-export const RESPAWN_BACKOFF_MAX_MS = 60_000;
+const RESPAWN_BACKOFF_BASE_MS = 2_000;
+const RESPAWN_BACKOFF_MAX_MS = 60_000;
 
 /** After this many consecutive failed respawns the supervisor latches `error`. */
-export const MAX_RESPAWNS = 5;
+const MAX_RESPAWNS = 5;
 
 /**
  * Consecutive unreachable probes before the supervisor kills and respawns.
@@ -51,10 +49,10 @@ export const MAX_RESPAWNS = 5;
  * avoid. A supervised helper with no in-flight user work could restart on the
  * first miss; the host cannot.
  */
-export const UNREACHABLE_PROBES_BEFORE_RESTART = 2;
+const UNREACHABLE_PROBES_BEFORE_RESTART = 2;
 
 /** …and more patience when the last good health reported an active turn. */
-export const UNREACHABLE_PROBES_BEFORE_RESTART_BUSY = 4;
+const UNREACHABLE_PROBES_BEFORE_RESTART_BUSY = 4;
 
 /**
  * How long the daemon waits for a stopped host to actually EXIT before killing
@@ -69,8 +67,8 @@ export const UNREACHABLE_PROBES_BEFORE_RESTART_BUSY = 4;
  * `TERMINATE_GRACE_MS` is 5 s against a socket that stays up through its
  * teardown; ours is generous because a wedged child costs the full grace.
  */
-export const HOST_EXIT_GRACE_MS = 30_000;
-export const HOST_EXIT_POLL_MS = 100;
+const HOST_EXIT_GRACE_MS = 30_000;
+const HOST_EXIT_POLL_MS = 100;
 
 /**
  * Agent goals §5.7, a host from before the goal hold: how young a Codex goal's
@@ -82,7 +80,7 @@ export const HOST_EXIT_POLL_MS = 100;
  * does, and the age is read after its probe and the snapshot reads (≤ 5 s
  * each). The window covers one tick and those reads with room to spare.
  */
-export const LEGACY_GOAL_TURN_BOUNDARY_MS = 45_000;
+const LEGACY_GOAL_TURN_BOUNDARY_MS = 45_000;
 
 /**
  * Agent goals §5.7, a host from before the goal hold: how soon after the
@@ -92,7 +90,7 @@ export const LEGACY_GOAL_TURN_BOUNDARY_MS = 45_000;
  * after a goal turn, which such a host records the same way — is not
  * stopped.
  */
-export const LEGACY_GOAL_CONTINUATION_GAP_MS = 3_000;
+const LEGACY_GOAL_CONTINUATION_GAP_MS = 3_000;
 
 export type AgentHostState =
   /** Never started, or intentionally stopped. */
@@ -232,13 +230,7 @@ export interface SupervisorOptions {
   env: Record<string, string>;
   /** The node binary; `process.execPath` in production. */
   nodeBin: string;
-  /** Overridable for tests; defaults to {@link AGENT_HOST_MAIN}. */
-  mainPath?: string;
   adapters: SupervisorAdapters;
-  /** Deadline on a replacement host reaching readiness (§8). */
-  preparedTimeoutMs?: number;
-  /** Grace for a stopped host to exit before its session is killed. */
-  exitGraceMs?: number;
   /**
    * The commit the DAEMON's code was read from (`support/code-stamp.ts`). A
    * healthy host reporting a different known stamp is a §3.1 case-3
@@ -340,15 +332,6 @@ export class AgentHostSupervisor {
   }
 
   /**
-   * Resolves once no agent goals §5.7 hold request is in flight. Supervision
-   * itself never waits on one; this is for a caller that must see a request's
-   * answer applied — a test.
-   */
-  goalHoldSettled(): Promise<void> {
-    return this.goalHoldInFlight ?? Promise.resolve();
-  }
-
-  /**
    * Pids the `/api/system/processes/kill` guard must refuse (§3.1 "Kill
    * guard"). With tmux the host lives in the `orqsvc-` service session the
    * guard already excludes; without it the host is a plain daemon child and
@@ -425,7 +408,7 @@ export class AgentHostSupervisor {
 
   /**
    * Runtime supervision, driven by the daemon's 15 s unref'd interval
-   * ({@link AGENT_HOST_HEALTH_INTERVAL_MS}).
+   * (the host-protocol health interval).
    */
   checkHealth(): Promise<void> {
     return this.transition(async () => {
@@ -867,7 +850,7 @@ export class AgentHostSupervisor {
    * when it is gone.
    */
   private async awaitHostExit(): Promise<boolean> {
-    const deadline = this.opts.adapters.now() + (this.opts.exitGraceMs ?? HOST_EXIT_GRACE_MS);
+    const deadline = this.opts.adapters.now() + HOST_EXIT_GRACE_MS;
     for (;;) {
       if (await this.hostGone()) return true;
       if (this.opts.adapters.now() >= deadline) {
@@ -950,7 +933,7 @@ export class AgentHostSupervisor {
     const args = [
       "--import",
       "tsx",
-      this.opts.mainPath ?? AGENT_HOST_MAIN,
+      AGENT_HOST_MAIN,
       "--appdir",
       this.opts.appdir
     ];
@@ -983,7 +966,7 @@ export class AgentHostSupervisor {
    */
   private async probeUntilReady(): Promise<ProbeOutcome> {
     const deadline =
-      this.opts.adapters.now() + (this.opts.preparedTimeoutMs ?? AGENT_HOST_PREPARED_TIMEOUT_MS);
+      this.opts.adapters.now() + AGENT_HOST_PREPARED_TIMEOUT_MS;
     let last: ProbeOutcome = { ok: false, reachable: false };
     for (;;) {
       last = await this.safeProbe();
@@ -1110,7 +1093,7 @@ function backgroundWorkThreadIds(
 }
 
 /** True while any thread has an active turn or live background work. */
-export function hostHasWork(
+function hostHasWork(
   health: AgentHostHealthResponse,
   daemonView: readonly string[] | null = []
 ): boolean {
@@ -1127,7 +1110,7 @@ export function hostHasWork(
  * otherwise read as "nothing running" and kill a fleet on the very deploy
  * that ships this rule.
  */
-export function drainBlockers(
+function drainBlockers(
   health: AgentHostHealthResponse,
   daemonView: readonly string[] | null = []
 ): string | null {
@@ -1226,5 +1209,3 @@ export function buildAgentHostEnv(input: {
   if (input.npmConfigPrefix) env.NPM_CONFIG_PREFIX = input.npmConfigPrefix;
   return env;
 }
-
-export { AGENT_HOST_HEALTH_INTERVAL_MS, AGENT_HOST_SERVICE_SESSION, agentHostRoutes };

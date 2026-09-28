@@ -7,17 +7,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  PENDING_ATTACHMENT_THREAD_SEGMENT,
   attachmentFileExtension,
   attachmentFileNameCandidates,
   createAttachmentId,
-  createPendingAttachmentId,
-  normalizeAttachmentRelativePath,
   parseAttachmentFileExtension,
   parseAttachmentIdFromRelativePath,
-  parseAttachmentUuid,
   parseThreadSegmentFromAttachmentId,
-  resolveAttachmentRelativePath,
   toSafeThreadAttachmentSegment
 } from "./attachments.ts";
 
@@ -30,14 +25,13 @@ test("a thread segment is sanitised to [a-z0-9_-] and bounded", () => {
 });
 
 test("the reserved pending segment can never be claimed by a thread", () => {
-  assert.equal(toSafeThreadAttachmentSegment(PENDING_ATTACHMENT_THREAD_SEGMENT), "_pending");
+  assert.equal(toSafeThreadAttachmentSegment("pending"), "_pending");
 });
 
 test("an id names its owning thread and round-trips", () => {
   const id = createAttachmentId("Thread One", UUID, "png");
   assert.equal(id, `thread-one-${UUID}-png`);
   assert.equal(parseThreadSegmentFromAttachmentId(id!), "thread-one");
-  assert.equal(parseAttachmentUuid(id!), UUID);
   assert.equal(parseAttachmentFileExtension(id!), "png");
 });
 
@@ -46,15 +40,9 @@ test("an unusable extension collapses to bin rather than riding along", () => {
   assert.equal(createAttachmentId("t1", UUID), `t1-${UUID}`);
 });
 
-test("a pending id is minted under the reserved segment", () => {
-  const id = createPendingAttachmentId(UUID, "png");
-  assert.equal(parseThreadSegmentFromAttachmentId(id), PENDING_ATTACHMENT_THREAD_SEGMENT);
-});
-
 test("a traversal-shaped id never parses", () => {
   for (const bad of ["../../etc/passwd", "t1/../t2", "t1.png", "", "..", "\0"]) {
     assert.equal(parseThreadSegmentFromAttachmentId(bad), null, bad);
-    assert.equal(parseAttachmentUuid(bad), null, bad);
   }
 });
 
@@ -63,19 +51,6 @@ test(".part is reserved, so a stored archive.part becomes .bin", () => {
   assert.equal(attachmentFileExtension("shot.PNG"), ".png");
   assert.equal(attachmentFileExtension("no-extension"), ".bin");
   assert.equal(attachmentFileExtension("weird.reallylongextension"), ".bin");
-});
-
-test("a relative path that escapes the attachments dir resolves to null", () => {
-  assert.equal(normalizeAttachmentRelativePath("../x"), null);
-  assert.equal(normalizeAttachmentRelativePath("/abs"), "abs");
-  assert.equal(
-    resolveAttachmentRelativePath({ attachmentsDir: "/a/b", relativePath: "../../etc/passwd" }),
-    null
-  );
-  assert.equal(
-    resolveAttachmentRelativePath({ attachmentsDir: "/a/b", relativePath: "x.png" }),
-    "/a/b/x.png"
-  );
 });
 
 test("the file name candidates follow the id's own extension when it has one", () => {

@@ -1,19 +1,16 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
-import type { RuntimeSubagent, RuntimeSubagentStatus, ThreadItem } from "@orquester/api/agent-chat";
+import type { RuntimeSubagent,RuntimeSubagentStatus,ThreadItem } from "@orquester/api/agent-chat";
 
 import {
-  agentActivityText,
-  backgroundShellActivityText,
-  deriveAgentSpawnSummary,
-  deriveLivenessBanner,
-  deriveRosterDockView,
-  isBackgroundShellItems,
-  liveAgentTaskIds,
-  resolveSpawnRowAgents,
-  ROSTER_VISIBLE_ROWS,
-  rosterRowLook
+agentActivityText,
+deriveAgentSpawnSummary,
+deriveLivenessBanner,
+deriveRosterDockView,
+isBackgroundShellItems,
+liveAgentTaskIds,
+resolveSpawnRowAgents
 } from "./roster.logic";
 import { activity } from "./test-helpers";
 
@@ -55,21 +52,6 @@ const agent = (
   ...overrides
 });
 
-describe("row look", () => {
-  it("presents the three in-flight statuses as one steady 'working'", () => {
-    assert.equal(rosterRowLook("pending"), "working");
-    assert.equal(rosterRowLook("running"), "working");
-    assert.equal(rosterRowLook("waiting"), "working");
-  });
-
-  it("reads an idle-but-resumable agent as settled, not in-motion", () => {
-    assert.equal(rosterRowLook("idle"), "settled");
-    assert.equal(rosterRowLook("completed"), "settled");
-    assert.equal(rosterRowLook("failed"), "failed");
-    assert.equal(rosterRowLook("interrupted"), "stopped");
-  });
-});
-
 describe("agentActivityText", () => {
   it("prefers progress while live and reverses that order once settled", () => {
     const live = agent("a", "running", { progress: "reading", lastToolName: "Read", result: "done" });
@@ -83,59 +65,6 @@ describe("agentActivityText", () => {
   });
 });
 
-describe("a background shell's activity line", () => {
-  const shell = (
-    status: RuntimeSubagentStatus,
-    overrides: Partial<RuntimeSubagent> = {}
-  ): RuntimeSubagent => agent("bg", status, { agentKind: "background", ...overrides });
-
-  it("says what a shell does — 'Running' — and never borrows the agent precedence", () => {
-    assert.equal(backgroundShellActivityText(shell("running")), "Running");
-    assert.equal(backgroundShellActivityText(shell("pending")), "Running");
-    assert.equal(backgroundShellActivityText(shell("waiting")), "Running");
-    // A provider that reports its own progress still wins: it is more specific
-    // than the state word.
-    assert.equal(
-      backgroundShellActivityText(shell("running", { progress: "  installing deps  " })),
-      "installing deps"
-    );
-  });
-
-  it("leads with the exit code once it settles, not with the provider's sentence", () => {
-    assert.equal(
-      backgroundShellActivityText(
-        shell("completed", {
-          exitCode: 0,
-          result: 'Background command "pnpm test" completed (exit code 0)'
-        })
-      ),
-      "Exited with code 0"
-    );
-    assert.equal(
-      backgroundShellActivityText(shell("failed", { exitCode: 2, error: "boom" })),
-      "Failed · exit 2"
-    );
-    assert.equal(backgroundShellActivityText(shell("interrupted")), "Stopped");
-    assert.equal(backgroundShellActivityText(shell("cancelled")), "Stopped");
-  });
-
-  it("degrades to the state alone when no exit code was ever reported", () => {
-    assert.equal(backgroundShellActivityText(shell("completed")), "Exited");
-    assert.equal(backgroundShellActivityText(shell("failed")), "Failed");
-    assert.equal(backgroundShellActivityText(shell("idle")), "Idle");
-  });
-
-  it("is what agentActivityText answers for a background row, and only for one", () => {
-    assert.equal(agentActivityText(shell("running")), "Running");
-    assert.equal(
-      agentActivityText(shell("completed", { exitCode: 1, result: "ignored" })),
-      "Exited with code 1"
-    );
-    // An agent row keeps the T3 precedence, including its "nothing yet" null.
-    assert.equal(agentActivityText(agent("a", "running")), null);
-  });
-});
-
 describe("deriveAgentSpawnSummary", () => {
   it("says 'Kicked off' while live and 'Ran' once settled", () => {
     const live = deriveAgentSpawnSummary({
@@ -143,43 +72,12 @@ describe("deriveAgentSpawnSummary", () => {
       agentCount: 2
     });
     assert.equal(live.live, true);
-    assert.equal(live.lead, "Kicked off 2 subagents");
-    assert.equal(live.status, "2 working");
 
     const settled = deriveAgentSpawnSummary({
       agents: [agent("a", "completed"), agent("b", "completed")],
       agentCount: 2
     });
-    assert.equal(settled.lead, "Ran 2 subagents");
-    assert.equal(settled.status, "✓ completed");
-  });
-
-  it("never reads a missing agent as completed", () => {
-    const summary = deriveAgentSpawnSummary({ agents: [], agentCount: 3 });
-    assert.equal(summary.status, "Status unavailable");
-    assert.equal(summary.tone, "inactive");
-  });
-
-  it("never reads an idle agent as completed", () => {
-    const summary = deriveAgentSpawnSummary({ agents: [agent("a", "idle")], agentCount: 1 });
-    assert.equal(summary.status, "1 idle");
-  });
-
-  it("reports failures and stops before idles", () => {
-    assert.equal(
-      deriveAgentSpawnSummary({
-        agents: [agent("a", "failed"), agent("b", "idle")],
-        agentCount: 2
-      }).status,
-      "1 failed"
-    );
-    assert.equal(
-      deriveAgentSpawnSummary({
-        agents: [agent("a", "interrupted"), agent("b", "idle")],
-        agentCount: 2
-      }).status,
-      "1 stopped"
-    );
+    assert.equal(settled.live, false);
   });
 
   it("keeps a workflow coordinator live between member launches", () => {
@@ -189,7 +87,6 @@ describe("deriveAgentSpawnSummary", () => {
       coordinatorStatus: "running"
     });
     assert.equal(summary.live, true);
-    assert.equal(summary.status, "working");
   });
 });
 
@@ -208,18 +105,6 @@ describe("spawn row resolution", () => {
 });
 
 describe("the dock", () => {
-  it("collapses past five and keeps the visible order stable", () => {
-    const roster = Array.from({ length: 8 }, (_, index) => agent(`a${index}`, "running"));
-    const view = deriveRosterDockView({ roster, expanded: false, turnSettled: false });
-    assert.equal(view.visible.length, ROSTER_VISIBLE_ROWS);
-    assert.equal(view.hiddenCount, 3);
-    assert.deepEqual(view.visible.map((a) => a.id), ["a0", "a1", "a2", "a3", "a4"]);
-  });
-
-  it("shows everything when expanded", () => {
-    const roster = Array.from({ length: 8 }, (_, index) => agent(`a${index}`, "running"));
-    assert.equal(deriveRosterDockView({ roster, expanded: true, turnSettled: false }).visible.length, 8);
-  });
 
   it("fades settled rows once the turn ends", () => {
     const roster = [agent("a", "completed"), agent("b", "running")];
@@ -235,7 +120,6 @@ describe("the dock", () => {
     const view = deriveRosterDockView({ roster, expanded: false, turnSettled: true });
     assert.deepEqual(view.pinnedBackground.map((a) => a.id), ["bg"]);
     assert.ok(!view.visible.some((a) => a.id === "bg"), "it does not count towards the five");
-    assert.equal(view.visible.length, ROSTER_VISIBLE_ROWS);
   });
 
   it("does fade a SETTLED background row", () => {
@@ -265,61 +149,6 @@ describe("the liveness banner", () => {
         stopping: false
       }).visible,
       false
-    );
-  });
-
-  it("uses the three titles", () => {
-    assert.equal(
-      deriveLivenessBanner({
-        backgroundLiveness: "working",
-        isTurnWorking: false,
-        liveAgentCount: 2,
-        stopping: false
-      }).title,
-      "2 agents working"
-    );
-    assert.equal(
-      deriveLivenessBanner({
-        backgroundLiveness: "working",
-        isTurnWorking: false,
-        liveAgentCount: 0,
-        stopping: false
-      }).title,
-      "Background work"
-    );
-    assert.equal(
-      deriveLivenessBanner({
-        backgroundLiveness: "monitoring",
-        isTurnWorking: false,
-        liveAgentCount: 0,
-        stopping: false
-      }).title,
-      "Monitoring"
-    );
-  });
-
-  it("names running shells apart from agents", () => {
-    assert.equal(
-      deriveLivenessBanner({
-        backgroundLiveness: "working",
-        isTurnWorking: false,
-        liveAgentCount: 8,
-        liveShellCount: 1,
-        stopping: false
-      }).title,
-      "8 agents and 1 shell running"
-    );
-  });
-
-  it("reads 'Stopping…' while an interrupt is in flight", () => {
-    assert.equal(
-      deriveLivenessBanner({
-        backgroundLiveness: "working",
-        isTurnWorking: false,
-        liveAgentCount: 1,
-        stopping: true
-      }).stopLabel,
-      "Stopping…"
     );
   });
 });

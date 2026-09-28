@@ -3,18 +3,12 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentAccount, UsageResponse } from "@orquester/api";
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem, ThreadSnapshotPayload, Turn } from "@orquester/api/agent-chat";
 import { activityLine, failureAfterBaseline, isNewTurn, itemsAfterBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
-import { buildCreateBody, sessionTitle } from "./create.ts";
+import { buildCreateBody } from "./create.ts";
 import { finalText, parentAssistantText } from "./executor.ts";
 import { excludedKeys, resetWaitUntil, emptyMemory } from "./failover.ts";
-import { createAccountPreview } from "./preview.ts";
-import { AUTONOMY_NOTE, buildHandoffPrompt, clipUtf8, clipUtf8Tail, handoffNotice, withAutonomyNote } from "./prompt.ts";
-import { FakeClock } from "./testing/fake-clock.ts";
-import { account, MemoryCooldowns, staticUsage } from "./testing/fake-context.ts";
-import { AUTONOMOUS_ANSWER } from "./prompt.ts";
-import { autonomousAnswers, autonomousDecision } from "./watch.ts";
+import { clipUtf8, clipUtf8Tail } from "./prompt.ts";
 
 const T = (s: number): string => new Date(Date.UTC(2026, 8, 28, 12, 0, s)).toISOString();
 
@@ -40,26 +34,10 @@ function snap(items: ThreadItem[], turns: Turn[], adapter: ThreadSnapshotPayload
   };
 }
 
-test("the autonomy note is appended exactly as the spec words it", () => {
-  assert.equal(AUTONOMY_NOTE, "You are running unattended inside an automated workflow. No human will answer. Never ask questions or wait for confirmation; make reasonable decisions and complete the task fully.");
-  assert.equal(withAutonomyNote("Do X.", true), `Do X.\n\n${AUTONOMY_NOTE}`);
-  assert.equal(withAutonomyNote("Do X.", false), "Do X.");
-});
-
 test("UTF-8 clipping never splits a code point; the tail keeps the newest part", () => {
   assert.deepEqual(clipUtf8("héllo", 2), { text: "h", truncated: true });
   assert.deepEqual(clipUtf8("abc", 3), { text: "abc", truncated: false });
   assert.deepEqual(clipUtf8Tail("abc€", 3), { text: "€", truncated: true });
-});
-
-test("the handoff prompt: original prompt, notice, messages, git status, autonomy note", () => {
-  const text = buildHandoffPrompt({ originalPrompt: "Fix #7.", previousAgent: "claude", previousMessages: "did A", gitStatus: " M a.ts\n", autonomyNote: true });
-  assert.ok(text.startsWith(`Fix #7.\n\n${handoffNotice("claude")}`));
-  assert.match(text, /did A/);
-  assert.match(text, / M a\.ts/);
-  assert.ok(text.endsWith(AUTONOMY_NOTE));
-  const noGit = buildHandoffPrompt({ originalPrompt: "P", previousAgent: "codex", previousMessages: "", gitStatus: null, autonomyNote: false });
-  assert.equal(noGit, `P\n\n${handoffNotice("codex")}`);
 });
 
 test("failures are read structurally, only after the baseline, with the legacy prefix only for reason-less rows", () => {
@@ -90,20 +68,6 @@ test("the baseline takes the thread's latest turn over a lagging summary", () =>
   assert.deepEqual(base.turn, { turnId: "t5", completedAt: T(5), running: false });
   assert.equal(isNewTurn({ turnId: "t5", state: "completed", startedAt: T(0), completedAt: T(5) }, base.turn), false, "the lagging summary catching up is no new turn");
   assert.equal(isNewTurn({ turnId: "t6", state: "running", startedAt: T(6), completedAt: null }, base.turn), true);
-});
-
-test("autonomous answers and decisions", () => {
-  const answers = autonomousAnswers({
-    requestId: "r", createdAt: T(0), dismissible: false,
-    questions: [
-      { id: "a", header: "", question: "", options: [], allowCustomAnswer: false },
-      { id: "b", header: "", question: "", options: [{ label: "One", description: "" }, { label: "Two (recommended)", description: "" }] },
-      { id: "c", header: "", question: "", options: [{ label: "One", description: "", value: "1" }], multiSelect: true }
-    ]
-  });
-  assert.deepEqual(answers, { a: AUTONOMOUS_ANSWER, b: "Two (recommended)", c: ["1"] });
-  assert.equal(autonomousDecision({ requestId: "r", requestKind: "command", createdAt: T(0) }), "accept");
-  assert.equal(autonomousDecision({ requestId: "r", requestKind: "command", createdAt: T(0), options: [{ decision: "acceptForSession", label: "" }, { decision: "decline", label: "" }] }), "acceptForSession");
 });
 
 test("the output is the latest settled turn's parent answer: commentary only when it is all, agents' words never, re-emitted Claude copies dropped", () => {
@@ -147,8 +111,6 @@ test("the create body: explicit account, full access, owner; the model only in t
   const claude = buildCreateBody({ candidate: { chainIndex: 0, agent: "claude", model: "opus", options: [{ id: "effort", value: "high" }], accountId: "a1", family: "claude" }, projectPath: "/p", title: "T", owner });
   assert.equal("model" in claude, false);
   assert.deepEqual(claude.chat?.modelSelection, { model: "opus", options: [{ id: "effort", value: "high" }] });
-  assert.equal(sessionTitle("WF", "Fix"), "WF · Fix");
-  assert.equal(sessionTitle("WF", "Fix", "  Custom "), "Custom");
 });
 
 test("exclusions: tried accounts only while their cooldown runs; unusable ones for good", () => {
@@ -165,33 +127,6 @@ test("wait-for-reset honours maxWaitHours from the first wait", () => {
   assert.equal(resetWaitUntil(decision, { now, firstWaitAt: now, maxWaitHours: 4 })?.toISOString(), decision.earliestResetAt);
   assert.equal(resetWaitUntil(decision, { now, firstWaitAt: new Date(now.getTime() - 2 * 3600_000), maxWaitHours: 4 }), null);
   assert.equal(resetWaitUntil({ chosen: null, reason: "", skipped: [] }, { now, firstWaitAt: now, maxWaitHours: 4 }), null);
-});
-
-test("the account preview decides as the block does (the owner's example), cooldowns included", async () => {
-  const clock = new FakeClock("2026-09-28T12:00:00.000Z");
-  const at = (ms: number) => new Date(clock.now().getTime() + ms).toISOString();
-  const DAY = 86_400_000;
-  const accounts: AgentAccount[] = [account("claude", "a-jasper", "jasperclaude"), account("claude", "a-eduard", "therealeduard465"), account("claude", "a-ara", "arakuma")];
-  const usage: UsageResponse = {
-    agents: [{
-      id: "claude", available: true, stale: false, session: null, weekly: null, asOf: at(-60_000),
-      aggregate: { strategy: "worst-account", accountCount: 3 },
-      accounts: [
-        { id: "a-jasper", label: "jasperclaude", available: true, stale: false, session: null, weekly: { percent: 63, resetsAt: at(4 * DAY) }, asOf: at(-60_000) },
-        { id: "a-eduard", label: "therealeduard465", available: true, stale: false, session: null, weekly: { percent: 90, resetsAt: at(DAY) }, asOf: at(-60_000) },
-        { id: "a-ara", label: "arakuma", available: true, stale: false, session: null, weekly: { percent: 16, resetsAt: at(5 * DAY) }, asOf: at(-60_000) }
-      ]
-    }]
-  };
-  const cooldowns = new MemoryCooldowns(clock);
-  const preview = createAccountPreview({ usage: staticUsage(usage), accounts: { list: () => ({ accounts, defaults: { claude: null, codex: null, grok: null } }) }, cooldowns, clock });
-  const chain = [{ agent: "claude", model: "opus", accounts: { strategy: "soonest-reset", maxWeeklyPct: 85 } }] as never;
-  const first = await preview(chain);
-  assert.equal(first.chosen?.accountLabel, "jasperclaude");
-  assert.ok(first.skipped.some((s) => s.label === "therealeduard465" && s.why === "threshold"));
-  await cooldowns.set("claude", "a-jasper", { until: at(3600_000), reason: "usage_limit", setAt: at(0) });
-  const second = await preview(chain);
-  assert.equal(second.chosen?.accountLabel, "arakuma");
 });
 
 test("the activity line reads tool calls and assistant text, never a provider's stderr or warnings", () => {

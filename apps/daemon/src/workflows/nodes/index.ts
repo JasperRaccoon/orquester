@@ -3,21 +3,19 @@
 import type { NodeExecutor, NodeExecutorRegistry } from "../contracts.ts";
 import { createCodeExecutor } from "./code.ts";
 import { createIfExecutor, createMergeExecutor, createStopExecutor, createSwitchExecutor, createTriggerExecutors } from "./flow.ts";
-import { createHttpExecutor, type HttpExecutorOptions } from "./http.ts";
-import { createShellExecutor, type ShellExecutorOptions } from "./shell.ts";
+import { createHttpExecutor } from "./http.ts";
+import { createShellExecutor } from "./shell.ts";
 import { createSubWorkflowExecutor } from "./subworkflow.ts";
 import { createWaitExecutor } from "./wait.ts";
 
 export { createCodeExecutor } from "./code.ts";
 export { createIfExecutor, createMergeExecutor, createStopExecutor, createSwitchExecutor, createTriggerExecutors } from "./flow.ts";
-export { createHttpExecutor, type HttpExecutorOptions } from "./http.ts";
-export { createShellExecutor, type ShellExecutorOptions } from "./shell.ts";
+export { createHttpExecutor } from "./http.ts";
+export { createShellExecutor } from "./shell.ts";
 export { createSubWorkflowExecutor } from "./subworkflow.ts";
 export { createWaitExecutor } from "./wait.ts";
 
 export interface NodeExecutorsOptions {
-  http?: HttpExecutorOptions;
-  shell?: ShellExecutorOptions;
   /** The agent block's executor (agent/*); without it an agent block fails "no executor". */
   agent?: NodeExecutor<"agent">;
 }
@@ -29,8 +27,8 @@ export function createNodeExecutors(options: NodeExecutorsOptions = {}): NodeExe
     "trigger.schedule": schedule,
     "trigger.git": git,
     code: createCodeExecutor(),
-    shell: createShellExecutor(options.shell),
-    http: createHttpExecutor(options.http),
+    shell: createShellExecutor(),
+    http: createHttpExecutor(),
     if: createIfExecutor(),
     switch: createSwitchExecutor(),
     merge: createMergeExecutor(),

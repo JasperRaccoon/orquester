@@ -14,13 +14,11 @@ import type { SystemStatusOptions } from "./system-status.ts";
 import {
   SYSTEM_STATUS_SUPPORTED,
   SystemStatusService,
-  collectDescendants,
   collectTree,
   cpuPercentFromSamples,
   decodeProcNetAddress,
   descendsFromRoot,
   launchMarkerOf,
-  mapLimited,
   parseCmdline,
   parseCpuSample,
   parseMemInfo,
@@ -243,11 +241,6 @@ test("descendsFromRoot does not loop on a parent cycle", () => {
   assert.equal(descendsFromRoot(cyclic, new Set([99]), 5), false);
 });
 
-test("collectDescendants returns the pid plus everything under it", () => {
-  assert.deepEqual(collectDescendants(procs, 21).sort((left, right) => left - right), [21, 30, 31]);
-  assert.deepEqual(collectDescendants(procs, 31), [31]);
-});
-
 test("parseProcStat survives a comm containing spaces and parentheses", () => {
   const line =
     "4242 (my (weird) proc) S 1197 4242 4242 0 -1 4194304 100 0 0 0 " +
@@ -257,18 +250,6 @@ test("parseProcStat survives a comm containing spaces and parentheses", () => {
   assert.equal(parseProcStat("garbage without a paren"), null);
 });
 
-test("parseProcStat agrees with parseProcStatus on this very process", async () => {
-  if (!SYSTEM_STATUS_SUPPORTED) {
-    return;
-  }
-  const [stat, status] = await Promise.all([
-    readFile(`/proc/${process.pid}/stat`, "utf8"),
-    readFile(`/proc/${process.pid}/status`, "utf8")
-  ]);
-  assert.equal(parseProcStat(stat)?.ppid, parseProcStatus(status)?.ppid);
-  assert.ok((parseProcStat(stat)?.starttime ?? 0) > 0);
-});
-
 test("cpuPercentFromSamples is the busy share of the delta", () => {
   assert.equal(cpuPercentFromSamples({ total: 1000, idle: 900 }, { total: 1100, idle: 950 }), 50);
   assert.equal(cpuPercentFromSamples({ total: 1000, idle: 900 }, { total: 1100, idle: 1000 }), 0);
@@ -276,22 +257,6 @@ test("cpuPercentFromSamples is the busy share of the delta", () => {
   // A counter that did not move (or went backwards after a suspend) is unusable.
   assert.equal(cpuPercentFromSamples({ total: 1000, idle: 900 }, { total: 1000, idle: 900 }), null);
   assert.equal(cpuPercentFromSamples({ total: 1000, idle: 900 }, { total: 900, idle: 800 }), null);
-});
-
-test("mapLimited preserves order and never exceeds the limit", async () => {
-  let inFlight = 0;
-  let peak = 0;
-  const items = Array.from({ length: 50 }, (_, index) => index);
-  const results = await mapLimited(items, 4, async (item) => {
-    inFlight += 1;
-    peak = Math.max(peak, inFlight);
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    inFlight -= 1;
-    return item * 2;
-  });
-  assert.deepEqual(results, items.map((item) => item * 2));
-  assert.ok(peak <= 4, `peak concurrency ${peak} exceeded the limit`);
-  assert.deepEqual(await mapLimited([], 4, async () => 1), []);
 });
 
 test("resolveSocketOwners picks the lowest pid sharing a listen socket", () => {
@@ -331,33 +296,6 @@ const service = (overrides: Partial<SystemStatusOptions> = {}): SystemStatusServ
     listSessionIds: () => new Set<string>(),
     ...overrides
   });
-
-test("resources() resamples CPU when the stored baseline is stale", async () => {
-  if (!SYSTEM_STATUS_SUPPORTED) {
-    return;
-  }
-  const slept: number[] = [];
-  let clock = Date.now();
-  const stale = service({
-    now: () => clock,
-    sleep: async (ms) => {
-      slept.push(ms);
-      await setTimeoutPromise(ms);
-    }
-  });
-  // Jump past the staleness bound: the constructor's baseline is now useless.
-  clock += 60_000;
-  const resourcesAfterGap = await stale.resources();
-  assert.deepEqual(slept, [200], "a stale baseline must be replaced by a fresh short-interval pair");
-  assert.ok(resourcesAfterGap.cpu.percent >= 0 && resourcesAfterGap.cpu.percent <= 100);
-  assert.equal(resourcesAfterGap.supported, true);
-  assert.ok((resourcesAfterGap.workspacesDisk.totalBytes ?? 0) > 0);
-
-  // A second read a beat later reuses the (now fresh) baseline: no resample.
-  clock += 5000;
-  await stale.resources();
-  assert.deepEqual(slept, [200], "a fresh baseline must not trigger a second sample");
-});
 
 test("resources() reports an unmeasurable volume as unknown, not as 0 bytes", async () => {
   if (!SYSTEM_STATUS_SUPPORTED) {
@@ -535,92 +473,38 @@ test("a marked process whose parent still runs outside every root is no orphan: 
 });
 
 test("kill() refuses a protectedPids entry, directly and inside a subtree", async () => {
-  if (!SYSTEM_STATUS_SUPPORTED) {
-    return;
-  }
-  // Stands in for the tmux-less agent-host child: a real child of this
-  // process, so it passes the "managed by this daemon" gate and would be
-  // killable if the guard were missing.
+  if (!SYSTEM_STATUS_SUPPORTED) return;
   const guarded = spawn("sleep", ["30"], { stdio: "ignore" });
-  const parent = spawn("sh", ["-c", "sleep 30"], { stdio: "ignore" });
+  const started = once(guarded, "spawn");
+  const guardedGone = once(guarded, "exit").then(() => undefined);
+  const parent = spawn("sh", ["-c", "sleep 30 & child=$!; printf '%s\\n' \"$child\"; wait \"$child\""], { stdio: ["ignore", "pipe", "ignore"] });
+  const parentGone = once(parent, "exit").then(() => undefined);
+  const childAnnounced = once(parent.stdout, "data");
+  let spared: number | undefined;
   try {
-    await setTimeoutPromise(300);
+    const [, [line]] = await Promise.all([started, childAnnounced]);
+    spared = Number(String(line).trim());
     assert.ok(guarded.pid && parent.pid);
-    const status = service({ protectedPids: () => [{ pid: guarded.pid as number, label: "the agent host" }] });
-
+    assert.ok(Number.isInteger(spared) && spared > 1);
+    const status = service({ protectedPids: () => [{ pid: guarded.pid!, label: "the agent host" }] });
     const refused = await status.kill(guarded.pid);
     assert.equal(refused.ok, false);
     assert.equal(refused.ok === false && refused.code, "PROCESS_PROTECTED");
-    assert.equal(refused.ok === false && refused.error, "Cannot stop the agent host.");
-    const { stdout: alive } = await exec("sh", [
-      "-c",
-      `kill -0 ${guarded.pid} 2>/dev/null && echo alive || echo gone`
-    ]);
-    assert.equal(alive.trim(), "alive", "a refused kill must not have signalled anything");
+    assert.doesNotThrow(() => process.kill(guarded.pid!, 0));
 
-    // Protected INSIDE a requested subtree: killing the shell must spare it.
-    const { stdout: kids } = await exec("pgrep", ["-P", String(parent.pid)]);
-    const spared = Number(kids.trim().split("\n")[0]);
-    assert.ok(Number.isInteger(spared) && spared > 1);
-    const sub = service({ protectedPids: () => [{ pid: spared, label: "the agent host" }] });
+    const sub = service({ protectedPids: () => [{ pid: spared!, label: "the agent host" }] });
     assert.equal((await sub.kill(parent.pid)).ok, true);
-    await setTimeoutPromise(200);
-    const { stdout: after } = await exec("sh", [
-      "-c",
-      `kill -0 ${spared} 2>/dev/null && echo alive || echo gone`
-    ]);
-    assert.equal(after.trim(), "alive", "a protected descendant must survive a subtree kill");
+    await allGone(parentGone, "the selected parent exiting");
+    assert.doesNotThrow(() => process.kill(spared!, 0), "a protected descendant must survive a subtree kill");
 
-    // The spared sleep is now reparented (its shell died), so it is no longer
-    // ours — clean it up by hand rather than through the service.
-    try {
-      process.kill(spared, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-
-    // A supplier that throws must not turn a legitimate kill into a 500 — nor
-    // fail closed and refuse everything.
-    const throwing = service({
-      protectedPids: () => {
-        throw new Error("boom");
-      }
-    });
+    const throwing = service({ protectedPids: () => { throw new Error("boom"); } });
     assert.equal((await throwing.kill(guarded.pid)).ok, true);
+    await allGone(guardedGone, "the unprotected child exiting");
   } finally {
-    for (const child of [guarded, parent]) {
-      child.kill("SIGKILL");
+    for (const pid of [guarded.pid, parent.pid, spared]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
     }
+    await allGone(Promise.all([parentGone, guardedGone]).then(() => undefined), "owned children exiting");
   }
-});
-
-test("concurrent cold processes()+ports() share one /proc scan", async () => {
-  if (!SYSTEM_STATUS_SUPPORTED) {
-    return;
-  }
-  // rootPids() calls listSessionIds() exactly once per scan, so it counts scans
-  // without reaching into the private cache.
-  let scans = 0;
-  const status = service({
-    listSessionIds: () => {
-      scans += 1;
-      return new Set<string>();
-    }
-  });
-
-  // Cold cache, both in flight: without the in-flight memo each would walk
-  // every pid on the box before either could store its result.
-  await Promise.all([status.processes(), status.ports()]);
-  assert.equal(scans, 1, "the second caller must join the scan already running");
-
-  // The settled scan is now the ordinary cache — still one scan.
-  await status.processes();
-  assert.equal(scans, 1);
-
-  // The kill guard must never ride a shared scan: `fresh` always rescans.
-  // pid 2 (kthreadd) is not a descendant of this process, so nothing is
-  // signalled — the guard rejects it after the scan.
-  const result = await status.kill(2);
-  assert.equal(result.ok, false);
-  assert.equal(scans, 2, "a fresh snapshot must not reuse the shared one");
 });

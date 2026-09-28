@@ -2,27 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { parseWorkflowLogWindow, type WorkflowLogWindow } from "../../../lib/api-client.ts";
-import { readWholeLog, startLogFollower, type LogFollowerTimers } from "./log-follower.ts";
+import { readWholeLog, startLogFollower } from "./log-follower.ts";
 
-class ManualTimers implements LogFollowerTimers {
-  queue: { id: number; fn: () => void; ms: number }[] = [];
-  private seq = 0;
-  set(fn: () => void, ms: number): unknown {
-    const id = ++this.seq;
-    this.queue.push({ id, fn, ms });
-    return id;
-  }
-  clear(handle: unknown): void {
-    this.queue = this.queue.filter((entry) => entry.id !== handle);
-  }
-  fire(): void {
-    const next = this.queue.shift();
-    next?.fn();
-  }
-}
+type FollowState = { following: boolean; loading: boolean; error: string | null };
 
-async function settle(): Promise<void> {
-  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+function receipt() {
+  let resolve!: (state: FollowState) => void;
+  const promise = new Promise<FollowState>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 /** A raw file of `raw`, served in windows of `size` bytes; the text is "redacted" (longer than the raw bytes). */
@@ -52,89 +39,97 @@ function server(raw: string, size: number, liveRef: { live: boolean }) {
 
 describe("the log follower", () => {
   it("reads a finished log to its end, window after window, by the daemon's offsets", async () => {
-    const live = { live: false };
-    const s = server("aSbSc\n".repeat(10), 7, live);
+    const s = server("aSbSc\n".repeat(10), 7, { live: false });
     const texts: string[] = [];
-    let final: unknown = null;
-    startLogFollower({ read: (o) => s.read(o), live: () => false, onText: (t) => texts.push(t), onState: (st) => (final = st), timers: new ManualTimers() });
-    await settle();
-    assert.equal(texts.join("").replace(/«secret:S»/g, "S"), "aSbSc\n".repeat(10));
-    assert.deepEqual(final, { following: false, loading: false, error: null });
-    // Offsets are the raw file's, never the (longer) redacted text's.
+    const settled = receipt();
+    startLogFollower({ read: (o) => s.read(o), live: () => false, onText: (t) => texts.push(t), onState: settled.resolve });
+    assert.deepEqual(await settled.promise, { following: false, loading: false, error: null });
+    assert.equal(texts.join(""), "a«secret:S»b«secret:S»c\n".repeat(10));
+    // The daemon cursor counts raw bytes; redaction makes displayed text longer.
     assert.deepEqual(s.reads, [0, 7, 14, 21, 28, 35, 42, 49, 56]);
   });
 
-  it("polls a live log, and a failed read resumes from the same offset once — no duplicates", async () => {
+  it("polls a live log, and a failed read resumes from the same offset once — no duplicates", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const live = { live: true };
     const s = server("one\n", 1024, live);
-    const timers = new ManualTimers();
     const texts: string[] = [];
-    startLogFollower({ read: (o) => s.read(o), live: () => live.live, onText: (t) => texts.push(t), onState: () => undefined, timers });
-    await settle();
+    let settled = receipt();
+    const follower = startLogFollower({ read: (o) => s.read(o), live: () => live.live, onText: (text) => texts.push(text), onState: (state) => settled.resolve(state) });
+    t.after(() => follower.stop());
+    await settled.promise;
     assert.deepEqual(texts, ["one\n"]);
-    assert.equal(timers.queue.length, 1, "one poll timer");
     s.failOnce();
-    timers.fire();
-    await settle();
-    assert.equal(timers.queue.length, 1, "exactly one retry timer after an error");
+    settled = receipt();
+    t.mock.timers.runAll();
+    assert.deepEqual(await settled.promise, { following: true, loading: false, error: null });
     s.append("two\n");
-    timers.fire();
-    await settle();
+    settled = receipt();
+    t.mock.timers.runAll();
+    await settled.promise;
     assert.deepEqual(texts, ["one\n", "two\n"]);
     assert.deepEqual(s.reads, [0, 4, 4]);
     live.live = false;
-    timers.fire();
-    await settle();
-    assert.equal(timers.queue.length, 0, "stops once the block is over");
+    settled = receipt();
+    t.mock.timers.runAll();
+    assert.deepEqual(await settled.promise, { following: false, loading: false, error: null });
+    t.mock.timers.runAll();
+    assert.deepEqual(s.reads, [0, 4, 4, 8]);
   });
 
   it("an error on a finished log is reported, not appended", async () => {
     const texts: string[] = [];
-    let final: { error: string | null } | null = null;
+    const settled = receipt();
     startLogFollower({
-      read: async () => {
-        throw new Error("404");
-      },
+      read: async () => { throw new Error("404"); },
       live: () => false,
-      onText: (t) => texts.push(t),
-      onState: (st) => (final = st),
-      timers: new ManualTimers(),
-      errorText: () => "The log could not be read."
+      onText: (text) => texts.push(text),
+      onState: settled.resolve
     });
-    await settle();
+    const state = await settled.promise;
     assert.deepEqual(texts, []);
-    assert.equal(final!.error, "The log could not be read.");
+    assert.equal(state.following, false);
+    assert.equal(state.loading, false);
+    assert.ok(state.error);
   });
 
-  it("stop() ends it: no further reads, no timer", async () => {
-    const live = { live: true };
-    const s = server("x\n", 1024, live);
-    const timers = new ManualTimers();
-    const follower = startLogFollower({ read: (o) => s.read(o), live: () => true, onText: () => undefined, onState: () => undefined, timers });
-    await settle();
+  it("stop() ends it: no further reads, including after wake", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const s = server("x\n", 1024, { live: true });
+    const settled = receipt();
+    const follower = startLogFollower({ read: (o) => s.read(o), live: () => true, onText: () => undefined, onState: settled.resolve });
+    t.after(() => follower.stop());
+    await settled.promise;
     follower.stop();
-    assert.equal(timers.queue.length, 0);
+    t.mock.timers.runAll();
     follower.wake();
-    await settle();
-    assert.equal(s.reads.length, 1);
+    assert.deepEqual(s.reads, [0]);
   });
 
-  it("a live log held at a partial last line waits for the next poll instead of spinning", async () => {
-    const timers = new ManualTimers();
+  it("a live log held at a partial last line waits for the next poll instead of spinning", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     let reads = 0;
-    startLogFollower({
+    let allowedReads = 1;
+    let settled = receipt();
+    const follower = startLogFollower({
       read: async (offset) => {
         reads += 1;
+        // Stop a broken immediate-retry loop so it fails below instead of hanging.
+        assert.ok(reads <= allowedReads);
         return { text: "", nextOffset: offset, eof: false, size: 10, live: true };
       },
       live: () => true,
       onText: () => undefined,
-      onState: () => undefined,
-      timers
+      onState: (state) => settled.resolve(state)
     });
-    await settle();
+    t.after(() => follower.stop());
+    await settled.promise;
     assert.equal(reads, 1);
-    assert.equal(timers.queue.length, 1);
+    allowedReads = 2;
+    settled = receipt();
+    t.mock.timers.runAll();
+    await settled.promise;
+    assert.equal(reads, 2);
   });
 
   it("readWholeLog reads every window to the end (the download)", async () => {

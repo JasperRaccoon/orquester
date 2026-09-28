@@ -64,7 +64,7 @@ export function isSessionLifecycleEvent(event: RuntimeEvent): event is SessionLi
  * from an unresolved request, never a stored status"). Keeping the mapping in
  * one place means no adapter has to remember it.
  */
-export function threadStatusFromRuntimeState(
+function threadStatusFromRuntimeState(
   state: RuntimeSessionState | "waiting"
 ): ThreadSessionStatus {
   switch (state) {
@@ -111,7 +111,7 @@ function statusAllowsActiveTurn(status: ThreadSessionStatus): boolean {
  * `cancelled` session status and the two are the same user-visible fact: the
  * turn stopped before it finished.
  */
-export function turnStatusFromTurnState(state: RuntimeTurnState): ThreadSessionStatus {
+function turnStatusFromTurnState(state: RuntimeTurnState): ThreadSessionStatus {
   switch (state) {
     case "completed":
       return "ready";

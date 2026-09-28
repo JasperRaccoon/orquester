@@ -31,7 +31,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 /** At most one `progress` update per thread in this window (goals §6). */
-export const GROK_GOAL_PROGRESS_THROTTLE_MS = 30_000;
+const GROK_GOAL_PROGRESS_THROTTLE_MS = 30_000;
 
 /**
  * `lastCheck` for a `not_achieved` verdict (goals §6.3 item 2). On the `checked`
@@ -39,7 +39,7 @@ export const GROK_GOAL_PROGRESS_THROTTLE_MS = 30_000;
  * of <max>)` when the frame names both counts — and never `last_event_detail`,
  * which on a verdict frame is still the worker's own summary of its round.
  */
-export const GROK_GOAL_NOT_ACHIEVED_CHECK = "Verification: not achieved";
+const GROK_GOAL_NOT_ACHIEVED_CHECK = "Verification: not achieved";
 
 /**
  * Grok's goal status → the goal status set (goals §6.3 item 2). Observed:
@@ -48,7 +48,7 @@ export const GROK_GOAL_NOT_ACHIEVED_CHECK = "Verification: not achieved";
  * `budget_limited`. `undefined` for anything else: the caller keeps the status
  * it already tracks rather than guess one.
  */
-export function grokGoalStatus(status: unknown): AgentGoalStatus | undefined {
+function grokGoalStatus(status: unknown): AgentGoalStatus | undefined {
   if (typeof status !== "string") {
     return undefined;
   }

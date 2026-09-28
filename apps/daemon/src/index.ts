@@ -1168,7 +1168,7 @@ type LaunchEnv = { env: Record<string, string>; unset?: string[]; accountId?: st
  * `unset` lists concatenate; the effective `accountId` is taken from `a`,
  * falling back to `b`. Returns null when neither contributes.
  */
-export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): LaunchEnv | null {
+function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): LaunchEnv | null {
   if (!a && !b) return null;
   const unset = [...(a?.unset ?? []), ...(b?.unset ?? [])];
   const merged: LaunchEnv = { env: { ...a?.env, ...b?.env } };
@@ -4320,7 +4320,7 @@ function sessionUploadsDir(daemonDir: string, sessionId: string): string {
  * direction. A success never closes: the host answers 2xx only once it has
  * read the whole body.
  */
-export function relayedUploadClosesConnection(status: number, request: { readonly complete?: boolean }): boolean {
+function relayedUploadClosesConnection(status: number, request: { readonly complete?: boolean }): boolean {
   return status >= 400 && request.complete !== true;
 }
 

@@ -5,36 +5,10 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CodexRpcError } from "../../../agent-host/adapters/codex/protocol.ts";
-import type { DeadlineTimers } from "../../../agent-host/support/deadline.ts";
 import { AgentProfileError } from "../../errors.ts";
 import { CodexAppServerClient, configWriteErrorCode, keyPath, toProfileError } from "./codex-config-client.ts";
 
 const FAKE = fileURLToPath(new URL("./testing/fake-app-server.mjs", import.meta.url));
-
-/** Timers a test fires by hand: nothing here waits on the clock. */
-class ManualTimers implements DeadlineTimers {
-  private next = 1;
-  readonly armed = new Map<number, { fire: () => void; ms: number }>();
-  set(fire: () => void, ms: number): unknown {
-    const handle = this.next++;
-    this.armed.set(handle, { fire, ms });
-    return handle;
-  }
-  clear(handle: unknown): void {
-    this.armed.delete(handle as number);
-  }
-  fire(ms: number): void {
-    for (const [handle, timer] of [...this.armed]) {
-      if (timer.ms === ms) {
-        this.armed.delete(handle);
-        timer.fire();
-      }
-    }
-  }
-  count(ms: number): number {
-    return [...this.armed.values()].filter((timer) => timer.ms === ms).length;
-  }
-}
 
 describe("CodexAppServerClient", () => {
   let dir: string;
@@ -55,13 +29,12 @@ describe("CodexAppServerClient", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  function client(timers: DeadlineTimers, extra: Partial<ConstructorParameters<typeof CodexAppServerClient>[0]> = {}) {
+  function client(extra: Partial<ConstructorParameters<typeof CodexAppServerClient>[0]> = {}) {
     const created = new CodexAppServerClient({
       bin: process.execPath,
       args: [FAKE, "app-server"],
       codexHome,
       home: dir,
-      timers,
       idleMs: 30_000,
       callTimeoutMs: 10_000,
       killGraceMs: 200,
@@ -81,8 +54,7 @@ describe("CodexAppServerClient", () => {
   }
 
   it("spawns on demand with CODEX_HOME, handshakes once and reuses the child", async () => {
-    const timers = new ManualTimers();
-    const c = client(timers);
+    const c = client();
     assert.equal(c.isRunning, false);
     const read = await c.call("config/read", { includeLayers: true });
     assert.equal(read.layers?.[0].name.type, "user");
@@ -96,39 +68,42 @@ describe("CodexAppServerClient", () => {
     assert.equal(c.isRunning, false);
   });
 
-  it("closes after the idle window and respawns on the next call", async () => {
-    const timers = new ManualTimers();
-    const c = client(timers);
+  it("closes after the idle window and respawns on the next call", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const c = client();
     await c.call("config/read", {});
-    assert.equal(timers.count(30_000), 1, "idle timer armed once nothing is pending");
     const pid = c.pid;
-    timers.fire(30_000);
-    assert.equal(c.isRunning, false);
+    t.mock.timers.tick(29_999);
+    assert.equal(c.isRunning, true, "still inside the idle window");
+    t.mock.timers.tick(1);
+    assert.equal(c.isRunning, false, "closed once idle for the whole window");
     await c.call("config/read", {});
     assert.equal(c.isRunning, true);
     assert.notEqual(c.pid, pid);
+    await c.close();
   });
 
-  it("does not arm the idle timer while a call is pending", async () => {
-    const timers = new ManualTimers();
-    const c = client(timers, { extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
-    const pending = c.call("hooks/list", { cwds: [dir] }).catch((error: unknown) => error);
+  it("does not close for idleness while a call is pending", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const c = client({ extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
+    const pending = c.call("hooks/list", { cwds: [dir] }, { timeoutMs: 60_000 }).catch((error: unknown) => error);
     await c.call("config/read", {});
-    assert.equal(timers.count(30_000), 0, "hooks/list is still pending");
-    assert.equal(c.isRunning, true);
-    timers.fire(10_000);
+    t.mock.timers.tick(30_000);
+    assert.equal(c.isRunning, true, "hooks/list is still pending, so the idle window never opened");
+    t.mock.timers.tick(30_000);
     assert.ok((await pending) instanceof AgentProfileError);
+    await c.close();
   });
 
-  it("fails a call that misses its deadline with AGENT_CLI_FAILED and kills the child", async () => {
+  it("fails a call that misses its deadline with AGENT_CLI_FAILED and kills the child", async (t) => {
     {
-      const timers = new ManualTimers();
-      const c = client(timers, { extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const c = client({ extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
       await c.call("config/read", {});
       const hung = c.call("hooks/list", {});
-      // The deadline is armed as the call starts; expire it.
-      assert.equal(timers.count(10_000), 1);
-      timers.fire(10_000);
+      t.mock.timers.tick(9_999);
+      assert.equal(c.isRunning, true, "inside the call's deadline");
+      t.mock.timers.tick(1);
       await assert.rejects(hung, (error: unknown) => {
         assert.ok(error instanceof AgentProfileError);
         assert.equal(error.code, "AGENT_CLI_FAILED");
@@ -137,12 +112,12 @@ describe("CodexAppServerClient", () => {
       });
       assert.equal(c.isRunning, false, "the wedged child is gone");
       assert.deepEqual((await c.call("config/read", {})).layers?.[0].name.type, "user", "the next call starts afresh");
+      await c.close();
     }
   });
 
   it("hands an answered error back as CodexRpcError, mapped by toProfileError", async () => {
-    const timers = new ManualTimers();
-    const c = client(timers);
+    const c = client();
     const error = await c
       .call("config/batchWrite", {
         edits: [{ keyPath: "model", value: "x", mergeStrategy: "replace" }],
@@ -166,7 +141,7 @@ describe("CodexAppServerClient", () => {
   });
 
   it("reports a binary that does not start as AGENT_CLI_FAILED", async () => {
-    const c = client(new ManualTimers(), { bin: join(dir, "no-such-codex"), args: ["app-server"] });
+    const c = client({ bin: join(dir, "no-such-codex"), args: ["app-server"] });
     await assert.rejects(c.call("config/read", {}), (error: unknown) => {
       assert.ok(error instanceof AgentProfileError);
       assert.equal(error.code, "AGENT_CLI_FAILED");

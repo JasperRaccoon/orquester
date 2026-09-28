@@ -1,14 +1,8 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
 
 import { parseLsRemote } from "./ls-remote";
 
-const exec = promisify(execFile);
 
 const A = "19f33c6764993e3cb961341967ac3b3c07579ef0";
 const B = "7ada497f806e271f569e1399b5e61d17fcb77cb4";
@@ -58,28 +52,4 @@ test("parseLsRemote: no HEAD line → no defaultBranch; a __proto__ branch stays
 test("parseLsRemote: SHA-256 object ids", () => {
   const long = "a".repeat(64);
   assert.deepEqual(parseLsRemote(`${long}\trefs/heads/main\n`).heads, { main: long });
-});
-
-test("parseLsRemote reads what a real `git ls-remote --symref` prints", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "orq-lsremote-"));
-  try {
-    const env = { ...process.env, HOME: dir, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
-    const git = (...args: string[]) => exec("git", args, { cwd: dir, env });
-    await git("init", "-q", "-b", "trunk");
-    await git("-c", "user.name=t", "-c", "user.email=t@t.invalid", "commit", "-q", "--allow-empty", "-m", "x");
-    await git("tag", "light");
-    await git("-c", "user.name=t", "-c", "user.email=t@t.invalid", "tag", "-a", "annotated", "-m", "a");
-    await git("branch", "side");
-    const { stdout: head } = await git("rev-parse", "HEAD");
-    const { stdout: tagObject } = await git("rev-parse", "annotated");
-    const { stdout } = await git("ls-remote", "--symref", "--", dir);
-    const sha = head.trim();
-    assert.deepEqual(parseLsRemote(stdout), {
-      heads: { side: sha, trunk: sha },
-      tags: { annotated: { sha: tagObject.trim(), commit: sha }, light: { sha, commit: sha } },
-      defaultBranch: "trunk"
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 });

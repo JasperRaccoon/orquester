@@ -256,7 +256,7 @@ const NON_INTERACTIVE_AUTH_METHOD_IDS: readonly string[] = ["cached_token", "xai
  * at all and let the first model call surface the login failure. Never
  * auto-select a method whose whole purpose is to open a browser.
  */
-export function resolveAuthMethodId(initialize: InitializeResponse): string | null {
+function resolveAuthMethodId(initialize: InitializeResponse): string | null {
   const meta = (initialize as { _meta?: Record<string, unknown> })._meta;
   const preferred = meta?.["defaultAuthMethodId"];
   if (typeof preferred === "string" && preferred.length > 0 && !INTERACTIVE_AUTH_METHOD_IDS.has(preferred)) {

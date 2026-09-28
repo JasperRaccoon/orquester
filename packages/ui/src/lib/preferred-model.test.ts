@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  launchModelSelection,
-  loadPreferredModelSelections,
-  savePreferredModelSelections
-} from "./preferred-model.ts";
+import { launchModelSelection, loadPreferredModelSelections, savePreferredModelSelections } from "./preferred-model.ts";
 
 const store = new Map<string, string>();
 (globalThis as { localStorage?: unknown }).localStorage = {

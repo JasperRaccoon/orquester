@@ -87,7 +87,6 @@ export interface WatchInput {
   whenOnlyWatchLoopsRemain: "finish" | "wait";
   /** Request ids this block already answered (a snapshot may list one for a moment longer). */
   handled: ReadonlySet<string>;
-  timings?: Partial<WatchTimings>;
   onActivity?: (line: string) => void;
   logger?: WorkflowLogger;
 }
@@ -235,7 +234,6 @@ export function autonomousDecision(request: PendingApproval): string {
 
 /** Watch a session until something needs doing, the work is done, the deadline passes or the run is cancelled. */
 export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
-  const timings = { ...DEFAULT_WATCH_TIMINGS, ...input.timings };
   const { api, sessionId, baseline, clock, signal } = input;
   const waker = createWaker(api, sessionId, clock, signal);
   let doneSince: number | null = null;
@@ -253,7 +251,7 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
       if (now >= input.deadlineAt.getTime()) return { kind: "timeout" };
       const obs = await observe(api, sessionId, input.logger);
       if (signal.aborted) return { kind: "cancelled" };
-      let nextWake = now + timings.rereadMs;
+      let nextWake = now + DEFAULT_WATCH_TIMINGS.rereadMs;
       if (obs?.gone) return { kind: "closed" };
       if (obs?.summary && obs.snapshot) {
         const s = obs.summary;
@@ -313,15 +311,15 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
           const endedAt = backgroundEndedAt(snap, baseline, backgroundGoneAt);
           const completedAt = latest!.completedAt ? Date.parse(latest!.completedAt) : Number.NaN;
           const wakeMayCome = endedAt !== null && !(Number.isFinite(completedAt) && completedAt >= endedAt);
-          const quiet = wakeMayCome ? Math.max(timings.quietMs, timings.wakeQuietMs) : timings.quietMs;
+          const quiet = wakeMayCome ? Math.max(DEFAULT_WATCH_TIMINGS.quietMs, DEFAULT_WATCH_TIMINGS.wakeQuietMs) : DEFAULT_WATCH_TIMINGS.quietMs;
           if (at - doneSince >= quiet) return { kind: "done", snapshot: snap, summary: s };
           nextWake = Math.min(nextWake, doneSince + quiet);
         } else if (completed && rung === "monitoring" && input.whenOnlyWatchLoopsRemain === "finish") {
           doneSince = null;
           doneKey = null;
           if (monitorSince === null) monitorSince = at;
-          if (at - monitorSince >= Math.max(timings.monitorGraceMs, timings.quietMs)) return { kind: "done", snapshot: snap, summary: s };
-          nextWake = Math.min(nextWake, monitorSince + Math.max(timings.monitorGraceMs, timings.quietMs));
+          if (at - monitorSince >= Math.max(DEFAULT_WATCH_TIMINGS.monitorGraceMs, DEFAULT_WATCH_TIMINGS.quietMs)) return { kind: "done", snapshot: snap, summary: s };
+          nextWake = Math.min(nextWake, monitorSince + Math.max(DEFAULT_WATCH_TIMINGS.monitorGraceMs, DEFAULT_WATCH_TIMINGS.quietMs));
         } else {
           doneSince = null;
           doneKey = null;
@@ -329,7 +327,7 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
         }
 
         const line = activityLine(snap);
-        if (line && line !== lastActivity && at - lastActivityAt >= timings.activityThrottleMs) {
+        if (line && line !== lastActivity && at - lastActivityAt >= DEFAULT_WATCH_TIMINGS.activityThrottleMs) {
           lastActivity = line;
           lastActivityAt = at;
           input.onActivity?.(line);
@@ -349,7 +347,7 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
  * daemon restart too), or the moment this watch first saw the session's background liveness gone.
  * Null when neither says background work ended.
  */
-export function backgroundEndedAt(snap: ThreadSnapshotPayload, baseline: AgentBaseline, watchedGoneAt: number | null): number | null {
+function backgroundEndedAt(snap: ThreadSnapshotPayload, baseline: AgentBaseline, watchedGoneAt: number | null): number | null {
   let latest = watchedGoneAt;
   for (const item of itemsAfterBaseline(snap.items, baseline)) {
     if (item.kind !== "activity" || item.activityKind !== "task.completed") continue;

@@ -20,7 +20,6 @@ import {
 import { createIngestion } from "../../../ingestion/index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen
@@ -73,15 +72,13 @@ export interface HostIngestion {
  */
 export function createHostIngestion(options: { startIso?: string } = {}): HostIngestion {
   const clock = new FakeClock(options.startIso);
-  const timers = new FakeTimers(clock);
+
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
     idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
   });
   const log = (): DomainEvent[] => [
     CREATED,
@@ -92,7 +89,7 @@ export function createHostIngestion(options: { startIso?: string } = {}): HostIn
       for (const event of events) {
         await ingestion.ingest(event);
       }
-      timers.advance(300);
+      clock.advance(300);
       await ingestion.drain();
     },
     log,

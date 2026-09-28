@@ -130,30 +130,30 @@ test("stale last-known reading drops scoped windows whose reset has passed", asy
 
   let clock = NOW;
   let fetches = 0;
+  t.mock.method(globalThis, "fetch", (async () => {
+    fetches++;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        seven_day: { utilization: 96, resets_at: new Date(NOW + 4 * 3_600_000).toISOString() },
+        limits: [
+          {
+            kind: "weekly_scoped",
+            percent: 100,
+            // Fable window resets 1h after the fetch
+            resets_at: new Date(NOW + 3_600_000).toISOString(),
+            scope: { model: { display_name: "Fable" } }
+          }
+        ]
+      })
+    } as unknown as Response;
+  }) as unknown as typeof fetch);
   const source = createClaudeSource({
     userhome,
     claudeHome,
-    now: () => clock,
-    fetchImpl: (async () => {
-      fetches++;
-      return {
-        ok: true,
-        status: 200,
-        headers: { get: () => null },
-        json: async () => ({
-          seven_day: { utilization: 96, resets_at: new Date(NOW + 4 * 3_600_000).toISOString() },
-          limits: [
-            {
-              kind: "weekly_scoped",
-              percent: 100,
-              // Fable window resets 1h after the fetch
-              resets_at: new Date(NOW + 3_600_000).toISOString(),
-              scope: { model: { display_name: "Fable" } }
-            }
-          ]
-        })
-      } as unknown as Response;
-    }) as unknown as typeof fetch
+    now: () => clock
   });
 
   const fresh = await source();

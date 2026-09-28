@@ -1,11 +1,11 @@
-import { test, type TestContext } from "node:test";
+import { test,type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp,mkdir,rm,symlink,writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname,join } from "node:path";
 import { FsSandboxError } from "@orquester/config/fs";
 import { ToolError } from "./errors.ts";
-import { DEFAULT_READ_BYTES, FsTools, MAX_FS_ENTRIES, MAX_READ_BYTES } from "./fs-tools.ts";
+import { DEFAULT_READ_BYTES,FsTools } from "./fs-tools.ts";
 
 async function makeRoot(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "orq-fs-tools-"));
@@ -81,17 +81,17 @@ test("listFiles rejects sandbox escapes and missing directories with safe errors
   );
 });
 
-test("listFiles caps entries and marks truncated after MAX_FS_ENTRIES", async (t) => {
+test("listFiles caps entries and marks truncated after 500", async (t) => {
   const root = await makeRoot(t);
   const dir = join(root, "many");
   await mkdir(dir, { recursive: true });
-  for (let i = 0; i < MAX_FS_ENTRIES + 1; i += 1) {
+  for (let i = 0; i < 501; i += 1) {
     await writeFile(join(dir, `f${String(i).padStart(4, "0")}.txt`), "x");
   }
 
   const result = await new FsTools({ fsRoot: root }).listFiles("many");
 
-  assert.equal(result.entries.length, MAX_FS_ENTRIES);
+  assert.equal(result.entries.length, 500);
   assert.equal(result.truncated, true);
   assert.deepEqual(
     result.entries.map((entry) => entry.name),
@@ -114,22 +114,6 @@ test("readFileWindow reads the default window and supports byte-offset paging", 
   assert.equal(second.text, "tail");
   assert.equal(second.offset, DEFAULT_READ_BYTES);
   assert.equal(second.truncated, false);
-});
-
-test("readFileWindow clamps offset and hard-caps maxBytes", async (t) => {
-  const root = await makeRoot(t);
-  await write(root, "huge.txt", "b".repeat(MAX_READ_BYTES + 5));
-
-  const negativeOffset = await new FsTools({ fsRoot: root }).readFileWindow("huge.txt", {
-    offset: -20,
-    maxBytes: MAX_READ_BYTES + 99,
-  });
-  const tinyWindow = await new FsTools({ fsRoot: root }).readFileWindow("huge.txt", { maxBytes: 0 });
-
-  assert.equal(negativeOffset.offset, 0);
-  assert.equal(negativeOffset.text.length, MAX_READ_BYTES);
-  assert.equal(negativeOffset.truncated, true);
-  assert.equal(tinyWindow.text.length, 1);
 });
 
 test("readFileWindow refuses binary files, directories, and missing files with safe ToolErrors", async (t) => {

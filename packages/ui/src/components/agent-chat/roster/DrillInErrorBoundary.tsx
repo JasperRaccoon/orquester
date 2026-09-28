@@ -45,11 +45,6 @@ export class DrillInErrorBoundary extends React.Component<DrillInErrorBoundaryPr
     console.error(`agent chat: the drill-in of agent ${this.props.agentId} failed to render`, error, info);
   }
 
-  /** "Back to the thread": leaving unmounts this boundary with the child. */
-  back = (): void => {
-    this.props.onBack();
-  };
-
   render(): React.ReactNode {
     const { error } = this.state;
     if (!error) {
@@ -57,7 +52,6 @@ export class DrillInErrorBoundary extends React.Component<DrillInErrorBoundaryPr
     }
     return (
       <div
-        data-drill-in-crashed={this.props.agentId}
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
         style={{ paddingBottom: this.props.bottomInset ?? 0 }}
       >
@@ -70,7 +64,7 @@ export class DrillInErrorBoundary extends React.Component<DrillInErrorBoundaryPr
         </div>
         <button
           type="button"
-          onClick={this.back}
+          onClick={this.props.onBack}
           className="ac-press flex min-h-10 items-center gap-1.5 rounded-md border border-neutral-700 px-3 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
         >
           <ArrowLeft size={14} aria-hidden />

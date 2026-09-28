@@ -18,11 +18,6 @@ import { errorText, type WorkflowRunsApi } from "./shared";
 
 export const RUN_HISTORY_PAGE = 25;
 
-/** Whether the store's first page was reloaded since the older pages were based on it. */
-export function firstPageReplaced(previousBefore: string | null | undefined, nextBefore: string | null): boolean {
-  return previousBefore !== undefined && previousBefore !== nextBefore;
-}
-
 export interface RunHistory {
   runs: WorkflowRunSummary[];
   /** The first page is on its way. */
@@ -67,7 +62,7 @@ export function useRunHistory(api: WorkflowRunsApi, workflowId: string | null): 
   // new end and them would be on neither. Start the older pages over.
   const basedOn = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    if (firstPageReplaced(basedOn.current, first.before)) {
+    if (basedOn.current !== undefined && basedOn.current !== first.before) {
       generation.current += 1;
       setOlder([]);
       setCursor(undefined);

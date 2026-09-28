@@ -171,7 +171,7 @@ function displayHost(account: Account): string {
  * The key path is quoted: core.sshCommand is parsed shell-like and the path may
  * contain spaces (e.g. macOS /Users/First Last/.orquester/...).
  */
-export function sshCommandFor(account: Account, knownHostsPath: string | null): string {
+function sshCommandFor(account: Account, knownHostsPath: string | null): string {
   const base = `ssh -i "${account.keyPath}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
   return account.provider !== "github" && knownHostsPath
     ? `${base} -o UserKnownHostsFile="${knownHostsPath}"`
@@ -186,7 +186,7 @@ export function sshCommandFor(account: Account, knownHostsPath: string | null): 
  * the instance keeps advertising an SSH clone URL. The token-backed HTTPS URL is
  * the transport that works until `confirmKey()` clears the flag.
  */
-export function pickCloneUrl(
+function pickCloneUrl(
   account: Pick<Account, "keyUploadPending">,
   urls: { ssh?: string; https?: string }
 ): string | undefined {

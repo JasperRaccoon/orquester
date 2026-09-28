@@ -9,8 +9,6 @@
  */
 
 import {
-  formatPromptDate,
-  formatPromptTime,
   resolvePromptVariables,
   type GitStatusResponse,
   type GitWorkingDiffResponse
@@ -19,19 +17,7 @@ import type { ProviderModel } from "@orquester/api/agent-chat";
 
 import { modelDisplayName } from "../launch-models";
 
-export {
-  branchText,
-  CHANGED_FILES_MAX_LINES,
-  changedFilesText,
-  DETACHED_HEAD,
-  diffText,
-  formatDiffCap,
-  NO_BRANCH,
-  NO_GIT_REPOSITORY,
-  NO_UNCOMMITTED_CHANGES,
-  projectNamesFromPath,
-  RESOLVE_CANCELLED
-} from "@orquester/api";
+export { projectNamesFromPath } from "@orquester/api";
 
 /** The git routes a prompt may read — `ApiClient` satisfies it; tests pass a fake. */
 export interface SavedPromptGitApi {
@@ -83,20 +69,6 @@ export async function resolveSavedPrompt(
     signal: input.signal
   });
   return result.ok ? { ok: true, text: result.text } : { ok: false, reason: result.reason };
-}
-
-// ---------------------------------------------------------------------------
-// The values (the formatters live in @orquester/api)
-// ---------------------------------------------------------------------------
-
-/** `{date}`: the local date, `YYYY-MM-DD`. */
-export function localDate(now: Date): string {
-  return formatPromptDate(now);
-}
-
-/** `{time}`: the local time, `HH:MM` (24 h). */
-export function localTime(now: Date): string {
-  return formatPromptTime(now);
 }
 
 /** `{agent}`: the registry entry's display name, else the id itself. */

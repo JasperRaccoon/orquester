@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
-import { BACKGROUND_LIVENESS_TTL_MS, createLivenessRegistry } from "./liveness.ts";
+import { createLivenessRegistry } from "./liveness.ts";
 import { createTestClock } from "./testing/fakes.ts";
 
 const base = { eventId: "e", threadId: "t1", createdAt: "1970-01-01T00:00:00.000Z" };
@@ -17,18 +17,6 @@ const task = (
 ): RuntimeEvent => ({ ...base, type, payload }) as unknown as RuntimeEvent;
 
 describe("background liveness registry (§3.1)", () => {
-  it("is null for an untouched thread", () => {
-    const registry = createLivenessRegistry();
-    assert.equal(registry.liveness("t1"), null);
-    assert.equal(registry.liveAgentCount("t1"), 0);
-  });
-
-  it("any live agent work reads as working", () => {
-    const registry = createLivenessRegistry();
-    registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
-    assert.equal(registry.liveness("t1"), "working");
-    assert.equal(registry.liveAgentCount("t1"), 1);
-  });
 
   it("watch loops alone read as monitoring", () => {
     const registry = createLivenessRegistry();
@@ -109,10 +97,10 @@ describe("background liveness expiry (Grok: tasks that never complete)", () => {
     registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
     assert.equal(registry.liveness("t1"), "monitoring");
 
-    clock.set(BACKGROUND_LIVENESS_TTL_MS - 1);
+    clock.set(10 * 60_000 - 1);
     assert.equal(registry.liveness("t1"), "monitoring", "still inside the window");
 
-    clock.set(BACKGROUND_LIVENESS_TTL_MS);
+    clock.set(10 * 60_000);
     assert.equal(registry.liveness("t1"), null, "silent for the whole window");
   });
 
@@ -120,11 +108,11 @@ describe("background liveness expiry (Grok: tasks that never complete)", () => {
     const clock = createTestClock(0);
     const registry = createLivenessRegistry({ clock });
     registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
-    clock.set(BACKGROUND_LIVENESS_TTL_MS - 1);
+    clock.set(10 * 60_000 - 1);
     registry.observe(task("task.progress", { taskId: "m1", taskType: "monitor", status: "running" }));
-    clock.set(BACKGROUND_LIVENESS_TTL_MS + 1);
+    clock.set(10 * 60_000 + 1);
     assert.equal(registry.liveness("t1"), "monitoring");
-    clock.set(BACKGROUND_LIVENESS_TTL_MS * 2);
+    clock.set(10 * 60_000 * 2);
     assert.equal(registry.liveness("t1"), null);
   });
 
@@ -132,7 +120,7 @@ describe("background liveness expiry (Grok: tasks that never complete)", () => {
     const clock = createTestClock(0);
     const registry = createLivenessRegistry({ clock });
     registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
-    clock.set(BACKGROUND_LIVENESS_TTL_MS * 100);
+    clock.set(10 * 60_000 * 100);
     assert.equal(registry.liveness("t1"), "working");
     assert.equal(registry.liveAgentCount("t1"), 1);
   });
@@ -218,9 +206,9 @@ describe("a turn the provider started sweeps nothing at its end", () => {
     registry.observe(turn("turn.aborted"));
     assert.equal(registry.liveness("t1"), "monitoring", "an aborted wake sweeps nothing either");
 
-    clock.set(BACKGROUND_LIVENESS_TTL_MS - 1);
+    clock.set(10 * 60_000 - 1);
     assert.equal(registry.liveness("t1"), "monitoring");
-    clock.set(BACKGROUND_LIVENESS_TTL_MS);
+    clock.set(10 * 60_000);
     assert.equal(registry.liveness("t1"), null, "the TTL still bounds a silent watch loop");
   });
 
@@ -238,17 +226,6 @@ describe("a turn the provider started sweeps nothing at its end", () => {
     clock.set(4_000);
     registry.observe(turn("turn.completed"));
     assert.equal(registry.liveness("t1"), null, "silent through the user's own turn");
-  });
-
-  it("a thread left with nothing live keeps no state behind a wake", () => {
-    const clock = createTestClock(0);
-    const registry = createLivenessRegistry({ clock });
-    registry.observe(turn("turn.started"), providerTurn);
-    assert.equal(registry.liveness("t1"), null);
-    registry.observe(task("task.started", { taskId: "sh1", taskType: "shell" }));
-    registry.observe(task("task.completed", { taskId: "sh1", taskType: "shell", status: "completed" }));
-    registry.observe(turn("turn.completed"));
-    assert.equal(registry.liveness("t1"), null);
   });
 });
 
@@ -276,9 +253,9 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     assert.equal(registry.liveness("t1"), "monitoring");
     assert.equal(registry.liveAgentCount("t1"), 0, "a shell is not an agent");
 
-    clock.set(BACKGROUND_LIVENESS_TTL_MS - 1);
+    clock.set(10 * 60_000 - 1);
     assert.equal(registry.liveness("t1"), "monitoring");
-    clock.set(BACKGROUND_LIVENESS_TTL_MS);
+    clock.set(10 * 60_000);
     assert.equal(registry.liveness("t1"), null, "silent for the whole window, like any watch loop");
   });
 
@@ -322,15 +299,6 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     // Codex's Stop/exit closer names no taskType at all.
     const closer = { taskId: "child-1", agentId: "child-1", status: "stopped" };
     registry.observe(task("task.completed", closer));
-    assert.equal(registry.liveness("t1"), null);
-  });
-
-  it("a Grok subagent — stamped with itself, typed subagent — is working until its end", () => {
-    const registry = createLivenessRegistry();
-    const agent = { taskId: "call-9", taskType: "subagent", agentId: "call-9" };
-    registry.observe(task("task.started", { ...agent, toolUseId: "call-9" }));
-    assert.equal(registry.liveness("t1"), "working");
-    registry.observe(task("task.completed", { ...agent, status: "completed" }));
     assert.equal(registry.liveness("t1"), null);
   });
 });

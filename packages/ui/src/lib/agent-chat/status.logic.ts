@@ -16,67 +16,13 @@
 import {
   SETTLED_TURN_STATES,
   type BackgroundLiveness,
-  type LatestTurnSummary,
   type ThreadActivityItem,
   type ThreadSessionStatus,
   type ThreadTokenUsage,
   type TurnState
 } from "@orquester/api/agent-chat";
 
-import { hasUnseenCompletion as threadHasUnseenCompletion } from "../thread-visits";
 import { compactionMarkerState, isCompactionActivity } from "./entries.logic";
-
-// ---------------------------------------------------------------------------
-// The §6.4 activity ladder lives on the HOST
-// ---------------------------------------------------------------------------
-//
-// It used to be mirrored here as `resolveChatActivity` / `resolveChatStatusPill`
-// / `statusPillPulses`. Nothing consumed them: every ambient surface buckets on
-// the daemon-pushed `SessionActivity` (`components/attention/agent-sessions.ts`),
-// which the host derives once in `apps/daemon/src/agent-chat/activity-ladder.ts`
-// — which is exactly what §7.1 asks for ("ambient surfaces read a shell, never
-// a thread"). A second copy of a ladder whose whole point is that there is one
-// of it is a drift hazard, so the fix wave deleted it (R7-12).
-// ---------------------------------------------------------------------------
-// Unread (§7.7)
-// ---------------------------------------------------------------------------
-
-/**
- * **Needs-attention and unread are two different things.** Unread is: the
- * latest turn's `completedAt` is newer than this client's last visit.
- *
- * The rule itself lives **once**, in `lib/thread-visits.ts` (which also owns
- * the persisted per-device map); this is the `LatestTurnSummary`-shaped
- * adapter the chat surfaces already hold.
- *
- * *T3: `Sidebar.logic.ts:635-644` (`hasUnseenCompletion`).*
- */
-export function hasUnseenCompletion(input: {
-  latestTurn?: LatestTurnSummary | null;
-  lastVisitedAt?: string | null;
-}): boolean {
-  return threadHasUnseenCompletion(
-    input.latestTurn?.completedAt,
-    input.lastVisitedAt ?? undefined
-  );
-}
-
-/**
- * A "mark unread" action is **just a last-visit stamp set one millisecond
- * before that completion** (§7.7).
- *
- * *T3: `uiStateStore.ts:272-296` (`markThreadUnread`).*
- */
-export function markUnreadVisitStamp(latestTurnCompletedAt: string | null | undefined): string | null {
-  if (!latestTurnCompletedAt) {
-    return null;
-  }
-  const completed = Date.parse(latestTurnCompletedAt);
-  if (Number.isNaN(completed)) {
-    return null;
-  }
-  return new Date(completed - 1).toISOString();
-}
 
 // ---------------------------------------------------------------------------
 // Recede (§7.7)
@@ -137,19 +83,6 @@ export function shouldRecedeSidebarThread(input: {
   if (input.isSelected || input.status === "input") return false;
   if (input.status === "working" || input.status === "monitoring") return true;
   return !input.isUnread;
-}
-
-/** A visit stamp only ever moves forward. *T3: `uiStateStore.ts:250-270`.* */
-export function nextVisitStamp(previous: string | null | undefined, visitedAt: string): string | null {
-  const next = Date.parse(visitedAt);
-  if (!Number.isFinite(next)) {
-    return previous ?? null;
-  }
-  const before = previous ? Date.parse(previous) : Number.NaN;
-  if (Number.isFinite(before) && before >= next) {
-    return previous ?? null;
-  }
-  return visitedAt;
 }
 
 // ---------------------------------------------------------------------------

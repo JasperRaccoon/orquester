@@ -30,7 +30,7 @@ export class ChatErrorBoundary extends React.Component<ChatErrorBoundaryProps, {
   }
 
   /** "Try again": the view's reset first, then render the thread again. */
-  reset = (): void => {
+  private reset = (): void => {
     this.props.onReset?.();
     this.setState({ error: null });
   };

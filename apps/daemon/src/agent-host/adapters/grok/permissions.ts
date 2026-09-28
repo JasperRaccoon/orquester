@@ -93,7 +93,7 @@ export function selectAutoApprovedOptionId(
  *
  * *T3: `packages/shared/src/relaySigning.ts:5-17`.*
  */
-export function stableStringify(value: unknown): string {
+function stableStringify(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(stableStringify).join(",")}]`;
   }

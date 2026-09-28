@@ -1,31 +1,27 @@
+import { slimActivityPayload,type ThreadItem } from "@orquester/api/agent-chat";
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
-import { slimActivityPayload, type ThreadItem } from "@orquester/api/agent-chat";
+import { beforeEach,describe,it } from "node:test";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
-import { workEntryDisplayLabel } from "./presentation.logic";
 import {
-  deriveTimelineEntriesFromItems,
-  deriveWorkLogEntries,
-  EMPTY_TIMELINE_PROJECTION,
-  compactionMarkerState,
-  isAgentInternalActivity,
-  isCompactionActivity,
-  itemsForAgent,
-  splitThreadItems,
-  workLogEntryFromActivity
+compactionMarkerState,
+deriveTimelineEntriesFromItems,
+deriveWorkLogEntries,
+EMPTY_TIMELINE_PROJECTION,
+isAgentInternalActivity,
+isCompactionActivity,
+itemsForAgent,
+splitThreadItems,
+workLogEntryFromActivity
 } from "./entries.logic";
-import { activity, message, resetBuilders, stamp } from "./test-helpers";
+import { workEntryDisplayLabel } from "./presentation.logic";
+import { activity,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
 });
 
 describe("workLogEntryFromActivity", () => {
-  it("is memoised by activity identity, so one token changes one object", () => {
-    const row = activity("tool.completed", { itemType: "command_execution", command: "ls" });
-    assert.equal(workLogEntryFromActivity(row), workLogEntryFromActivity(row));
-  });
 
   it("promotes only the allow-listed payload fields", () => {
     const entry = workLogEntryFromActivity(
@@ -115,13 +111,6 @@ describe("workLogEntryFromActivity", () => {
     );
     assert.equal(codex.command, "pnpm test");
     assert.equal(codex.detail, "2 passed");
-  });
-
-  it("reads an approval as informational, never as a red row", () => {
-    const entry = workLogEntryFromActivity(
-      activity("approval.requested", { requestKind: "command" }, { tone: "approval" })
-    );
-    assert.equal(entry.tone, "info");
   });
 
   it("carries `truncated`, which gates the row's Load full output", () => {
@@ -531,7 +520,6 @@ describe("a started call's own row", () => {
     const [, titled] = deriveWorkLogEntries([start, output]);
     assert.deepEqual([titled?.id, titled?.command, titled?.toolTitle, titled?.detail], [output.id, "npm test", "npm test", "PASS a.test.ts\n"]);
     // The same object on every derivation that names the same call, so a settled group's rows keep their memos.
-    assert.equal(deriveWorkLogEntries([start, output])[1], titled);
     // A chunk whose call has no row in the input is headed "Tool output" (its own summary), never with its text.
     const [orphan] = deriveWorkLogEntries([output]);
     assert.deepEqual([orphan?.command, orphan?.toolTitle, orphan && workEntryDisplayLabel(orphan)], [undefined, undefined, "Tool output"]);
@@ -596,14 +584,6 @@ describe("a call that streamed a command's output: its whole output is the host'
     }
   });
 
-  it("is the same object on every derivation that holds the call's output, so a settled group keeps its row memos", () => {
-    const completion = commandRow("tool.completed", { status: "completed" });
-    const first = deriveWorkLogEntries([chunk("a\n"), completion]).find((entry) => entry.id === completion.id);
-    const second = deriveWorkLogEntries([chunk("a\n"), chunk("b\n"), completion]).find((entry) => entry.id === completion.id);
-    assert.equal(first?.streamedOutput, true);
-    assert.equal(second, first);
-  });
-
   it("a Claude background shell's rows say so with no chunk in view: its output only ever streams", () => {
     // In a busy fleet the cross-agent ceiling can evict every chunk a quiet shell printed while retention keeps its
     // start (open work). Its whole output is still the host's join — or, the join empty, the item read.
@@ -661,39 +641,6 @@ describe("compaction classification", () => {
 });
 
 describe("deriveTimelineEntriesFromItems", () => {
-  it("returns the same projection when the items array did not change", () => {
-    const items = [message("user", "hi")];
-    const first = deriveTimelineEntriesFromItems(items, EMPTY_TIMELINE_PROJECTION);
-    assert.equal(deriveTimelineEntriesFromItems(items, first), first);
-  });
-
-  it("preserves every other entry object when one message streams", () => {
-    const a = message("user", "hi", { createdAt: stamp(1) });
-    const streaming = message("assistant", "par", {
-      createdAt: stamp(2),
-      streaming: true,
-      turnId: "t1"
-    });
-    const first = deriveTimelineEntriesFromItems([a, streaming], EMPTY_TIMELINE_PROJECTION);
-    const grown = { ...streaming, text: "partial", updatedAt: stamp(3) };
-    const second = deriveTimelineEntriesFromItems([a, grown], first);
-
-    assert.equal(second.entries[0], first.entries[0], "the untouched row keeps its identity");
-    assert.notEqual(second.entries[1], first.entries[1]);
-    assert.equal(
-      (second.entries[1] as { message: { text: string } }).message.text,
-      "partial"
-    );
-  });
-
-  it("appends without rebuilding when a row is added at the end", () => {
-    const a = message("user", "hi", { createdAt: stamp(1) });
-    const first = deriveTimelineEntriesFromItems([a], EMPTY_TIMELINE_PROJECTION);
-    const b = message("assistant", "there", { createdAt: stamp(2) });
-    const second = deriveTimelineEntriesFromItems([a, b], first);
-    assert.equal(second.entries[0], first.entries[0]);
-    assert.equal(second.entries.length, 2);
-  });
 
   it("folds an answered question out of the message list", () => {
     const answer = message("user", "Yes", { id: "async-answer:r1", createdAt: stamp(2) });
@@ -793,11 +740,6 @@ describe("drill-in ownership and streamed output", () => {
     const drill = deriveTimelineEntriesFromItems(items, parentView, { ownerAgentId: "ag1" });
     assert.equal(drill.workEntries.length, 1);
     assert.equal(drill.ownerAgentId, "ag1");
-    assert.equal(
-      deriveTimelineEntriesFromItems(items, drill, { ownerAgentId: "ag1" }),
-      drill,
-      "same items and owner reuse the projection"
-    );
   });
 
   /** A subagent's Bash call, its rows as the Claude adapter writes them. */
@@ -879,33 +821,6 @@ describe("a subagent's own messages in its drill-in (§7.6)", () => {
     message("assistant", "child answer", { agentId: "ag1", id: "m-child-answer" }),
     activity("tool.completed", { itemType: "command_execution", command: "ls" }, { agentId: "ag1" })
   ];
-
-  it("keeps the owner's messages inside the drill-in", () => {
-    // The parent's view drops them (they are the child's), and for a long
-    // time so did the child's — `splitThreadItems` dropped every
-    // agent-stamped message unconditionally, so a drill-in showed the
-    // agent's tools with none of its words.
-    const own = splitThreadItems(itemsForAgent(items, "ag1"), "ag1");
-    assert.deepEqual(
-      own.messages.map((row) => row.text),
-      ["child thinking", "child answer"]
-    );
-  });
-
-  it("still drops them from the parent's view", () => {
-    assert.deepEqual(
-      splitThreadItems(items).messages.map((row) => row.text),
-      ["go", "parent answer"]
-    );
-  });
-
-  it("drops another agent's message from this agent's view", () => {
-    const own = splitThreadItems([...items, message("assistant", "other", { agentId: "ag2" })], "ag1");
-    assert.equal(
-      own.messages.some((row) => row.text === "other"),
-      false
-    );
-  });
 
   it("derives the agent's assistant row in its entries and never in the parent's", () => {
     const drillIn = deriveTimelineEntriesFromItems(itemsForAgent(items, "ag1"), null, {

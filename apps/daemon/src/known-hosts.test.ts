@@ -1,28 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureKnownHosts, KNOWN_HOSTS_SEED, parseKnownHostsDocument } from "./known-hosts";
+import { ensureKnownHosts, parseKnownHostsDocument } from "./known-hosts";
 
-test("seeds once, idempotently, preserving TOFU-appended entries", async () => {
+test("seeds once, idempotently, preserving TOFU-appended entries", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "orq-kh-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
   const path = await ensureKnownHosts(dir, { refresh: false });
   await ensureKnownHosts(dir, { refresh: false }); // second call must not duplicate
-  const { appendFile } = await import("node:fs/promises");
   await appendFile(path, "[bb.corp.com]:7999 ssh-ed25519 AAAAtofu\n");
   await ensureKnownHosts(dir, { refresh: false }); // must keep the TOFU line
   const text = await readFile(path, "utf8");
-  for (const line of KNOWN_HOSTS_SEED)
-    assert.equal(text.split("\n").filter((l) => l === line).length, 1);
+  const lines = text.trim().split("\n");
+  assert.equal(new Set(lines).size, lines.length, "repeated seeding adds no duplicate trust entries");
   assert.ok(text.includes("[bb.corp.com]:7999 ssh-ed25519 AAAAtofu"));
 });
 
-test("every pinned line covers BOTH bitbucket.org and ssh.bitbucket.org", () => {
+test("every pinned line covers BOTH bitbucket.org and ssh.bitbucket.org", async (t) => {
   // All Cloud SSH traffic targets ssh.bitbucket.org; known_hosts matches on the
   // hostname ssh connects to, so a bitbucket.org-only pin would never apply.
-  assert.ok(KNOWN_HOSTS_SEED.length > 0);
-  for (const line of KNOWN_HOSTS_SEED) {
+  const dir = await mkdtemp(join(tmpdir(), "orq-kh-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const lines = (await readFile(await ensureKnownHosts(dir, { refresh: false }), "utf8")).trim().split("\n");
+  assert.ok(lines.some((line) => line.includes("ssh-ed25519")));
+  for (const line of lines) {
     const hosts = line.split(" ")[0].split(",");
     assert.ok(hosts.includes("bitbucket.org"), `missing bitbucket.org in: ${line}`);
     assert.ok(hosts.includes("ssh.bitbucket.org"), `missing ssh.bitbucket.org in: ${line}`);

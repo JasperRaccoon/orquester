@@ -60,14 +60,14 @@ export interface TranscriptResult {
  * The room a shed result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. A
  * result with `unavailable` turns leaves that sentence's bytes and a space more.
  */
-export const TRANSCRIPT_HINT_BYTES = 320;
+const TRANSCRIPT_HINT_BYTES = 320;
 /** What a `hint` field adds to a result besides its text: `,"hint":""`. */
 const HINT_FIELD_BYTES = 10;
 /**
  * The subagent list's share of the room once a result is over it: the list takes whatever the transcript does not
  * need, and never less than this fraction when it needs it.
  */
-export const ROSTER_SHARE = 0.25;
+const ROSTER_SHARE = 0.25;
 
 const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
 // A hook's start and progress are provider bookkeeping, as its successful completion is (below); the GUI keeps only
@@ -152,7 +152,7 @@ function codePointBytes(cp: number): number {
 }
 
 /** A string's size inside a JSON result — escaped, UTF-8, quotes excluded — counted, never serialised. */
-export function jsonTextBytes(text: string): number {
+function jsonTextBytes(text: string): number {
   let bytes = 0;
   for (const ch of text) bytes += codePointBytes(ch.codePointAt(0)!);
   return bytes;
@@ -328,7 +328,7 @@ export function fitRoster<T extends { status: string }>(rows: readonly Sized<T>[
  * spared row (`sparedIndex`) is never dropped: it is cut last, its biggest part first (`cutRow`). Empty only when not
  * even that row's skeleton fits. Returns the entries' exact size with them. Pure, and linear: every row was measured once.
  */
-export function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance: number): { entries: TranscriptEntry[]; bytes: number } {
+function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance: number): { entries: TranscriptEntry[]; bytes: number } {
   const rows = entries.map((e) => ({ ...e }));
   let sum = rows.reduce((total, r) => total + r.bytes, 0);
   let count = rows.length;

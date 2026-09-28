@@ -76,15 +76,6 @@ export async function searchProjectFiles(
     exclude?: string;
     maxResults?: number | string;
     signal?: AbortSignal;
-    /** Force a backend. Internal/test seam only — never plumbed through the route. */
-    engine?: "auto" | "node" | "rg";
-    /**
-     * Called once per matched file inside the post-`runRipgrep` size-stat phase.
-     * Internal/test seam only — never plumbed through the route: it lets a test
-     * abort *deterministically* inside that window (the only phase whose abort
-     * checks have no other checkpoint) instead of racing a wall-clock timer.
-     */
-    onStatFile?: () => void;
   }
 ): Promise<FsSearchResponse> {
   if (!options.query) throw new FsSearchError(400, "INVALID_REQUEST", "q required.", "query");
@@ -107,8 +98,7 @@ export async function searchProjectFiles(
       ? new FsSearchError(504, "SEARCH_TIMEOUT", "Search timed out.")
       : new FsSearchError(499, "REQUEST_ABORTED", "Request aborted.");
 
-  const engine = options.engine ?? "auto";
-  const useRg = engine === "rg" || (engine === "auto" && resolveRg());
+  const useRg = resolveRg();
 
   // Optional ripgrep fast path. When `rg` is on PATH it walks + matches far faster
   // than the pure-Node engine; the engine below stays the fallback (and the tested
@@ -124,14 +114,13 @@ export async function searchProjectFiles(
         maxResults,
         globs,
         signal: composed,
-        makeAbortError,
-        onStatFile: options.onStatFile
+        makeAbortError
       });
     } catch (error) {
       // Regex/glob/exit-2/abort surface as FsSearchError and must propagate. A spawn
       // failure at runtime (rg vanished after the probe) is any other error — fall
-      // through to the node engine unless the caller explicitly forced "rg".
-      if (error instanceof FsSearchError || engine === "rg") throw error;
+      // through to the node engine.
+      if (error instanceof FsSearchError) throw error;
     }
   }
 
@@ -452,8 +441,6 @@ interface RipgrepOpts {
   globs: CompiledGlobList | null;
   signal: AbortSignal;
   makeAbortError: () => FsSearchError;
-  /** Internal/test seam — see `searchProjectFiles`'s option of the same name. */
-  onStatFile?: () => void;
 }
 
 /**
@@ -502,7 +489,6 @@ async function searchWithRipgrep(fsRoot: string, root: string, opts: RipgrepOpts
   // ripgrep's match events carry no file size; stat each matched file so `size`
   // matches the node path. Files live under `root` (already sandboxed); guard anyway.
   for (const file of collected.files) {
-    opts.onStatFile?.();
     throwIfAborted();
     try {
       const safe = await assertInsideFsRoot(fsRoot, join(root, ...file.path.split("/").filter(Boolean)));

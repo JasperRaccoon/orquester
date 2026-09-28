@@ -68,7 +68,7 @@ export function resolveLaunchModel(input: {
  * (`openrouter/anthropic/claude-3-haiku` → `openrouter`), or `null` for a
  * bare slug the adapter serves itself.
  */
-export function modelProviderOf(slug: string): string | null {
+function modelProviderOf(slug: string): string | null {
   const cut = slug.indexOf("/");
   return cut > 0 ? slug.slice(0, cut) : null;
 }
@@ -131,9 +131,8 @@ export function launchModelList(input: {
   models: readonly ProviderModel[];
   selected: string | null;
   query?: string;
-  limit?: number;
 }): LaunchModelList {
-  const limit = input.limit ?? LAUNCH_MODEL_CHIP_LIMIT;
+  const limit = LAUNCH_MODEL_CHIP_LIMIT;
   const all = input.models.map(toChoice);
   const searchable = all.length > limit;
   const query = (input.query ?? "").trim().toLowerCase();
@@ -176,26 +175,4 @@ export function launchModelList(input: {
 
   const eligible = query ? matches.length : all.length;
   return { shown, hidden: Math.max(0, eligible - shown.length), searchable };
-}
-
-/**
- * Models grouped by provider, biggest group last-named first is NOT the rule —
- * groups keep catalogue order of first appearance, so a provider never jumps
- * around between renders.
- */
-export function groupModelsByProvider(
-  models: readonly ProviderModel[]
-): Array<{ provider: string | null; models: LaunchModelChoice[] }> {
-  const groups = new Map<string, { provider: string | null; models: LaunchModelChoice[] }>();
-  for (const model of models) {
-    const choice = toChoice(model);
-    const key = choice.provider ?? "";
-    const group = groups.get(key);
-    if (group) {
-      group.models.push(choice);
-    } else {
-      groups.set(key, { provider: choice.provider, models: [choice] });
-    }
-  }
-  return [...groups.values()];
 }

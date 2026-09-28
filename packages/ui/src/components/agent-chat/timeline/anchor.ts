@@ -23,19 +23,8 @@ export interface RowMetric {
 }
 
 /**
- * The index of the first row whose **bottom edge** is past `scrollTop` — i.e.
- * the topmost row with any pixel visible.
- *
- * Returns `-1` for an empty list, and the last index when everything is above
- * the viewport (a scroll position past the end, which happens transiently while
- * rows are still materialising under `content-visibility: auto`).
- */
-export function findFirstVisibleRowIndex(rows: readonly RowMetric[], scrollTop: number): number {
-  return findFirstVisibleIndex(rows.length, (index) => rows[index] as RowMetric, scrollTop);
-}
-
-/**
- * The same search against a lazy accessor, which is the form the timeline uses.
+ * The index of the first visible row, read through a lazy accessor.
+ * Returns -1 for an empty list and the last index beyond the content.
  *
  * It matters that this **never materialises every metric**: reading `offsetTop`
  * on one element flushes layout once, and then only the ~log₂(n) probed

@@ -132,7 +132,7 @@ import { taskLinkageActivityFields } from "../ingestion/activities.ts";
 import { cancelledRequestActivity } from "./events.ts";
 
 /** The detail a call a dead process left open is closed with. */
-export const LEFTOVER_CALL_DETAIL = "Stopped when the agent host restarted.";
+const LEFTOVER_CALL_DETAIL = "Stopped when the agent host restarted.";
 
 /** One row that ends one unit of leftover work: a `thread.activity-appended` payload's activity. */
 export interface LeftoverClosing {
@@ -448,7 +448,7 @@ function taskCloser(agent: RuntimeSubagent, rows: TaskRows, input: LeftoverWorkI
 const LEGACY_LAUNCH_ADAPTERS: ReadonlySet<AgentAdapterId> = new Set(["opencode", "codex", "grok"]);
 
 /** The launch id a first load gives an agent an older host launched with none. */
-export function legacyLaunchId(taskId: string): string {
+function legacyLaunchId(taskId: string): string {
   return `legacy-launch:${taskId}`;
 }
 

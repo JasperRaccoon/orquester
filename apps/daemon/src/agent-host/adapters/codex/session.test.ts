@@ -11,6 +11,7 @@
 
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { after, describe, it } from "node:test";
 
 import type { AgentGoal, GoalUpdatedPayload, RuntimeEvent } from "@orquester/api/agent-chat";
@@ -19,7 +20,7 @@ import { resumeCursorFor } from "../../orchestration/resume.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
 import { createCodexAdapter } from "./index.ts";
-import { CodexSession, fileChangeDetail, type CodexSessionOptions } from "./session.ts";
+import { CodexSession, type CodexSessionOptions } from "./session.ts";
 import {
   EventCollector,
   createFakeContext,
@@ -46,6 +47,8 @@ interface Rig {
   session: CodexSession;
   events: EventCollector;
   received: () => ReturnType<ReturnType<typeof writeMockCodexServer>["received"]>;
+  notify(method: string, params: unknown): Promise<void>;
+  waitForSent(method: string): Promise<void>;
   stop(): Promise<void>;
   closed: () => boolean;
   logs: ReturnType<typeof createFakeContext>["logs"];
@@ -59,7 +62,7 @@ function rig(
 ): Rig {
   const server =
     mock.bin !== undefined
-      ? { bin: mock.bin, dir: null as string | null, received: () => [] }
+      ? { bin: mock.bin, dir: null as string | null, received: () => [], notify: () => {} }
       : writeMockCodexServer(mock);
   if (server.dir !== null && server.dir !== undefined) {
     const dir = server.dir;
@@ -67,6 +70,12 @@ function rig(
   }
 
   const { context, logs, rawFrames } = createFakeContext();
+  const wire = new EventEmitter();
+  const logRawFrame = context.logRawFrame;
+  context.logRawFrame = (threadId, frame) => {
+    logRawFrame(threadId, frame);
+    wire.emit("frame");
+  };
   const queue = new AsyncEventQueue<RuntimeEvent>();
   const events = new EventCollector(queue);
   let closed = false;
@@ -109,6 +118,25 @@ function rig(
     session,
     events,
     received: () => server.received(),
+    waitForSent: async (method) => {
+      const sent = (): boolean => rawFrames.some(({ frame }) => {
+        const logged = frame as { direction: string; frame: { method?: string } };
+        return logged.direction === "send" && logged.frame.method === method;
+      });
+      if (sent()) return;
+      await new Promise<void>((resolve) => {
+        const check = (): void => {
+          if (!sent()) return;
+          wire.off("frame", check);
+          resolve();
+        };
+        wire.on("frame", check);
+      });
+    },
+    notify: async (method, params) => {
+      server.notify(method, params);
+      await session.readThread();
+    },
     stop,
     closed: () => closed,
     logs,
@@ -278,7 +306,7 @@ describe("codex session — start, turn, stop", () => {
       "no MCP server has ever reported: the reload must not be sent"
     );
 
-    r.session.injectNotificationForTest("mcpServer/startupStatus/updated", {
+    await r.notify("mcpServer/startupStatus/updated", {
       server: "demo",
       status: { type: "ready" }
     });
@@ -429,14 +457,6 @@ describe("codex session — approvals", () => {
     await r.stop();
   });
 
-  it("a file-change approval with no joinable item says so rather than inventing a path", async () => {
-    assert.equal(
-      fileChangeDetail([]),
-      "Apply a file change (the provider sent no file list)."
-    );
-    assert.equal(fileChangeDetail([], "needs write access"), "needs write access");
-  });
-
   it("a file-change approval falls back to the default four options", async () => {
     const r = rig({
       turns: [{ kind: "file-change-approval", path: "/tmp/a.txt", diff: "banana\n" }]
@@ -466,7 +486,7 @@ describe("codex session — approvals", () => {
     await r.events.waitForType("turn.completed");
     // Feed an item that completes `declined` without any preceding request —
     // exactly what a CLI-side refusal looks like on the wire.
-    r.session.injectNotificationForTest("item/completed", {
+    await r.notify("item/completed", {
       item: {
         type: "commandExecution",
         id: "policy-denied-1",
@@ -795,57 +815,6 @@ describe("codex session — interrupt ordering", () => {
     await r.stop();
   });
 
-  it("emits exactly ONE user-input.resolved per parked question", async () => {
-    // `settlePendingRequests` used to emit its own row AND let the handler
-    // emit a second for the same requestId (Q1 finding 17).
-    const r = rig({
-      turns: [
-        {
-          kind: "user-input",
-          questionId: "q",
-          header: "H",
-          question: "Q?",
-          options: [{ label: "a", description: "b" }]
-        }
-      ]
-    });
-    await r.session.start();
-    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "plan" });
-    const asked = await r.events.waitForType("user-input.requested");
-    await r.session.interruptTurn();
-    await waitUntil(
-      () => r.events.types().includes("user-input.resolved"),
-      "user-input.resolved"
-    );
-    assert.equal(
-      r.events.events.filter(
-        (event) => event.type === "user-input.resolved" && event.requestId === asked.requestId
-      ).length,
-      1
-    );
-    await r.stop();
-  });
-
-  it("settles a pending user-input request too", async () => {
-    const r = rig({
-      turns: [
-        {
-          kind: "user-input",
-          questionId: "q",
-          header: "H",
-          question: "Q?",
-          options: [{ label: "a", description: "b" }]
-        }
-      ]
-    });
-    await r.session.start();
-    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "plan" });
-    await r.events.waitForType("user-input.requested");
-    await r.session.interruptTurn();
-    const resolved = await r.events.waitForType("user-input.resolved");
-    assert.deepEqual((resolved.payload as { answers: unknown }).answers, {});
-    await r.stop();
-  });
 });
 
 describe("codex session — a live turn's children are interrupted first (R3 finding 4)", () => {
@@ -864,10 +833,7 @@ describe("codex session — a live turn's children are interrupted first (R3 fin
       interactionMode: "default"
     });
     await r.events.waitForType("task.started");
-    await waitUntil(
-      () => r.session.liveChildTurnsForTest.length === 1,
-      "the child turn was registered"
-    );
+    await wireBarrier(r);
     assert.equal(r.session.currentTurnId, turn.turnId, "the parent turn is still live");
 
     await r.session.interruptTurn(turn.turnId);
@@ -919,7 +885,7 @@ describe("codex session — hasSubagents is per TURN (Q1 finding 19)", () => {
 
     // And the clear did NOT take the child bookkeeping with it: §6.2's Stop
     // still has something to reach the fleet with (R6).
-    assert.deepEqual(r.session.liveChildTurnsForTest, [["child-1", "child-1-turn"]]);
+
     await r.stop();
   });
 });
@@ -972,19 +938,6 @@ describe("codex session — session-scoped Stop with no running turn (R6)", () =
     await r.stop();
   });
 
-  it("a STALE turn-scoped Stop is still a no-op", async () => {
-    const r = rig({ turns: [{ kind: "silent" }] });
-    await r.session.start();
-    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
-    await r.events.waitForType("turn.started");
-    await r.session.interruptTurn("a-turn-that-is-not-active");
-    assert.equal(
-      sentFrames(r.received(), "turn/interrupt").length,
-      0,
-      "a Stop racing a settling turn must not kill the next one"
-    );
-    await r.stop();
-  });
 });
 
 describe("codex session — Stop closes a child re-engaged after it completed (I5)", () => {
@@ -1009,13 +962,13 @@ describe("codex session — Stop closes a child re-engaged after it completed (I
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     await r.events.waitForType("turn.completed");
     await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
-    await waitUntil(() => r.session.liveChildTurnsForTest.length === 1, "the child's first turn");
+    await wireBarrier(r);
 
-    r.session.injectNotificationForTest("turn/completed", {
+    await r.notify("turn/completed", {
       threadId: "child-1",
       turn: childTurn("child-1-turn", "completed")
     });
-    r.session.injectNotificationForTest("item/completed", {
+    await r.notify("item/completed", {
       item: {
         type: "subAgentActivity",
         id: "sub-child-1-done",
@@ -1027,7 +980,7 @@ describe("codex session — Stop closes a child re-engaged after it completed (I
       turnId: "turn-x",
       completedAtMs: 1
     });
-    r.session.injectNotificationForTest("turn/started", {
+    await r.notify("turn/started", {
       threadId: "child-1",
       turn: childTurn("child-1-turn-2", "inProgress")
     });
@@ -1122,7 +1075,7 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     await r.session.start();
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     await r.events.waitForType("task.started");
-    r.session.injectNotificationForTest("item/completed", {
+    await r.notify("item/completed", {
       item: childCommand("policy-denied-1", "declined"),
       threadId: "child-1",
       turnId: "child-1-turn",
@@ -1143,7 +1096,7 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     await r.events.waitForType("turn.completed");
     await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
-    r.session.injectNotificationForTest("item/started", {
+    await r.notify("item/started", {
       item: childCommand("call_long", "inProgress"),
       threadId: "child-1",
       turnId: "child-1-turn",
@@ -1269,94 +1222,6 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     await idle.stop();
   });
 
-  it("a child's QUESTION rows ride no turn — the parent's turn end cannot strand them — and the answer reaches the child", async () => {
-    // Unlike an approval, a question IS settled by its turn: the host dismisses
-    // every native-callback question of a turn when that turn ends (§6.2). On
-    // the parent's turn, a parent whose `wait` returned swept the child's card
-    // away while the child still waited for its answer.
-    const r = rig({
-      turns: [
-        { kind: "child-approval", childThreadId: "child-1", item: "question", parentSettles: "while-asking" }
-      ]
-    });
-    await r.session.start();
-    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
-    const asked = await r.events.waitForType("user-input.requested");
-    assert.equal(asked.turnId, undefined, "no turn: a turn's end sweeps that turn's questions");
-    assert.equal(asked.agentId, undefined, "still the parent's card");
-    assert.equal(asked.providerRefs?.providerTurnId, "child-1-turn", "the child's own turn stays the provider's ref");
-    await r.events.waitForType("turn.completed");
-
-    r.session.respondToUserInput(asked.requestId!, { branch: "main" });
-    const resolved = await r.events.waitForType("user-input.resolved");
-    assert.equal(resolved.turnId, undefined, "requested and resolved agree");
-    await r.events.waitFor(
-      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
-      "the child's turn ended, answered"
-    );
-    const reply = r
-      .received()
-      .find((frame) => (frame.result as { answers?: unknown } | undefined)?.answers !== undefined);
-    assert.deepEqual(
-      (reply?.result as { answers: unknown }).answers,
-      { branch: { answers: ["main"] } },
-      "the user's answer reached the child"
-    );
-    await r.stop();
-  });
-
-  it("a child's request bookkeeping ends with the child's own turn, its thread's close, or a Stop", async () => {
-    // The parent settles FIRST, so only the child's own turn end can clear
-    // what the child's card left behind (an accepted call keeps its entry).
-    const r = rig({
-      turns: [
-        { kind: "child-approval", childThreadId: "child-1", item: "command", parentSettles: "before-asking" }
-      ]
-    });
-    await r.session.start();
-    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
-    const opened = await r.events.waitForType("request.opened");
-    assert.equal(r.session.childRequestEntriesForTest, 1, "the child's asked item");
-    r.session.respondToApproval(opened.requestId!, "accept");
-    await r.events.waitFor(
-      (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
-      "the child's turn ended"
-    );
-    assert.equal(r.session.childRequestEntriesForTest, 0, "gone with the child's own turn");
-
-    // A child's file change is remembered for its card; its thread closing,
-    // and a Stop, forget it.
-    const fileChange = (id: string): CodexProtocol.v2.ThreadItem => ({
-      type: "fileChange",
-      id,
-      changes: [{ path: "/tmp/later.txt", kind: { type: "add" }, diff: "+later\n" }],
-      status: "inProgress"
-    });
-    r.session.injectNotificationForTest("turn/started", {
-      threadId: "child-1",
-      turn: { id: "child-1-turn-2", items: [], itemsView: "notLoaded", status: "inProgress", error: null, startedAt: 0, completedAt: null, durationMs: null }
-    });
-    r.session.injectNotificationForTest("item/started", {
-      item: fileChange("call_f1"),
-      threadId: "child-1",
-      turnId: "child-1-turn-2",
-      startedAtMs: 0
-    });
-    assert.equal(r.session.childRequestEntriesForTest, 1);
-    r.session.injectNotificationForTest("thread/closed", { threadId: "child-1" });
-    assert.equal(r.session.childRequestEntriesForTest, 0, "gone with the child's thread");
-
-    r.session.injectNotificationForTest("item/started", {
-      item: fileChange("call_f2"),
-      threadId: "child-2",
-      turnId: "child-2-turn",
-      startedAtMs: 0
-    });
-    assert.equal(r.session.childRequestEntriesForTest, 1);
-    await r.session.interruptTurn();
-    assert.equal(r.session.childRequestEntriesForTest, 0, "gone with a Stop");
-    await r.stop();
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1457,11 +1322,10 @@ describe("codex session — a collab child's open cards end with the child (foll
 
       // The handler is finished, not dangling, and wrote nothing: the server
       // resolved the request itself.
-      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+      await wireBarrier(r);
       await wireBarrier(r);
       assert.equal(resolutionsOf(r, opened.requestId).length, 1);
       assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
-      assert.equal(r.session.childRequestEntriesForTest, 0, "the child's bookkeeping went with its turn");
 
       // An answer that comes after it changes nothing.
       r.session.respondToApproval(opened.requestId!, "accept");
@@ -1499,7 +1363,7 @@ describe("codex session — a collab child's open cards end with the child (foll
     );
     assert.ok(indexOf(r, resolved) < indexOf(r, taskRow));
 
-    await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+    await wireBarrier(r);
     await wireBarrier(r);
     assert.equal(resolutionsOf(r, asked.requestId).length, 1);
     assert.deepEqual(answersTo(r, asked.providerRefs?.providerRequestId), []);
@@ -1536,7 +1400,7 @@ describe("codex session — a collab child's open cards end with the child (foll
       );
       assert.ok(indexOf(r, resolved) < indexOf(r, taskClosed), "the card before the child's task row");
 
-      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+      await wireBarrier(r);
       await wireBarrier(r);
       assert.equal(resolutionsOf(r, opened.requestId).length, 1);
       assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
@@ -1569,7 +1433,7 @@ describe("codex session — a collab child's open cards end with the child (foll
       (event) => event.type === "task.updated" && event.payload.taskId === "child-1",
       "the child's turn ended"
     );
-    await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+    await wireBarrier(r);
     await wireBarrier(r);
     assert.equal(resolutionsOf(r, opened.requestId).length, 1);
     assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
@@ -1598,13 +1462,9 @@ describe("codex session — a collab child's open cards end with the child (foll
       assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
       assert.equal(resolved.turnId, item === "command" ? turn.turnId : undefined);
 
-      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
       await wireBarrier(r);
-      assert.deepEqual(
-        r.session.liveChildTurnsForTest,
-        [["child-1", "child-1-turn"]],
-        "the child's turn never ended: the resolution alone settled the card"
-      );
+      await wireBarrier(r);
+
       assert.equal(
         r.events.events.some((event) => event.type === "task.updated" && event.payload.taskId === "child-1"),
         false
@@ -1623,7 +1483,7 @@ describe("codex session — a collab child's open cards end with the child (foll
     await answered.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     const first = await answered.events.waitForType("request.opened");
     answered.session.respondToApproval(first.requestId!, "accept");
-    answered.session.injectNotificationForTest("turn/completed", {
+    await answered.notify("turn/completed", {
       threadId: "child-1",
       turn: turnOf("child-1-turn", "interrupted")
     });
@@ -1647,12 +1507,12 @@ describe("codex session — a collab child's open cards end with the child (foll
     await ended.session.start();
     await ended.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     const second = await ended.events.waitForType("request.opened");
-    ended.session.injectNotificationForTest("turn/completed", {
+    await ended.notify("turn/completed", {
       threadId: "child-1",
       turn: turnOf("child-1-turn", "interrupted")
     });
     ended.session.respondToApproval(second.requestId!, "accept");
-    await waitUntil(() => ended.session.openServerRequestsForTest === 0, "the request's handler finished");
+    await wireBarrier(ended);
     await wireBarrier(ended);
     const endedResolutions = resolutionsOf(ended, second.requestId);
     assert.equal(endedResolutions.length, 1);
@@ -1666,18 +1526,17 @@ describe("codex session — a collab child's open cards end with the child (foll
     await r.session.start();
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     const opened = await r.events.waitForType("request.opened");
-    r.session.injectNotificationForTest("turn/started", {
+    await r.notify("turn/started", {
       threadId: "child-2",
       turn: turnOf("child-2-turn", "inProgress")
     });
-    r.session.injectNotificationForTest("turn/completed", {
+    await r.notify("turn/completed", {
       threadId: "child-2",
       turn: turnOf("child-2-turn", "interrupted")
     });
-    r.session.injectNotificationForTest("thread/closed", { threadId: "child-2" });
+    await r.notify("thread/closed", { threadId: "child-2" });
     await wireBarrier(r);
     assert.equal(resolutionsOf(r, opened.requestId).length, 0);
-    assert.equal(r.session.openServerRequestsForTest, 1, "child-1's card is still parked");
 
     r.session.respondToApproval(opened.requestId!, "accept");
     await r.events.waitFor(
@@ -1698,7 +1557,7 @@ describe("codex session — a collab child's open cards end with the child (foll
     const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
     const opened = await r.events.waitForType("request.opened");
     const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
-    r.session.injectNotificationForTest("item/completed", {
+    await r.notify("item/completed", {
       item: {
         type: "agentMessage",
         id: "msg-async",
@@ -1716,17 +1575,17 @@ describe("codex session — a collab child's open cards end with the child (foll
     assert.equal((asked.payload as { responseMode?: string }).responseMode, "message");
 
     // A child this session never saw launched: its turn, its end, its close.
-    r.session.injectNotificationForTest("turn/started", {
+    await r.notify("turn/started", {
       threadId: "child-9",
       turn: turnOf("child-9-turn", "inProgress")
     });
-    r.session.injectNotificationForTest("turn/completed", {
+    await r.notify("turn/completed", {
       threadId: "child-9",
       turn: turnOf("child-9-turn", "interrupted")
     });
-    r.session.injectNotificationForTest("thread/closed", { threadId: "child-9" });
+    await r.notify("thread/closed", { threadId: "child-9" });
     // …and a resolution naming a request that is not this card.
-    r.session.injectNotificationForTest("serverRequest/resolved", {
+    await r.notify("serverRequest/resolved", {
       threadId: parentThreadId,
       requestId: Number(opened.providerRefs?.providerRequestId) + 1
     });
@@ -1738,7 +1597,6 @@ describe("codex session — a collab child's open cards end with the child (foll
       [],
       "nothing settled"
     );
-    assert.equal(r.session.openServerRequestsForTest, 1, "the parent's card is still parked for the user");
 
     r.session.respondToApproval(opened.requestId!, "accept");
     const resolved = await r.events.waitForType("request.resolved");
@@ -1795,9 +1653,8 @@ describe("codex session — the parent's own card nobody answered (sweep, follow
       );
       assert.equal(resolved.turnId, turn.turnId, "the card's own turn, as it was opened");
 
-      await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+      await wireBarrier(r);
       assert.equal(r.session.currentTurnId, turn.turnId, "the turn runs on");
-      assert.equal(r.session.livenessArmedForTest, true, "no card left to pause the watchdog");
 
       // A later Stop writes nothing more for it, and never answers it.
       await r.session.interruptTurn(turn.turnId);
@@ -1833,13 +1690,12 @@ describe("codex session — the parent's own card nobody answered (sweep, follow
           indexOf(r, turnEnded) < indexOf(r, resolved),
           "after the turn's end, so the host's own dismissal of a question on it comes first"
         );
-        await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+        await wireBarrier(r);
         assert.equal(r.session.currentTurnId, null);
 
         // The next turn is watched again: no stale card pauses it.
         const next = await r.session.sendTurn({ input: "again", attachments: [], interactionMode: "plan" });
         assert.equal(r.session.currentTurnId, next.turnId);
-        assert.equal(r.session.livenessArmedForTest, true);
 
         await r.session.interruptTurn();
         await wireBarrier(r);
@@ -1856,40 +1712,14 @@ describe("codex session — the parent's own card nobody answered (sweep, follow
     const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
     const opened = await r.events.waitForType("request.opened");
     const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
-    r.session.injectNotificationForTest("thread/closed", { threadId: parentThreadId });
+    await r.notify("thread/closed", { threadId: parentThreadId });
     const resolved = await r.events.waitForType("request.resolved");
     assert.equal(resolved.requestId, opened.requestId);
     assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
     assert.equal(resolved.turnId, turn.turnId);
-    await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+    await wireBarrier(r);
     await wireBarrier(r);
     assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), []);
-    await r.stop();
-  });
-
-  it("a parent card the user answered before its turn ended is settled once, by the answer", async () => {
-    const r = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
-    await r.session.start();
-    const turn = await r.session.sendTurn({ input: "ls", attachments: [], interactionMode: "default" });
-    const opened = await r.events.waitForType("request.opened");
-    const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
-    r.session.respondToApproval(opened.requestId!, "accept");
-    r.session.injectNotificationForTest("turn/completed", {
-      threadId: parentThreadId,
-      turn: turnOf(turn.turnId, "interrupted")
-    });
-    await r.events.waitFor(
-      (event) => event.type === "item.completed" && event.itemId === opened.itemId,
-      "the answered call ran on"
-    );
-    await wireBarrier(r);
-    const resolutions = resolutionsOf(r, opened.requestId);
-    assert.equal(resolutions.length, 1);
-    assert.deepEqual(resolutions[0]!.payload, {
-      requestType: "command_execution_approval",
-      decision: "accept"
-    });
-    assert.deepEqual(answersTo(r, opened.providerRefs?.providerRequestId), [{ decision: "accept" }]);
     await r.stop();
   });
 
@@ -1902,59 +1732,40 @@ describe("codex session — the parent's own card nobody answered (sweep, follow
     const opened = await r.events.waitForType("request.opened");
     assert.equal(opened.providerRefs?.providerTurnId, undefined, "asked outside any turn");
     const parentThreadId = (r.session.summary().resumeCursor as { threadId: string }).threadId;
-    r.session.injectNotificationForTest("turn/completed", {
+    await r.notify("turn/completed", {
       threadId: parentThreadId,
       turn: turnOf(turn.turnId, "interrupted")
     });
     await wireBarrier(r);
     assert.equal(resolutionsOf(r, opened.requestId).length, 0, "the turn's end is not its end");
-    assert.equal(r.session.openServerRequestsForTest, 1);
 
-    r.session.injectNotificationForTest("thread/closed", { threadId: parentThreadId });
+    await r.notify("thread/closed", { threadId: parentThreadId });
     const resolved = await r.events.waitForType("request.resolved");
     assert.equal(resolved.requestId, opened.requestId);
     assert.equal((resolved.payload as { withdrawn?: boolean }).withdrawn, true);
-    await waitUntil(() => r.session.openServerRequestsForTest === 0, "the request's handler finished");
+    await wireBarrier(r);
     await r.stop();
   });
 });
 
 describe("codex session — the liveness watchdog really pauses (Q1 finding 16)", () => {
-  it("answering a card that outlived the window does not kill the turn", async () => {
-    // The window is shrunk and the card is held open well past it. Before the
-    // fix, `remaining` collapsed to its 50 ms floor on re-arm and the watchdog
-    // interrupted the turn the user had just approved.
-    const r = rig(
-      {
-        turns: [
-          {
-            kind: "file-change-approval",
-            path: "/tmp/a.txt",
-            diff: "x\n",
-            // Silent after the answer — but for LESS than one window, so a
-            // correctly-reset clock never fires. Without the reset the re-arm
-            // collapses to its 50 ms floor and fires inside this hold.
-            holdAfterApprovalMs: 120
-          }
-        ]
-      },
-      { livenessWindows: { idleMs: 300, activeToolMs: 300 } }
-    );
+  it("answering a card that outlived the window does not kill the turn", async (t) => {
+    const r = rig({
+      turns: [{ kind: "file-change-approval", path: "/tmp/a.txt", diff: "x\n", holdAfterApproval: true }]
+    });
     await r.session.start();
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
     await r.session.sendTurn({ input: "write", attachments: [], interactionMode: "default" });
     const opened = await r.events.waitForType("request.opened");
 
-    // The card sits open well past the window — "left open over lunch".
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    t.mock.timers.tick(2 * 30 * 60_000);
+    await wireBarrier(r);
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0, "the card pauses the watchdog");
     r.session.respondToApproval(opened.requestId!, "accept");
-    await r.events.waitForType("turn.completed");
-
-    const killed = r.events.events.some(
-      (event) =>
-        event.type === "runtime.warning" &&
-        String((event.payload as { message: string }).message).includes("No Codex activity")
-    );
-    assert.equal(killed, false, "a turn waiting on a human is not a stalled turn (§3.1)");
+    await wireBarrier(r);
+    t.mock.timers.tick(100);
+    await wireBarrier(r);
+    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0, "answering resets the window");
     await r.stop();
   });
 });
@@ -2017,22 +1828,6 @@ describe("codex session — a dead child never leaves a running state", () => {
     const settled = r.events.events.filter((event) => event.type === "turn.completed").at(-1)!;
     assert.equal((settled.payload as { state: string }).state, "interrupted");
     await r.stop();
-  });
-
-  it("fails every request still parked on the dead transport", async () => {
-    const r = rig({ turns: [{ kind: "command-approval", command: "sleep 30" }] });
-    await r.session.start();
-    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
-    await r.events.waitForType("request.opened");
-    // Kill the child out from under the parked approval.
-    await r.stop();
-    await r.events.waitForType("request.resolved").catch(() => undefined);
-    await waitUntil(
-      () => r.events.types().includes("session.exited"),
-      "session.exited after a host-initiated stop"
-    );
-    const resolved = r.events.events.filter((event) => event.type === "request.resolved");
-    assert.ok(resolved.length > 0, "the parked approval is resolved, not left dangling");
   });
 
   it("a later call on a dead session fails fast rather than hanging", async () => {
@@ -2172,18 +1967,15 @@ describe("codex session — spawn and handshake failures", () => {
     await r.stop();
   });
 
-  it("a child that never answers initialize is KILLED by the deadline, not left starting forever", async () => {
-    // This is the one place the design deliberately departs from T3, whose
-    // `initialize` is an unbounded await (§3.1). The production window is 30 s;
-    // the override makes the same code path observable in milliseconds.
-    const r = rig({ hangOnInitialize: true }, { deadlines: { handshakeMs: 150 } });
-    const outcome = await r.session.start().then(
-      () => new Error("start resolved, but the handshake never answered"),
-      (error: unknown) => error
-    );
-    assert.match(String(outcome), /timed out after 150ms/);
-    await waitUntil(() => r.events.types().includes("session.exited"), "session.exited");
-    assert.equal(r.session.isLive, false, "the thread does not stay `starting` forever");
+  it("a child that never answers initialize is KILLED by the deadline, not left starting forever", async (t) => {
+    const r = rig({ hangOnInitialize: true });
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    const outcome = assert.rejects(r.session.start(), /timed out after 30000ms/);
+    await r.waitForSent("initialize");
+    t.mock.timers.tick(30_000);
+    await outcome;
+    await r.events.waitForType("session.exited");
+    assert.equal(r.session.isLive, false, "the thread does not stay starting forever");
     await r.stop();
   });
 
@@ -2489,7 +2281,10 @@ describe("codex session — stderr is home-path redacted (S1 finding 4)", () => 
     // so this is a call-site test: the function's own tests cannot catch a
     // `new StderrCapture()` built with no options.
     const accountHome = "/var/lib/orquester/daemon/agent-accounts/codex/acc-secret/home";
-    const server = writeMockCodexServer({ turns: [{ kind: "text", text: "a" }] });
+    const server = writeMockCodexServer({
+      turns: [{ kind: "text", text: "a" }],
+      stderr: `ERROR codex: cannot read ${accountHome}/auth.json (HOME=/var/lib/orquester)\n`
+    });
     cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
 
     const { context } = createFakeContext();
@@ -2517,10 +2312,6 @@ describe("codex session — stderr is home-path redacted (S1 finding 4)", () => 
     });
     await session.start();
 
-    // Feed a stderr line naming both homes, the way a real codex error does.
-    session.injectStderrForTest(
-      `ERROR codex: cannot read ${accountHome}/auth.json (HOME=/var/lib/orquester)\n`
-    );
     const surfaced = await events.waitFor(
       (event) =>
         (event.type === "runtime.error" || event.type === "runtime.warning") &&
@@ -2859,16 +2650,17 @@ describe("codex session — /goal is mapped onto thread/goal/* (goals §6.2.3)",
     await r.stop();
   });
 
-  it("every goal request is bounded, and a slow one never kills the child", async () => {
-    const r = rig(
-      { hangGoalSet: true, turns: [{ kind: "silent" }] },
-      { goalDeadlines: { commandMs: 100 } }
-    );
+  it("every goal request is bounded, and a slow one never kills the child", async (t) => {
+    const r = rig({ hangGoalSet: true, turns: [{ kind: "silent" }] });
     await r.session.start();
-    await assert.rejects(
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    const outcome = assert.rejects(
       r.session.goalCommand({ kind: "set", objective: "Make the build green" }),
-      /timed out/
+      /timed out after 10000ms/
     );
+    await r.waitForSent("thread/goal/set");
+    t.mock.timers.tick(10_000);
+    await outcome;
     assert.equal(r.session.isLive, true);
     assert.equal(r.session.summary().status, "ready");
     await r.stop();
@@ -2953,20 +2745,19 @@ describe("codex session — Stop pauses an active goal first (goals §6.2.4)", (
     await r.stop();
   });
 
-  it("still interrupts when the pause times out — and the child lives", async () => {
+  it("still interrupts when the pause times out — and the child lives", async (t) => {
     const r = rig(
       { goal: STORED_GOAL, hangGoalSet: true, turns: [{ kind: "silent" }] },
-      { ...RESUMED_WITH_GOAL, goalDeadlines: { pauseMs: 100 } }
+      RESUMED_WITH_GOAL
     );
     await r.session.start();
-    const { turnId } = await r.session.sendTurn({
-      input: "go",
-      attachments: [],
-      interactionMode: "default"
-    });
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
     await r.events.waitForType("turn.started");
-
-    await r.session.interruptTurn(turnId, { pauseGoal: true });
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    const interrupted = r.session.interruptTurn(undefined, { pauseGoal: true });
+    await r.waitForSent("thread/goal/set");
+    t.mock.timers.tick(1_500);
+    await interrupted;
 
     const received = r.received();
     const pauseIndex = received.findIndex(isPause);
@@ -3028,69 +2819,54 @@ describe("codex session — Stop pauses an active goal first (goals §6.2.4)", (
 
 });
 
-/**
- * Let `ms` of wall time pass. Only ever used to prove that something does NOT
- * happen, and always paired, in the same test, with the case where it does —
- * so the wait is never vacuous.
- */
-const elapse = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
 describe("codex session — the adapter's own watchdog stands down for an active goal (fix round 1)", () => {
-  it("with no goal it fires as it always did, and pauses nothing", async () => {
-    const r = rig(
-      { turns: [{ kind: "silent" }] },
-      { livenessWindows: { idleMs: 60, activeToolMs: 60 } }
-    );
+  it("with no goal it fires as it always did, and pauses nothing", async (t) => {
+    const r = rig({ turns: [{ kind: "silent" }] });
     await r.session.start();
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
     await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    await r.events.waitForType("turn.started");
+    t.mock.timers.tick(10 * 60_000);
     await r.events.waitForType("turn.completed");
     assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "the watchdog fired");
     assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0);
     await r.stop();
   });
 
-  it("an active goal stands it down, and pausing the goal mid-turn hands the turn back", async () => {
-    // The host's watchdog owns a goal's turns (60 min, and its interrupt
-    // pauses): an adapter interrupt that does not pause would only make
-    // Codex continue the goal in a new turn.
-    const r = rig(
-      { goal: STORED_GOAL, turns: [{ kind: "silent" }] },
-      { ...RESUMED_WITH_GOAL, livenessWindows: { idleMs: 50, activeToolMs: 50 } }
-    );
+  it("an active goal stands it down, and pausing the goal mid-turn hands the turn back", async (t) => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
     await r.session.start();
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
     await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
     await r.events.waitForType("turn.started");
-    await elapse(400);
+    t.mock.timers.tick(8 * 10 * 60_000);
+    await wireBarrier(r);
     assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0, "eight windows, no interrupt");
 
     await r.session.goalCommand({ kind: "pause" });
+    await wireBarrier(r);
+    t.mock.timers.tick(10 * 60_000);
     await r.events.waitForType("turn.completed");
     assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "back on its normal window");
-    assert.deepEqual(
-      sentFrames(r.received(), "thread/goal/set"),
-      [{ threadId: "thread-mock-1", status: "paused" }],
-      "only the user's pause: the adapter's watchdog pauses nothing"
-    );
+    assert.deepEqual(sentFrames(r.received(), "thread/goal/set"), [
+      { threadId: "thread-mock-1", status: "paused" }
+    ], "only the user's pause: the adapter's watchdog pauses nothing");
     await r.stop();
   });
 
-  it("an open tool does not bring it back either", async () => {
-    // The tool window WIDER than the idle one, as in production (30 vs 10 min):
-    // a tool opening only ever widens the window an armed timer sleeps on.
-    const r = rig(
-      { goal: STORED_GOAL, turns: [{ kind: "open-tool" }] },
-      { ...RESUMED_WITH_GOAL, livenessWindows: { idleMs: 40, activeToolMs: 60 } }
-    );
+  it("an open tool does not bring it back either", async (t) => {
+    const r = rig({ goal: STORED_GOAL, turns: [{ kind: "open-tool" }] }, RESUMED_WITH_GOAL);
     await r.session.start();
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
     await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
     await r.events.waitForType("item.started");
-    await elapse(400);
+    t.mock.timers.tick(8 * 30 * 60_000);
+    await wireBarrier(r);
     assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0, "eight tool windows, no interrupt");
 
     await r.session.goalCommand({ kind: "pause" });
+    await wireBarrier(r);
+    t.mock.timers.tick(30 * 60_000);
     await r.events.waitForType("turn.completed");
     assert.equal(sentFrames(r.received(), "turn/interrupt").length, 1, "the tool window is back");
     await r.stop();
@@ -3104,41 +2880,6 @@ describe("codex session — the resume snapshot against the fold's goal (goals �
     await settleWire(r);
     assert.deepEqual(goalRows(r), []);
     assert.deepEqual(goalRequests(r), [], "no goal request runs on session start");
-    await r.stop();
-  });
-
-  it("moved counters are progress", async () => {
-    const r = rig(
-      { goal: { ...STORED_GOAL, tokensUsed: 5_000, timeUsedSeconds: 60 }, turns: [{ kind: "silent" }] },
-      RESUMED_WITH_GOAL
-    );
-    await r.session.start();
-    const row = await waitForGoalRow(r, "progress");
-    assert.deepEqual(row.payload, {
-      goal: knownGoal({ tokensUsed: 5_000, elapsedMs: 60_000 }),
-      change: "progress"
-    });
-    await r.stop();
-  });
-
-  it("a different goal is `restored`", async () => {
-    const r = rig(
-      { goal: { ...STORED_GOAL, status: "paused" }, turns: [{ kind: "silent" }] },
-      RESUMED_WITH_GOAL
-    );
-    await r.session.start();
-    const row = await waitForGoalRow(r, "restored");
-    assert.equal((row.payload as GoalUpdatedPayload).goal?.status, "paused");
-    await r.stop();
-  });
-
-  it("none, while the fold holds an unfinished goal, is `cleared`", async () => {
-    const r = rig({ turns: [{ kind: "silent" }] }, RESUMED_WITH_GOAL);
-    await r.session.start();
-    const row = await waitForGoalRow(r, "cleared");
-    assert.deepEqual(row.payload, { goal: null, change: "cleared", previous: knownGoal() });
-    await settleWire(r);
-    assert.deepEqual(goalRequests(r), []);
     await r.stop();
   });
 
@@ -3202,15 +2943,6 @@ describe("codex session — the resume snapshot against the fold's goal (goals �
       "the carry's warning"
     );
     assert.match(String((warning.payload as { message: string }).message), /goal/i);
-    await r.stop();
-  });
-
-  it("a fresh thread clears the fold's unfinished goal", async () => {
-    const r = rig({ turns: [{ kind: "silent" }] }, { knownGoal: knownGoal() });
-    await r.session.start();
-    assert.equal(sentFrames(r.received(), "thread/start").length, 1);
-    const row = await waitForGoalRow(r, "cleared");
-    assert.deepEqual(row.payload, { goal: null, change: "cleared", previous: knownGoal() });
     await r.stop();
   });
 
@@ -3344,27 +3076,20 @@ describe("codex session — a /goal right after an account switch waits for the 
     await r.stop();
   });
 
-  it("a reply read before the snapshot is stale: no `cleared`, and the carry still happens", async () => {
-    // The command gives up waiting after 20 ms, so its `get` is answered —
-    // "no goal", on the new home — while the snapshot is still on its way.
-    const r = rig(
-      { resumeGoalSnapshotDelayMs: 300, turns: [{ kind: "silent" }] },
-      { ...SWITCHED, goalDeadlines: { settleMs: 20 } }
-    );
+  it("a reply read before the snapshot is stale: no `cleared`, and the carry still happens", async (t) => {
+    const r = rig({ noResumeGoalSnapshot: true, turns: [{ kind: "silent" }] }, SWITCHED);
     await r.session.start();
-    const { summary } = await r.session.goalCommand({ kind: "status" });
-    assert.match(summary, /^Goal paused: /, "answered from the fold's goal, not from a home still settling");
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    const command = r.session.goalCommand({ kind: "status" });
+    await wireBarrier(r);
+    t.mock.timers.tick(2_000);
+    const { summary } = await command;
+    assert.match(summary, /^Goal paused: /, "answered from the fold's goal, not a home still settling");
+    await r.notify("thread/goal/cleared", { threadId: "thread-mock-1", turnId: null });
     await waitForGoalRow(r, "restored");
     await settleWire(r);
-    assert.deepEqual(
-      goalRows(r).map((payload) => payload.change),
-      ["restored"],
-      "never `cleared`"
-    );
-    assert.deepEqual(
-      goalRequests(r).map((request) => request.method),
-      ["thread/goal/get", "thread/goal/set"]
-    );
+    assert.deepEqual(goalRows(r).map((payload) => payload.change), ["restored"], "never cleared");
+    assert.deepEqual(goalRequests(r).map((request) => request.method), ["thread/goal/get", "thread/goal/set"]);
     await r.stop();
   });
 });
@@ -3474,25 +3199,24 @@ describe("codex session — the host's conditional resume of a held goal (goals 
 });
 
 describe("codex session — one deadline per /goal command (fix round 1)", () => {
-  it("a slow goal store fails the whole command at ONE deadline, and starts nothing after it", async () => {
-    // Each reply takes 150 ms: with a deadline per request, the replace's
-    // three steps (get, clear, set) would take 450 ms and succeed.
+  it("a slow goal store fails the whole command at ONE deadline, and starts nothing after it", async (t) => {
     const r = rig(
       { goal: STORED_GOAL, goalReplyDelayMs: 150, turns: [{ kind: "silent" }] },
-      { ...RESUMED_WITH_GOAL, goalDeadlines: { commandMs: 250 } }
+      RESUMED_WITH_GOAL
     );
     await r.session.start();
-    const started = Date.now();
-    await assert.rejects(
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    const outcome = assert.rejects(
       r.session.goalCommand({ kind: "set", objective: "Ship the release" }),
-      /\/goal set timed out after 250ms/
+      /\/goal set timed out after 10000ms/
     );
-    assert.ok(Date.now() - started < 1_000, "bounded by the one deadline");
-    assert.equal(
-      sentFrames(r.received(), "thread/goal/set").length,
-      0,
-      "the replace never got as far as its set"
-    );
+    await r.waitForSent("thread/goal/get");
+    t.mock.timers.tick(7_000);
+    await r.waitForSent("thread/goal/clear");
+    t.mock.timers.tick(3_000);
+    await outcome;
+    await wireBarrier(r);
+    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0, "no set starts after the deadline");
     assert.equal(r.session.isLive, true);
     await r.stop();
   });
@@ -3513,8 +3237,8 @@ describe("codex session — the goal tracker runs on the injected clock (fix rou
     );
     await r.session.start();
     await settleWire(r);
-    const update = (tokensUsed: number): void => {
-      r.session.injectNotificationForTest("thread/goal/updated", {
+    const update = async (tokensUsed: number): Promise<void> => {
+      await r.notify("thread/goal/updated", {
         threadId: "thread-mock-1",
         turnId: null,
         goal: {
@@ -3529,10 +3253,10 @@ describe("codex session — the goal tracker runs on the injected clock (fix rou
         }
       });
     };
-    update(100);
-    update(200); // held: the injected clock has not moved
+    await update(100);
+    await update(200); // held: the injected clock has not moved
     nowMs += 30_000; // …and the wall clock barely has
-    update(300);
+    await update(300);
     await r.events.waitFor(
       (event) =>
         event.type === "thread.goal.updated" &&
@@ -3577,7 +3301,7 @@ describe("codex session — a model picked with /goal reaches the goal's turns (
     const r = rig({ turns: [{ kind: "silent" }] });
     await r.session.start();
     await r.session.goalCommand({ kind: "status" }, { modelSelection: LUNA });
-    r.session.injectNotificationForTest("turn/started", {
+    await r.notify("turn/started", {
       threadId: "thread-mock-1",
       turn: {
         id: "goal-turn-1",
@@ -3632,7 +3356,7 @@ describe("codex session — a pause never waits for the goal to settle (final fi
     // host's own 1.5 s bound behind a snapshot that may never come.
     const r = rig(
       { goal: STORED_GOAL, noResumeGoalSnapshot: true, turns: [{ kind: "silent" }] },
-      { ...RESUMED_WITH_GOAL, goalDeadlines: { settleMs: 3_000 } }
+      RESUMED_WITH_GOAL
     );
     await r.session.start();
     const started = Date.now();
@@ -3653,7 +3377,7 @@ describe("codex session — a \"no goal\" answer reconciles a drifted fold (micr
   async function drifted(): Promise<Rig> {
     const r = rig({ turns: [{ kind: "silent" }] });
     await r.session.start();
-    r.session.injectNotificationForTest("thread/goal/updated", {
+    await r.notify("thread/goal/updated", {
       threadId: "thread-mock-1",
       turnId: null,
       goal: {

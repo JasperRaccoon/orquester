@@ -1,7 +1,7 @@
 // Ported from T3 Code (MIT): apps/web/src/components/chat/ContextWindowMeter.tsx:8-36
 
 /** Above this, the ring turns destructive. */
-export const METER_OVERLOAD_PERCENT = 90;
+const METER_OVERLOAD_PERCENT = 90;
 
 /** Clamps to 0–100 and treats a missing value as empty rather than as an error. */
 export function clampMeterPercent(value: number | null | undefined): number {

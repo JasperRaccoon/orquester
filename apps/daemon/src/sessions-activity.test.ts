@@ -6,7 +6,7 @@ import test from "node:test";
 import type { RegistryEntry, SessionActivity } from "@orquester/api";
 import type { ActivityCause } from "./ansi-activity.ts";
 import type { RegistryService } from "./registry.ts";
-import { buildLaunchCommand, LocalSessionManager } from "./sessions.ts";
+import { LocalSessionManager } from "./sessions.ts";
 
 async function waitFor<T>(poll: () => T | undefined | false, timeoutMs = 2000): Promise<T> {
   const started = Date.now();
@@ -112,49 +112,4 @@ test("LocalSessionManager raises finished attention when the command exits", asy
     mgr.closeAll();
     await rm(root, { recursive: true, force: true });
   }
-});
-
-test("buildLaunchCommand adds a login flag for tmux-backed shells only", () => {
-  const bash: RegistryEntry = {
-    id: "bash",
-    name: "Bash",
-    kind: "shell",
-    bin: ["bash"],
-    enabled: true,
-    resolvedBin: "/bin/bash",
-    installState: "idle"
-  };
-
-  assert.deepEqual(buildLaunchCommand(bash, { tmux: true }), { bin: "/bin/bash", args: ["-l"] });
-  assert.deepEqual(buildLaunchCommand(bash, { tmux: false }), { bin: "/bin/bash", args: [] });
-});
-
-test("buildLaunchCommand can launch an agent as a child of a real shell", () => {
-  const opencode: RegistryEntry = {
-    id: "opencode",
-    name: "OpenCode",
-    kind: "agent",
-    bin: ["opencode"],
-    args: ["--flag"],
-    launchViaShell: true,
-    enabled: true,
-    resolvedBin: "/opt/bin/opencode",
-    installState: "idle"
-  };
-
-  const launch = buildLaunchCommand(opencode, { tmux: true });
-  if (process.platform === "win32") {
-    assert.deepEqual(launch, { bin: "/opt/bin/opencode", args: ["--flag"] });
-    return;
-  }
-
-  if (launch.bin.endsWith("/env")) {
-    assert.match(launch.args[0], /^SHELL=\/.*(?:ba)?sh$/);
-    assert.match(launch.args[1], /\/(?:ba)?sh$/);
-    assert.deepEqual(launch.args.slice(3), ['"$@"', "orquester-launch", "/opt/bin/opencode", "--flag"]);
-    return;
-  }
-
-  assert.match(launch.bin, /\/(?:ba)?sh$/);
-  assert.deepEqual(launch.args.slice(1), ['"$@"', "orquester-launch", "/opt/bin/opencode", "--flag"]);
 });

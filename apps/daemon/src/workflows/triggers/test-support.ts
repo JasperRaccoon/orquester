@@ -1,10 +1,15 @@
-// Test helpers for the trigger modules (fake TriggerHost, workflows, a no-I/O state store).
+// Test helpers for the trigger modules (fake TriggerHost, workflows, temporary state files).
 
+import { mkdtempSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after } from "node:test";
 import type { Workflow, WorkflowNode } from "@orquester/api";
 import { workflowRecordSchema } from "@orquester/config";
 import type { FireRequest, TriggerHost, WorkflowLogger } from "../contracts.ts";
 import { WorkflowStateStore } from "../state-store.ts";
-import type { ManualClock } from "./clock.ts";
+import type { ManualClock } from "../testing/manual-trigger-clock.ts";
 
 export interface FakeHost extends TriggerHost {
   workflows: Workflow[];
@@ -80,8 +85,19 @@ export function workflow(id: string, nodes: WorkflowNode[], overrides: Record<st
   });
 }
 
+const stateFixtures: { root: string; store: WorkflowStateStore }[] = [];
+after(async () => {
+  await Promise.all(stateFixtures.map(async ({ root, store }) => {
+    await store.flush();
+    await rm(root, { recursive: true, force: true });
+  }));
+});
+
 export function memoryState(): WorkflowStateStore {
-  return new WorkflowStateStore({ path: "/nonexistent/workflow-state.json", write: async () => undefined });
+  const root = mkdtempSync(join(tmpdir(), "orq-trigger-state-"));
+  const store = new WorkflowStateStore({ path: join(root, "state.json") });
+  stateFixtures.push({ root, store });
+  return store;
 }
 
 export function recordingLogger(): WorkflowLogger & { lines: string[] } {

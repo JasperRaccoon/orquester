@@ -9,7 +9,7 @@
  *
  * The helpers still live beside the MCP tools that grew them (`mcp/reads.ts`, `mcp/wait.ts`,
  * `mcp/views.ts`, `mcp/agents.ts`); this module RE-EXPORTS the very same functions — never
- * wrappers — so the two callers cannot drift (`chat-client/index.test.ts` pins the identity).
+ * wrappers — so both callers use the same behavior.
  * Import from here outside `mcp/`.
  *
  * Errors are the MCP's `ToolError {code, message}`: a daemon code passed through (`INVALID_OWNER`,
@@ -39,15 +39,14 @@ export {
 } from "../mcp/reads.ts";
 
 // --- waits (Broadcaster-driven, never sleeps) -------------------------------
-export { turnBaseline, turnOutcome, waitForTurn, watchSessions } from "../mcp/wait.ts";
-export type { TurnBaseline, TurnOutcome, WatchOptions, WatchScope, WatchState } from "../mcp/wait.ts";
+export { turnBaseline, turnOutcome, waitForTurn } from "../mcp/wait.ts";
+export type { TurnBaseline, TurnOutcome, WatchScope } from "../mcp/wait.ts";
 
 // --- what a turn said -------------------------------------------------------
-export { assistantTextForTurn, lastReply, latestSettledTurn } from "../mcp/views.ts";
+export { assistantTextForTurn } from "../mcp/views.ts";
 
 // --- agents, models, accounts ------------------------------------------------
 export {
-  EFFORT_OPTION_IDS,
   findAgent,
   findModel,
   loadAgents,

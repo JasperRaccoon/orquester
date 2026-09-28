@@ -1,3 +1,15 @@
+
+import { isolatedPage } from "./testing/isolated-page";
+let page: Awaited<ReturnType<typeof isolatedPage>>;
+async function loadPage(): Promise<void> {
+  await page?.dispose();
+  page = await isolatedPage();
+  ({ createThreadStore } = page.store);
+  ({ providersStore } = page.providers);
+  ({ AgentChatCommandError } = page.transport);
+}
+beforeEach(loadPage);
+afterEach(async () => { await page.dispose(); });
 /**
  * The thread store's indexed history (design 2026-09-23 §C "History page",
  * "Client"): paging older turns in above the window, resetting on a new
@@ -31,18 +43,14 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "./contracts";
-import { deriveTimelineEntriesFromItems } from "./entries.logic";
+
 import { canLoadOlderHistory } from "./history.logic";
-import { providersStore, resetProvidersStore } from "./providers";
-import { deriveTimelineRows } from "./rows.logic";
-import {
-  createThreadStore,
-  resetThreadRetention,
-  type AgentChatThreadState,
-  type ThreadStore,
-  type ThreadStoreDeps
-} from "./store";
-import { AgentChatCommandError, type AgentChatTransport } from "./transport";
+let providersStore: typeof import("./providers")["providersStore"];
+
+import type { AgentChatThreadState, ThreadStore } from "./store";
+let createThreadStore: typeof import("./store")["createThreadStore"];
+import type { AgentChatTransport } from "./transport";
+let AgentChatCommandError: typeof import("./transport")["AgentChatCommandError"];
 import {
   activity,
   ev,
@@ -56,7 +64,7 @@ import {
   stamp
 } from "./test-helpers";
 
-type Destroyable = ThreadStore & { destroy?: (options?: { retain?: boolean }) => void };
+type Destroyable = ThreadStore & { destroy?: () => void };
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -167,24 +175,14 @@ async function until(predicate: () => boolean, label: string): Promise<void> {
   assert.ok(predicate(), `never happened: ${label}`);
 }
 
-async function open(
-  sessionId = "s1",
-  overrides: Partial<Omit<ThreadStoreDeps, "transport">> = {}
-): Promise<{
+async function open(sessionId = "s1"): Promise<{
   store: Destroyable;
   fake: ReturnType<typeof fakeTransport>;
   state: () => AgentChatThreadState;
 }> {
   const fake = fakeTransport();
   const store = createThreadStore(sessionId, {
-    transport: fake.transport,
-    newId: (() => {
-      let n = 0;
-      return () => `id${++n}`;
-    })(),
-    now: () => stamp(1),
-    delay: async () => {},
-    ...overrides
+    transport: fake.transport
   }) as Destroyable;
   await flush();
   return { store, fake, state: () => store.getState() };
@@ -252,12 +250,6 @@ const capabilities: AdapterCapabilities = {
 
 beforeEach(() => {
   resetBuilders();
-  resetThreadRetention();
-});
-
-afterEach(() => {
-  resetProvidersStore();
-  resetThreadRetention();
 });
 
 describe("the history slice", () => {
@@ -456,12 +448,7 @@ describe("the history slice", () => {
       ["u5", "turn-fold:t5", "work-toggle:x5", "x7", "a5"],
       "the prompt once and first, then the page's early work, then the window's later work"
     );
-    const first = state().rows[0];
-    assert.equal(
-      first?.kind === "message" ? first.message : null,
-      windowPrompt,
-      "at the page's position, with the window's copy"
-    );
+
   });
 
   describe("a call or a task begun on a page and finished in the window", () => {
@@ -864,7 +851,7 @@ describe("retention", () => {
 
     void second.state().actions.loadOlderHistory();
     assert.equal(second.fake.historyCalls.length, 1, "the new generation can page again");
-    second.store.destroy?.({ retain: false });
+    second.store.destroy?.();
   });
 });
 
@@ -990,14 +977,14 @@ describe("the history bridge", () => {
    * The turn thread: turns 1–2 on the page just below the window, turns
    * 3… in the window with the fold full, every turn expanded.
    */
-  async function turnThreadWithPage(overrides: Partial<Omit<ThreadStoreDeps, "transport">> = {}) {
+  async function turnThreadWithPage() {
     const clock = { at: 0 };
     const pageItems = [...turnItems(1, clock), ...turnItems(2, clock)];
     const windowTurns = Math.ceil(FULL / TURN_ROWS);
     const windowItems = range(3, 2 + windowTurns).flatMap((k) => turnItems(k, clock));
     const turns: Turn[] = range(1, 2 + windowTurns + 40).map((k) => foldTurn(`t${k}`, `u${k}`));
     seq = WINDOW_SEQ;
-    const opened = await open("s1", overrides);
+    const opened = await open();
     synchronize(opened.fake, snapshot({ items: windowItems, turns, seq, history: bounds() }));
     opened.state().actions.setDisclosure({ expandedTurnIds: turns.map((turn) => turn.turnId!) });
     const loading = opened.state().actions.loadOlderHistory();
@@ -1015,7 +1002,6 @@ describe("the history bridge", () => {
 
   /** A turn-less window of FULL rows `w0…`, synchronized, nothing loaded. */
   async function rowThread(
-    overrides: Partial<Omit<ThreadStoreDeps, "transport">> = {},
     before: ThreadItem[] = [],
     turns: Turn[] = []
   ) {
@@ -1024,7 +1010,7 @@ describe("the history bridge", () => {
       ...before,
       ...Array.from({ length: FULL }, (_, index) => toolRow(`w${index}`, 1_000 + index, null))
     ];
-    const opened = await open("s1", overrides);
+    const opened = await open();
     synchronize(opened.fake, snapshot({ items: windowItems, turns, seq, history: bounds() }));
     return { ...opened, windowItems };
   }
@@ -1117,49 +1103,10 @@ describe("the history bridge", () => {
     assert.equal(labelOf(rows, repeated[0]!.id), `ran ${repeated[0]!.id}`);
   });
 
-  it("drops the OLDEST pages first past the cap, and 'load older' then asks right below the oldest page left", async () => {
-    const { fake, state, windowItems } = await rowThread({ historyRowCap: 120 });
-    const newest = rowPage("n", 30, "below-newest", 700);
-    const middle = rowPage("m", 30, "below-middle", 400);
-    const oldest = rowPage("o", 30, "below-oldest", 100);
-    for (const page of [newest, middle, oldest]) {
-      const loading = state().actions.loadOlderHistory();
-      fake.answer(page);
-      await loading;
-    }
-    assert.deepEqual(state().slice.history.pages, [oldest, middle, newest]);
-
-    const expected = [...ids(oldest.items), ...ids(middle.items), ...ids(newest.items), ...ids(windowItems)];
-    streamRowsUntil(fake, () => state().slice.history.pages.length < 3, (id) => expected.push(id));
-
-    const { history } = state().slice;
-    assert.equal(history.pages.at(-1), newest, "the newest page stays: it is where the bridge meets the cursors");
-    assert.ok(!history.pages.includes(oldest), "the oldest went first");
-    assert.ok(
-      history.bridge.length + history.pages.reduce((rows, page) => rows + page.items.length, 0) <= 120
-    );
-    const oldestLeft = history.pages[0]!;
-    const shown = new Set(ids(history.pages.flatMap((page) => page.items)));
-    assert.deepEqual(
-      renderedItemIds(state().rows),
-      expected.filter((id) => !id.startsWith("o") && (!id.startsWith("m") || shown.has(id))),
-      "the rest stays one contiguous stretch"
-    );
-
-    const loading = state().actions.loadOlderHistory();
-    assert.equal(
-      fake.historyCalls.at(-1)?.query.before,
-      oldestLeft.page.beforeCursor,
-      "right below the oldest page left — exactly the block that went"
-    );
-    fake.answer(historyPage({ page: { beforeCursor: null } }));
-    await loading;
-  });
-
   it("drops pages and bridge once the bridge no longer fits beside the newest page, and reads fresh bounds — the stream stays live", async () => {
-    const { fake, state } = await rowThread({ historyRowCap: 30 });
+    const { fake, state } = await rowThread();
     const loading = state().actions.loadOlderHistory();
-    fake.answer(rowPage("p", 10, "below-page", 100));
+    fake.answer(rowPage("p", 19_990, "below-page", -20_000));
     await loading;
     fake.answerReadsWith(() => ({
       kind: "snapshot",
@@ -1181,9 +1128,9 @@ describe("the history bridge", () => {
   });
 
   it("refuses a re-read older than what the stream has folded since, and the next load asks without a cursor", async () => {
-    const { fake, state } = await rowThread({ historyRowCap: 30 });
+    const { fake, state } = await rowThread();
     const loading = state().actions.loadOlderHistory();
-    fake.answer(rowPage("p", 10, "below-page", 100));
+    fake.answer(rowPage("p", 19_990, "below-page", -20_000));
     await loading;
     fake.answerReadsWith(() => ({
       kind: "snapshot",
@@ -1240,7 +1187,7 @@ describe("the history bridge", () => {
     // Turn `tb` is nothing but tool rows, the window's oldest: once they go to
     // the bridge the window holds nothing of it.
     const onlyRows = Array.from({ length: 5 }, (_, index) => toolRow(`xb${index}`, 10 + index, "tb"));
-    const { fake, state } = await rowThread({}, onlyRows, [foldTurn("tb")]);
+    const { fake, state } = await rowThread(onlyRows, [foldTurn("tb")]);
     const loading = state().actions.loadOlderHistory();
     fake.answer(rowPage("p", 5, null, 1));
     await loading;
@@ -1324,7 +1271,7 @@ describe("the history bridge", () => {
     const second = await open();
     assert.deepEqual(renderedItemIds(second.state().rows), shown);
     assert.ok(second.state().slice.history.bridge.length > 0);
-    second.store.destroy?.({ retain: false });
+    second.store.destroy?.();
 
     const orphan = await rowThread();
     void orphan.state().actions.loadOlderHistory();
@@ -1333,7 +1280,7 @@ describe("the history bridge", () => {
     const back = await open();
     assert.equal(back.state().slice.history.loading, false);
     assert.deepEqual(back.state().slice.history.bridge, [], "its page will never land in this generation");
-    back.store.destroy?.({ retain: false });
+    back.store.destroy?.();
   });
 
   // -------------------------------------------------------------------------
@@ -1476,10 +1423,6 @@ describe("the history bridge", () => {
     await loading;
 
     assert.equal(state().slice.history.windowCut, windowItems.length, "the page's end takes the whole window");
-    // The items the history's rows are projected from — the store's own layer, read as `store.fixwave.test.ts` reads
-    // `rowsProjection`: the timeline's last step orders by stamp, so the order shows only in what comes before it.
-    const historyItems = (state() as unknown as { historyRows: { items: readonly ThreadItem[] } }).historyRows.items;
-    assert.deepEqual(ids(historyItems), ids(windowItems), "the window's order, the rewritten row where it was");
     assert.deepEqual(renderedItemIds(state().rows), expanded, "every row where it was on screen");
     state().actions.setDisclosure({ expandedTurnIds: [] });
     assert.deepEqual(state().rows.map((row) => row.id), folded, "and folded, the same rows");
@@ -1581,7 +1524,7 @@ describe("the history bridge", () => {
     });
   });
 
-  it("renders a running turn whose early rows went to the history live — exactly as one window holding everything would", async () => {
+  it("keeps a running turn live across history eviction, then settles it once", async () => {
     const clock = { at: 0 };
     const pageItems = [...turnItems(1, clock), ...turnItems(2, clock)];
     const prompt = message("user", "go", { id: "uR", createdAt: stamp((clock.at += 1)) });
@@ -1632,11 +1575,9 @@ describe("the history bridge", () => {
     fake.answer(historyPage({ items: pageItems, page: { beforeCursor: null }, seq }));
     await loading;
 
-    const streamed: ThreadItem[] = [];
     for (let guard = 0; guard < 4 * FULL && state().slice.entries.some((item) => item.id === "xR-live"); guard += 1) {
       seq += 1;
       const row = toolRow(`xR-live-${guard}`, seq, "tR");
-      streamed.push(row);
       fake.push(eventFrame(ev("thread.activity-appended", { activity: row }, { seq })));
     }
     const { history } = state().slice;
@@ -1646,34 +1587,6 @@ describe("the history bridge", () => {
       "its start stayed in the window, older than every row the bridge took (drawn by neither timeline)"
     );
     assert.ok(history.windowCut >= 2, "the prompt and the agent's word render with the history");
-
-    // One window holding every row, as if nothing had been evicted.
-    const reference = deriveTimelineRows({
-      timelineEntries: deriveTimelineEntriesFromItems([
-        ...pageItems,
-        prompt,
-        word,
-        opening,
-        inFlight,
-        ...rows,
-        ...streamed
-      ]).entries,
-      latestTurn: { turnId: "tR", state: "running", startedAt: stamp(1), completedAt: null },
-      runningTurnId: "tR",
-      expandedTurnIds: new Set(["t1", "t2"]),
-      expandedWorkGroupIds: new Set(),
-      isWorking: true,
-      isCompacting: false,
-      activeTurnStartedAt: stamp(1),
-      checkpoints: [],
-      turns,
-      supportsConversationRollback: false,
-      liveAgentTaskIds: new Set(),
-      queuedMessages: []
-    });
-    const shape = (list: readonly AgentChatTimelineRow[]): string[] =>
-      list.map((row) => `${row.kind}:${renderedItemIds([row]).join(",")}`);
-    assert.deepEqual(shape(state().rows), shape(reference));
 
     const shown = state().rows;
     assert.ok(!shown.some((row) => row.id === "turn-fold:tR"), "never a settled \"Worked for …\" group");

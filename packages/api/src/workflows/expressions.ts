@@ -39,12 +39,12 @@ export const EXPRESSION_FILTERS = [
 export type ExpressionFilterName = (typeof EXPRESSION_FILTERS)[number];
 
 /** A template longer than this (UTF-16 units) is not parsed: it renders as written, with an error. */
-export const MAX_TEMPLATE_LENGTH = 1024 * 1024;
+const MAX_TEMPLATE_LENGTH = 1024 * 1024;
 /** Segments after the root. */
-export const MAX_EXPRESSION_PATH_DEPTH = 32;
-export const MAX_EXPRESSION_FILTERS = 16;
+const MAX_EXPRESSION_PATH_DEPTH = 32;
+const MAX_EXPRESSION_FILTERS = 16;
 /** A string literal inside an expression (a `default("…")` argument, a `["key"]`). */
-export const MAX_EXPRESSION_LITERAL_LENGTH = 4096;
+const MAX_EXPRESSION_LITERAL_LENGTH = 4096;
 
 const FORBIDDEN_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 const ROOTS: ReadonlySet<string> = new Set(EXPRESSION_ROOTS);
@@ -743,26 +743,6 @@ export function templateReferences(src: string): TemplateReference[] {
       start: segment.start,
       end: segment.end
     }));
-}
-
-/** The block names a template reads (`nodes.<Name>`), each once, in first-use order. */
-export function referencedNodeNames(src: string): string[] {
-  const names: string[] = [];
-  for (const ref of templateReferences(src)) {
-    const name = ref.path[0];
-    if (ref.root === "nodes" && typeof name === "string" && !names.includes(name)) names.push(name);
-  }
-  return names;
-}
-
-/** The secret names a template reads (`secrets.<NAME>`), each once. */
-export function referencedSecretNames(src: string): string[] {
-  const names: string[] = [];
-  for (const ref of templateReferences(src)) {
-    const name = ref.path[0];
-    if (ref.root === "secrets" && typeof name === "string" && !names.includes(name)) names.push(name);
-  }
-  return names;
 }
 
 /**

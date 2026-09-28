@@ -46,7 +46,7 @@ export type RuntimeEventDraft = {
 }[RuntimeEvent["type"]];
 
 /** Codex's two raw sources (§4.2 `RuntimeEventRawSource`). */
-export const CODEX_RAW_NOTIFICATION = "codex.app-server.notification" as const;
+const CODEX_RAW_NOTIFICATION = "codex.app-server.notification" as const;
 export const CODEX_RAW_REQUEST = "codex.app-server.request" as const;
 
 export interface CodexNormaliserOptions {
@@ -1936,26 +1936,6 @@ export function canonicalRequestType(method: string): CanonicalRequestType {
       return "exec_command_approval";
     default:
       return "unknown";
-  }
-}
-
-/** `ProviderRequestKind` (§5.1), the coarser bucket the persisted row carries. */
-export function providerRequestKind(
-  requestType: CanonicalRequestType
-): "command" | "file-read" | "file-change" | "mcp-elicitation" | "permission" {
-  switch (requestType) {
-    case "command_execution_approval":
-    case "exec_command_approval":
-      return "command";
-    case "file_read_approval":
-      return "file-read";
-    case "file_change_approval":
-    case "apply_patch_approval":
-      return "file-change";
-    case "mcp_elicitation_approval":
-      return "mcp-elicitation";
-    default:
-      return "permission";
   }
 }
 

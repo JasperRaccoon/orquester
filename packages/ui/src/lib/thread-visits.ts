@@ -79,7 +79,7 @@ export function saveThreadVisits(visits: ThreadVisits): void {
  * unread. Returns the same object when nothing changed, so a selector on it
  * does not re-render the tab strip on every activation.
  */
-export function markThreadVisited(
+function markThreadVisited(
   visits: ThreadVisits,
   sessionId: string,
   visitedAt: string

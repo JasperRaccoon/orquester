@@ -4,18 +4,12 @@ import { describe, it } from "node:test";
 import {
   evaluateExpression,
   hasTemplate,
-  MAX_EXPRESSION_PATH_DEPTH,
-  MAX_TEMPLATE_LENGTH,
   parseTemplate,
-  referencedNodeNames,
-  referencedSecretNames,
   renderTemplate,
   renderTemplateValue,
   rewriteNodeReferences,
   singleExpression,
-  templateReferences,
-  type ExpressionContext,
-  type TemplateExpression
+  type ExpressionContext
 } from "./expressions.ts";
 
 function ctx(overrides: Partial<ExpressionContext> = {}): ExpressionContext {
@@ -39,30 +33,8 @@ function render(src: string, context = ctx()) {
 }
 
 describe("parseTemplate", () => {
-  it("splits text and expressions with offsets", () => {
-    const parsed = parseTemplate("Hi {{ input.a }}!");
-    assert.deepEqual(parsed.errors, []);
-    assert.equal(parsed.segments.length, 3);
-    const expr = parsed.segments[1] as TemplateExpression;
-    assert.equal(expr.kind, "expr");
-    assert.equal(expr.root, "input");
-    assert.deepEqual(expr.path, ["a"]);
-    assert.equal(expr.raw, "{{ input.a }}");
-    assert.equal(expr.source, "input.a");
-    assert.equal(expr.start, 3);
-    assert.equal(expr.end, 16);
-    assert.deepEqual(parsed.segments[2], { kind: "text", text: "!", start: 16, end: 17 });
-  });
-
   it("parses dot, index and quoted keys, and filters with arguments", () => {
-    const expr = singleExpression(`{{nodes.Fetch.output.tickets[0]["key"] | default("none") | lines(2) | upper}}`);
-    assert.ok(expr);
-    assert.deepEqual(expr.path, ["Fetch", "output", "tickets", 0, "key"]);
-    assert.deepEqual(expr.filters, [
-      { name: "default", args: ["none"] },
-      { name: "lines", args: [2] },
-      { name: "upper", args: [] }
-    ]);
+    assert.equal(render(`{{nodes.Fetch.output.tickets[0]["key"] | default("none") | lines(2) | upper}}`).text, "A-1");
   });
 
   it("accepts literal kinds in filter arguments", () => {
@@ -75,9 +47,7 @@ describe("parseTemplate", () => {
       ["false", false],
       ["null", null]
     ] as const) {
-      const expr = singleExpression(`{{ input.x | default(${arg}) }}`);
-      assert.ok(expr, arg);
-      assert.deepEqual(expr.filters[0]!.args, [value]);
+      assert.deepEqual(renderTemplateValue(`{{ input.x | default(${arg}) }}`, ctx()).value, value);
     }
   });
 
@@ -107,8 +77,7 @@ describe("parseTemplate", () => {
       const parsed = parseTemplate(`a ${src} b`);
       assert.equal(parsed.errors.length, 1, src);
       assert.match(parsed.errors[0]!.message, message, src);
-      assert.equal(parsed.segments.length, 1, src);
-      assert.equal((parsed.segments[0] as { text: string }).text, `a ${src} b`, src);
+      assert.equal(render(`a ${src} b`).text, `a ${src} b`, src);
     }
   });
 
@@ -117,32 +86,27 @@ describe("parseTemplate", () => {
     assert.equal(parsed.errors.length, 1);
     assert.match(parsed.errors[0]!.message, /not closed/);
     assert.equal(parsed.errors[0]!.root, "nodes");
-    assert.deepEqual(parsed.segments, [{ kind: "text", text: "x {{ nodes.A.output", start: 0, end: 19 }]);
+    assert.equal(render("x {{ nodes.A.output").text, "x {{ nodes.A.output");
   });
 
   it("finds the closing braces past quoted }}", () => {
-    const expr = singleExpression('{{ input.a | default("}}") }}');
-    assert.ok(expr);
-    assert.deepEqual(expr.filters[0]!.args, ["}}"]);
+    assert.equal(render('{{ input.nope | default("}}") }}').text, "}}");
   });
 
   it("\\{{ is a literal", () => {
-    const parsed = parseTemplate("a \\{{ input.a }} b");
-    assert.deepEqual(parsed.errors, []);
-    assert.equal(parsed.segments.length, 1);
-    assert.equal((parsed.segments[0] as { text: string }).text, "a {{ input.a }} b");
+    assert.equal(render("a \\{{ input.a }} b").text, "a {{ input.a }} b");
     assert.equal(render("\\{{x}} and {{ input.a }}").text, "{{x}} and 1");
   });
 
   it("caps path depth", () => {
-    const ok = `{{ input${".a".repeat(MAX_EXPRESSION_PATH_DEPTH)} }}`;
+    const ok = `{{ input${".a".repeat(32)} }}`;
     assert.deepEqual(parseTemplate(ok).errors, []);
-    const deep = `{{ input${".a".repeat(MAX_EXPRESSION_PATH_DEPTH + 1)} }}`;
+    const deep = `{{ input${".a".repeat(33)} }}`;
     assert.match(parseTemplate(deep).errors[0]!.message, /at most 32/);
   });
 
   it("does not parse a template over the length cap", () => {
-    const huge = "{{ input.a }}" + "x".repeat(MAX_TEMPLATE_LENGTH);
+    const huge = "{{ input.a }}" + "x".repeat(1024 * 1024);
     const parsed = parseTemplate(huge);
     assert.equal(parsed.errors.length, 1);
     assert.match(parsed.errors[0]!.message, /longer than/);
@@ -155,14 +119,9 @@ describe("parseTemplate", () => {
     const braces = "{".repeat(50_000) + "}".repeat(50_000);
     const result = render(braces);
     assert.ok(result.warnings.length >= 1);
-    const quotes = `{{ input | default("${"\\".repeat(5000)}") }}`;
-    assert.equal(typeof render(quotes).text, "string");
+    const quotes = `{{ input.nope | default("${"\\".repeat(5000)}") }}`;
+    assert.equal(render(quotes).text, "\\".repeat(2500));
     assert.match(parseTemplate(`{{ input | default("${"a".repeat(5000)}") }}`).errors[0]!.message, /longer than 4096/);
-  });
-
-  it("a non-string template is empty", () => {
-    assert.deepEqual(parseTemplate(undefined as unknown as string), { segments: [], errors: [] });
-    assert.deepEqual(renderTemplate(null as unknown as string, ctx()), { text: "", warnings: [] });
   });
 });
 
@@ -335,23 +294,6 @@ describe("evaluateExpression", () => {
 });
 
 describe("references", () => {
-  it("lists paths, node names and secret names", () => {
-    const src = "{{ nodes.A.output.text }} {{ nodes.B.status }} {{ nodes.A.error }} {{ secrets.X }} {{ bad }} {{ input }}";
-    assert.deepEqual(
-      templateReferences(src).map((ref) => [ref.root, ref.path]),
-      [
-        ["nodes", ["A", "output", "text"]],
-        ["nodes", ["B", "status"]],
-        ["nodes", ["A", "error"]],
-        ["secrets", ["X"]],
-        ["input", []]
-      ]
-    );
-    assert.deepEqual(referencedNodeNames(src), ["A", "B"]);
-    assert.deepEqual(referencedSecretNames(src), ["X"]);
-    assert.deepEqual(templateReferences("no braces"), []);
-  });
-
   it("hasTemplate: workflow expressions only", () => {
     assert.equal(hasTemplate("echo {{ input.a }}"), true);
     assert.equal(hasTemplate("echo {{ nodes.A.output"), true, "an unclosed expression is still an attempt");

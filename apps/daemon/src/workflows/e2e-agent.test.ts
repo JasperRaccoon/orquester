@@ -11,20 +11,21 @@
 //     sends the turn twice (the command id was persisted before the POST).
 
 import assert from "node:assert/strict";
-import { after, describe, test } from "node:test";
+import { after, describe, test, type TestContext } from "node:test";
 
 import type { AccountPreviewResponse, EventMessage, GetWorkflowRunResponse, RunWorkflowResponse, WorkflowRun, WorkflowWriteResponse } from "@orquester/api";
 import { join } from "node:path";
+import { workflowRunsDir } from "@orquester/config";
 
+import { realClock } from "./factory.ts";
 import type { AgentBlockOutput } from "./agent/executor.ts";
 import { account, staticAccounts, staticUsage } from "./agent/testing/fake-context.ts";
 import { byAccount, FakeChatHost } from "./agent/testing/fake-chat-host.ts";
 import { FakeClock, flushAsync } from "./agent/testing/fake-clock.ts";
-import { boot, runFinished, tempAppdir, type Booted } from "./testing/daemon-harness.ts";
+import { boot, runFinished, tempAppdir, waitForFileState, type Booted } from "./testing/daemon-harness.ts";
 
 const FIXED = { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } as const;
 const ACCOUNTS = [account("claude", "a1", "alpha"), account("claude", "a2", "beta"), account("codex", "c1", "cx-one")];
-const realDelay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const dirs: Awaited<ReturnType<typeof tempAppdir>>[] = [];
 after(async () => {
@@ -35,30 +36,13 @@ after(async () => {
  * Run the fake clock until `done()`: let real I/O (run.json writes, the routes) settle, then jump to
  * the next fake timer — the agent block's waits, the fake provider's steps, the engine's throttles.
  */
-async function driveUntil(clock: FakeClock, done: () => boolean, label: string): Promise<void> {
-  const next = (): { at: number } | undefined => (clock as unknown as { nextTimer(): { at: number } | undefined }).nextTimer();
-  const settle = async (ms: number): Promise<void> => {
-    await flushAsync(4);
-    await realDelay(ms);
-    await flushAsync(4);
-  };
+async function driveUntil(h: Booted, clock: FakeClock, done: () => boolean, label: string): Promise<void> {
   for (let step = 0; step < 20_000; step += 1) {
-    await settle(1);
+    await flushAsync(8);
+    await Promise.all([h.runStore.flush(), h.state.flush()]);
     if (done()) return;
-    let timer = next();
-    if (!timer) {
-      await realDelay(5);
-      continue;
-    }
-    // A far timer (the hourly sweep, a block's deadline) is jumped to only once real I/O had time to
-    // land — otherwise time would run away while a run.json write is in flight.
-    if (timer.at - clock.now().getTime() > 30_000) {
-      await settle(30);
-      if (done()) return;
-      timer = next();
-      if (!timer) continue;
-    }
-    await clock.advance(Math.max(0, timer.at - clock.now().getTime()));
+    const timer = (clock as unknown as { nextTimer(): { at: number } | undefined }).nextTimer();
+    await clock.advance(timer ? Math.min(1_000, Math.max(0, timer.at - clock.now().getTime())) : 0);
   }
   throw new Error(`driveUntil gave up: ${label}`);
 }
@@ -72,17 +56,19 @@ function agentConfig(chain: unknown[], text: string): Record<string, unknown> {
   return { prompt: { kind: "text", text }, chain, autonomyNote: true };
 }
 
-async function setup(host: FakeChatHost, clock: FakeClock): Promise<{ h: Booted; projectPath: string; dir: Awaited<ReturnType<typeof tempAppdir>> }> {
+async function setup(host: FakeChatHost, clock: FakeClock, t: TestContext): Promise<{ h: Booted; projectPath: string; dir: Awaited<ReturnType<typeof tempAppdir>> }> {
   const dir = await tempAppdir();
   dirs.push(dir);
-  const h = await boot(dir.root, { clock, engineApi: () => host, accounts: staticAccounts(host), usage: staticUsage() });
+  t.mock.method(realClock, "now", () => clock.now());
+  t.mock.method(realClock, "setTimeout", (fn: () => void, ms: number) => clock.setTimeout(fn, ms));
+  const h = await boot(dir.root, { engineApi: () => host, accounts: staticAccounts(host), usage: staticUsage() });
   return { h, projectPath: join(dir.workspacesDir, "acme", "app"), dir };
 }
 
 const finishedIn = (h: Booted, runId: string) => () => h.events.some(runFinished(runId));
 
 describe("e2e: agent blocks through the engine", () => {
-  test("a usage limit switches accounts in the same session, then hands off across families", async () => {
+  test("a usage limit switches accounts in the same session, then hands off across families", async (t) => {
     const clock = new FakeClock("2026-09-28T12:00:00.000Z");
     const host = new FakeChatHost({
       clock,
@@ -93,7 +79,7 @@ describe("e2e: agent blocks through the engine", () => {
         c1: [{ kind: "say", text: "codex finished" }]
       })
     });
-    const { h, projectPath } = await setup(host, clock);
+    const { h, projectPath } = await setup(host, clock, t);
     try {
       const chain = [
         { agent: "claude", model: "opus", accounts: { ...FIXED, accounts: ["a1", "a2"] } },
@@ -124,7 +110,7 @@ describe("e2e: agent blocks through the engine", () => {
 
       const started = await json<RunWorkflowResponse>(h, "POST", `/api/workflows/${workflowId}/run`, {});
       const runId = started.body.runId!;
-      await driveUntil(clock, finishedIn(h, runId), "the agent run");
+      await driveUntil(h, clock, finishedIn(h, runId), "the agent run");
       const run = (await json<GetWorkflowRunResponse>(h, "GET", `/api/workflow-runs/${runId}`)).body.run as WorkflowRun;
       // A Stop block (as success) ends the run `stopped`, its value the run's final output.
       assert.equal(run.status, "stopped", JSON.stringify({ error: run.error, fix: run.blocks.fix }, null, 2));
@@ -171,10 +157,10 @@ describe("e2e: agent blocks through the engine", () => {
     }
   });
 
-  test("the host catalogue: unknown agents and models are validation problems, and the preview passes over them", async () => {
+  test("the host catalogue: unknown agents and models are validation problems, and the preview passes over them", async (t) => {
     const clock = new FakeClock("2026-09-28T12:00:00.000Z");
     const host = new FakeChatHost({ clock, accounts: ACCOUNTS, behaviour: byAccount({}) });
-    const { h, projectPath } = await setup(host, clock);
+    const { h, projectPath } = await setup(host, clock, t);
     try {
       const chain = [
         { agent: "nope", model: "x", accounts: { ...FIXED } },
@@ -223,14 +209,14 @@ describe("e2e: agent blocks through the engine", () => {
     }
   });
 
-  test("a restart while the agent works resumes the watcher and never sends the turn twice", async () => {
+  test("a restart while the agent works resumes the watcher and never sends the turn twice", async (t) => {
     const clock = new FakeClock("2026-09-28T12:00:00.000Z");
     const host = new FakeChatHost({
       clock,
       accounts: ACCOUNTS,
       behaviour: () => [{ kind: "say", text: "working on it" }, { kind: "wait", ms: 10 * 60_000 }, { kind: "say", text: "all done" }]
     });
-    const setupResult = await setup(host, clock);
+    const setupResult = await setup(host, clock, t);
     let h = setupResult.h;
     try {
       const created = await json<WorkflowWriteResponse>(h, "POST", "/api/workflows", {
@@ -246,19 +232,15 @@ describe("e2e: agent blocks through the engine", () => {
       const runId = (await json<RunWorkflowResponse>(h, "POST", `/api/workflows/${workflowId}/run`, {})).body.runId!;
 
       // Until the turn is running at the provider and the block's WaitingOn says so on disk.
-      await driveUntil(clock, () => host.turnLog.length === 1 && host.session(host.sessionsOwnedBy("work")[0]!.id).activeTurnId !== null, "the turn to start");
-      let persisted = await h.runStore.load(runId);
-      for (let i = 0; i < 200 && (persisted?.blocks.work?.waitingOn as { phase?: string } | undefined)?.phase !== "watching"; i += 1) {
-        await realDelay(5);
-        persisted = await h.runStore.load(runId);
-      }
+      await driveUntil(h, clock, () => host.turnLog.length === 1 && host.session(host.sessionsOwnedBy("work")[0]!.id).activeTurnId !== null, "the turn to start");
+      const persisted = await waitForFileState(join(workflowRunsDir(setupResult.dir.root), runId, "run.json"), () => h.runStore.load(runId), (run) => (run?.blocks.work?.waitingOn as { phase?: string } | undefined)?.phase === "watching");
       const waitingOn = persisted!.blocks.work!.waitingOn as { kind: string; commandId: string; phase: string };
       assert.equal(waitingOn.kind, "agent");
       assert.equal(waitingOn.phase, "watching", JSON.stringify(waitingOn));
 
       await h.close();
-      h = await boot(setupResult.dir.root, { clock, engineApi: () => host, accounts: staticAccounts(host), usage: staticUsage() });
-      await driveUntil(clock, finishedIn(h, runId), "the resumed run");
+      h = await boot(setupResult.dir.root, { engineApi: () => host, accounts: staticAccounts(host), usage: staticUsage() });
+      await driveUntil(h, clock, finishedIn(h, runId), "the resumed run");
       const run = (await json<GetWorkflowRunResponse>(h, "GET", `/api/workflow-runs/${runId}`)).body.run as WorkflowRun;
       assert.equal(run.status, "succeeded", JSON.stringify(run.blocks.work, null, 2));
       assert.equal((run.blocks.work!.output as AgentBlockOutput).text, "working on it\n\nall done", "the turn's whole answer");

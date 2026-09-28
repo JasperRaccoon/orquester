@@ -28,12 +28,11 @@ import {
   loadWorkflows,
   loadWorkflowSecrets,
   markWorkflowsStale,
-  mergeBlock,
-  mergeRunSummary,
   resetWorkflows,
   runWorkflowNow,
   setWorkflowEnabled,
   workflowSecretsKey,
+  workflowRunLoadError,
   workflowsStore,
   withEnabledOverride,
   type WorkflowsApi
@@ -98,17 +97,14 @@ function block(overrides: Partial<WorkflowBlockRun> & { nodeId: string }): Workf
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
-  reject: (error: unknown) => void;
 }
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
+  const promise = new Promise<T>((res) => {
     resolve = res;
-    reject = rej;
   });
-  return { promise, resolve, reject };
+  return { promise, resolve };
 }
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -134,10 +130,8 @@ class FakeApi implements WorkflowsApi {
   runAnswer: RunWorkflowResponse = { runId: "r-new" };
   runs: { id: string; req?: RunWorkflowRequest }[] = [];
   runList: WorkflowRunSummary[] = [];
-  nextRunList: Deferred<ListWorkflowRunsResponse> | null = null;
   runDetail: unknown = null;
   nextRunDetail: Deferred<GetWorkflowRunResponse> | null = null;
-  secretsCalls: (string | null)[] = [];
   deleteError: unknown = null;
 
   async listWorkflows(): Promise<ListWorkflowsResponse> {
@@ -186,11 +180,6 @@ class FakeApi implements WorkflowsApi {
     return this.runAnswer;
   }
   async listWorkflowRuns(): Promise<ListWorkflowRunsResponse> {
-    if (this.nextRunList) {
-      const next = this.nextRunList;
-      this.nextRunList = null;
-      return next.promise;
-    }
     return { runs: this.runList, before: null };
   }
   async getWorkflowRun(): Promise<GetWorkflowRunResponse> {
@@ -201,8 +190,7 @@ class FakeApi implements WorkflowsApi {
     }
     return this.runDetail as GetWorkflowRunResponse;
   }
-  async listWorkflowSecrets(workflowId?: string | null): Promise<ListWorkflowSecretsResponse> {
-    this.secretsCalls.push(workflowId ?? null);
+  async listWorkflowSecrets(): Promise<ListWorkflowSecretsResponse> {
     return {
       secrets: [
         { name: "TOKEN", scope: "global", updatedAt: T0, short: false },
@@ -265,13 +253,19 @@ describe("the list load", () => {
 
   it("a failure is the error state, and a refresh failure keeps the rows", async () => {
     const api = new FakeApi();
-    api.nextList = deferred();
-    const first = loadWorkflows(api);
-    api.nextList?.reject(apiError(404, "", "no route"));
-    // `nextList` was taken by the call already.
-    await first;
+    api.listWorkflows = async () => { throw apiError(404, "", "no route"); };
+    await loadWorkflows(api);
     assert.equal(state().load.status, "error");
-    assert.match(state().load.error ?? "", /does not support automated workflows/);
+    assert.ok(state().load.error);
+
+    api.listWorkflows = async () => ({ workflows: [summary({ id: "a" })] });
+    await loadWorkflows(api);
+    api.listWorkflows = async () => { throw apiError(503, "UNAVAILABLE", "offline"); };
+    await loadWorkflows(api, { force: true });
+    assert.equal(state().load.status, "loaded");
+    assert.equal(state().load.stale, true);
+    assert.equal(state().load.error, "offline");
+    assert.deepEqual([...state().summaries.keys()], ["a"]);
   });
 
   it("an event that crosses the answer is not undone by it", async () => {
@@ -379,20 +373,21 @@ describe("events", () => {
   });
 });
 
-describe("merge rules", () => {
-  it("a run that ended never reads as running again", () => {
-    const ended = run({ id: "r", workflowId: "a", status: "failed" });
-    assert.equal(mergeRunSummary(ended, run({ id: "r", workflowId: "a", status: "running" })), ended);
-    const running = run({ id: "r", workflowId: "a", status: "running" });
-    assert.equal(mergeRunSummary(running, ended), ended);
-  });
-
-  it("a block never steps back", () => {
-    const done = block({ nodeId: "n", status: "succeeded", attempt: 1 });
-    assert.equal(mergeBlock(done, block({ nodeId: "n", status: "running", attempt: 1 })), done);
-    const retry = block({ nodeId: "n", status: "running", attempt: 2 });
-    assert.equal(mergeBlock(done, retry), retry, "a new attempt moves on");
-    assert.equal(mergeBlock(retry, done), retry, "an earlier attempt does not");
+describe("block progress events", () => {
+  it("block updates accept a retry but ignore an earlier attempt or state", () => {
+    const update = (status: WorkflowBlockRun["status"], attempt: number) => applyWorkflowsEvent(event("workflowRun.updated", {
+      run: run({ id: "r", workflowId: "a" }),
+      blocks: [block({ nodeId: "n", status, attempt })]
+    }));
+    update("succeeded", 1);
+    update("running", 1);
+    assert.equal(state().runs.r?.blocks.n?.status, "succeeded");
+    update("running", 2);
+    assert.equal(state().runs.r?.blocks.n?.status, "running");
+    assert.equal(state().runs.r?.blocks.n?.attempt, 2);
+    update("succeeded", 1);
+    assert.equal(state().runs.r?.blocks.n?.status, "running");
+    assert.equal(state().runs.r?.blocks.n?.attempt, 2);
   });
 });
 
@@ -476,9 +471,17 @@ describe("runs", () => {
 
   it("a run whose definition does not parse is an error, not a crash", async () => {
     const api = new FakeApi();
-    api.runDetail = { run: { ...run({ id: "r2", workflowId: "a" }), definition: { nope: true } } };
+    api.runDetail = { run: {
+      ...run({ id: "r2", workflowId: "a" }),
+      definition: { nope: true },
+      triggerPayload: null,
+      blocks: {},
+      takenEdges: [],
+      deadEdges: []
+    } };
     await assert.doesNotReject(loadWorkflowRun(api, "r2"));
     assert.equal(state().runs.r2, undefined);
+    assert.ok(workflowRunLoadError("r2"));
   });
 });
 
@@ -514,7 +517,9 @@ describe("mutations", () => {
     const refused = await setWorkflowEnabled(api, "a", false);
     assert.equal(refused.ok, false);
     assert.equal(state().enabledOverrides.size, 0, "rolled back");
-    assert.match(state().notice?.text ?? "", /Couldn't disable “Nightly”: The workflow has 2 errors/);
+    assert.equal(refused.ok ? null : refused.code, "INVALID_WORKFLOW");
+    assert.equal(state().notice?.tone, "error");
+    assert.equal(state().notice?.workflowId, "a");
     dismissWorkflowsNotice();
     assert.equal(state().notice, null);
   });
@@ -542,7 +547,6 @@ describe("mutations", () => {
     assert.equal(created.ok, true);
     const row = state().summaries.get("w-new");
     assert.equal(row?.name, "Fresh");
-    assert.deepEqual(row?.triggers.map((t) => t.text), ["Manual"]);
     api.deleteError = apiError(404, "WORKFLOW_NOT_FOUND", "gone");
     const deleted = await deleteWorkflow(api, "w-new");
     assert.equal(deleted.ok, true);

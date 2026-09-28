@@ -7,7 +7,7 @@ export interface UsageAgentView { id: string; name: string; available: boolean; 
 const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok Build" };
 
 /** The top-bar countdown (`formatCountdown` in the UI) without the "Resets in" prefix. */
-export function formatResetsIn(resetsAt: string | undefined, now: number): string | undefined {
+function formatResetsIn(resetsAt: string | undefined, now: number): string | undefined {
   if (!resetsAt) return undefined;
   const ms = Date.parse(resetsAt) - now;
   if (Number.isNaN(ms)) return undefined;

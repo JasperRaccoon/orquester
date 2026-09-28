@@ -24,7 +24,7 @@ export function FullOutputPane({ loading, text, notes }: FullOutputPaneProps): R
       {!loading && notes.length > 0 ? (
         <div className="space-y-0.5 border-b border-neutral-800 px-4 py-2 text-xs text-neutral-400">
           {notes.map((note) => (
-            <p key={note} data-full-output-note="">
+            <p key={note}>
               {note}
             </p>
           ))}

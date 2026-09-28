@@ -9,17 +9,17 @@ import { readThread, requireChatSession } from "./reads.ts";
 import { capText, clipText, MAX_RESULT_BYTES, resultBytes } from "./result.ts";
 import { cutTail, fitRoster, proposedPlan, sized, SUBAGENT_TEXT_CHARS } from "./transcript.ts";
 
-export const VIEW_TEXT_CAP = 16_384;
+const VIEW_TEXT_CAP = 16_384;
 /**
  * The most a session detail takes, in UTF-8 bytes of its JSON: ok()'s cap less room for what a tool returns beside it
  * (`seq`, `applied`, …, well under 1 KB). send_message and implement_plan, which add `pending`, fit the detail again in
  * what their own fields leave (`fitDetail`, tools/messages.ts).
  */
-export const SESSION_DETAIL_BYTES = MAX_RESULT_BYTES - 1_000;
+const SESSION_DETAIL_BYTES = MAX_RESULT_BYTES - 1_000;
 /** completed | failed | interrupted | cancelled — the fold's own set (`thread.ts`), typed for callers holding a plain string. */
 export const SETTLED_TURN_STATES: ReadonlySet<string> = TURN_SETTLED_STATES;
 /** §4.3's default four with the GUI's labels (`banner-model.ts` `DEFAULT_APPROVAL_OPTIONS`), listed approve-first as spec §6.2 does. */
-export const DEFAULT_APPROVAL_DECISIONS: readonly ApprovalOption[] = [
+const DEFAULT_APPROVAL_DECISIONS: readonly ApprovalOption[] = [
   { decision: "accept", label: "Approve" },
   { decision: "acceptForSession", label: "Always allow this session" },
   { decision: "decline", label: "Decline" },
@@ -32,9 +32,9 @@ export const DEFAULT_APPROVAL_DECISIONS: readonly ApprovalOption[] = [
  * detail keeps an objective whole up to Claude's and Codex's own limit (the host's `MAX_GOAL_OBJECTIVE_CHARS`) and a
  * last check up to 2 000: bounded so, the goal can stay among the fields fitDetail never cuts.
  */
-export const GOAL_LABEL_CHARS = 200;
-export const GOAL_OBJECTIVE_CHARS = 4_000;
-export const GOAL_CHECK_CHARS = 2_000;
+const GOAL_LABEL_CHARS = 200;
+const GOAL_OBJECTIVE_CHARS = 4_000;
+const GOAL_CHECK_CHARS = 2_000;
 
 export type SessionReason = ChatActivityRung | "new" | "exited";
 /**
@@ -85,7 +85,7 @@ export async function buildViewContext(api: DaemonApi): Promise<ViewContext> {
   return { workspacesDir: api.workspacesDir, adapterByRefId, accountLabelById, capabilitiesByAdapter };
 }
 
-export function sessionReason(s: SessionSummary): SessionReason | null {
+function sessionReason(s: SessionSummary): SessionReason | null {
   if (s.kind !== "agent-chat") return s.status === "exited" ? "exited" : null;
   if ((s.chatSessionStatus ?? "idle") === "idle" && !s.latestTurn) return "new";
   const rung = resolveChatActivity(s).rung;
@@ -98,7 +98,7 @@ export function sessionReason(s: SessionSummary): SessionReason | null {
  * reports continuing is one an Orquester update holds (goals §5.7, the GUI's `isGoalHeldForUpdate`): the host's own
  * predicate needs an `active` goal otherwise.
  */
-export function goalView(s: SessionSummary): GoalView | null {
+function goalView(s: SessionSummary): GoalView | null {
   const g = parseAgentGoal(s.goal);
   if (!g || !isUnfinishedGoal(g)) return null;
   const continuing = s.goal?.continuing === true;
@@ -110,7 +110,7 @@ export function goalView(s: SessionSummary): GoalView | null {
  * the end as no goal (Claude's met or failed goal), when it does not read, and from a host that predates goals.
  * `continuing` is the summary's, the host's word, held to the snapshot's own status.
  */
-export function goalDetailView(snap: ThreadSnapshotPayload, summaryGoal: SessionSummary["goal"]): GoalDetailView | null {
+function goalDetailView(snap: ThreadSnapshotPayload, summaryGoal: SessionSummary["goal"]): GoalDetailView | null {
   const g = parseThreadGoal(snap.goal);
   if (!g) return null;
   // The summary trails the snapshot by a host poll — right after a `/goal pause` it can still say continuing — and the
@@ -153,7 +153,7 @@ export function sessionView(s: SessionSummary, ctx: ViewContext): SessionView {
   return view;
 }
 
-export function optionsObject(options: readonly ProviderOptionSelection[] | undefined): Record<string, string | boolean> {
+function optionsObject(options: readonly ProviderOptionSelection[] | undefined): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
   for (const o of options ?? []) out[o.id] = o.value;
   return out;
@@ -214,7 +214,7 @@ export function pendingQuestionViews(snap: ThreadSnapshotPayload): PendingQuesti
  * The latest proposed plan. `actionable` is judged on the snapshot with the host's rule (`proposedPlan`, transcript.ts),
  * never on the summary's flag, which trails it by one poll: right after implement_plan that flag still says yes.
  */
-export function planView(snap: ThreadSnapshotPayload): PlanView | null {
+function planView(snap: ThreadSnapshotPayload): PlanView | null {
   const plan = proposedPlan(snap.items);
   if (!plan) return null;
   const p = (plan.item.payload ?? {}) as { planId?: unknown; planMarkdown?: unknown; truncated?: unknown };
@@ -226,7 +226,7 @@ export function planView(snap: ThreadSnapshotPayload): PlanView | null {
 /** A subagent's text as a view shows it: at most SUBAGENT_TEXT_CHARS code points, a cut ending in "…"; a non-string as its JSON. */
 const subagentText = (value: unknown): string => clipText(typeof value === "string" ? value : JSON.stringify(value), SUBAGENT_TEXT_CHARS);
 
-export function subagentView(r: RuntimeSubagent): SubagentView {
+function subagentView(r: RuntimeSubagent): SubagentView {
   const v: SubagentView = { id: r.id, kind: r.kind, agentKind: r.agentKind, title: r.title == null ? null : subagentText(r.title), status: r.status, startedAt: r.startedAt ?? null, completedAt: r.completedAt ?? null };
   if (r.model) v.model = r.model;
   if (r.effort) v.effort = r.effort;
@@ -281,7 +281,7 @@ export function fitDetail(detail: SessionDetail, budget: number): SessionDetail 
   return fitted;
 }
 
-export function latestSettledTurn(turns: readonly Turn[]): Turn | null {
+function latestSettledTurn(turns: readonly Turn[]): Turn | null {
   for (let i = turns.length - 1; i >= 0; i -= 1) {
     const t = turns[i]!;
     if (t.turnId && SETTLED_TURN_STATES.has(t.state)) return t;
@@ -309,7 +309,7 @@ export function assistantTextForTurn(items: readonly ThreadItem[], turnId: strin
  * paragraph a host before the pre-turn-stream fix wrote a second time at `result`, which an old log keeps: the GUI's
  * rule, from the one implementation (`reEmittedAssistantCopies`, `@orquester/api/agent-chat`), counted over the window.
  */
-export function lastReply(snap: ThreadSnapshotPayload): SessionDetail["lastReply"] | null {
+function lastReply(snap: ThreadSnapshotPayload): SessionDetail["lastReply"] | null {
   const t = latestSettledTurn(snap.turns);
   if (!t?.turnId) return null;
   const copies = repairsReEmittedAssistantCopies(snap.head.adapter) ? reEmittedAssistantCopies(snap.items) : undefined;

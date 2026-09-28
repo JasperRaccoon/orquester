@@ -18,12 +18,12 @@ import path from "node:path";
 
 import { spawnProviderChild, type ProviderChild } from "../support/spawn.ts";
 
-export const GIT_DEFAULT_TIMEOUT_MS = 30_000;
-export const GIT_DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
-export const GIT_DEFAULT_CONCURRENCY = 8;
-export const GIT_TRANSIENT_RETRIES = 2;
-export const GIT_TRANSIENT_RETRY_DELAY_MS = 75;
-export const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
+const GIT_DEFAULT_TIMEOUT_MS = 30_000;
+const GIT_DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
+const GIT_DEFAULT_CONCURRENCY = 8;
+const GIT_TRANSIENT_RETRIES = 2;
+const GIT_TRANSIENT_RETRY_DELAY_MS = 75;
+const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
 
 export type GitOutputMode = "truncate" | "error";
 
@@ -129,7 +129,7 @@ function firstLine(text: string): string {
 }
 
 /** Classify before discarding stderr; keep paths and process output out of errors. */
-export function isTransientGitExit(stderr: string): boolean {
+function isTransientGitExit(stderr: string): boolean {
   return (
     /unable to create [^\n]*\.lock['"]?: file exists/i.test(stderr) ||
     /(?:unable to stat|lstat\(|error: open\()[^\n]+: no such file or directory/i.test(stderr)
@@ -140,7 +140,7 @@ export function isTransientGitExit(stderr: string): boolean {
  * A counting semaphore. The permit pool is per service instance, which is
  * host-wide in production because the host builds one checkpoint service.
  */
-export class Semaphore {
+class Semaphore {
   #available: number;
   readonly #waiters: Array<() => void> = [];
 
@@ -179,15 +179,10 @@ export class Semaphore {
 export interface GitRunnerOptions {
   /** The complete environment for every git child (§3.1). */
   gitEnv: Record<string, string>;
-  maxConcurrentGit?: number;
-  /** Test seam: resolve the binary differently. */
-  resolveGitBinary?: (env: Record<string, string>) => string;
 }
 
 export interface GitRunner {
   run(input: GitRunInput): Promise<GitRunResult>;
-  /** The env every child starts from, after the runner's own defaults. */
-  readonly env: Record<string, string>;
 }
 
 /**
@@ -205,8 +200,7 @@ const GIT_ENV_DEFAULTS: Record<string, string> = {
 
 export function createGitRunner(options: GitRunnerOptions): GitRunner {
   const env: Record<string, string> = { ...GIT_ENV_DEFAULTS, ...options.gitEnv };
-  const permits = new Semaphore(options.maxConcurrentGit ?? GIT_DEFAULT_CONCURRENCY);
-  const resolveBinary = options.resolveGitBinary ?? resolveGitBinary;
+  const permits = new Semaphore(GIT_DEFAULT_CONCURRENCY);
   let binary: string | null = null;
 
   const runOnce = async (input: GitRunInput): Promise<GitRunResult> => {
@@ -218,7 +212,7 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
     const release = await permits.acquire();
     try {
       throwIfAborted(input);
-      binary ??= resolveBinary(env);
+      binary ??= resolveGitBinary(env);
       return await runGit(binary, env, input);
     } finally {
       release();
@@ -248,7 +242,7 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
     }
   };
 
-  return { run, env };
+  return { run };
 }
 
 /** An already-aborted signal never fires `abort` again, so it is checked, not listened for. */
@@ -446,7 +440,7 @@ class CappedBuffer {
  * absolute path — a bare name would be resolved against the *daemon's* PATH by
  * the OS, which is not the PATH the host was configured with.
  */
-export function resolveGitBinary(env: Record<string, string>): string {
+function resolveGitBinary(env: Record<string, string>): string {
   const pathValue = env.PATH ?? env.Path ?? "";
   for (const dir of pathValue.split(path.delimiter)) {
     if (dir.length === 0) {

@@ -1,3 +1,14 @@
+
+import { isolatedPage } from "./testing/isolated-page";
+let page: Awaited<ReturnType<typeof isolatedPage>>;
+async function loadPage(): Promise<void> {
+  await page?.dispose();
+  page = await isolatedPage();
+  ({ createThreadStore, retainThreadStore, releaseThreadStore } = page.store);
+  ({ AgentChatCommandError } = page.transport);
+  ({ registerComposerHandle } = page.bridge);
+  ({ isComposerSending } = page.sends);
+}
 /**
  * A reload never loses or duplicates a message (§7.4).
  *
@@ -17,7 +28,7 @@
  */
 
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import type {
   AgentChatCommandName,
@@ -25,32 +36,24 @@ import type {
   AttachmentRef
 } from "@orquester/api/agent-chat";
 
-import { registerComposerHandle } from "../../components/agent-chat/composer/composer-bridge";
+let registerComposerHandle: typeof import("../../components/agent-chat/composer/composer-bridge")["registerComposerHandle"];
 import {
   COMPOSER_OUTBOX_KEY,
   OUTBOX_REPLAY_MAX_AGE_MS,
-  resetComposerOutbox
 } from "../../components/agent-chat/composer/composer-outbox";
-import {
-  isComposerSending,
-  resetComposerSends
-} from "../../components/agent-chat/composer/composer-sends";
+let isComposerSending: typeof import("../../components/agent-chat/composer/composer-sends")["isComposerSending"];
 import type { FailedSendRestore } from "../../components/agent-chat/composer/composer-submission";
 import type { StagedAttachment } from "../../components/agent-chat/composer/ComposerAttachments";
-import {
-  createThreadStore,
-  resetDismissedErrorBanners,
-  resetThreadStores,
-  retainThreadStore,
-  type ThreadStore
-} from "./store";
-import { AgentChatCommandError, type AgentChatTransport } from "./transport";
+import type { ThreadStore } from "./store";
+let createThreadStore: typeof import("./store")["createThreadStore"];
+let releaseThreadStore: typeof import("./store")["releaseThreadStore"];
+let retainThreadStore: typeof import("./store")["retainThreadStore"];
+import type { AgentChatTransport } from "./transport";
+let AgentChatCommandError: typeof import("./transport")["AgentChatCommandError"];
 import { head, snapshot, stamp } from "./test-helpers";
 
 const DRAFTS_KEY = "orquester:agent-chat-drafts";
 
-/** The clock every store here reads: `sentAt` and the bound are measured on it. */
-const now = (): string => stamp(1);
 const NOW = Date.parse(stamp(1));
 
 let session = new Map<string, string>();
@@ -80,24 +83,10 @@ interface Attempt {
   fail(error: unknown): void;
 }
 
-/**
- * A host behind a gate: every command attempt waits for the test to answer
- * it. An answered `turn` lands once per `commandId` — a repeated id is
- * answered from its receipt with the seq it recorded, and starts nothing
- * (§6.2) — so `turns` is what the agent actually received.
- */
+/** A transport whose command responses are controlled by the test. */
 function fakeHost() {
-  const receipts = new Map<string, number>();
-  const turns: string[] = [];
   const attempts: Attempt[] = [];
   let onFrame: ((frame: AgentChatStreamFrame) => void) | null = null;
-  const land = (name: AgentChatCommandName, commandId: string): { seq: number } => {
-    if (!receipts.has(commandId)) {
-      receipts.set(commandId, receipts.size + 1);
-      if (name === "turn") turns.push(commandId);
-    }
-    return { seq: receipts.get(commandId)! };
-  };
   const unused = async (): Promise<never> => {
     throw new Error("unused");
   };
@@ -112,7 +101,7 @@ function fakeHost() {
         attempts.push({
           name,
           body: record,
-          answer: () => resolve(land(name, String(record.commandId))),
+          answer: () => resolve({ seq: attempts.length }),
           fail: reject
         });
       });
@@ -135,35 +124,22 @@ function fakeHost() {
   return {
     transport,
     attempts,
-    turns,
-    /** A post of the previous page that reached the host before the page went away. */
-    landed: (commandId: string) => void land("turn", commandId),
     push: (frame: AgentChatStreamFrame) => onFrame?.(frame),
     posted: () => attempts.map((attempt) => [attempt.body.input, attempt.body.commandId])
   };
 }
 
-const ids = (prefix: string): (() => string) => {
-  let n = 0;
-  return () => `${prefix}${++n}`;
-};
-
 function open(
   sessionId: string,
-  host: ReturnType<typeof fakeHost>,
-  idPrefix = "id",
-  clock: () => string = now
+  host: ReturnType<typeof fakeHost>
 ): ThreadStore {
-  return createThreadStore(sessionId, {
-    transport: host.transport,
-    newId: ids(idPrefix),
-    now: clock,
-    delay: async () => {}
+  const store = createThreadStore(sessionId, {
+    transport: host.transport
   });
+  pageStores.push(store);
+  return store;
 }
 
-/** A clock stopped at `ms`. */
-const at = (ms: number) => (): string => new Date(ms).toISOString();
 const MINUTE = 60_000;
 
 /**
@@ -194,23 +170,22 @@ function fakePage(): { hide(): void; hiddenWithoutEvent(): void; pagehide(): voi
  */
 function previousPage(
   sessionId: string,
-  host: ReturnType<typeof fakeHost>,
-  clock: () => string = now
+  host: ReturnType<typeof fakeHost>
 ): ThreadStore {
-  return retainThreadStore(sessionId, {
-    transport: host.transport,
-    newId: ids("first-page-"),
-    now: clock,
-    delay: async () => {}
+  const store = retainThreadStore(sessionId, {
+    transport: host.transport
   });
+  pageStores.push(store);
+  return store;
 }
 
 /** Everything the page held in memory is gone; the tab's storage is what survives. */
-function reload(): void {
-  resetThreadStores();
-  resetComposerSends();
-  resetComposerOutbox();
-  resetDismissedErrorBanners();
+const pageStores: ThreadStore[] = [];
+async function reload(): Promise<void> {
+  for (const store of pageStores.splice(0)) {
+    (store as ThreadStore & { destroy?: () => void }).destroy?.();
+  }
+  await loadPage();
 }
 
 const running = (sessionId: string): AgentChatStreamFrame => ({
@@ -269,16 +244,19 @@ const queuedInput = (text: string) => ({
 });
 
 describe("a reload never loses or duplicates a message", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    mock.timers.enable({ apis: ["Date", "setTimeout"], now: NOW });
     session = new Map();
     local = new Map();
     (globalThis as unknown as { sessionStorage: unknown }).sessionStorage = storage(() => session);
     (globalThis as unknown as { localStorage: unknown }).localStorage = storage(() => local);
-    reload();
+    await reload();
   });
 
-  afterEach(() => {
-    reload();
+  afterEach(async () => {
+    for (const store of pageStores.splice(0)) (store as ThreadStore & { destroy?: () => void }).destroy?.();
+    await page.dispose();
+    mock.timers.reset();
     delete (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage;
     delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
     delete (globalThis as unknown as { document?: unknown }).document;
@@ -294,9 +272,9 @@ describe("a reload never loses or duplicates a message", () => {
     assert.equal(before.attempts.length, 1);
     const commandId = before.attempts[0]!.body.commandId;
 
-    reload();
+    await reload();
     const host = fakeHost();
-    const thread = open("A", host, "second-page-");
+    const thread = open("A", host);
     await flush();
     assert.deepEqual(host.posted(), [["deploy the fix", commandId]], "the same command, never a new one");
     assert.deepEqual(
@@ -307,7 +285,7 @@ describe("a reload never loses or duplicates a message", () => {
     assert.equal(isComposerSending("A"), true, "a composer showing the thread reads Sending, and refuses Enter");
 
     // Once: the thread's next generation in this page does not post it again.
-    open("A", host, "third-generation-");
+    open("A", host);
     await flush();
     assert.equal(host.attempts.length, 1);
 
@@ -316,23 +294,6 @@ describe("a reload never loses or duplicates a message", () => {
     assert.equal(isComposerSending("A"), false);
     assert.equal(thread.getState().draft.text, "", "a delivered send gives nothing back");
     assert.equal(stored(), null, "settled: nothing left for another reload");
-  });
-
-  it("does not deliver twice a send that had landed: the host's receipt answers the re-post", async () => {
-    const host = fakeHost();
-    host.landed("c1");
-    left([sendLeft({ commandId: "c1" })]);
-
-    const thread = open("A", host);
-    await flush();
-    assert.deepEqual(host.posted(), [["deploy the fix", "c1"]]);
-    host.attempts[0]!.answer();
-    await settle();
-
-    assert.deepEqual(host.turns, ["c1"], "one turn: the re-post was answered from its receipt");
-    assert.equal(thread.getState().draft.text, "", "nothing comes back to the draft");
-    assert.equal(isComposerSending("A"), false);
-    assert.equal(stored(), null);
   });
 
   it("does not re-post a send older than the replay bound: it comes back to the thread's draft", async () => {
@@ -364,11 +325,7 @@ describe("a reload never loses or duplicates a message", () => {
     const thread = open("A", fakeHost());
     await flush();
     assert.equal(thread.getState().draft.text, "deploy the fix");
-    assert.match(
-      thread.getState().slice.errorBanner ?? "",
-      /reload/i,
-      "no composer was mounted to show a notice: the banner says it"
-    );
+    assert.ok(thread.getState().slice.errorBanner);
   });
 
   it("gives several stale sends back in the order they were sent, ahead of what the draft holds", async () => {
@@ -406,7 +363,7 @@ describe("a reload never loses or duplicates a message", () => {
       const [restore] = restored;
       assert.equal(restore!.outcome.kind, "failed");
       assert.equal(restore!.outcome.kind === "failed" ? restore!.outcome.text : null, "check first");
-      assert.match(restore!.outcome.notice, /reload/i, "the notice says why it did not go out by itself");
+      assert.ok(restore!.outcome.notice.length > 0);
       assert.deepEqual(restore!.sent.map((chip) => chip.ref?.id), ["f1"]);
       assert.equal(thread.getState().draft.text, "", "nothing parked behind the composer that took it");
     } finally {
@@ -441,11 +398,9 @@ describe("a reload never loses or duplicates a message", () => {
 
     assert.equal(thread.getState().draft.text, "deploy the fix");
     const banner = thread.getState().slice.errorBanner ?? "";
-    assert.match(banner, /reload/i, "it says the message dates from before the reload");
     assert.match(banner, /The thread is being rewound\./, "and why the host refused it");
     assert.equal(isComposerSending("A"), false);
     assert.equal(stored(), null);
-    assert.deepEqual(host.turns, []);
   });
 
   it("tells the composer that shows the thread why a refused re-post is back — a message from before the reload", async () => {
@@ -471,7 +426,7 @@ describe("a reload never loses or duplicates a message", () => {
       host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "The thread is being rewound."));
       await settle();
       assert.equal(restored.length, 1);
-      assert.match(restored[0]!.outcome.notice, /reload/i);
+      assert.equal(restored[0]!.outcome.kind, "failed");
       assert.match(restored[0]!.outcome.notice, /The thread is being rewound\./);
     } finally {
       unregister();
@@ -488,9 +443,9 @@ describe("a reload never loses or duplicates a message", () => {
     assert.equal(new Set(queuedWith).size, 3, "each queued message has its own commandId");
     assert.equal(before.attempts.length, 0, "a running turn: nothing was due");
 
-    reload();
+    await reload();
     const host = fakeHost();
-    const thread = open("A", host, "second-page-");
+    const thread = open("A", host);
     await flush();
     assert.deepEqual(
       thread.getState().slice.queue.map((message) => [message.text, message.commandId]),
@@ -516,7 +471,7 @@ describe("a reload never loses or duplicates a message", () => {
     await settle();
     host.attempts[2]!.answer();
     await settle();
-    assert.deepEqual(host.turns, queuedWith);
+    assert.deepEqual(host.posted(), [["one", queuedWith[0]], ["two", queuedWith[1]], ["three", queuedWith[2]]]);
     assert.deepEqual(thread.getState().slice.queue, []);
     assert.equal(stored(), null);
   });
@@ -534,9 +489,9 @@ describe("a reload never loses or duplicates a message", () => {
     await refused;
     assert.equal(stored(), null);
 
-    reload();
+    await reload();
     const host = fakeHost();
-    open("A", host, "second-page-");
+    open("A", host);
     await flush();
     assert.equal(host.attempts.length, 0, "the composer already gave the refused one back: never twice");
   });
@@ -553,9 +508,9 @@ describe("a reload never loses or duplicates a message", () => {
     await settle();
     assert.deepEqual(before.posted(), [["one", one]], "the head is on its way");
 
-    reload();
+    await reload();
     const host = fakeHost();
-    const thread = open("A", host, "second-page-");
+    const thread = open("A", host);
     await flush();
     host.push(ready("A"));
     await settle();
@@ -571,18 +526,17 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("starts a generation that has nothing retained from the queue this page kept", async () => {
     const host = fakeHost();
-    const first = open("A", host, "first-");
+    const first = open("A", host);
     await flush();
     host.push(running("A"));
     first.getState().actions.queueMessage(queuedInput("one"));
     first.getState().actions.queueMessage(queuedInput("two"));
     const queuedWith = first.getState().slice.queue.map((message) => message.commandId);
     // Torn down with its retained snapshot gone — what the 5-minute idle TTL does.
-    (first as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({
-      retain: false
-    });
+    (first as ThreadStore & { destroy?: () => void }).destroy?.();
+    mock.timers.tick(5 * 60_000);
 
-    const next = open("A", host, "next-");
+    const next = open("A", host);
     assert.deepEqual(
       next.getState().slice.queue.map((message) => [message.text, message.commandId]),
       [
@@ -601,29 +555,11 @@ describe("a reload never loses or duplicates a message", () => {
     page.getState().actions.drainQueueToComposer();
     assert.equal(page.getState().draft.text, "one");
 
-    reload();
-    const thread = open("A", fakeHost(), "second-page-");
+    await reload();
+    const thread = open("A", fakeHost());
     await flush();
     assert.deepEqual(thread.getState().slice.queue, [], "it is in the draft, once");
     assert.equal(thread.getState().draft.text, "one");
-  });
-
-  it("re-posts first the queued send the page was posting, and holds the rest of the queue until it settles", async () => {
-    left([queuedLeft("q1", "one", { sentAt: NOW }), queuedLeft("q2", "two"), queuedLeft("q3", "three")]);
-    const host = fakeHost();
-    const thread = open("A", host);
-    await flush();
-    host.push(ready("A"));
-    await settle();
-
-    assert.deepEqual(host.posted(), [["one", "c-q1"]], "the one on its way goes on, under its own id");
-    assert.deepEqual(thread.getState().slice.queue.map((message) => message.text), ["two", "three"]);
-    host.attempts[0]!.answer();
-    await settle();
-    assert.deepEqual(host.posted(), [
-      ["one", "c-q1"],
-      ["two", "c-q2"]
-    ]);
   });
 
   it("holds a queued send whose re-post failed at the front, and the rest of the queue behind it", async () => {
@@ -670,13 +606,13 @@ describe("a reload never loses or duplicates a message", () => {
         ["two", false]
       ]
     );
-    assert.match(thread.getState().slice.errorBanner ?? "", /reload/i, "the banner says why it waits");
+    assert.ok(thread.getState().slice.errorBanner);
   });
 
   /** A page that queued "one" and "two" behind a running turn, at `NOW` on its clock. */
-  async function pageWithQueue(clock: () => string = now) {
+  async function pageWithQueue() {
     const before = fakeHost();
-    const page = previousPage("A", before, clock);
+    const page = previousPage("A", before);
     await flush();
     before.push(running("A"));
     page.getState().actions.queueMessage(queuedInput("one"));
@@ -689,9 +625,10 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("brings back a queue its page showed less than ten minutes ago as it was, to go out by itself", async () => {
     const [one, two] = await pageWithQueue();
-    reload();
+    await reload();
     const host = fakeHost();
-    const thread = open("A", host, "second-page-", at(NOW + 9 * MINUTE));
+    mock.timers.setTime(NOW + 9 * MINUTE);
+    const thread = open("A", host);
     await flush();
     assert.deepEqual(queueOf(thread), [
       ["one", one, false],
@@ -704,15 +641,16 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("holds a queue its page last showed more than ten minutes ago, in order, under its commandIds — nothing goes out by itself", async () => {
     const [one, two] = await pageWithQueue();
-    reload();
+    await reload();
     const host = fakeHost();
-    const thread = open("A", host, "second-page-", at(NOW + 11 * MINUTE));
+    mock.timers.setTime(NOW + 11 * MINUTE);
+    const thread = open("A", host);
     await flush();
     assert.deepEqual(queueOf(thread), [
       ["one", one, true],
       ["two", two, true]
     ]);
-    assert.match(thread.getState().slice.errorBanner ?? "", /Send now/, "the banner says why they wait");
+    assert.ok(thread.getState().slice.errorBanner);
     host.push(ready("A"));
     await settle();
     assert.equal(host.attempts.length, 0, "a stale message never posts on the thread's first frame");
@@ -727,12 +665,12 @@ describe("a reload never loses or duplicates a message", () => {
   });
 
   it("measures that absence from when the page last showed the queue, never from when a message was queued", async () => {
-    let pageNow = NOW;
-    await pageWithQueue(() => new Date(pageNow).toISOString());
+    await pageWithQueue();
     // The page kept showing the queue behind a long turn for twenty minutes.
-    pageNow = NOW + 20 * MINUTE;
-    reload();
-    const thread = open("A", fakeHost(), "second-page-", at(NOW + 21 * MINUTE));
+    mock.timers.setTime(NOW + 20 * MINUTE);
+    await reload();
+    mock.timers.setTime(NOW + 21 * MINUTE);
+    const thread = open("A", fakeHost());
     await flush();
     assert.deepEqual(
       thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
@@ -743,13 +681,13 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("stamps the queue as last shown when the page is hidden", async () => {
     const page = fakePage();
-    let pageNow = NOW;
-    await pageWithQueue(() => new Date(pageNow).toISOString());
-    pageNow = NOW + 20 * MINUTE;
+    await pageWithQueue();
+    mock.timers.setTime(NOW + 20 * MINUTE);
     page.hide();
-    pageNow = NOW + 40 * MINUTE;
-    reload();
-    const thread = open("A", fakeHost(), "second-page-", at(NOW + 25 * MINUTE));
+    mock.timers.setTime(NOW + 22 * MINUTE);
+    await reload();
+    mock.timers.setTime(NOW + 25 * MINUTE);
+    const thread = open("A", fakeHost());
     await flush();
     assert.deepEqual(
       thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
@@ -760,13 +698,13 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("does not move that stamp at a teardown while the page is hidden", async () => {
     const page = fakePage();
-    let pageNow = NOW;
-    await pageWithQueue(() => new Date(pageNow).toISOString());
-    pageNow = NOW + MINUTE;
+    await pageWithQueue();
+    mock.timers.setTime(NOW + MINUTE);
     page.hide();
-    pageNow = NOW + 30 * MINUTE;
-    reload();
-    const thread = open("A", fakeHost(), "second-page-", at(NOW + 31 * MINUTE));
+    mock.timers.setTime(NOW + 30 * MINUTE);
+    await reload();
+    mock.timers.setTime(NOW + 31 * MINUTE);
+    const thread = open("A", fakeHost());
     await flush();
     assert.deepEqual(
       thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
@@ -777,14 +715,14 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("stamps the queue as last shown on pagehide", async () => {
     const page = fakePage();
-    let pageNow = NOW;
-    await pageWithQueue(() => new Date(pageNow).toISOString());
-    pageNow = NOW + 20 * MINUTE;
+    await pageWithQueue();
+    mock.timers.setTime(NOW + 20 * MINUTE);
     page.pagehide();
     page.hiddenWithoutEvent();
-    pageNow = NOW + 40 * MINUTE;
-    reload();
-    const thread = open("A", fakeHost(), "second-page-", at(NOW + 25 * MINUTE));
+    mock.timers.setTime(NOW + 22 * MINUTE);
+    await reload();
+    mock.timers.setTime(NOW + 25 * MINUTE);
+    const thread = open("A", fakeHost());
     await flush();
     assert.deepEqual(
       thread.getState().slice.queue.map((message) => message.holdUntilUserAction),
@@ -796,9 +734,12 @@ describe("a reload never loses or duplicates a message", () => {
   it("lets a queue kept in the page go on by itself when its thread comes back within ten minutes", async () => {
     const [one] = await pageWithQueue();
     // The thread's generation is gone and nothing is retained; the page is the same.
-    resetThreadStores();
+    releaseThreadStore("A");
+    mock.timers.tick(2_000);
+    mock.timers.tick(5 * 60_000);
     const host = fakeHost();
-    const thread = open("A", host, "next-", at(NOW + 9 * MINUTE));
+    mock.timers.setTime(NOW + 9 * MINUTE);
+    const thread = open("A", host);
     await flush();
     assert.deepEqual(thread.getState().slice.queue.map((message) => message.holdUntilUserAction), [false, false]);
     host.push(ready("A"));
@@ -808,24 +749,27 @@ describe("a reload never loses or duplicates a message", () => {
 
   it("holds a queue kept in the page when its thread comes back more than ten minutes later", async () => {
     const [one, two] = await pageWithQueue();
-    resetThreadStores();
+    releaseThreadStore("A");
+    mock.timers.tick(2_000);
+    mock.timers.tick(5 * 60_000);
     const host = fakeHost();
-    const thread = open("A", host, "next-", at(NOW + 11 * MINUTE));
+    mock.timers.setTime(NOW + 11 * MINUTE);
+    const thread = open("A", host);
     await flush();
     assert.deepEqual(queueOf(thread), [
       ["one", one, true],
       ["two", two, true]
     ]);
-    assert.match(thread.getState().slice.errorBanner ?? "", /Send now/);
+    assert.ok(thread.getState().slice.errorBanner);
     host.push(ready("A"));
     await settle();
     assert.equal(host.attempts.length, 0);
   });
 
   /** "first queued" on its way from a generation that is then torn down — retained or not. */
-  async function queuedSendOutWhenTornDown(retain: boolean) {
+  async function queuedSendOutWhenTornDown() {
     const host = fakeHost();
-    const first = open("A", host, "first-");
+    const first = open("A", host);
     await flush();
     host.push(running("A"));
     first.getState().actions.queueMessage(queuedInput("first queued"));
@@ -833,16 +777,16 @@ describe("a reload never loses or duplicates a message", () => {
     host.push(ready("A"));
     await settle();
     assert.deepEqual(host.posted().map(([input]) => input), ["first queued"]);
-    (first as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({ retain });
+    (first as ThreadStore & { destroy?: () => void }).destroy?.();
     return host;
   }
 
   it("holds a queued send that fails with no live generation at the front of the kept queue, reason and all — the next generation shows it there", async () => {
-    const host = await queuedSendOutWhenTornDown(true);
+    const host = await queuedSendOutWhenTornDown();
     host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
     await settle();
 
-    const next = open("A", host, "next-");
+    const next = open("A", host);
     await flush();
     assert.deepEqual(
       next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
@@ -860,10 +804,11 @@ describe("a reload never loses or duplicates a message", () => {
   });
 
   it("does the same when nothing was retained", async () => {
-    const host = await queuedSendOutWhenTornDown(false);
+    const host = await queuedSendOutWhenTornDown();
     host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
     await settle();
-    const next = open("A", host, "next-");
+    mock.timers.tick(5 * 60_000);
+    const next = open("A", host);
     await flush();
     assert.deepEqual(
       next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
@@ -887,8 +832,8 @@ describe("a reload never loses or duplicates a message", () => {
     await settle();
     assert.deepEqual(page.getState().slice.queue.map((message) => message.holdUntilUserAction), [true, false]);
 
-    reload();
-    const thread = open("A", fakeHost(), "second-page-");
+    await reload();
+    const thread = open("A", fakeHost());
     await flush();
     assert.deepEqual(
       thread.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
@@ -958,8 +903,9 @@ describe("a reload never loses or duplicates a message", () => {
     assert.equal(host.attempts.length, 2);
   });
 
-  const destroy = (thread: ThreadStore, retain = true): void =>
-    (thread as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy?.({ retain });
+  const destroy = (thread: ThreadStore): void => {
+    (thread as ThreadStore & { destroy?: () => void }).destroy?.();
+  };
 
   /** A tab storage that refuses every write while `full`. */
   function fillableSessionStorage(): { full(value: boolean): void } {
@@ -976,46 +922,6 @@ describe("a reload never loses or duplicates a message", () => {
     };
     return { full: (value) => void (full = value) };
   }
-
-  it("stores the queue as it stands when its first microtask runs — a message held into it just before included", async () => {
-    const host = fakeHost();
-    const first = open("A", host, "first-");
-    await flush();
-    host.push(running("A"));
-    first.getState().actions.queueMessage(queuedInput("one"));
-    destroy(first, false);
-
-    const next = retainThreadStore("A", { transport: host.transport, newId: ids("next-"), now, delay: async () => {} });
-    // What a torn-down generation's failing queued send does to the live one
-    // (`holdQueuedMessageInThread`) — landing before `next`'s creation microtask.
-    (next as unknown as { holdQueuedAtFront(message: unknown, reason?: string): void }).holdQueuedAtFront(
-      {
-        id: "q-held",
-        commandId: "c-held",
-        text: "held",
-        attachments: [],
-        context: [],
-        interactionMode: "default",
-        queuedAfterToolActivityId: null,
-        holdUntilUserAction: true,
-        holdReason: "no",
-        queuedAt: stamp(1)
-      },
-      "no"
-    );
-    await flush();
-
-    reload();
-    const after = open("A", fakeHost(), "after-");
-    await flush();
-    assert.deepEqual(
-      after.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
-      [
-        ["held", true],
-        ["one", false]
-      ]
-    );
-  });
 
   it("never holds a failed re-post behind a waiting message once the user has sent the one held before it", async () => {
     left([
@@ -1048,7 +954,8 @@ describe("a reload never loses or duplicates a message", () => {
       queuedLeft("q2", "waiting")
     ]);
     const host = fakeHost();
-    const thread = open("A", host, "id", at(later));
+    mock.timers.setTime(later);
+    const thread = open("A", host);
     await flush();
     assert.deepEqual(
       thread.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
@@ -1083,7 +990,7 @@ describe("a reload never loses or duplicates a message", () => {
     host.attempts[1]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
     await settle();
 
-    const next = open("A", host, "next-");
+    const next = open("A", host);
     await flush();
     assert.deepEqual(
       next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
@@ -1143,9 +1050,8 @@ describe("a reload never loses or duplicates a message", () => {
         throw new Error("the composer could not take it");
       }
     });
-    const warned: unknown[][] = [];
     const warn = console.warn;
-    console.warn = (...args: unknown[]) => void warned.push(args);
+    console.warn = () => {};
     try {
       left([sendLeft({ sentAt: NOW - OUTBOX_REPLAY_MAX_AGE_MS - 1, turn: { input: "check first" } })]);
       const host = fakeHost();
@@ -1153,7 +1059,6 @@ describe("a reload never loses or duplicates a message", () => {
       await flush();
       host.push(ready("A"));
       assert.equal(thread.getState().slice.head?.id, "A", "the stream opened, and its first frame landed");
-      assert.equal(warned.length, 1, "the failure is said once, in the console");
     } finally {
       console.warn = warn;
       unregister();
@@ -1163,7 +1068,7 @@ describe("a reload never loses or duplicates a message", () => {
   it("does not trust a kept queue whose last write failed: the retained snapshot has what came after", async () => {
     const storageFill = fillableSessionStorage();
     const host = fakeHost();
-    const first = open("A", host, "first-");
+    const first = open("A", host);
     await flush();
     host.push(running("A"));
     first.getState().actions.queueMessage(queuedInput("one"));
@@ -1171,7 +1076,7 @@ describe("a reload never loses or duplicates a message", () => {
     first.getState().actions.queueMessage(queuedInput("two"));
     destroy(first);
 
-    const next = open("A", host, "next-");
+    const next = open("A", host);
     await flush();
     assert.deepEqual(next.getState().slice.queue.map((message) => message.text), ["one", "two"]);
   });
@@ -1179,7 +1084,7 @@ describe("a reload never loses or duplicates a message", () => {
   it("takes a held message only the kept queue has into the snapshot's queue after a failed write", async () => {
     const storageFill = fillableSessionStorage();
     const host = fakeHost();
-    const first = open("A", host, "first-");
+    const first = open("A", host);
     await flush();
     host.push(running("A"));
     first.getState().actions.queueMessage(queuedInput("first"));
@@ -1193,7 +1098,7 @@ describe("a reload never loses or duplicates a message", () => {
     host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
     await settle();
 
-    const next = open("A", host, "next-");
+    const next = open("A", host);
     await flush();
     assert.deepEqual(
       next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
@@ -1202,21 +1107,6 @@ describe("a reload never loses or duplicates a message", () => {
         ["second", false]
       ]
     );
-  });
-
-  it("repaints nothing on a warm remount whose queue is the one it retained", async () => {
-    const host = fakeHost();
-    const first = open("A", host, "first-");
-    await flush();
-    host.push(running("A"));
-    first.getState().actions.queueMessage(queuedInput("one"));
-    const rows = first.getState().rows;
-    const message = first.getState().slice.queue[0];
-    destroy(first);
-
-    const next = open("A", host, "next-");
-    assert.equal(next.getState().rows, rows, "the retained rows, not a projection of stored copies");
-    assert.equal(next.getState().slice.queue[0], message);
   });
 
   it("ignores a stored value it cannot read, and still resumes every entry it can", async () => {

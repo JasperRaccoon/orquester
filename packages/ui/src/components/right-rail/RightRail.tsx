@@ -4,8 +4,7 @@ import { cn } from "../../lib/cn";
 import {
   RIGHT_RAIL_DOCK_ID,
   RIGHT_RAIL_PANEL_ORDER,
-  RIGHT_RAIL_PANEL_REGISTRY,
-  type RightRailPanelRegistry
+  RIGHT_RAIL_PANEL_REGISTRY
 } from "./panels";
 import type { RightRailPanelId } from "./types";
 
@@ -14,8 +13,6 @@ export interface RightRailProps {
   open: RightRailPanelId | null;
   /** A button was clicked: open its panel, switch to it, or close it when it is the open one. */
   onToggle: (id: RightRailPanelId) => void;
-  /** The panels by id (the real ones unless a check passes fakes). */
-  panels?: RightRailPanelRegistry;
 }
 
 /**
@@ -26,8 +23,7 @@ export interface RightRailProps {
  */
 export const RightRail: React.FC<RightRailProps> = ({
   open,
-  onToggle,
-  panels = RIGHT_RAIL_PANEL_REGISTRY
+  onToggle
 }) => (
   <div
     role="group"
@@ -35,7 +31,7 @@ export const RightRail: React.FC<RightRailProps> = ({
     className="flex w-11 shrink-0 flex-col items-center gap-1 border-l border-neutral-800 bg-neutral-900/40 py-2"
   >
     {RIGHT_RAIL_PANEL_ORDER.map((id) => {
-      const { title, Icon } = panels[id];
+      const { title, Icon } = RIGHT_RAIL_PANEL_REGISTRY[id];
       const active = open === id;
       return (
         <button

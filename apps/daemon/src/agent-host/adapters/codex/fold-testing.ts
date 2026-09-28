@@ -20,7 +20,6 @@ import {
 import { createIngestion } from "../../ingestion/index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen
@@ -32,23 +31,20 @@ export const FOLD_TESTING_THREAD_ID = "thread-1";
 /**
  * Ingest `steps` in order, as the session emits them, and answer the log they
  * write: the host's `thread.created` first, then everything ingestion appended,
- * sequenced as the store sequences it. After each step the ingestion clock
- * moves past the §5.6 buffer's 250 ms flush, so a step that streams output
- * writes its own `tool.output` row.
+ * sequenced as the store sequences it. After each step ingestion drains buffered output, so a step that streams
+ * output writes its own `tool.output` row.
  */
 export async function ingestCodexDrafts(
   steps: readonly (readonly RuntimeEventDraft[])[]
 ): Promise<DomainEvent[]> {
   const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
+
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
     idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
   });
   let seq = 0;
   for (const step of steps) {
@@ -60,7 +56,8 @@ export async function ingestCodexDrafts(
         createdAt: clock.nowIso()
       } as RuntimeEvent);
     }
-    timers.advance(300);
+    clock.advance(300);
+    await ingestion.drain();
   }
   await ingestion.drain();
 

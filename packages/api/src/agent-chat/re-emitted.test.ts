@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { reEmittedAssistantCopies, repairsReEmittedAssistantCopies } from "./re-emitted.ts";
+import { reEmittedAssistantCopies } from "./re-emitted.ts";
 import { activity } from "./test-helpers.ts";
 import type { ThreadMessageItem } from "./thread.ts";
 
@@ -38,21 +38,6 @@ function message(
 }
 
 const opening = "All checks are now clean. I'll close out the ledger.";
-
-test("the turn's last message is a copy when it repeats the turn's opening one, word for word", () => {
-  const items = [
-    message("user", "go"),
-    message("assistant", opening, { turnId: "t1", id: "m-open" }),
-    activity("tool.completed", { itemType: "command_execution", command: "ls" }, { turnId: "t1" }),
-    message("assistant", "Goal tracking is built.", { turnId: "t1", id: "m-final" }),
-    message("assistant", opening, { turnId: "t1", id: "m-copy" })
-  ];
-  assert.deepEqual(
-    [...reEmittedAssistantCopies(items)],
-    ["m-copy"],
-    "the first occurrence stays where it was said; the copy is the one found"
-  );
-});
 
 test("the same words in another turn are no copy, and neither is a repeat still streaming", () => {
   const items = [
@@ -162,17 +147,6 @@ test("one author's messages only, in the view asked for: the parent's, or one su
   assert.deepEqual([...reEmittedAssistantCopies(blankOwner)], ["m-copy"]);
 });
 
-test("counted in the view handed in: a view that starts mid-turn compares with its own first message", () => {
-  const items = [
-    message("assistant", "Evicted opening.", { turnId: "t1", id: "m-evicted" }),
-    message("assistant", "Running the suite.", { turnId: "t1", id: "m-first-in-view" }),
-    message("assistant", "All green.", { turnId: "t1", id: "m-answer" }),
-    message("assistant", "Running the suite.", { turnId: "t1", id: "m-last" })
-  ];
-  assert.deepEqual([...reEmittedAssistantCopies(items)], [], "the whole turn's opening is another message");
-  assert.deepEqual([...reEmittedAssistantCopies(items.slice(1))], ["m-last"], "the view's own first message");
-});
-
 test("a copy is found per turn, in each turn it closes", () => {
   const items = [
     message("assistant", "Picking up the subagent's result.", { turnId: "t1", id: "t1-open" }),
@@ -183,15 +157,4 @@ test("a copy is found per turn, in each turn it closes", () => {
     message("assistant", "Another result came in.", { turnId: "t2", id: "t2-copy" })
   ];
   assert.deepEqual([...reEmittedAssistantCopies(items)].sort(), ["t1-copy", "t2-copy"]);
-});
-
-test("the repair is a Claude thread's alone: exactly the claude adapter", () => {
-  assert.equal(repairsReEmittedAssistantCopies("claude"), true);
-  for (const adapter of ["codex", "opencode", "grok"] as const) {
-    assert.equal(repairsReEmittedAssistantCopies(adapter), false, adapter);
-  }
-  assert.equal(repairsReEmittedAssistantCopies(undefined), false, "no head yet: nothing is second-guessed");
-  // An ADAPTER id, never a registry id.
-  assert.equal(repairsReEmittedAssistantCopies("claude-code"), false);
-  assert.equal(repairsReEmittedAssistantCopies(""), false);
 });

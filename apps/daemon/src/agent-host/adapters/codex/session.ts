@@ -180,18 +180,6 @@ export interface CodexSessionOptions {
   modelSelection: ModelSelection;
   resumeCursor?: unknown;
   /**
-   * Overrides for {@link AGENT_HOST_DEADLINES}. Production passes nothing; a
-   * test shortens the handshake window so §3.1's "an expired deadline kills
-   * the child" is exercised in milliseconds rather than half a minute.
-   */
-  deadlines?: Partial<Record<keyof typeof AGENT_HOST_DEADLINES, number>>;
-  /**
-   * Overrides for {@link TURN_LIVENESS_WINDOWS}. Production passes nothing; a
-   * test shrinks the window so §3.1's "paused entirely while a request is
-   * pending" is exercised in milliseconds rather than ten minutes.
-   */
-  livenessWindows?: { idleMs: number; activeToolMs: number };
-  /**
    * The fold's goal for this thread (goals §4.6 `knownGoal`), so only a real
    * change becomes a `thread.goal.updated` — a resume that finds the goal the
    * thread already shows is no news.
@@ -204,13 +192,6 @@ export interface CodexSessionOptions {
    * know it: it is re-created rather than reported cleared (goals §6.2.2).
    */
   carryGoal?: boolean;
-  /**
-   * Overrides for the goal windows ({@link CODEX_GOAL_COMMAND_MS},
-   * {@link CODEX_GOAL_SETTLE_MS}, `AGENT_HOST_DEADLINES.goalPauseMs`).
-   * Production passes nothing; a test shrinks them so a wedged goal store is
-   * exercised in milliseconds.
-   */
-  goalDeadlines?: { commandMs?: number; settleMs?: number; pauseMs?: number };
   emit: (draft: RuntimeEventDraft) => void;
   /** Called once the session has settled for good, so the adapter can forget it. */
   onClosed: () => void;
@@ -424,51 +405,6 @@ export class CodexSession {
 
   get currentTurnId(): string | null {
     return this.activeTurnId;
-  }
-
-  /**
-   * Feed one server notification as if it had arrived on the transport.
-   *
-   * Test-only seam for the frames the scripted peer cannot produce on demand —
-   * a CLI-side policy denial, for instance, has no trigger a client can send.
-   * It goes through the exact same path a real frame does.
-   */
-  injectNotificationForTest(method: ServerNotificationMethod, params: unknown): void {
-    this.handleNotification(method, params);
-  }
-
-  /**
-   * The live collab children, as `[childThreadId, childTurnId]`.
-   *
-   * Read-only, and test-only in practice: a child registers itself from a
-   * `turn/started` on its OWN thread id, which raises no event of ours, so a
-   * test driving the real wire has nothing else to wait on.
-   */
-  get liveChildTurnsForTest(): [string, string][] {
-    return this.normaliser.liveChildTurns();
-  }
-
-  /**
-   * Server→client requests whose handler has not finished on the transport:
-   * parked, or answered and not yet written. A withdrawn card must not stay
-   * here — a Stop waits on this set before it interrupts.
-   */
-  get openServerRequestsForTest(): number {
-    return this.peer?.openServerRequestCount ?? 0;
-  }
-
-  /** Whether the liveness watchdog is armed — never while a card is parked (§3.1). */
-  get livenessArmedForTest(): boolean {
-    return this.livenessTimer !== null;
-  }
-
-  /** How many entries the collab children's request bookkeeping holds ({@link childRequests}). */
-  get childRequestEntriesForTest(): number {
-    let entries = 0;
-    for (const requests of this.childRequests.values()) {
-      entries += requests.asked.size + requests.fileChanges.size;
-    }
-    return entries;
   }
 
   /**
@@ -1347,10 +1283,6 @@ export class CodexSession {
   }
 
   private goalDeadline(name: "commandMs" | "settleMs" | "pauseMs"): number {
-    const override = this.options.goalDeadlines?.[name];
-    if (override !== undefined) {
-      return override;
-    }
     switch (name) {
       case "commandMs":
         return CODEX_GOAL_COMMAND_MS;
@@ -2279,7 +2211,7 @@ export class CodexSession {
    * 30 while a tool call is open** (§3.1, stated there and nowhere else).
    */
   private livenessWindowMs(): number {
-    const windows = this.options.livenessWindows ?? TURN_LIVENESS_WINDOWS;
+    const windows = TURN_LIVENESS_WINDOWS;
     return this.liveTasks.size > 0 || this.normaliser.openItemIds().length > 0
       ? windows.activeToolMs
       : windows.idleMs;
@@ -2408,17 +2340,6 @@ export class CodexSession {
     child.stderr.on("end", () => {
       this.surfaceStderr(this.stderr.flush());
     });
-  }
-
-  /**
-   * Feed one stderr chunk as if the child had written it.
-   *
-   * Test-only seam: the redaction is a property of how `StderrCapture` was
-   * CONSTRUCTED, which `stderr.test.ts` cannot see because it tests the
-   * function rather than its call site (S1 finding 4).
-   */
-  injectStderrForTest(chunk: string): void {
-    this.surfaceStderr(this.stderr.push(chunk));
   }
 
   /**
@@ -2646,7 +2567,7 @@ export class CodexSession {
    * place the design does not follow T3.
    */
   private deadline(name: keyof typeof AGENT_HOST_DEADLINES): number {
-    return this.options.deadlines?.[name] ?? AGENT_HOST_DEADLINES[name];
+    return AGENT_HOST_DEADLINES[name];
   }
 
   private bounded<T>(work: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -2756,7 +2677,7 @@ const MAX_TURN_PAGES = 20;
 // ---------------------------------------------------------------------------
 
 /** How many added/removed lines a unified diff hunk declares. */
-export function countDiffLines(diff: string): { added: number; removed: number } {
+function countDiffLines(diff: string): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
   for (const line of diff.split("\n")) {
@@ -2780,7 +2701,7 @@ export function countDiffLines(diff: string): { added: number; removed: number }
  * The full diff rides `args.changes`; this is the one-line summary, so a card
  * with no room for a diff still names the file rather than its own type.
  */
-export function fileChangeDetail(
+function fileChangeDetail(
   changes: readonly CodexProtocol.v2.FileUpdateChange[],
   reason?: string
 ): string {
@@ -2801,7 +2722,7 @@ export function fileChangeDetail(
 // MCP elicitation (§4.5 the five handlers; R3 finding 11)
 // ---------------------------------------------------------------------------
 
-export interface ElicitationShape {
+interface ElicitationShape {
   /**
    * True when this elicitation is an **approval** rather than a real MCP form.
    *
@@ -2817,7 +2738,7 @@ export interface ElicitationShape {
   options: ApprovalOption[];
 }
 
-export function describeElicitation(
+function describeElicitation(
   params: CodexProtocol.v2.McpServerElicitationRequestParams
 ): ElicitationShape {
   const meta = readMetaRecord(params);

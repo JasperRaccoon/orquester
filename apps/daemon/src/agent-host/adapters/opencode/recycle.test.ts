@@ -1,25 +1,32 @@
 /**
  * Agent profile §4.8 — OpenCode server recycling, at the adapter: the REAL
- * adapter, its REAL server pool and REAL thread sessions, over an injected
- * transport (a fake `fetch` answering the routes a session uses, and an SSE
- * stream the test pushes verbatim-shaped frames into) and a fake server child
- * handed to the pool through its `startServer` seam — so no `opencode serve`,
- * no account and no network.
+ * adapter, its REAL server pool and REAL thread sessions against real server
+ * processes — the scripted mock peer of `testing/peer.ts`, spawned by the pool
+ * exactly as `opencode serve` is and stopped by its real group kill. Each peer
+ * forwards the session routes to one in-process OpenCode fake (`MOCK_UPSTREAM`):
+ * it records every request with the server it reached, answers the routes a
+ * session uses, and holds the SSE stream the test pushes verbatim-shaped frames
+ * into — so no `opencode`, no account and no network.
  *
  * Nothing here sleeps: every wait is on an emitted event, a recorded request,
- * a fake child's kill or the adapter's own `recycleSettled()` drain.
+ * a server's exit (the pool's kill resolves on it) or the adapter's own
+ * `recycleSettled()` drain.
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, StartSessionInput } from "../../adapter.ts";
-import type { ChildExitReason } from "../../support/spawn.ts";
 import { OpenCodeAdapterImpl } from "./index.ts";
-import type { OpenCodeStartedServer } from "./server.ts";
 import { createHostIngestion, HOST_THREAD_ID } from "./testing/host.ts";
+import { makePeer, type Peer } from "./testing/peer.ts";
 import { deferred } from "./util.ts";
 
 // ---------------------------------------------------------------------------
@@ -28,63 +35,96 @@ import { deferred } from "./util.ts";
 
 interface RecordedRequest {
   method: string;
+  /** The URL as the adapter sent it: the origin is the server it reached. */
   url: URL;
   body?: unknown;
 }
 
+/** An `opencode serve` the pool started (a peer process), as it announced itself. */
+interface PeerServer {
+  url: string;
+  pid: number;
+}
+
+/** Whether the server's process is gone (the pool's kill resolves once it is reaped). */
+function gone(server: PeerServer): boolean {
+  try {
+    process.kill(server.pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 class FakeOpenCode {
   readonly requests: RecordedRequest[] = [];
+  /** Every server started, in start order. */
+  readonly servers: PeerServer[] = [];
   /** While set, `GET /session/:id/message` answers only once it resolves (a history read in flight). */
   messagesGate: Promise<void> | undefined;
   /** Resolved by the first gated `GET /session/:id/message`. */
   readonly messagesRequested = deferred<void>();
+  readonly http = createServer((req, res) => {
+    void this.handle(req, res);
+  });
   private readonly sessions = new Map<string, { id: string; directory: string }>();
-  private controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+  private stream: ServerResponse | undefined;
   private nextSession = 0;
 
-  readonly fetchImpl: typeof fetch = async (input, init) => {
-    const url = new URL(String(input));
-    const method = init?.method ?? "GET";
-    const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
-    this.requests.push({ method, url, ...(body !== undefined ? { body } : {}) });
+  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const text = Buffer.concat(chunks).toString("utf8");
+    const url = new URL(req.url ?? "/", String(req.headers["x-peer-origin"] ?? "http://upstream.invalid"));
+    const method = req.method ?? "GET";
     const path = url.pathname;
+    if (path === "/__peer/up") {
+      const announced = JSON.parse(text) as PeerServer & { origin: string };
+      this.servers.push({ url: announced.origin, pid: announced.pid });
+      json(res, {});
+      return;
+    }
+    const body = text.length > 0 ? (JSON.parse(text) as unknown) : undefined;
+    this.requests.push({ method, url, ...(body !== undefined ? { body } : {}) });
     if (path === "/event") {
-      const stream = new ReadableStream<Uint8Array>({
-        start: (controller) => {
-          this.controller = controller;
-        }
-      });
-      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.flushHeaders();
+      this.stream = res;
+      return;
     }
     if (path === "/session" && method === "POST") {
       this.nextSession += 1;
       const record = { id: `ses_${this.nextSession}`, directory: url.searchParams.get("directory") ?? "/repo" };
       this.sessions.set(record.id, record);
-      return json(record);
+      json(res, record);
+      return;
     }
-    if (path === "/session/status") return json({});
+    if (path === "/session/status") return json(res, {});
     const match = /^\/session\/([^/]+)(\/.*)?$/.exec(path);
     if (match !== null) {
       const tail = match[2] ?? "";
       if (tail === "" && method === "GET") {
         const record = this.sessions.get(match[1]!);
-        return record === undefined ? json({ name: "NotFoundError", data: { message: "gone" } }, 404) : json(record);
+        return record === undefined ? json(res, { name: "NotFoundError", data: { message: "gone" } }, 404) : json(res, record);
       }
-      if (tail === "" && method === "PATCH") return json(true);
-      if (tail === "/prompt_async") return new Response(null, { status: 204 });
-      if (tail === "/abort") return json(true);
+      if (tail === "" && method === "PATCH") return json(res, true);
+      if (tail === "/prompt_async") {
+        res.writeHead(204).end();
+        return;
+      }
+      if (tail === "/abort") return json(res, true);
       if (tail === "/message" && method === "GET" && this.messagesGate !== undefined) {
         this.messagesRequested.resolve();
         await this.messagesGate;
       }
-      if (tail === "/message" || tail === "/children") return json([]);
+      if (tail === "/message" || tail === "/children") return json(res, []);
     }
-    return json({}, 404);
-  };
+    json(res, {}, 404);
+  }
 
   /** Push one SSE frame onto the newest event stream. */
   push(event: unknown): void {
-    this.controller?.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+    this.stream?.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
   find(method: string, suffix: string): RecordedRequest | undefined {
@@ -92,31 +132,35 @@ class FakeOpenCode {
   }
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+function json(res: ServerResponse, body: unknown, status = 200): void {
+  res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 }
 
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
-interface FakeServer {
-  url: string;
-  killed: boolean;
-}
-
 interface Harness {
   adapter: OpenCodeAdapterImpl;
   fake: FakeOpenCode;
-  servers: FakeServer[];
+  servers: PeerServer[];
   events: RuntimeEvent[];
+  /**
+   * The host's session start for the thread, then the catalogue refresh the
+   * start forks settled — a probe holding the server is in-flight work, and
+   * the recycle counts below are about the thread's own session.
+   */
+  start(extra?: Partial<StartSessionInput>): Promise<Awaited<ReturnType<OpenCodeAdapterImpl["startSession"]>>>;
   waitFor(type: RuntimeEvent["type"], from?: number): Promise<RuntimeEvent>;
   dispose(): Promise<void>;
 }
 
-function makeHarness(): Harness {
+async function makeHarness(): Promise<Harness> {
   const fake = new FakeOpenCode();
-  const servers: FakeServer[] = [];
+  await new Promise<void>((resolve) => fake.http.listen(0, "127.0.0.1", resolve));
+  const upstream = `http://127.0.0.1:${(fake.http.address() as AddressInfo).port}`;
+  const peer: Peer = makePeer();
+  const project = await mkdtemp(join(tmpdir(), "orq-opencode-recycle-"));
   const events: RuntimeEvent[] = [];
   const waiters = new Set<{ type: string; from: number; resolve: (event: RuntimeEvent) => void }>();
   const abort = new AbortController();
@@ -129,39 +173,30 @@ function makeHarness(): Harness {
       messageId: (prefix: string) => `${prefix}-${(ids += 1)}`,
       uuid: () => `uuid-${(ids += 1)}`
     },
-    resolveAttachmentPath: async (_threadId, attachmentId) => `/attachments/${attachmentId}`,
-    attachmentsDir: () => "/attachments",
+    resolveAttachmentPath: async (_threadId, attachmentId) => join(peer.dir, attachmentId),
+    attachmentsDir: () => peer.dir,
     logRawFrame: () => undefined,
-    buildEnv: () => ({}),
-    // No binary: the forked catalogue refresh a session start kicks answers
-    // "not installed" and never touches the pool.
-    resolveBin: async () => null,
+    buildEnv: () => ({
+      PATH: process.env.PATH ?? "",
+      HOME: peer.dir,
+      TMPDIR: peer.dir,
+      MOCK_VERSION: "1.18.32",
+      MOCK_UPSTREAM: upstream
+    }),
+    resolveBin: async () => peer.bin,
     sessionPath: () => "/usr/bin",
-    tmpDir: () => "/tmp",
+    tmpDir: () => peer.dir,
     signal: abort.signal
   };
-  const startServer = async (): Promise<OpenCodeStartedServer> => {
-    const server: FakeServer = { url: `http://127.0.0.1:${4100 + servers.length}`, killed: false };
-    servers.push(server);
-    const exited = deferred<ChildExitReason>();
-    return {
-      url: server.url,
-      version: "1.18.32",
-      serverPassword: undefined,
-      child: {
-        pid: 9000 + servers.length,
-        exited: exited.promise,
-        hasExited: () => exited.settled(),
-        kill: async () => {
-          server.killed = true;
-          const reason: ChildExitReason = { kind: "signal", code: null, signal: "SIGTERM" };
-          exited.resolve(reason);
-          return reason;
-        }
-      }
-    };
+  const input: StartSessionInput = {
+    threadId: HOST_THREAD_ID,
+    projectPath: project,
+    cwd: project,
+    home: { kind: "system", path: peer.dir },
+    modelSelection: { model: "openrouter/google/gemini-3.1-flash-lite" },
+    runtimeMode: "approval-required"
   };
-  const adapter = new OpenCodeAdapterImpl(ctx, { pool: { startServer, fetchImpl: fake.fetchImpl } });
+  const adapter = new OpenCodeAdapterImpl(ctx);
   // The host's one consumer of the adapter's stream.
   const consumed = (async () => {
     for await (const event of adapter.events) {
@@ -177,8 +212,13 @@ function makeHarness(): Harness {
   return {
     adapter,
     fake,
-    servers,
+    servers: fake.servers,
     events,
+    async start(extra = {}) {
+      const started = await adapter.startSession({ ...input, ...extra });
+      await adapter.refreshSnapshot({ cwd: project });
+      return started;
+    },
     waitFor(type, from = 0) {
       const found = events.slice(from).find((event) => event.type === type);
       if (found !== undefined) return Promise.resolve(found);
@@ -190,18 +230,13 @@ function makeHarness(): Harness {
       await adapter.stopAll();
       abort.abort();
       await consumed;
+      fake.http.closeAllConnections();
+      await new Promise<void>((resolve) => fake.http.close(() => resolve()));
+      peer.cleanup();
+      await rm(project, { recursive: true, force: true });
     }
   };
 }
-
-const START: StartSessionInput = {
-  threadId: HOST_THREAD_ID,
-  projectPath: "/repo",
-  cwd: "/repo",
-  home: { kind: "system", path: "/home/owner" },
-  modelSelection: { model: "openrouter/google/gemini-3.1-flash-lite" },
-  runtimeMode: "approval-required"
-};
 
 /** One turn's frames, in the order 1.18.x emits them, ending on the parent's idle. */
 function runTurnToIdle(fake: FakeOpenCode, sessionId: string, userMessageId: string): void {
@@ -252,14 +287,14 @@ function sessionIdOf(h: Harness): string {
 // ---------------------------------------------------------------------------
 
 test("an idle project's server is stopped now, with no session.exited, and the thread's next start gets a fresh server", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   try {
-    const first = await h.adapter.startSession(START);
+    const first = await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
 
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
-    assert.equal(h.servers[0]!.killed, true, "the idle server is gone once the route answers");
+    assert.equal(gone(h.servers[0]!), true, "the idle server is gone once the route answers");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), false);
     assert.deepEqual(h.adapter.listSessions(), []);
     assert.equal(
@@ -280,7 +315,7 @@ test("an idle project's server is stopped now, with no session.exited, and the t
 
     // The host's `ensureSession` on the next turn: a start from the binding's cursor.
     const from = h.events.length;
-    await h.adapter.startSession({ ...START, resumeCursor: first.resumeCursor });
+    await h.start({ resumeCursor: first.resumeCursor });
     assert.equal(h.servers.length, 2, "a fresh server — the one that reads the new config");
     assert.ok(h.fake.find("GET", `/session/${sessionId}`), "the same upstream session is resumed");
     const resumed = await h.waitFor("session.started", from);
@@ -289,22 +324,22 @@ test("an idle project's server is stopped now, with no session.exited, and the t
     assert.equal(turnPath, `/session/${sessionId}/prompt_async`);
     const lastSubmit = h.fake.requests.filter((request) => request.url.pathname.endsWith("/prompt_async")).at(-1);
     assert.equal(lastSubmit?.url.origin, h.servers[1]!.url, "the turn runs on the new server");
-    assert.equal(h.servers[1]!.killed, false);
+    assert.equal(gone(h.servers[1]!), false);
   } finally {
     await h.dispose();
   }
 });
 
 test("a busy server is deferred, recycled once when its turn ends, and not again on later idles", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   try {
-    const first = await h.adapter.startSession(START);
+    const first = await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
     await sendTurn(h);
 
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 1 });
-    assert.equal(h.servers[0]!.killed, false, "a running turn is never disturbed");
+    assert.equal(gone(h.servers[0]!), false, "a running turn is never disturbed");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
     // Asked again while still busy: still one server, still deferred.
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 1 });
@@ -316,19 +351,19 @@ test("a busy server is deferred, recycled once when its turn ends, and not again
     const completed = await h.waitFor("turn.completed", turnStart);
     assert.ok(completed.type === "turn.completed" && completed.payload.state === "completed");
     await h.adapter.recycleSettled();
-    assert.equal(h.servers[0]!.killed, true, "recycled once idle");
+    assert.equal(gone(h.servers[0]!), true, "recycled once idle");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), false);
     assert.equal(h.events.some((event) => event.type === "session.exited"), false);
 
     // Back on a fresh server, another turn to idle: no second recycle.
-    await h.adapter.startSession({ ...START, resumeCursor: first.resumeCursor });
+    await h.start({ resumeCursor: first.resumeCursor });
     await sendTurn(h);
     const again = h.events.length;
     runTurnToIdle(h.fake, sessionId, sessionPromptId(h));
     await h.waitFor("turn.completed", again);
     await h.adapter.recycleSettled();
     assert.equal(h.servers.length, 2);
-    assert.equal(h.servers[1]!.killed, false, "the mark was spent on the first idle");
+    assert.equal(gone(h.servers[1]!), false, "the mark was spent on the first idle");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
   } finally {
     await h.dispose();
@@ -336,9 +371,9 @@ test("a busy server is deferred, recycled once when its turn ends, and not again
 });
 
 test("a turn that reaches a recycled thread before its restart brings the session back itself", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   try {
-    await h.adapter.startSession(START);
+    await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
@@ -353,10 +388,10 @@ test("a turn that reaches a recycled thread before its restart brings the sessio
 });
 
 test("nothing running means nothing recycled; a user's session stop after a recycle forgets the thread", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   try {
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 0 });
-    await h.adapter.startSession(START);
+    await h.start();
     await h.waitFor("session.state.changed");
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
     await h.adapter.stopSession(HOST_THREAD_ID);
@@ -371,9 +406,9 @@ test("nothing running means nothing recycled; a user's session stop after a recy
 });
 
 test("history reads and rewind on a recycled idle thread bring its session back (the host calls them without ensureSession)", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   try {
-    await h.adapter.startSession(START);
+    await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
@@ -401,9 +436,9 @@ test("history reads and rewind on a recycled idle thread bring its session back 
 });
 
 test("a recycle never stops the server under a history read; it goes once the read ends", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   try {
-    await h.adapter.startSession(START);
+    await h.start();
     await h.waitFor("session.state.changed");
     const gate = deferred<void>();
     h.fake.messagesGate = gate.promise;
@@ -411,11 +446,11 @@ test("a recycle never stops the server under a history read; it goes once the re
     await h.fake.messagesRequested.promise;
 
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 1 });
-    assert.equal(h.servers[0]!.killed, false, "the read's server stays up");
+    assert.equal(gone(h.servers[0]!), false, "the read's server stays up");
     gate.resolve();
     await reading;
     await h.adapter.recycleSettled();
-    assert.equal(h.servers[0]!.killed, true, "recycled once the read ended");
+    assert.equal(gone(h.servers[0]!), true, "recycled once the read ended");
     assert.equal(h.events.some((event) => event.type === "session.exited"), false);
   } finally {
     h.fake.messagesGate = undefined;

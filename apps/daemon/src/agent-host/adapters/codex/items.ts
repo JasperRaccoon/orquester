@@ -18,7 +18,6 @@ import type { CanonicalItemType, RuntimeItemStatus } from "@orquester/api/agent-
 import type { CodexProtocol } from "./_generated/index.ts";
 
 export type CodexThreadItem = CodexProtocol.v2.ThreadItem;
-export type CodexItemType = CodexThreadItem["type"];
 
 export interface ClassifiedItem {
   itemType: CanonicalItemType;
@@ -41,33 +40,6 @@ export interface ClassifiedItem {
   timelineBypass: boolean;
   /** Set when the type string is not in this build's catalogue (§10). */
   unknownType?: string;
-}
-
-/** Item `type` strings this build knows, derived from the generated union. */
-const KNOWN_ITEM_TYPES: ReadonlySet<string> = new Set<CodexItemType>([
-  "userMessage",
-  "hookPrompt",
-  "agentMessage",
-  "functionCallOutput",
-  "plan",
-  "reasoning",
-  "commandExecution",
-  "fileChange",
-  "mcpToolCall",
-  "dynamicToolCall",
-  "collabAgentToolCall",
-  "subAgentActivity",
-  "webSearch",
-  "imageView",
-  "sleep",
-  "imageGeneration",
-  "enteredReviewMode",
-  "exitedReviewMode",
-  "contextCompaction"
-]);
-
-export function isKnownCodexItemType(type: string): type is CodexItemType {
-  return KNOWN_ITEM_TYPES.has(type);
 }
 
 /**
@@ -285,7 +257,7 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
  * characters of a Bash call's output Claude Code hands back by default
  * (`BASH_MAX_OUTPUT_LENGTH`), which a Claude completion stores whole.
  */
-export const COMMAND_OUTPUT_MAX_BYTES = 64 * 1024;
+const COMMAND_OUTPUT_MAX_BYTES = 64 * 1024;
 
 /**
  * `text` whole when its UTF-8 fits {@link COMMAND_OUTPUT_MAX_BYTES}, else its
@@ -297,7 +269,7 @@ export const COMMAND_OUTPUT_MAX_BYTES = 64 * 1024;
  * slice's whole source string alive behind it, and the source may be any size —
  * the bound would hold on disk and not in the fold that keeps the row.
  */
-export function boundCommandOutput(text: string): { text: string; truncated: boolean } {
+function boundCommandOutput(text: string): { text: string; truncated: boolean } {
   if (Buffer.byteLength(text, "utf8") <= COMMAND_OUTPUT_MAX_BYTES) {
     return { text, truncated: false };
   }

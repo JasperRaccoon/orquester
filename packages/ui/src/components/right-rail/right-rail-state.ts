@@ -28,20 +28,20 @@ import React from "react";
 
 import type { RightRailPanelId } from "./types";
 
-export const RIGHT_RAIL_STORAGE_KEY = "orquester:right-rail";
-export const RIGHT_RAIL_STATE_VERSION = 1;
+const RIGHT_RAIL_STORAGE_KEY = "orquester:right-rail";
+const RIGHT_RAIL_STATE_VERSION = 1;
 
 /** The dock's width (px): default, and the range a drag or a stored value is clamped into. */
 export const RIGHT_RAIL_WIDTH_DEFAULT = 320;
 export const RIGHT_RAIL_WIDTH_MIN = 260;
 export const RIGHT_RAIL_WIDTH_MAX = 560;
 /** The icon rail's own width (`w-11`). */
-export const RIGHT_RAIL_BAR_WIDTH = 44;
+const RIGHT_RAIL_BAR_WIDTH = 44;
 /**
  * What the tab content always keeps beside the dock and the rail (px). It wins
  * over the dock's minimum: a row too narrow for both draws the dock narrower.
  */
-export const RIGHT_RAIL_CONTENT_MIN = 360;
+const RIGHT_RAIL_CONTENT_MIN = 360;
 
 export interface RightRailState {
   /** The panel docked beside the tab content (desktop), or `null` with the dock closed. */
@@ -55,7 +55,7 @@ export const RIGHT_RAIL_DEFAULT_STATE: RightRailState = Object.freeze({
   width: RIGHT_RAIL_WIDTH_DEFAULT
 });
 
-export function isRightRailPanelId(value: unknown): value is RightRailPanelId {
+function isRightRailPanelId(value: unknown): value is RightRailPanelId {
   return value === "prompts" || value === "history" || value === "workflows" || value === "profile";
 }
 
@@ -73,7 +73,7 @@ const ROW_RESERVE = RIGHT_RAIL_BAR_WIDTH + RIGHT_RAIL_CONTENT_MIN;
  * (`RIGHT_RAIL_CSS_MIN_WIDTH` / `RIGHT_RAIL_CSS_MAX_WIDTH`). No (usable)
  * measurement → the maximum alone.
  */
-export function rightRailWidthCap(rowWidth?: number | null): number {
+function rightRailWidthCap(rowWidth?: number | null): number {
   let max = RIGHT_RAIL_WIDTH_MAX;
   if (typeof rowWidth === "number" && Number.isFinite(rowWidth) && rowWidth > 0) {
     max = Math.min(max, rowWidth - ROW_RESERVE);
@@ -112,7 +112,7 @@ export function clampRightRailWidth(px: number, rowWidth?: number | null): numbe
  * number is a width (clamped into range); only a known panel id — or, for
  * `open`, an explicit `null` — is a panel.
  */
-export function sanitizeRightRailState(value: unknown): RightRailState {
+function sanitizeRightRailState(value: unknown): RightRailState {
   const record =
     typeof value === "object" && value !== null && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -150,23 +150,17 @@ export function serializeRightRailState(state: RightRailState): string {
 
 /* ── Storage ────────────────────────────────────────────────────────────── */
 
-/** The two `Storage` methods this module uses (a test passes its own). */
-export interface RightRailStorage {
+/** The two browser storage methods this module uses. */
+interface RightRailStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
 }
-
-/** Test seam: `undefined` = the real `localStorage`. */
-let storageOverride: RightRailStorage | null | undefined;
 
 /**
  * The browser's `localStorage`, or `null` where there is none (SSR, node) —
  * or where merely touching it throws (a locked-down profile).
  */
 function defaultStorage(): RightRailStorage | null {
-  if (storageOverride !== undefined) {
-    return storageOverride;
-  }
   try {
     return typeof localStorage === "undefined" ? null : localStorage;
   } catch {
@@ -175,21 +169,18 @@ function defaultStorage(): RightRailStorage | null {
 }
 
 /** Load the persisted state; the defaults on any failure. */
-export function loadRightRailState(storage: RightRailStorage | null = defaultStorage()): RightRailState {
+export function loadRightRailState(): RightRailState {
   try {
-    return parseRightRailState(storage?.getItem(RIGHT_RAIL_STORAGE_KEY));
+    return parseRightRailState(defaultStorage()?.getItem(RIGHT_RAIL_STORAGE_KEY));
   } catch {
     return RIGHT_RAIL_DEFAULT_STATE;
   }
 }
 
 /** Persist the state; a storage failure is non-fatal (it stays in memory). */
-export function saveRightRailState(
-  state: RightRailState,
-  storage: RightRailStorage | null = defaultStorage()
-): void {
+export function saveRightRailState(state: RightRailState): void {
   try {
-    storage?.setItem(RIGHT_RAIL_STORAGE_KEY, serializeRightRailState(state));
+    defaultStorage()?.setItem(RIGHT_RAIL_STORAGE_KEY, serializeRightRailState(state));
   } catch {
     /* ignore quota/availability errors — the state stays in memory only */
   }
@@ -271,13 +262,4 @@ export function setRightRailWidth(
 /** Double-click on the resize handle: back to the default width. */
 export function resetRightRailWidth(): void {
   update({ width: RIGHT_RAIL_WIDTH_DEFAULT }, true);
-}
-
-/**
- * Test seam: forget the in-memory state (the next read loads again) and read
- * and write `storage` instead of `localStorage`. Listeners are kept.
- */
-export function __resetRightRailStoreForTests(options: { storage?: RightRailStorage | null } = {}): void {
-  current = null;
-  storageOverride = "storage" in options ? options.storage : undefined;
 }

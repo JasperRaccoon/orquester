@@ -61,7 +61,7 @@ export type TokenClass =
  * Tag → our token class. Order matters: `@lezer/highlight` resolves the most
  * specific matching rule, so the broad families come last.
  */
-export const CHAT_HIGHLIGHTER: Highlighter = tagHighlighter([
+const CHAT_HIGHLIGHTER: Highlighter = tagHighlighter([
   { tag: tags.comment, class: "comment" },
   { tag: tags.lineComment, class: "comment" },
   { tag: tags.blockComment, class: "comment" },
@@ -149,7 +149,7 @@ const KNOWN_TOKEN_CLASSES = new Set<string>([
  * matched. Take the first one we know; an unknown list renders unstyled rather
  * than throwing, because this reads grammars from twenty language packages.
  */
-export function pickTokenClass(classes: string): TokenClass | null {
+function pickTokenClass(classes: string): TokenClass | null {
   for (const candidate of classes.split(/\s+/)) {
     if (KNOWN_TOKEN_CLASSES.has(candidate)) return candidate as TokenClass;
   }
@@ -193,7 +193,7 @@ function pushRun(lines: HighlightedLine[], code: string, from: number, to: numbe
  * not claim is emitted as an unstyled run, so the concatenation of every run is
  * always exactly the input — the invariant the tests assert.
  */
-export function treeToLines(code: string, tree: Tree): HighlightedLine[] {
+function treeToLines(code: string, tree: Tree): HighlightedLine[] {
   const lines: HighlightedLine[] = [[]];
   let cursor = 0;
   highlightTree(tree, CHAT_HIGHLIGHTER, (from, to, classes) => {
@@ -214,7 +214,7 @@ export function treeToLines(code: string, tree: Tree): HighlightedLine[] {
  * re-parses on every chunk; a multi-hundred-kilobyte paste is a log dump, not
  * code, and highlighting it would dominate the frame budget for no benefit.
  */
-export const MAX_HIGHLIGHT_CHARS = 120_000;
+const MAX_HIGHLIGHT_CHARS = 120_000;
 
 /**
  * A per-block incremental highlighter.
@@ -281,7 +281,7 @@ export function highlightCode(code: string, parser: Parser | null): HighlightedL
 // Ported from T3 Code (MIT): apps/web/src/lib/lruCache.ts
 
 /** Size-aware LRU. `set` of an oversized value is a no-op, never an eviction storm. */
-export class SizedLruCache<T> {
+class SizedLruCache<T> {
   private readonly entries = new Map<string, { value: T; size: number }>();
   private totalSize = 0;
 
@@ -289,14 +289,6 @@ export class SizedLruCache<T> {
     private readonly maxEntries: number,
     private readonly maxBytes: number
   ) {}
-
-  get size(): number {
-    return this.entries.size;
-  }
-
-  get bytes(): number {
-    return this.totalSize;
-  }
 
   get(key: string): T | null {
     const entry = this.entries.get(key);
@@ -325,16 +317,11 @@ export class SizedLruCache<T> {
     this.entries.set(key, { value, size });
     this.totalSize += size;
   }
-
-  clear(): void {
-    this.entries.clear();
-    this.totalSize = 0;
-  }
 }
 
 /** T3's numbers: 500 entries / 50 MB. *T3: `ChatMarkdown.tsx:338-339`.* */
-export const HIGHLIGHT_CACHE_MAX_ENTRIES = 500;
-export const HIGHLIGHT_CACHE_MAX_BYTES = 50 * 1024 * 1024;
+const HIGHLIGHT_CACHE_MAX_ENTRIES = 500;
+const HIGHLIGHT_CACHE_MAX_BYTES = 50 * 1024 * 1024;
 
 export const highlightCache = new SizedLruCache<HighlightedLine[]>(
   HIGHLIGHT_CACHE_MAX_ENTRIES,
@@ -342,7 +329,7 @@ export const highlightCache = new SizedLruCache<HighlightedLine[]>(
 );
 
 /** FNV-1a, 32-bit. A hash plus the length keeps the key short and collision-shy. */
-export function fnv1a32(value: string): number {
+function fnv1a32(value: string): number {
   let hash = 0x811c9dc5;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);

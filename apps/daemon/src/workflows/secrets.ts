@@ -32,7 +32,6 @@ export interface WorkflowSecretsServiceOptions {
   /** `workflowSecretsPath(baseDir)`. */
   file: string;
   logger?: Pick<Console, "warn" | "error">;
-  now?: () => Date;
 }
 
 /** A copy whose every map has no prototype (structuredClone would give them `Object.prototype`). */
@@ -58,12 +57,10 @@ export class WorkflowSecretsService implements SecretStore {
   private blockedReason: string | null = null;
   private readonly file: string;
   private readonly logger: Pick<Console, "warn" | "error">;
-  private readonly now: () => Date;
 
   constructor(options: WorkflowSecretsServiceOptions) {
     this.file = options.file;
     this.logger = options.logger ?? console;
-    this.now = options.now ?? (() => new Date());
   }
 
   async load(): Promise<void> {
@@ -83,7 +80,7 @@ export class WorkflowSecretsService implements SecretStore {
     } catch (error) {
       // The parse error of a JSON file quotes no value (JSON.parse names a position only).
       const detail = error instanceof SyntaxError ? "not JSON" : error instanceof Error ? error.message : "invalid";
-      const aside = `${this.file}.corrupt-${this.now().toISOString().replace(/[:.]/g, "-")}`;
+      const aside = `${this.file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
       try {
         await rename(this.file, aside);
       } catch (moveError) {
@@ -148,7 +145,7 @@ export class WorkflowSecretsService implements SecretStore {
     if (workflowId !== undefined && (typeof workflowId !== "string" || workflowId.length === 0)) {
       throw new WorkflowError(400, "SECRET_INVALID", "workflowId must be a non-empty string.");
     }
-    const entry = { value, updatedAt: this.now().toISOString() };
+    const entry = { value, updatedAt: new Date().toISOString() };
     const next = cloneSecretsFile(this.data);
     if (workflowId === undefined) next.global[name] = entry;
     else {

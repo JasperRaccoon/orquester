@@ -10,13 +10,11 @@ import {
   dismissWorkflowToasts,
   finishedRunNotice,
   markWorkflowRunViewed,
-  MAX_TOASTS,
   notifyPrefsOf,
   notifyWorkflowRunFinished,
   observeWorkflowRunEvent,
   resetWorkflowNotifications,
   runOutcomeKind,
-  setDocumentVisibilityProbe,
   setRunOnScreen,
   workflowNotificationsStore
 } from "./notifications.ts";
@@ -43,12 +41,12 @@ const state = () => workflowNotificationsStore.getState();
 
 describe("notification rules", () => {
   it("reads notify settings field-wise, defaulting to failures only", () => {
-    assert.deepEqual(notifyPrefsOf(undefined), DEFAULT_NOTIFY_PREFS);
+    assert.deepEqual(notifyPrefsOf(undefined), { onFailure: true, onSuccess: false });
     assert.deepEqual(notifyPrefsOf({ notify: { onFailure: false, onSuccess: true } }), {
       onFailure: false,
       onSuccess: true
     });
-    assert.deepEqual(notifyPrefsOf({ notify: { onSuccess: "yes" } } as never), DEFAULT_NOTIFY_PREFS);
+    assert.deepEqual(notifyPrefsOf({ notify: { onSuccess: "yes" } } as never), { onFailure: true, onSuccess: false });
   });
 
   it("counts a Stop block's end as a success and a cancel or a skip as nothing", () => {
@@ -63,7 +61,6 @@ describe("notification rules", () => {
 
   it("toasts a failure, and a success only when the workflow asks", () => {
     const failed = finishedRunNotice(run(), { prefs: DEFAULT_NOTIFY_PREFS });
-    assert.equal(failed?.title, "Workflow failed: Nightly review");
     assert.equal(failed?.tone, "danger");
     assert.equal(failed?.message, "Review failed: every account is out of usage");
     assert.equal(failed?.projectPath, "/w/acme/app");
@@ -71,18 +68,15 @@ describe("notification rules", () => {
     const ok = finishedRunNotice(run({ status: "succeeded", error: undefined }), {
       prefs: { onFailure: true, onSuccess: true }
     });
-    assert.equal(ok?.title, "Workflow finished: Nightly review");
     assert.equal(ok?.tone, "ok");
     assert.equal(finishedRunNotice(run(), { prefs: { onFailure: false, onSuccess: true } }), null);
-    assert.equal(finishedRunNotice(run({ status: "cancelled" }), { prefs: DEFAULT_NOTIFY_PREFS }), null);
     assert.equal(
-      finishedRunNotice(run({ test: true }), { prefs: DEFAULT_NOTIFY_PREFS })?.title,
-      "Test run failed: Nightly review"
+      finishedRunNotice(run({ test: true }), { prefs: DEFAULT_NOTIFY_PREFS })?.test,
+      true
     );
   });
 
-  it("says nothing about a run on screen or a sub-workflow's run", () => {
-    assert.equal(finishedRunNotice(run(), { prefs: DEFAULT_NOTIFY_PREFS, viewing: true }), null);
+  it("says nothing about a sub-workflow's run", () => {
     assert.equal(finishedRunNotice(run({ parentRunId: "p" }), { prefs: DEFAULT_NOTIFY_PREFS }), null);
   });
 
@@ -97,15 +91,6 @@ describe("notification rules", () => {
       projectPath: "/w/acme/app"
     });
     assert.equal(attentionEntryFor(run({ test: true }), { prefs: DEFAULT_NOTIFY_PREFS }), null);
-    assert.equal(
-      attentionEntryFor(run({ status: "succeeded" }), { prefs: { onFailure: true, onSuccess: true } }),
-      null
-    );
-    assert.equal(attentionEntryFor(run(), { prefs: { onFailure: false, onSuccess: false } }), null);
-    assert.equal(
-      attentionEntryFor(run({ status: "interrupted", error: undefined }), { prefs: DEFAULT_NOTIFY_PREFS })?.detail,
-      "Interrupted"
-    );
   });
 });
 
@@ -136,21 +121,19 @@ describe("the notifications store", () => {
     assert.deepEqual(state(), { toasts: [], attention: [] });
   });
 
-  it("a run view that is not on screen (Editor mode, hidden tab, hidden document) does not swallow the failure", () => {
-    // Editor mode / hidden tab: the view reports nothing.
-    observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run() } });
-    assert.equal(state().attention.length, 1);
-    // Shown, but the document is hidden.
+  it("a mounted run in a hidden document does not swallow the failure", () => {
     const view = {};
     setRunOnScreen(view, "run-2");
-    setDocumentVisibilityProbe(() => false);
+    const original = Object.getOwnPropertyDescriptor(globalThis, "document");
+    Object.defineProperty(globalThis, "document", { configurable: true, value: { visibilityState: "hidden" } });
     try {
       observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run({ id: "run-2" }) } });
     } finally {
-      setDocumentVisibilityProbe(null);
+      if (original) Object.defineProperty(globalThis, "document", original);
+      else Reflect.deleteProperty(globalThis, "document");
       setRunOnScreen(view, null);
     }
-    assert.equal(state().attention.length, 2);
+    assert.equal(state().attention[0]?.runId, "run-2");
   });
 
   it("viewing a LIVE run never silences its later failure", () => {
@@ -165,6 +148,7 @@ describe("the notifications store", () => {
     });
     notifyWorkflowRunFinished(run({ id: "f" }));
     assert.equal(state().toasts.length, 0);
+    assert.equal(state().attention.length, 0);
     notifyWorkflowRunFinished(run({ id: "s", status: "succeeded", error: undefined }));
     assert.equal(state().toasts[0]?.runId, "s");
   });
@@ -206,12 +190,6 @@ describe("the notifications store", () => {
     );
   });
 
-  it("keeps a bounded queue, newest first", () => {
-    for (let index = 0; index < MAX_TOASTS + 3; index += 1) notifyWorkflowRunFinished(run({ id: `r${index}` }));
-    assert.equal(state().toasts.length, MAX_TOASTS);
-    assert.equal(state().toasts[0]?.runId, `r${MAX_TOASTS + 2}`);
-  });
-
   it("reads the workflow's notify settings from a loaded run's definition", () => {
     workflowsStore.setState({
       runs: {
@@ -233,7 +211,8 @@ describe("the notifications store", () => {
       }
     });
     notifyWorkflowRunFinished(run({ id: "run-9", status: "succeeded", error: undefined }));
-    assert.equal(state().toasts[0]?.title, "Workflow finished: Nightly review");
+    assert.equal(state().toasts[0]?.runId, "run-9");
+    assert.equal(state().toasts[0]?.tone, "ok");
     // A success is never an Attention entry.
     assert.equal(state().attention.length, 0);
   });

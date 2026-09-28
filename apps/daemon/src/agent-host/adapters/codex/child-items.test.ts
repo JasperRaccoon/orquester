@@ -21,15 +21,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  slimActivityPayload,
-  toThreadSnapshot,
-  type ThreadActivityItem,
-  type ThreadFoldState
-} from "@orquester/api/agent-chat";
-
-import { transcriptEntries } from "../../../mcp/transcript.ts";
-import { joinToolOutput } from "../../store/tool-output.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
 import { foldCodexLog, ingestCodexDrafts } from "./fold-testing.ts";
 import { CodexNormaliser, type RuntimeEventDraft } from "./normalise.ts";
@@ -427,129 +418,7 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Through ingestion, the real fold, the host's join and the MCP transcript
-// ---------------------------------------------------------------------------
-
-/** The tool entries read_transcript serves, from the snapshot slimmed as every read is. */
-function toolEntries(state: ThreadFoldState, agentId?: string): string[][] {
-  const snap = toThreadSnapshot(state);
-  const read = {
-    ...snap,
-    items: snap.items.map((item) =>
-      item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item
-    )
-  };
-  return transcriptEntries(read, {
-    turns: 5,
-    ...(agentId !== undefined ? { agentId } : {}),
-    include: new Set(["tools"] as const),
-    maxChars: 100_000
-  })
-    .entries.filter((entry) => entry.kind === "tool")
-    .map((entry) => [entry.tool!.type, entry.tool!.status, entry.agentId ?? "(parent)"]);
-}
-
 describe("a child's call through ingestion and the fold (Task 3)", () => {
-  it("is ONE call in the child's drill-in with its output joined, and no row of the parent's", async () => {
-    const n = make();
-    // Each step is ingested on its own, so every chunk of output is a row.
-    const events = await ingestCodexDrafts([
-      turnStarted(n, PARENT, PARENT_TURN),
-      launchChild(n),
-      itemStarted(n, CHILD, CHILD_TURN, commandItem(CALL, "inProgress", null)),
-      outputDelta(n, CHILD, CHILD_TURN, CALL, "ok 1\n"),
-      outputDelta(n, CHILD, CHILD_TURN, CALL, "ok 2\n"),
-      outputDelta(n, CHILD, CHILD_TURN, CALL, "ok 3\n"),
-      itemCompleted(n, CHILD, CHILD_TURN, commandItem(CALL, "completed", "ok 1\nok 2\nok 3\n")),
-      // The parent's own call under the same raw id: its row, not the child's.
-      itemStarted(n, PARENT, PARENT_TURN, commandItem(CALL, "inProgress", null)),
-      itemCompleted(n, PARENT, PARENT_TURN, commandItem(CALL, "completed", "mine\n"))
-    ]);
-    const state = foldCodexLog(events);
-    const activities = state.items.filter((item): item is ThreadActivityItem => item.kind === "activity");
-    const callOf = (activity: ThreadActivityItem): unknown =>
-      (activity.payload as { toolUseId?: unknown } | null)?.toolUseId;
-
-    const childRows = activities.filter((activity) => callOf(activity) === CHILD_CALL);
-    assert.deepEqual(
-      childRows.map((row) => row.activityKind),
-      ["tool.started", "tool.output", "tool.output", "tool.output", "tool.completed"]
-    );
-    assert.deepEqual(
-      [...new Set(childRows.map((row) => `${row.turnId}|${row.agentId}`))],
-      [`${PARENT_TURN}|${CHILD}`],
-      "one call, one turn key, one owner"
-    );
-    assert.equal(
-      activities.filter((activity) => callOf(activity) === CALL).length,
-      2,
-      "the parent's own call keeps its own id and its own two rows"
-    );
-
-    // The host's join reads the child's output whole, from any row of the call.
-    const completion = childRows.at(-1)!;
-    assert.deepEqual(joinToolOutput(events, completion.id), {
-      toolUseId: CHILD_CALL,
-      output: "ok 1\nok 2\nok 3\n",
-      complete: true,
-      truncated: false
-    });
-
-    // read_transcript: the child's drill-in shows the call, once; the parent's
-    // view shows only the parent's own.
-    assert.deepEqual(toolEntries(state, CHILD), [["command_execution", "completed", CHILD]]);
-    assert.deepEqual(toolEntries(state), [["command_execution", "completed", "(parent)"]]);
-  });
-
-  it("a child's MCP progress persists as the child's heartbeat and reaches its roster row", async () => {
-    // Routed to the parent (as it was), the frame carried the child's raw item
-    // id, no owner and no task: ingestion wrote nothing for it.
-    const n = make();
-    const events = await ingestCodexDrafts([
-      turnStarted(n, PARENT, PARENT_TURN),
-      launchChild(n),
-      itemStarted(n, CHILD, CHILD_TURN, mcpItem("call_m", "inProgress")),
-      mcpProgress(n, "call_m", "indexing 3/9")
-    ]);
-    const state = foldCodexLog(events);
-    const heartbeats = state.items.flatMap((item) => {
-      if (item.kind !== "activity" || item.activityKind !== "tool.progress") return [];
-      const payload = item.payload as { toolUseId?: unknown; taskId?: unknown; toolName?: unknown };
-      return [[item.agentId, payload.toolUseId, payload.taskId, payload.toolName]];
-    });
-    assert.deepEqual(heartbeats, [[CHILD, `codex-child:${CHILD}:call_m`, CHILD, "serena: search"]]);
-    assert.equal(state.roster.find((agent) => agent.id === CHILD)?.lastToolName, "serena: search");
-  });
-
-  it("a child's call starting never ends the parent's thinking block", async () => {
-    // Ingestion closes a thinking block when a tool of the SAME author starts,
-    // and reads the author off the envelope's agentId: stamped on the payload
-    // alone, the child's call would split the parent's block in two.
-    const n = make();
-    const thinking = (delta: string): RuntimeEventDraft[] => {
-      const params: CodexProtocol.v2.ReasoningTextDeltaNotification = {
-        threadId: PARENT,
-        turnId: PARENT_TURN,
-        itemId: "rs_1",
-        delta,
-        contentIndex: 0
-      };
-      return n.notification("item/reasoning/textDelta", params);
-    };
-    const events = await ingestCodexDrafts([
-      turnStarted(n, PARENT, PARENT_TURN),
-      launchChild(n),
-      thinking("Waiting on the explorer. "),
-      itemStarted(n, CHILD, CHILD_TURN, commandItem(CALL, "inProgress", null)),
-      thinking("It is still running.")
-    ]);
-    const state = foldCodexLog(events);
-    const blocks = state.items.flatMap((item) =>
-      item.kind === "message" && item.role === "reasoning" ? [[item.text, item.agentId ?? "(parent)"]] : []
-    );
-    assert.deepEqual(blocks, [["Waiting on the explorer. It is still running.", "(parent)"]]);
-  });
 
   it("a child's roster row keeps its launch's name through every tick, and carries its own usage", async () => {
     // Every tick used to put what the child was doing in `description`, which

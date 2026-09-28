@@ -24,13 +24,9 @@ import { escapeRegExp } from "../../../lib/regexp";
 /**
  * Absorbed by W11 into the one resolver (fix-wave R7-6) and re-exported here
  * only so existing imports keep resolving. **These are not second copies** —
- * there is exactly one implementation, in `presentation.logic.ts`. So is
- * `isToolOutputRow`, a streamed output chunk of a tool call: the run's live
- * row and a group's summary read the rows this join renders
- * (`withoutJoinedOutput`), by the same definition of a chunk.
+ * there is exactly one implementation, in `presentation.logic.ts`.
  */
 export {
-  isStreamedOutputEntry as isToolOutputRow,
   showDestructiveRowStyle,
   workEntryIsActiveTurnActivity
 } from "../../../lib/agent-chat/presentation.logic";

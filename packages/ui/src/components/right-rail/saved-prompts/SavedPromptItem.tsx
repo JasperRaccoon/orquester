@@ -46,7 +46,7 @@ export interface SavedPromptFeedback {
   text: string;
 }
 
-export interface SavedPromptItemProps {
+interface SavedPromptItemProps {
   prompt: SavedPrompt;
   expanded: boolean;
   variant: "docked" | "sheet";

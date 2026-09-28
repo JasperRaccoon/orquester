@@ -49,7 +49,7 @@ type SvgIcon = React.FunctionComponent<React.SVGProps<SVGSVGElement>>;
  * One vendored SVG per id; the `Record` makes a missing MAPPING a typecheck
  * error; a missing FILE is caught by `file-icon.test.ts`.
  */
-export const FILE_ICONS: Record<FileIconId, SvgIcon> = {
+const FILE_ICONS: Record<FileIconId, SvgIcon> = {
   table: Table, word: Word, powerpoint: Powerpoint, pdf: Pdf, json: Json, yaml: Yaml, toml: Toml,
   xml: Xml, database: Database, jupyter: Jupyter, zip: Zip, typescript: Typescript,
   react_ts: ReactTs, javascript: Javascript, react: React_, python: Python, rust: Rust, go: Go,

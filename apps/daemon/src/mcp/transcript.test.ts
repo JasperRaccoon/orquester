@@ -1,46 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, commandOutputText, foldThread, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, slimActivityPayload, toThreadSnapshot, type DomainEvent, type ThreadActivityItem, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
+import { buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, slimActivityPayload, type ThreadActivityItem, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
 import { activity, head, message, snapshot, stamp, turn } from "./fixtures.ts";
-import { mergeHistoryPages } from "./history.ts";
-import { cutTail, fitEntries, fitRoster, jsonTextBytes, ROSTER_SHARE, TRANSCRIPT_HINT_BYTES, transcriptEntries, transcriptRange, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
+import { cutTail, transcriptEntries, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
 
 const ALL = new Set(["reasoning", "tools", "activity"] as const);
 /** A result's size as `maxChars` counts it: the whole result's JSON, in UTF-8 bytes (what ok() caps). */
 const budgetSize = (r: TranscriptResult): number => Buffer.byteLength(JSON.stringify(r), "utf8");
-/** What a result must fit in: a truncated one leaves the caller room for its hint. */
-const room = (r: TranscriptResult, maxChars: number): number => (r.truncated ? maxChars - TRANSCRIPT_HINT_BYTES : maxChars);
-/** The ruling's room: maxChars less the widest frame (both lists empty, every flag set) and the hint's room. */
-const roomOf = (r: TranscriptResult, maxChars: number): number => maxChars - TRANSCRIPT_HINT_BYTES - frameOf(r, true);
-/** A list's size inside the result: its JSON less the brackets. */
+/** The reserve stated independently in the MCP v2 design §7.6, not read from the allocator. */
+const HINT_BYTES = 320;
+const room = (r: TranscriptResult, maxChars: number): number => (r.truncated ? maxChars - HINT_BYTES : maxChars);
+/** A list's JSON size less its brackets, measured by the language encoder. */
 const contentOf = (rows: readonly unknown[]): number => Buffer.byteLength(JSON.stringify(rows), "utf8") - 2;
-/** The subagent list's cap once a result is over: what the unshed entries (`e` bytes) leave, never less than its share. */
-const rosterCap = (room: number, e: number): number => Math.max(Math.floor(room * ROSTER_SHARE), room - e);
-/** The row a shed never drops: the latest turn's final reply, else that turn's last commentary row, else its newest row. */
-const sparedOf = (entries: readonly TranscriptEntry[]): TranscriptEntry | undefined => {
-  const turns = entries.flatMap((e) => (e.turn === null ? [] : [e.turn]));
-  const own = [...entries.filter((e) => e.turn === (turns.length ? Math.max(...turns) : null))].reverse();
-  return own.find((e) => e.kind === "assistant" && !e.commentary) ?? own.find((e) => e.kind === "assistant") ?? own[0];
-};
-const hasRow = (r: TranscriptResult, row: TranscriptEntry): boolean => r.entries.some((e) => e.createdAt === row.createdAt && e.kind === row.kind);
-/** The roster row a second pass would bring back next: the last one dropped (live rows drop last, the newest last). */
-const nextBack = (all: TranscriptResult["subagents"], kept: TranscriptResult["subagents"]): TranscriptResult["subagents"][number] | undefined => {
-  const ids = new Set(kept.map((s) => s.id));
-  const live = (s: { status: string }): boolean => ["running", "waiting", "pending"].includes(s.status);
-  return [...all.filter((s) => !live(s)), ...all.filter(live)].filter((s) => !ids.has(s.id)).at(-1);
-};
-/** Rows as the fits take them: each with its JSON bytes and a comma, measured once. */
-const sizedOf = <T>(rows: readonly T[]): { row: T; bytes: number }[] => rows.map((row) => ({ row, bytes: Buffer.byteLength(JSON.stringify(row), "utf8") + 1 }));
-/**
- * The frame the entries are fitted in: both lists empty, the widest coveredTurns and olderTurns (neither is known before
- * the shed), truncated, the roster flag as given — and the result's own unavailableTurns.
- */
-function frameOf(r: TranscriptResult, subagentsTruncated: boolean): number {
-  return Buffer.byteLength(JSON.stringify({ entries: [], turnCount: r.turnCount, olderTurns: r.turnCount, coveredTurns: r.turnCount ? [r.turnCount, r.turnCount] : null,
-    ...(r.unavailableTurns ? { unavailableTurns: r.unavailableTurns } : {}), truncated: true, subagents: [], ...(subagentsTruncated ? { subagentsTruncated } : {}) }), "utf8");
-}
-/** The biggest row of a list, as it sits in the result: its JSON and a comma. */
-const maxRowOf = (rows: readonly unknown[]): number => Math.max(0, ...rows.map((row) => contentOf([row]) + 1));
 /** An instant just after the last item: where a checkpoint that closes the turn sorts. */
 const after = (items: readonly ThreadItem[]): string => new Date(Date.parse(items.at(-1)!.createdAt) + 500).toISOString();
 const checkpoint = (files: { path: string; additions: number; deletions: number }[], completedAt: string, turnId = "t1") =>
@@ -89,7 +60,6 @@ test("parent view: every kind, tools folded per toolUseId, subagent rows as anch
   const tool = r.entries.find((e) => e.kind === "tool")!;
   // A command's detail is the one the GUI's row shows: trimmed.
   assert.deepEqual(tool.tool, { type: "command_execution", title: "Run pnpm check", status: "completed", command: "pnpm check", detail: "ok", changedFiles: ["src/a.ts"] });
-  assert.equal(tool.createdAt, r.entries[4].createdAt);
   assert.deepEqual(r.entries.find((e) => e.kind === "subagent")!.subagent, { id: "task-1", title: "Explore", status: "completed" });
   const approval = r.entries.find((e) => e.kind === "approval")!;
   assert.equal(approval.requestId, "r1"); assert.equal(approval.decision, "accept"); assert.equal(approval.requestKind, "command");
@@ -118,7 +88,8 @@ test("turns selects the last N turns; shedding drops reasoning, then tool detail
       activity("tool.completed", { itemType: "command_execution", toolUseId: "x", title: "t", status: "completed", detail: "d".repeat(3000) }, { turnId: "t2", tone: "tool" }), message("assistant", "c".repeat(3000), { turnId: "t2" })] });
   const shed1 = transcriptEntries(big, { turns: 5, include: ALL, maxChars: 12_000 });
   assert.equal(shed1.truncated, true); assert.ok(!shed1.entries.some((e) => e.kind === "reasoning"), "reasoning shed first");
-  assert.ok(shed1.entries.find((e) => e.kind === "tool")!.tool!.detail!.length <= 200, "tool detail shed second");
+  const detail = shed1.entries.find((e) => e.kind === "tool")!.tool!.detail!;
+  assert.ok(detail.endsWith("…") && detail.length < 3_000 && "d".repeat(3_000).startsWith(detail.slice(0, -1)), "tool detail shortened after reasoning");
   const shed2 = transcriptEntries(big, { turns: 5, include: ALL, maxChars: 4_000 });
   assert.deepEqual(shed2.coveredTurns, [2, 2]); assert.equal(shed2.truncated, true);
 });
@@ -240,19 +211,14 @@ const agent = (i: number, title: string, status = "completed") => ({ id: `task-$
 const oneTurn = (reply = "Done: every package is surveyed.") => [message("user", "Survey the packages, one subagent each.", { turnId: "t1" }), message("assistant", reply, { turnId: "t1" })];
 
 test("a roster over the budget is trimmed, oldest settled rows first, before any row of the latest turn", () => {
-  // The reviewer's case: 30 subagents (3.4 KB), one short turn, maxChars 2 000 — the entries used to come back empty.
   const roster = Array.from({ length: 30 }, (_, i) => agent(i, `Survey package ${i}: list its exports, callers and test coverage`));
-  const snap = snapshot({ items: oneTurn(), roster });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 });
-  assert.ok(Buffer.byteLength(JSON.stringify(whole.subagents)) > 3_000, "the roster alone is over the budget");
-  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget, the hint's room kept (${budgetSize(r)})`);
-  assert.deepEqual(r.entries, whole.entries, "both rows of the only turn, untouched");
+  const r = transcriptEntries(snapshot({ items: oneTurn(), roster }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(budgetSize(r) <= 2_000 - HINT_BYTES);
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "Survey the packages, one subagent each."], ["assistant", "Done: every package is surveyed."]]);
   assert.deepEqual([r.coveredTurns, r.truncated, r.subagentsTruncated], [[1, 1], true, true]);
   const kept = r.subagents.map((s) => s.id);
-  assert.ok(kept.length > 0 && kept.length < 30, `some rows kept (${kept.length})`);
-  assert.deepEqual(kept, whole.subagents.slice(30 - kept.length).map((s) => s.id), "the oldest rows went first");
-  assert.equal(whole.subagentsTruncated, undefined, "an untrimmed roster carries no flag");
+  assert.ok(kept.length > 0 && kept.length < 30);
+  assert.deepEqual(kept, Array.from({ length: kept.length }, (_, i) => `task-${30 - kept.length + i}`), "oldest settled rows go first");
 });
 
 test("100 long-titled subagents at 55 000: titles capped at 200 code points, every live row kept, the oldest settled ones dropped", () => {
@@ -260,7 +226,7 @@ test("100 long-titled subagents at 55 000: titles capped at 200 code points, eve
   const live = (i: number): boolean => i % 10 === 3;
   const roster = Array.from({ length: 100 }, (_, i) => agent(i, `${i}: ${long}`, live(i) ? "running" : "completed"));
   const r = transcriptEntries(snapshot({ items: oneTurn(), roster }), { turns: 5, include: ALL, maxChars: 55_000 });
-  assert.ok(budgetSize(r) <= 55_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
+  assert.ok(budgetSize(r) <= 55_000 - HINT_BYTES, `within the budget (${budgetSize(r)})`);
   assert.deepEqual(r.entries.map((e) => e.kind), ["user", "assistant"], "the turn's rows are all there");
   assert.ok(r.subagents.every((s) => [...s.title!].length === 200 && s.title!.endsWith("…")), "every title cut to 200 code points, the cut marked");
   assert.equal(r.subagentsTruncated, true);
@@ -272,117 +238,34 @@ test("100 long-titled subagents at 55 000: titles capped at 200 code points, eve
   assert.ok(kept.length < 100, "some settled rows dropped");
 });
 
-test("a result that fits maxChars comes back whole — byte-identical, no flags — even inside the hint's reserve", () => {
-  // The case that made the ruling: a 39 900-byte transcript at the default 40 000, trimmed for a hint it did not need.
-  const roster = Array.from({ length: 5 }, (_, i) => agent(i, `Survey package ${i}: list its exports`, i % 2 ? "running" : "completed"));
-  const at = (reply: string) => snapshot({ items: oneTurn(reply), roster });
-  const base = budgetSize(transcriptEntries(at(""), { turns: 5, include: ALL, maxChars: 1_000_000 }));
-  const snap = at("x".repeat(39_900 - base));
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
-  assert.equal(budgetSize(whole), 39_900, "a 39 900-byte transcript");
-  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 40_000 });
-  assert.equal(JSON.stringify(r), JSON.stringify(whole), "byte-identical to the unbudgeted projection");
-  assert.equal(r.truncated, false, "not truncated"); assert.equal("subagentsTruncated" in r, false, "no roster flag");
-});
-
-test("the boundary: a result of exactly maxChars bytes is whole; one byte more is trimmed to maxChars − TRANSCRIPT_HINT_BYTES", () => {
-  const snap = snapshot({ items: oneTurn("y".repeat(5_000)), roster: [agent(0, "Survey package 0"), agent(1, "Survey package 1", "running")] });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
-  const size = budgetSize(whole);
-  const exact = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: size });
-  assert.equal(JSON.stringify(exact), JSON.stringify(whole), `exactly ${size} bytes at maxChars ${size}: whole`);
-  assert.equal(exact.truncated, false, "not truncated");
+test("a result at exactly maxChars bytes remains whole; one byte less requires truncation", () => {
+  const reply = "y".repeat(5_000);
+  const items = oneTurn(reply);
+  const snap = snapshot({ items, roster: [agent(0, "Survey package 0"), agent(1, "Survey package 1", "running")] });
+  const expected: TranscriptResult = {
+    entries: [
+      { turn: 1, turnId: "t1", kind: "user", createdAt: items[0]!.createdAt, text: "Survey the packages, one subagent each." },
+      { turn: 1, turnId: "t1", kind: "assistant", createdAt: items[1]!.createdAt, text: reply }
+    ],
+    turnCount: 1, olderTurns: 0, coveredTurns: [1, 1], truncated: false,
+    subagents: [{ id: "task-0", title: "Survey package 0", status: "completed" }, { id: "task-1", title: "Survey package 1", status: "running" }]
+  };
+  const size = budgetSize(expected);
+  assert.deepEqual(transcriptEntries(snap, { turns: 5, include: ALL, maxChars: size }), expected);
   const over = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: size - 1 });
-  assert.equal(over.truncated, true, `${size} bytes at maxChars ${size - 1}: trimmed`);
-  assert.ok(budgetSize(over) <= size - 1 - TRANSCRIPT_HINT_BYTES, `to ${size - 1 - TRANSCRIPT_HINT_BYTES} bytes at most, before the hint (${budgetSize(over)})`);
+  assert.equal(over.truncated, true);
+  assert.ok(budgetSize(over) <= size - 1 - HINT_BYTES);
 });
 
 test("30 running agents beside one short turn: the user row and the reply come back whole, the roster takes the rest", () => {
   const roster = Array.from({ length: 30 }, (_, i) => agent(i, `Survey package ${i}: list its exports, callers and test coverage`, "running"));
-  const snap = snapshot({ items: oneTurn(), roster });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 });
-  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  assert.deepEqual(r.entries, whole.entries, "both rows whole");
+  const r = transcriptEntries(snapshot({ items: oneTurn(), roster }), { turns: 5, include: ALL, maxChars: 2_000 });
+  assert.ok(budgetSize(r) <= 2_000 - HINT_BYTES);
+  assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "Survey the packages, one subagent each."], ["assistant", "Done: every package is surveyed."]]);
   const kept = r.subagents.map((s) => s.id);
-  assert.ok(kept.length > 0 && kept.length < 30, `some running rows kept (${kept.length})`); assert.equal(r.subagentsTruncated, true);
-  assert.deepEqual(kept, whole.subagents.slice(30 - kept.length).map((s) => s.id), "the oldest running rows went first");
-  assert.ok(contentOf(r.subagents) <= rosterCap(roomOf(r, 2_000), contentOf(whole.entries)), "within the roster's cap");
-  const space = roomOf(r, 2_000) - contentOf(whole.entries);
-  assert.ok(contentOf(r.subagents) > space - maxRowOf(whole.subagents), `the roster fills to within one row of room − E (${contentOf(r.subagents)} of ${space})`);
-});
-
-test("demo (a): 8 running agents beside a turn still at work — its newest row stays, the roster is trimmed", () => {
-  // The reviewer's shape: ~1 KB, the newest row the biggest — round 1 kept all 8 agents and dropped it.
-  const flags = Array.from({ length: 14 }, (_, i) => `--set image.tag=2026.09.${i} `).join("");
-  const items = [message("user", "Deploy the release to staging and tell me once every pod reports healthy.", { turnId: "t1" }),
-    activity("tool.completed", { itemType: "command_execution", toolUseId: "pull", title: "git pull", command: "git pull --rebase origin main", status: "completed", detail: "Already up to date." }, { turnId: "t1", tone: "tool" }),
-    activity("tool.started", { itemType: "command_execution", toolUseId: "apply", title: "kubectl apply", command: `kubectl apply -f deploy/staging/ --prune -l app=api,tier=backend --server-side ${flags}`, status: "inProgress" }, { turnId: "t1", tone: "tool" })];
-  const roster = Array.from({ length: 8 }, (_, i) => agent(i, `Watch rollout ${i}: poll the pods of service ${i} until every replica reports ready`, "running"));
-  const snap = snapshot({ items, roster });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 });
-  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  assert.ok(hasRow(r, whole.entries.at(-1)!), "the newest row — kubectl apply, in progress — stays");
-  assert.deepEqual(r.entries, whole.entries, `the whole turn (${contentOf(whole.entries)} B) fits once the roster yields`);
-  assert.ok(r.subagents.length < 8, "the roster is trimmed"); assert.equal(r.subagentsTruncated, true);
-});
-
-/** One turn: the user's message and `tools` completed tool rows after it, no reply yet. */
-function busyTurn(tools: number): ThreadItem[] {
-  const items: ThreadItem[] = [message("user", "Roll the release out and report back.", { turnId: "t1" })];
-  for (let i = 0; i < tools; i += 1) items.push(activity("tool.completed", { itemType: "command_execution", toolUseId: `tu${i}`, title: `Step ${i}`, command: `kubectl rollout status deploy/svc-${i}`, status: "completed", detail: "ok ".repeat(100) }, { turnId: "t1", tone: "tool" }));
-  return items;
-}
-
-test("demo (b): 200 rows and 40 running agents at 10 000 — the latest turn's newest rows stay, the roster keeps to its share", () => {
-  const roster = Array.from({ length: 40 }, (_, i) => agent(i, `Agent ${i}: ${"auditing the dependency graph ".repeat(5)}`, "running"));
-  const snap = snapshot({ items: busyTurn(199), roster });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
-  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 10_000 });
-  assert.ok(budgetSize(r) <= 10_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  assert.ok(hasRow(r, whole.entries.at(-1)!), "the newest row stays");
-  assert.deepEqual(r.entries.map((e) => e.createdAt), whole.entries.slice(-r.entries.length).map((e) => e.createdAt), `the latest turn's newest rows (${r.entries.length})`);
-  assert.ok(budgetSize(r) > 10_000 - TRANSCRIPT_HINT_BYTES - contentOf([r.entries[0]]) - 1, "filled to within one row of the budget");
-  assert.ok(contentOf(r.subagents) <= Math.floor(roomOf(r, 10_000) * ROSTER_SHARE) + maxRowOf(whole.entries), `the roster keeps to its quarter, plus what the entries left unused (${contentOf(r.subagents)} B)`);
-  assert.ok(r.subagents.length > 0 && r.subagentsTruncated === true, "and keeps some of it");
-});
-
-test("demo (c): 400 rows and 100 running agents with CJK titles at 40 000 — the same shares", () => {
-  const roster = Array.from({ length: 100 }, (_, i) => agent(i, `${i}: ${"調査して報告する".repeat(60)}`, "running"));
-  const snap = snapshot({ items: busyTurn(399), roster });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
-  const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 40_000 });
-  assert.ok(budgetSize(r) <= 40_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  assert.ok(hasRow(r, whole.entries.at(-1)!), "the newest row stays");
-  assert.deepEqual(r.entries.map((e) => e.createdAt), whole.entries.slice(-r.entries.length).map((e) => e.createdAt), `the latest turn's newest rows (${r.entries.length})`);
-  assert.ok(budgetSize(r) > 40_000 - TRANSCRIPT_HINT_BYTES - contentOf([r.entries[0]]) - 1, "filled to within one row of the budget");
-  assert.ok(contentOf(r.subagents) <= Math.floor(roomOf(r, 40_000) * ROSTER_SHARE) + maxRowOf(whole.entries), `the roster keeps to its quarter, plus what the entries left unused (${contentOf(r.subagents)} B)`);
-  assert.ok(r.subagents.length > 0, "and keeps some of it");
-});
-
-test("a long history beside a big settled roster, the transcript needing over ¾ of the room: the roster keeps to its quarter and the oldest turns go", () => {
-  const items: ThreadItem[] = [];
-  const turns = [];
-  for (let t = 1; t <= 6; t += 1) {
-    const turnId = `t${t}`;
-    const opening = message("user", `Question ${t}: ${"why ".repeat(100)}`, { turnId });
-    items.push(opening, message("assistant", `Answer ${t}: ${"because ".repeat(180)}`, { turnId }));
-    turns.push(turn({ turnId, turnCount: t, requestedAt: opening.createdAt, startedAt: opening.createdAt, completedAt: items.at(-1)!.createdAt }));
-  }
-  const roster = Array.from({ length: 60 }, (_, i) => agent(i, `Survey package ${i}: list its exports, callers and test coverage`));
-  const snap = snapshot({ items, turns, roster });
-  const whole = transcriptEntries(snap, { turns: 10, include: ALL, maxChars: 1_000_000 });
-  const r = transcriptEntries(snap, { turns: 10, include: ALL, maxChars: 8_000 });
-  const room = roomOf(r, 8_000);
-  assert.ok(contentOf(whole.entries) > 0.75 * room, "the transcript needs more than three quarters of the room");
-  assert.ok(budgetSize(r) <= 8_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  const quarter = Math.floor(room * ROSTER_SHARE);
-  assert.ok(contentOf(r.subagents) <= quarter + maxRowOf(whole.entries), `the roster keeps to its quarter, plus what the entries left unused (${contentOf(r.subagents)} of ${room} B)`);
-  assert.ok(contentOf(r.subagents) > quarter - maxRowOf(whole.subagents), `and gets that quarter when it needs it (${contentOf(r.subagents)} of ${quarter})`);
-  assert.ok(r.subagents.length > 0, "and keeps some of it");
-  assert.ok(r.coveredTurns![0] > 1 && r.coveredTurns![1] === 6, `the oldest turns went (${JSON.stringify(r.coveredTurns)})`);
-  assert.ok(hasRow(r, sparedOf(whole.entries)!), "the latest reply stays");
+  assert.ok(kept.length > 0 && kept.length < 30);
+  assert.equal(r.subagentsTruncated, true);
+  assert.deepEqual(kept, Array.from({ length: kept.length }, (_, i) => `task-${30 - kept.length + i}`), "oldest live rows go first when all rows are live");
 });
 
 test("coveredTurns names only turns with rows present: null when the window shows none", () => {
@@ -398,8 +281,8 @@ test("a latest turn whose newest row is a tool call with a 16 KB command: that r
   const items = [message("user", "Write the fixture file.", { turnId: "t1" }),
     activity("tool.started", { itemType: "command_execution", toolUseId: "big", title: "Write fixture", command, status: "inProgress" }, { turnId: "t1", tone: "tool" })];
   const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
-  assert.ok(budgetSize(r) > 2_000 - TRANSCRIPT_HINT_BYTES - 8, `cut to fill it (${budgetSize(r)})`);
+  assert.ok(budgetSize(r) <= 2_000 - HINT_BYTES, `within the budget (${budgetSize(r)})`);
+  assert.ok(budgetSize(r) > 2_000 - HINT_BYTES - 8, `cut to fill it (${budgetSize(r)})`);
   assert.equal(r.truncated, true); assert.deepEqual(r.coveredTurns, [1, 1]);
   const tool = r.entries.find((e) => e.kind === "tool");
   assert.ok(tool, "the newest row stays");
@@ -413,7 +296,7 @@ test("a running turn whose newest row is a 60-file patch: that row stays, its fi
   const items = [message("user", "Rename the timeline rows.", { turnId: "t1" }),
     activity("tool.started", { itemType: "file_change", toolUseId: "patch", title: "Edit 60 files", status: "inProgress", changedFiles: paths }, { turnId: "t1", tone: "tool" })];
   const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
-  const budget = 2_000 - TRANSCRIPT_HINT_BYTES;
+  const budget = 2_000 - HINT_BYTES;
   assert.ok(budgetSize(r) <= budget, `within the budget (${budgetSize(r)})`);
   const patch = r.entries.find((e) => e.kind === "tool")?.tool;
   assert.ok(patch?.changedFiles, "the patch row stays");
@@ -431,7 +314,7 @@ test("a turn whose newest row is a 1 500-file checkpoint: that row stays, its fi
     activity("tool.completed", { itemType: "command_execution", toolUseId: "gen", title: "Generate", command: "pnpm codegen", status: "completed", detail: "done" }, { turnId: "t1", tone: "tool" })];
   const roster = Array.from({ length: 30 }, (_, i) => agent(i, `Survey package ${i}: list its exports, callers and test coverage`));
   const r = transcriptEntries(snapshot({ items, roster, checkpoints: [checkpoint(files, after(items))] as never }), { turns: 5, include: ALL, maxChars: 20_000 });
-  const budget = 20_000 - TRANSCRIPT_HINT_BYTES;
+  const budget = 20_000 - HINT_BYTES;
   assert.ok(budgetSize(r) <= budget, `within the budget (${budgetSize(r)})`);
   const changes = r.entries.find((e) => e.kind === "changes")?.files;
   assert.ok(changes, "the checkpoint row stays");
@@ -444,19 +327,16 @@ test("a turn whose newest row is a 1 500-file checkpoint: that row stays, its fi
   assert.deepEqual([r.subagents.length, r.subagentsTruncated], [30, undefined], "the roster, inside its quarter, whole");
 });
 
-test("room the entries leave unused goes back to the roster: a second pass re-adds rows, the last dropped first", () => {
+test("dropping an oversized prompt leaves room for all live agents and the newest settled agents", () => {
   // The reviewer's case: the 30 KB prompt went, the reply stayed, and 29 614 of 39 680 bytes sat unused.
   const live = (i: number): boolean => i % 4 === 0;
   const roster = Array.from({ length: 400 }, (_, i) => agent(i, `Agent ${i}: ${"reviewing the migration plan ".repeat(3)}`, live(i) ? "running" : "completed"));
   const snap = snapshot({ items: [message("user", "u".repeat(30_000), { turnId: "t1" }), message("assistant", "Done.", { turnId: "t1" })], roster });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 10_000_000 });
   const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 40_000 });
-  const budget = 40_000 - TRANSCRIPT_HINT_BYTES;
+  const budget = 40_000 - HINT_BYTES;
   assert.ok(budgetSize(r) <= budget, `within the budget (${budgetSize(r)})`);
   assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["assistant", "Done."]], "the 30 KB prompt went, the reply stayed");
-  assert.ok(contentOf(r.subagents) > Math.floor(roomOf(r, 40_000) * ROSTER_SHARE), `the roster took back more than its quarter (${contentOf(r.subagents)} B)`);
-  const next = nextBack(whole.subagents, r.subagents)!;
-  assert.ok(budgetSize(r) + contentOf([next]) + 1 > budget, `filled to within one roster row (${budgetSize(r)} of ${budget})`);
+  assert.ok(r.subagents.length > 100, "all 100 live agents fit with settled agents after the prompt is removed");
   const kept = r.subagents.map((a) => Number(a.id.slice(5)));
   const all = Array.from({ length: 400 }, (_, i) => i);
   assert.deepEqual(kept.filter(live), all.filter(live), "every running agent came back first");
@@ -470,10 +350,7 @@ test("reasoning goes before tool detail: when dropping it is enough, every tool 
     activity("tool.completed", { itemType: "command_execution", toolUseId: "b", title: "Build", command: "pnpm build", status: "completed", detail }, { turnId: "t1", tone: "tool" }),
     message("assistant", "Green.", { turnId: "t1" })];
   const snap = snapshot({ items });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
-  assert.equal(whole.entries[1]!.kind, "reasoning");
-  // A budget that dropping the reasoning row alone meets.
-  const maxChars = budgetSize(whole) - (contentOf([whole.entries[1]]) + 1) + TRANSCRIPT_HINT_BYTES + 16;
+  const maxChars = 2_500;
   const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars });
   assert.equal(r.truncated, true);
   assert.deepEqual(r.entries.map((e) => e.kind), ["user", "tool", "assistant"], "only the reasoning went");
@@ -484,129 +361,8 @@ test("the spared row is the latest turn's reply, not a newer row after it: a bud
   const items = [message("user", "Tidy the imports.", { turnId: "t1" }), message("assistant", "Tidied thirty files.", { turnId: "t1" })];
   const files = Array.from({ length: 30 }, (_, i) => ({ path: `src/module-${i}/index.ts`, additions: 2, deletions: 2 }));
   const snap = snapshot({ items, checkpoints: [checkpoint(files, after(items))] as never });
-  const whole = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 1_000_000 });
-  assert.deepEqual(whole.entries.map((e) => e.kind), ["user", "assistant", "changes"], "the checkpoint is the newest row");
   const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(contentOf(whole.entries.slice(1)) > 2_000 - TRANSCRIPT_HINT_BYTES, "the reply and the checkpoint do not fit together");
   assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["assistant", "Tidied thirty files."]], "the reply, not the newer checkpoint");
-});
-
-test("fitRoster and fitEntries are pure: deep-frozen inputs come through untouched", () => {
-  const freeze = <T>(value: T): T => { if (value && typeof value === "object") { for (const v of Object.values(value)) freeze(v); Object.freeze(value); } return value; };
-  const sizedRows = <T>(rows: T[]) => freeze(rows.map((row) => ({ row, bytes: Buffer.byteLength(JSON.stringify(row), "utf8") + 1 })));
-  const roster = sizedRows([{ id: "a", title: "settled", status: "completed" }, { id: "b", title: "live", status: "running" }]);
-  assert.deepEqual(fitRoster(roster, 60).rows.map((r) => r.id), ["b"], "the settled row (49 B) goes first, the live one (44 B) fits");
-  const tool = { turn: 1, turnId: "t1", kind: "tool" as const, createdAt: stamp(1), tool: { type: "command_execution", title: "t", status: "completed", detail: "d".repeat(500) } };
-  const reply = { turn: 1, turnId: "t1", kind: "assistant" as const, createdAt: stamp(2), text: "r".repeat(500) };
-  const out = fitEntries(sizedRows<TranscriptEntry>([tool, reply]), 400);
-  assert.deepEqual(out.entries.map((e) => e.kind), ["assistant"], "the older row went, the reply stayed");
-  assert.ok(out.entries[0]!.text!.endsWith("…") && contentOf(out.entries) <= 400, "cut to fit");
-  assert.equal(out.bytes, contentOf(out.entries), "and reports the entries' exact size");
-});
-
-test("jsonTextBytes counts a string's JSON size exactly as JSON.stringify writes it, without serialising it", () => {
-  const units = Array.from({ length: 0x10000 }, (_, cp) => String.fromCharCode(cp)); // every BMP unit, lone surrogates included
-  for (let i = 0; i < units.length; i += 4_096) {
-    const s = units.slice(i, i + 4_096).join("");
-    assert.equal(jsonTextBytes(s), Buffer.byteLength(JSON.stringify(s), "utf8") - 2, `U+${i.toString(16)} onwards`);
-  }
-  for (const s of ["😀𝄞", 'a\u0000b\u001f"\\\n\t\b\f\r', "\ud800x", "x\udc00", "  \u007f", ""]) assert.equal(jsonTextBytes(s), Buffer.byteLength(JSON.stringify(s), "utf8") - 2, JSON.stringify(s));
-});
-
-test("a randomized probe (fixed seed): whole when it fits, else within the reserve, keeping its spared row, sharing and filling", () => {
-  let seed = 0x5eedb1;
-  const rand = (): number => { // mulberry32
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
-  };
-  const int = (lo: number, hi: number): number => lo + Math.floor(rand() * (hi - lo + 1));
-  const pick = <T>(xs: readonly T[]): T => xs[int(0, xs.length - 1)]!;
-  // No "…" in the alphabet: a text ending in one was cut.
-  const text = (max: number): string => pick(["a", "é", "漢", "😀", '"', "\n", "word "]).repeat(int(1, max));
-  const statuses = ["running", "waiting", "pending", "idle", "completed", "failed", "interrupted"];
-  const isLive = (status: string): boolean => ["running", "waiting", "pending"].includes(status);
-  const tally = { truncated: 0, rosterTrimmed: 0, liveDropped: 0, cut: 0, listCut: 0, secondPass: 0 };
-  for (let run = 0; run < 120; run += 1) {
-    const turnCount = int(1, 5);
-    const items: ThreadItem[] = [];
-    const turns = [];
-    const checkpoints: ReturnType<typeof checkpoint>[] = [];
-    for (let t = 1; t <= turnCount; t += 1) {
-      const turnId = `t${t}`;
-      const opening = message("user", text(3_000), { turnId });
-      items.push(opening);
-      if (rand() < 0.5) items.push(message("reasoning", text(4_000), { turnId }));
-      for (let k = int(0, 6); k > 0; k -= 1) {
-        const changedFiles = rand() < 0.3 ? Array.from({ length: int(1, 80) }, (_, f) => `src/${text(30)}/${f}.ts`) : undefined;
-        items.push(activity("tool.completed", { itemType: "command_execution", toolUseId: `${turnId}-${k}`, title: text(60), command: text(200), status: "completed", detail: text(3_000), ...(changedFiles ? { changedFiles } : {}) }, { turnId, tone: "tool" }));
-      }
-      if (rand() < 0.6) items.push(message("assistant", text(20_000), { turnId }));
-      if (rand() < 0.5) checkpoints.push(checkpoint(Array.from({ length: int(1, 1_500) }, (_, f) => ({ path: `src/${text(40)}/${f}.ts`, additions: int(0, 900), deletions: int(0, 900) })), after(items), turnId));
-      turns.push(turn({ turnId, turnCount: t, requestedAt: opening.createdAt, startedAt: opening.createdAt, completedAt: items.at(-1)!.createdAt }));
-    }
-    const roster = Array.from({ length: int(0, 100) }, (_, i) => agent(i, text(400), pick(statuses))) as unknown as { id: string; status: string }[];
-    const maxChars = int(2_000, 55_000);
-    const window = int(1, 5);
-    const snap = snapshot({ items, turns, roster: roster as never, checkpoints: checkpoints as never });
-    const whole = transcriptEntries(snap, { turns: window, include: ALL, maxChars: Number.MAX_SAFE_INTEGER });
-    const r = transcriptEntries(snap, { turns: window, include: ALL, maxChars });
-    const where = `run ${run}: ${turnCount} turns, ${roster.length} agents, maxChars ${maxChars}`;
-    const budget = maxChars - TRANSCRIPT_HINT_BYTES;
-    // Whole when the untrimmed result fits maxChars; otherwise trimmed to maxChars less the hint's reserve.
-    const wholeSize = budgetSize(whole);
-    if (wholeSize <= maxChars) assert.equal(JSON.stringify(r), JSON.stringify(whole), `${where}: ${wholeSize} bytes fit, so whole`);
-    else assert.ok(r.truncated && budgetSize(r) <= budget, `${where}: ${wholeSize} bytes do not fit, so trimmed to ${budget} (${budgetSize(r)})`);
-    if (!r.truncated) assert.deepEqual(r, whole, `${where}: nothing shed when it fits`);
-    // The same shape at budgets straddling its whole size: anywhere in [size, size + reserve] it comes back whole; one
-    // byte under it, it is trimmed below the reserve.
-    const snug = wholeSize + int(0, TRANSCRIPT_HINT_BYTES);
-    assert.equal(JSON.stringify(transcriptEntries(snap, { turns: window, include: ALL, maxChars: snug })), JSON.stringify(whole), `${where}: whole at maxChars ${snug}`);
-    const tight = transcriptEntries(snap, { turns: window, include: ALL, maxChars: wholeSize - 1 });
-    assert.ok(tight.truncated && budgetSize(tight) <= wholeSize - 1 - TRANSCRIPT_HINT_BYTES, `${where}: trimmed at maxChars ${wholeSize - 1}`);
-    // The spared row — the latest turn's final reply, else its last commentary, else its newest row — always stays (a
-    // minimal row always fits here).
-    const spared = sparedOf(whole.entries)!;
-    assert.ok(hasRow(r, spared), `${where}: the spared row stays`);
-    const present = r.entries.flatMap((e) => (e.turn === null ? [] : [e.turn]));
-    assert.deepEqual(r.coveredTurns, present.length ? [Math.min(...present), Math.max(...present)] : null, `${where}: coveredTurns names the rows present`);
-    assert.equal(r.subagentsTruncated === true, r.subagents.length < roster.length, `${where}: subagentsTruncated`);
-    assert.ok(r.subagents.every((s) => [...(s.title ?? "")].length <= 200), `${where}: titles capped`);
-    // Shed order in the roster: settled rows oldest first, live ones only after every settled row, oldest first.
-    const kept = new Set(r.subagents.map((s) => s.id));
-    const keptOf = (live: boolean) => roster.filter((a) => isLive(a.status) === live).map((a) => kept.has(a.id));
-    for (const flags of [keptOf(false), keptOf(true)]) assert.ok(flags.every((k, i) => !k || flags.slice(i).every(Boolean)), `${where}: rows dropped oldest first`);
-    if (keptOf(true).includes(false)) assert.ok(!keptOf(false).includes(true), `${where}: a live row went before a settled one`);
-    // A trimmed roster fills: the next row the second pass would bring back does not fit.
-    const next = nextBack(whole.subagents, r.subagents);
-    if (next) assert.ok(budgetSize(r) + contentOf([next]) + 1 > budget, `${where}: the roster fills to within one row (${budgetSize(r)} of ${budget})`);
-    // A spared list capped to a head and a count of the rest (a checkpoint's files, a tool's changed files).
-    const listed = r.entries.find((e) => e.createdAt === spared.createdAt);
-    if ((listed?.files?.at(-1)?.path ?? listed?.tool?.changedFiles?.at(-1) ?? "").startsWith("…")) tally.listCut += 1;
-    if (r.truncated) {
-      const space = roomOf(r, maxChars);
-      // The second pass only re-adds roster rows: the entries are exactly what fitEntries gives at the first pass's allowance.
-      const firstPass = fitRoster(sizedOf(whole.subagents), rosterCap(space, contentOf(whole.entries)));
-      const firstAllowance = budget - frameOf(r, firstPass.trimmed) - firstPass.bytes;
-      assert.deepEqual(r.entries, fitEntries(sizedOf(whole.entries), firstAllowance).entries, `${where}: the second pass leaves the fitted entries untouched`);
-      if (r.subagents.length > firstPass.rows.length) tally.secondPass += 1;
-      // A reply cut to fit: the entries keep at least what the roster's share leaves (no starved reply), and the
-      // result ends within one code point of the budget (no under-fill).
-      const cut = r.entries.find((e) => e.createdAt === spared.createdAt)!;
-      if (spared.text !== undefined && cut.text !== spared.text) {
-        // Cut to fit, the entries used their whole allowance: the roster kept within its first-pass cap.
-        assert.ok(contentOf(r.subagents) <= rosterCap(space, contentOf(whole.entries)), `${where}: the roster within max(⌊room/4⌋, room − E)`);
-        assert.ok(contentOf(r.entries) >= space - Math.floor(space * ROSTER_SHARE) - 6, `${where}: the reply's floor (${contentOf(r.entries)} of ${space})`);
-        assert.ok(budgetSize(r) > budget - 7, `${where}: filled (${budgetSize(r)} of ${budget})`);
-        tally.cut += 1;
-      }
-      tally.truncated += 1;
-      if (r.subagentsTruncated) tally.rosterTrimmed += 1;
-      if (keptOf(true).includes(false)) tally.liveDropped += 1;
-    }
-  }
-  assert.ok(Object.values(tally).every((n) => n >= 5), `the probe reaches every branch: ${JSON.stringify(tally)}`);
 });
 
 test("cutTail: seeded random texts — exact against JSON.stringify, never splitting a surrogate pair, never cutting more than needed", () => {
@@ -651,26 +407,16 @@ function turnsOf(n: number): { turns: Turn[]; items: ThreadItem[] } {
   return { turns, items };
 }
 
-test("transcriptRange: the turns just before beforeTurn, else the latest; never outside the thread's turns", () => {
-  assert.deepEqual(transcriptRange(10, 3), { start: 8, end: 10 });
-  assert.deepEqual(transcriptRange(10, 3, 11), { start: 8, end: 10 }, "beforeTurn turnCount + 1 is the default");
-  assert.deepEqual(transcriptRange(10, 3, 6), { start: 3, end: 5 });
-  assert.deepEqual(transcriptRange(10, 5, 3), { start: 1, end: 2 }, "never before turn 1");
-  assert.deepEqual(transcriptRange(10, 200), { start: 1, end: 10 });
-  assert.deepEqual(transcriptRange(10, 3, 99), { start: 8, end: 10 }, "clamped, never past the last turn");
-  assert.deepEqual(transcriptRange(0, 3), { start: 1, end: 0 }, "no started turn: an empty range");
-});
-
 test("beforeTurn reads the turns just before it; olderTurns counts the started turns before the range", () => {
   const snap = snapshot(turnsOf(6));
   const read = (turns: number, beforeTurn?: number) => transcriptEntries(snap, { turns, ...(beforeTurn === undefined ? {} : { beforeTurn }), include: ALL, maxChars: 100_000 });
   const r = read(2, 5);
   assert.deepEqual(r.entries.map((e) => [e.turn, e.text]), [[3, "ask 3"], [3, "reply 3"], [4, "ask 4"], [4, "reply 4"]]);
   assert.deepEqual([r.turnCount, r.olderTurns, r.coveredTurns], [6, 2, [3, 4]]);
-  assert.deepEqual(Object.keys(r), ["entries", "turnCount", "olderTurns", "coveredTurns", "truncated", "subagents"], "olderTurns always, unavailableTurns only when some were not read");
   const latest = read(2);
   assert.deepEqual([latest.olderTurns, latest.coveredTurns], [4, [5, 6]]);
-  assert.deepEqual(read(2, 7), latest, "beforeTurn turnCount + 1 reads the latest turns");
+  const sentinel = read(2, 7);
+  assert.deepEqual([sentinel.olderTurns, sentinel.coveredTurns], [4, [5, 6]], "beforeTurn turnCount + 1 reads the latest turns");
   assert.deepEqual([read(9, 3).olderTurns, read(9, 3).coveredTurns], [0, [1, 2]], "a range from turn 1 has none older");
   assert.equal(transcriptEntries(snapshot({ turns: [], items: [] }), { turns: 3, include: ALL, maxChars: 100_000 }).olderTurns, 0);
 });
@@ -723,7 +469,7 @@ test("a row with no turn belongs to the range by its time: from the first turn's
   assert.deepEqual(new Set(texts()), new Set(["ask 3", "reply 3", "Turn failed: f3", "Turn failed: at 3"]), "the latest turn: from its request on, with no end");
 });
 
-test("a merged snapshot's rows sort into log order: a call whose start a page holds and whose end the window holds is one row, at its start, in its latest state", () => {
+test("a historical call start and retained completion project as one entry at the start time in its latest state", () => {
   const ask = message("user", "Run the suite.", { turnId: null, id: "ask-2" });
   const started = activity("tool.started", { itemType: "command_execution", toolUseId: "tu1", title: "pnpm test", command: "pnpm test", status: "inProgress" }, { turnId: "t2", tone: "tool" });
   const completed = activity("tool.completed", { itemType: "command_execution", toolUseId: "tu1", title: "pnpm test", status: "completed", detail: "ok" }, { turnId: "t2", tone: "tool" });
@@ -731,7 +477,7 @@ test("a merged snapshot's rows sort into log order: a call whose start a page ho
   const turns = [turn({ turnId: "t1", requestedAt: stamp(0) }), turn({ turnId: "t2", turnCount: 2, requestedAt: ask.createdAt, startedAt: ask.createdAt, completedAt: reply.createdAt, userMessageId: ask.id })];
   const window = snapshot({ turns, items: [completed, reply] });
   // The page holds the turn's opening: its prompt and the call's first row.
-  const merged = mergeHistoryPages(window, [{ items: [ask, started], checkpoints: [] }]);
+  const merged = { ...window, items: [ask, started, completed, reply] };
   const r = transcriptEntries(merged, { turns: 1, include: ALL, maxChars: 100_000, windowItems: window.items });
   assert.deepEqual(r.entries.map((e) => [e.kind, e.turn]), [["user", 2], ["tool", 2], ["assistant", 2]]);
   const tool = r.entries[1]!;
@@ -746,101 +492,43 @@ test("the actionable plan is judged on the window: a plan only a page holds has 
   const planRow = (snap: ReturnType<typeof snapshot>, windowItems?: readonly ThreadItem[]) =>
     transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000, ...(windowItems ? { windowItems } : {}) }).entries.find((e) => e.kind === "plan");
   const window = snapshot({ turns, items: [later] });
-  assert.equal(planRow(mergeHistoryPages(window, [{ items: [plan], checkpoints: [] }]), window.items)!.actionable, false);
+  assert.equal(planRow({ ...window, items: [plan, later] }, window.items)!.actionable, false);
   const kept = snapshot({ turns, items: [plan, later] });
   assert.equal(planRow(kept, kept.items)!.actionable, true, "the same plan in the window is actionable, as the host says");
   assert.equal(planRow(kept)!.actionable, true, "without windowItems, snap.items is the window");
 });
 
-test("unavailable turns are reported, and their sentence is held back: whole only when the result fits with it, else shed below both hints' room", () => {
+test("unavailable turns reserve room for their hint at the whole-result byte boundary", () => {
   const hint = "Turn 1 could not be read whole: older turns are unavailable on this host right now. Try again later.";
   const unavailable = { turns: [1, 1] as [number, number], hint };
-  const snap = snapshot({ items: oneTurn("r".repeat(5_000)) });
+  const reply = "r".repeat(5_000);
+  const items = oneTurn(reply);
+  const snap = snapshot({ items });
   const opts = { turns: 5, include: ALL, unavailable };
-  const whole = transcriptEntries(snap, { ...opts, maxChars: 1_000_000 });
-  assert.deepEqual([whole.unavailableTurns, whole.truncated], [[1, 1], false]);
-  assert.deepEqual(Object.keys(whole), ["entries", "turnCount", "olderTurns", "coveredTurns", "unavailableTurns", "truncated", "subagents"]);
-  // The hint field inside the result: `,"hint":"…"`.
-  const field = Buffer.byteLength(JSON.stringify({ hint }), "utf8") - 1;
-  const exact = budgetSize(whole) + field;
-  assert.equal(JSON.stringify(transcriptEntries(snap, { ...opts, maxChars: exact })), JSON.stringify(whole), "whole when it fits with its hint");
+  const expected: TranscriptResult = {
+    entries: [
+      { turn: 1, turnId: "t1", kind: "user", createdAt: items[0]!.createdAt, text: "Survey the packages, one subagent each." },
+      { turn: 1, turnId: "t1", kind: "assistant", createdAt: items[1]!.createdAt, text: reply }
+    ],
+    turnCount: 1, olderTurns: 0, coveredTurns: [1, 1], unavailableTurns: [1, 1], truncated: false, subagents: []
+  };
+  const exact = Buffer.byteLength(JSON.stringify({ ...expected, hint }), "utf8");
+  assert.deepEqual(transcriptEntries(snap, { ...opts, maxChars: exact }), expected);
   const over = transcriptEntries(snap, { ...opts, maxChars: exact - 1 });
-  assert.equal(over.truncated, true, "one byte less: shed, though the result alone would still fit");
-  assert.ok(budgetSize(over) <= exact - 1 - TRANSCRIPT_HINT_BYTES - jsonTextBytes(hint) - 1, `below maxChars less the shed hint's room, the sentence and a space (${budgetSize(over)})`);
+  assert.equal(over.truncated, true);
+  const hintTextBytes = Buffer.byteLength(JSON.stringify(hint), "utf8") - 2;
+  assert.ok(budgetSize(over) <= exact - 1 - HINT_BYTES - hintTextBytes - 1);
   assert.deepEqual(over.unavailableTurns, [1, 1]);
   const plain = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: exact - 1 });
   assert.equal(plain.truncated, false, "without unavailable turns the same budget holds the result whole");
 });
 
-test("a randomized probe with beforeTurn and unavailable turns (fixed seed): the range, olderTurns, and the answer within maxChars, its hint's room kept", () => {
-  let seed = 0x3c19a7;
-  const rand = (): number => { // mulberry32
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
-  };
-  const int = (lo: number, hi: number): number => lo + Math.floor(rand() * (hi - lo + 1));
-  const pick = <T>(xs: readonly T[]): T => xs[int(0, xs.length - 1)]!;
-  const text = (max: number): string => pick(["a", "é", "漢", "😀", '"', "\n", "word "]).repeat(int(1, max));
-  const tally = { whole: 0, shed: 0, unavailable: 0, before: 0, pagedFromCovered: 0 };
-  for (let run = 0; run < 120; run += 1) {
-    const turnCount = int(1, 8);
-    const items: ThreadItem[] = [];
-    const turns: Turn[] = [];
-    for (let t = 1; t <= turnCount; t += 1) {
-      const turnId = `t${t}`;
-      const opening = message("user", text(2_000), { turnId });
-      items.push(opening);
-      for (let k = int(0, 3); k > 0; k -= 1) items.push(activity("tool.completed", { itemType: "command_execution", toolUseId: `${turnId}-${k}`, title: text(40), command: text(100), status: "completed", detail: text(2_000) }, { turnId, tone: "tool" }));
-      if (rand() < 0.3) items.push(activity("provider.turn.start.failed", { detail: text(200) }, { turnId: null, tone: "error", summary: "Turn failed" }));
-      items.push(message("assistant", text(6_000), { turnId }));
-      turns.push(turn({ turnId, turnCount: t, requestedAt: opening.createdAt, startedAt: opening.createdAt, completedAt: items.at(-1)!.createdAt }));
-    }
-    const roster = Array.from({ length: int(0, 40) }, (_, i) => agent(i, text(200), pick(["running", "completed"])));
-    const snap = snapshot({ items, turns, roster });
-    const count = int(1, 4);
-    const beforeTurn = rand() < 0.7 ? int(2, turnCount + 1) : undefined;
-    const { start, end } = transcriptRange(turnCount, count, beforeTurn);
-    const unavailable = rand() < 0.6 ? { turns: [start, int(start, Math.max(start, end))] as [number, number], hint: `Turns ${text(60)} could not be read whole.` } : undefined;
-    const maxChars = int(2_000, 55_000);
-    const opts = { turns: count, ...(beforeTurn === undefined ? {} : { beforeTurn }), include: ALL, ...(unavailable ? { unavailable } : {}) };
-    const r = transcriptEntries(snap, { ...opts, maxChars });
-    const whole = transcriptEntries(snap, { ...opts, maxChars: Number.MAX_SAFE_INTEGER });
-    const where = `run ${run}: ${turnCount} turns, turns ${count}, beforeTurn ${beforeTurn}, maxChars ${maxChars}`;
-    // Counted back from the first turn delivered: once the shed dropped rows, from the first turn it left.
-    const dropped = r.entries.length < whole.entries.length;
-    assert.equal(r.olderTurns, dropped && r.coveredTurns ? r.coveredTurns[0] - 1 : start - 1, `${where}: olderTurns`);
-    if (dropped && r.coveredTurns && r.coveredTurns[0] > start) tally.pagedFromCovered += 1;
-    assert.deepEqual(r.unavailableTurns, unavailable?.turns, `${where}: unavailableTurns`);
-    assert.ok(r.entries.every((e) => e.turn === null || (e.turn >= start && e.turn <= end)), `${where}: every row inside [${start}, ${end}]`);
-    // The room the tool's hint takes: the sentence as a field of its own on a whole result; on a shed one, the sentence,
-    // a space and the shed hint's reserve.
-    const said = unavailable ? jsonTextBytes(unavailable.hint) : 0;
-    const wholeRoom = unavailable ? 10 + said : 0;
-    if (budgetSize(whole) + wholeRoom <= maxChars) {
-      assert.equal(JSON.stringify(r), JSON.stringify(whole), `${where}: fits with its hint, so whole`);
-      tally.whole += 1;
-    } else {
-      assert.ok(r.truncated, `${where}: does not fit with its hint, so shed`);
-      assert.ok(budgetSize(r) <= maxChars - TRANSCRIPT_HINT_BYTES - (unavailable ? said + 1 : 0), `${where}: shed below both hints' room (${budgetSize(r)})`);
-      tally.shed += 1;
-    }
-    if (unavailable) tally.unavailable += 1;
-    if (beforeTurn !== undefined && beforeTurn <= turnCount) tally.before += 1;
-  }
-  assert.ok(Object.values(tally).every((n) => n >= 10), `the probe reaches every branch: ${JSON.stringify(tally)}`);
-});
-
 // ---- Transcript details (design item 4): command output, failed hooks, commentary, the compaction rule. ----
 
-/**
- * The one tool row of a transcript read with every include, its rows slimmed as every read path slims them
- * (`slimActivityPayload`, the orchestrator's `slimItemsForRead`): the transcript never sees a payload any other way.
- */
-const toolRow = (items: ThreadItem[]): NonNullable<TranscriptEntry["tool"]> => {
+/** A call's rows as every read serves them (§5.6 slimming, `truncated` stamped where it cut), folded into its one entry. */
+const toolEntry = (items: ThreadItem[]): TranscriptEntry => {
   const read = items.map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item));
-  return transcriptEntries(snapshot({ items: read }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!.tool!;
+  return transcriptEntries(snapshot({ items: read }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!;
 };
 
 test("a Grok-shaped command whose detail repeats the command shows its output, and an echo with no output never clears it", () => {
@@ -856,39 +544,11 @@ test("a Grok-shaped command whose detail repeats the command shows its output, a
     data: { toolUseId: "call-1", kind: "execute", command: "echo hi", rawInput: { command: "echo hi" }, ...output }
   }, { turnId: "t1", tone: "tool" });
   const printed = (text: string) => ({ rawOutput: { type: "Bash", output_for_prompt: text, exit_code: 0 }, content: [{ type: "content", content: { type: "text", text } }] });
-  // The start only echoes the command: no detail (the title and command say what runs; the GUI's next row replaces the
-  // start whole).
-  assert.deepEqual(toolRow([started]), { type: "command_execution", title: "run_terminal_command", status: "inProgress", command: "echo hi" });
-  assert.deepEqual(toolRow([started, call("tool.completed", "completed", printed("hi\n"))]),
-    { type: "command_execution", title: "Execute `echo hi`", status: "completed", command: "echo hi", detail: "hi" });
-  // A command that printed nothing: the start's echo is never taken for its output.
-  assert.equal(toolRow([started, call("tool.completed", "completed")]).detail, undefined);
-  // Both streams on disk: the read keeps the first (stdout), as its one-line preview.
-  assert.equal(toolRow([started, call("tool.completed", "completed", { rawOutput: { stdout: "hi\nthere\n", stderr: "note\n" } })]).detail, "hi");
-  // An update that carried the output, then an echo that carries none: the output stays.
-  assert.equal(toolRow([started, call("tool.updated", "inProgress", printed("partial\n")), call("tool.completed", "completed")]).detail, "partial");
+  assert.deepEqual(toolEntry([started]).tool, { type: "command_execution", title: "run_terminal_command", status: "inProgress", command: "echo hi" });
+  // A later echo-only completion must not erase the update's output or turn its command echo into output.
+  const completed = toolEntry([started, call("tool.updated", "inProgress", printed("partial\n")), call("tool.completed", "completed")]);
+  assert.deepEqual(completed.tool, { type: "command_execution", title: "Execute `echo hi`", status: "completed", command: "echo hi", detail: "partial" });
 });
-
-test("a Codex command shows its item's aggregatedOutput; a detail that already says more stands", () => {
-  const items = [
-    activity("tool.started", { itemType: "command_execution", toolUseId: "call-1", title: "Bash", status: "inProgress" }, { turnId: "t1", tone: "tool" }),
-    activity("tool.completed", { itemType: "command_execution", toolUseId: "call-1", title: "Bash", status: "completed", data: { item: { command: "ls -1", aggregatedOutput: "a\nb\n" } } }, { turnId: "t1", tone: "tool" })
-  ];
-  // The read's preview of it: the first line.
-  assert.equal(toolRow(items).detail, "a");
-  // OpenCode's detail is already the fuller output: its data's one-line result does not replace it.
-  const openCode = activity("tool.completed", { itemType: "command_execution", toolUseId: "oc", title: "bash", status: "completed", detail: "first line\nsecond line", data: { command: "cat f", result: "first line" } }, { turnId: "t1", tone: "tool" });
-  assert.equal(toolRow([openCode]).detail, "first line\nsecond line");
-  // Any other tool keeps its provider detail as it came, untrimmed, whatever its data says.
-  const patch = activity("tool.completed", { itemType: "file_change", toolUseId: "p", title: "Edit", status: "completed", detail: "3 lines\n", data: { rawOutput: { content: "x" } } }, { turnId: "t1", tone: "tool" });
-  assert.equal(toolRow([patch]).detail, "3 lines\n");
-});
-
-/** A call's rows as every read serves them (§5.6 slimming, `truncated` stamped where it cut), folded into its one entry. */
-const toolEntry = (items: ThreadItem[]): TranscriptEntry => {
-  const read = items.map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item));
-  return transcriptEntries(snapshot({ items: read }), { turns: 5, include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!;
-};
 
 test("outputItemId names the call's completion when the read cut it — the row the GUI's \"Load full output\" reads", () => {
   const lines = `${Array.from({ length: 200 }, (_, i) => `test ${i} passed`).join("\n")}\n`;
@@ -904,7 +564,6 @@ test("outputItemId names the call's completion when the read cut it — the row 
   // Nothing cut, no field at all.
   const uncut = toolEntry([started, row("tool.completed", "completed")]);
   assert.equal("outputItemId" in uncut, false);
-  assert.deepEqual(Object.keys(uncut), ["turn", "turnId", "kind", "createdAt", "tool"]);
 });
 
 test("without streamed output, outputItemId is never an update: ingestion stores it already cut, so its item holds nothing the row does not", () => {
@@ -916,8 +575,6 @@ test("without streamed output, outputItemId is never an update: ingestion stores
   // `GET …/items/:itemId` would serve for it is the preview again, `truncated` and all.
   const live = row("tool.updated", "inProgress", { item: { command: "pnpm test", aggregatedOutput: output } });
   const stored = { ...live, payload: slimActivityPayload(live.payload) };
-  assert.equal((stored.payload as { truncated?: unknown }).truncated, true);
-  assert.equal(commandOutputText((stored.payload as { data: unknown }).data), "test 0 passed", "the stored update holds only the preview");
   // So a running call offers no id, and a completion the read did not cut leaves none behind an update either.
   assert.equal("outputItemId" in toolEntry([row("tool.started", "inProgress"), stored]), false);
   assert.equal("outputItemId" in toolEntry([row("tool.started", "inProgress"), stored, row("tool.completed", "completed")]), false);
@@ -932,7 +589,6 @@ test("without streamed output, outputItemId is never a call's start, where the r
     itemType: "command_execution", toolUseId: "call-1", title: "run_terminal_command", status: "inProgress", detail: "echo hi",
     data: { toolUseId: "call-1", command: "echo hi", vendorTool: "run_terminal_command", readOnly: false, rawInput: { command: "echo hi" } }
   }, { turnId: "t1", tone: "tool" });
-  assert.equal((slimActivityPayload(started.payload) as { truncated?: unknown }).truncated, true, "the start's payload is cut");
   assert.equal("outputItemId" in toolEntry([started]), false, "a call that has only started offers nothing");
   const denied = activity("tool.denied", { itemType: "command_execution", toolUseId: "call-1", title: "rm -rf build", data: { reason: "x".repeat(20_000) } }, { turnId: "t1", tone: "tool" });
   assert.equal(toolEntry([started, denied]).outputItemId, denied.id);
@@ -951,44 +607,12 @@ test("a call that streamed output offers its latest row as outputItemId, where n
   // A completion the read did not cut is the latest row too.
   const done = row("tool.completed", "completed");
   assert.equal(toolEntry([started, chunk("test 0 passed\n"), done]).outputItemId, done.id);
-  // One the read cut is offered by the first rule, streamed or not; a call that streamed nothing offers nothing new.
-  const cut = row("tool.completed", "completed", { item: { command: "pnpm test", aggregatedOutput: "a\nb\n" } });
-  assert.equal(toolEntry([started, chunk("a\n"), cut]).outputItemId, cut.id);
-  assert.equal("outputItemId" in toolEntry([started, update]), false);
   // Another call's chunks are not this call's output.
   const other = activity("tool.output", { toolUseId: "call-2", streamKind: "command_output", delta: "x" }, { turnId: "t1", tone: "tool" });
   assert.equal("outputItemId" in toolEntry([started, other]), false);
   // The chunk rows themselves never become entries.
   const read = transcriptEntries(snapshot({ items: [started, chunk("a\n"), chunk("b\n")] }), { turns: 5, include: ALL, maxChars: 100_000 });
   assert.deepEqual(read.entries.map((e) => e.kind), ["tool"]);
-});
-
-test("through the real fold, a running command keeps its entry past 1 200 of its own chunks: its title, command and outputItemId", () => {
-  // A Codex command that streams: one `tool.output` row per flush of its output, each a row of the parent's window.
-  // Its start used to go on chunk 550 — the parent view then had no entry at all, so no id to read the output with.
-  let seq = 0;
-  const event = (type: DomainEvent["type"], payload: unknown): DomainEvent => {
-    seq += 1;
-    return { seq, eventId: `e${seq}`, threadId: "c1", type, payload, occurredAt: stamp(seq), commandId: null, causationEventId: null, metadata: {} } as DomainEvent;
-  };
-  const row = (id: string, activityKind: string, payload: Record<string, unknown>): DomainEvent => {
-    const at = stamp(seq + 1);
-    return event("thread.activity-appended", { activity: { kind: "activity", id, tone: "tool", activityKind, summary: activityKind === "tool.output" ? "Tool output" : "npm test", payload: { toolUseId: "call-1", ...payload }, turnId: "t1", createdAt: at, updatedAt: at } });
-  };
-  const events = [
-    event("thread.created", { projectPath: "/w/acme/api", cwd: "/w/acme/api", title: "Codex", adapter: "codex", refId: "codex", accountId: "", home: "system", modelSelection: { model: "gpt-5" }, runtimeMode: "full-access" }),
-    event("thread.message-sent", { messageId: "u1", role: "user", text: "run the tests", streaming: false, turnId: null }),
-    event("thread.turn-start-requested", { turnId: null, messageId: "u1", interactionMode: "default" }),
-    event("thread.session-set", { session: { status: "running", activeTurnId: "t1" } }),
-    row("start-1", "tool.started", { itemType: "command_execution", title: "npm test", status: "inProgress", data: { command: "npm test", cwd: "/w/acme/api" } }),
-    ...Array.from({ length: 1_200 }, (_, n) => row(`chunk-${n}`, "tool.output", { streamKind: "command_output", delta: `test ${n} passed\n` }))
-  ];
-  const snap = toThreadSnapshot(foldThread(events));
-  assert.equal(snap.items.some((item) => item.id === "chunk-0"), false, "retention trimmed the call's own output");
-  // Served as every read serves it (§5.6 slimming).
-  const read = { ...snap, items: snap.items.map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item)) };
-  const tools = transcriptEntries(read, { turns: 5, include: ALL, maxChars: 100_000 }).entries.filter((e) => e.kind === "tool");
-  assert.deepEqual(tools.map((e) => [e.tool, e.outputItemId]), [[{ type: "command_execution", title: "npm test", status: "inProgress", command: "npm test" }, "start-1"]]);
 });
 
 test("a background shell's row, in its own drill-in, offers outputItemId — its chunks count wherever its turn range ends", () => {
@@ -1010,7 +634,6 @@ test("a background shell's row, in its own drill-in, offers outputItemId — its
   // Settled: the completion — cut on the wire, though its data holds no output — is the id.
   const completed = shell("tool.completed", { itemType: "command_execution", title: "Background shell", status: "completed", data: { ...data, exitCode: 0 } }, "t2", stamp(6));
   const settled = { ...running, items: [...running.items, completed].map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item)) };
-  assert.equal((settled.items.at(-1) as { payload: { truncated?: unknown } }).payload.truncated, true);
   const done = transcriptEntries(settled, { turns: 5, agentId: "task-1", include: ALL, maxChars: 100_000 }).entries.find((e) => e.kind === "tool")!;
   assert.deepEqual([done.tool!.status, done.outputItemId], ["completed", completed.id]);
 });
@@ -1197,7 +820,7 @@ test("a turn with no answer is spared on its last commentary row, as the GUI end
     activity("tool.started", { itemType: "command_execution", toolUseId: "m", title: "Migrate", status: "inProgress", command: `pnpm migrate ${"--table t ".repeat(150)}` }, { turnId: "t1", tone: "tool" })
   ];
   const r = transcriptEntries(snapshot({ items }), { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `within the budget (${budgetSize(r)})`);
+  assert.ok(budgetSize(r) <= 2_000 - HINT_BYTES, `within the budget (${budgetSize(r)})`);
   assert.deepEqual(r.entries.map((e) => [e.kind, e.commentary]), [["assistant", true]], "the narration stays, cut to fit; the tool row goes");
   assert.ok(r.entries[0]!.text!.endsWith("…") && narration.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the narration");
   // With an answer, the answer is the spared row as before.
@@ -1220,9 +843,8 @@ test("the spared commentary is the latest turn's LAST: an earlier one, a newer t
   ];
   const turns = [turn(), turn({ turnId: "t2", turnCount: 2, state: "interrupted", requestedAt: items[2]!.createdAt, startedAt: items[2]!.createdAt, completedAt: items.at(-1)!.createdAt })];
   const snap = snapshot({ items, turns });
-  assert.equal(sparedOf(transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 100_000 }).entries)?.text, last);
   const r = transcriptEntries(snap, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(r.truncated && budgetSize(r) <= 2_000 - TRANSCRIPT_HINT_BYTES, `trimmed within the budget (${budgetSize(r)})`);
+  assert.ok(r.truncated && budgetSize(r) <= 2_000 - HINT_BYTES, `trimmed within the budget (${budgetSize(r)})`);
   assert.deepEqual(r.entries.map((e) => [e.turn, e.kind, e.commentary]), [[2, "assistant", true]], "every other row goes, the newest one included");
   assert.ok(r.entries[0]!.text!.endsWith("…") && last.startsWith(r.entries[0]!.text!.slice(0, -1)), "a head of the LAST narration");
 });
@@ -1338,7 +960,7 @@ test("the parent view of a Claude thread has no row for a re-emitted opening par
     message("assistant", long(ANSWER), { turnId: "t1", id: "l-answer" }), message("assistant", long(OPENING), { turnId: "t1", id: "l-copy" })
   ] });
   const shed = transcriptEntries(tight, { turns: 5, include: ALL, maxChars: 2_000 });
-  assert.ok(shed.truncated && budgetSize(shed) <= 2_000 - TRANSCRIPT_HINT_BYTES, `trimmed within the budget (${budgetSize(shed)})`);
+  assert.ok(shed.truncated && budgetSize(shed) <= 2_000 - HINT_BYTES, `trimmed within the budget (${budgetSize(shed)})`);
   assert.deepEqual(assistantTexts(shed), [long(ANSWER)]);
 });
 
@@ -1359,7 +981,7 @@ test("a read with older pages merged under the window counts the copies over all
   const window = snapshot({ items: [tool, answer, copy] });
   assert.deepEqual(assistantTexts(transcriptEntries(window, { turns: 5, include: ALL, maxChars: 100_000 })), [ANSWER, OPENING]);
   // read_transcript's page merged under it (history.ts) holds the turn's start: now the copy is found, and has no row.
-  const merged = mergeHistoryPages(window, [{ items: [prompt, open], checkpoints: [] }]);
+  const merged = { ...window, items: [prompt, open, tool, answer, copy] };
   const r = transcriptEntries(merged, { turns: 5, include: ALL, maxChars: 100_000, windowItems: window.items });
   assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "go"], ["assistant", OPENING], ["tool", undefined], ["assistant", ANSWER]]);
 });

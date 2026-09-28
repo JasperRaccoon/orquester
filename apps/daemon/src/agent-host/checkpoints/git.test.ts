@@ -1,14 +1,14 @@
 /**
  * The bounded git runner. The "git" here is a stand-in script, because what is
  * under test is the bounding — env, exit handling, timeout, output cap,
- * transient retry and the permit pool — not git itself. The real thing is
+ * transient retry — not git itself. The real thing is
  * exercised end-to-end in `service.test.ts`.
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -16,9 +16,7 @@ import {
   GitExitError,
   GitOutputLimitError,
   GitTimeoutError,
-  Semaphore,
-  createGitRunner,
-  isTransientGitExit
+  createGitRunner
 } from "./git.ts";
 
 const FAKE = `
@@ -32,12 +30,14 @@ if (mode === "env") {
 } else if (mode === "spew") {
   process.stdout.write("x".repeat(Number(rest[0])));
 } else if (mode === "hang") {
+  process.stdout.write("ready\\n");
   setInterval(() => {}, 1000);
 } else if (mode === "stdin") {
   const chunks = [];
   process.stdin.on("data", (chunk) => chunks.push(chunk));
   process.stdin.on("end", () => process.stdout.write(Buffer.concat(chunks).toString("hex")));
-} else if (mode === "flaky") {
+} else if (mode === "flaky" || mode === "flaky-stream") {
+  if (mode === "flaky-stream") process.stdout.write("record\\0");
   let count = 0;
   try { count = Number(readFileSync(rest[0], "utf8")); } catch {}
   count += 1;
@@ -49,7 +49,6 @@ if (mode === "env") {
   process.stdout.write("recovered after " + count);
 } else if (mode === "trace") {
   appendFileSync(rest[0], "start\\n");
-  setTimeout(() => { appendFileSync(rest[0], "end\\n"); }, 60);
 }
 `;
 
@@ -58,16 +57,16 @@ async function fakeGit(t: { after(fn: () => unknown): void }): Promise<{
   script: string;
 }> {
   const dir = await mkdtemp(join(tmpdir(), "orq-fakegit-"));
-  const script = join(dir, "fake-git.mjs");
-  await writeFile(script, FAKE, "utf8");
+  const script = join(dir, "git");
+  await writeFile(script, `#!${process.execPath}\n${FAKE}`, "utf8");
+  await chmod(script, 0o700);
   t.after(() => rm(dir, { recursive: true, force: true }));
   return { dir, script };
 }
 
-function runnerFor(env: Record<string, string> = {}) {
+function runnerFor(script: string, env: Record<string, string> = {}) {
   return createGitRunner({
-    gitEnv: { PATH: "/usr/bin:/bin", ...env },
-    resolveGitBinary: () => process.execPath
+    gitEnv: { PATH: `${dirname(script)}:/usr/bin:/bin`, ...env }
   });
 }
 
@@ -78,11 +77,11 @@ test("the child env is exactly what was configured, plus the runner's defaults",
     delete process.env.ORQ_CHECKPOINT_CANARY;
   });
 
-  const runner = runnerFor({ HOME: "/tmp/home" });
+  const runner = runnerFor(script, { HOME: "/tmp/home" });
   const result = await runner.run({
     operation: "test",
     cwd: process.cwd(),
-    args: [script, "env"],
+    args: ["env"],
     env: { GIT_INDEX_FILE: "/tmp/idx", LC_ALL: undefined }
   });
   const env = JSON.parse(result.stdout) as Record<string, string>;
@@ -96,10 +95,10 @@ test("the child env is exactly what was configured, plus the runner's defaults",
 
 test("a non-zero exit throws unless the caller allows it", async (t) => {
   const { script } = await fakeGit(t);
-  const runner = runnerFor();
+  const runner = runnerFor(script);
 
   await assert.rejects(
-    runner.run({ operation: "test", cwd: process.cwd(), args: [script, "exit", "3", "boom"] }),
+    runner.run({ operation: "test", cwd: process.cwd(), args: ["exit", "3", "boom"] }),
     (error: unknown) => {
       assert.ok(error instanceof GitExitError);
       assert.equal(error.exitCode, 3);
@@ -112,7 +111,7 @@ test("a non-zero exit throws unless the caller allows it", async (t) => {
   const allowed = await runner.run({
     operation: "test",
     cwd: process.cwd(),
-    args: [script, "exit", "3", "boom"],
+    args: ["exit", "3", "boom"],
     allowNonZeroExit: true
   });
   assert.equal(allowed.exitCode, 3);
@@ -121,12 +120,12 @@ test("a non-zero exit throws unless the caller allows it", async (t) => {
 
 test("a hung child is killed at the deadline", async (t) => {
   const { script } = await fakeGit(t);
-  const runner = runnerFor();
+  const runner = runnerFor(script);
   await assert.rejects(
     runner.run({
       operation: "test",
       cwd: process.cwd(),
-      args: [script, "hang"],
+      args: ["hang"],
       timeoutMs: 120
     }),
     GitTimeoutError
@@ -135,12 +134,12 @@ test("a hung child is killed at the deadline", async (t) => {
 
 test("output over the cap truncates, or fails when the answer must be whole", async (t) => {
   const { script } = await fakeGit(t);
-  const runner = runnerFor();
+  const runner = runnerFor(script);
 
   const truncated = await runner.run({
     operation: "test",
     cwd: process.cwd(),
-    args: [script, "spew", "5000"],
+    args: ["spew", "5000"],
     maxOutputBytes: 100,
     appendTruncationMarker: true
   });
@@ -152,7 +151,7 @@ test("output over the cap truncates, or fails when the answer must be whole", as
     runner.run({
       operation: "test",
       cwd: process.cwd(),
-      args: [script, "spew", "5000"],
+      args: ["spew", "5000"],
       maxOutputBytes: 100,
       outputMode: "error"
     }),
@@ -162,13 +161,13 @@ test("output over the cap truncates, or fails when the answer must be whole", as
 
 test("a transient lock failure is retried, and only when the caller asked", async (t) => {
   const { dir, script } = await fakeGit(t);
-  const runner = runnerFor();
+  const runner = runnerFor(script);
 
   const counter = join(dir, "attempts-retry");
   const recovered = await runner.run({
     operation: "test",
     cwd: process.cwd(),
-    args: [script, "flaky", counter, "2"],
+    args: ["flaky", counter, "2"],
     retryTransient: true
   });
   assert.equal(recovered.stdout, "recovered after 3");
@@ -178,7 +177,7 @@ test("a transient lock failure is retried, and only when the caller asked", asyn
     runner.run({
       operation: "test",
       cwd: process.cwd(),
-      args: [script, "flaky", other, "2"]
+      args: ["flaky", other, "2"]
     }),
     (error: unknown) => {
       assert.ok(error instanceof GitExitError);
@@ -193,7 +192,7 @@ test("a transient lock failure is retried, and only when the caller asked", asyn
     runner.run({
       operation: "test",
       cwd: process.cwd(),
-      args: [script, "flaky", stubborn, "99"],
+      args: ["flaky", stubborn, "99"],
       retryTransient: true
     }),
     GitExitError
@@ -202,60 +201,20 @@ test("a transient lock failure is retried, and only when the caller asked", asyn
 
 test("stdin reaches the child byte for byte", async (t) => {
   const { script } = await fakeGit(t);
-  const runner = runnerFor();
+  const runner = runnerFor(script);
   const payload = "delete refs/x\0\0delete refs/y\0\0";
   const result = await runner.run({
     operation: "test",
     cwd: process.cwd(),
-    args: [script, "stdin"],
+    args: ["stdin"],
     stdin: payload
   });
   assert.equal(result.stdout, Buffer.from(payload, "utf8").toString("hex"));
 });
 
-test("the permit pool never lets more than its count run at once", async (t) => {
-  const { dir, script } = await fakeGit(t);
-  const trace = join(dir, "trace.log");
-  const runner = createGitRunner({
-    gitEnv: { PATH: "/usr/bin:/bin" },
-    maxConcurrentGit: 1,
-    resolveGitBinary: () => process.execPath
-  });
-
-  await Promise.all(
-    [0, 1, 2].map(() =>
-      runner.run({ operation: "test", cwd: process.cwd(), args: [script, "trace", trace] })
-    )
-  );
-
-  const lines = (await readFile(trace, "utf8")).trim().split("\n");
-  assert.deepEqual(lines, ["start", "end", "start", "end", "start", "end"]);
-});
-
-test("Semaphore hands out exactly its permits and releases once", async () => {
-  const semaphore = new Semaphore(2);
-  const first = await semaphore.acquire();
-  const second = await semaphore.acquire();
-  let thirdAcquired = false;
-  const third = semaphore.acquire().then((release) => {
-    thirdAcquired = true;
-    return release;
-  });
-
-  await Promise.resolve();
-  assert.equal(thirdAcquired, false, "the third caller waits");
-
-  first();
-  first(); // a double release must not create a permit out of thin air
-  const release = await third;
-  assert.equal(thirdAcquired, true);
-  release();
-  second();
-});
-
 test("R5 #13: a streaming scanner is never replayed by the retry", async (t) => {
   const { dir, script } = await fakeGit(t);
-  const runner = runnerFor();
+  const runner = runnerFor(script);
   const counter = join(dir, "attempts-scanner");
   const chunks: string[] = [];
 
@@ -265,20 +224,20 @@ test("R5 #13: a streaming scanner is never replayed by the retry", async (t) => 
     runner.run({
       operation: "test",
       cwd: process.cwd(),
-      args: [script, "flaky", counter, "2"],
+      args: ["flaky-stream", counter, "2"],
       retryTransient: true,
       onStdoutChunk: (chunk) => chunks.push(chunk.toString("utf8"))
     }),
     GitExitError
   );
   assert.equal((await readFile(counter, "utf8")).trim(), "1", "the command ran exactly once");
-  assert.deepEqual(chunks, [], "and the scanner was never fed twice");
+  assert.equal(chunks.join(""), "record\0", "the scanner receives one real record, never a replay");
 });
 
 test("Q1 #44: an already-aborted signal never spawns a process", async (t) => {
   const { dir, script } = await fakeGit(t);
   const trace = join(dir, "aborted-trace.log");
-  const runner = runnerFor();
+  const runner = runnerFor(script);
   const controller = new AbortController();
   controller.abort();
 
@@ -286,7 +245,7 @@ test("Q1 #44: an already-aborted signal never spawns a process", async (t) => {
     runner.run({
       operation: "test",
       cwd: process.cwd(),
-      args: [script, "trace", trace],
+      args: ["trace", trace],
       signal: controller.signal
     }),
     GitAbortedError
@@ -296,28 +255,40 @@ test("Q1 #44: an already-aborted signal never spawns a process", async (t) => {
 
 test("Q1 #44: an abort mid-run kills the child and reports the abort", async (t) => {
   const { script } = await fakeGit(t);
-  const runner = runnerFor();
+  const runner = runnerFor(script);
   const controller = new AbortController();
-
+  let ready!: () => void;
+  const started = new Promise<void>((resolve) => { ready = resolve; });
   const pending = runner.run({
     operation: "test",
     cwd: process.cwd(),
-    args: [script, "hang"],
-    // Generous timeout: the abort, not the deadline, must be what ends this.
+    args: ["hang"],
     timeoutMs: 30_000,
     allowNonZeroExit: true,
-    signal: controller.signal
+    signal: controller.signal,
+    onStdoutChunk: () => ready()
   });
+  const rejected = assert.rejects(pending, GitAbortedError);
+  await started;
   controller.abort();
-
-  await assert.rejects(pending, GitAbortedError);
+  await rejected;
 });
 
-test("only real lock/ENOENT noise is classified as transient", () => {
-  assert.equal(
-    isTransientGitExit("fatal: Unable to create '/r/.git/index.lock': File exists."),
-    true
-  );
-  assert.equal(isTransientGitExit("error: open(\"a.txt\"): No such file or directory"), true);
-  assert.equal(isTransientGitExit("error: pathspec 'nope' did not match any file"), false);
+test("only real lock/ENOENT noise is classified as transient", async (t) => {
+  const { script } = await fakeGit(t);
+  const runner = runnerFor(script);
+  for (const [stderr, retryable] of [
+    ["fatal: Unable to create '/r/.git/index.lock': File exists.", true],
+    ['error: open("a.txt"): No such file or directory', true],
+    ["error: pathspec 'nope' did not match any file", false]
+  ] as const) {
+    await assert.rejects(
+      runner.run({ operation: "test", cwd: process.cwd(), args: ["exit", "1", stderr] }),
+      (error: unknown) => {
+        assert.ok(error instanceof GitExitError);
+        assert.equal(error.retryable, retryable);
+        return true;
+      }
+    );
+  }
 });

@@ -14,7 +14,7 @@ import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
 import { byAttention } from "./watch.ts";
 
-export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
+const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
 const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
 const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("Model options by id, e.g. {\"effort\":\"high\",\"thinking\":true}. `effort` works for every agent.");
 const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
@@ -368,12 +368,12 @@ const closeSession = defineTool({
 });
 
 /** How long revert_session waits for the host to finish the rewind it accepted. */
-export const REWIND_WAIT_MS = 10_000;
+const REWIND_WAIT_MS = 10_000;
 /**
  * How long that wait goes without reading the thread again when no bus event about the session wakes it first: a
  * rewind's failure row moves nothing on the session's summary, so no event may ever announce it.
  */
-export const REWIND_RECHECK_MS = 1_000;
+const REWIND_RECHECK_MS = 1_000;
 /** What §5.5 step 6 appends, as an `error` activity, for any rewind that failed (orchestrator.ts `revertEffect`). */
 const REVERT_FAILED_ACTIVITY_KIND = "checkpoint.revert.failed";
 

@@ -22,16 +22,12 @@ import {
 
 import { projectClaudeHistory } from "../adapters/claude/project-history.ts";
 import { projectCodexHistory } from "../adapters/codex/history.ts";
-import {
-  GROK_HISTORY_RAW_METHOD,
-  projectGrokHistory
-} from "../adapters/grok/history.ts";
+import { projectGrokHistory } from "../adapters/grok/history.ts";
 import { projectOpenCodeHistory } from "../adapters/opencode/history.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createIngestion } from "./index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen,
@@ -42,7 +38,6 @@ const THREAD_ID = "t1";
 
 function harness() {
   const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
   const liveness = new RecordingLiveness();
   const ingestion = createIngestion({
@@ -50,14 +45,11 @@ function harness() {
     liveness,
     clock,
     idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer,
-    slim: (payload) => payload,
     placeholderCheckpoint: () => {
       throw new Error("history must never mint a checkpoint");
     }
   });
-  return { ingestion, sink, liveness, timers };
+  return { ingestion, sink, liveness };
 }
 
 async function replay(events: readonly RuntimeEvent[]) {
@@ -293,7 +285,6 @@ describe("E6: a replayed transcript rebuilds the timeline", () => {
     for (const event of events) {
       assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
     }
-    assert.equal(events[0]?.raw?.method, GROK_HISTORY_RAW_METHOD);
 
     const { sink, liveness } = await replay(events);
     assert.deepEqual(roleText(sink.events()), ["user:what changed?", "assistant:Three files."]);
@@ -420,6 +411,7 @@ describe("E6: a replayed row never looks live", () => {
         { turnId: "turn-1", itemId: "r1" }
       )
     ]);
+    assert.deepEqual(roleText(sink.events()), ["user:hi", "reasoning:thinking"]);
     for (const message of sink.messages()) {
       assert.equal(message.payload.streaming, false);
     }

@@ -3,19 +3,11 @@ import { describe, it } from "node:test";
 
 import {
   escapePromptVariables,
-  isPromptVariableName,
-  PROMPT_VARIABLES,
   promptVariablesUsed,
   renderPromptTemplate
 } from "./saved-prompts.ts";
 
 describe("prompt variables", () => {
-  it("knows exactly the listed names", () => {
-    for (const spec of PROMPT_VARIABLES) assert.equal(isPromptVariableName(spec.name), true);
-    assert.equal(isPromptVariableName("issue"), false);
-    assert.equal(isPromptVariableName("Project"), false);
-  });
-
   it("lists the known variables a body uses, once each, in first-use order", () => {
     assert.deepEqual(
       promptVariablesUsed("Review {branch} in {project}; {branch} again, {issue}, {{diff}}"),

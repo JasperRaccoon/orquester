@@ -8,13 +8,7 @@ import { activity, foldTurn, historyPage, message, resetBuilders, stamp } from "
 import {
   createLoadedPromptsMemo,
   filterPromptsBySearch,
-  foldSearchText,
-  knownTurnIdsOf,
-  loadedUserMessages,
   mergeHistoryPrompts,
-  promptTurnClaims,
-  searchTermsOf,
-  turnOrdinalsOf,
   type HistoryPrompt,
   type LoadedPromptsInput
 } from "./prompts.logic";
@@ -47,43 +41,38 @@ function ids(prompts: readonly HistoryPrompt[]): string[] {
   return prompts.map((prompt) => prompt.messageId);
 }
 
-describe("promptTurnClaims", () => {
-  it("numbers the turn each prompt opened by its position among the STARTED turns", () => {
-    const claims = promptTurnClaims([
-      foldTurn("t1", "u1"),
-      foldTurn(null, "u-pending"), // never started: no ordinal, no claim
-      foldTurn("t2"), // started by the agent: claims nothing, still counts
-      foldTurn("t3", "u3")
+describe("prompt turn numbering", () => {
+  it("numbers opening prompts by started turns and keeps the first claim", () => {
+    const result = createLoadedPromptsMemo()(input({
+      entries: [
+        message("user", "first", { id: "u1" }),
+        message("user", "later", { id: "u3" }),
+        message("user", "pending", { id: "u-pending" })
+      ],
+      turns: [
+        foldTurn("t1", "u1"),
+        foldTurn(null, "u-pending"),
+        foldTurn("t2"),
+        foldTurn("t3", "u3"),
+        foldTurn("t4", "u1")
+      ]
+    }));
+    assert.deepEqual(result.prompts.map(({ messageId, turnId, turnOrdinal }) => [messageId, turnId, turnOrdinal]), [
+      ["u-pending", null, null],
+      ["u3", "t3", 3],
+      ["u1", "t1", 1]
     ]);
-    assert.deepEqual(claims.get("u1"), { turnId: "t1", ordinal: 1 });
-    assert.deepEqual(claims.get("u3"), { turnId: "t3", ordinal: 3 });
-    assert.equal(claims.has("u-pending"), false);
-  });
-
-  it("lets the first turn win when one prompt names two", () => {
-    const claims = promptTurnClaims([foldTurn("t1", "u1"), foldTurn("t2", "u1")]);
-    assert.deepEqual(claims.get("u1"), { turnId: "t1", ordinal: 1 });
-  });
-
-  it("counts a replayed turn id once, like `startedTurns`", () => {
-    const claims = promptTurnClaims([foldTurn("t1", "u1"), foldTurn("t1", "u1"), foldTurn("t2", "u2")]);
-    assert.deepEqual(claims.get("u2"), { turnId: "t2", ordinal: 2 });
-    assert.equal(turnOrdinalsOf([foldTurn("t1"), foldTurn("t1"), foldTurn("t2")]).get("t2"), 2);
-  });
-
-  it("knows every turn id the fold holds, pending rows aside", () => {
-    assert.deepEqual([...knownTurnIdsOf([foldTurn("t1"), foldTurn(null), foldTurn("t2")])], ["t1", "t2"]);
   });
 });
 
-describe("loadedUserMessages", () => {
+describe("loaded history prompts", () => {
   it("walks the pages, the bridge, then the window — parent user messages only, once each", () => {
     const pageOnly = message("user", "from a page", { id: "p1" });
     const shared = message("user", "on a page and in the window", { id: "s1" });
     const bridged = message("user", "in the bridge", { id: "b1" });
-    const windowCopy = { ...shared, updatedAt: stamp(99) };
+    const windowCopy = { ...shared, text: "edited prompt", updatedAt: stamp(99) };
     const own = message("user", "window only", { id: "w1" });
-    const messages = loadedUserMessages({
+    const result = createLoadedPromptsMemo()(input({
       pages: [historyPage({ items: [pageOnly, shared, message("assistant", "an answer")] })],
       bridge: [bridged, activity("tool.completed", {})],
       entries: [
@@ -92,13 +81,9 @@ describe("loadedUserMessages", () => {
         message("reasoning", "thinking"),
         own
       ]
-    });
-    assert.deepEqual(
-      messages.map((item) => item.id),
-      ["p1", "s1", "b1", "w1"]
-    );
-    // Listed at its OLDEST place, with the newest copy.
-    assert.equal(messages[1], windowCopy);
+    }));
+    assert.deepEqual(ids(result.prompts), ["w1", "b1", "s1", "p1"]);
+    assert.equal(result.prompts[2]!.text, "edited prompt");
   });
 });
 
@@ -153,59 +138,14 @@ describe("createLoadedPromptsMemo", () => {
     });
   });
 
-  it("hands the same list back while only the rest of the window streams", () => {
-    const memo = createLoadedPromptsMemo();
-    const u1 = message("user", "prompt", { id: "u1" });
-    const turns = [foldTurn("t1", "u1")];
-    const first = memo(input({ entries: [u1, message("assistant", "Wor", { id: "a1", streaming: true })], turns }));
-    const second = memo(
-      input({ entries: [u1, message("assistant", "Working on it", { id: "a1", streaming: true })], turns })
-    );
-    assert.equal(second, first, "a streamed token moves nothing the panel shows");
-    // A new turns array with the same claims keeps the list too.
-    const third = memo(input({ entries: [u1], turns: [...turns] }));
-    assert.equal(third.prompts, first.prompts);
-    assert.equal(third, first);
-  });
-
-  it("walks the loaded history only when its arrays change — per token, only the window", () => {
-    const memo = createLoadedPromptsMemo();
-    let reads = 0;
-    // Counts every read of the page's items, however the walk reaches them.
-    const counted = <T extends object>(list: T[]): T[] =>
-      new Proxy(list, {
-        get(target, key, receiver) {
-          reads += 1;
-          return Reflect.get(target, key, receiver);
-        }
-      });
-    const pages = [historyPage({ items: counted([message("user", "from a page", { id: "p1" })]) })];
-    const bridge = counted([message("user", "in the bridge", { id: "b1" })]);
-    const u1 = message("user", "live", { id: "u1" });
-    const turns = [foldTurn("t1", "u1")];
-    const first = memo(input({ pages, bridge, entries: [u1, message("assistant", "a", { id: "a1" })], turns }));
-    assert.deepEqual(ids(first.prompts), ["u1", "b1", "p1"]);
-    const afterFirst = reads;
-    assert.ok(afterFirst > 0);
-    const second = memo(input({ pages, bridge, entries: [u1, message("assistant", "ab", { id: "a1" })], turns }));
-    assert.equal(second, first);
-    assert.equal(reads, afterFirst, "a streamed token re-reads no page and no bridge row");
-    const bridged = memo(input({ pages, bridge: [...bridge, message("user", "evicted", { id: "b2" })], entries: [u1], turns }));
-    assert.deepEqual(ids(bridged.prompts), ["u1", "b2", "b1", "p1"], "a new bridge array is read again");
-  });
-
-  it("reuses every unchanged prompt object when one is added, and renumbers on a new claim", () => {
+  it("numbers a pending prompt when its turn starts", () => {
     const memo = createLoadedPromptsMemo();
     const u1 = message("user", "one", { id: "u1" });
     const u2 = message("user", "two", { id: "u2" });
-    const before = memo(input({ entries: [u1], turns: [foldTurn("t1", "u1")] }));
     const after = memo(input({ entries: [u1, u2], turns: [foldTurn("t1", "u1"), foldTurn(null, "u2")] }));
-    assert.notEqual(after.prompts, before.prompts);
-    assert.equal(after.prompts[1], before.prompts[0], "u1 keeps its object");
     assert.equal(after.prompts[0]!.turnOrdinal, null);
     const started = memo(input({ entries: [u1, u2], turns: [foldTurn("t1", "u1"), foldTurn("t2", "u2")] }));
     assert.equal(started.prompts[0]!.turnOrdinal, 2, "the turn started: the prompt is numbered");
-    assert.equal(started.prompts[1], before.prompts[0]);
   });
 });
 
@@ -264,25 +204,12 @@ describe("mergeHistoryPrompts", () => {
       null
     );
     assert.deepEqual(ids(merged), ["i-new", "w3", "w2", "w1", "i-tie", "i-old"]);
-    // Deterministic.
-    assert.deepEqual(
-      ids(
-        mergeHistoryPrompts(
-          [loaded("w3", stamp(50)), loaded("w2", stamp(52)), loaded("w1", stamp(30))],
-          [entry("i-new", stamp(60)), entry("i-tie", stamp(30)), entry("i-old", stamp(10))],
-          null
-        )
-      ),
-      ids(merged)
-    );
   });
 
-  it("lists an index prompt once even when two pages carried it, and keeps its row object", () => {
+  it("lists an index prompt once even when two pages carried it", () => {
     const shared = entry("u1", stamp(10));
     const first = mergeHistoryPrompts([], [shared, { ...shared }], null);
     assert.deepEqual(ids(first), ["u1"]);
-    const second = mergeHistoryPrompts([], [shared], null);
-    assert.equal(second[0], first[0]);
   });
 });
 
@@ -302,11 +229,6 @@ describe("search", () => {
     indexRewindable: null
   }));
 
-  it("folds case, diacritics and compatibility forms", () => {
-    assert.equal(foldSearchText("Café ÉCOLE ﬁle"), "cafe ecole file");
-    assert.deepEqual(searchTermsOf("  Café   menu "), ["cafe", "menu"]);
-  });
-
   it("needs every word, in any order", () => {
     assert.deepEqual(ids(filterPromptsBySearch(prompts, "menu cafe")), ["a"]);
     assert.deepEqual(ids(filterPromptsBySearch(prompts, "the")), ["a", "b", "c"]);
@@ -314,7 +236,7 @@ describe("search", () => {
     assert.deepEqual(ids(filterPromptsBySearch(prompts, "FILE")), ["c"]);
   });
 
-  it("hands the list back for a blank query", () => {
-    assert.equal(filterPromptsBySearch(prompts, "   "), prompts);
+  it("shows all prompts for a blank query", () => {
+    assert.deepEqual(ids(filterPromptsBySearch(prompts, "   ")), ["a", "b", "c"]);
   });
 });

@@ -83,13 +83,6 @@ export function parseAskUserQuestionInput(input: Record<string, unknown>): AskUs
   };
 }
 
-/** Convenience for the replay harness and the smoke script. */
-export function questionsFromAskUserQuestionInput(
-  input: Record<string, unknown>
-): UserInputQuestion[] {
-  return parseAskUserQuestionInput(input).questions;
-}
-
 /**
  * The reply the SDK expects: the original `questions` array plus an `answers`
  * map keyed by question **text**, whose value is the option **label**.

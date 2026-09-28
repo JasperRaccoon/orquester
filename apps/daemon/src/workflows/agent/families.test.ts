@@ -1,16 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountFamilyOf, cooldownKey, cooldownSubject } from "./families.ts";
-
-test("accountFamilyOf: an agent's accounts are its own family's; OpenCode and unknown agents have none", () => {
-  for (const refId of ["claude", "codex", "grok"]) assert.equal(accountFamilyOf(refId), refId, refId);
-  assert.equal(accountFamilyOf("opencode"), null);
-  assert.equal(accountFamilyOf("deepseek"), null);
-  // Launchers a removed build offered: no family here, the catalogue refuses them.
-  assert.equal(accountFamilyOf("claudex"), null);
-  assert.equal(accountFamilyOf("claudemix"), null);
-  assert.equal(accountFamilyOf("toString"), null, "no prototype keys");
-});
+import { cooldownKey, cooldownSubject } from "./families.ts";
 
 test("cooldownSubject: one key per quota — accountless launches keyed by provider", () => {
   const key = (refId: string, model: string, accountId = "system"): string => {

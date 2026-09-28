@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { buildProviderEnv } from "../support/env.ts";
 import {
   createFileLaunchConfigStore,
-  launchConfigFromRequest,
   parseThreadLaunchConfig
 } from "./launch-config.ts";
 
@@ -33,17 +31,6 @@ describe("thread launch config (§3.1, §6.1)", () => {
     assert.equal(parseThreadLaunchConfig(null), null);
   });
 
-  it("picks the three launch fields off a create request", () => {
-    assert.deepEqual(
-      launchConfigFromRequest({
-        launchEnv: { ANTHROPIC_BASE_URL: "http://127.0.0.1:1" },
-        homePath: "/home/proxy"
-      }),
-      { launchEnv: { ANTHROPIC_BASE_URL: "http://127.0.0.1:1" }, homePath: "/home/proxy" }
-    );
-    assert.deepEqual(launchConfigFromRequest({}), {});
-  });
-
   it("round-trips through a 0600 file and survives a reread", async () => {
     const dir = await mkdtemp(join(tmpdir(), "launch-config-"));
     try {
@@ -58,7 +45,6 @@ describe("thread launch config (§3.1, §6.1)", () => {
       const path = join(dir, "threads", "t1", "launch.json");
       // A launcher env can carry a credential, so it is as sensitive as the appdir.
       assert.equal((await stat(path)).mode & 0o777, 0o600);
-      assert.match(await readFile(path, "utf8"), /ANTHROPIC_AUTH_TOKEN/);
 
       const reread = createFileLaunchConfigStore({ rootDir: dir });
       assert.deepEqual(await reread.load("t1"), {
@@ -81,34 +67,5 @@ describe("thread launch config (§3.1, §6.1)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("the launch environment (§3.1)", () => {
-  const base = {
-    adapter: "claude" as const,
-    sessionPath: "/usr/bin",
-    tmpDir: "/var/lib/orquester/tmp",
-    homeDir: "/var/lib/orquester",
-    sessionId: "t1",
-    launchId: "launch-1"
-  };
-
-  it("strips an ambient credential a launcher env carries, and keeps the rest", () => {
-    const env = buildProviderEnv({
-      ...base,
-      extraEnv: {
-        ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
-        ANTHROPIC_AUTH_TOKEN: "tok",
-        ANTHROPIC_API_KEY: "someone-elses-key"
-      }
-    });
-    assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:9");
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
-    assert.equal(
-      env.ANTHROPIC_API_KEY,
-      undefined,
-      "a thread can never silently bill a different identity"
-    );
   });
 });

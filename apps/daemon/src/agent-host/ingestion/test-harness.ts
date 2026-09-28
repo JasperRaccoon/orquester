@@ -2,7 +2,7 @@
  * Deterministic seams for the ingestion tests (§9: wait on events, never on
  * sleeps). Nothing here is used at runtime — it exists so every batching
  * threshold, every coalescing window and every flush point is asserted against
- * a clock and a timer queue the test drives by hand.
+ * controlled timestamps and Node's native timer mocks.
  */
 
 import type { AppendableDomainEvent, LivenessRegistry } from "../services.ts";
@@ -31,53 +31,6 @@ export class FakeClock implements Clock {
 
   get ms(): number {
     return this.#ms;
-  }
-}
-
-interface ScheduledTimer {
-  handle: number;
-  dueAt: number;
-  fn: () => void;
-}
-
-/** A timer queue slaved to a {@link FakeClock}. `advance` runs what came due. */
-export class FakeTimers {
-  readonly #clock: FakeClock;
-  #next = 1;
-  #timers: ScheduledTimer[] = [];
-
-  constructor(clock: FakeClock) {
-    this.#clock = clock;
-  }
-
-  readonly setTimer = (fn: () => void, ms: number): unknown => {
-    const handle = this.#next++;
-    this.#timers.push({ handle, dueAt: this.#clock.ms + ms, fn });
-    return handle;
-  };
-
-  readonly clearTimer = (handle: unknown): void => {
-    this.#timers = this.#timers.filter((timer) => timer.handle !== handle);
-  };
-
-  get pending(): number {
-    return this.#timers.length;
-  }
-
-  /** Move the clock and fire every timer that came due, earliest first. */
-  advance(ms: number): void {
-    this.#clock.advance(ms);
-    for (;;) {
-      const due = this.#timers
-        .filter((timer) => timer.dueAt <= this.#clock.ms)
-        .sort((a, b) => a.dueAt - b.dueAt || a.handle - b.handle);
-      if (due.length === 0) {
-        return;
-      }
-      const next = due[0]!;
-      this.#timers = this.#timers.filter((timer) => timer.handle !== next.handle);
-      next.fn();
-    }
   }
 }
 

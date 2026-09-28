@@ -111,15 +111,7 @@ function shellTaskEntry(
   return entry;
 }
 
-/** The shell's items → the entries one `work` row carries, in arrival order. */
-export function backgroundShellEntries(
-  items: readonly ThreadItem[],
-  agentId: string
-): WorkLogEntry[] {
-  return shellEntriesOf(itemsForAgent(items, agentId), agentId);
-}
-
-/** {@link backgroundShellEntries}, from the shell's own items (`itemsForAgent`). */
+/** The shell's own items → command entries, in arrival order. */
 function shellEntriesOf(own: readonly ThreadItem[], agentId: string): WorkLogEntry[] {
   const entries: WorkLogEntry[] = [];
   const lifecycleRowByCallId = new Map<string, number>();
@@ -191,15 +183,6 @@ function shellEntriesOf(own: readonly ThreadItem[], agentId: string): WorkLogEnt
  * own id — the roster's fallback when nothing ever named the task — names
  * nothing, and is no title.
  */
-export function backgroundShellRows(
-  items: readonly ThreadItem[],
-  agentId: string,
-  fallbackTitle?: string
-): AgentChatTimelineRow[] {
-  return shellRowsOf(itemsForAgent(items, agentId), agentId, fallbackTitle);
-}
-
-/** {@link backgroundShellRows}, from the shell's own items (`itemsForAgent`). */
 function shellRowsOf(own: readonly ThreadItem[], agentId: string, fallbackTitle?: string): AgentChatTimelineRow[] {
   const groupedEntries = shellEntriesOf(own, agentId);
   if (groupedEntries.length === 0) return [];
@@ -230,7 +213,7 @@ export interface BackgroundShellProjection {
 }
 
 /**
- * {@link backgroundShellRows}, held: `previous` itself while the shell's own
+ * The shell's command rows, held: `previous` itself while the shell's own
  * items are the same objects, in the same order, under the same title. The
  * thread's items change on every token of any stream — the parent's answer,
  * another agent's thought — and a row rebuilt for each of them made `WorkRow`

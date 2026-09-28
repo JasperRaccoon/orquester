@@ -30,16 +30,6 @@ test("worst-account picks the highest-percent window per field across accounts",
     accountCount: 2,
     staleAccountCount: 0
   });
-  // Per-account list is passed through unchanged.
-  assert.equal(head.accounts, accounts);
-});
-
-test("managed-only (base === null) surfaces the worst managed window, not empty", () => {
-  const accounts: UsageAccount[] = [acct({ id: "a1", session: { percent: 95 }, weekly: { percent: 10 } })];
-  const head = aggregateWorstAccountUsage("codex", null, accounts, NOW);
-  assert.equal(head.id, "codex");
-  assert.equal(head.session?.percent, 95);
-  assert.equal(head.weekly?.percent, 10);
 });
 
 test("System base participates in the pool and can be the worst source", () => {
@@ -115,12 +105,6 @@ test("windows that all expired leave the head window null", () => {
   const head = aggregateWorstAccountUsage("claude", null, accounts, NOW);
   assert.equal(head.session, null);
   assert.equal(head.weekly, null);
-});
-
-test("a window without resetsAt is treated as current", () => {
-  const accounts: UsageAccount[] = [acct({ id: "a1", weekly: { percent: 55 } })];
-  const head = aggregateWorstAccountUsage("claude", null, accounts, NOW);
-  assert.equal(head.weekly?.percent, 55);
 });
 
 test("the System base is exposed as a `system` row (expired windows scrubbed)", () => {

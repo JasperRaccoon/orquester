@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { XaiAskUserQuestionParams } from "./acp/_generated/xai.ts";
-import { OTHER_LABEL, answersToXaiResponse } from "./questions.ts";
+import { answersToXaiResponse } from "./questions.ts";
 
 /** Verbatim from the capture: note the question carries no `id`. */
 const REAL: XaiAskUserQuestionParams = {
@@ -43,7 +43,7 @@ test("an array of answers is accepted, trimmed, and blanks dropped", () => {
 
 test("free text that matches no option becomes `Other` plus a note", () => {
   const response = answersToXaiResponse(REAL, { [TEXT]: "gamma.txt" });
-  assert.deepEqual(response.answers, { [TEXT]: [OTHER_LABEL] });
+  assert.deepEqual(response.answers, { [TEXT]: ["Other"] });
   assert.deepEqual(response.annotations?.[TEXT], { notes: "gamma.txt" });
 });
 

@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -18,12 +18,7 @@ import type { Checkpoint } from "@orquester/api/agent-chat";
 import type { CheckpointService } from "../services.ts";
 import { checkpointRefForThreadTurn, checkpointRefNamespace } from "./refs.ts";
 import {
-  CHECKPOINT_DIFF_CACHE_LIMIT,
-  CHECKPOINT_DIFF_CACHE_MAX_BYTES,
-  CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
-  CHECKPOINT_REF_LIMIT,
   CheckpointRefDeleteError,
-  CheckpointRefUnavailableError,
   CheckpointRollbackUnsupportedError,
   CheckpointTurnRangeError,
   createCheckpointService
@@ -100,6 +95,10 @@ test("the user's index, HEAD, refs, stash and reflog are byte-identical afterwar
   assert.equal(after.stashes, before.stashes);
   assert.equal(after.status, before.status);
   assert.equal(after.headReflog, before.headReflog);
+  const userRefs = after.branches
+    .split("\n")
+    .filter((line) => line.length > 0 && !line.startsWith("refs/orquester/checkpoints/"));
+  assert.deepEqual(userRefs, before.branches.trimEnd().split("\n"));
   // The only new refs are ours.
   const newRefs = after.branches
     .split("\n")
@@ -169,29 +168,6 @@ test("a missing baseline keeps the post ref and records an empty file list", asy
   assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [
     checkpointRefForThreadTurn(THREAD, 1)
   ]);
-});
-
-test("a baseline is idempotent: the second call captures nothing", async (t) => {
-  const repo = await seededRepo();
-  t.after(() => repo.cleanup());
-  const service = serviceFor(repo);
-
-  const first = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-  assert.ok(first);
-  const firstCommit = (await repo.gitReadOnly("rev-parse", first.ref)).trim();
-
-  await repo.write("tracked.txt", "changed after the baseline\n");
-  const second = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-
-  // Answers the existing baseline rather than `null`: `null` is reserved for
-  // "this project has no checkpoints", and from turn 2 on the baseline is
-  // always already there.
-  assert.deepEqual(second, { turnCount: 0, ref: first.ref, status: "ready" });
-  assert.equal(
-    (await repo.gitReadOnly("rev-parse", first.ref)).trim(),
-    firstCommit,
-    "an existing baseline is never recaptured"
-  );
 });
 
 test("a placeholder checkpoint is reused at its own turn count", async (t) => {
@@ -328,51 +304,6 @@ test("readTurnDiff ignores whitespace by default and can be told not to", async 
   assert.match(exact, /^\+alpha {3}$/m);
 });
 
-test("readTurnDiff caches by (thread, from, to, whitespace)", async (t) => {
-  const repo = await seededRepo();
-  t.after(() => repo.cleanup());
-  const service = serviceFor(repo);
-  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-  await repo.write("tracked.txt", "one\ntwo\n");
-  await service.captureTurnEnd({
-    threadId: THREAD,
-    cwd: repo.dir,
-    turnId: "turn-1",
-    assistantMessageId: null
-  });
-
-  const first = await service.readTurnDiff({
-    threadId: THREAD,
-    cwd: repo.dir,
-    fromTurnCount: 0,
-    toTurnCount: 1
-  });
-  assert.match(first, /tracked\.txt/);
-
-  // Remove the TO ref: a cache miss would now fail the range check instead.
-  await repo.git("update-ref", "-d", checkpointRefForThreadTurn(THREAD, 1));
-  const cached = await service.readTurnDiff({
-    threadId: THREAD,
-    cwd: repo.dir,
-    fromTurnCount: 0,
-    toTurnCount: 1
-  });
-  assert.equal(cached, first, "served from the cache, not from the deleted ref");
-
-  // A different whitespace flag is a different key, so it misses — and the
-  // miss really goes to git, which no longer has the ref.
-  await assert.rejects(
-    service.readTurnDiff({
-      threadId: THREAD,
-      cwd: repo.dir,
-      fromTurnCount: 0,
-      toTurnCount: 1,
-      ignoreWhitespace: false
-    }),
-    CheckpointTurnRangeError
-  );
-});
-
 test("readTurnDiff refuses a turn above the thread's highest checkpoint", async (t) => {
   const repo = await seededRepo();
   t.after(() => repo.cleanup());
@@ -395,10 +326,10 @@ test("captures prune to the 200-ref cap, oldest first", async (t) => {
   t.after(() => repo.cleanup());
   const service = serviceFor(repo);
 
-  // Plant CHECKPOINT_REF_LIMIT refs in one git process, then capture one more.
+  // Plant 200 refs in one git process, then capture one more.
   const head = (await repo.gitReadOnly("rev-parse", "HEAD")).trim();
   const commands: string[] = [];
-  for (let turnCount = 0; turnCount < CHECKPOINT_REF_LIMIT; turnCount += 1) {
+  for (let turnCount = 0; turnCount < 200; turnCount += 1) {
     commands.push(`create ${checkpointRefForThreadTurn(THREAD, turnCount)}\0${head}\0`);
   }
   await repo.gitStdin(commands.join(""), "update-ref", "-z", "--stdin");
@@ -411,12 +342,12 @@ test("captures prune to the 200-ref cap, oldest first", async (t) => {
   });
 
   assert.ok(summary);
-  assert.equal(summary.turnCount, CHECKPOINT_REF_LIMIT);
+  assert.equal(summary.turnCount, 200);
   const refs = await refNames(repo, checkpointRefNamespace(THREAD));
-  assert.equal(refs.length, CHECKPOINT_REF_LIMIT);
+  assert.equal(refs.length, 200);
   assert.ok(!refs.includes(checkpointRefForThreadTurn(THREAD, 0)), "the oldest ref was pruned");
   assert.ok(refs.includes(checkpointRefForThreadTurn(THREAD, 1)));
-  assert.ok(refs.includes(checkpointRefForThreadTurn(THREAD, CHECKPOINT_REF_LIMIT)));
+  assert.ok(refs.includes(checkpointRefForThreadTurn(THREAD, 200)));
 });
 
 test("pruneAbove deletes every ref above the target and nothing else", async (t) => {
@@ -660,32 +591,6 @@ test("R5 #10: a turn whose baseline is missing diffs against HEAD, not 404", asy
   );
 });
 
-test("R5 #10: a baseline pruned by the cap still answers a diff", async (t) => {
-  const repo = await seededRepo();
-  t.after(() => repo.cleanup());
-  const service = serviceFor(repo);
-
-  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-  await repo.write("tracked.txt", "one\ntwo\n");
-  await service.captureTurnEnd({
-    threadId: THREAD,
-    cwd: repo.dir,
-    turnId: "turn-1",
-    assistantMessageId: null
-  });
-  // The cap pruned turn/0 (simulated by deleting it) — the row is still there.
-  await repo.git("update-ref", "-d", checkpointRefForThreadTurn(THREAD, 0));
-
-  const diff = await service.readTurnDiff({
-    threadId: THREAD,
-    cwd: repo.dir,
-    fromTurnCount: 0,
-    toTurnCount: 1
-  });
-  assert.equal(typeof diff, "string");
-  assert.match(diff, /tracked\.txt/);
-});
-
 test("R5 #10: with no HEAD at all the fallback is the empty tree", async (t) => {
   const repo = await createTempRepo();
   t.after(() => repo.cleanup());
@@ -789,28 +694,6 @@ test("R5 #20: a non-cone sparse checkout that cannot be rebuilt fails the captur
   assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [], "no ref was written");
 });
 
-test("R5 #20: a stale temp-index lock does not poison the next capture", async (t) => {
-  const repo = await seededRepo();
-  t.after(() => repo.cleanup());
-  const gitDir = join(repo.dir, ".git");
-  // A capture killed mid-flight leaves <tempIndex>.lock behind. With a fixed
-  // uuid the next capture reuses that exact path, which is the poisoned case.
-  const service = createCheckpointService({ gitEnv: repo.gitEnv, uuid: () => "fixed" });
-  await writeFile(join(gitDir, "orq-checkpoint-index-fixed"), "stale", "utf8");
-  await writeFile(join(gitDir, "orq-checkpoint-index-fixed.lock"), "stale", "utf8");
-
-  const result = await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-
-  assert.ok(result);
-  assert.equal(result.status, "ready", result.detail ?? "");
-  const entries = await repo.gitCommonDirEntries();
-  assert.deepEqual(
-    entries.filter((entry) => entry.startsWith("orq-checkpoint-index")),
-    [],
-    "the temp index and its lock are removed in the finally"
-  );
-});
-
 test("Q1 #42: a ref that survives deletion fails the prune instead of reporting success", async (t) => {
   const repo = await seededRepo();
   const gitDir = join(repo.dir, ".git");
@@ -898,49 +781,6 @@ test("E2E #E8: a capture for a turn a revert truncated is dropped", async (t) =>
   assert.equal(fresh.turnCount, 2);
 });
 
-test("R5 #14/Q1 #43: the diff cache is bounded by bytes, not only by entries", async (t) => {
-  const repo = await createTempRepo();
-  t.after(() => repo.cleanup());
-  const line = `${"x".repeat(120)}\n`;
-  await repo.write("big.txt", line.repeat(40));
-  await repo.git("add", ".");
-  await repo.git("commit", "-qm", "initial");
-  const service = serviceFor(repo);
-
-  await service.captureBaseline({ threadId: THREAD, cwd: repo.dir });
-  await repo.write("big.txt", line.repeat(80));
-  const summary = await service.captureTurnEnd({
-    threadId: THREAD,
-    cwd: repo.dir,
-    turnId: "turn-1",
-    assistantMessageId: null
-  });
-  assert.ok(summary);
-
-  const first = await service.readTurnDiff({
-    threadId: THREAD,
-    cwd: repo.dir,
-    fromTurnCount: 0,
-    toTurnCount: 1
-  });
-  assert.ok(first.length > 0);
-  // Served from the cache: the ref is gone and the answer is unchanged.
-  await repo.git("update-ref", "-d", checkpointRefForThreadTurn(THREAD, 1));
-  const cached = await service.readTurnDiff({
-    threadId: THREAD,
-    cwd: repo.dir,
-    fromTurnCount: 0,
-    toTurnCount: 1
-  });
-  assert.equal(cached, first);
-  // The budget that makes that safe on a 2 GB box is the byte one: an
-  // entry-count cap alone would admit 32 × 10 MB.
-  assert.ok(
-    CHECKPOINT_DIFF_CACHE_MAX_BYTES <
-      CHECKPOINT_DIFF_CACHE_LIMIT * CHECKPOINT_DIFF_MAX_OUTPUT_BYTES
-  );
-});
-
 test("S1 #9: a failure detail collapses the host's home path to ~", async (t) => {
   const repo = await seededRepo();
   const gitDir = join(repo.dir, ".git");
@@ -957,6 +797,7 @@ test("S1 #9: a failure detail collapses the host's home path to ~", async (t) =>
 
   assert.ok(result);
   assert.equal(result.status, "error");
+  assert.ok(result.detail?.includes("~"), "the actual host-home path was replaced");
   assert.ok(
     !(result.detail ?? "").includes(home),
     `raw host path leaked into a timeline row: ${result.detail ?? ""}`

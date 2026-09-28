@@ -7,7 +7,7 @@ import { itemTurnId } from "./transcript.ts";
  * activities (the host's HISTORY_PAGE_ACTIVITIES), so one call reaches some 2 000 activities below the retained window
  * before it says what it could not read.
  */
-export const HISTORY_PAGES_PER_READ = 5;
+const HISTORY_PAGES_PER_READ = 5;
 
 /** The turns of a read's range that could not be read whole, first and last, and why. */
 export interface HistoryUnavailable {
@@ -351,7 +351,7 @@ function byTime<T>(rows: T[], at: (row: T) => string): T[] {
  * order, so the transcript folds a tool call from its start. Checkpoints the same way, keyed by turn id (a page's
  * checkpoint without one is never read, so it is not kept). Pure; the snapshot itself when there are no pages.
  */
-export function mergeHistoryPages(snap: ThreadSnapshotPayload, pages: readonly Pick<ThreadHistoryPage, "items" | "checkpoints">[]): ThreadSnapshotPayload {
+function mergeHistoryPages(snap: ThreadSnapshotPayload, pages: readonly Pick<ThreadHistoryPage, "items" | "checkpoints">[]): ThreadSnapshotPayload {
   if (pages.length === 0) return snap;
   const items = new Map<string, ThreadItem>();
   const checkpoints = new Map<string, Checkpoint>();

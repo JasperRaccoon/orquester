@@ -11,8 +11,6 @@
  * apps/server/src/checkpointing/CheckpointDiffQuery.ts
  */
 
-import { randomUUID } from "node:crypto";
-
 import type { AgentAdapterId, Checkpoint, CheckpointFile } from "@orquester/api/agent-chat";
 
 import type { CaptureResult, CheckpointService, Clock, TurnDiffSummary } from "../services.ts";
@@ -23,7 +21,7 @@ import {
   resolveCheckpointCommit
 } from "./capture.ts";
 import { redactStderr } from "../support/stderr.ts";
-import { createGitRunner, type GitRunner, type GitRunnerOptions } from "./git.ts";
+import { createGitRunner, type GitRunnerOptions } from "./git.ts";
 import { parseTurnDiffFilesFromNumstat } from "./numstat.ts";
 import {
   checkpointRefForThreadTurn,
@@ -32,20 +30,20 @@ import {
 } from "./refs.ts";
 
 /** At most this many checkpoint refs per thread; older ones prune oldest-first. */
-export const CHECKPOINT_REF_LIMIT = 200;
+const CHECKPOINT_REF_LIMIT = 200;
 
 /** §5.4: diff output is capped at 10 MB. */
-export const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
+const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
 
 /** Derived state, dropped freely. Entry bound; the byte bound below is the real one. */
-export const CHECKPOINT_DIFF_CACHE_LIMIT = 32;
+const CHECKPOINT_DIFF_CACHE_LIMIT = 32;
 
 /**
  * The cache's total footprint. A patch may be up to
  * {@link CHECKPOINT_DIFF_MAX_OUTPUT_BYTES}, so entries alone bound nothing: 32
  * of them would be ~320 MB of retained V8 strings on a 2 GB VPS.
  */
-export const CHECKPOINT_DIFF_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const CHECKPOINT_DIFF_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * The one adapter without conversation rollback (§4.5 Grok, §5.5 step 2).
@@ -111,12 +109,8 @@ export class CheckpointRefDeleteError extends Error {
   }
 }
 
-export interface CheckpointServiceOptions extends Omit<GitRunnerOptions, "maxConcurrentGit"> {
+export interface CheckpointServiceOptions extends GitRunnerOptions {
   clock?: Clock;
-  /** Host-wide permit count for concurrent git work (§5.4). */
-  maxConcurrentGit?: number;
-  /** Test seam: deterministic temp-index names. */
-  uuid?: () => string;
   /** Best-effort diagnostics; never throws into a turn. */
   log?: (message: string, detail?: Record<string, unknown>) => void;
 }
@@ -188,16 +182,9 @@ const defaultClock: Clock = {
 
 export function createCheckpointService(options: CheckpointServiceOptions): CheckpointService {
   const clock = options.clock ?? defaultClock;
-  const uuid = options.uuid ?? randomUUID;
   const log = options.log ?? (() => {});
   const runner = createGitRunner({
-    gitEnv: options.gitEnv,
-    ...(options.maxConcurrentGit === undefined
-      ? {}
-      : { maxConcurrentGit: options.maxConcurrentGit }),
-    ...(options.resolveGitBinary === undefined
-      ? {}
-      : { resolveGitBinary: options.resolveGitBinary })
+    gitEnv: options.gitEnv
   });
 
   /**
@@ -445,7 +432,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       return { turnCount, ref, status: "ready" };
     }
     try {
-      await captureCheckpoint(runner, { cwd: input.cwd, ref, uuid: uuid() });
+      await captureCheckpoint(runner, { cwd: input.cwd, ref });
     } catch (error) {
       log("checkpoint baseline capture failed", {
         threadId: input.threadId,
@@ -548,7 +535,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     const completedAt = clock.nowIso();
 
     try {
-      await captureCheckpoint(runner, { cwd, ref, uuid: uuid() });
+      await captureCheckpoint(runner, { cwd, ref });
     } catch (error) {
       log("checkpoint capture failed", { threadId, turnCount, detail: describeError(error) });
       return {
@@ -782,6 +769,3 @@ function errorDetail(error: unknown, homeDirs: readonly string[] = []): string {
 function cachedSize(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
-
-export { CHECKPOINT_CAPTURE_OPERATION };
-export type { GitRunner };

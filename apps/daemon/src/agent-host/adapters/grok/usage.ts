@@ -33,9 +33,9 @@ import type { TurnTokenUsage } from "@orquester/api/agent-chat";
 import type { XaiUsage } from "./acp/_generated/xai.ts";
 
 /** `costUsdTicks` is USD × 1e9: `121_754_000` ticks = $0.121754. */
-export const COST_USD_TICKS_PER_DOLLAR = 1_000_000_000;
+const COST_USD_TICKS_PER_DOLLAR = 1_000_000_000;
 
-export function costUsdFromTicks(ticks: unknown): number | undefined {
+function costUsdFromTicks(ticks: unknown): number | undefined {
   return typeof ticks === "number" && Number.isFinite(ticks) && ticks >= 0
     ? ticks / COST_USD_TICKS_PER_DOLLAR
     : undefined;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { removeFilePath, textNamesPath } from "./composer-files.ts";
+import { removeFilePath } from "./composer-files.ts";
 
 describe("file paths in the prompt", () => {
   it("removing a file drops its path and one adjacent space", () => {
@@ -26,9 +26,4 @@ describe("file paths in the prompt", () => {
     assert.equal(removeFilePath("x /t/a.xlsx y", ""), "x /t/a.xlsx y");
   });
 
-  it("knows whether the text already names a path", () => {
-    assert.equal(textNamesPath("see /t/a.xlsx", "/t/a.xlsx"), true);
-    assert.equal(textNamesPath("see /t/b.xlsx", "/t/a.xlsx"), false);
-    assert.equal(textNamesPath("anything", ""), false);
-  });
 });

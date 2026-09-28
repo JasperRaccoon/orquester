@@ -10,11 +10,6 @@ export class SlotAbortedError extends Error {
 }
 
 export interface SlotPool {
-  readonly size: number;
-  /** Slots held now (may exceed `size` after a forced acquire). */
-  inUse(): number;
-  /** Waiters queued behind the cap. */
-  waiting(): number;
   /**
    * A slot, FIFO behind earlier waiters. Resolves with an idempotent `release`. Rejects with
    * `SlotAbortedError` when `signal` aborts first. `force` takes a slot at once even past the cap —
@@ -48,9 +43,6 @@ export function createSlotPool(size: number): SlotPool {
   };
 
   return {
-    size: cap,
-    inUse: () => held,
-    waiting: () => queue.length,
     acquire(signal, opts = {}) {
       if (signal.aborted) return Promise.reject(new SlotAbortedError());
       if (opts.force || (held < cap && queue.length === 0)) {

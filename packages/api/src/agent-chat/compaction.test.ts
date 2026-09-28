@@ -95,11 +95,11 @@ test("a blank or non-string agentId owns nothing — the UI's quiet-timeline rul
 });
 
 test("every phase of the conversation's own marker is a conversation compaction; only compacted is settled", () => {
-  for (const state of ["compacting", "compacted", "compaction-failed"] as const) {
+  for (const [state, settled] of [["compacting", false], ["compacted", true], ["compaction-failed", false]] as const) {
     const row = activity("context-compaction", { state });
     assert.equal(isConversationCompactionActivity(row), true);
     assert.equal(compactionMarkerState(row), state);
-    assert.equal(isSettledConversationCompaction(row), state === "compacted");
+    assert.equal(isSettledConversationCompaction(row), settled);
   }
 });
 

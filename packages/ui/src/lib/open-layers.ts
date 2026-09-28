@@ -41,16 +41,6 @@ export function isAnyLayerOpen(): boolean {
 }
 
 /**
- * The effect a layer runs, keyed on `open` (`useOpenLayer`): registered while
- * open, released by the cleanup React runs when `open` turns false, when the
- * layer unmounts open, and between StrictMode's two invocations — so the
- * registry never keeps a phantom layer that would swallow every later Escape.
- */
-export function openLayerEffect(open: boolean): (() => void) | undefined {
-  return open ? openLayer() : undefined;
-}
-
-/**
  * A layer that must know whether it is the NEWEST open one (a bottom sheet
  * whose own Escape must not beat a dropdown opened inside it: both listen on
  * `document`, and the sheet's listener, bound first, runs first). The set

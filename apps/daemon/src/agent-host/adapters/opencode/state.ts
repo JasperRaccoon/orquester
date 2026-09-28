@@ -244,7 +244,7 @@ const OVERLAP_ANCHOR_TRIES = 16;
  * {@link OVERLAP_ANCHOR_TRIES} the linear pass ({@link borderOverlap}) answers,
  * so no window costs more than that.
  */
-export function suffixPrefixOverlap(left: string, right: string): number {
+function suffixPrefixOverlap(left: string, right: string): number {
   const size = Math.min(left.length, right.length);
   if (size === 0) {
     return 0;
@@ -274,7 +274,7 @@ export function suffixPrefixOverlap(left: string, right: string): number {
  * whatever the output, where trying each overlap in turn is quadratic on one
  * that repeats itself.
  */
-export function borderOverlap(left: string, right: string): number {
+function borderOverlap(left: string, right: string): number {
   const size = Math.min(left.length, right.length);
   if (size === 0) {
     return 0;

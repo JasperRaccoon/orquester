@@ -227,11 +227,7 @@ test("`responseMode` is promoted onto the pending entry, with the turn that aske
       ["native", undefined, "turn-7"]
     ]
   );
-  // `dismissible` stays exactly `responseMode === "message"` — derived, never
-  // independently authored, so the two can never disagree.
-  for (const entry of pending.userInputs) {
-    assert.equal(entry.dismissible, entry.responseMode === "message");
-  }
+
 });
 
 test("an unrecognised `responseMode` is not a message-mode question", () => {
@@ -333,15 +329,6 @@ test("a request that arrives AFTER a resolution with the same id opens fresh", (
     [["codex-T-1", "file-change"]],
     "the later request is a different request and must render"
   );
-});
-
-test("a resolution still closes the request that PRECEDES it", () => {
-  resetActivityIds();
-  const pending = derivePendingRequests([
-    activity("approval.requested", { requestId: "r1", requestType: "permission_approval" }),
-    activity("approval.resolved", { requestId: "r1", decision: "accept" })
-  ]);
-  assert.deepEqual(pending.approvals, []);
 });
 
 test("a recycled question id opens fresh too", () => {

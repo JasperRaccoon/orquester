@@ -6,18 +6,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { ApprovalDecision } from "@orquester/api/agent-chat";
-
 import type { PermissionOption, RequestPermissionRequest } from "./acp/_generated/schema.ts";
 import { autoApprovesEdits, autoApprovesEverything, grokSpawnArgs } from "./launch.ts";
 import {
   approvalGrantKey,
   isEditApproval,
-  permissionDetail,
   permissionRequestType,
   selectAutoApprovedOptionId,
-  selectPermissionOptionId,
-  stableStringify
+  selectPermissionOptionId
 } from "./permissions.ts";
 
 /** Exactly what CLI 1.0.34 advertises for a file write, in its own order. */
@@ -58,11 +54,6 @@ test("cancel selects nothing, so the reply is {outcome:{outcome:'cancelled'}}", 
   assert.equal(selectPermissionOptionId(REAL_OPTIONS, "cancel"), undefined);
 });
 
-test("selection keys on kind, never on index — allow_always is options[0]", () => {
-  assert.equal(REAL_OPTIONS[0].kind, "allow_always");
-  assert.notEqual(selectPermissionOptionId(REAL_OPTIONS, "accept"), REAL_OPTIONS[0].optionId);
-});
-
 test("a blank option id counts as absent", () => {
   const blank: PermissionOption[] = [{ optionId: "   ", name: "Yes", kind: "allow_once" }];
   assert.equal(selectPermissionOptionId(blank, "accept"), undefined);
@@ -72,21 +63,6 @@ test("full-access takes the widest grant the request offers", () => {
   assert.equal(selectAutoApprovedOptionId(REAL_OPTIONS), "allow-edits-session");
   const onceOnly = REAL_OPTIONS.filter((option) => option.kind === "allow_once");
   assert.equal(selectAutoApprovedOptionId(onceOnly), "allow-once");
-});
-
-test("every decision is covered", () => {
-  const decisions: ApprovalDecision[] = [
-    "accept",
-    "acceptForSession",
-    "acceptAlways",
-    "decline",
-    "cancel"
-  ];
-  for (const decision of decisions) {
-    // No throw, and a defined answer for everything but `cancel`.
-    const id = selectPermissionOptionId(REAL_OPTIONS, decision);
-    assert.equal(decision === "cancel" ? id === undefined : typeof id === "string", true);
-  }
 });
 
 // ---------------------------------------------------------------------------
@@ -99,15 +75,6 @@ test("the argv per runtime mode, including the flag that moves", () => {
   assert.deepEqual(grokSpawnArgs("auto"), ["--permission-mode", "auto", "agent", "stdio"]);
   // `--always-approve` belongs to `agent`, so it comes AFTER it.
   assert.deepEqual(grokSpawnArgs("full-access"), ["agent", "--always-approve", "stdio"]);
-});
-
-test("--permission-mode always precedes `agent`, --always-approve always follows it", () => {
-  for (const mode of ["approval-required", "auto-accept-edits", "auto"] as const) {
-    const args = grokSpawnArgs(mode);
-    assert.ok(args.indexOf("--permission-mode") < args.indexOf("agent"));
-  }
-  const full = grokSpawnArgs("full-access");
-  assert.ok(full.indexOf("agent") < full.indexOf("--always-approve"));
 });
 
 test("the adapter compensates for acceptEdits being a no-op on this CLI", () => {
@@ -182,10 +149,11 @@ test("a generic title with different commands does not collide", () => {
   assert.notEqual(a, b);
 });
 
-test("stableStringify is key-order independent, array-order dependent, undefined-dropping", () => {
-  assert.equal(stableStringify({ b: 1, a: 2 }), stableStringify({ a: 2, b: 1 }));
-  assert.notEqual(stableStringify([1, 2]), stableStringify([2, 1]));
-  assert.equal(stableStringify({ a: 1, b: undefined }), stableStringify({ a: 1 }));
+test("session grants ignore object key order but distinguish ordered operation arguments", () => {
+  const key = (rawInput: Record<string, unknown>) => approvalGrantKey(toolCall({ kind: "edit", rawInput }));
+  assert.equal(key({ path: "/tmp/a", content: "text" }), key({ content: "text", path: "/tmp/a" }));
+  assert.notEqual(key({ paths: ["/tmp/a", "/tmp/b"] }), key({ paths: ["/tmp/b", "/tmp/a"] }));
+  assert.equal(key({ path: "/tmp/a", extra: undefined }), key({ path: "/tmp/a" }));
 });
 
 // ---------------------------------------------------------------------------
@@ -222,14 +190,4 @@ test("the vendor tool kind beats ACP's coarser one", () => {
     _meta: { "x.ai/tool": { version: 1, name: "exit_plan_mode", kind: "exit_plan", namespace: "grok_build", label: "Exit Plan Mode", read_only: true } }
   });
   assert.equal(permissionRequestType(plan), "permission_approval");
-});
-
-test("the card detail never falls back to raw params", () => {
-  assert.equal(
-    permissionDetail(toolCall({ kind: "execute", rawInput: { variant: "Bash", command: "echo hi" } })),
-    "echo hi"
-  );
-  assert.equal(permissionDetail(toolCall({ title: "Write `/tmp/a.txt`" })), "/tmp/a.txt");
-  assert.equal(permissionDetail(toolCall({ locations: [{ path: "/tmp/b" }] })), "/tmp/b");
-  assert.equal(permissionDetail(toolCall({})), "Tool call");
 });

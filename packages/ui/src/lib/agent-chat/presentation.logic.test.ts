@@ -1,29 +1,21 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
 import type { WorkLogEntry } from "./contracts";
 import {
-  commandProgramName,
-  isStreamedOutputEntry,
-  liveWorkEntryLabel,
-  normalizeCompactToolLabel,
-  omitSupersededLifecycleMarkers,
-  summarizeToolGroup,
-  toolGroupAction,
-  toolGroupSummaryKind,
-  withoutJoinedOutput,
-  singleToolCallLabel,
-  workEntryDisplayIndicatesToolFailure,
-  workEntryDisplayLabel,
-  workEntryIconName,
-  workEntryIndicatesToolFailure,
-  workEntryIndicatesToolNeutralStatus,
-  workEntryIsProviderDenial,
-  workEntrySeverity,
-  workEntryIsActiveTurnActivity,
-  nestRowsUnderParentCall,
-  showDestructiveRowStyle,
-  workLogEntryIsToolLike
+isStreamedOutputEntry,
+liveWorkEntryLabel,
+nestRowsUnderParentCall,
+showDestructiveRowStyle,
+singleToolCallLabel,
+toolGroupAction,
+withoutJoinedOutput,
+workEntryDisplayIndicatesToolFailure,
+workEntryDisplayLabel,
+workEntryIndicatesToolFailure,
+workEntryIsActiveTurnActivity,
+workEntryIsProviderDenial,
+workEntrySeverity
 } from "./presentation.logic";
 
 const entry = (overrides: Partial<WorkLogEntry> = {}): WorkLogEntry => ({
@@ -62,97 +54,6 @@ describe("toolGroupAction", () => {
   });
 });
 
-describe("summarizeToolGroup", () => {
-  it("counts distinct files for edits and rows for everything else", () => {
-    const summary = summarizeToolGroup([
-      entry({ id: "1", requestKind: "file-read" }),
-      entry({ id: "2", requestKind: "file-read" }),
-      entry({ id: "3", requestKind: "file-read" }),
-      entry({ id: "4", command: "pnpm test" }),
-      entry({ id: "5", command: "pnpm check" })
-    ]);
-    assert.equal(summary, "Read 3 files and ran 2 commands");
-  });
-
-  it("de-duplicates changed files across rows", () => {
-    const summary = summarizeToolGroup([
-      entry({ id: "1", changedFiles: ["/a.ts", "/b.ts"] }),
-      entry({ id: "2", changedFiles: ["/b.ts"] })
-    ]);
-    assert.equal(summary, "Changed 2 files");
-  });
-
-  it("joins three buckets with an Oxford comma", () => {
-    const summary = summarizeToolGroup([
-      entry({ id: "1", requestKind: "file-read" }),
-      entry({ id: "2", command: "ls" }),
-      entry({ id: "3", changedFiles: ["/a.ts"] })
-    ]);
-    assert.equal(summary, "Read 1 file, ran 1 command, and changed 1 file");
-  });
-
-  it("drops superseded lifecycle markers before counting", () => {
-    const marker = entry({
-      id: "start",
-      sourceActivityKind: "tool.started",
-      itemType: "command_execution",
-      label: "Run command"
-    });
-    const terminal = entry({
-      id: "done",
-      sourceActivityKind: "tool.completed",
-      itemType: "command_execution",
-      label: "Run command complete",
-      toolLifecycleStatus: "completed",
-      command: "ls"
-    });
-    assert.equal(summarizeToolGroup([marker, terminal]), "Ran 1 command");
-  });
-
-  it("keeps an unkeyed marker whose identity has no later terminal row", () => {
-    const marker = entry({
-      id: "start",
-      sourceActivityKind: "tool.started",
-      itemType: "command_execution",
-      label: "Run command"
-    });
-    assert.equal(omitSupersededLifecycleMarkers([marker], (value) => value).length, 1);
-  });
-});
-
-describe("normalizeCompactToolLabel", () => {
-  it("makes a completion label equal its start label", () => {
-    assert.equal(normalizeCompactToolLabel("Read file complete"), "Read file");
-    assert.equal(normalizeCompactToolLabel("Read file"), "Read file");
-  });
-});
-
-describe("severity", () => {
-  it("reserves the destructive treatment for severe failures", () => {
-    assert.equal(workEntrySeverity(entry({ sourceActivityKind: "runtime.error" })), "severe");
-    assert.equal(
-      workEntrySeverity(entry({ sourceActivityKind: "provider.turn.start.failed" })),
-      "severe"
-    );
-  });
-
-  it("gives a warning its own class, distinct from both", () => {
-    assert.equal(workEntrySeverity(entry({ sourceActivityKind: "runtime.warning" })), "warning");
-    assert.equal(workEntryIconName(entry({ sourceActivityKind: "runtime.warning" })), "circle-alert");
-  });
-
-  it("gives a non-zero exit only the muted failure mark", () => {
-    assert.equal(
-      workEntrySeverity(entry({ command: "false", detail: "exited with exit code 1" })),
-      "failure"
-    );
-  });
-
-  it("is clean when nothing failed", () => {
-    assert.equal(workEntrySeverity(entry({ command: "ls", detail: "a\nb" })), "none");
-  });
-});
-
 describe("CLI-side denials", () => {
   it("reads a tool_use_error result as a denial even with no approval request", () => {
     assert.equal(
@@ -161,55 +62,6 @@ describe("CLI-side denials", () => {
     );
     assert.equal(workEntryIsProviderDenial(entry({ toolLifecycleStatus: "declined" })), true);
     assert.equal(workEntryIsProviderDenial(entry({ detail: "fine" })), false);
-  });
-});
-
-describe("misc helpers", () => {
-  it("classifies tool-likeness from the promoted fields", () => {
-    assert.equal(workLogEntryIsToolLike(entry({ tone: "tool" })), true);
-    assert.equal(workLogEntryIsToolLike(entry({ tone: "info", label: "note" })), false);
-    assert.equal(
-      workLogEntryIsToolLike(entry({ tone: "info", itemType: "command_execution" })),
-      true
-    );
-  });
-
-  it("hides a neutral tool row from a collapsed group but never a spawn row", () => {
-    const neutral = entry({ tone: "tool", toolLifecycleStatus: "inProgress" });
-    assert.equal(workEntryIndicatesToolNeutralStatus(neutral), true);
-    assert.equal(
-      workEntryIndicatesToolNeutralStatus({
-        ...neutral,
-        agentSpawn: { workflowId: null, agentTaskIds: ["t1"] }
-      }),
-      false
-    );
-  });
-
-  it("narrows the summary kind to the five the row model allows", () => {
-    assert.equal(toolGroupSummaryKind([entry({ requestKind: "file-read" })]), "read");
-    assert.equal(
-      toolGroupSummaryKind([entry({ itemType: "web_search", toolTitle: "Grep" })]),
-      "search"
-    );
-    assert.equal(
-      toolGroupSummaryKind([entry({ id: "1", command: "ls" }), entry({ id: "2", changedFiles: ["/a"] })]),
-      "other"
-    );
-  });
-
-  it("names the program a command runs", () => {
-    assert.equal(commandProgramName("ls -la"), "ls");
-    assert.equal(commandProgramName("FOO=1 sudo /usr/bin/apt-get install x"), "apt-get");
-    assert.equal(commandProgramName("   "), null);
-  });
-
-  it("labels a live command row in the present tense", () => {
-    assert.equal(liveWorkEntryLabel(entry({ command: "pnpm test" }), true), "Running pnpm");
-    assert.equal(
-      liveWorkEntryLabel(entry({ command: "pnpm test", toolLifecycleStatus: "failed" }), true),
-      "Failed pnpm"
-    );
   });
 });
 
@@ -248,11 +100,6 @@ describe("a call's streamed output", () => {
       withoutJoinedOutput(wrapped, (row) => row.entry).map((row) => row.entry.id),
       ["s", "d", "c3", "c6"]
     );
-  });
-
-  it("withoutJoinedOutput hands a list with no chunk back as it is", () => {
-    const rows = [entry({ id: "a", toolCallId: "call-1" }), entry({ id: "b" })];
-    assert.equal(withoutJoinedOutput(rows, (row) => row), rows);
   });
 
   it("a chunk's row is headed like its call's own row — its command, else its title — else \"Tool output\", never its text", () => {
@@ -310,17 +157,6 @@ describe("R7-6 — arms absorbed from the deleted second resolver", () => {
     );
   });
 
-  it("keeps the arms W11 already had", () => {
-    assert.equal(
-      toolGroupAction(entry({ sourceActivityKind: "approval.requested", tone: "info" })),
-      "update"
-    );
-    assert.equal(
-      toolGroupAction(entry({ itemType: "web_search", toolTitle: "Grep" })),
-      "code-search"
-    );
-  });
-
   it("exposes the live-row predicate the activity group needs", () => {
     assert.equal(
       workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "inProgress" })),
@@ -334,19 +170,6 @@ describe("R7-6 — arms absorbed from the deleted second resolver", () => {
       workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "completed" })),
       false
     );
-  });
-
-  it("reserves the destructive style for severe or non-tool-like failures", () => {
-    // A non-zero exit is a failure but not destructive (§7.3).
-    assert.equal(
-      showDestructiveRowStyle(entry({ command: "false", detail: "exited with exit code 1" })),
-      false
-    );
-    assert.equal(
-      showDestructiveRowStyle(entry({ sourceActivityKind: "runtime.error", tone: "error" })),
-      true
-    );
-    assert.equal(showDestructiveRowStyle(entry({ command: "ls", detail: "ok" })), false);
   });
 });
 

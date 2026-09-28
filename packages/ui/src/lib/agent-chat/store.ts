@@ -81,7 +81,6 @@ import {
   hasSettledCompaction,
   HISTORY_PAGES_PER_LOAD,
   HISTORY_REVEAL_PAGE_CAP,
-  HISTORY_ROW_CAP,
   historyErrorMessage,
   historyWithinCap,
   historyWithPage,
@@ -198,22 +197,9 @@ import {
 
 export interface ThreadStoreDeps {
   transport: AgentChatTransport;
-  /** Injected so tests are deterministic. */
-  newId?: () => string;
-  now?: () => string;
-  /** How many times a `HOST_UNAVAILABLE` command is retried with the SAME id. */
-  hostUnavailableRetries?: number;
-  /** Injected in tests; production uses `setTimeout`. */
-  delay?: (ms: number) => Promise<void>;
-  /**
-   * The most rows the history's pages and bridge may hold together
-   * ({@link HISTORY_ROW_CAP}). Injected in tests, which cannot stream twenty
-   * thousand evictions to reach the real one.
-   */
-  historyRowCap?: number;
 }
 
-function defaultId(): string {
+function newId(): string {
   const cryptoRef = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
   if (cryptoRef?.randomUUID) {
     return cryptoRef.randomUUID();
@@ -221,7 +207,7 @@ function defaultId(): string {
   return `id-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
-const defaultDelay = (ms: number): Promise<void> =>
+const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Store one thread's draft under its id, leaving every other thread's as it is. */
@@ -375,7 +361,7 @@ export type ThreadStore = StoreApi<AgentChatThreadState>;
  * for the same reason — and so, on the slice itself, is the one in-flight set
  * that rides it, `respondingRequestIds` (see {@link cachedThreadState}).
  */
-export interface RetainedThreadState {
+interface RetainedThreadState {
   reducer: AgentChatReducerState;
   queue: QueueState;
   timeline: ThreadTimelineProjection;
@@ -401,15 +387,6 @@ export interface RetainedThreadState {
  */
 const retention = new ThreadRetentionCache<RetainedThreadState>();
 
-/** Test seam: drop every retained snapshot. */
-export function resetThreadRetention(): void {
-  retention.clear();
-}
-
-/** How many threads currently hold a retained snapshot. Test/diagnostic seam. */
-export function retainedThreadCount(): number {
-  return retention.size;
-}
 
 /**
  * The retained state as a remount should paint it.
@@ -434,7 +411,7 @@ export function retainedThreadCount(): number {
  * *T3: `packages/client-runtime/src/state/threads.ts:161-176`
  * (`cachedThreadState`).*
  */
-export function cachedThreadState(retained: RetainedThreadState): RetainedThreadState {
+function cachedThreadState(retained: RetainedThreadState): RetainedThreadState {
   const slice = retained.reducer.slice;
   const connection =
     slice.connection === "synchronized" && slice.head !== null ? "synchronized" : "idle";
@@ -488,7 +465,7 @@ function retainableFrom(state: InternalState): RetainedThread<RetainedThreadStat
  * composer comes back and the thread still converges from the stream whenever
  * the host finishes.
  */
-export const REWIND_TIMEOUT_MS = 120_000;
+const REWIND_TIMEOUT_MS = 120_000;
 
 /** What §5.5 step 6 appends, as an `error` activity, for any failed rewind. */
 const REVERT_FAILED_ACTIVITY_KIND = "checkpoint.revert.failed";
@@ -503,7 +480,7 @@ const REWIND_TIMED_OUT =
  * plans against whatever snapshot there is. The palette opens the tab first,
  * so a cold thread is usually mid-connect when the reveal starts.
  */
-export const REVEAL_SYNC_TIMEOUT_MS = 10_000;
+const REVEAL_SYNC_TIMEOUT_MS = 10_000;
 
 type RewindProgress =
   | { kind: "pending" }
@@ -878,7 +855,7 @@ function samePlan(left: ActivePlanState | null, right: ActivePlanState | null): 
  * a connection that went half-open between the browser and the daemon — so
  * no send can hold its thread "Sending" for longer than its retry budget.
  */
-export const COMMAND_ATTEMPT_TIMEOUT_MS = 25_000;
+const COMMAND_ATTEMPT_TIMEOUT_MS = 25_000;
 
 const COMMAND_TIMED_OUT = "The agent host did not answer in time.";
 
@@ -987,17 +964,10 @@ type HoldingThreadStore = ThreadStore & {
 };
 
 export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): ThreadStore {
-  const newId = deps.newId ?? defaultId;
-  const now = deps.now ?? (() => new Date().toISOString());
-  const delay = deps.delay ?? defaultDelay;
-  const maxRetries = deps.hostUnavailableRetries ?? 3;
-  const historyRowCap = deps.historyRowCap ?? HISTORY_ROW_CAP;
+  const maxRetries = 3;
   const positions = timelinePositionStore();
-  /** Epoch ms on the injected clock: when a send left, as the tab's outbox measures it. */
-  const clock = (): number => {
-    const at = Date.parse(now());
-    return Number.isFinite(at) ? at : Date.now();
-  };
+  /** Epoch ms when a send left, as the tab's outbox measures it. */
+  const clock = (): number => Date.now();
 
   // §6.5/§7.2: take the retained snapshot (removing it — this generation is
   // now the live copy) and claim the key, so only this generation may write it
@@ -1885,7 +1855,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           interactionMode: get().slice.interactionMode,
           queuedAfterToolActivityId: null,
           holdUntilUserAction: false,
-          queuedAt: now()
+          queuedAt: new Date().toISOString()
         });
       },
 
@@ -1947,7 +1917,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
                 ? latestCompletedToolActivityId(state.timeline.activities)
                 : message.queuedAfterToolActivityId
           };
-          const { state: queue } = enqueue(state.queue, anchored, now, newId);
+          const { state: queue } = enqueue(state.queue, anchored, () => new Date().toISOString(), newId);
           const reducer = patchSlice(state.reducer, { queue: [...queue.messages] });
           return { ...state, queue, reducer, slice: reducer.slice };
         });
@@ -2204,7 +2174,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // for after `set` returns, like the resync above.
         const history = reducer.slice.history;
         if (history.bridge.length > state.slice.history.bridge.length) {
-          const capped = historyWithinCap(history, historyRowCap);
+          const capped = historyWithinCap(history);
           if (capped.history !== history) {
             reducer = patchSlice(reducer, { history: capped.history });
           }
@@ -2538,10 +2508,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   }
 
   // Expose the teardown on the store object so the registry can call it.
-  // `retain: false` is the "drop it for good" path (`resetThreadStores`).
-  (store as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }).destroy = (
-    options
-  ) => {
+  (store as ThreadStore & { destroy?: () => void }).destroy = () => {
     closed = true;
     stream?.close();
     stream = null;
@@ -2558,9 +2525,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     // The live subscription is gone; the VALUE survives for the idle TTL so a
     // remount paints it instantly and resumes by cursor (§6.5, §7.2). Refused
     // outright when a newer generation already claimed this key.
-    if (options?.retain !== false) {
-      retention.retain(sessionId, retentionOwner, retainableFrom(store.getState()));
-    }
+    retention.retain(sessionId, retentionOwner, retainableFrom(store.getState()));
     // A wait on the stream settles now rather than at its timeout: no frame
     // will ever reach this generation again.
     for (const listener of [...destroyListeners]) {
@@ -2580,10 +2545,6 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
  */
 const dismissedErrorBanners = new Set<string>();
 
-/** Test seam. */
-export function resetDismissedErrorBanners(): void {
-  dismissedErrorBanners.clear();
-}
 
 function errorMessage(error: unknown): string {
   if (error instanceof AgentChatCommandError) {
@@ -2808,18 +2769,6 @@ function seedQueueFrom(input: {
   ];
 }
 
-/** Test seam: drop every slice immediately, retained snapshots included. */
-export function resetThreadStores(): void {
-  for (const [sessionId, entry] of [...registry.entries()]) {
-    cancelDispose(entry);
-    registry.delete(sessionId);
-    (
-      entry.store as ThreadStore & { destroy?: (options?: { retain?: boolean }) => void }
-    ).destroy?.({ retain: false });
-  }
-  retention.clear();
-  keptQueueCurrent.clear();
-}
 
 export type { AttachmentRef, ComposerContextRecord, InteractionMode };
 export { DEFAULT_INTERACTION_MODE };

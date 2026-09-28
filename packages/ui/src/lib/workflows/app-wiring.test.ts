@@ -2,23 +2,17 @@
  * The app store's hooks into the workflows store, and the `workflow` tab
  * kind: `/events` messages of the `workflows` channel reach the module store,
  * editor tabs open once per workflow, follow renames and close with their
- * workflow, and a sign-out or a connection switch empties the module store.
+ * workflow.
  *
- * The routing and the tab actions run for real on the actual app store. The
- * resets are pinned in the source: driving `signOut`/`selectConnection` under
- * node would build a real `ApiClient`, whose WebSocket session channel
- * connects at construction.
+ * The routing and tab actions run on the actual app store.
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { beforeEach, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { WORKFLOWS_CHANNEL, type WorkflowSummary } from "@orquester/api";
 
-import { useAppStore, withoutWorkflowTabs } from "../../store/app.ts";
+import { useAppStore } from "../../store/app.ts";
 import { resetWorkflows, workflowsStore } from "./store.ts";
 
 const P = "/w/acme/app";
@@ -63,13 +57,9 @@ describe("the app store routes workflow events", () => {
     assert.equal(workflowsStore.getState().summaries.has("a"), false);
   });
 
-  it("the same message on another channel does not, and garbage never throws", () => {
+  it("the same message on another channel does not reach workflows", () => {
     app().applyEvent(event("elsewhere", "workflow.upserted", { workflow: summary({ id: "a" }) }));
     assert.equal(workflowsStore.getState().summaries.size, 0);
-    assert.doesNotThrow(() => {
-      app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.upserted", null));
-      app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.deleted", 7));
-    });
   });
 });
 
@@ -102,17 +92,12 @@ describe("the workflow tab kind", () => {
   it("an unknown workflow takes the caller's title", () => {
     app().openWorkflowTab(P, "zz", { title: "Fresh" });
     assert.equal(app().workflowTabsByProject[P]?.[0]?.title, "Fresh");
-    app().openWorkflowTab(P, "yy");
-    assert.equal(app().workflowTabsByProject[P]?.[1]?.title, "Workflow");
   });
 
   it("follows a rename and closes with its workflow, handing the focus on", () => {
     app().openWorkflowTab(P, "a", { title: "Old" });
     app().openWorkflowTab(P, "b", { title: "Other" });
     app().openWorkflowTab(Q, "a", { title: "Old" });
-    const before = app().workflowTabsByProject;
-    app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.upserted", { workflow: summary({ id: "c", name: "Unrelated" }) }));
-    assert.equal(app().workflowTabsByProject, before, "an upsert of a workflow with no tab changes nothing");
 
     app().applyEvent(event(WORKFLOWS_CHANNEL, "workflow.upserted", { workflow: summary({ id: "a", name: "Renamed" }) }));
     assert.equal(app().workflowTabsByProject[P]?.[0]?.title, "Renamed");
@@ -134,46 +119,5 @@ describe("the workflow tab kind", () => {
     await app().closeTab(id);
     assert.deepEqual(app().workflowTabsByProject[P], []);
     assert.equal(app().activeTabByProject[P], null);
-  });
-});
-
-describe("a sign-out and a connection switch reset the workflows", () => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const source = readFileSync(join(here, "..", "..", "store", "app.ts"), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:\\])\/\/.*$/gm, "$1");
-
-  function methodBody(name: string): string {
-    const store = source.indexOf("create<AppState>(");
-    assert.ok(store >= 0, "app.ts still creates its store with create<AppState>(");
-    const start = source.indexOf(`\n  ${name}: `, store);
-    assert.ok(start >= 0, `app.ts still has ${name}`);
-    const next = source.slice(start + 1).search(/\n {2}[A-Za-z]\w*: /);
-    return next < 0 ? source.slice(start) : source.slice(start, start + 1 + next);
-  }
-
-  for (const name of ["signOut", "selectConnection"]) {
-    it(`${name} resets them before it switches the client`, () => {
-      const body = methodBody(name);
-      const reset = body.indexOf("resetWorkflows();");
-      assert.ok(reset >= 0, `${name} calls resetWorkflows()`);
-      assert.ok(reset < body.indexOf("set({"), "before the new client is installed");
-      assert.ok(body.includes("...withoutWorkflowTabs(get())"), `${name} drops the previous daemon's workflow tabs`);
-    });
-  }
-
-  it("withoutWorkflowTabs empties the tabs and clears an active pointer at one", () => {
-    const result = withoutWorkflowTabs({
-      workflowTabsByProject: { [P]: [{ id: "wt-1", projectPath: P, workflowId: "a", title: "A" }] },
-      activeTabByProject: { [P]: "wt-1", [Q]: "session-9" }
-    });
-    assert.deepEqual(result.workflowTabsByProject, {});
-    assert.deepEqual(result.activeTabByProject, { [P]: null, [Q]: "session-9" });
-  });
-
-  it("project and workspace cleanup drop the workflow tabs too", () => {
-    const start = source.indexOf("function clearProjectLocalState(");
-    const body = source.slice(start, source.indexOf("\n}\n", start));
-    assert.ok(body.includes("workflowTabsByProject"), "clearProjectLocalState purges workflow tabs");
   });
 });

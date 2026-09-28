@@ -49,15 +49,14 @@ export function mergeClaudeRefreshedCreds(
 }
 
 export async function refreshClaudeToken(
-  refreshToken: string,
-  fetchImpl: typeof fetch = fetch
+  refreshToken: string
 ): Promise<
   | { ok: true; access_token: string; refresh_token: string; expires_at?: number; expires_in?: number }
   | { ok: false; invalidGrant: boolean }
 > {
   let res: Response;
   try {
-    res = await fetchImpl(CLAUDE_TOKEN_URL, {
+    res = await fetch(CLAUDE_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: CLAUDE_CLIENT_ID })
@@ -97,14 +96,13 @@ export function mergeCodexRefreshedTokens(
 }
 
 export async function refreshCodexToken(
-  refreshToken: string,
-  fetchImpl: typeof fetch = fetch
+  refreshToken: string
 ): Promise<
   { ok: true; access_token: string; refresh_token: string; id_token?: string } | { ok: false; invalidGrant: boolean }
 > {
   let res: Response;
   try {
-    res = await fetchImpl(CODEX_TOKEN_URL, {
+    res = await fetch(CODEX_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -160,14 +158,13 @@ export function mergeGrokRefreshedAuth(
 }
 
 export async function refreshGrokToken(
-  refreshToken: string,
-  fetchImpl: typeof fetch = fetch
+  refreshToken: string
 ): Promise<
   { ok: true; access_token: string; refresh_token?: string; expires_in?: number } | { ok: false; invalidGrant: boolean }
 > {
   let res: Response;
   try {
-    res = await fetchImpl(GROK_TOKEN_URL, {
+    res = await fetch(GROK_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({

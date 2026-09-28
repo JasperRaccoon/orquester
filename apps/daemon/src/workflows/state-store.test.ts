@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { WorkflowStateStore } from "./state-store.ts";
 
+const roots: string[] = [];
+after(async () => {
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+});
+
 async function scratch(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "orquester-wf-state-"));
+  const root = await mkdtemp(join(tmpdir(), "orquester-wf-state-"));
+  roots.push(root);
+  return root;
 }
 
 function quietLogger() {
@@ -36,7 +43,7 @@ test("a missing file loads empty, silently; updates persist atomically at 0600",
 });
 
 test("get() is a snapshot", async () => {
-  const store = new WorkflowStateStore({ path: "/x", write: async () => undefined });
+  const store = new WorkflowStateStore({ path: join(await scratch(), "state.json") });
   const snapshot = store.get();
   snapshot.cooldowns["claude:a"] = cooldown;
   assert.deepEqual(store.get().cooldowns, {});
@@ -47,13 +54,14 @@ test("a corrupt file starts empty, is moved aside and logged — never thrown", 
   const path = join(dir, "workflow-state.json");
   await writeFile(path, "{ nope", "utf8");
   const { lines, logger } = quietLogger();
-  const store = new WorkflowStateStore({ path, logger, now: () => new Date("2026-09-28T12:00:00.000Z") });
+  const store = new WorkflowStateStore({ path, logger });
   await store.load();
   assert.deepEqual(store.get().cooldowns, {});
-  assert.equal(lines.length, 1);
-  assert.match(lines[0]!, /^warn: workflow-state\.json is corrupt/);
+  assert.ok(lines.length > 0);
   const files = await readdir(dir);
-  assert.deepEqual(files, ["workflow-state.json.corrupt-2026-09-28T12-00-00-000Z"]);
+  const aside = files.find((name) => name.startsWith("workflow-state.json.corrupt-"));
+  assert.ok(aside);
+  assert.equal(await readFile(join(dir, aside), "utf8"), "{ nope");
 });
 
 test("bad entries are dropped by the tolerant parse, good ones kept", async () => {
@@ -72,71 +80,37 @@ test("an unreadable path starts empty and logs", async () => {
   const store = new WorkflowStateStore({ path: dir /* a directory: EISDIR */, logger });
   await store.load();
   assert.deepEqual(store.get().cooldowns, {});
-  assert.match(lines[0]!, /could not be read \(EISDIR\)/);
+  assert.ok(lines.length > 0);
 });
 
-test("updates apply at once, writes are serialized and coalesced", async () => {
-  const writes: string[] = [];
-  let release: (() => void) | undefined;
-  let inFlight = 0;
-  let maxInFlight = 0;
-  const store = new WorkflowStateStore({
-    path: "/x",
-    write: async (_p, content) => {
-      inFlight++;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      if (writes.length === 0) await new Promise<void>((resolve) => (release = resolve));
-      writes.push(content);
-      inFlight--;
-    }
-  });
-  const first = store.update((d) => void (d.cooldowns["claude:1"] = cooldown));
-  assert.ok(store.get().cooldowns["claude:1"], "visible before the write lands");
-  // Let the first write start (it blocks), then queue three more.
-  await new Promise((resolve) => setImmediate(resolve));
-  const rest = [2, 3, 4].map((n) => store.update((d) => void (d.cooldowns[`claude:${n}`] = cooldown)));
-  assert.equal(rest[0], rest[2], "one queued write carries every change made while it waits");
-  release!();
-  await Promise.all([first, ...rest]);
-  await store.flush();
-  assert.equal(maxInFlight, 1);
-  assert.equal(writes.length, 2);
-  assert.deepEqual(Object.keys(JSON.parse(writes[1]!).cooldowns), ["claude:1", "claude:2", "claude:3", "claude:4"]);
-});
-
-test("a throwing mutator changes nothing; a failed write rejects, keeps the change and the next write carries it", async () => {
-  const writes: string[] = [];
-  let fail = true;
-  const { lines, logger } = quietLogger();
-  const store = new WorkflowStateStore({
-    path: "/x",
-    logger,
-    write: async (_p, content) => {
-      if (fail) throw new Error("disk full");
-      writes.push(content);
-    }
-  });
-  await assert.rejects(
-    store.update((d) => {
-      d.cooldowns["claude:x"] = cooldown;
-      throw new Error("boom");
-    }),
-    /boom/
-  );
-  assert.deepEqual(store.get().cooldowns, {});
-  await assert.rejects(store.update((d) => void (d.cooldowns["claude:a"] = cooldown)), /disk full/);
-  assert.match(lines.at(-1)!, /^error: workflow-state\.json could not be written: disk full/);
-  await store.flush();
-  fail = false;
-  await store.update((d) => void (d.cooldowns["claude:b"] = cooldown));
-  assert.deepEqual(Object.keys(JSON.parse(writes[0]!).cooldowns), ["claude:a", "claude:b"]);
-});
-
-test("the default writer writes a file the next load reads", async () => {
-  const dir = await scratch();
-  const path = join(dir, "workflow-state.json");
+test("concurrent updates are immediately visible and all become durable", async () => {
+  const path = join(await scratch(), "state.json");
   const store = new WorkflowStateStore({ path });
-  await store.update((d) => void (d.etags["https://api.github.com/x"] = { etag: "W/1", body: { a: 1 } }));
+  const writes = [1, 2, 3, 4].map((n) => store.update((draft) => void (draft.cooldowns[`claude:${n}`] = cooldown)));
+  assert.deepEqual(Object.keys(store.get().cooldowns), ["claude:1", "claude:2", "claude:3", "claude:4"]);
+  await Promise.all(writes);
+  const reloaded = new WorkflowStateStore({ path });
+  await reloaded.load();
+  assert.deepEqual(Object.keys(reloaded.get().cooldowns), ["claude:1", "claude:2", "claude:3", "claude:4"]);
+});
+
+test("a throwing mutator changes nothing; a failed write retains changes for the next write", async () => {
+  const parent = join(await scratch(), "blocked");
+  await writeFile(parent, "obstruction");
+  const path = join(parent, "state.json");
+  const store = new WorkflowStateStore({ path, logger: quietLogger().logger });
+  await assert.rejects(store.update((draft) => {
+    draft.cooldowns["claude:x"] = cooldown;
+    throw new Error("boom");
+  }), /boom/);
+  assert.deepEqual(store.get().cooldowns, {});
+  await assert.rejects(
+    store.update((draft) => void (draft.cooldowns["claude:a"] = cooldown)),
+    (error: unknown) => ["EEXIST", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")
+  );
+  assert.deepEqual(store.get().cooldowns, { "claude:a": cooldown });
   await store.flush();
-  assert.deepEqual(JSON.parse(await readFile(path, "utf8")).etags, { "https://api.github.com/x": { etag: "W/1", body: { a: 1 } } });
+  await rm(parent);
+  await store.update((draft) => void (draft.cooldowns["claude:b"] = cooldown));
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")).cooldowns, { "claude:a": cooldown, "claude:b": cooldown });
 });

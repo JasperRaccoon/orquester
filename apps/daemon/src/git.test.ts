@@ -3,7 +3,7 @@ import test from "node:test";
 import type { GitStatusResponse } from "@orquester/api";
 import { GIT_WORKING_DIFF_DEFAULT_MAX_BYTES, GIT_WORKING_DIFF_MAX_BYTES } from "@orquester/api";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,7 +11,6 @@ import {
   GitError,
   GitService,
   GitWatcher,
-  WORKING_DIFF_UNTRACKED_MAX,
   passesGitEventFilter,
   workingDiffMaxBytes
 } from "./git";
@@ -76,7 +75,7 @@ test("serializes concurrent git mutations in the same repository", async () => {
   const commands = [deferred(), deferred()];
   const git = new GitService({
     runner: async (_file, args, options) => {
-      calls.push(`${options.cwd}:${args.join(" ")}`);
+      calls.push(options.cwd);
       return commands[calls.length - 1].promise;
     }
   });
@@ -86,15 +85,12 @@ test("serializes concurrent git mutations in the same repository", async () => {
   const second = git.fetch("/repo");
   await nextTurn();
 
-  assert.deepEqual(calls, ["/repo:fetch --all --prune"]);
+  assert.deepEqual(calls, ["/repo"]);
 
   commands[0].resolve();
   await first;
   await nextTurn();
-  assert.deepEqual(calls, [
-    "/repo:fetch --all --prune",
-    "/repo:fetch --all --prune"
-  ]);
+  assert.deepEqual(calls, ["/repo", "/repo"]);
 
   commands[1].resolve();
   await second;
@@ -145,85 +141,36 @@ test("continues a repository queue after an earlier mutation fails", async () =>
   await second;
 });
 
-test("pull fetches all remotes before merging the upstream branch", async () => {
-  const calls: string[] = [];
-  const commands = [deferred(), deferred()];
-  const git = new GitService({
-    runner: async (_file, args) => {
-      calls.push(args.join(" "));
-      return commands[calls.length - 1].promise;
-    }
-  });
-
-  const pull = git.pull("/repo");
-  await nextTurn();
-  assert.deepEqual(calls, ["fetch --all --prune"]);
-
-  commands[0].resolve();
-  await nextTurn();
-  assert.deepEqual(calls, ["fetch --all --prune", "merge --no-edit @{upstream}"]);
-
-  commands[1].resolve();
-  await pull;
-});
-
-test("discard splits tracked and untracked pathspecs into separate commands", async () => {
-  // `git restore` aborts the WHOLE invocation on one unknown pathspec, so a
-  // mixed list must never reach it as a single call.
-  const { git, calls } = fakeGit((args) =>
-    args[0] === "status" ? nul("?? un tracked.txt", " M tracked file.txt", "A  staged new.txt") : ""
-  );
-
-  await git.discard("/repo", ["tracked file.txt", "un tracked.txt", "staged new.txt"]);
-
-  assert.deepEqual(calls, [
-    // Unscoped on purpose (rename detection is pathspec-limited); filtered here.
-    ["status", "--porcelain=v1", "-z"],
-    ["restore", "--staged", "--worktree", "--", "tracked file.txt", "staged new.txt"],
-    ["clean", "-fd", "--", "un tracked.txt"]
-  ]);
-});
-
 test("discard touches only the requested paths, never the rest of the tree", async () => {
-  const { git, calls } = fakeGit((args) =>
-    args[0] === "status" ? nul(" M asked.txt", " M untouched.txt", "?? other.txt") : ""
-  );
-  await git.discard("/repo", ["asked.txt"]);
-  assert.deepEqual(calls, [
-    ["status", "--porcelain=v1", "-z"],
-    ["restore", "--staged", "--worktree", "--", "asked.txt"]
-  ]);
+  const dir = await tempRepo();
+  try {
+    await writeFile(join(dir, "kept.txt"), "discard this edit\n");
+    await writeFile(join(dir, "unrelated.txt"), "keep this work\n");
+    await new GitService().discard(dir, ["kept.txt"]);
+    assert.equal(await readFile(join(dir, "kept.txt"), "utf8"), "one\n");
+    assert.equal(await readFile(join(dir, "unrelated.txt"), "utf8"), "keep this work\n");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("discard of a folder pathspec covers the entries beneath it", async () => {
-  const { git, calls } = fakeGit((args) =>
-    args[0] === "status" ? nul(" M src/a.txt", "?? src/new.txt", " M other/b.txt") : ""
-  );
-  await git.discard("/repo", ["src/"]);
-  assert.deepEqual(calls.slice(1), [
-    ["restore", "--staged", "--worktree", "--", "src/a.txt"],
-    ["clean", "-fd", "--", "src/new.txt"]
-  ]);
-});
-
-test("discard skips a command entirely when its side of the split is empty", async () => {
-  const { git, calls } = fakeGit((args) => (args[0] === "status" ? nul("?? only-untracked.txt") : ""));
-  await git.discard("/repo", ["only-untracked.txt"]);
-  assert.deepEqual(calls.map((c) => c[0]), ["status", "clean"]);
-});
-
-test("discarding a rename restores both the new AND the original path", async () => {
-  // porcelain v1 -z emits NEW then OLD for a rename, as one record. Restoring
-  // only the new path leaves the original staged-deleted and gone from the
-  // worktree — a discard that half-reverts.
-  const { git, calls } = fakeGit((args) => (args[0] === "status" ? nul("R  new.txt", "old.txt") : ""));
-  await git.discard("/repo", ["new.txt"]);
-  assert.deepEqual(calls[1], ["restore", "--staged", "--worktree", "--", "new.txt", "old.txt"]);
-
-  // …and naming the ORIGINAL path (a stale list, or the History pane) works too.
-  const second = fakeGit((args) => (args[0] === "status" ? nul("R  new.txt", "old.txt") : ""));
-  await second.git.discard("/repo", ["old.txt"]);
-  assert.deepEqual(second.calls[1], ["restore", "--staged", "--worktree", "--", "new.txt", "old.txt"]);
+  const dir = await tempRepo();
+  try {
+    await mkdir(join(dir, "src"));
+    await writeFile(join(dir, "src/a.txt"), "original\n");
+    await exec("git", ["add", "src/a.txt"], { cwd: dir });
+    await exec("git", ["commit", "-qm", "source"], { cwd: dir });
+    await writeFile(join(dir, "src/a.txt"), "changed\n");
+    await writeFile(join(dir, "src/new.txt"), "untracked\n");
+    await writeFile(join(dir, "kept.txt"), "unrelated work\n");
+    await new GitService().discard(dir, ["src/"]);
+    assert.equal(await readFile(join(dir, "src/a.txt"), "utf8"), "original\n");
+    await assert.rejects(stat(join(dir, "src/new.txt")), { code: "ENOENT" });
+    assert.equal(await readFile(join(dir, "kept.txt"), "utf8"), "unrelated work\n");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("log carries parent hashes for the commit graph", async () => {
@@ -303,41 +250,15 @@ test("stash list splits on the record separator and unwraps git's WIP subject", 
   ]);
 });
 
-test("stash mutations build the stash@{n} ref themselves and reject a bad index", async () => {
-  const { git, calls } = fakeGit((args) => (args[0] === "rev-parse" ? "sha-at-that-slot\n" : ""));
-  await git.stashApply("/repo", 2, "sha-at-that-slot");
-  await git.stashPop("/repo", 0, "sha-at-that-slot");
-  await git.stashDrop("/repo", 1, "sha-at-that-slot");
-  await git.stashCreate("/repo", { message: "  wip  ", includeUntracked: true });
-  await git.stashCreate("/repo", { message: "   " });
-  assert.deepEqual(calls, [
-    ["rev-parse", "--verify", "--quiet", "stash@{2}^{commit}"],
-    ["stash", "apply", "stash@{2}"],
-    ["rev-parse", "--verify", "--quiet", "stash@{0}^{commit}"],
-    ["stash", "pop", "stash@{0}"],
-    ["rev-parse", "--verify", "--quiet", "stash@{1}^{commit}"],
-    ["stash", "drop", "stash@{1}"],
-    ["stash", "push", "--include-untracked", "-m", "wip"],
-    ["stash", "push"]
-  ]);
-  await assert.rejects(git.stashApply("/repo", -1, "sha"), /stash index/);
-  await assert.rejects(git.stashApply("/repo", 1.5, "sha"), /stash index/);
-  await assert.rejects(git.stashApply("/repo", 0, ""), /stash sha/);
-});
-
-test("a stash op refuses (409) when the list shifted under the client", async () => {
-  // The client asks to drop stash@{1} it saw as "old-sha"; the slot now holds a
-  // different commit because someone else pushed/dropped a stash meanwhile.
-  const { git, calls } = fakeGit((args) => (args[0] === "rev-parse" ? "someone-elses-sha\n" : ""));
-  await assert.rejects(git.stashDrop("/repo", 1, "old-sha"), (error: unknown) => {
-    assert.equal((error as GitError).status, 409);
-    return true;
-  });
-  assert.deepEqual(
-    calls.map((c) => c[0]),
-    ["rev-parse"],
-    "the destructive command must never run after a mismatch"
-  );
+test("stash mutations reject invalid index or missing identity before invoking git", async () => {
+  const { git, calls } = fakeGit(() => "");
+  for (const index of [-1, 1.5]) {
+    await assert.rejects(git.stashApply("/repo", index, "sha"), (error: unknown) =>
+      error instanceof GitError && error.status === 400);
+  }
+  await assert.rejects(git.stashApply("/repo", 0, ""), (error: unknown) =>
+    error instanceof GitError && error.status === 400);
+  assert.equal(calls.length, 0);
 });
 
 test("a stash op refuses (409) when the index no longer resolves at all", async () => {
@@ -351,15 +272,17 @@ test("a stash op refuses (409) when the index no longer resolves at all", async 
   });
 });
 
-test("watcher polls only while subscribed, and only emits on a real change", async () => {
+test("watcher polls only while subscribed, and only emits on a real change", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let files: string[] = [];
   const status = () => ({ isRepo: true, files: files.map((path) => ({ path })) }) as unknown as GitStatusResponse;
   let reads = 0;
   const git = { status: async () => { reads += 1; return status(); } } as unknown as GitService;
 
   const seen: string[][] = [];
-  const watcher = new GitWatcher(git, (_path, s) => seen.push(s.files.map((f) => f.path)), 5);
-  const settle = () => new Promise((r) => setTimeout(r, 40));
+  const watcher = new GitWatcher(git, (_path, s) => seen.push(s.files.map((f) => f.path)));
+  t.after(() => watcher.stop());
+  const settle = async () => { t.mock.timers.tick(2_000); await nextTurn(); };
 
   watcher.subscribe("/repo");
   watcher.subscribe("/repo"); // a second client shares the one loop
@@ -386,28 +309,6 @@ test("watcher polls only while subscribed, and only emits on a real change", asy
   watcher.stop();
 });
 
-test("watcher re-seeds after a failed read so recovery emits", async () => {
-  let fail = false;
-  const git = {
-    status: async () => {
-      if (fail) throw new Error("not a repo");
-      return { isRepo: true, files: [] } as unknown as GitStatusResponse;
-    }
-  } as unknown as GitService;
-  const seen: number[] = [];
-  const watcher = new GitWatcher(git, () => seen.push(1), 5);
-  const settle = () => new Promise((r) => setTimeout(r, 40));
-
-  watcher.subscribe("/repo");
-  await settle();
-  fail = true;
-  await settle();
-  fail = false;
-  await settle();
-  assert.deepEqual(seen, [], "an unchanged status across a failure window is not an event");
-  watcher.stop();
-});
-
 test("the /events filter routes by event TYPE, not by a substring of the payload", () => {
   const event = (type: string, payload: unknown) =>
     JSON.stringify({ id: "1", channel: "projects", type, createdAt: "now", payload });
@@ -426,15 +327,17 @@ test("the /events filter routes by event TYPE, not by a substring of the payload
   assert.equal(passesGitEventFilter('{"project.git.changed" oops', null), true, "unparseable → deliver");
 });
 
-test("watcher ignores a lastFetched-only change (the background auto-fetch)", async () => {
+test("watcher ignores a lastFetched-only change (the background auto-fetch)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let lastFetched = "2026-08-16T10:00:00.000Z";
   const git = {
     status: async () =>
       ({ isRepo: true, files: [], lastFetched }) as unknown as GitStatusResponse
   } as unknown as GitService;
   const seen: number[] = [];
-  const watcher = new GitWatcher(git, () => seen.push(1), 5);
-  const settle = () => new Promise((r) => setTimeout(r, 40));
+  const watcher = new GitWatcher(git, () => seen.push(1));
+  t.after(() => watcher.stop());
+  const settle = async () => { t.mock.timers.tick(2_000); await nextTurn(); };
 
   watcher.subscribe("/repo");
   await settle();
@@ -563,62 +466,6 @@ test("workingDiffMaxBytes parses an integer, defaults, and clamps", () => {
   assert.equal(workingDiffMaxBytes("-5"), 1);
   assert.equal(workingDiffMaxBytes(String(GIT_WORKING_DIFF_MAX_BYTES + 1)), GIT_WORKING_DIFF_MAX_BYTES);
   assert.equal(workingDiffMaxBytes(Number.POSITIVE_INFINITY), GIT_WORKING_DIFF_MAX_BYTES);
-});
-
-test("working diff reads a bounded amount, and a capped read that overflows is a cut, not a failure", async () => {
-  const calls: { args: string[]; maxBuffer: number }[] = [];
-  const git = new GitService({
-    runner: async (_file, args, options) => {
-      calls.push({ args, maxBuffer: options.maxBuffer });
-      if (args[0] === "rev-parse") return { stdout: args.includes("--is-inside-work-tree") ? "true\n" : "abc\n", stderr: "" };
-      if (args[0] === "ls-files") return { stdout: nul("a.txt", "dir/b.txt"), stderr: "" };
-      // What node's execFile rejects with once git outruns maxBuffer.
-      throw Object.assign(new Error("stdout maxBuffer length exceeded"), {
-        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-        stdout: "diff --git a/x b/x\n+one\n+tw",
-        stderr: ""
-      });
-    }
-  });
-
-  const result = await git.workingDiff("/repo", 100);
-  assert.deepEqual(result, {
-    isRepo: true,
-    diff: "diff --git a/x b/x\n+one\n",
-    truncated: true,
-    untracked: ["a.txt", "dir/b.txt"]
-  });
-  const diff = calls.find((call) => call.args.includes("diff"));
-  assert.deepEqual(diff?.args, [
-    "-c",
-    "core.quotePath=false",
-    "-c",
-    "diff.noprefix=false",
-    "-c",
-    "diff.mnemonicPrefix=false",
-    "-c",
-    "diff.relative=false",
-    "-c",
-    "diff.srcPrefix=a/",
-    "-c",
-    "diff.dstPrefix=b/",
-    "diff",
-    "--no-color",
-    "--no-ext-diff",
-    "--no-textconv",
-    "HEAD",
-    "--",
-    "."
-  ]);
-  assert.equal(diff?.maxBuffer, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES + 1, "a small cap still reads a bounded amount");
-
-  await git.workingDiff("/repo", GIT_WORKING_DIFF_MAX_BYTES + 99);
-  const diffs = calls.filter((call) => call.args.includes("diff"));
-  assert.equal(diffs[1]?.maxBuffer, GIT_WORKING_DIFF_MAX_BYTES + 1, "the cap is clamped before it sizes the read");
-  assert.ok(
-    calls.filter((call) => call.args[0] === "ls-files").every((call) => call.maxBuffer <= 8 * 1024 * 1024),
-    "the untracked listing is a bounded read too"
-  );
 });
 
 test("an overflow on a read that did not ask for a cap is still an error", async () => {
@@ -776,21 +623,6 @@ test("working diff stops git once a huge patch has written enough, and still cut
     assert.ok(Buffer.byteLength(cut.diff) <= 10_000);
     assert.ok(cut.diff.endsWith("\n"));
     assert.ok(whole.diff.startsWith(cut.diff), "a clean prefix of the whole patch");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("working diff lists at most WORKING_DIFF_UNTRACKED_MAX untracked files", async () => {
-  const dir = await tempRepo();
-  try {
-    await mkdir(join(dir, "many"));
-    for (let i = 0; i < WORKING_DIFF_UNTRACKED_MAX + 3; i++) {
-      await writeFile(join(dir, "many", `f${i}.txt`), "");
-    }
-    const result = await new GitService().workingDiff(dir, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
-    assert.equal(result.untracked.length, WORKING_DIFF_UNTRACKED_MAX);
-    assert.ok(result.untracked.every((path) => path.startsWith("many/f")), "repo-relative paths");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

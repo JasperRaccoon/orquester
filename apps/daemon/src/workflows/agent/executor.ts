@@ -124,7 +124,7 @@ export type AgentPhase =
   | "waiting-reset"
   | "output";
 
-export const AGENT_PHASES: readonly AgentPhase[] = [
+const AGENT_PHASES: readonly AgentPhase[] = [
   "selecting",
   "creating",
   "sending",
@@ -139,14 +139,14 @@ export const AGENT_PHASES: readonly AgentPhase[] = [
   "output"
 ];
 
-export interface AgentTimings extends WatchTimings {
+interface AgentTimings extends WatchTimings {
   /** How long to wait for a session to go idle after an interrupt (then once more, then hand off). */
   idleWaitMs: number;
   /** The pause before retrying a daemon call that answered HOST_UNAVAILABLE. */
   retryMs: number;
 }
 
-export const DEFAULT_AGENT_TIMINGS: AgentTimings = { ...DEFAULT_WATCH_TIMINGS, idleWaitMs: 120_000, retryMs: 5_000 };
+const DEFAULT_AGENT_TIMINGS: AgentTimings = { ...DEFAULT_WATCH_TIMINGS, idleWaitMs: 120_000, retryMs: 5_000 };
 
 /** A plan card is implemented at most this many times per block; after that the plan is the answer. */
 export const MAX_PLAN_IMPLEMENTATIONS = 5;
@@ -159,7 +159,6 @@ export interface AgentExecutorDeps {
   clock: Clock;
   mintId: MintId;
   logger: WorkflowLogger;
-  timings?: Partial<AgentTimings>;
 }
 
 /** Everything the block persists in `WaitingOn.state` (§5.8). */
@@ -213,7 +212,6 @@ export function createAgentExecutor(deps: AgentExecutorDeps): NodeExecutor<"agen
   return {
     type: "agent",
     async execute(ctx) {
-      const timings = { ...DEFAULT_AGENT_TIMINGS, ...deps.timings };
       let state: AgentBlockState;
       if (ctx.resumeFrom) {
         const parsed = parseState(ctx.resumeFrom);
@@ -225,7 +223,7 @@ export function createAgentExecutor(deps: AgentExecutorDeps): NodeExecutor<"agen
       } else {
         state = initialState(ctx, deps.clock.now());
       }
-      return new AgentBlockRun(deps, timings, ctx, state).run();
+      return new AgentBlockRun(deps, ctx, state).run();
     }
   };
 }
@@ -302,7 +300,6 @@ class AgentBlockRun {
 
   constructor(
     private readonly deps: AgentExecutorDeps,
-    private readonly timings: AgentTimings,
     private readonly ctx: NodeExecutionContext<"agent">,
     private readonly st: AgentBlockState
   ) {
@@ -558,7 +555,6 @@ class AgentBlockRun {
       deadlineAt: new Date(this.st.deadlineAt),
       whenOnlyWatchLoopsRemain: this.config.whenOnlyWatchLoopsRemain,
       handled: new Set(this.st.answered),
-      timings: this.timings,
       onActivity: (activity) => this.ctx.update({ activity }),
       logger: this.ctx.log
     });
@@ -670,9 +666,9 @@ class AgentBlockRun {
   }
 
   private async waitingIdle(): Promise<NodeResult | null> {
-    const idleUntil = Date.parse(this.st.idleSince ?? this.now().toISOString()) + this.timings.idleWaitMs;
+    const idleUntil = Date.parse(this.st.idleSince ?? this.now().toISOString()) + DEFAULT_AGENT_TIMINGS.idleWaitMs;
     const until = new Date(Math.min(idleUntil, Date.parse(this.st.deadlineAt)));
-    const result = await waitForIdle({ api: this.api, sessionId: this.st.sessionId!, clock: this.deps.clock, signal: this.ctx.signal, until, rereadMs: this.timings.rereadMs, logger: this.ctx.log });
+    const result = await waitForIdle({ api: this.api, sessionId: this.st.sessionId!, clock: this.deps.clock, signal: this.ctx.signal, until, rereadMs: DEFAULT_AGENT_TIMINGS.rereadMs, logger: this.ctx.log });
     if (result === "cancelled") throw new Cancelled();
     if (result === "timeout" && this.now().getTime() >= Date.parse(this.st.deadlineAt)) return null; // the deadline takes over
     if (result === "idle") {
@@ -965,7 +961,7 @@ class AgentBlockRun {
   private async pause(opts: { ignoreDeadline?: boolean } = {}): Promise<void> {
     if (this.ctx.signal.aborted) throw new Cancelled();
     if (!opts.ignoreDeadline && this.deadlineApplies() && this.now().getTime() >= Date.parse(this.st.deadlineAt)) throw new DeadlinePassed();
-    await this.sleepUntil(this.now().getTime() + this.timings.retryMs);
+    await this.sleepUntil(this.now().getTime() + DEFAULT_AGENT_TIMINGS.retryMs);
   }
 
   private sleepUntil(at: number): Promise<void> {

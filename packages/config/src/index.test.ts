@@ -99,6 +99,43 @@ const persistedHead = {
   updatedAt: "2026-09-24T00:05:00.000Z"
 };
 
+test("legacy proxy-home tabs and thread heads remain readable after launcher retirement", () => {
+  const tabs = parseSessionsConfig({
+    version: 1,
+    sessions: [{
+      id: "t1",
+      title: "Saved proxy conversation",
+      order: 0,
+      projectPath: "/w/p",
+      refId: "claudex",
+      kind: "agent-chat",
+      cwd: "/w/p",
+      createdAt: "2026-09-24T00:00:00.000Z",
+      chat: { threadId: "t1", accountId: "", home: "cliproxy", lastSeq: 40 }
+    }]
+  });
+  assert.deepEqual(tabs.sessions.map((tab) => ({ id: tab.id, refId: tab.refId, chat: tab.chat })), [{
+    id: "t1",
+    refId: "claudex",
+    chat: { threadId: "t1", accountId: "", home: "system", lastSeq: 40 }
+  }]);
+
+  const head = parseAgentThreadHead({
+    ...persistedHead,
+    adapter: "claude",
+    refId: "claudex",
+    accountId: "",
+    home: "cliproxy",
+    session: { status: "ready", activeTurnId: null, resumeCursor: { threadId: "t1", resume: "provider-session" } }
+  });
+  assert.ok(head);
+  assert.equal(head.id, "t1");
+  assert.equal(head.refId, "claudex");
+  assert.equal(head.home, "system");
+  assert.equal(head.seq, 40);
+  assert.deepEqual(head.session.resumeCursor, { threadId: "t1", resume: "provider-session" });
+});
+
 test("a head carrying the goal-resume marker round-trips it", () => {
   const parsed = parseAgentThreadHead({ ...persistedHead, resumeGoalAfterRestart: true });
   assert.ok(parsed);

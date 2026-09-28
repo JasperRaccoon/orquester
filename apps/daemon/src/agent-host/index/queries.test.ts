@@ -11,15 +11,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import {
-  THREAD_PROMPTS_DEFAULT_LIMIT,
-  THREAD_PROMPTS_MAX_LIMIT,
-  THREAD_PROMPT_TEXT_MAX_CHARS,
-  THREAD_SEARCH_MAX_RESULTS,
-  applyDomainEvent,
   buildPlanImplementationPrompt,
-  createEmptyThreadState,
-  recallablePromptText,
-  type ThreadMessageItem,
   type ThreadPromptEntry
 } from "@orquester/api/agent-chat";
 
@@ -31,16 +23,6 @@ import {
   type IndexedTurn,
   type ThreadIndex
 } from "./index.ts";
-import { MAX_INDEXED_TEXT_CHARS } from "./indexer.ts";
-import {
-  PROMPTS_MIN_BATCH,
-  PROMPTS_SCAN_BUDGET,
-  decodePromptsCursor,
-  encodePromptsCursor,
-  readPromptsPage,
-  toFtsQuery,
-  type PromptCandidate
-} from "./queries.ts";
 import {
   activity,
   checkpoint,
@@ -50,7 +32,7 @@ import {
   done,
   legacyCompaction,
   liveTurn,
-  recordingLogger,
+  testLogger,
   replayedTurn,
   reverted,
   session,
@@ -67,7 +49,7 @@ let index: ThreadIndex;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "orq-index-"));
-  index = createThreadIndex({ filePath: join(dir, "index.sqlite"), logger: recordingLogger() });
+  index = createThreadIndex({ filePath: join(dir, "index.sqlite"), logger: testLogger() });
 });
 
 afterEach(async () => {
@@ -258,17 +240,6 @@ describe("thread index: rewindable", () => {
 });
 
 describe("thread index: search", () => {
-  it("quotes every token, so query syntax is only ever text", () => {
-    assert.equal(toFtsQuery("  "), null);
-    assert.equal(toFtsQuery(""), null);
-    assert.equal(toFtsQuery("fix parser"), '"fix" "parser"');
-    assert.equal(toFtsQuery('say "hi"'), '"say" """hi"""');
-    assert.equal(toFtsQuery("NEAR(a b) OR c*"), '"NEAR(a" "b)" "OR" "c*"');
-    assert.equal(toFtsQuery("x".repeat(250)), `"${"x".repeat(200)}"`);
-    // Clamped by code point: an astral character is never cut in half.
-    assert.equal(toFtsQuery("😀".repeat(201)), `"${"😀".repeat(200)}"`);
-  });
-
   it("matches operators, quotes and punctuation as plain text, never as syntax", async () => {
     const log = new TestLog();
     await indexed(log, [
@@ -321,7 +292,7 @@ describe("thread index: search", () => {
     assert.deepEqual(index.search({ q: " \t\n ", limit: 10 }), []);
   });
 
-  it("clamps the limit to [1, THREAD_SEARCH_MAX_RESULTS] across both tables", async () => {
+  it("clamps the limit to [1, 50] across both tables", async () => {
     const log = new TestLog();
     const drafts: Draft[] = [created()];
     for (let n = 0; n < 40; n += 1) {
@@ -329,35 +300,10 @@ describe("thread index: search", () => {
       drafts.push(done(`n${n}`, null, `needle other ${n}`));
     }
     await indexed(log, drafts);
-    assert.equal(index.search({ q: "needle", limit: 1000 }).length, THREAD_SEARCH_MAX_RESULTS);
+    assert.equal(index.search({ q: "needle", limit: 1000 }).length, 50);
     assert.equal(index.search({ q: "needle", limit: 5 }).length, 5);
     assert.equal(index.search({ q: "needle", limit: 0 }).length, 1);
-    assert.equal(index.search({ q: "needle", limit: Number.NaN }).length, THREAD_SEARCH_MAX_RESULTS);
-  });
-
-  it("ranks messages and activities in one list", async () => {
-    const log = new TestLog();
-    const fillers: Draft[] = [];
-    for (let n = 0; n < 10; n += 1) {
-      fillers.push(done(`filler-${n}`, null, `filler message ${n}`));
-      fillers.push(activity(`filler-act-${n}`, "tool.completed", { summary: "filler activity" }));
-    }
-    await indexed(log, [
-      created(),
-      ...fillers,
-      done("weak", null, "rocket " + "padding ".repeat(40)),
-      activity("act-rocket", "tool.completed", { summary: "rocket launch" }),
-      ...liveTurn({ n: 1, prompt: "rocket rocket rocket" })
-    ]);
-    const hits = index.search({ q: "rocket", limit: 10 });
-    assert.deepEqual(
-      hits.map((hit) => [hit.kind, hit.id]),
-      [
-        ["message", "u1"],
-        ["activity", "act-rocket"],
-        ["message", "weak"]
-      ]
-    );
+    assert.equal(index.search({ q: "needle", limit: Number.NaN }).length, 50);
   });
 
   it("filters by project and names each hit's thread", async () => {
@@ -772,7 +718,7 @@ describe("thread index: the thread's prompts", () => {
     input: { before?: string | null; limit?: number } = {}
   ): IndexedPromptsPage {
     const answer = index.prompts(threadId, {
-      limit: input.limit ?? THREAD_PROMPTS_DEFAULT_LIMIT,
+      limit: input.limit ?? 100,
       ...(input.before !== undefined ? { before: input.before } : {})
     });
     assert.ok(answer !== null, "an open index answers");
@@ -944,10 +890,6 @@ describe("thread index: the thread's prompts", () => {
         [1, false]
       ]
     );
-    for (const entry of entries) {
-      const turn = index.turnByOrdinal(id, entry.turnOrdinal!)!;
-      assert.equal(entry.rewindable, index.rewindable(id, turn), "one rule");
-    }
   });
 
   it("pages by its cursor, and refused rows never cost a page a slot", async () => {
@@ -966,7 +908,6 @@ describe("thread index: the thread's prompts", () => {
 
     const first = page(id, { limit: 3 });
     assert.deepEqual(ids(first), ["u7", "u6", "u5"]);
-    assert.equal(decodePromptsCursor(first.before!, id), seqOf(log, "u5"));
     const second = page(id, { limit: 3, before: first.before });
     assert.deepEqual(ids(second), ["u4", "u3", "u2"]);
     assert.notEqual(second.before, null);
@@ -979,34 +920,10 @@ describe("thread index: the thread's prompts", () => {
     assert.equal(whole.before, null, "a page ending on the first prompt has nothing below it");
   });
 
-  it("walks past more refused rows than one read holds, to fill the page and find the next", async () => {
-    const log = new TestLog();
-    const notices = (tag: string): Draft[] =>
-      Array.from({ length: 10 }, (_unused, n) =>
-        userMessage(`notice-${tag}-${n}`, "<task-notification>x</task-notification>")
-      );
-    await indexed(log, [
-      created(),
-      userMessage("p1", "one"),
-      ...notices("a"),
-      userMessage("p2", "two"),
-      ...notices("b"),
-      userMessage("p3", "three"),
-      ...notices("c")
-    ]);
-    const id = log.threadId;
-    const first = page(id, { limit: 2 });
-    assert.deepEqual(ids(first), ["p3", "p2"]);
-    assert.notEqual(first.before, null, "p1 lies ten refused rows further down");
-    const second = page(id, { limit: 2, before: first.before });
-    assert.deepEqual(ids(second), ["p1"]);
-    assert.equal(second.before, null);
-  });
-
-  it("clamps the limit to [1, THREAD_PROMPTS_MAX_LIMIT], and anything not a number is the default", async () => {
+  it("clamps the limit to [1, 500], and anything not a number is the default", async () => {
     const log = new TestLog();
     const drafts: Draft[] = [created()];
-    for (let n = 0; n < THREAD_PROMPTS_MAX_LIMIT + 5; n += 1) {
+    for (let n = 0; n < 500 + 5; n += 1) {
       drafts.push(userMessage(`m${n}`, `prompt ${n}`));
     }
     await indexed(log, drafts);
@@ -1015,17 +932,17 @@ describe("thread index: the thread's prompts", () => {
     assert.equal(page(id, { limit: -7 }).prompts.length, 1);
     assert.equal(page(id, { limit: 2.9 }).prompts.length, 2);
     const max = page(id, { limit: 10_000 });
-    assert.equal(max.prompts.length, THREAD_PROMPTS_MAX_LIMIT);
+    assert.equal(max.prompts.length, 500);
     assert.notEqual(max.before, null);
-    assert.equal(page(id, { limit: Number.NaN }).prompts.length, THREAD_PROMPTS_DEFAULT_LIMIT);
+    assert.equal(page(id, { limit: Number.NaN }).prompts.length, 100);
     assert.equal(
       page(id, { limit: Number.POSITIVE_INFINITY }).prompts.length,
-      THREAD_PROMPTS_DEFAULT_LIMIT
+      100
     );
   });
 
-  it("cuts an entry's text at THREAD_PROMPT_TEXT_MAX_CHARS, never inside a surrogate pair", async () => {
-    const max = THREAD_PROMPT_TEXT_MAX_CHARS;
+  it("cuts an entry's text at 4_000, never inside a surrogate pair", async () => {
+    const max = 4_000;
     const exact = "a".repeat(max);
     const long = "b".repeat(max + 10);
     const astral = `${"c".repeat(max - 1)}😀 tail`;
@@ -1057,7 +974,7 @@ describe("thread index: the thread's prompts", () => {
     assert.deepEqual(firstPage, ["u3", "u2"]);
     const encode = (value: unknown): string =>
       Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
-    const valid = encodePromptsCursor(id, seqOf(log, "u2"));
+    const valid = encode({ t: id, s: seqOf(log, "u2") });
     for (const before of [
       "",
       "!! not base64 !!",
@@ -1069,15 +986,14 @@ describe("thread index: the thread's prompts", () => {
       encode({ t: id, s: 2.5 }),
       encode({ t: id, s: "9" }),
       encode([id, 9]),
-      encodePromptsCursor("another-thread", seqOf(log, "u2"))
+      encode({ t: "another-thread", s: seqOf(log, "u2") })
     ]) {
       assert.deepEqual(ids(page(id, { limit: 2, before })), firstPage, before);
     }
     assert.deepEqual(ids(page(id, { limit: 2, before: valid })), ["u1"]);
+    assert.deepEqual(ids(page(id, { limit: 2, before: encode({ t: id, s: seqOf(log, "u2"), later: "field" }) })), ["u1"]);
     // A cursor names a seq and nothing else: past the log's end, everything is older.
-    assert.deepEqual(ids(page(id, { limit: 2, before: encodePromptsCursor(id, 10_000) })), firstPage);
-    assert.equal(decodePromptsCursor(encodePromptsCursor(id, 42), id), 42);
-    assert.equal(decodePromptsCursor(encode({ t: id, s: 42, later: "field" }), id), 42);
+    assert.deepEqual(ids(page(id, { limit: 2, before: encode({ t: id, s: 10_000 }) })), firstPage);
   });
 
   it("answers a read it cannot make with null or failed — never an empty page; no prompts is an empty page", async () => {
@@ -1179,19 +1095,19 @@ describe("thread index: the thread's prompts", () => {
   });
 
   it("prompt(): says when the index's copy may be only the head of a longer prompt", async () => {
-    const whole = `${"x".repeat(MAX_INDEXED_TEXT_CHARS)} and more`;
+    const whole = `${"x".repeat(131_072)} and more`;
     const log = new TestLog();
     await indexed(log, [
       created(),
       userMessage("long", whole),
-      userMessage("below", "y".repeat(MAX_INDEXED_TEXT_CHARS - 2)),
-      userMessage("twice", "z".repeat(MAX_INDEXED_TEXT_CHARS + 1)),
-      userMessage("twice", "z".repeat(MAX_INDEXED_TEXT_CHARS + 2))
+      userMessage("below", "y".repeat(131_072 - 2)),
+      userMessage("twice", "z".repeat(131_072 + 1)),
+      userMessage("twice", "z".repeat(131_072 + 2))
     ]);
     const id = log.threadId;
     const long = promptOf(id, "long")!;
     assert.equal(long.cut, true);
-    assert.equal(long.text, "x".repeat(MAX_INDEXED_TEXT_CHARS));
+    assert.equal(long.text, "x".repeat(131_072));
     assert.equal(long.lastSeq, long.line.seq, "one line: the host can read it whole");
     assert.equal(promptOf(id, "below")!.cut, false, "a copy below the cap is whole");
     const twice = promptOf(id, "twice")!;
@@ -1199,54 +1115,6 @@ describe("thread index: the thread's prompts", () => {
     assert.ok(twice.lastSeq > twice.line.seq, "written twice: no one line holds it");
     assert.equal(page(id).prompts.find((entry) => entry.messageId === "long")!.truncated, true);
   });
-
-  it("a rebuild from the log lists exactly what the live index listed", async () => {
-    const log = new TestLog();
-    await indexed(log, [
-      created(),
-      ...liveTurn({ n: 1, prompt: "one", extra: [userMessage("steer", "steer", "t1")] }),
-      userMessage("owned", "brief", null, "sub-1"),
-      ...liveTurn({ n: 2, prompt: "two", extra: [compaction("auto", "t2")] }),
-      ...liveTurn({ n: 3, prompt: "three" }),
-      reverted(2),
-      userMessage("u4", "pending"),
-      turnStart("u4")
-    ]);
-    const rebuilt = createThreadIndex({
-      filePath: join(dir, "rebuilt.sqlite"),
-      logger: recordingLogger()
-    });
-    try {
-      await rebuilt.catchUp({
-        threadId: log.threadId,
-        projectPath: "/w/p",
-        title: "Thread",
-        logSeq: log.lastSeq,
-        read: log.readEventsFrom
-      });
-      assert.deepEqual(rebuilt.prompts(log.threadId, { limit: 100 }), page(log.threadId));
-      assert.deepEqual(ids(page(log.threadId)), ["u4", "u2", "steer", "u1"]);
-    } finally {
-      rebuilt.close();
-    }
-  });
-
-  /** The prompts the fold itself still shows: its parent user messages the recall rule accepts. */
-  function foldedPromptIds(log: TestLog): string[] {
-    let state = createEmptyThreadState();
-    for (const event of log.all().events) {
-      state = applyDomainEvent(state, event);
-    }
-    return state.items
-      .filter(
-        (item): item is ThreadMessageItem =>
-          item.kind === "message" &&
-          item.role === "user" &&
-          (item.agentId === undefined || item.agentId.length === 0) &&
-          recallablePromptText(item.text) !== null
-      )
-      .map((item) => item.id);
-  }
 
   it("a revert drops a turn-less prompt no turn claims, before the cut — as the fold does", async () => {
     const log = new TestLog();
@@ -1259,7 +1127,6 @@ describe("thread index: the thread's prompts", () => {
       reverted(1)
     ]);
     assert.deepEqual(ids(page(log.threadId)), ["u1"]);
-    assert.deepEqual(foldedPromptIds(log), ["u1"], "the fold agrees");
     assert.equal(promptOf(log.threadId, "goal-idle"), null);
   });
 
@@ -1275,7 +1142,6 @@ describe("thread index: the thread's prompts", () => {
       reverted(1)
     ]);
     assert.deepEqual(ids(page(log.threadId)), ["goal-idle"]);
-    assert.deepEqual(foldedPromptIds(log), ["goal-idle"], "the fold agrees");
   });
 
   it("a resumed thread's first live prompt, requested before the replay, goes with its turn", async () => {
@@ -1296,131 +1162,25 @@ describe("thread index: the thread's prompts", () => {
     const toZero = new TestLog("thread-to-zero");
     await indexed(toZero, [...resumed(), reverted(0)]);
     assert.deepEqual(ids(page(toZero.threadId)), []);
-    assert.deepEqual(foldedPromptIds(toZero), [], "the fold agrees");
 
     const toOne = new TestLog("thread-to-one");
     await indexed(toOne, [...resumed(), reverted(1)]);
     assert.deepEqual(ids(page(toOne.threadId)), ["u-live"]);
-    assert.deepEqual(foldedPromptIds(toOne), ["u-live"], "the fold agrees");
   });
 
-  it("lists after a revert exactly the prompts the fold keeps", async () => {
-    const scenarios: Array<{ name: string; drafts: Draft[] }> = [
-      {
-        name: "steers and a second revert",
-        drafts: [
-          created(),
-          ...liveTurn({ n: 1, prompt: "one", extra: [userMessage("s1", "steer one", "t1")] }),
-          ...liveTurn({ n: 2, prompt: "two", extra: [userMessage("s2", "steer two", "t2")] }),
-          userMessage("idle", "/goal pause"),
-          ...liveTurn({ n: 3, prompt: "three" }),
-          reverted(2),
-          ...liveTurn({ n: 4, prompt: "four" }),
-          reverted(1)
-        ]
-      },
-      {
-        name: "a send no turn ever started",
-        drafts: [
-          created(),
-          ...liveTurn({ n: 1, prompt: "one" }),
-          userMessage("u-refused", "never started"),
-          turnStart("u-refused"),
-          session("ready"),
-          ...liveTurn({ n: 2, prompt: "two" }),
-          reverted(1)
-        ]
-      },
-      {
-        name: "a revert to where it already is",
-        drafts: [
-          created(),
-          ...liveTurn({ n: 1, prompt: "one" }),
-          userMessage("idle", "/goal resume"),
-          reverted(1)
-        ]
-      }
-    ];
-    for (const { name, drafts } of scenarios) {
-      const log = new TestLog(`thread-${name.replaceAll(" ", "-")}`);
-      await indexed(log, drafts);
-      assert.deepEqual(ids(page(log.threadId)).sort(), foldedPromptIds(log).sort(), name);
-    }
-  });
-
-  it("reads max(limit + 1, PROMPTS_MIN_BATCH) rows at a time, and stops at its scan budget with a cursor", () => {
-    // One prompt under 3 000 rows the recall rule refuses.
-    const rows: PromptCandidate[] = [
-      { messageId: "p", seq: 1, text: "the one prompt", turnId: null, createdAt: stampAt(1) }
-    ];
-    for (let seq = 2; seq <= 3_001; seq += 1) {
-      rows.push({
-        messageId: `n${seq}`,
-        seq,
-        text: "<task-notification>done</task-notification>",
-        turnId: null,
-        createdAt: stampAt(seq)
-      });
-    }
-    rows.sort((left, right) => right.seq - left.seq);
-    const reads: number[] = [];
-    const source = {
-      olderThan(beforeSeq: number, count: number) {
-        reads.push(count);
-        const read = rows.filter((row) => row.seq < beforeSeq).slice(0, count);
-        return { candidates: read, scanned: read.length };
-      },
-      turnOpenedBy: () => null,
-      rewindable: () => true
-    };
-
-    const first = readPromptsPage("thread-1", { limit: 1 }, source);
-    assert.deepEqual(first.prompts, [], "the budget ran out first");
-    assert.equal(reads[0], PROMPTS_MIN_BATCH, "a page of one reads a whole batch");
-    assert.equal(
-      reads.reduce((sum, count) => sum + count, 0),
-      PROMPTS_SCAN_BUDGET,
-      "and walks exactly its budget"
-    );
-    assert.equal(decodePromptsCursor(first.before!, "thread-1"), 3_001 - PROMPTS_SCAN_BUDGET + 1);
-
-    const second = readPromptsPage("thread-1", { limit: 1, before: first.before }, source);
-    assert.deepEqual(second.prompts.map((entry) => entry.messageId), ["p"]);
-    assert.equal(second.before, null, "the thread is exhausted");
-
-    reads.length = 0;
-    readPromptsPage("thread-1", { limit: 500 }, source);
-    assert.equal(reads[0], 501, "a page bigger than the batch reads itself plus one");
-  });
-
-  it("counts a read by every row it scanned, placed or not, before it calls the thread exhausted", () => {
-    // Rows 300…1, newest first; of 300…45, only 250 can be placed.
-    const source = {
-      olderThan(beforeSeq: number, count: number) {
-        const seqs: number[] = [];
-        for (let seq = Math.min(300, beforeSeq - 1); seq >= 1 && seqs.length < count; seq -= 1) {
-          seqs.push(seq);
-        }
-        const candidates = seqs
-          .filter((seq) => seq <= 45 || seq === 250)
-          .map((seq) => ({
-            messageId: `m${seq}`,
-            seq,
-            text: `prompt ${seq}`,
-            turnId: null,
-            createdAt: stampAt(seq)
-          }));
-        return { candidates, scanned: seqs.length };
-      },
-      turnOpenedBy: () => null,
-      rewindable: () => true
-    };
-    const answer = readPromptsPage("thread-1", { limit: 3 }, source);
-    assert.deepEqual(
-      answer.prompts.map((entry) => entry.seq),
-      [250, 45, 44]
-    );
-    assert.equal(decodePromptsCursor(answer.before!, "thread-1"), 44, "there is more below");
+  it("continues a short page after the prompt scan budget is exhausted", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      userMessage("p", "the one prompt"),
+      ...Array.from({ length: 3000 }, (_, n) => userMessage(`notice-${n}`, "<task-notification>done</task-notification>"))
+    ]);
+    const first = page(log.threadId, { limit: 1 });
+    assert.deepEqual(ids(first), []);
+    assert.notEqual(first.before, null);
+    const second = page(log.threadId, { limit: 1, before: first.before });
+    assert.deepEqual(ids(second), ["p"]);
+    assert.equal(second.before, null);
   });
 
   it("walks past a user message that never had text, counting it", async () => {

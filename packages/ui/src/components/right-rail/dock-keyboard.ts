@@ -68,7 +68,7 @@ export function dockKeyAction(input: DockKeyInput): DockKeyAction {
  * "any", so the dock's registration is set aside for one synchronous read and
  * then taken out again — `ours.current` is left holding the new release.
  */
-export function otherKeyboardLayerOpen(ours: { current: (() => void) | null }): boolean {
+function otherKeyboardLayerOpen(ours: { current: (() => void) | null }): boolean {
   const release = ours.current;
   if (release === null) return isAnyLayerOpen();
   release();
@@ -98,7 +98,7 @@ export function useDockKeyboardLayer(held: boolean): () => boolean {
 }
 
 /** What {@link focusFellOut} needs of the element that last had focus in the dock. */
-export interface LastFocused {
+interface LastFocused {
   isConnected: boolean;
   matches?: (selector: string) => boolean;
   closest?: (selector: string) => unknown;
@@ -114,7 +114,7 @@ export interface LastFocused {
  * running turn. A user who clicked away left behind an element that is still
  * there and still focusable, and the dock lets go.
  */
-export function focusFellOut(input: {
+function focusFellOut(input: {
   /** `document.activeElement`. */
   active: Element | null;
   body: Element | null;
@@ -130,18 +130,16 @@ export function focusFellOut(input: {
 }
 
 /** What the focus tracker reads and drives: the dock's root and the document. */
-export interface FocusTrackerEnv {
+interface FocusTrackerEnv {
   node: LastFocused & {
     contains(other: Element): boolean;
     focus(options?: { preventScroll?: boolean }): void;
   };
   doc: { readonly activeElement: Element | null; readonly body: Element | null };
   setInside(inside: boolean): void;
-  /** Run `task` once the current commit is done (`setTimeout(…, 0)`); returns its cancel. */
-  defer(task: () => void): () => void;
 }
 
-export interface FocusTracker {
+interface FocusTracker {
   /** Decide from where focus is now: a DOM change, a deferred `focusout`, the first look. */
   check(): void;
   /** A `focusin` inside the dock; `target` is the element that took focus. */
@@ -164,7 +162,7 @@ export interface FocusTracker {
  * before a `focusin` listener exists, and without it that field's removal
  * would read as the user leaving.
  */
-export function createFocusTracker(env: FocusTrackerEnv): FocusTracker {
+function createFocusTracker(env: FocusTrackerEnv): FocusTracker {
   let last: LastFocused | null = null;
   let cancelDeferred: (() => void) | null = null;
   const release = (): void => {
@@ -206,10 +204,11 @@ export function createFocusTracker(env: FocusTrackerEnv): FocusTracker {
       // To nowhere: a click on nothing focusable, the window losing focus, or
       // the focused element going away mid-commit. Decided once it is done.
       cancelDeferred?.();
-      cancelDeferred = env.defer(() => {
+      const timer = setTimeout(() => {
         cancelDeferred = null;
         check();
-      });
+      }, 0);
+      cancelDeferred = () => clearTimeout(timer);
     },
     dispose() {
       cancelDeferred?.();
@@ -244,11 +243,7 @@ export function useFocusInside(node: HTMLElement | null): boolean {
     const tracker = createFocusTracker({
       node,
       doc: document,
-      setInside,
-      defer: (task) => {
-        const timer = setTimeout(task, 0);
-        return () => clearTimeout(timer);
-      }
+      setInside
     });
     const onFocusIn = (event: FocusEvent): void =>
       tracker.focusIn(event.target instanceof Element ? event.target : null);

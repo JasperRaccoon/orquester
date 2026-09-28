@@ -38,11 +38,9 @@ export interface AppendedBatch {
 
 export class TestLog {
   readonly threadId: string;
-  private lines: Array<{ event: DomainEvent; line: string; position: EventPosition }> = [];
+  private lines: Array<{ event: DomainEvent; position: EventPosition }> = [];
   private bytes = 0;
   private seq = 0;
-  /** Every `readEventsFrom` call, for assertions. */
-  readonly reads: Array<{ byteOffset: number; afterSeq: number }> = [];
 
   constructor(threadId = "thread-1") {
     this.threadId = threadId;
@@ -79,7 +77,7 @@ export class TestLog {
         byteLength: Buffer.byteLength(line, "utf8")
       };
       this.bytes += position.byteLength;
-      this.lines.push({ event, line, position });
+      this.lines.push({ event, position });
       events.push(event);
       positions.push(position);
     }
@@ -132,7 +130,6 @@ export class TestLog {
     byteOffset: number;
     afterSeq: number;
   }): Promise<EventsFromResult> => {
-    this.reads.push({ ...input });
     const stale: EventsFromResult = {
       events: [],
       positions: [],
@@ -379,22 +376,6 @@ export function liveTurn(input: {
 // Logger
 // ---------------------------------------------------------------------------
 
-export interface RecordingLogger extends AdapterLogger {
-  readonly entries: Array<{ level: "debug" | "info" | "warn" | "error"; message: string }>;
-}
-
-export function recordingLogger(): RecordingLogger {
-  const entries: RecordingLogger["entries"] = [];
-  const record =
-    (level: "debug" | "info" | "warn" | "error") =>
-    (message: string): void => {
-      entries.push({ level, message });
-    };
-  return {
-    entries,
-    debug: record("debug"),
-    info: record("info"),
-    warn: record("warn"),
-    error: record("error")
-  };
+export function testLogger(): AdapterLogger {
+  return { debug() {}, info() {}, warn() {}, error() {} };
 }

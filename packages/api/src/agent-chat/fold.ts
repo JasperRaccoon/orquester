@@ -58,7 +58,6 @@ import type { ThreadGoal } from "./goal.ts";
 import { derivePendingRequests } from "./pending.ts";
 import {
   createRosterEngine,
-  foldSubagentActivities,
   rosterEngineAppend,
   rosterEngineReplace,
   rosterFromEngine
@@ -167,7 +166,7 @@ export interface FoldEvictions {
  * Only the thread's own state: the id → position index that makes a streaming
  * delta cheap used to ride here as `itemIndex`, and copying it per appended row
  * was a fifth of a big thread's fold. It now lives in the fold's side table
- * with the other caches ({@link itemPositionOf} reads it).
+ * with the other caches.
  */
 export interface ThreadFoldState {
   head: ThreadHead | null;
@@ -482,7 +481,8 @@ function ownerOf(activity: ThreadActivityItem): string | null {
  */
 function trimWindow(
   items: readonly ThreadItem[],
-  activities: ThreadActivityItem[]
+  activities: ThreadActivityItem[],
+  messageRetention: "window" | "all"
 ): {
   items: ThreadItem[];
   activities: ThreadActivityItem[];
@@ -490,7 +490,9 @@ function trimWindow(
   dropped: ThreadItem[];
 } | null {
   const dropActivities = activitiesToDrop(activities);
-  let messagesToDrop = Math.max(0, items.length - activities.length - MESSAGE_RETENTION_LIMIT);
+  let messagesToDrop = messageRetention === "all"
+    ? 0
+    : Math.max(0, items.length - activities.length - MESSAGE_RETENTION_LIMIT);
   if (dropActivities.size === 0 && messagesToDrop === 0) {
     return null;
   }
@@ -653,9 +655,13 @@ function countsWithout(counts: RetentionCounts, dropped: readonly ThreadItem[]):
 function retentionTriggered(
   items: readonly ThreadItem[],
   activities: readonly ThreadActivityItem[],
-  counts: RetentionCounts
+  counts: RetentionCounts,
+  messageRetention: "window" | "all"
 ): boolean {
-  if (items.length - activities.length > MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK) {
+  if (
+    messageRetention === "window" &&
+    items.length - activities.length > MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK
+  ) {
     return true;
   }
   return (
@@ -960,6 +966,26 @@ export function applyDomainEvent(
   state: ThreadFoldState,
   event: DomainEvent
 ): ThreadFoldState {
+  return applyEvent(state, event, "window");
+}
+
+/**
+ * Replay complete message history for a durable item read outside the resident
+ * window. Activity retention stays bounded; message merging, turn claims and
+ * rewinds keep their usual rules.
+ */
+export function applyFullHistoryEvent(
+  state: ThreadFoldState,
+  event: DomainEvent
+): ThreadFoldState {
+  return applyEvent(state, event, "all");
+}
+
+function applyEvent(
+  state: ThreadFoldState,
+  event: DomainEvent,
+  messageRetention: "window" | "all"
+): ThreadFoldState {
   if (event.seq <= state.seq) {
     return state;
   }
@@ -969,13 +995,14 @@ export function applyDomainEvent(
   }
 
   const mutation = reduce(state, event);
-  return commit(state, event, mutation);
+  return commit(state, event, mutation, messageRetention);
 }
 
 function commit(
   state: ThreadFoldState,
   event: DomainEvent,
-  mutation: Mutation
+  mutation: Mutation,
+  messageRetention: "window" | "all"
 ): ThreadFoldState {
   let items = mutation.items ?? state.items;
   let activities = mutation.activities ?? state.activities;
@@ -998,8 +1025,8 @@ function commit(
     // Batch retention (design B): nothing is trimmed until a class holds more
     // than its limit plus its slack, and then every class is cut back to its
     // limit at once.
-    if (retentionTriggered(items, activities, caches.counts)) {
-      const trimmed = trimWindow(items, activities);
+    if (retentionTriggered(items, activities, caches.counts, messageRetention)) {
+      const trimmed = trimWindow(items, activities, messageRetention);
       if (trimmed !== null) {
         retentionDropped = trimmed.activities !== activities;
         items = trimmed.items;
@@ -1121,117 +1148,6 @@ const NO_DROPPED: readonly ThreadItem[] = [];
  */
 export function itemsDroppedByRetention(state: ThreadFoldState): readonly ThreadItem[] {
   return droppedByStep.get(state) ?? NO_DROPPED;
-}
-
-/**
- * The position of item `id` in `state.items` — its LAST one, should a message
- * and an activity share an id — or undefined (tests, diagnostics).
- */
-export function itemPositionOf(state: ThreadFoldState, id: string): number | undefined {
-  const position = positionOf(cachesOf(state).index, state.items, id);
-  return position !== undefined && state.items[position]?.id === id ? position : undefined;
-}
-
-/**
- * **Test-only.** Design A2's invariant, checked: how the caches the fold keeps
- * for `state` differ from caches rebuilt from its arrays — a description of
- * the first mismatches, or `null` when they agree or when none are kept yet (a
- * state nothing has folded onto builds them on first use). The roster engine
- * is compared through its output under both liveness readings, which refolds
- * the whole activity list: `{ roster: false }` skips it.
- */
-export function __foldCacheConsistency(
-  state: ThreadFoldState,
-  options: { readonly roster?: boolean } = {}
-): string | null {
-  const caches = cachesByState.get(state);
-  if (caches === undefined) {
-    return null;
-  }
-  const problems: string[] = [];
-
-  // The index: the base must map every id of its rows to that id's LAST
-  // position among them, and nothing else; the tail past it is walked, so it
-  // only has to be short. Checked without building a map: every row's id must
-  // point at a row at or after it with the same id (so at its last one), and
-  // exactly one row per distinct id — its last — points at itself.
-  const { base, baseLength } = caches.index;
-  if (baseLength > state.items.length || state.items.length - baseLength > INDEX_TAIL_LIMIT) {
-    problems.push(`index base covers ${baseLength} of ${state.items.length} rows`);
-  } else {
-    let lastPositions = 0;
-    for (let position = 0; position < baseLength; position += 1) {
-      const id = state.items[position]!.id;
-      const at = base.get(id);
-      if (at === undefined || at < position || at >= baseLength || state.items[at]!.id !== id) {
-        problems.push(`index puts ${id} (row ${position}) at ${String(at)}`);
-        break;
-      }
-      if (at === position) lastPositions += 1;
-    }
-    if (problems.length === 0 && base.size !== lastPositions) {
-      problems.push(`index base holds ${base.size} ids, its rows ${lastPositions}`);
-    }
-  }
-
-  const counts = countsFrom(state.activities);
-  for (const field of ["parent", "agentTotal", "agentsPastTrigger"] as const) {
-    if (caches.counts[field] !== counts[field]) {
-      problems.push(`counts.${field} is ${caches.counts[field]}, the window says ${counts[field]}`);
-    }
-  }
-  const agents = new Set([...caches.counts.agents.keys(), ...counts.agents.keys()]);
-  for (const agent of agents) {
-    if (caches.counts.agents.get(agent) !== counts.agents.get(agent)) {
-      problems.push(
-        `counts for agent ${agent}: ${String(caches.counts.agents.get(agent))}, the window says ${String(counts.agents.get(agent))}`
-      );
-      break;
-    }
-  }
-
-  if (options.roster !== false && caches.roster !== null) {
-    for (const sessionLive of [true, false]) {
-      if (
-        !sameJsonValue(
-          rosterFromEngine(caches.roster, { sessionLive }),
-          foldSubagentActivities(state.activities, { sessionLive })
-        )
-      ) {
-        problems.push(`the roster engine disagrees with the activity list (sessionLive ${sessionLive})`);
-      }
-    }
-  }
-  return problems.length === 0 ? null : problems.join("; ");
-}
-
-/** Structural equality of JSON-shaped values, key order aside (the roster rows). */
-function sameJsonValue(left: unknown, right: unknown): boolean {
-  if (left === right) {
-    return true;
-  }
-  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
-    return false;
-  }
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
-      left.length === right.length &&
-      left.every((entry, index) => sameJsonValue(entry, right[index]))
-    );
-  }
-  const leftRecord = left as Record<string, unknown>;
-  const rightRecord = right as Record<string, unknown>;
-  const keys = Object.keys(leftRecord);
-  return (
-    keys.length === Object.keys(rightRecord).length &&
-    keys.every(
-      (key) =>
-        Object.prototype.hasOwnProperty.call(rightRecord, key) &&
-        sameJsonValue(leftRecord[key], rightRecord[key])
-    )
-  );
 }
 
 /**

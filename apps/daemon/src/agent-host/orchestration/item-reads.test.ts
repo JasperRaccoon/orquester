@@ -1,8 +1,8 @@
 /**
  * The orchestrator's item reads over the REAL store (`createThreadStore`): `GET …/items/:itemId` and
  * `GET …/items/:itemId/output?offset=&maxBytes=` reach the store's own paths — its item cursor and tool-output cache —
- * which the host's HTTP and MCP harnesses, running on the in-memory fake, never do. And the one read the store is
- * spared: a message the thread's resident fold still holds.
+ * which the host's HTTP and MCP harnesses, running on the in-memory fake, never do.
+ * Message reconstruction after retention is owned by store/tool-output.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -11,43 +11,22 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 
-import {
-  MESSAGE_RETENTION_LIMIT,
-  MESSAGE_RETENTION_SLACK,
-  SLIM_MAX_STRING_BYTES,
-  TASK_PROMPT_MAX_CHARS
-} from "@orquester/api/agent-chat";
-
 import { runtimeEventToActivities } from "../ingestion/activities.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 import { createThreadStore } from "../store/index.ts";
 import { createTestHost } from "./testing/index.ts";
 
-type RealStore = ReturnType<typeof createThreadStore>;
-
-/** A test host whose orchestrator runs on the real store, with its item reads counted and its log reads recorded. */
+/** A test host running the public item reads against the durable store. */
 async function realStoreHost(t: { after(fn: () => unknown): void }) {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-item-reads-"));
-  const reads: Array<[string, number, number]> = [];
-  const store: RealStore = createThreadStore({ rootDir, sweepIntervalMs: 0, onLogRead: (threadId, from, to) => reads.push([threadId, from, to]) });
-  const calls = { readItem: 0, readToolOutputWindow: 0 };
-  const readItem = store.readItem.bind(store);
-  const readToolOutputWindow = store.readToolOutputWindow.bind(store);
-  store.readItem = (threadId, itemId) => {
-    calls.readItem += 1;
-    return readItem(threadId, itemId);
-  };
-  store.readToolOutputWindow = (threadId, itemId, window) => {
-    calls.readToolOutputWindow += 1;
-    return readToolOutputWindow(threadId, itemId, window);
-  };
+  const store = createThreadStore({ rootDir });
   const host = createTestHost({ store });
   t.after(async () => {
     await host.stop();
     store.close();
     await fs.rm(rootDir, { recursive: true, force: true });
   });
-  return { host, store, calls, reads, readItem };
+  return { host };
 }
 
 let eventCount = 0;
@@ -63,8 +42,8 @@ const shellRow = (threadId: string, id: string, activityKind: string, payload: R
   });
 
 describe("the orchestrator's item reads over the real store", () => {
-  it("answers a message its resident fold holds from the fold — equal to the store's whole-log fold — never asking the store", async (t) => {
-    const { host, calls, readItem } = await realStoreHost(t);
+  it("reads the complete resident message after streamed deltas", async (t) => {
+    const { host } = await realStoreHost(t);
     const threadId = await host.createThread();
     // A message streamed in many deltas, then settled by a frame whose empty text keeps the body.
     const deltas = Array.from({ length: 60 }, (_, i) => `chunk ${i} ✓ 😀 "quoted" \\ \n`);
@@ -72,34 +51,8 @@ describe("the orchestrator's item reads over the real store", () => {
     await host.settle();
 
     const resident = await host.orchestrator.readItem(threadId, "assistant:1");
-    assert.equal(calls.readItem, 0, "the store was not asked");
+
     assert.deepEqual([resident?.kind, resident?.kind === "message" ? resident.text : null], ["message", deltas.join("")]);
-    // What the store answers for it, from the log: the same merged message, field for field.
-    assert.deepEqual(resident, await readItem(threadId, "assistant:1"));
-  });
-
-  it("reads a message retention dropped from the fold, and any activity, through the store", async (t) => {
-    const { host, calls, readItem } = await realStoreHost(t);
-    const threadId = await host.createThread();
-    // One past the batch trim's threshold: the fold cuts messages back to the limit, the oldest first.
-    const count = MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK + 1;
-    const messages = Array.from({ length: count }, (_, i) => said(threadId, `m-${i}`, `message ${i}`, false));
-    for (let i = 0; i < count; i += 500) await host.orchestrator.ingestionSink(threadId, messages.slice(i, i + 500));
-    await host.orchestrator.ingestionSink(threadId, [shellRow(threadId, "shell-start", "tool.started", { itemType: "command_execution" })]);
-    await host.settle();
-    const read = await host.orchestrator.readThread(threadId);
-    assert.ok(read.kind === "snapshot");
-    assert.equal(read.thread.items.some((item) => item.id === "m-0"), false, "precondition: retention dropped the oldest message");
-
-    const dropped = await host.orchestrator.readItem(threadId, "m-0");
-    assert.equal(calls.readItem, 1, "a message the fold no longer holds goes to the store");
-    assert.deepEqual(dropped, await readItem(threadId, "m-0"), "and the store's answer is the answer");
-    const activity = await host.orchestrator.readItem(threadId, "shell-start");
-    assert.equal(calls.readItem, 2, "an activity always goes to the store: the log, not the projection, is its authority");
-    assert.equal(activity?.kind === "activity" ? activity.activityKind : null, "tool.started");
-    // The newest message is still in the fold: no store read.
-    assert.equal((await host.orchestrator.readItem(threadId, `m-${count - 1}`))?.kind, "message");
-    assert.equal(calls.readItem, 2);
   });
 
   it("an agent's launch prompt: the snapshot carries it slimmed and flagged, the item read serves it as stored", async (t) => {
@@ -108,7 +61,7 @@ describe("the orchestrator's item reads over the real store", () => {
     // Past the wire's 16 KiB cap, within the host's at-rest bound: the one
     // range where the drill-in's "load the whole prompt" read has more.
     const prompt = `Audit the store.\n${"Context line — ✓.\n".repeat(1_100)}`;
-    assert.ok(prompt.length > SLIM_MAX_STRING_BYTES && prompt.length <= TASK_PROMPT_MAX_CHARS);
+    assert.ok(prompt.length > 16_384 && prompt.length <= 32_000);
     const [start] = runtimeEventToActivities({
       eventId: "re-start",
       threadId,
@@ -134,8 +87,8 @@ describe("the orchestrator's item reads over the real store", () => {
     assert.equal(stored?.kind === "activity" ? (stored.payload as Record<string, unknown>).prompt : null, prompt);
   });
 
-  it("serves a tool call's output windows from the real store's cache: after the first page, only the log's tail is read", async (t) => {
-    const { host, store, calls, reads } = await realStoreHost(t);
+  it("serves output windows including newly appended output and completion", async (t) => {
+    const { host } = await realStoreHost(t);
     const threadId = await host.createThread();
     await host.orchestrator.ingestionSink(threadId, [
       shellRow(threadId, "shell-start", "tool.started", { itemType: "command_execution" }),
@@ -146,19 +99,16 @@ describe("the orchestrator's item reads over the real store", () => {
 
     const first = await host.orchestrator.readToolOutputWindow(threadId, "shell-start", { offset: 0, maxBytes: 4 });
     assert.deepEqual(first, { toolUseId: "bgshell:task-1", offset: 0, text: "one\n", totalBytes: 10, nextOffset: 4, complete: false, truncated: false });
-    assert.equal(calls.readToolOutputWindow, 1, "delegated to the store");
 
-    const before = await store.logLength(threadId);
     await host.orchestrator.ingestionSink(threadId, [
       shellRow(threadId, "o3", "tool.output", { streamKind: "command_output", delta: "three\n" }),
       shellRow(threadId, "shell-done", "tool.completed", { itemType: "command_execution" })
     ]);
     await host.settle();
-    const after = await store.logLength(threadId);
-    reads.length = 0;
+
     const next = await host.orchestrator.readToolOutputWindow(threadId, "shell-start", { offset: 4, maxBytes: 100 });
     assert.deepEqual(next, { toolUseId: "bgshell:task-1", offset: 4, text: "  two\nthree\n", totalBytes: 16, complete: true, truncated: false });
-    assert.deepEqual(reads, [[threadId, before, after], [threadId, before, after]], "the item's tail, then the join's: never the log from its start");
+
     assert.deepEqual(await host.orchestrator.readToolOutput(threadId, "shell-start"), { toolUseId: "bgshell:task-1", output: "one\n  two\nthree\n", complete: true, truncated: false });
   });
 });

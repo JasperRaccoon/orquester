@@ -38,12 +38,12 @@ import type {
 import { buildSandboxEnv, defaultSandboxTmpDir } from "./env.ts";
 import { isSameProcessAlive, readStarttime, signalGroupIfOurs } from "./proc.ts";
 
-export const SANDBOX_RUNNER_PATH = fileURLToPath(new URL("./runner.mjs", import.meta.url));
+const SANDBOX_RUNNER_PATH = fileURLToPath(new URL("./runner.mjs", import.meta.url));
 
 /** SIGTERM → SIGKILL grace, the runner's and `kill()`'s (spec §5.6). */
-export const SANDBOX_KILL_GRACE_MS = 5_000;
+const SANDBOX_KILL_GRACE_MS = 5_000;
 /** How far past the deadline + grace `wait()` steps in for a runner that did not. */
-export const SANDBOX_DEADLINE_BACKSTOP_MS = 10_000;
+const SANDBOX_DEADLINE_BACKSTOP_MS = 10_000;
 const DEFAULT_POLL_MS = 250;
 /** How long kill() waits for a runner that is still booting to install its SIGTERM handler. */
 const RUNNER_READY_TIMEOUT_MS = 5_000;
@@ -81,16 +81,6 @@ export interface SandboxRunnerOptions {
   /** `<appdir>/tmp` — the attempt's TMPDIR. Defaults to the daemon's TMPDIR, else the OS's. */
   appdirTmp?: string;
   clock?: Clock;
-  /** How often `wait()` checks the attempt (and reports log sizes). Default 250 ms. */
-  pollMs?: number;
-  /** SIGTERM → SIGKILL grace. Default 5 s (spec §5.6); tests shorten it. */
-  killGraceMs?: number;
-  /** Per-stream log cap. Default `WORKFLOW_LIMITS.maxLogBytes`. */
-  maxLogBytes?: number;
-  /** Code result cap. Default `WORKFLOW_LIMITS.maxOutputBytes`. */
-  maxOutputBytes?: number;
-  /** The node binary the runner (and the code host) run on. Default `process.execPath`. */
-  nodePath?: string;
   logger?: WorkflowLogger;
 }
 
@@ -209,11 +199,11 @@ export interface DetailedSandboxRunner extends SandboxRunner {
 
 export function createSandboxRunner(options: SandboxRunnerOptions = {}): DetailedSandboxRunner {
   const clock = options.clock ?? realClock;
-  const pollMs = Math.max(1, options.pollMs ?? DEFAULT_POLL_MS);
-  const killGraceMs = Math.max(0, options.killGraceMs ?? SANDBOX_KILL_GRACE_MS);
-  const maxLogBytes = options.maxLogBytes ?? WORKFLOW_LIMITS.maxLogBytes;
-  const maxOutputBytes = options.maxOutputBytes ?? WORKFLOW_LIMITS.maxOutputBytes;
-  const nodePath = options.nodePath ?? process.execPath;
+  const pollMs = DEFAULT_POLL_MS;
+  const killGraceMs = SANDBOX_KILL_GRACE_MS;
+  const maxLogBytes = WORKFLOW_LIMITS.maxLogBytes;
+  const maxOutputBytes = WORKFLOW_LIMITS.maxOutputBytes;
+  const nodePath = process.execPath;
   const tmpDir = options.appdirTmp ?? defaultSandboxTmpDir();
 
   /** Runners this daemon started: resolved on their `exit`, so a wait wakes at once. */

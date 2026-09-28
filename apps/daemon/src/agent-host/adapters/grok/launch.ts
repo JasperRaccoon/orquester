@@ -105,7 +105,7 @@ export const GROK_EXTRA_ENV: Readonly<Record<string, string>> = {
  * 1.0.3 is the oldest build seen speaking this protocol on this host; 1.0.34
  * is what every fixture was captured from.
  */
-export const MINIMUM_GROK_VERSION = "1.0.3";
+const MINIMUM_GROK_VERSION = "1.0.3";
 /** The version the fixtures — and therefore the normaliser — were built against. */
 export const VALIDATED_GROK_VERSION = "1.0.34";
 
@@ -116,7 +116,7 @@ export function parseGrokVersion(output: string): string | null {
 }
 
 /** Numeric-segment compare; a non-numeric suffix is ignored. -1 / 0 / 1. */
-export function compareVersions(a: string, b: string): number {
+function compareVersions(a: string, b: string): number {
   const left = a.split(/[.+-]/).map((part) => Number.parseInt(part, 10));
   const right = b.split(/[.+-]/).map((part) => Number.parseInt(part, 10));
   const length = Math.max(left.length, right.length);
@@ -156,7 +156,7 @@ export function versionGateMessage(version: string | null): string {
  * **never sent over the wire** — `13-errors-and-rpcs.ndjson` shows it coming
  * back as a hard `-32602 "unknown model id"`, exactly like a typo.
  */
-export const GROK_PRODUCT_SLUG = "grok-build";
+const GROK_PRODUCT_SLUG = "grok-build";
 
 /** T3's validation for a reasoning-effort id. *T3: `GrokAcpSupport.ts:101-122`.* */
 const REASONING_EFFORT_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/i;
@@ -224,12 +224,12 @@ export function resolveGrokModelUpdate(
 }
 
 /** Whether the selection names a reasoning effort at all, valid or not. */
-export function hasReasoningEffortPreference(selection: ModelSelection | undefined): boolean {
+function hasReasoningEffortPreference(selection: ModelSelection | undefined): boolean {
   return selection?.options?.some((entry) => entry.id === GROK_EFFORT_OPTION_ID) === true;
 }
 
 /** The validated `reasoningEffort` of a selection, or null. */
-export function grokReasoningEffort(selection: ModelSelection | undefined): string | null {
+function grokReasoningEffort(selection: ModelSelection | undefined): string | null {
   const option = selection?.options?.find((entry) => entry.id === GROK_EFFORT_OPTION_ID);
   if (option === undefined || typeof option.value !== "string") {
     return null;
@@ -308,7 +308,7 @@ export function grokReasoningEffort(selection: ModelSelection | undefined): stri
  * applies as an `env_overlay` layer ON TOP of whatever the user's own config
  * says, touching no shared file at all.
  */
-export const GROK_MANAGED_CONFIG: ReadonlyArray<{ section: string; key: string; value: string }> = [
+const GROK_MANAGED_CONFIG: ReadonlyArray<{ section: string; key: string; value: string }> = [
   { section: "features", key: "support_permission", value: "true" },
   { section: "cli", key: "auto_update", value: "false" }
 ];
@@ -317,7 +317,7 @@ export const GROK_MANAGED_CONFIG: ReadonlyArray<{ section: string; key: string; 
 export const GROK_CONFIG_PATH_ENV = "GROK_CONFIG_PATH";
 
 /** The overlay's contents. Fully host-owned, so it is rendered, not patched. */
-export function renderGrokOverlayConfig(): string {
+function renderGrokOverlayConfig(): string {
   const bySection = new Map<string, string[]>();
   for (const { section, key, value } of GROK_MANAGED_CONFIG) {
     const lines = bySection.get(section) ?? [];

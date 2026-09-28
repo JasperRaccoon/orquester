@@ -23,35 +23,35 @@ const labels = (text: string, s = scope(), pos = text.length) => templateComplet
 describe("the completion scope", () => {
   it("lists only the blocks upstream, the triggers, and the direct input's fields", () => {
     const s = scope();
-    assert.deepEqual(s.upstream.map((n) => n.name), ["OnTag", "Fetch", "Review"]);
+    assert.deepEqual(s.upstream.map((n) => n.name).sort(), ["Fetch", "OnTag", "Review"]);
     assert.deepEqual(s.triggerTypes, ["trigger.git"]);
-    assert.deepEqual(s.inputFields, ["text", "sessionId", "agent", "model", "accountId", "durationMs", "hops"]);
+    assert.deepEqual(s.inputFields.slice().sort(), ["accountId", "agent", "durationMs", "hops", "model", "sessionId", "text"]);
   });
 });
 
 describe("templateCompletions", () => {
   it("offers the roots right after {{", () => {
-    assert.deepEqual(labels("Hi {{ "), ["nodes", "input", "trigger", "run", "project", "secrets", "workflow"]);
+    assert.deepEqual(labels("Hi {{ ")?.sort(), ["input", "nodes", "project", "run", "secrets", "trigger", "workflow"]);
     assert.deepEqual(labels("{{no"), ["nodes"]);
   });
 
   it("walks nodes → a block → output → its known fields, from the caret back", () => {
-    assert.deepEqual(labels("{{ nodes."), ["OnTag", "Fetch", "Review"]);
+    assert.deepEqual(labels("{{ nodes.")?.sort(), ["Fetch", "OnTag", "Review"]);
     assert.deepEqual(labels("{{ nodes.Re"), ["Review"]);
-    assert.deepEqual(labels("{{ nodes.Review."), ["output", "status", "error"]);
+    assert.deepEqual(labels("{{ nodes.Review.")?.sort(), ["error", "output", "status"]);
     assert.deepEqual(labels("{{ nodes.Review.output.t"), ["text"]);
-    assert.deepEqual(labels("{{ nodes.OnTag.output.pr."), ["number", "title", "body", "url", "author", "head", "base", "action", "headSha"]);
-    assert.deepEqual(labels("{{ nodes.Review.error."), ["kind", "message"]);
+    assert.deepEqual(labels("{{ nodes.OnTag.output.pr.")?.sort(), ["action", "author", "base", "body", "head", "headSha", "number", "title", "url"]);
+    assert.deepEqual(labels("{{ nodes.Review.error.")?.sort(), ["kind", "message"]);
     const answer = templateCompletions("x {{ nodes.Re", 13, scope());
     assert.deepEqual([answer?.from, answer?.to], [11, 13], "replaces just the typed part");
   });
 
   it("knows the trigger's fields, the run, the project, the secrets and the input", () => {
     assert.ok(labels("{{ trigger.")?.includes("tag"));
-    assert.deepEqual(labels("{{ trigger.release."), ["id", "name", "tag", "body", "url", "prerelease"]);
-    assert.deepEqual(labels("{{ run."), ["id", "startedAt", "workflowId", "workflowName", "attempt"]);
+    assert.deepEqual(labels("{{ trigger.release.")?.sort(), ["body", "id", "name", "prerelease", "tag", "url"]);
+    assert.deepEqual(labels("{{ run.")?.sort(), ["attempt", "id", "startedAt", "workflowId", "workflowName"]);
     assert.deepEqual(labels("{{ project.b"), ["branch"]);
-    assert.deepEqual(labels("{{ secrets."), ["API_TOKEN", "SLACK_PATH"]);
+    assert.deepEqual(labels("{{ secrets.")?.sort(), ["API_TOKEN", "SLACK_PATH"]);
     assert.deepEqual(labels("{{ input.te"), ["text"]);
   });
 

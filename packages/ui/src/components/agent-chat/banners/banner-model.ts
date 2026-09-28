@@ -31,7 +31,7 @@ export interface BannerStackEntry {
  *
  * *T3: `ComposerBannerStack.tsx:33-41`.*
  */
-export function bannerPriority(entry: BannerStackEntry): number {
+function bannerPriority(entry: BannerStackEntry): number {
   if (entry.priority === "activity") return 0;
   if (entry.priority === "urgent" || entry.variant === "error" || entry.variant === "warning") {
     return 1;
@@ -63,7 +63,7 @@ export function sortBannerStack<T extends BannerStackEntry>(entries: readonly T[
  *
  * *T3: `ComposerPendingApprovalActions.tsx:23-28`.*
  */
-export const DEFAULT_APPROVAL_OPTIONS: readonly ApprovalOption[] = [
+const DEFAULT_APPROVAL_OPTIONS: readonly ApprovalOption[] = [
   { decision: "cancel", label: "Cancel" },
   { decision: "decline", label: "Decline" },
   { decision: "acceptForSession", label: "Always allow this session" },

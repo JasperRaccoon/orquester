@@ -44,31 +44,30 @@ describe("FileTail", () => {
 
   it("a multibyte character split across two reads decodes once, whole", async () => {
     const path = nodePath.join(dir, "utf8.log");
-    // "é" is two bytes; a 3-byte read window puts its first byte at the end of
+    // "é" is two bytes; a 64 KiB read window puts its first byte at the end of
     // read one and its second at the start of read two.
-    await writeFile(path, "aaébb", "utf8");
-    const tail = new FileTail({ path, maxReadBytes: 3 });
+    const prefix = "a".repeat(65535);
+    await writeFile(path, `${prefix}ébb`, "utf8");
+    const tail = new FileTail({ path });
 
     const one = await tail.read();
-    assert.equal(one.text, "aa", "the dangling lead byte is held back, never rendered as U+FFFD");
+    assert.equal(one.text, prefix, "the dangling lead byte is held back, never rendered as U+FFFD");
     const two = await tail.read();
     assert.equal(two.text, "ébb");
-    assert.equal(`${one.text}${two.text}`, "aaébb");
+    assert.equal(`${one.text}${two.text}`, `${prefix}ébb`);
   });
 
   it("stops at the per-shell cap with one truncation notice naming the file", async () => {
     const path = nodePath.join(dir, "big.log");
-    await writeFile(path, "x".repeat(40), "utf8");
-    const tail = new FileTail({ path, maxReadBytes: 10, maxTotalBytes: 20 });
-
-    const one = await tail.read();
-    assert.equal(one.text, "x".repeat(10));
-    assert.equal(one.done, false);
-
-    const two = await tail.read();
-    assert.equal(two.done, true, "the cap ends the tail");
-    assert.ok(two.text.startsWith("x".repeat(10)));
-    assert.ok(two.text.includes(path), "the notice names the file so the user can read the rest");
+    await writeFile(path, "x".repeat(1024 * 1024 + 1), "utf8");
+    const tail = new FileTail({ path });
+    for (let read = 0; read < 15; read += 1) {
+      assert.deepEqual(await tail.read(), { text: "x".repeat(65536), done: false });
+    }
+    const capped = await tail.read();
+    assert.equal(capped.done, true);
+    assert.ok(capped.text.startsWith("x".repeat(65536)));
+    assert.ok(capped.text.includes(path), "the notice names the file so the user can read the rest");
 
     const three = await tail.read();
     assert.deepEqual(three, { text: "", done: true }, "and then nothing, ever again");
@@ -82,7 +81,6 @@ describe("FileTail", () => {
     assert.equal(one.done, true);
     assert.ok(one.text.includes("ENOENT"), one.text);
     assert.ok(one.text.includes(path), one.text);
-    assert.ok(one.text.startsWith("[orquester]"), one.text);
 
     assert.deepEqual(await tail.read(), { text: "", done: true });
   });

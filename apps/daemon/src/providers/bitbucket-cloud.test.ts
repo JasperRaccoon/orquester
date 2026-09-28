@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bitbucketCloudProvider, toCloudRepoSummary } from "./bitbucket-cloud";
+import { bitbucketCloudProvider } from "./bitbucket-cloud";
 
 test("parseRepoUrl accepts bitbucket.org https/ssh (old + new host)/shorthand", () => {
   const ctx = {};
@@ -43,8 +43,8 @@ test("cloneUrls always emits the NEW ssh host", async () => {
   );
 });
 
-test("toCloudRepoSummary rewrites the API's (possibly stale) ssh host and maps fields", () => {
-  const s = toCloudRepoSummary({
+test("toCloudRepoSummary rewrites the API's (possibly stale) ssh host and maps fields", async (t) => {
+  const repo = {
     full_name: "ws/r",
     slug: "r",
     is_private: true,
@@ -56,7 +56,11 @@ test("toCloudRepoSummary rewrites the API's (possibly stale) ssh host and maps f
         { name: "ssh", href: "git@bitbucket.org:ws/r.git" }
       ]
     }
-  });
+  };
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request) => Response.json({
+    values: String(url).includes("/user/workspaces") ? [{ workspace: { slug: "ws" } }] : [repo]
+  }));
+  const [s] = await bitbucketCloudProvider.listRepos({ token: "listing-fixture" });
   assert.equal(s.sshUrl, "git@ssh.bitbucket.org:ws/r.git");
   assert.equal(s.httpsUrl, "https://bitbucket.org/ws/r.git"); // credentials stripped from href
   assert.equal(s.fullName, "ws/r");

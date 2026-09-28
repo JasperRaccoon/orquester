@@ -328,13 +328,6 @@ export interface DraftPersistScheduler {
   cancel(): void;
 }
 
-export interface DraftPersistSchedulerOptions {
-  delayMs?: number;
-  /** Test seams; the defaults are the window's timers. */
-  setTimer?: (fn: () => void, delayMs: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
-}
-
 /**
  * A **trailing throttle**, not a resetting debounce.
  *
@@ -350,22 +343,14 @@ export interface DraftPersistSchedulerOptions {
  * window would otherwise resurrect the message the user just sent.
  */
 export function createDraftPersistScheduler(
-  commit: (draft: ComposerDraft) => void,
-  options: DraftPersistSchedulerOptions = {}
+  commit: (draft: ComposerDraft) => void
 ): DraftPersistScheduler {
-  const delayMs = options.delayMs ?? DRAFT_PERSIST_DELAY_MS;
-  const setTimer =
-    options.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms) as unknown);
-  const clearTimer =
-    options.clearTimer ??
-    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-
   let pending: ComposerDraft | null = null;
-  let timer: unknown = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
 
   const stopTimer = (): void => {
     if (timer === null) return;
-    clearTimer(timer);
+    clearTimeout(timer);
     timer = null;
   };
 
@@ -379,11 +364,11 @@ export function createDraftPersistScheduler(
     schedule(draft) {
       pending = draft;
       if (timer !== null) return;
-      timer = setTimer(() => {
+      timer = setTimeout(() => {
         timer = null;
         const next = take();
         if (next) commit(next);
-      }, delayMs);
+      }, DRAFT_PERSIST_DELAY_MS);
     },
     flush() {
       stopTimer();

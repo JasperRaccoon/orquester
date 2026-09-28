@@ -15,12 +15,12 @@
 
 import type { AgentGoal, RuntimeEvent, RuntimeEventRaw, RuntimeEventRawSource } from "@orquester/api/agent-chat";
 
-import type { BackgroundTrack, ENDED_TASKS_REMEMBERED, EndedTask } from "./background-tasks.ts";
+import type { BackgroundTrack, EndedTask } from "./background-tasks.ts";
 import type { LoopTrack, scheduledTask } from "./loops.ts";
 import type { GrokNormalizer } from "./normalize.ts";
 import type { PlanPathHost } from "./plan.ts";
 import type { ChildSession, HeldSpawn, subagentFromToolCall, SubagentLaunch, SubagentTrack } from "./subagents.ts";
-import type { FINISHED_CALLS_REMEMBERED, FinishedCall, ToolTrack } from "./tool-calls.ts";
+import type { FinishedCall, ToolTrack } from "./tool-calls.ts";
 
 export const ACP_RAW_SOURCE: RuntimeEventRawSource = "acp.jsonrpc";
 export const XAI_RAW_SOURCE: RuntimeEventRawSource = "acp.grok.extension";
@@ -78,14 +78,14 @@ export interface GrokNormalizerState {
   readonly tools: Map<string, ToolTrack>;
   /**
    * Calls that reached a terminal status → their row type and who ended them,
-   * bounded by {@link FINISHED_CALLS_REMEMBERED}.
+   * bounded by the finished-call memory limit.
    */
   readonly finishedCalls: Map<string, FinishedCall>;
   readonly tasks: Map<string, BackgroundTrack>;
   /**
    * Background task ids (lower-cased) whose end was written — a shell's, and
    * every id that named an ended subagent run — and who wrote it, bounded by
-   * {@link ENDED_TASKS_REMEMBERED}; see `shellReport` (`background-tasks.ts`).
+   * the ended-task memory limit; see `shellReport` (`background-tasks.ts`).
    * A snapshot entry's status may be terminal, so a finished shell can still
    * be listed, and that listing started it again under its id, put it back in
    * the liveness registry as a watch loop, and ended it a second time when it

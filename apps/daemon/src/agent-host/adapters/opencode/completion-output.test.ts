@@ -31,7 +31,6 @@ import { chatSummary, shellSummary } from "../../../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../../../mcp/testing.ts";
 import type { ToolContext } from "../../../mcp/tool.ts";
 import { outputTools } from "../../../mcp/tools/output.ts";
-import { parseItemOutputWindow } from "../../server/http-server.ts";
 import { joinToolOutput, toolOutputWindow } from "../../store/tool-output.ts";
 import { normalizeOpenCodeEvent } from "./normalize.ts";
 import type { OpenCodeRawEvent } from "./protocol.ts";
@@ -161,10 +160,9 @@ function daemon(item: ThreadItem, events: readonly DomainEvent[]): FakeDaemonApi
       if (joined === null) {
         return { status: 404, body: { error: { code: "ITEM_NOT_FOUND", message: "No tool call behind item." } } };
       }
-      const window = parseItemOutputWindow(
-        new URL(`http://agent-host.localhost/?${new URLSearchParams(query ?? {})}`)
-      );
-      return { status: 200, body: window === null ? joined : toolOutputWindow(joined, window) };
+      // The MCP tool supplies both valid numeric parameters; HTTP validation has its own owner.
+      const window = { offset: Number(query?.offset), maxBytes: Number(query?.maxBytes) };
+      return { status: 200, body: toolOutputWindow(joined, window) };
     });
 }
 

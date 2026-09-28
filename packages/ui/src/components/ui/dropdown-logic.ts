@@ -58,27 +58,6 @@ export function dropdownHorizontalPosition(input: {
 export type DropdownRole = "menu" | "dialog";
 
 /**
- * The panel's own accessibility attributes.
- *
- * A `menu` by default, exactly as before. A panel holding a text readout and
- * plain buttons is a `dialog` — a `menu` promises menu items and arrow-key
- * navigation it does not have — and names itself. One that takes focus when it
- * opens is focusable itself (`tabIndex: -1`), for when it holds no control to
- * take it.
- */
-export function dropdownPanelAttributes(input: {
-  role?: DropdownRole;
-  ariaLabel?: string;
-  focusOnOpen?: boolean;
-}): { role: DropdownRole; "aria-label"?: string; tabIndex?: -1 } {
-  return {
-    role: input.role ?? "menu",
-    ...(input.ariaLabel !== undefined ? { "aria-label": input.ariaLabel } : {}),
-    ...(input.focusOnOpen === true ? { tabIndex: -1 as const } : {})
-  };
-}
-
-/**
  * Marks a control that must never take focus by itself: a destructive one,
  * which the Enter that follows an open would fire (fix round 2 — "Clear goal"
  * as the goal popover's only action).
@@ -86,7 +65,7 @@ export function dropdownPanelAttributes(input: {
 export const DROPDOWN_DESTRUCTIVE_ATTRIBUTE = "data-destructive";
 
 /** What counts as a control focus may land on: enabled, and in the tab order. */
-export const DROPDOWN_FOCUSABLE = [
+const DROPDOWN_FOCUSABLE = [
   "button:not([disabled])",
   "a[href]",
   "input:not([disabled])",
@@ -104,26 +83,4 @@ export const DROPDOWN_FOCUSABLE = [
 export function dropdownFocusTarget(panel: HTMLElement): HTMLElement {
   const first = panel.querySelector<HTMLElement>(DROPDOWN_FOCUSABLE);
   return first === null || first.hasAttribute(DROPDOWN_DESTRUCTIVE_ATTRIBUTE) ? panel : first;
-}
-
-// ---------------------------------------------------------------------------
-// Dismissal
-// ---------------------------------------------------------------------------
-
-/**
- * Subscribe an OPEN panel to the event that should close it — for the chat's
- * popovers, the visible chat tab moving away from the panel's own thread
- * (`dismissWhenChatTabLeaves`, `lib/agent-chat-active-tab.ts`): the panel is
- * portaled, so it would otherwise stay open over the next tab with the old
- * thread's Pause/Clear or Compact still live (final fix wave). Its own tab
- * being activated never closes it — in the grid view the click that opens it
- * also activates its cell. Returns the unsubscribe for the effect's cleanup;
- * a closed panel, or one with nothing to watch, subscribes to nothing.
- */
-export function dropdownDismissSubscription(
-  open: boolean,
-  dismissOn: ((dismiss: () => void) => () => void) | undefined,
-  dismiss: () => void
-): (() => void) | undefined {
-  return open && dismissOn !== undefined ? dismissOn(dismiss) : undefined;
 }

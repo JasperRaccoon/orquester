@@ -52,7 +52,7 @@ export function rowBottomPadding(row: AgentChatTimelineRow): string {
 
 
 /** Compact token counts: `128k`, `12.4k`, `840`. */
-export function formatTokenCount(tokens: number): string {
+function formatTokenCount(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens < 0) return "0";
   if (tokens < 1000) return String(Math.round(tokens));
   const thousands = tokens / 1000;

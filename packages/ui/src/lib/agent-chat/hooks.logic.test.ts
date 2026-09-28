@@ -7,9 +7,9 @@
  */
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
-import type { ThreadSessionStatus, Turn, TurnState } from "@orquester/api/agent-chat";
+import type { ThreadSessionStatus,Turn,TurnState } from "@orquester/api/agent-chat";
 
 import { turnStartedAt } from "./hooks";
 

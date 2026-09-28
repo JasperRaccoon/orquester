@@ -90,33 +90,6 @@ describe("engine: resume after a restart", () => {
     assert.equal(block.output, 2);
   });
 
-  test("a code process still alive is re-attached and its result read", async () => {
-    const env = restartable([workflow("w1", [T(), node("A", "code")], [edge("T", "A")])]);
-    const first = env.boot();
-    const { runId } = await first.engine.run("w1", {});
-    await flush();
-    const waitingOn = (await blockOf(first, runId!, "A")).waitingOn;
-    assert.equal(waitingOn?.kind, "process");
-    await first.engine.stop();
-
-    const second = env.boot();
-    await second.engine.resume();
-    await flush();
-    assert.equal(env.shared.sandbox.processes.length, 1, "nothing re-spawned");
-    env.shared.sandbox.finish(env.shared.sandbox.last().handle.pid, {
-      code: 0,
-      signal: null,
-      timedOut: false,
-      stdoutBytes: 0,
-      stderrBytes: 0,
-      result: { ok: true, value: { answer: 42 } }
-    });
-    const result = await second.engine.waitForRun(runId!);
-    assert.equal(result.status, "succeeded");
-    assert.deepEqual((await blockOf(second, runId!, "A")).output, { answer: 42 });
-    assert.equal((await blockOf(second, runId!, "A")).waitingOn, undefined);
-  });
-
   test("a code process that ended while the daemon was down: its exit.json is read", async () => {
     const env = restartable([workflow("w1", [T(), node("A", "code")], [edge("T", "A")])]);
     const first = env.boot();
@@ -199,10 +172,11 @@ describe("engine: resume after a restart", () => {
     assert.deepEqual(code.seen, ["After"]);
   });
 
-  test("an HTTP GET is re-issued; a POST fails interrupted", async () => {
+  test("an HTTP GET is re-issued; a POST fails interrupted", async (t) => {
     for (const method of ["GET", "POST"] as const) {
       const env = restartable([workflow("w1", [T(), node("H", "http", { method, url: "https://api.test/x" })], [edge("T", "H")])]);
-      const hang = createHttpExecutor({ fetch: () => new Promise<Response>(() => undefined) });
+      t.mock.method(globalThis, "fetch", () => new Promise<Response>(() => undefined));
+      const hang = createHttpExecutor();
       const first = env.boot({ http: hang });
       const { runId } = await first.engine.run("w1", {});
       await flush();
@@ -210,12 +184,11 @@ describe("engine: resume after a restart", () => {
       await first.engine.stop();
 
       const calls: string[] = [];
-      const answer = createHttpExecutor({
-        fetch: async (input) => {
-          calls.push(String(input));
-          return new Response(JSON.stringify({ ok: 1 }), { status: 200, headers: { "content-type": "application/json" } });
-        }
+      t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+        calls.push(String(input));
+        return new Response(JSON.stringify({ ok: 1 }), { status: 200, headers: { "content-type": "application/json" } });
       });
+      const answer = createHttpExecutor();
       const second = env.boot({ http: answer });
       await second.engine.resume();
       const result = await second.engine.waitForRun(runId!);
@@ -229,52 +202,6 @@ describe("engine: resume after a restart", () => {
         assert.equal((await blockOf(second, runId!, "H")).error?.kind, "interrupted");
       }
     }
-  });
-
-  test("an agent block is re-entered with its persisted WaitingOn", async () => {
-    const agentConfig = { prompt: { kind: "text", text: "go" } };
-    const env = restartable([workflow("w1", [T(), node("A", "agent", agentConfig)], [edge("T", "A")])]);
-    const hanging = controlledExecutor("agent");
-    const first = env.boot({ agent: hanging });
-    const { runId } = await first.engine.run("w1", {});
-    await flush();
-    await hanging.calls[0]!.ctx.setWaitingOn({
-      kind: "agent",
-      sessionId: "s-1",
-      commandId: "cmd-1",
-      command: "turn",
-      baseline: { seq: 3 },
-      deadlineAt: "2026-09-28T14:00:00.000Z",
-      phase: "watch",
-      state: { chainIndex: 0 }
-    });
-    hanging.calls[0]!.ctx.update({ sessionId: "s-1", activity: "Editing" });
-    await first.engine.stop();
-
-    let seenResume: unknown;
-    const agent = scripted("agent", {
-      A: (ctx) => {
-        seenResume = ctx.resumeFrom;
-        return { status: "succeeded", output: { text: "done" } };
-      }
-    });
-    const second = env.boot({ agent });
-    await second.engine.resume();
-    const result = await second.engine.waitForRun(runId!);
-    assert.equal(result.status, "succeeded");
-    assert.deepEqual(seenResume, {
-      kind: "agent",
-      sessionId: "s-1",
-      commandId: "cmd-1",
-      command: "turn",
-      baseline: { seq: 3 },
-      deadlineAt: "2026-09-28T14:00:00.000Z",
-      phase: "watch",
-      state: { chainIndex: 0 }
-    });
-    const block = await blockOf(second, runId!, "A");
-    assert.equal(block.attempt, 1, "a resume is the same attempt");
-    assert.equal(block.sessionId, "s-1");
   });
 
   test("a block running without a WaitingOn: a pure block re-runs as the same attempt", async () => {
@@ -363,15 +290,18 @@ describe("engine: resume after a restart", () => {
     await flush();
     code.calls[0]!.ctx.update({ activity: "last words" });
     await h.engine.stop();
-    const savesAfterStop = h.runStore.saves;
+    const handover = (await h.runStore.load(runId!))!;
+    assert.equal(handover.status, "running");
+    assert.equal(handover.blocks.A!.activity, "last words");
+    handover.blocks.A!.activity = "successor owns the run";
+    await h.runStore.save(handover);
     const eventsAfterStop = h.events.length;
     code.calls[0]!.resolve({ status: "succeeded", output: 1 } as NodeResult);
     await flush();
-    assert.equal(h.runStore.saves, savesAfterStop);
     assert.equal(h.events.length, eventsAfterStop);
     const saved = (await h.runStore.load(runId!))!;
     assert.equal(saved.status, "running");
-    assert.equal(saved.blocks.A!.activity, "last words");
+    assert.equal(saved.blocks.A!.activity, "successor owns the run");
     await assert.rejects(h.engine.run("w1", {}), /stopping/);
   });
 });

@@ -116,16 +116,6 @@ export function catchUpReaskDelay(state: PromptIndexState | undefined): number |
   return catchUpDelayMs(state.catchUpAttempts);
 }
 
-export interface ReaskTimers {
-  set: (run: () => void, ms: number) => unknown;
-  clear: (handle: unknown) => void;
-}
-
-const REAL_TIMERS: ReaskTimers = {
-  set: (run, ms) => setTimeout(run, ms),
-  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
-};
-
 /**
  * Arm the next quiet re-ask of a catching-up session and hand back its
  * cancel — an effect's cleanup, so the asking stops when the panel goes — or
@@ -134,13 +124,12 @@ const REAL_TIMERS: ReaskTimers = {
 export function scheduleCatchUpReask(
   cache: Pick<PromptIndexCache, "retry">,
   sessionId: string,
-  state: PromptIndexState | undefined,
-  timers: ReaskTimers = REAL_TIMERS
+  state: PromptIndexState | undefined
 ): (() => void) | null {
   const delay = catchUpReaskDelay(state);
   if (delay === null) return null;
-  const handle = timers.set(() => cache.retry(sessionId), delay);
-  return () => timers.clear(handle);
+  const handle = setTimeout(() => cache.retry(sessionId), delay);
+  return () => clearTimeout(handle);
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +201,7 @@ function errorCodeOf(error: ApiError): string | null {
 }
 
 /** What a failed `GET …/prompts` says: the fallback note's detail, a failed older page. */
-export function promptListErrorMessage(
+function promptListErrorMessage(
   error: unknown,
   fallback: string = "Couldn't load this chat's prompts."
 ): string {
@@ -231,7 +220,7 @@ export function promptListErrorMessage(
 }
 
 /** What a failed `GET …/prompts/:messageId` says on the open card. */
-export function promptTextErrorMessage(error: unknown): string {
+function promptTextErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     const code = errorCodeOf(error);
     if (code === "PROMPT_NOT_FOUND") return "That prompt is no longer in this chat.";
@@ -269,10 +258,7 @@ export class PromptIndexCache {
   private readonly generations = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
 
-  constructor(
-    private readonly fetchers: PromptIndexFetchers,
-    private readonly limit: number = PROMPT_PAGE_LIMIT
-  ) {}
+  constructor(private readonly fetchers: PromptIndexFetchers) {}
 
   /** `useSyncExternalStore`'s subscribe: stable, returns the unsubscribe. */
   readonly subscribe = (listener: () => void): (() => void) => {
@@ -336,7 +322,7 @@ export class PromptIndexCache {
    * The next older page, when there is one and none is on its way — `limit`
    * prompts of it (a search asks for {@link SEARCH_PAGE_LIMIT}).
    */
-  loadOlder(sessionId: string, limit: number = this.limit): void {
+  loadOlder(sessionId: string, limit: number = PROMPT_PAGE_LIMIT): void {
     const state = this.states.get(sessionId);
     if (state === undefined || state.status !== "ready" || state.before === null || state.loadingOlder) {
       return;
@@ -395,7 +381,7 @@ export class PromptIndexCache {
     const previousAttempts = showing?.status === "catchingUp" ? showing.catchUpAttempts : 0;
     this.set(sessionId, showing !== undefined ? { ...showing, refreshing: true } : LOADING);
     this.fetchers
-      .page(sessionId, { limit: this.limit })
+      .page(sessionId, { limit: PROMPT_PAGE_LIMIT })
       .then((response) => {
         if (this.generations.get(sessionId) !== generation) return;
         if (response.indexed) {

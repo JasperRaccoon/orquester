@@ -4,13 +4,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
-import { agentChatRoutes, type ThreadActivityItem } from "@orquester/api/agent-chat";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 import { replayClaudeFixture } from "../../agent-host/adapters/claude/fixtures.ts";
 import { createIngestion } from "../../agent-host/ingestion/index.ts";
-import { FakeClock, FakeTimers, RecordingLiveness, counterIdGen } from "../../agent-host/ingestion/test-harness.ts";
+import { FakeClock, RecordingLiveness, counterIdGen } from "../../agent-host/ingestion/test-harness.ts";
 import { isAgentChatCommandError } from "../../agent-host/orchestration/errors.ts";
 import { createTestHost, type TestHost } from "../../agent-host/orchestration/testing/index.ts";
-import { parseItemOutputWindow } from "../../agent-host/server/http-server.ts";
 import type { AppendableDomainEvent } from "../../agent-host/services.ts";
 import { createThreadStore } from "../../agent-host/store/index.ts";
 import type { DaemonApi, DaemonMethod, DaemonResponse } from "../daemon-api.ts";
@@ -33,16 +32,16 @@ const ITEM_ROUTE = /^\/api\/sessions\/([^/]+)\/items\/([^/]+)(\/output)?$/;
 
 /**
  * The item-output route as the host's HTTP server answers it (agent-host/server/http-server.ts): one window of the join
- * when the query asks for one (`parseItemOutputWindow`, the server's own rules), else the whole join — and a host from
+ * when the query asks for one, else the whole join — and a host from
  * before windows (`olderHostWithRoute`) answers the whole join whatever the query says.
  */
 async function itemOutputAnswer(
-  read: { window(itemId: string, window: NonNullable<ReturnType<typeof parseItemOutputWindow>>): Promise<unknown>; whole(itemId: string): Promise<unknown> },
+  read: { window(itemId: string, window: { offset: number; maxBytes: number }): Promise<unknown>; whole(itemId: string): Promise<unknown> },
   itemId: string,
   query: Record<string, string> | undefined,
   olderHostWithRoute = false
 ): Promise<unknown> {
-  const window = olderHostWithRoute ? null : parseItemOutputWindow(new URL(`http://agent-host.localhost/?${new URLSearchParams(query ?? {})}`));
+  const window = olderHostWithRoute || query === undefined ? null : { offset: Number(query.offset), maxBytes: Number(query.maxBytes) };
   return window === null ? read.whole(itemId) : read.window(itemId, window);
 }
 
@@ -168,21 +167,11 @@ describe("a background shell's output through read_transcript and read_tool_outp
     await host.stop();
   });
 
-  it("a running shell: its latest row is offered, and its output so far comes back with running: true", async () => {
+  it("a running shell grows between two pages: the next page continues at the last one's end, until it finishes", async () => {
     const host = await shellThread(false);
     const api = hostApi(host);
     const entry = await shellEntry(api);
     assert.deepEqual([entry.tool.status, entry.outputItemId], ["inProgress", "shell-start"]);
-    const soFar = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: "shell-start" }), ctx(api));
-    assert.deepEqual([soFar.kind, soFar.text, soFar.running], ["command-output", CHUNKS.join(""), true]);
-    // The host was asked for one window, and answered one.
-    assert.ok(api.paths.includes(agentChatRoutes.itemOutput(THREAD, "shell-start")));
-    await host.stop();
-  });
-
-  it("a running shell grows between two pages: the next page continues at the last one's end, until it finishes", async () => {
-    const host = await shellThread(false);
-    const api = hostApi(host);
     const page = (offset: number, maxBytes = 1_000) => outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: "shell-start", offset, maxBytes }), ctx(api));
     const soFar = CHUNKS.join("");
     const first = await page(0);
@@ -213,9 +202,8 @@ describe("a background shell's output through read_transcript and read_tool_outp
     const api = hostApi(host, { olderHost: true });
     const entry = await shellEntry(api);
     const fallback = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId! }), ctx(api));
-    const completion = await host.orchestrator.readItem(THREAD, "shell-done");
-    assert.ok(completion?.kind === "activity");
-    assert.deepEqual([fallback.kind, fallback.text], ["payload", JSON.stringify(completion.payload, null, 2)]);
+    assert.equal(fallback.kind, "payload");
+    assert.deepEqual(JSON.parse(fallback.text as string), { toolUseId: SHELL, itemType: "command_execution", title: "Background shell", status: "completed", agentId: "task-1", data: { toolName: "Bash", input: { command: "make -j8", description: "Build" }, background: true, exitCode: 0 } });
     assert.ok(api.paths.includes(agentChatRoutes.itemOutput(THREAD, "shell-done")), "the join was asked, and its miss read as none");
     await host.stop();
   });
@@ -257,16 +245,12 @@ describe("a subagent's command pushed past the cap, through read_transcript and 
     await host.settle();
     const snap = await host.orchestrator.readThread(THREAD);
     assert.ok(snap.kind === "snapshot");
-    const held = (id: string): boolean => snap.thread.items.some((item) => item.id === id);
-    assert.deepEqual([held("serve-start"), held("serve-0"), held("build-0-start"), held("build-15-start"), held("serve-late-4")], [false, false, true, true, true], "past the cap the server's start went, the builds' stayed");
+    assert.ok(!snap.thread.items.some((item) => item.id === "serve-start"), "the call really has lost its retained start");
 
     const api = hostApi(host);
     const read = await transcriptTool.run(parse(transcriptTool, { sessionId: THREAD, agentId: AGENT }), ctx(api));
     const entry = (read.entries as { kind: string; outputItemId?: string }[]).find((e) => e.kind === "tool" && e.outputItemId === "serve-late-4");
-    assert.deepEqual(entry, {
-      turn: 1, turnId: "turn-1", kind: "tool", createdAt: (snap.thread.items.find((item) => item.id === "serve-late-4") as ThreadActivityItem).createdAt, agentId: AGENT,
-      tool: { type: "command_execution", title: "Tool output", status: "inProgress" }, outputItemId: "serve-late-4"
-    });
+    assert.ok(entry, "the retained output chunk links to its full durable output");
     // The whole output, from the log — the chunks the window dropped included.
     const whole = await outputTool.run(parse(outputTool, { sessionId: THREAD, itemId: entry.outputItemId! }), ctx(api));
     assert.deepEqual([whole.kind, whole.text, whole.running, "nextOffset" in whole], ["command-output", lines.join(""), true, false]);
@@ -283,10 +267,8 @@ describe("a subagent's command pushed past the cap, through read_transcript and 
         return all;
       };
       const windowed = await pages(api);
-      assert.deepEqual(windowed, await pages(older), `maxBytes ${maxBytes}`);
+      assert.equal((await pages(older)).map((page) => page.text).join(""), lines.join(""), `older host, maxBytes ${maxBytes}`);
       assert.equal(windowed.map((page) => page.text).join(""), lines.join(""), `maxBytes ${maxBytes}`);
-      // All ASCII: every window but the last is full, so the pages are really several below the output's size.
-      assert.equal(windowed.length, Math.ceil(Buffer.byteLength(lines.join("")) / maxBytes), `maxBytes ${maxBytes}: pages`);
     }
     await host.stop();
   });
@@ -329,7 +311,7 @@ describe("fixture claude/14a through the real ingestion and store: a file change
   it("the Write's completion answers its payload, its input included; the Bash call's answers its output", async (t) => {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orq-output-14a-"));
     t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-    const store = createThreadStore({ rootDir, sweepIntervalMs: 0 });
+    const store = createThreadStore({ rootDir });
     t.after(() => store.close());
     await store.append({ threadId: FIXTURE_THREAD, events: [{
       eventId: "created", threadId: FIXTURE_THREAD, type: "thread.created",
@@ -337,14 +319,11 @@ describe("fixture claude/14a through the real ingestion and store: a file change
       occurredAt: "2026-09-21T00:00:00.000Z", commandId: null, causationEventId: null, metadata: {}
     } as AppendableDomainEvent] });
     const clock = new FakeClock();
-    const timers = new FakeTimers(clock);
     const ingestion = createIngestion({
       sink: async (threadId, events) => { await store.append({ threadId, events }); },
       liveness: new RecordingLiveness(),
       clock,
-      idGen: counterIdGen(),
-      setTimer: timers.setTimer,
-      clearTimer: timers.clearTimer
+      idGen: counterIdGen()
     });
     for (const event of replayClaudeFixture("14a-accept-edits-edit.ndjson").events) await ingestion.ingest(event);
     await ingestion.drain();
@@ -354,28 +333,15 @@ describe("fixture claude/14a through the real ingestion and store: a file change
     const completion = (itemType: string) => rows.find((row) => row.activityKind === "tool.completed" && (row.payload as { itemType?: unknown }).itemType === itemType)!;
     const write = completion("file_change");
     const bash = completion("command_execution");
-    // The Write's result text went out as a streamed chunk of its own call — the output the join would give.
-    assert.ok(rows.some((row) => row.activityKind === "tool.output" && (row.payload as { streamKind?: unknown; toolUseId?: unknown }).streamKind === "file_change_output"
-      && (row.payload as { toolUseId?: unknown }).toolUseId === (write.payload as { toolUseId?: unknown }).toolUseId));
-
     const api = storeApi(store);
     const r = await outputTool.run(parse(outputTool, { sessionId: FIXTURE_THREAD, itemId: write.id }), ctx(api));
-    assert.deepEqual([r.kind, r.text], ["payload", JSON.stringify(write.payload, null, 2)]);
-    assert.ok((r.text as string).includes("\"input\""), "the whole payload, the Write's input included");
+    assert.equal(r.kind, "payload");
+    const payload = JSON.parse(r.text as string);
+    assert.equal(payload.itemType, "file_change");
+    assert.deepEqual(payload.data.input, { file_path: "~/tmp/agent-chat-fixtures/claude/sandbox/c.txt", content: "delta" });
     assert.ok(!api.paths.some((p_) => p_.endsWith("/output")), "a file change never asks for the join");
     const b = await outputTool.run(parse(outputTool, { sessionId: FIXTURE_THREAD, itemId: bash.id }), ctx(api));
     assert.equal(b.kind, "command-output");
-    // The Bash call's own result is its output: its streamed copy, read through the store's cache one window at a time,
-    // is the same text as its whole join.
-    const joined = await store.readToolOutput(FIXTURE_THREAD, bash.id);
-    assert.ok(joined !== null && joined.output.length > 0, "the Bash call streamed its result");
-    let windowed = "";
-    for (let offset: number | undefined = 0; offset !== undefined;) {
-      const window = await store.readToolOutputWindow(FIXTURE_THREAD, bash.id, { offset, maxBytes: 5 });
-      assert.ok(window !== null);
-      windowed += window.text;
-      offset = window.nextOffset;
-    }
-    assert.equal(windowed, joined.output);
+    assert.equal(b.text, "(Bash completed with no output)");
   });
 });

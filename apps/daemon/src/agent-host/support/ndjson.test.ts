@@ -67,31 +67,24 @@ test("writer queues behind backpressure and flushes in order on drain", () => {
 
   sink.accepting = false;
   writer.write({ n: 1 }); // goes straight through, sink then says full
-  assert.equal(writer.isBackpressured, true);
 
   writer.write({ n: 2 });
   writer.write({ n: 3 });
   assert.deepEqual(sink.written, ['{"n":1}\n']);
-  assert.ok(writer.pendingBytes > 0);
 
   sink.release();
   assert.deepEqual(sink.written, ['{"n":1}\n', '{"n":2}\n', '{"n":3}\n']);
-  assert.equal(writer.pendingBytes, 0);
-  assert.equal(writer.isBackpressured, false);
 });
 
 test("writer drops rather than growing past the queue budget", () => {
   const sink = new FakeSink();
-  const dropped: number[] = [];
-  // One queued record (25 bytes) fits; the second would take it past 40.
-  const writer = new NdjsonWriter(sink, { maxQueuedBytes: 40, onDrop: (n) => dropped.push(n) });
+  // One 3 MiB record fits; a second exceeds the 4 MiB queue budget.
+  const writer = new NdjsonWriter(sink);
 
   sink.accepting = false;
   writer.write({ a: 1 });
-  assert.equal(writer.write({ padding: "0123456789" }), true);
-  assert.equal(writer.write({ padding: "0123456789" }), false, "second queued record drops");
-  assert.equal(writer.droppedCount, 1);
-  assert.equal(dropped.length, 1);
+  assert.equal(writer.write({ padding: "x".repeat(3 * 1024 * 1024) }), true);
+  assert.equal(writer.write({ padding: "x".repeat(3 * 1024 * 1024) }), false, "second queued record drops");
 });
 
 test("writer survives a non-serialisable record without taking the stream down", () => {

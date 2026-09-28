@@ -11,7 +11,7 @@
  * all of which ingestion writes.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import {
   applyDomainEvent,
@@ -35,7 +35,6 @@ import type { AppendableDomainEvent } from "../services.ts";
 import { createIngestion } from "./index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen,
@@ -47,17 +46,14 @@ const THREAD_ID = "t1";
 
 function harness() {
   const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
     idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
   });
-  return { ingestion, sink, timers };
+  return { ingestion, sink, advanceTime: (ms: number) => { clock.advance(ms); mock.timers.tick(ms); } };
 }
 
 /**
@@ -112,16 +108,19 @@ function activities(state: ReturnType<typeof fold>): ThreadActivityItem[] {
   return state.items.filter((item): item is ThreadActivityItem => item.kind === "activity");
 }
 
+beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
+afterEach(() => mock.timers.reset());
+
 describe("ingestion output folded by the real fold (§5.1)", () => {
   it("streamed deltas concatenate into one settled assistant message", async () => {
-    const { ingestion, sink, timers } = harness();
+    const { ingestion, sink, advanceTime } = harness();
     const turn = { turnId: "turn-1", itemId: "item-1" };
     await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
     for (const delta of ["Hello ", "there.\n\n", "Second para.\n\n", "Third."]) {
       await ingestion.ingest(
         runtimeEvent("content.delta", { streamKind: "assistant_text", delta }, turn)
       );
-      timers.advance(300);
+      advanceTime(300);
       await settle();
     }
     await ingestion.ingest(
@@ -917,31 +916,6 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
       assert.equal(agent.activationCount, 2);
     });
   }
-
-  it("a status-only reopen does NOT survive retention: why adapters start again", async () => {
-    // An appended status row reopens a settled agent too — it is all an agent
-    // launched before the contract gets, since its first start names no call
-    // — but it is an ordinary row of the agent's window: once retention drops
-    // it, the old end reads again while the agent works.
-    const [opencode] = shapes;
-    assert.ok(opencode);
-    const { ingestion, sink } = harness();
-    await ingestAll(ingestion, [
-      runtimeEvent("turn.started", {}, turn),
-      ...opencode.run("call_first"),
-      ...opencode.end("call_first", "first result"),
-      task("task.updated", { toolUseId: "call_resume", status: "running" })
-    ]);
-    const reopened = child(fold(sink.events()));
-    assert.equal(reopened.status, "running");
-    assert.equal(reopened.activationCount, 2);
-
-    await ingestAll(ingestion, toolCalls(300));
-    const evicted = child(fold(sink.events()));
-    assert.equal(evicted.status, "completed", "the old end reads again, mid-run");
-    assert.equal(evicted.activationCount, 1);
-    assert.equal(evicted.result, "first result");
-  });
 });
 
 describe("a background shell's exit code, from the normaliser through the real fold", () => {

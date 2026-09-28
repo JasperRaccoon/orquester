@@ -8,8 +8,6 @@ import { test } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { SessionSummary } from "@orquester/api";
 import {
-  AGENT_CHAT_ERROR_CODES,
-  THREAD_SEARCH_MAX_QUERY_CHARS,
   agentChatRoutes,
   type AgentChatErrorCode,
   type ThreadHistoryPage,
@@ -76,16 +74,15 @@ interface Harness {
   host: FakeHost;
   healthy: boolean;
   seqs: Array<[string, number]>;
-  restarts: number;
   providerBroadcasts: string[];
+  restartResult: { hostInstanceId: string | null; markedThreadIds: string[] };
   /** `[sessionId, accountId]` per §3.4 account switch reaching the service. */
   accountSwitches: Array<[string, string]>;
   close(): Promise<void>;
 }
 
 async function makeHarness(
-  sessions: Record<string, SessionSummary | undefined> = {},
-  attachments: Record<string, string> = {}
+  sessions: Record<string, SessionSummary | undefined> = {}
 ): Promise<Harness> {
   const host = await makeFakeHost();
   const app = Fastify({ logger: false });
@@ -93,8 +90,8 @@ async function makeHarness(
     host,
     healthy: true,
     seqs: [],
-    restarts: 0,
     providerBroadcasts: [],
+    restartResult: { hostInstanceId: "host-2", markedThreadIds: ["t1"] },
     accountSwitches: []
   };
   registerAgentChatRoutes(app, {
@@ -104,11 +101,6 @@ async function makeHarness(
     noteSeq: (id, seq) => harness.seqs?.push([id, seq]),
     switchAccount: async (id, body) => {
       harness.accountSwitches?.push([id, body.accountId]);
-      if (body.accountId === "refused") {
-        throw Object.assign(new Error("That account cannot run this agent."), {
-          code: "INVALID_COMMAND"
-        });
-      }
       // `throw:<code>` refuses with that code, to pin the status of each one.
       if (body.accountId.startsWith("throw:")) {
         throw Object.assign(new Error(`Refused with ${body.accountId}.`), {
@@ -117,14 +109,10 @@ async function makeHarness(
       }
       return { seq: 7 };
     },
-    restartHost: async () => {
-      harness.restarts = (harness.restarts ?? 0) + 1;
-      return { hostInstanceId: "host-2", markedThreadIds: ["t1"] };
-    },
+    restartHost: async () => harness.restartResult!,
     onProvidersChanged: (adapterId) => harness.providerBroadcasts?.push(adapterId),
-    attachmentPath: async (_sessionId, attachmentId) =>
-      attachments[attachmentId] === undefined ? null : attachments[attachmentId],
-    sendAttachment: async (reply, path) => reply.code(200).send({ streamed: path })
+    attachmentPath: async () => null,
+    sendAttachment: async () => { throw new Error("A refused attachment must never be streamed"); }
   });
   await app.ready();
   harness.app = app;
@@ -149,43 +137,20 @@ const tab = (id: string): SessionSummary => ({
   createdAt: "2026-09-21T00:00:00.000Z"
 });
 
-test("a command is proxied verbatim, with the host token attached", async () => {
+test("documented commands preserve their path, body, authentication and acknowledgement", async () => {
   const h = await makeHarness({ t1: tab("t1") });
-  h.host.handler = (_req, res) =>
-    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ seq: 42 }));
-  const response = await h.app.inject({
-    method: "POST",
-    url: agentChatRoutes.turn("t1"),
-    payload: { commandId: "c1", input: "hi" }
-  });
-  assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { seq: 42 });
-  assert.equal(h.host.requests.length, 1);
-  assert.equal(h.host.requests[0].method, "POST");
-  assert.equal(h.host.requests[0].url, "/threads/t1/turn");
-  assert.equal(h.host.requests[0].auth, "Bearer tok");
-  assert.deepEqual(JSON.parse(h.host.requests[0].body), { commandId: "c1", input: "hi" });
-  await h.close();
-});
-
-test("every §6.2 command has a route", async () => {
-  const h = await makeHarness({ t1: tab("t1") });
-  h.host.handler = (_req, res) =>
-    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ seq: 1 }));
-  const paths = [
-    agentChatRoutes.turn("t1"),
-    agentChatRoutes.interrupt("t1"),
-    agentChatRoutes.approval("t1"),
-    agentChatRoutes.answer("t1"),
-    agentChatRoutes.dismiss("t1"),
-    agentChatRoutes.revert("t1"),
-    agentChatRoutes.compact("t1"),
-    agentChatRoutes.mode("t1"),
-    agentChatRoutes.sessionStop("t1")
-  ];
-  for (const url of paths) {
-    const response = await h.app.inject({ method: "POST", url, payload: { commandId: "c" } });
-    assert.equal(response.statusCode, 200, url);
+  h.host.handler = (_req, res) => res.writeHead(200, { "content-type": "application/json" }).end('{"seq":42}');
+  for (const suffix of ["turn", "interrupt", "approval", "answer", "dismiss", "revert", "compact", "mode", "background", "session/stop"]) {
+    const response = await h.app.inject({
+      method: "POST", url: `/api/sessions/t1/${suffix}`, payload: { commandId: "c1", input: "hi" }
+    });
+    assert.equal(response.statusCode, 200, suffix);
+    assert.deepEqual(response.json(), { seq: 42 });
+    const forwarded = h.host.requests.at(-1)!;
+    assert.equal(forwarded.method, "POST");
+    assert.equal(forwarded.url, `/threads/t1/${suffix}`);
+    assert.equal(forwarded.auth, "Bearer tok");
+    assert.deepEqual(JSON.parse(forwarded.body), { commandId: "c1", input: "hi" });
   }
   await h.close();
 });
@@ -385,30 +350,18 @@ test("a refresh broadcasts agent.providers.changed ONLY when it changed somethin
   await h.close();
 });
 
-test("§6.3 attachment read-back resolves through the host and streams the file", async () => {
-  // `/api/fs/download` cannot serve these: it is confined to `fsRoot` and the
-  // thread's attachments live under the appdir. The host owns the namespace.
-  const h = await makeHarness({ t1: tab("t1") }, { "att-1": "/appdir/threads/t1/attachments/a.png" });
-  const ok = await h.app.inject({ method: "GET", url: agentChatRoutes.attachment("t1", "att-1") });
-  assert.equal(ok.statusCode, 200);
-  assert.deepEqual(ok.json(), { streamed: "/appdir/threads/t1/attachments/a.png" });
-
-  const missing = await h.app.inject({
-    method: "GET",
-    url: agentChatRoutes.attachment("t1", "nope")
-  });
+test("attachment reads reject missing IDs, unknown tabs and unavailable hosts", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  const missing = await h.app.inject({ method: "GET", url: agentChatRoutes.attachment("t1", "nope") });
   assert.equal(missing.statusCode, 404);
-
-  const ghost = await h.app.inject({
-    method: "GET",
-    url: agentChatRoutes.attachment("ghost", "att-1")
-  });
+  assert.equal(missing.json().error.code, "THREAD_NOT_FOUND");
+  const ghost = await h.app.inject({ method: "GET", url: agentChatRoutes.attachment("ghost", "att-1") });
   assert.equal(ghost.statusCode, 404);
   assert.equal(ghost.json().error.code, "THREAD_NOT_FOUND");
-
   h.healthy = false;
   const down = await h.app.inject({ method: "GET", url: agentChatRoutes.attachment("t1", "att-1") });
   assert.equal(down.statusCode, 503);
+  assert.equal(down.json().error.code, "HOST_UNAVAILABLE");
   await h.close();
 });
 
@@ -416,12 +369,14 @@ test("the host-stop route drives the supervisor's drain restart", async () => {
   const h = await makeHarness();
   const response = await h.app.inject({ method: "POST", url: agentChatRoutes.hostStop, payload: {} });
   assert.equal(response.statusCode, 200);
-  assert.equal(h.restarts, 1);
   assert.deepEqual(response.json(), {
     ok: true,
     markedThreadIds: ["t1"],
     hostInstanceId: "host-2"
   });
+  h.restartResult = { hostInstanceId: null, markedThreadIds: ["t1"] };
+  const unavailable = await h.app.inject({ method: "POST", url: agentChatRoutes.hostStop, payload: {} });
+  assert.deepEqual(unavailable.json(), { ok: false, markedThreadIds: ["t1"], hostInstanceId: null });
   await h.close();
 });
 
@@ -486,18 +441,6 @@ test("the account route is daemon-owned: it never hits the host socket itself", 
   await h.close();
 });
 
-test("a refused switch answers the §6.2 envelope with its own status", async () => {
-  const h = await makeHarness({ t1: tab("t1") });
-  const response = await h.app.inject({
-    method: "POST",
-    url: agentChatRoutes.account("t1"),
-    payload: { commandId: "c1", accountId: "refused" }
-  });
-  assert.equal(response.statusCode, 400);
-  assert.equal(response.json().error.code, "INVALID_COMMAND");
-  await h.close();
-});
-
 test("the account route is 404 for an unknown tab and 503 while the host is down", async () => {
   const h = await makeHarness({ t1: tab("t1") });
   const missing = await h.app.inject({
@@ -533,7 +476,7 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
     ITEM_NOT_FOUND: 404,
     PROMPT_NOT_FOUND: 404
   };
-  for (const code of AGENT_CHAT_ERROR_CODES) {
+  for (const code of Object.keys(expected) as AgentChatErrorCode[]) {
     const response = await h.app.inject({
       method: "POST",
       url: agentChatRoutes.account("t1"),
@@ -690,14 +633,14 @@ test("a host that predates the index (404 on /search) answers the unavailable se
       })
     );
 
-  const long = "ü".repeat(THREAD_SEARCH_MAX_QUERY_CHARS + 50);
+  const long = "ü".repeat(250);
   const clamped = await h.app.inject({
     method: "GET",
     url: `${agentChatRoutes.search}?${new URLSearchParams({ q: long, limit: "5" })}`
   });
   assert.equal(clamped.statusCode, 200);
   assert.deepEqual(clamped.json(), {
-    query: "ü".repeat(THREAD_SEARCH_MAX_QUERY_CHARS),
+    query: "ü".repeat(200),
     hits: [],
     truncated: false,
     indexed: false

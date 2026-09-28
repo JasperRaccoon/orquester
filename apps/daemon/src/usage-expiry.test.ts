@@ -46,23 +46,23 @@ test("expired-token lastGood serves only windows that have not reset yet", async
 
   let clock = NOW;
   let fetches = 0;
+  t.mock.method(globalThis, "fetch", (async () => {
+    fetches++;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      // Weekly window resets 1h after the fetch; session window 4h after.
+      json: async () => ({
+        five_hour: { utilization: 50, resets_at: new Date(NOW + 4 * 3_600_000).toISOString() },
+        seven_day: { utilization: 100, resets_at: new Date(NOW + 3_600_000).toISOString() }
+      })
+    } as unknown as Response;
+  }) as unknown as typeof fetch);
   const source = createClaudeSource({
     userhome,
     claudeHome,
-    now: () => clock,
-    fetchImpl: (async () => {
-      fetches++;
-      return {
-        ok: true,
-        status: 200,
-        headers: { get: () => null },
-        // Weekly window resets 1h after the fetch; session window 4h after.
-        json: async () => ({
-          five_hour: { utilization: 50, resets_at: new Date(NOW + 4 * 3_600_000).toISOString() },
-          seven_day: { utilization: 100, resets_at: new Date(NOW + 3_600_000).toISOString() }
-        })
-      } as unknown as Response;
-    }) as unknown as typeof fetch
+    now: () => clock
   });
 
   const fresh = await source();

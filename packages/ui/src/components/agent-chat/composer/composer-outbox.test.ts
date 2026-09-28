@@ -1,3 +1,4 @@
+import { isolatedPage } from "../../../lib/agent-chat/testing/isolated-page";
 /**
  * What a tab has on its way out survives a reload of that tab (§7.4): every
  * composer send still in flight and every queued message not yet delivered,
@@ -10,24 +11,21 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import type { QueuedComposerMessage } from "../../../lib/agent-chat/contracts";
-import {
-  adoptOutboxLeftovers,
-  COMPOSER_OUTBOX_KEY,
-  holdOutboxQueuedAtFront,
-  MAX_OUTBOX_ENTRIES,
-  OUTBOX_QUEUE_ABSENCE_MAX_MS,
-  outboxQueue,
-  outboxQueueFresh,
-  outboxQueueShownAt,
-  parseComposerOutbox,
-  recordOutboxQueuedPost,
-  recordOutboxSend,
-  removeOutboxEntry,
-  resetComposerOutbox,
-  stampOutboxQueueShown,
-  writeOutboxQueue,
-  type OutboxQueuedMessage
-} from "./composer-outbox";
+import type { OutboxQueuedMessage } from "./composer-outbox";
+let adoptOutboxLeftovers: typeof import("./composer-outbox")["adoptOutboxLeftovers"];
+let COMPOSER_OUTBOX_KEY: typeof import("./composer-outbox")["COMPOSER_OUTBOX_KEY"];
+let holdOutboxQueuedAtFront: typeof import("./composer-outbox")["holdOutboxQueuedAtFront"];
+let MAX_OUTBOX_ENTRIES: typeof import("./composer-outbox")["MAX_OUTBOX_ENTRIES"];
+let OUTBOX_QUEUE_ABSENCE_MAX_MS: typeof import("./composer-outbox")["OUTBOX_QUEUE_ABSENCE_MAX_MS"];
+let outboxQueue: typeof import("./composer-outbox")["outboxQueue"];
+let outboxQueueFresh: typeof import("./composer-outbox")["outboxQueueFresh"];
+let outboxQueueShownAt: typeof import("./composer-outbox")["outboxQueueShownAt"];
+let parseComposerOutbox: typeof import("./composer-outbox")["parseComposerOutbox"];
+let recordOutboxQueuedPost: typeof import("./composer-outbox")["recordOutboxQueuedPost"];
+let recordOutboxSend: typeof import("./composer-outbox")["recordOutboxSend"];
+let removeOutboxEntry: typeof import("./composer-outbox")["removeOutboxEntry"];
+let stampOutboxQueueShown: typeof import("./composer-outbox")["stampOutboxQueueShown"];
+let writeOutboxQueue: typeof import("./composer-outbox")["writeOutboxQueue"];
 
 let backing = new Map<string, string>();
 
@@ -58,7 +56,12 @@ const queued = (id: string, text: string, commandId = `c-${id}`): OutboxQueuedMe
 });
 
 /** A reload of this tab: the page forgets what it wrote, the storage stays. */
-const reload = (): void => resetComposerOutbox();
+let page: Awaited<ReturnType<typeof isolatedPage>>;
+async function reload(): Promise<void> {
+  await page?.dispose();
+  page = await isolatedPage();
+  ({ adoptOutboxLeftovers, COMPOSER_OUTBOX_KEY, holdOutboxQueuedAtFront, MAX_OUTBOX_ENTRIES, OUTBOX_QUEUE_ABSENCE_MAX_MS, outboxQueue, outboxQueueFresh, outboxQueueShownAt, parseComposerOutbox, recordOutboxQueuedPost, recordOutboxSend, removeOutboxEntry, stampOutboxQueueShown, writeOutboxQueue } = page.outbox);
+}
 
 /** One entry's shape, as the store reads it, without the page it came from. */
 const summary = (entry: ReturnType<typeof adoptOutboxLeftovers>[number]): string =>
@@ -67,24 +70,25 @@ const summary = (entry: ReturnType<typeof adoptOutboxLeftovers>[number]): string
     : `queued ${entry.message.commandId} "${entry.message.text}"${entry.sentAt === undefined ? "" : " posted"}`;
 
 describe("the composer outbox", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     installSessionStorage();
-    resetComposerOutbox();
+    await reload();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await page.dispose();
     delete (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage;
   });
 
-  it("hands what this page is sending to the next page of the tab, once — never back to this page", () => {
+  it("hands what this page is sending to the next page of the tab, once — never back to this page", async () => {
     recordOutboxSend({ sessionId: "A", commandId: "c1", sentAt: 1_000, turn: { input: "deploy the fix" } });
     assert.deepEqual(adoptOutboxLeftovers("A"), [], "this page's own send is in flight here, not a leftover");
 
-    reload();
+    await reload();
     assert.deepEqual(adoptOutboxLeftovers("A").map(summary), ['send c1 "deploy the fix"']);
     assert.deepEqual(adoptOutboxLeftovers("A"), [], "the page that took it over owns it now");
 
-    reload();
+    await reload();
     assert.deepEqual(
       adoptOutboxLeftovers("A").map(summary),
       ['send c1 "deploy the fix"'],
@@ -92,44 +96,44 @@ describe("the composer outbox", () => {
     );
   });
 
-  it("hands a thread its own leftovers only, and leaves every other thread's for that thread", () => {
+  it("hands a thread its own leftovers only, and leaves every other thread's for that thread", async () => {
     recordOutboxSend({ sessionId: "A", commandId: "c1", sentAt: 1_000, turn: { input: "to A" } });
     recordOutboxSend({ sessionId: "B", commandId: "c2", sentAt: 1_000, turn: { input: "to B" } });
-    reload();
+    await reload();
     assert.deepEqual(adoptOutboxLeftovers("A").map(summary), ['send c1 "to A"']);
     assert.deepEqual(adoptOutboxLeftovers("B").map(summary), ['send c2 "to B"']);
   });
 
-  it("forgets an entry once it settles, for this page and the next", () => {
+  it("forgets an entry once it settles, for this page and the next", async () => {
     recordOutboxSend({ sessionId: "A", commandId: "c1", sentAt: 1_000, turn: { input: "landed" } });
     recordOutboxSend({ sessionId: "A", commandId: "c2", sentAt: 1_000, turn: { input: "still going" } });
     removeOutboxEntry("c1");
-    reload();
+    await reload();
     assert.deepEqual(adoptOutboxLeftovers("A").map(summary), ['send c2 "still going"']);
     removeOutboxEntry("c2");
     assert.equal(backing.has(COMPOSER_OUTBOX_KEY), false, "nothing left, nothing stored");
   });
 
-  it("forgets a settled entry even while it is still stored under the page that left it", () => {
+  it("forgets a settled entry even while it is still stored under the page that left it", async () => {
     // The adoption's rewrite of the entry did not land (a full storage): the
     // settle must forget it anyway, or every later generation re-posts it.
     recordOutboxSend({ sessionId: "A", commandId: "c1", sentAt: 1_000, turn: { input: "landed" } });
-    reload();
+    await reload();
     removeOutboxEntry("c1");
     assert.equal(backing.has(COMPOSER_OUTBOX_KEY), false);
   });
 
-  it("writes a queue over any stored copy of its messages, whichever page stored it", () => {
+  it("writes a queue over any stored copy of its messages, whichever page stored it", async () => {
     writeOutboxQueue("A", [queued("q1", "one")]);
-    reload();
+    await reload();
     // This page holds the message now, but its adoption never reached the storage.
     writeOutboxQueue("A", [queued("q1", "one"), queued("q2", "two")]);
     assert.deepEqual(outboxQueue("A").map((message) => message.text), ["one", "two"]);
-    reload();
+    await reload();
     assert.deepEqual(adoptOutboxLeftovers("A").map(summary), ['queued c-q1 "one"', 'queued c-q2 "two"']);
   });
 
-  it("mirrors a thread's queue in order, keeping the send in flight and every other thread's queue", () => {
+  it("mirrors a thread's queue in order, keeping the send in flight and every other thread's queue", async () => {
     writeOutboxQueue("A", [queued("q1", "one"), queued("q2", "two"), queued("q3", "three")]);
     writeOutboxQueue("B", [queued("qb", "b's")]);
     // The head goes out: marked as posted BEFORE the queue drops it.
@@ -142,7 +146,7 @@ describe("the composer outbox", () => {
       "this page's queue of the thread: what is still waiting, in order"
     );
 
-    reload();
+    await reload();
     assert.deepEqual(adoptOutboxLeftovers("A").map(summary), [
       'queued c-q1 "one" posted',
       'queued c-q2 "two"',
@@ -151,16 +155,16 @@ describe("the composer outbox", () => {
     assert.deepEqual(adoptOutboxLeftovers("B").map(summary), ['queued c-qb "b\'s"']);
   });
 
-  it("gives a cold generation of this page the thread's queue, and a next page none of it until adopted", () => {
+  it("gives a cold generation of this page the thread's queue, and a next page none of it until adopted", async () => {
     writeOutboxQueue("A", [queued("q1", "one"), queued("q2", "two")]);
     assert.deepEqual(outboxQueue("A").map((message) => message.commandId), ["c-q1", "c-q2"]);
-    reload();
+    await reload();
     assert.deepEqual(outboxQueue("A"), [], "a previous page's queue is a leftover, not this page's queue");
     adoptOutboxLeftovers("A");
     assert.deepEqual(outboxQueue("A").map((message) => message.text), ["one", "two"]);
   });
 
-  it("never drops a send in flight to stay under the cap — only messages still waiting, oldest first", () => {
+  it("never drops a send in flight to stay under the cap — only messages still waiting, oldest first", async () => {
     recordOutboxSend({ sessionId: "A", commandId: "on-its-way", sentAt: 1_000, turn: { input: "sent" } });
     writeOutboxQueue("B", [queued("posted", "queued, on its way")]);
     recordOutboxQueuedPost("B", queued("posted", "queued, on its way"), 2_000);
@@ -173,12 +177,12 @@ describe("the composer outbox", () => {
       "the two oldest waiting messages made room"
     );
     assert.equal(outboxQueue("C").length, MAX_OUTBOX_ENTRIES - 2);
-    reload();
+    await reload();
     assert.deepEqual(adoptOutboxLeftovers("A").map(summary), ['send on-its-way "sent"']);
     assert.deepEqual(adoptOutboxLeftovers("B").map(summary), ['queued c-posted "queued, on its way" posted']);
   });
 
-  it("holds a message at the front of a thread's kept queue, reason and all, and says whether it could", () => {
+  it("holds a message at the front of a thread's kept queue, reason and all, and says whether it could", async () => {
     writeOutboxQueue("A", [queued("q2", "two"), queued("q3", "three")]);
     const held = { ...queued("q1", "one"), holdUntilUserAction: true, holdReason: "The agent host is restarting." };
     assert.equal(holdOutboxQueuedAtFront("A", held), true);
@@ -195,7 +199,7 @@ describe("the composer outbox", () => {
     assert.equal(holdOutboxQueuedAtFront("A", held), false, "no tab storage: the caller keeps it elsewhere");
   });
 
-  it("holds a later failure behind the ones it follows, keeping their order", () => {
+  it("holds a later failure behind the ones it follows, keeping their order", async () => {
     writeOutboxQueue("A", [queued("w", "waiting")]);
     const first = { ...queued("f1", "first"), holdUntilUserAction: true, holdReason: "no" };
     const second = { ...queued("f2", "second"), holdUntilUserAction: true, holdReason: "no" };
@@ -204,7 +208,7 @@ describe("the composer outbox", () => {
     assert.deepEqual(outboxQueue("A").map((message) => message.text), ["first", "second", "waiting"]);
   });
 
-  it("says whether a queue write reached the storage", () => {
+  it("says whether a queue write reached the storage", async () => {
     assert.equal(writeOutboxQueue("A", [queued("q1", "one")]), true);
     const stub = (globalThis as unknown as { sessionStorage: { setItem: (key: string, value: string) => void } })
       .sessionStorage;
@@ -215,14 +219,14 @@ describe("the composer outbox", () => {
     assert.deepEqual(outboxQueue("A").map((message) => message.text), ["one"], "what was stored stays");
   });
 
-  it("keeps a thread's last-shown stamp while it has queued messages, and forgets it with them", () => {
+  it("keeps a thread's last-shown stamp while it has queued messages, and forgets it with them", async () => {
     stampOutboxQueueShown("A", 5_000);
     assert.equal(outboxQueueShownAt("A"), null, "no queue, nothing to stamp");
 
     writeOutboxQueue("A", [queued("q1", "one")]);
     stampOutboxQueueShown("A", 6_000);
     assert.equal(outboxQueueShownAt("A"), 6_000);
-    reload();
+    await reload();
     assert.equal(outboxQueueShownAt("A"), 6_000, "the next page reads what this one stamped");
 
     adoptOutboxLeftovers("A");
@@ -230,7 +234,7 @@ describe("the composer outbox", () => {
     assert.equal(outboxQueueShownAt("A"), null, "the queue is gone, and its stamp with it");
   });
 
-  it("is fresh while the later of the queue's last showing and the message's queueing is within the bound", () => {
+  it("is fresh while the later of the queue's last showing and the message's queueing is within the bound", async () => {
     const queuedAt = new Date(10_000).toISOString();
     const bound = OUTBOX_QUEUE_ABSENCE_MAX_MS;
     assert.equal(outboxQueueFresh({ shownAt: 20_000, queuedAt, now: 20_000 + bound }), true, "at the bound");
@@ -245,11 +249,11 @@ describe("the composer outbox", () => {
     assert.equal(outboxQueueFresh({ shownAt: 20_000, queuedAt, now: 19_000 }), false, "a clock that ran backwards");
   });
 
-  it("keeps every send in flight even past the cap: the bound only ever drops a waiting message", () => {
+  it("keeps every send in flight even past the cap: the bound only ever drops a waiting message", async () => {
     for (let index = 0; index <= MAX_OUTBOX_ENTRIES; index += 1) {
       recordOutboxSend({ sessionId: "A", commandId: `c${index}`, sentAt: 1_000, turn: { input: `m${index}` } });
     }
-    reload();
+    await reload();
     const kept = adoptOutboxLeftovers("A");
     assert.equal(kept.length, MAX_OUTBOX_ENTRIES + 1);
     assert.equal(summary(kept[0]!), 'send c0 "m0"');
@@ -272,13 +276,13 @@ describe("the composer outbox", () => {
     };
     const parse = (entries: unknown[]) => parseComposerOutbox(JSON.stringify({ v: 1, entries }));
 
-    it("reads nothing out of a value that is not a v1 outbox", () => {
+    it("reads nothing out of a value that is not a v1 outbox", async () => {
       for (const raw of [null, "", "{nope", "[]", "42", '{"v":2,"entries":[]}', '{"v":1}', '{"v":1,"entries":{}}']) {
         assert.deepEqual(parseComposerOutbox(raw), [], `${raw}`);
       }
     });
 
-    it("keeps the entries it can read, and drops each one it cannot", () => {
+    it("keeps the entries it can read, and drops each one it cannot", async () => {
       const entries = parse([
         send,
         "a string",
@@ -304,7 +308,7 @@ describe("the composer outbox", () => {
       );
     });
 
-    it("drops a malformed optional field, never the message it belongs to", () => {
+    it("drops a malformed optional field, never the message it belongs to", async () => {
       const [entry] = parse([
         {
           ...send,
@@ -360,7 +364,7 @@ describe("the composer outbox", () => {
       } satisfies QueuedComposerMessage);
     });
 
-    it("keeps a model selection and a plan-mode turn it can read", () => {
+    it("keeps a model selection and a plan-mode turn it can read", async () => {
       const [entry] = parse([
         {
           ...send,
@@ -382,7 +386,7 @@ describe("the composer outbox", () => {
       assert.equal(entry.generatedPrompt, true);
     });
 
-    it("reads a held message's reason, and the last-shown stamps, field-wise", () => {
+    it("reads a held message's reason, and the last-shown stamps, field-wise", async () => {
       const raw = JSON.stringify({
         v: 1,
         entries: [
@@ -408,7 +412,7 @@ describe("the composer outbox", () => {
       assert.equal(parseComposerOutbox(backing.get(COMPOSER_OUTBOX_KEY)!).length, 1, "and costs no entry");
     });
 
-    it("keeps the first of two entries under one commandId", () => {
+    it("keeps the first of two entries under one commandId", async () => {
       const entries = parse([send, { ...send, turn: { input: "a copy" } }]);
       assert.deepEqual(
         entries.map((entry) => (entry.kind === "send" ? entry.turn.input : "")),

@@ -4,7 +4,7 @@
 
 import type { AgentAccount, UsageResponse } from "@orquester/api";
 import type { AccountsReader, NodeResult, PromptRenderer, WaitingOn } from "../../contracts.ts";
-import { createAgentExecutor, type AgentTimings } from "../executor.ts";
+import { createAgentExecutor } from "../executor.ts";
 import { FakeChatHost, type FakeAgent, type FakeBehaviour } from "./fake-chat-host.ts";
 import { FakeClock } from "./fake-clock.ts";
 import { createFakeContext, fakePrompts, MemoryCooldowns, silentLogger, SimulatedCrash, staticAccounts, staticUsage, type FakeContext, type FakeContextOptions } from "./fake-context.ts";
@@ -15,7 +15,6 @@ export interface ScenarioOptions {
   behaviour?: FakeBehaviour;
   usage?: UsageResponse;
   prompts?: PromptRenderer;
-  timings?: Partial<AgentTimings>;
   start?: string;
   /** What selection reads (default: the host's own accounts). */
   accountsReader?: AccountsReader;
@@ -49,7 +48,6 @@ export class Scenario {
       clock: this.clock,
       mintId: this.mintId,
       logger: silentLogger,
-      ...(this.opts.timings ? { timings: this.opts.timings } : {})
     });
   }
 

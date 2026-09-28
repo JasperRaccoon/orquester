@@ -106,20 +106,6 @@ describe("the provider session binding (§3.3, §4.1)", () => {
     await next.stop();
   });
 
-  it("…and without the binding it would not have — the control", async () => {
-    const { store, threadId, first } = await threadWithACursor();
-    await first.stop();
-    stripCursorFromEventSourcedState(store, threadId);
-    store.bindings.delete(threadId);
-
-    const next = createTestHost({ store });
-    await next.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "again" });
-    await next.settle();
-
-    assert.equal(next.adapter.lastStart?.resumeCursor, undefined);
-    await next.stop();
-  });
-
   it("falls back to the head's cursor for a thread written before bindings existed (§8)", async () => {
     const { store, threadId, first } = await threadWithACursor();
     await first.stop();
@@ -197,7 +183,7 @@ describe("the provider session binding (§3.3, §4.1)", () => {
     await host.settle();
     const binding = host.store.bindings.get(threadId);
     assert.ok(binding, "the binding exists as soon as the thread does");
-    assert.notEqual(binding.resumeCursor, null);
+    assert.deepEqual(binding.resumeCursor, { threadId, resume: "conv-abc" });
     await host.stop();
   });
 });

@@ -44,14 +44,14 @@ import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type
 import { WORKFLOW_AUTHORING_GUIDE } from "./workflows-guide.ts";
 
 /** What a workflow tool plans its result to: the cap less room for ok()'s own framing and a few keys added last. */
-export const WORKFLOW_RESULT_BUDGET = MAX_RESULT_BYTES - 4_000;
+const WORKFLOW_RESULT_BUDGET = MAX_RESULT_BYTES - 4_000;
 /** Problems listed in a result / an error's detail, and quoted in an error's text. */
 const MAX_PROBLEMS = 100;
 const MAX_PROBLEMS_IN_MESSAGE = 8;
 /** The shortest a definition's long text is cut to before the whole result is left to ok()'s last-resort cut. */
 const MIN_FIELD_CHARS = 200;
 /** How often a run wait re-reads the run whatever the bus says (the safety net). */
-export const RUN_REREAD_MS = 10_000;
+const RUN_REREAD_MS = 10_000;
 /** A block output window read with get_workflow_run {nodeId}. */
 const OUTPUT_WINDOW_BYTES = 48_000;
 
@@ -74,7 +74,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Problems from a daemon body, kept only when they have the shape (a route from another build may send anything). */
-export function sanitizeProblems(raw: unknown): WorkflowProblem[] {
+function sanitizeProblems(raw: unknown): WorkflowProblem[] {
   if (!Array.isArray(raw)) return [];
   const problems: WorkflowProblem[] = [];
   for (const entry of raw) {
@@ -98,7 +98,7 @@ function sortedProblems(problems: readonly WorkflowProblem[]): WorkflowProblem[]
 }
 
 /** A result's problems: sorted, at most MAX_PROBLEMS, with counts. */
-export function problemsView(problems: readonly WorkflowProblem[]): { problems: WorkflowProblem[]; errorCount: number; warningCount: number; problemsOmitted?: number } {
+function problemsView(problems: readonly WorkflowProblem[]): { problems: WorkflowProblem[]; errorCount: number; warningCount: number; problemsOmitted?: number } {
   const sorted = sortedProblems(problems);
   const view: { problems: WorkflowProblem[]; errorCount: number; warningCount: number; problemsOmitted?: number } = {
     problems: sorted.slice(0, MAX_PROBLEMS),
@@ -121,7 +121,7 @@ function opIndexOf(env: Record<string, unknown>): number | undefined {
  * through; its problems go into the text (the part every client shows) and, whole, into `detail.problems`. Anything
  * else falls back to the MCP's generic mapping (daemonError), which never echoes a 5xx body.
  */
-export function workflowError(res: DaemonResponse): ToolError {
+function workflowError(res: DaemonResponse): ToolError {
   const body = isRecord(res.body) ? res.body : null;
   const env = body && isRecord(body.error) ? body.error : null;
   if (!env || typeof env.code !== "string") return daemonError(res);
@@ -151,7 +151,7 @@ function expectWorkflowOk<T>(res: DaemonResponse): T {
 // ---------------------------------------------------------------------------
 
 /** "ws/project" for an existing project, words for a temp one. */
-export function projectLabel(project: WorkflowProject, workspacesDir: string): string {
+function projectLabel(project: WorkflowProject, workspacesDir: string): string {
   if (project.kind === "existing") {
     const names = projectNamesFor(project.projectPath, workspacesDir);
     return names.workspace && names.name ? `${names.workspace}/${names.name}` : project.projectPath;
@@ -160,7 +160,7 @@ export function projectLabel(project: WorkflowProject, workspacesDir: string): s
   return `temporary project in workspace ${project.workspace} (${source})`;
 }
 
-export function runSummaryView(r: WorkflowRunSummary): Record<string, unknown> {
+function runSummaryView(r: WorkflowRunSummary): Record<string, unknown> {
   const view: Record<string, unknown> = { runId: r.id, workflowId: r.workflowId, workflowName: r.workflowName, status: r.status };
   if (r.skipReason) view.skipReason = r.skipReason;
   view.trigger = r.trigger.text ?? r.trigger.kind;
@@ -244,7 +244,8 @@ function fitLongStrings<T>(value: T, label: string, budget: number, frame: (v: u
 }
 
 /** The definition as a result shows it: pinned test outputs summarised when large, long texts cut to fit. */
-export function definitionView(workflow: Workflow, extra: Record<string, unknown>, budget = WORKFLOW_RESULT_BUDGET): Record<string, unknown> {
+function definitionView(workflow: Workflow, extra: Record<string, unknown>): Record<string, unknown> {
+  const budget = WORKFLOW_RESULT_BUDGET;
   const flags: Record<string, unknown> = {};
   let shown: Record<string, unknown> = { ...workflow };
   if (workflow.pinned && resultBytes(workflow.pinned) > 4_096) {
@@ -303,7 +304,7 @@ interface OutputSlot {
  * Give each slot as much of the budget as the result has left, smallest first (water-filling): an output that fits its
  * share is kept whole as a value; a larger one becomes the head of its JSON text (`<key>Text`) with `outputTruncated`.
  */
-export function fitOutputs(result: Record<string, unknown>, slots: OutputSlot[], budget: number): boolean {
+function fitOutputs(result: Record<string, unknown>, slots: OutputSlot[], budget: number): boolean {
   const present = slots.filter((s) => s.value !== undefined);
   for (const s of present) if (s.daemonTruncated) s.holder.outputTruncated = true;
   let cutAny = false;
@@ -391,7 +392,7 @@ function orderedBlocks(run: WorkflowRun): WorkflowBlockRun[] {
 const OUTPUT_NOTE = "Outputs marked outputTruncated are cut (outputText is the head of their JSON): read one whole with get_workflow_run {runId, nodeId}.";
 
 /** A whole run: summary, every block with its output fitted to the budget, and the final output. */
-export function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Record<string, unknown> }): Record<string, unknown> {
+function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Record<string, unknown> }): Record<string, unknown> {
   const blocks = orderedBlocks(run);
   const views = blocks.map(blockView);
   const result: Record<string, unknown> = { ...(opts.extra ?? {}), run: runSummaryView(run), blocks: views };
@@ -434,7 +435,7 @@ function findNode(workflow: Workflow, ref: string): WorkflowNode {
 }
 
 /** One window of a JSON text by UTF-8 byte offset, cut on a character boundary and sized to fit a result. */
-export function outputWindow(text: string, offset: number, maxBytes = OUTPUT_WINDOW_BYTES): { text: string; offset: number; totalBytes: number; nextOffset?: number } {
+function outputWindow(text: string, offset: number, maxBytes: number): { text: string; offset: number; totalBytes: number; nextOffset?: number } {
   const bytes = Buffer.from(text, "utf8");
   let start = Math.min(Math.max(0, offset), bytes.length);
   while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1; // never start inside a character
@@ -454,7 +455,7 @@ export function outputWindow(text: string, offset: number, maxBytes = OUTPUT_WIN
  * A tap on the bus, opened BEFORE the run is started, so a run that ends before the POST answers is still heard. It
  * records every run the bus says has ended (a `workflowRun.finished`, or an update whose status is no longer active).
  */
-export class RunEndTap {
+class RunEndTap {
   private readonly ended = new Set<string>();
   private wake: (() => void) | null = null;
   private readonly off: () => void;
@@ -489,8 +490,8 @@ export class RunEndTap {
  * Wait for `runId` to end: woken by the bus, re-reading the run every `rereadMs` whatever the bus says. Resolves with
  * the run as last read and whether it ended; a timeout or an abort resolves `ended: false`. The tap stays the caller's.
  */
-export async function waitForRunEnd(api: DaemonApi, tap: RunEndTap, runId: string, opts: { timeoutMs: number; signal: AbortSignal; rereadMs?: number }): Promise<{ run: WorkflowRun | null; ended: boolean }> {
-  const rereadMs = opts.rereadMs ?? RUN_REREAD_MS;
+async function waitForRunEnd(api: DaemonApi, tap: RunEndTap, runId: string, opts: { timeoutMs: number; signal: AbortSignal }): Promise<{ run: WorkflowRun | null; ended: boolean }> {
+  const rereadMs = RUN_REREAD_MS;
   const started = performance.now();
   const remaining = () => opts.timeoutMs - (performance.now() - started);
   let nextRereadAt = started + rereadMs;

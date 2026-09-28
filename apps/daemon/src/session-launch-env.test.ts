@@ -1,33 +1,32 @@
 import { test } from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { writeAddonEnvLaunchScript } from "./sessions.ts";
-import { composeExtraEnv } from "./index.ts";
 
-test("wrapper exports env and unsets requested keys", async () => {
-  const w = await writeAddonEnvLaunchScript({ bin: "claude", args: ["--foo"] }, { CLAUDE_CONFIG_DIR: "/x/home" }, ["ANTHROPIC_API_KEY"]);
-  const script = await readFile(w.args[0], "utf8");
-  // This repo's shellQuote leaves shell-safe strings unquoted, so tolerate optional quotes.
-  assert.match(script, /export CLAUDE_CONFIG_DIR='?\/x\/home'?/);
-  assert.match(script, /unset ANTHROPIC_API_KEY/);
-  assert.match(script, /exec '?claude'? '?--foo'?/);
-  await w.cleanup();
+test("launcher child receives env overrides, removals and literal arguments", async () => {
+  const child = {
+    bin: process.execPath,
+    args: ["-e", "process.stdout.write(JSON.stringify({ home: process.env.CLAUDE_CONFIG_DIR, key: process.env.ANTHROPIC_API_KEY, args: process.argv.slice(1) }))", "a b", "$(echo injected)"]
+  };
+  const launch = await writeAddonEnvLaunchScript(child, { CLAUDE_CONFIG_DIR: "/x/home with 'quotes'" }, ["ANTHROPIC_API_KEY"]);
+  try {
+    const { stdout } = await promisify(execFile)(launch.bin, launch.args, { env: { ...process.env, ANTHROPIC_API_KEY: "inherited-secret" } });
+    assert.deepEqual(JSON.parse(stdout), { home: "/x/home with 'quotes'", args: ["a b", "$(echo injected)"] });
+  } finally {
+    await launch.cleanup();
+  }
 });
 
-test("wrapper still returns a script when only unsets are present (no env)", async () => {
-  const w = await writeAddonEnvLaunchScript({ bin: "claude", args: [] }, {}, ["ANTHROPIC_API_KEY"]);
-  assert.notEqual(w.bin, "claude"); // wrapped through a shell, not the bare bin
-  const script = await readFile(w.args[0], "utf8");
-  assert.match(script, /unset ANTHROPIC_API_KEY/);
-  await w.cleanup();
-});
-
-test("composeExtraEnv carries accountId from b when a is null", () => {
-  const merged = composeExtraEnv(null, { env: {}, accountId: "acc-x" });
-  assert.equal(merged?.accountId, "acc-x");
-});
-
-test("composeExtraEnv prefers a's accountId when both set", () => {
-  const merged = composeExtraEnv({ env: {}, accountId: "a" }, { env: {}, accountId: "b" });
-  assert.equal(merged?.accountId, "a");
+test("launcher removes inherited credentials even without env overrides", async () => {
+  const launch = await writeAddonEnvLaunchScript({
+    bin: process.execPath,
+    args: ["-e", "process.stdout.write(JSON.stringify({ key: process.env.ANTHROPIC_API_KEY }))"]
+  }, {}, ["ANTHROPIC_API_KEY"]);
+  try {
+    const { stdout } = await promisify(execFile)(launch.bin, launch.args, { env: { ...process.env, ANTHROPIC_API_KEY: "inherited-secret" } });
+    assert.deepEqual(JSON.parse(stdout), {});
+  } finally {
+    await launch.cleanup();
+  }
 });

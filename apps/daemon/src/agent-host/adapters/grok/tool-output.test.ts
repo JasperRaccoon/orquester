@@ -8,75 +8,42 @@ import assert from "node:assert/strict";
 
 import {
   acpKindFromVendorKind,
-  TOOL_CALL_CONTENT_MAX_CHARS,
-  TOOL_CALL_CONTENT_TRUNCATION_MARKER,
-  TOOL_CALL_RAW_BYTES_MAX,
   boundRawOutput,
-  boundToolContent,
-  boundToolOutputText,
   decideToolEmission,
   extractToolCommand,
   itemTypeFromToolKind,
-  normalizeToolKind,
   requestTypeFromToolKind,
   toolContentText,
-  toolOutputUnchanged,
-  toolProgressLength
 } from "./tool-output.ts";
 
-test("short output passes through untouched, by reference", () => {
-  const text = "hi\n";
-  assert.equal(boundToolOutputText(text), text);
-});
-
-test("long output keeps the TAIL and is marked", () => {
-  const text = "x".repeat(TOOL_CALL_CONTENT_MAX_CHARS + 500) + "END";
-  const bounded = boundToolOutputText(text);
-  assert.ok(bounded.startsWith(TOOL_CALL_CONTENT_TRUNCATION_MARKER));
-  assert.ok(bounded.endsWith("END"), "the end is the useful part of a redrawing tool");
-  assert.equal(
-    bounded.length,
-    TOOL_CALL_CONTENT_MAX_CHARS + TOOL_CALL_CONTENT_TRUNCATION_MARKER.length
-  );
+test("long output keeps the specified 8000-character tail and truncation marker", () => {
+  const text = "x".repeat(100_000) + "END";
+  const bounded = (boundRawOutput({ stdout: text }) as { stdout: string }).stdout;
+  assert.match(bounded, /^\[Earlier output truncated\]/);
+  assert.equal(bounded.replace(/^\[Earlier output truncated\]\s*/, ""), "x".repeat(7_997) + "END");
 });
 
 test("boundRawOutput bounds Grok's cumulative text fields", () => {
-  const raw = {
-    type: "Bash",
-    output_for_prompt: "y".repeat(TOOL_CALL_CONTENT_MAX_CHARS + 10),
-    exit_code: 0
-  };
-  const bounded = boundRawOutput(raw) as Record<string, unknown>;
-  assert.notEqual(bounded, raw);
-  assert.ok((bounded["output_for_prompt"] as string).startsWith(TOOL_CALL_CONTENT_TRUNCATION_MARKER));
+  const bounded = boundRawOutput({ type: "Bash", output_for_prompt: "y".repeat(100_000) + "END", exit_code: 0 }) as Record<string, unknown>;
+  const output = bounded["output_for_prompt"] as string;
+  assert.ok(output.length < 10_000);
+  assert.ok(output.endsWith("END"));
   assert.equal(bounded["exit_code"], 0);
 });
 
 test("boundRawOutput bounds the BYTE ARRAY T3's list does not know about", () => {
-  const raw = { type: "Bash", output: new Array(TOOL_CALL_RAW_BYTES_MAX + 100).fill(65) };
-  const bounded = boundRawOutput(raw) as Record<string, unknown>;
-  assert.equal((bounded["output"] as number[]).length, TOOL_CALL_RAW_BYTES_MAX);
+  const bounded = boundRawOutput({ type: "Bash", output: [...new Array(100_000).fill(65), 90] }) as Record<string, unknown>;
+  const output = bounded["output"] as number[];
+  assert.ok(output.length < 10_000);
+  assert.equal(output.at(-1), 90);
 });
 
 test("boundRawOutput reaches one level into Grok's discriminated payload", () => {
-  const raw = {
-    type: "ReadFile",
-    FileContent: { content: "z".repeat(TOOL_CALL_CONTENT_MAX_CHARS + 1), total_lines: 4 }
-  };
-  const bounded = boundRawOutput(raw) as Record<string, Record<string, unknown>>;
-  assert.ok((bounded["FileContent"]["content"] as string).startsWith(TOOL_CALL_CONTENT_TRUNCATION_MARKER));
+  const bounded = boundRawOutput({ type: "ReadFile", FileContent: { content: "z".repeat(100_000) + "END", total_lines: 4 } }) as Record<string, Record<string, unknown>>;
+  const content = bounded["FileContent"]["content"] as string;
+  assert.ok(content.length < 10_000);
+  assert.ok(content.endsWith("END"));
   assert.equal(bounded["FileContent"]["total_lines"], 4);
-});
-
-test("identity is preserved when nothing changed — coalescing depends on it", () => {
-  const raw = { type: "Bash", output_for_prompt: "hi\n" };
-  assert.equal(boundRawOutput(raw), raw);
-  const content = [{ type: "content", content: { type: "text", text: "hi" } }];
-  assert.equal(boundToolContent(content), content);
-  assert.equal(
-    toolOutputUnchanged({ content, rawOutput: raw }, { content, rawOutput: raw }),
-    true
-  );
 });
 
 test("toolContentText joins and bounds the text entries", () => {
@@ -169,15 +136,12 @@ test("big growth emits immediately, and a SHRINKING tail counts too", () => {
   );
 });
 
-test("progress is measured across content and rawOutput, not just detail", () => {
-  // The regression this guards: a command tool pins `detail` to the command
-  // string, so a detail-only measure never grows and live stdout is withheld.
-  const snapshot = {
-    detail: "echo hi",
-    content: [{ type: "content", content: { type: "text", text: "x".repeat(500) } }],
-    rawOutput: { output_for_prompt: "y".repeat(900) }
-  };
-  assert.equal(toolProgressLength(snapshot), 900);
+test("stdout growth emits even when the command detail stays unchanged", () => {
+  assert.equal(decideToolEmission({
+    previous: { detail: "echo hi", rawOutput: { output_for_prompt: "" } },
+    next: { detail: "echo hi", rawOutput: { output_for_prompt: "y".repeat(900) } },
+    skippedSinceEmit: 0
+  }).emit, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -196,12 +160,6 @@ test("the item map and the request map differ on `read` and on `search`", () => 
     assert.equal(requestTypeFromToolKind(kind), "file_change_approval");
   }
   assert.equal(itemTypeFromToolKind(undefined), "dynamic_tool_call");
-});
-
-test("normalizeToolKind trims and rejects blanks", () => {
-  assert.equal(normalizeToolKind("  edit "), "edit");
-  assert.equal(normalizeToolKind("   "), undefined);
-  assert.equal(normalizeToolKind(7), undefined);
 });
 
 test("the command comes from rawInput, then argv, then the title's backticks", () => {

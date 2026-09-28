@@ -34,19 +34,3 @@ export function pickBlockId(items: readonly TimelineItem[], picked: string | nul
 
 /** A phone's run view: its step timeline (the default), or the run drawn on the canvas. */
 export type PhoneRunPane = "timeline" | "canvas";
-
-/**
- * Whether a newly listed run should take over the view: a run the user just
- * started (Run now, a retry) is selected by its caller; a run a trigger
- * started never steals the view from a run the user is reading — only from
- * nothing, or from the newest run when that was shown by default.
- */
-export function followsNewRun(input: {
-  /** The run the user picked, if any (else the view shows the default). */
-  picked: string | null;
-  newestBefore: string | null;
-  newestNow: string | null;
-}): boolean {
-  if (input.newestNow === null || input.newestNow === input.newestBefore) return false;
-  return input.picked === null;
-}

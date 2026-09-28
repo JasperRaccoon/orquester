@@ -8,6 +8,12 @@ const legacyAccount = {
   token: "ghp_x", createdAt: "2025-01-01T00:00:00.000Z"
 };
 
+const migratedConfig = { version: 1 as const, accounts: [{
+  id: "a1", label: "work", provider: "github" as const, login: "octo", remoteKeyId: "123",
+  gitName: "Octo", gitEmail: "o@x.com", publicKey: "ssh-ed25519 AAAA octo", keyPath: "/keys/a1",
+  token: "ghp_x", createdAt: "2025-01-01T00:00:00.000Z"
+}] };
+
 test("legacy github account payload migrates (githubLogin→login, githubKeyId→remoteKeyId, provider default)", () => {
   const cfg = parseAccountsConfig({ version: 1, accounts: [legacyAccount] });
   const a = cfg.accounts[0];
@@ -33,9 +39,7 @@ test("new-shape bitbucket-server account round-trips", () => {
 });
 
 test("already-migrated payload is untouched (idempotent)", () => {
-  const once = parseAccountsConfig({ version: 1, accounts: [legacyAccount] });
-  const twice = parseAccountsConfig(JSON.parse(JSON.stringify(once)));
-  assert.deepEqual(twice, once);
+  assert.deepEqual(parseAccountsConfig(JSON.parse(JSON.stringify(migratedConfig))), migratedConfig);
 });
 
 // Rollback safety: the serialized file must stay parseable by the PRE-provider
@@ -61,8 +65,7 @@ test("serialize does not mirror legacy fields onto bitbucket records", () => {
 });
 
 test("serialize→parse round-trips to the identical config", () => {
-  const cfg = parseAccountsConfig({ version: 1, accounts: [legacyAccount] });
-  assert.deepEqual(parseAccountsConfig(JSON.parse(JSON.stringify(serializeAccountsConfig(cfg)))), cfg);
+  assert.deepEqual(parseAccountsConfig(JSON.parse(JSON.stringify(serializeAccountsConfig(migratedConfig)))), migratedConfig);
 });
 
 test("serialize skips a non-numeric remoteKeyId (old schema required a number)", () => {

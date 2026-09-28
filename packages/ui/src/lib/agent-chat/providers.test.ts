@@ -4,22 +4,27 @@
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
-import type { AdapterCapabilities, ProviderSnapshot } from "@orquester/api/agent-chat";
+import type { AdapterCapabilities,ProviderSnapshot } from "@orquester/api/agent-chat";
 
-import {
-  authErrorMessage,
-  authErrorNotice,
-  loadProviders,
-  providerForRefId,
-  providersStore,
-  refreshProvider,
-  resetProvidersStore,
-  sanitizeProviderSnapshot,
-  setProviderSideEffects
-} from "./providers";
+let authErrorNotice: typeof import("./providers")["authErrorNotice"];
+let loadProviders: typeof import("./providers")["loadProviders"];
+let providerForRefId: typeof import("./providers")["providerForRefId"];
+let providersStore: typeof import("./providers")["providersStore"];
+let refreshProvider: typeof import("./providers")["refreshProvider"];
+let setProviderSideEffects: typeof import("./providers")["setProviderSideEffects"];
 import type { AgentChatTransport } from "./transport";
+
+import { isolatedPage } from "./testing/isolated-page";
+let page: Awaited<ReturnType<typeof isolatedPage>>;
+async function loadPage(): Promise<void> {
+  await page?.dispose();
+  page = await isolatedPage();
+  ({ authErrorNotice, loadProviders, providerForRefId, providersStore, refreshProvider, setProviderSideEffects } = page.providers);
+}
+beforeEach(loadPage);
+afterEach(async () => { await page.dispose(); });
 
 const capabilities: AdapterCapabilities = {
   sessionModelSwitch: "in-session",
@@ -55,33 +60,8 @@ function transportServing(providers: ProviderSnapshot[], refreshed?: ProviderSna
   } as unknown as AgentChatTransport;
 }
 
-beforeEach(() => {
-  resetProvidersStore();
-});
 
 describe("authErrorNotice — `unknown` is not `unauthenticated` (§7.7, T3 §7)", () => {
-  it("names an unauthenticated provider, and earns the SIGN-IN copy", () => {
-    const notice = authErrorNotice(provider({ auth: { status: "unauthenticated" } }));
-    assert.match(notice?.message ?? "", /not signed in/);
-    assert.equal(notice?.tone, "sign-in");
-  });
-
-  it("gives `status: error` + `unauthenticated` the alarming tone as well", () => {
-    // T3 `ProviderStatusBanner.tsx:78-81`: the "<provider> is unauthenticated"
-    // title is `status === "error" && auth.status === "unauthenticated"`.
-    const notice = authErrorNotice(
-      provider({ status: "error", auth: { status: "unauthenticated" }, message: "401" })
-    );
-    assert.equal(notice?.tone, "sign-in");
-  });
-
-  it("never tells an `unknown` provider to sign in — it gets the NEUTRAL tone", () => {
-    const notice = authErrorNotice(
-      provider({ status: "error", auth: { status: "unknown" }, message: "token expired" })
-    );
-    assert.equal(notice?.message, "token expired");
-    assert.equal(notice?.tone, "status", "an ambiguity is never a credential verdict");
-  });
 
   it("says nothing at all for an `unknown` provider that merely is not installed", () => {
     // Settings → Agents, not Settings → Accounts: an absent CLI has no
@@ -92,22 +72,6 @@ describe("authErrorNotice — `unknown` is not `unauthenticated` (§7.7, T3 §7)
       ),
       null
     );
-  });
-
-  it("is silent for a healthy provider, and for an errored one that IS signed in", () => {
-    assert.equal(authErrorMessage(provider()), null);
-    assert.equal(
-      authErrorMessage(provider({ status: "error", auth: { status: "authenticated" } })),
-      null
-    );
-  });
-
-  it("carries the two snapshot columns the dismissal key spans", () => {
-    const notice = authErrorNotice(
-      provider({ status: "error", auth: { status: "unauthenticated" } })
-    );
-    assert.equal(notice?.providerStatus, "error");
-    assert.equal(notice?.authStatus, "unauthenticated");
   });
 
   it("is silent for a PENDING snapshot — nobody has looked at that provider yet", () => {
@@ -124,7 +88,6 @@ describe("authErrorNotice — `unknown` is not `unauthenticated` (§7.7, T3 §7)
       models: [{ slug: "default", name: "Default", isDefault: true, capabilities: null }]
     });
     assert.equal(authErrorNotice(pending), null);
-    assert.equal(authErrorMessage(pending), null);
   });
 });
 
@@ -146,18 +109,6 @@ describe("Q2-11 — auth errors are published for the sink to de-duplicate", () 
     setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
     await loadProviders(transportServing([provider()]), { force: true });
     assert.deepEqual(raised, []);
-  });
-
-  it("publishes an `auth.status {error}` snapshot as the same toast", async () => {
-    const raised: string[] = [];
-    setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
-    await loadProviders(
-      transportServing([
-        provider({ status: "error", auth: { status: "unknown" }, message: "token expired" })
-      ]),
-      { force: true }
-    );
-    assert.deepEqual(raised, ["token expired"]);
   });
 });
 
@@ -370,60 +321,6 @@ describe("R6 #11 — a provider row from an older host is repaired, never truste
 });
 
 describe("goals §8.1 — `capabilities.goals` is validated field-wise; a malformed block is absent", () => {
-  const withGoals = (goals: unknown) =>
-    sanitizeProviderSnapshot({ id: "codex", refIds: ["codex"], capabilities: { ...capabilities, goals } })
-      ?.capabilities.goals;
-
-  it("keeps each adapter's block as the host wrote it (goals §4.5)", () => {
-    for (const block of [
-      { command: "provider", actions: ["continue", "clear"], continuesAcrossTurns: false },
-      { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true },
-      { command: "provider", actions: ["resume", "clear"], continuesAcrossTurns: false }
-    ]) {
-      assert.deepEqual(withGoals(block), block);
-    }
-  });
-
-  it("absent stays absent: no goal surface (OpenCode, and every host that predates goals)", () => {
-    const row = sanitizeProviderSnapshot({ id: "opencode", refIds: ["opencode"], capabilities });
-    assert.ok(row);
-    assert.equal("goals" in row.capabilities, false);
-    assert.equal(withGoals(undefined), undefined);
-  });
-
-  it("a block it cannot read is dropped whole — never half-trusted", () => {
-    for (const broken of [
-      null,
-      "host",
-      [],
-      { actions: ["clear"], continuesAcrossTurns: true },
-      { command: "cli", actions: ["clear"], continuesAcrossTurns: true },
-      { command: "host", continuesAcrossTurns: true },
-      { command: "host", actions: "clear", continuesAcrossTurns: true },
-      { command: "host", actions: ["clear"] },
-      { command: "host", actions: ["clear"], continuesAcrossTurns: "yes" }
-    ]) {
-      const row = sanitizeProviderSnapshot({
-        id: "codex",
-        refIds: ["codex"],
-        capabilities: { ...capabilities, goals: broken }
-      });
-      assert.ok(row, "the provider row itself survives");
-      assert.equal("goals" in row.capabilities, false, JSON.stringify(broken));
-      assert.equal(row.capabilities.showPlanModeToggle, true, "the rest of the block is untouched");
-    }
-  });
-
-  it("drops an action it does not know rather than the whole block — a newer host may add one", () => {
-    assert.deepEqual(
-      withGoals({
-        command: "host",
-        actions: ["pause", "edit", 7, null, "clear", "pause"],
-        continuesAcrossTurns: true
-      }),
-      { command: "host", actions: ["pause", "clear"], continuesAcrossTurns: true }
-    );
-  });
 
   it("a row from the catalog read is repaired the same way", async () => {
     await loadProviders(

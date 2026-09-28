@@ -17,7 +17,7 @@ import type { AgentChatTimelineRow } from "../../../lib/agent-chat/contracts";
  * is the gap between the last real row and the visible edge above the composer.
  */
 
-export const TIMELINE_FOLLOW_REARM_THRESHOLD_PX = 40;
+const TIMELINE_FOLLOW_REARM_THRESHOLD_PX = 40;
 
 export interface TimelineScrollMetrics {
   /** `scrollHeight` — the full scrollable content, footer spacer included. */
@@ -29,12 +29,12 @@ export interface TimelineScrollMetrics {
 }
 
 /** Distance from the bottom of the content, in px. Never negative. */
-export function distanceFromEnd(metrics: TimelineScrollMetrics): number {
+function distanceFromEnd(metrics: TimelineScrollMetrics): number {
   return Math.max(0, metrics.contentLength - metrics.scroll - metrics.scrollLength);
 }
 
 /** Whether the viewport currently sits inside the re-arm band. */
-export function isWithinFollowBand(metrics: TimelineScrollMetrics): boolean {
+function isWithinFollowBand(metrics: TimelineScrollMetrics): boolean {
   return distanceFromEnd(metrics) <= TIMELINE_FOLLOW_REARM_THRESHOLD_PX;
 }
 
@@ -102,7 +102,7 @@ export function timelineIsWorking(rows: readonly AgentChatTimelineRow[]): boolea
  * *T3: `MessagesTimeline.tsx:618-631` — "Two frames covers the fresh-data
  * layout pass and the initial end pin."*
  */
-export const TIMELINE_SETTLE_FRAMES = 2;
+const TIMELINE_SETTLE_FRAMES = 2;
 
 /**
  * The named latch that keeps a list-identity change instant.
@@ -123,7 +123,7 @@ export interface TimelineSettleLatch {
   readonly frames: number;
 }
 
-export const IDLE_SETTLE_LATCH: TimelineSettleLatch = { identity: null, frames: 0 };
+const IDLE_SETTLE_LATCH: TimelineSettleLatch = { identity: null, frames: 0 };
 
 /**
  * One list's identity.

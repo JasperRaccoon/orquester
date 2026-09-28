@@ -43,7 +43,7 @@ export const ACCOUNT_HOME_ENV_VAR: Record<AgentAdapterId, string> = {
  * adapter that owns it; nothing is ever inherited, so this is a second line of
  * defence against a caller that builds `extraEnv` from a wider source.
  */
-export const AMBIENT_CREDENTIAL_ENV_VARS: Record<AgentAdapterId, readonly string[]> = {
+const AMBIENT_CREDENTIAL_ENV_VARS: Record<AgentAdapterId, readonly string[]> = {
   claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_API_KEY"],
   codex: ["OPENAI_API_KEY", "OPENAI_API_BASE", "CODEX_API_KEY"],
   opencode: ["OPENCODE_API_KEY"],
@@ -139,13 +139,4 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
   env[AGENT_LAUNCH_ENV_VAR] = launchId;
 
   return env;
-}
-
-/**
- * True when a value would need shell expansion to be usable. The host injects
- * only absolute paths (§3.1), so this is an assertion helper for adapters and
- * for tests, not a fixer — nothing here rewrites a value.
- */
-export function needsShellExpansion(value: string): boolean {
-  return value.startsWith("~") || value.includes("$");
 }

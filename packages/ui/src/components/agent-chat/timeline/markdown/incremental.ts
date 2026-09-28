@@ -26,33 +26,33 @@
  * the file typechecking without adding a dependency.
  */
 
-export interface MdPoint {
+interface MdPoint {
   line: number;
   column: number;
   offset?: number | undefined;
 }
 
-export interface MdPosition {
+interface MdPosition {
   start: MdPoint;
   end: MdPoint;
 }
 
-export interface MdNode {
+interface MdNode {
   type: string;
   position?: MdPosition | undefined;
   children?: MdNode[] | undefined;
 }
 
-export interface MdRoot extends MdNode {
+interface MdRoot extends MdNode {
   type: "root";
   children: MdNode[];
 }
 
 /** What `remark-parse` installs on the processor, structurally. */
-export type MarkdownParser = (source: string, file: unknown) => MdRoot;
+type MarkdownParser = (source: string, file: unknown) => MdRoot;
 
 /** The subset of a unified processor this plugin touches. */
-export interface MarkdownProcessorLike {
+interface MarkdownProcessorLike {
   parser?: MarkdownParser | undefined;
 }
 
@@ -64,13 +64,13 @@ interface ParsedPrefix {
 }
 
 /** Definitions are document-wide, so their presence forces a full parse. */
-export function hasDefinitions(node: MdNode): boolean {
+function hasDefinitions(node: MdNode): boolean {
   if (node.type === "definition" || node.type === "footnoteDefinition") return true;
   return node.children?.some((child) => hasDefinitions(child)) ?? false;
 }
 
 /** Re-bases a suffix parse onto the document's coordinates. */
-export function shiftPositions(node: MdNode, offset: number, lines: number): void {
+function shiftPositions(node: MdNode, offset: number, lines: number): void {
   if (node.position) {
     for (const point of [node.position.start, node.position.end]) {
       if (point.offset !== undefined) point.offset += offset;
@@ -92,7 +92,7 @@ function cloneNodes(nodes: readonly MdNode[]): MdNode[] {
  * Wraps a parser with the prefix cache. One cache per streaming renderer —
  * the returned function is stateful and must not be shared between messages.
  */
-export function createIncrementalMarkdownParser(parse: MarkdownParser): MarkdownParser {
+function createIncrementalMarkdownParser(parse: MarkdownParser): MarkdownParser {
   let cached: ParsedPrefix | undefined;
 
   return (source, file) => {

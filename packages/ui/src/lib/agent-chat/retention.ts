@@ -63,14 +63,6 @@ interface RetentionCell<TState> {
   retainedAt: number;
 }
 
-export interface ThreadRetentionOptions {
-  ttlMs?: number;
-  maxEntries?: number;
-  /** Injected in tests; production uses `setTimeout`/`clearTimeout`. */
-  setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
-  clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
-}
-
 /**
  * The retained-snapshot store.
  *
@@ -79,18 +71,7 @@ export interface ThreadRetentionOptions {
  */
 export class ThreadRetentionCache<TState> {
   private readonly cells = new Map<string, RetentionCell<TState>>();
-  private readonly ttlMs: number;
-  private readonly maxEntries: number;
-  private readonly setTimer: NonNullable<ThreadRetentionOptions["setTimer"]>;
-  private readonly clearTimer: NonNullable<ThreadRetentionOptions["clearTimer"]>;
   private clock = 0;
-
-  constructor(options: ThreadRetentionOptions = {}) {
-    this.ttlMs = options.ttlMs ?? THREAD_SNAPSHOT_IDLE_TTL_MS;
-    this.maxEntries = options.maxEntries ?? THREAD_SNAPSHOT_CACHE_MAX;
-    this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
-    this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
-  }
 
   /**
    * Become the key's owner and mint the token that proves it.
@@ -135,11 +116,6 @@ export class ThreadRetentionCache<TState> {
     return snapshot;
   }
 
-  /** Read without taking. For assertions and for surfaces that must not own one. */
-  peek(key: string): RetainedThread<TState> | null {
-    return this.cells.get(key)?.snapshot ?? null;
-  }
-
   /**
    * Write the retained value, if `owner` still owns the key.
    *
@@ -156,39 +132,20 @@ export class ThreadRetentionCache<TState> {
     cell.retainedAt = ++this.clock;
     // The generation that wrote this is gone; the key is free for the next one.
     cell.owner = null;
-    cell.timer = this.setTimer(() => {
+    cell.timer = setTimeout(() => {
       const current = this.cells.get(key);
       if (current === cell && current.snapshot === snapshot) {
         this.cells.delete(key);
       }
-    }, this.ttlMs);
+    }, THREAD_SNAPSHOT_IDLE_TTL_MS);
     cell.timer.unref?.();
     this.evictOverflow();
     return true;
   }
 
-  /** How many keys currently hold a retained value. */
-  get size(): number {
-    let count = 0;
-    for (const cell of this.cells.values()) {
-      if (cell.snapshot !== null) {
-        count += 1;
-      }
-    }
-    return count;
-  }
-
-  /** Test seam: drop everything, timers included. */
-  clear(): void {
-    for (const cell of this.cells.values()) {
-      this.disarm(cell);
-    }
-    this.cells.clear();
-  }
-
   private disarm(cell: RetentionCell<TState>): void {
     if (cell.timer !== null) {
-      this.clearTimer(cell.timer);
+      clearTimeout(cell.timer);
       cell.timer = null;
     }
   }
@@ -200,11 +157,11 @@ export class ThreadRetentionCache<TState> {
         held.push(entry);
       }
     }
-    if (held.length <= this.maxEntries) {
+    if (held.length <= THREAD_SNAPSHOT_CACHE_MAX) {
       return;
     }
     held = held.sort((left, right) => left[1].retainedAt - right[1].retainedAt);
-    for (const [key, cell] of held.slice(0, held.length - this.maxEntries)) {
+    for (const [key, cell] of held.slice(0, held.length - THREAD_SNAPSHOT_CACHE_MAX)) {
       this.disarm(cell);
       this.cells.delete(key);
     }

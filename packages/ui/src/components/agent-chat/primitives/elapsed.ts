@@ -9,7 +9,7 @@
  * is narrower than a "0", so without tabular figures a once-a-second tick
  * visibly twitches the row.
  */
-export function formatElapsed(totalSeconds: number): string {
+function formatElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(seconds / 60);
   if (minutes === 0) return `${seconds}s`;
@@ -32,10 +32,10 @@ function parseStamp(stamp: ElapsedStamp): number {
  * by four different agent CLIs, so a malformed one must shrink the output, not
  * poison the row.
  */
-export function elapsedBetween(start: ElapsedStamp, end: ElapsedStamp, now = Date.now()): string {
+export function elapsedBetween(start: ElapsedStamp, end: ElapsedStamp): string {
   const from = parseStamp(start);
   if (Number.isNaN(from)) return "";
-  const to = end === null || end === undefined ? now : parseStamp(end);
+  const to = end === null || end === undefined ? Date.now() : parseStamp(end);
   if (Number.isNaN(to)) return "";
   return formatElapsed((to - from) / 1000);
 }

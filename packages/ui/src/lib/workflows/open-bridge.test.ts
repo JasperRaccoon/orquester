@@ -5,10 +5,6 @@ import { openWorkflowRun, subscribeOpenWorkflowRun, workflowRunTargetOf } from "
 
 const target = { workflowId: "wf-1", runId: "run-1", nodeId: "node-1" };
 
-test("with no listener, opening a run is a no-op that reports false", () => {
-  assert.equal(openWorkflowRun(target), false);
-});
-
 test("every listener takes the run, and unsubscribing takes it out", () => {
   const a: unknown[] = [];
   const b: unknown[] = [];

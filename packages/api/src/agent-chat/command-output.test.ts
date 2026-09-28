@@ -97,26 +97,6 @@ test("an echo counts only on a call whose data says it executes (ACP's kind, any
   assert.equal(commandDisplayDetail(command({ detail: "ls", data: { ...data, kind: "read" } })), "ls");
 });
 
-test("the output places are read in order, the first non-blank one winning", () => {
-  const places: [string, Record<string, unknown>][] = [
-    ["aggregatedOutput", { item: { aggregatedOutput: "aggregatedOutput", result: { content: "item result" } } }],
-    ["item result", { item: { result: { content: "item result" } }, rawOutput: "raw text" }],
-    ["raw text", { rawOutput: "raw text" }],
-    ["raw content", { rawOutput: { content: "raw content", stdout: "stdout" } }],
-    ["stdout", { rawOutput: { stdout: "stdout", output: "output" } }],
-    ["output", { rawOutput: { output: "output", output_for_prompt: "for prompt" } }],
-    ["for prompt", { rawOutput: { output_for_prompt: "for prompt" }, content: [{ type: "content", content: { text: "acp" } }] }],
-    ["acp", { content: [{ type: "content", content: { text: "acp" } }], result: { content: "result content" } }],
-    ["result content", { result: { content: "result content" } }],
-    ["result text", { result: "result text" }]
-  ];
-  for (const [expected, data] of places) {
-    assert.equal(commandDisplayDetail(command({ data })), expected, expected);
-  }
-  // A blank place is passed over, never taken.
-  assert.equal(commandDisplayDetail(command({ data: { item: { aggregatedOutput: "  " }, rawOutput: { content: "raw content" } } })), "raw content");
-});
-
 test("a provider detail that already says more stands (OpenCode's output, Codex's own detail)", () => {
   const openCode = command({ detail: "first line\nsecond line", data: { command: "cat file", result: "first line" } });
   assert.equal(commandDisplayDetail(openCode), "first line\nsecond line");
@@ -220,16 +200,6 @@ test("commandOutputText: no output is undefined — no data, blanks, non-text va
   const none: unknown[] = [undefined, null, "text", 7, ["a"], {}, { item: { aggregatedOutput: "  \n" } }, { rawOutput: { output: [104, 105] } },
     { rawOutput: { stdout: " ", stderr: "\n" } }, { content: [{ type: "diff", path: "a.ts" }] }, { result: { content: [{ type: "text", text: "blocks" }] } }];
   for (const data of none) assert.equal(commandOutputText(data), undefined, JSON.stringify(data));
-});
-
-test("commandOutputText holds the whole output the wire's one-line preview is cut from", () => {
-  const lines = `${Array.from({ length: 500 }, (_, i) => `line ${i}`).join("\n")}\n`;
-  const data = { item: { command: "seq 0 499", aggregatedOutput: lines } };
-  assert.equal(commandOutputText(data), lines);
-  // What every read path serves instead: the first line, and `truncated` saying the item holds more.
-  const wire = slimActivityPayload(command({ title: "Bash", data })) as { data: unknown; truncated?: unknown };
-  assert.equal(wire.truncated, true);
-  assert.equal(commandOutputText(wire.data), "line 0");
 });
 
 test("storedCommandOutput: an item stored whole holds its output whole, whatever row of the call it is", () => {

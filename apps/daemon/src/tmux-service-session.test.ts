@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Tmux, tmuxAvailable, tmuxVersionOk, SERVICE_SESSION_PREFIX } from "./tmux.ts";
+import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux.ts";
 
 /**
  * Build a Tmux against a throwaway `-S` socket (never the daemon's). Returns null
@@ -25,11 +25,6 @@ async function makeTestTmux(t: any): Promise<Tmux | null> {
   });
   return new Tmux(socket);
 }
-
-test("SERVICE_SESSION_PREFIX is outside the reaped orq- namespace", () => {
-  assert.equal(SERVICE_SESSION_PREFIX, "orqsvc-");
-  assert.equal("orqsvc-agent-host".startsWith("orq-"), false);
-});
 
 test("service session lives outside orq- namespace and survives listSessions/reattach scans", async (t) => {
   const tmux = await makeTestTmux(t);

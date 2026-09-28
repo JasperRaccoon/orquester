@@ -50,40 +50,6 @@ export const RUNTIME_MODE_TO_PERMISSION_MODE: Readonly<
   "full-access": "bypassPermissions"
 };
 
-/**
- * §4.5's "Never set" list, **verbatim**. It is the spec's list, not a
- * description of the code: editing it to match the code is what would let a
- * regression through the test that reads it.
- */
-export const CLAUDE_NEVER_SET_OPTIONS = [
-  "hooks",
-  "allowedTools",
-  "disallowedTools",
-  "maxTurns",
-  "fallbackModel",
-  "agents",
-  "stderr",
-  "abortController",
-  "executable",
-  "strictMcpConfig",
-  "maxThinkingTokens"
-] as const;
-
-/**
- * The one entry of that list this adapter **does** set on a session, and why.
- *
- * §3.1 requires a provider child's stderr to be "captured, not discarded",
- * classified and redacted before it reaches the user or `events.ndjson`; the
- * SDK's `stderr` callback is the only access to the CLI's stderr there is. It
- * is a passive observer — it changes nothing about how the CLI runs — so the
- * §3.1 requirement wins over the §4.5 list, and the deviation is recorded in
- * INTEGRATION-NOTES for the eventual spec amendment.
- *
- * `abortController` and `strictMcpConfig` are likewise set on the **probe**
- * options, which §4.5 explicitly prescribes; the list above governs a session.
- */
-export const CLAUDE_SESSION_ALLOWED_DESPITE_SPEC = ["stderr"] as const;
-
 export interface BuildClaudeQueryOptionsInput {
   cwd: string;
   /** The registry-resolved `claude`, never the SDK's bundled copy (§10). */

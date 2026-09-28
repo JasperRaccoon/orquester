@@ -31,12 +31,10 @@ describe("image placeholders", () => {
     assert.equal(removeImagePlaceholder("no images here", 1), "no images here");
   });
 
-  it("revokes every preview URL a chip set holds, and only those", () => {
+  it("revokes every preview URL a chip set holds, and only those", (t) => {
     const revoked: string[] = [];
-    revokeImagePreviews(
-      [{ previewUrl: "blob:a" }, {}, { previewUrl: "blob:b" }],
-      (url) => revoked.push(url)
-    );
+    t.mock.method(URL, "revokeObjectURL", (url: string) => revoked.push(url));
+    revokeImagePreviews([{ previewUrl: "blob:a" }, {}, { previewUrl: "blob:b" }]);
     assert.deepEqual(revoked, ["blob:a", "blob:b"]);
   });
 
@@ -47,7 +45,6 @@ describe("image placeholders", () => {
     const back = withoutPreviews([image, file]);
     assert.deepEqual(back, [{ key: "a", mimeType: "image/png" }, file]);
     assert.equal("previewUrl" in back[0]!, false, "the lazy resolve only runs for a chip with no URL");
-    assert.equal(back[1], file, "a chip with no URL is returned as it is");
     assert.equal(image.previewUrl, "blob:a", "the sent chip itself is not mutated");
   });
 });

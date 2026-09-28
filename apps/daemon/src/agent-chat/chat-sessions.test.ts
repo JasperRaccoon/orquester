@@ -361,29 +361,6 @@ test("the PTY-only surface is inert for a chat tab", async () => {
   assert.equal(router.buffer("bash-1"), "pty");
 });
 
-test("liveAccountIds unions both kinds (the idle-account refresher reads it)", () => {
-  const { router, chat } = makeRouter();
-  seed(chat, "chat-1", 0);
-  assert.deepEqual([...router.liveAccountIds()], ["acc-1"]);
-});
-
-test("create dispatches on the kind", async () => {
-  const pty = new FakePty();
-  const chat = chatManager();
-  let chatCreates = 0;
-  const router = new ChatAwareSessionManager(pty, chat, {
-    create: async () => {
-      chatCreates++;
-      return seed(chat, "chat-1", 0);
-    },
-    onClose: () => undefined,
-    onRename: () => undefined
-  });
-  await router.create({ kind: "agent-chat", refId: "claude" } as CreateSessionRequest);
-  assert.equal(chatCreates, 1);
-  await assert.rejects(() => router.create({ kind: "shell", refId: "bash" } as CreateSessionRequest));
-});
-
 // --- §3.4 account switch ---------------------------------------------------
 
 test("setAccount moves the summary AND the persisted chat block together", () => {

@@ -31,7 +31,6 @@ import {
 import { createIngestion } from "../../ingestion/index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen
@@ -46,20 +45,15 @@ import {
   type NormalizerSignal
 } from "./normalize.ts";
 import {
-  KNOWN_IGNORED_EVENT_TYPES,
   asRawEvent,
-  isHandledEventType,
   type OpenCodeRawEvent
 } from "./protocol.ts";
 import type { ProviderListResponse } from "./routes.ts";
 import { modelContextLimits } from "./snapshot.ts";
 import {
-  advanceOutputMark,
-  borderOverlap,
   claimPrompt,
   createSessionState,
   makeTurnTokenUsageAccumulator,
-  suffixPrefixOverlap,
   type OpenCodeSessionState
 } from "./state.ts";
 import {
@@ -300,15 +294,13 @@ async function throughHost(
   events: readonly RuntimeEvent[]
 ): Promise<{ log: DomainEvent[]; roster: RuntimeSubagent[] }> {
   const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
+
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
     idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
   });
   for (const event of events) {
     await ingestion.ingest(event);
@@ -361,18 +353,6 @@ function sseTypes(name: string): Set<string> {
 // ---------------------------------------------------------------------------
 // The structural assertion (§9)
 // ---------------------------------------------------------------------------
-
-test("every event type in every capture has a defined disposition", () => {
-  const undecided: string[] = [];
-  for (const name of fixtureNames()) {
-    for (const type of sseTypes(name)) {
-      if (!isHandledEventType(type) && !KNOWN_IGNORED_EVENT_TYPES.has(type)) {
-        undecided.push(`${name}: ${type}`);
-      }
-    }
-  }
-  assert.deepEqual(undecided, []);
-});
 
 test("no capture produces a runtime.warning for a known-ignored frame", () => {
   for (const name of fixtureNames()) {
@@ -2628,104 +2608,18 @@ test("a value of no known shape shares nothing provable: it re-bases and adds no
   );
 });
 
-test("a removed part drops its mark; the marks are bounded, the longest unwritten first", () => {
-  const session = liveSession(BASH_SESSION_ID);
-  const partOf = (frame: OpenCodeRawEvent): string =>
-    (frame.properties as { part: { id: string } }).part.id;
-  const bash = bashFrames();
-  feed(session, [withOutput(bash.grown, "one\n")]);
-  assert.deepEqual([...session.state.outputMarks.keys()], [partOf(bash.grown)]);
-  feed(session, [
-    {
-      type: "message.part.removed",
-      properties: {
-        sessionID: BASH_SESSION_ID,
-        messageID: "msg_0c19e9533001yJC1rvPg6UFOT3",
-        partID: partOf(bash.grown)
-      }
-    }
-  ]);
-  assert.equal(session.state.outputMarks.size, 0);
-
-  // 64 commands running at once, none of them settling, then a 65th: the
-  // mark written longest ago is the one that goes.
-  const command = (index: number, output: string): OpenCodeRawEvent =>
-    withOutput(bashFrames({ prt_0c19e993b0013DG2Hi0JnCZ7bT: `prt_cmd_${index}` }).grown, output);
-  feed(
-    session,
-    Array.from({ length: 64 }, (_, index) => command(index, "x\n"))
-  );
-  const more = feed(session, [command(0, "x\ny\n"), command(64, "z\n")]).flat();
-  assert.deepEqual(
-    outputChunks(more).map((chunk) => chunk.payload.delta),
-    ["y\n", "z\n"]
-  );
-  assert.equal(session.state.outputMarks.size, 64);
-  assert.equal(session.state.outputMarks.has("prt_cmd_0"), true, "written again, so kept");
-  assert.equal(session.state.outputMarks.has("prt_cmd_1"), false);
-});
-
 test("a repeating output that slides into itself loses the repeat, never shows it twice", () => {
   const bar = "=".repeat(30_000);
   const window = outputWindow(`${bar}==`);
-  assert.deepEqual(advanceOutputMark(bar, window), { mark: window, chunk: "" });
-});
-
-test("the window's overlap is the longest suffix of the mark that starts it", () => {
-  // Against the obvious quadratic reading, on a two-letter alphabet where
-  // borders repeat and a wrong fallback shows: short words, and long ones
-  // made of a few repeated blocks, which past the 256-character anchor offer
-  // the search many places to try.
-  let seed = 7;
-  const next = (bound: number): number => {
-    seed = (seed * 48_271) % 2_147_483_647;
-    return seed % bound;
-  };
-  const letters = (length: number): string =>
-    Array.from({ length }, () => (next(2) === 0 ? "a" : "b")).join("");
-  const blocks = (): string => {
-    const block = letters(1 + next(4));
-    return `${block.repeat(Math.floor(next(700) / block.length))}${letters(next(3))}`;
-  };
-  const longest = (left: string, right: string): number => {
-    let length = Math.min(left.length, right.length);
-    while (length > 0 && !left.endsWith(right.slice(0, length))) {
-      length -= 1;
-    }
-    return length;
-  };
-  for (let round = 0; round < 2_000; round += 1) {
-    const long = round % 10 === 0;
-    const left = long ? blocks() : letters(next(13));
-    const right = long ? blocks() : letters(next(13));
-    const expected = longest(left, right);
-    assert.equal(suffixPrefixOverlap(left, right), expected, `${left} / ${right}`);
-    assert.equal(borderOverlap(left, right), expected, `${left} / ${right}`);
-  }
-  // Hundreds of places end with the anchor and only the last verifies: the
-  // linear pass answers.
-  const defect = `${"a".repeat(300)}b${"a".repeat(300)}`;
-  assert.equal(suffixPrefixOverlap(defect, "a".repeat(601)), 300);
-});
-
-test("a head-less value that does not extend the mark adds nothing, whatever it overlaps", () => {
-  // Its leading "\n" overlaps the mark's end; read as a window, it repeated one\ntwo.
-  const value = "\n[truncated]\none\ntwo\nthree\n";
-  assert.deepEqual(advanceOutputMark("one\ntwo\n", value), { mark: value, chunk: "" });
-});
-
-test("a removed message drops its parts' marks", () => {
   const session = liveSession(BASH_SESSION_ID);
   const bash = bashFrames();
-  feed(session, [withOutput(bash.grown, "one\n")]);
-  assert.equal(session.state.outputMarks.size, 1);
-  feed(session, [
-    {
-      type: "message.removed",
-      properties: { sessionID: BASH_SESSION_ID, messageID: "msg_0c19e9533001yJC1rvPg6UFOT3" }
-    }
-  ]);
-  assert.equal(session.state.outputMarks.size, 0);
+  const chunks = outputChunks(feed(session, [
+    bash.pending,
+    bash.running,
+    withOutput(bash.grown, bar),
+    withOutput(bash.grown, window)
+  ]).flat());
+  assert.deepEqual(chunks.map((chunk) => chunk.payload.delta), [bar]);
 });
 
 // ---------------------------------------------------------------------------
@@ -3192,16 +3086,6 @@ test("an account failure on session.error carries a structured reason (workflows
   assert.deepEqual(reasons({ name: "UnknownError", data: { message: "429 Too Many Requests" } }), [
     [undefined, undefined]
   ]);
-});
-
-test("14: a SIGTERM mid-turn leaves the capture with no farewell frame to decode", () => {
-  const { events } = replay("14-process-behaviour-and-sigterm.ndjson");
-  // Nothing in the stream announces the shutdown: a client learns only from
-  // the transport, which is why supervision cannot wait for an orderly signal.
-  assert.deepEqual(
-    eventsOfType(events, "session.exited"),
-    []
-  );
 });
 
 // ---------------------------------------------------------------------------

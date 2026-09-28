@@ -8,11 +8,11 @@ import { outputHandles } from "./graph.ts";
 import type { WorkflowEdge, WorkflowNode } from "./types.ts";
 
 export const LAYOUT_NODE_WIDTH = 240;
-export const LAYOUT_NODE_HEIGHT = 96;
+const LAYOUT_NODE_HEIGHT = 96;
 /** Column gap: room for a branch's label ("case 2 · Feature") between a card and the next. */
 export const LAYOUT_RANK_SEP = 112;
-export const LAYOUT_NODE_SEP = 48;
-export const LAYOUT_GRID = 16;
+const LAYOUT_NODE_SEP = 48;
+const LAYOUT_GRID = 16;
 /** Extra room above a failure branch, so its dashed edges run clear of the cards above. */
 const FAILURE_GAP = 32;
 
@@ -28,7 +28,7 @@ type LayoutGraph = { nodes: readonly LayoutNode[]; edges: readonly LayoutEdge[] 
 const snap = (value: number): number => Math.round(value / LAYOUT_GRID) * LAYOUT_GRID;
 
 /** A card's height for layout: taller when it has many labelled outputs (a switch). */
-export function layoutNodeHeight(node: Pick<LayoutNode, "type"> & { config?: unknown }): number {
+function layoutNodeHeight(node: Pick<LayoutNode, "type"> & { config?: unknown }): number {
   const handles = outputHandles({ id: "", ...node });
   return LAYOUT_NODE_HEIGHT + Math.max(0, handles.length - 2) * 24;
 }
@@ -38,7 +38,7 @@ export function layoutNodeHeight(node: Pick<LayoutNode, "type"> & { config?: unk
  * `error` output, or comes from another block of the failure side. They are laid out apart, below
  * the success path, so its dashed edges never cross it.
  */
-export function failureSide(nodes: readonly LayoutNode[], edges: readonly LayoutEdge[]): Set<string> {
+function failureSide(nodes: readonly LayoutNode[], edges: readonly LayoutEdge[]): Set<string> {
   const incoming = new Map<string, LayoutEdge[]>();
   for (const edge of edges) {
     const list = incoming.get(edge.target) ?? [];

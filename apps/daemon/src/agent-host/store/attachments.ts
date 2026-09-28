@@ -43,29 +43,12 @@ const ATTACHMENT_FILENAME_EXTENSIONS = [
  * Normalise a path fragment that must stay inside the attachments dir.
  * Returns null for anything absolute, escaping or NUL-bearing.
  */
-export function normalizeAttachmentRelativePath(rawRelativePath: string): string | null {
+function normalizeAttachmentRelativePath(rawRelativePath: string): string | null {
   const normalized = NodePath.normalize(rawRelativePath).replace(/^[/\\]+/, "");
   if (normalized.length === 0 || normalized.startsWith("..") || normalized.includes("\0")) {
     return null;
   }
   return normalized.replace(/\\/g, "/");
-}
-
-/** Resolve a relative path inside `attachmentsDir`, or null if it escapes. */
-export function resolveAttachmentRelativePath(input: {
-  readonly attachmentsDir: string;
-  readonly relativePath: string;
-}): string | null {
-  const normalizedRelativePath = normalizeAttachmentRelativePath(input.relativePath);
-  if (!normalizedRelativePath) {
-    return null;
-  }
-  const attachmentsRoot = NodePath.resolve(input.attachmentsDir);
-  const filePath = NodePath.resolve(NodePath.join(attachmentsRoot, normalizedRelativePath));
-  if (!filePath.startsWith(`${attachmentsRoot}${NodePath.sep}`)) {
-    return null;
-  }
-  return filePath;
 }
 
 /**
@@ -123,11 +106,6 @@ export function createAttachmentId(
   return `${threadSegment}-${uuid}${attachmentIdExtensionSuffix(extension)}`;
 }
 
-/** Mint an id for an upload whose thread does not exist yet (§5.1). */
-export function createPendingAttachmentId(uuid: string, extension?: string): string {
-  return `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${uuid}${attachmentIdExtensionSuffix(extension)}`;
-}
-
 function matchAttachmentId(attachmentId: string): RegExpMatchArray | null {
   const normalizedId = normalizeAttachmentRelativePath(attachmentId);
   if (!normalizedId || normalizedId.includes("/") || normalizedId.includes(".")) {
@@ -138,10 +116,6 @@ function matchAttachmentId(attachmentId: string): RegExpMatchArray | null {
 
 export function parseThreadSegmentFromAttachmentId(attachmentId: string): string | null {
   return matchAttachmentId(attachmentId)?.[1]?.toLowerCase() ?? null;
-}
-
-export function parseAttachmentUuid(attachmentId: string): string | null {
-  return matchAttachmentId(attachmentId)?.[2]?.toLowerCase() ?? null;
 }
 
 export function parseAttachmentFileExtension(attachmentId: string): string | null {

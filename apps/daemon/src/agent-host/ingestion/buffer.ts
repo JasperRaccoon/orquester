@@ -19,16 +19,11 @@
 import { splitBufferedText } from "./text-boundary.ts";
 
 /** §5.6: flush every 250 ms … */
-export const BATCH_INTERVAL_MS = 250;
+const BATCH_INTERVAL_MS = 250;
 /** … or 8 KB, whichever first. Measured in UTF-16 code units, the cheap bound. */
-export const BATCH_MAX_CHARS = 8 * 1024;
+const BATCH_MAX_CHARS = 8 * 1024;
 
-export type TimerHandle = unknown;
-
-export interface BufferTimers {
-  setTimer: (fn: () => void, ms: number) => TimerHandle;
-  clearTimer: (handle: TimerHandle) => void;
-}
+type TimerHandle = ReturnType<typeof setTimeout>;
 
 /**
  * One buffered stream. Owned by {@link DeltaBufferSet}; the set is what
@@ -53,7 +48,6 @@ export interface BufferFlush {
  * asynchronously from the 250 ms timer.
  */
 export class DeltaBufferSet {
-  readonly #timers: BufferTimers;
   readonly #now: () => number;
   readonly #onTimerFlush: (flush: BufferFlush) => void;
   readonly #entries = new Map<string, BufferEntry>();
@@ -66,12 +60,10 @@ export class DeltaBufferSet {
   readonly #lastDeliveredAtMs = new Map<string, number>();
 
   constructor(options: {
-    timers: BufferTimers;
     now: () => number;
     /** Called when the 250 ms window expires. `append` returns its flush instead. */
     onTimerFlush: (flush: BufferFlush) => void;
   }) {
-    this.#timers = options.timers;
     this.#now = options.now;
     this.#onTimerFlush = options.onTimerFlush;
   }
@@ -171,7 +163,7 @@ export class DeltaBufferSet {
     if (entry.timer !== null) {
       return;
     }
-    entry.timer = this.#timers.setTimer(() => {
+    entry.timer = setTimeout(() => {
       const current = this.#entries.get(key);
       if (current === undefined) {
         return;
@@ -209,7 +201,7 @@ export class DeltaBufferSet {
 
   #dispose(key: string, entry: BufferEntry): void {
     if (entry.timer !== null) {
-      this.#timers.clearTimer(entry.timer);
+      clearTimeout(entry.timer);
       entry.timer = null;
     }
     this.#entries.delete(key);

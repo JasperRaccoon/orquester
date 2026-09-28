@@ -27,7 +27,7 @@
 import type { XaiAskUserQuestionParams } from "./acp/_generated/xai.ts";
 
 /** A free-text answer that matches no advertised option becomes this label. */
-export const OTHER_LABEL = "Other";
+const OTHER_LABEL = "Other";
 
 export interface XaiAnswerEnvelope {
   readonly outcome: "accepted";

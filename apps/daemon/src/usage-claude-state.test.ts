@@ -11,7 +11,6 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
-  CLAUDE_USAGE_MIN_INTERVAL_MS,
   claudeLiveUsageFromWindows,
   createClaudeSource,
   type ClaudeUsageRecord,
@@ -42,7 +41,7 @@ async function claudeHome(t: test.TestContext): Promise<string> {
   return home;
 }
 
-function endpoint(answers: Array<{ status: number; body?: unknown; retryAfter?: string }>) {
+function endpoint(t: test.TestContext, answers: Array<{ status: number; body?: unknown; retryAfter?: string }>) {
   const calls: number[] = [];
   let clock = () => NOW;
   const fetchImpl = (async () => {
@@ -55,7 +54,8 @@ function endpoint(answers: Array<{ status: number; body?: unknown; retryAfter?: 
       json: async () => answer.body ?? {}
     } as unknown as Response;
   }) as unknown as typeof fetch;
-  return { calls, fetchImpl, setClock: (fn: () => number) => (clock = fn) };
+  t.mock.method(globalThis, "fetch", fetchImpl);
+  return { calls, setClock: (fn: () => number) => (clock = fn) };
 }
 
 const usageBody = (session: number, weekly: number) => ({
@@ -66,9 +66,9 @@ const usageBody = (session: number, weekly: number) => ({
 test("asks the endpoint at most once per window, even with nothing to show", async (t) => {
   const home = await claudeHome(t);
   let clock = NOW;
-  const api = endpoint([{ status: 429, retryAfter: "10" }, { status: 200, body: usageBody(4, 20) }]);
+  const api = endpoint(t, [{ status: 429, retryAfter: "10" }, { status: 200, body: usageBody(4, 20) }]);
   api.setClock(() => clock);
-  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => clock, fetchImpl: api.fetchImpl });
+  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => clock });
 
   const first = await source();
   assert.equal(first?.session, null);
@@ -79,7 +79,7 @@ test("asks the endpoint at most once per window, even with nothing to show", asy
     await source();
   }
   assert.equal(api.calls.length, 1, "a Retry-After shorter than the window is floored at the window");
-  clock = NOW + CLAUDE_USAGE_MIN_INTERVAL_MS;
+  clock = NOW + 5 * MIN;
   const fresh = await source();
   assert.equal(api.calls.length, 2);
   assert.equal(fresh?.session?.percent, 4);
@@ -93,9 +93,9 @@ test("asks the endpoint at most once per window, even with nothing to show", asy
 test("a restart keeps the last reading and waits out the window the previous process opened", async (t) => {
   const home = await claudeHome(t);
   const store = new MemoryStore();
-  const api = endpoint([{ status: 200, body: usageBody(10, 90) }, { status: 200, body: usageBody(11, 91) }]);
+  const api = endpoint(t, [{ status: 200, body: usageBody(10, 90) }, { status: 200, body: usageBody(11, 91) }]);
   const make = (now: number) =>
-    createClaudeSource({ userhome: home, claudeHome: home, now: () => now, fetchImpl: api.fetchImpl, state: { store, key: "claude:a" } });
+    createClaudeSource({ userhome: home, claudeHome: home, now: () => now, state: { store, key: "claude:a" } });
 
   assert.equal((await make(NOW)())?.weekly?.percent, 90);
   // The daemon restarts two minutes later: the new source shows the numbers at once, asks nothing.
@@ -111,13 +111,13 @@ test("a restart keeps the last reading and waits out the window the previous pro
 test("a 429's Retry-After survives a restart and the last reading is served greyed meanwhile", async (t) => {
   const home = await claudeHome(t);
   const store = new MemoryStore();
-  const api = endpoint([
+  const api = endpoint(t, [
     { status: 200, body: usageBody(10, 50) },
     { status: 429, retryAfter: "1800" },
     { status: 200, body: usageBody(12, 52) }
   ]);
   const make = (now: number) =>
-    createClaudeSource({ userhome: home, claudeHome: home, now: () => now, fetchImpl: api.fetchImpl, state: { store, key: "k" } });
+    createClaudeSource({ userhome: home, claudeHome: home, now: () => now, state: { store, key: "k" } });
 
   await make(NOW)();
   const limited = await make(NOW + 6 * MIN)();
@@ -134,7 +134,7 @@ test("a 429's Retry-After survives a restart and the last reading is served grey
 test("a live reading replaces the account windows, keeps the scoped ones, and skips the poll", async (t) => {
   const home = await claudeHome(t);
   let clock = NOW;
-  const api = endpoint([
+  const api = endpoint(t, [
     {
       status: 200,
       body: {
@@ -144,7 +144,7 @@ test("a live reading replaces the account windows, keeps the scoped ones, and sk
     },
     { status: 200, body: usageBody(99, 99) }
   ]);
-  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => clock, fetchImpl: api.fetchImpl });
+  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => clock });
   await source();
 
   clock = NOW + 4 * MIN;
@@ -167,8 +167,8 @@ test("a live reading replaces the account windows, keeps the scoped ones, and sk
 
 test("a live reading on an account with no reading yet stands on its own", async (t) => {
   const home = await claudeHome(t);
-  const api = endpoint([]);
-  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => NOW, fetchImpl: api.fetchImpl });
+  const api = endpoint(t, []);
+  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => NOW });
   source.ingestLive({ session: { percent: 3 }, weekly: { percent: 16 }, observedAt: NOW });
   const served = await source();
   assert.equal(api.calls.length, 0);
@@ -181,8 +181,8 @@ test("a stamp from the future (the clock moved back) does not block the endpoint
   const home = await claudeHome(t);
   const store = new MemoryStore();
   store.set("k", { lastGood: null, lastFetchAt: NOW + 60 * MIN, retryAt: NOW + 100 * 24 * 60 * MIN, liveAt: 0, failed: false });
-  const api = endpoint([{ status: 200, body: usageBody(5, 6) }]);
-  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => NOW, fetchImpl: api.fetchImpl, state: { store, key: "k" } });
+  const api = endpoint(t, [{ status: 200, body: usageBody(5, 6) }]);
+  const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => NOW, state: { store, key: "k" } });
   assert.equal((await source())?.session?.percent, 5);
 });
 

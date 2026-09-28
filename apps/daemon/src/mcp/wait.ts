@@ -5,14 +5,14 @@ import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import { listSessions } from "./reads.ts";
 
-export interface WatchState { sessions: ReadonlyMap<string, SessionSummary>; closed: ReadonlySet<string> }
+interface WatchState { sessions: ReadonlyMap<string, SessionSummary>; closed: ReadonlySet<string> }
 /**
  * What a watch holds: ONE session — whose close, or absence from the first read, rejects the watch with
  * SESSION_NOT_FOUND at once rather than running it to the timeout — or every session `select` admits. Never both,
  * so the two cannot disagree.
  */
 export type WatchScope = { sessionId: string; select?: never } | { select: (s: SessionSummary) => boolean; sessionId?: never };
-export type WatchOptions<T> = WatchScope & { api: DaemonApi; evaluate: (state: WatchState) => T | null; timeoutMs: number; signal: AbortSignal; now: () => number; settleMs?: number; rereadMs?: number };
+type WatchOptions<T> = WatchScope & { api: DaemonApi; evaluate: (state: WatchState) => T | null; timeoutMs: number; signal: AbortSignal; now: () => number; settleMs?: number };
 
 const DEFAULT_SETTLE_MS = 300;
 const DEFAULT_REREAD_MS = 10_000;
@@ -37,9 +37,9 @@ function attentionStamp(activity: SessionActivity | undefined): number {
  * listener, never thrown into the publisher. A closed session leaves the watch for
  * good; with `sessionId`, its close ends the watch (SESSION_NOT_FOUND).
  */
-export async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null> {
+async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null> {
   const settleMs = opts.settleMs ?? DEFAULT_SETTLE_MS;
-  const rereadMs = opts.rereadMs ?? DEFAULT_REREAD_MS;
+  const rereadMs = DEFAULT_REREAD_MS;
   const only = opts.sessionId;
   const select = only === undefined ? opts.select : (s: SessionSummary) => s.id === only;
   let sessions = new Map<string, SessionSummary>();
@@ -215,7 +215,7 @@ export async function waitForTurn(api: DaemonApi, sessionId: string, baseline: T
 }
 
 /** Stamps compare as instants: the daemon writes UTC `toISOString()`, a caller's `after` may carry an offset or no milliseconds. */
-export function attentionQualifies(s: SessionSummary, after: string): boolean {
+function attentionQualifies(s: SessionSummary, after: string): boolean {
   const a = s.activity;
   return Boolean(a && a.attention !== null && a.needsAttentionAt && Date.parse(a.needsAttentionAt) > Date.parse(after));
 }
@@ -224,10 +224,10 @@ export function attentionQualifies(s: SessionSummary, after: string): boolean {
  * §9.2's wait. Scoped by `sessionId`, the session closing, or being gone by the first read, rejects with
  * SESSION_NOT_FOUND; a `select` scope — a project, or every session — just stops watching a closed session.
  */
-export async function waitForAttention(api: DaemonApi, opts: WatchScope & { after: string; timeoutMs: number; signal: AbortSignal; now: () => number; settleMs?: number }): Promise<{ sessions: SessionSummary[]; cursor: string; timedOut: boolean }> {
+export async function waitForAttention(api: DaemonApi, opts: WatchScope & { after: string; timeoutMs: number; signal: AbortSignal; now: () => number }): Promise<{ sessions: SessionSummary[]; cursor: string; timedOut: boolean }> {
   const scope: WatchScope = opts.sessionId === undefined ? { select: opts.select } : { sessionId: opts.sessionId };
   const hit = await watchSessions<SessionSummary[]>({
-    ...scope, api, timeoutMs: opts.timeoutMs, signal: opts.signal, now: opts.now, settleMs: opts.settleMs,
+    ...scope, api, timeoutMs: opts.timeoutMs, signal: opts.signal, now: opts.now,
     evaluate: (state) => { const q = [...state.sessions.values()].filter((s) => attentionQualifies(s, opts.after)); return q.length ? q : null; }
   });
   if (!hit) return { sessions: [], cursor: opts.after, timedOut: true };

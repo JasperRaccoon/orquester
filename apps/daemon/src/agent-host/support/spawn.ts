@@ -27,20 +27,6 @@ export interface SpawnProviderChildOptions {
   /** The complete environment. Build it with `buildProviderEnv`. */
   env: Record<string, string>;
   cwd: string;
-  /**
-   * Put the child in its own process group so a kill signals the whole tree.
-   *
-   * **Defaults to true on POSIX**, and that default is load-bearing: a
-   * provider CLI starts MCP servers of its own, and signalling only the direct
-   * child leaves them running and reparented to init — one orphaned server per
-   * chat session, for the life of the box (E20). A group leader's `kill(-pid)`
-   * takes them with it — unless the child starts them in sessions of their
-   * own, as the Grok CLI does its shells and MCP servers: those are found by
-   * the launch marker they inherit instead (`leftover-processes.ts`). Pass
-   * `false` only for a child that must outlive the signal, and say why.
-   * Ignored on Windows, which has no process groups.
-   */
-  detached?: boolean;
   /** Overrides {@link DEFAULT_KILL_GRACE_MS} for this child. */
   killGraceMs?: number;
 }
@@ -83,15 +69,13 @@ export interface ProviderChild {
  */
 export function spawnProviderChild(options: SpawnProviderChildOptions): ProviderChild {
   const { command, args, env, cwd, killGraceMs } = options;
-  // Group-leading is the default; see `detached`'s note (E20).
-  const detached = options.detached ?? true;
   const grace = killGraceMs ?? DEFAULT_KILL_GRACE_MS;
 
   const child = nodeSpawn(command, [...args], {
     cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
-    detached: detached && process.platform !== "win32",
+    detached: process.platform !== "win32",
     // Never a shell: an arg that happens to contain a metacharacter must reach
     // the binary verbatim, and there is nothing here that needs a shell.
     shell: false,
@@ -136,7 +120,7 @@ export function spawnProviderChild(options: SpawnProviderChildOptions): Provider
       return;
     }
     try {
-      if (detached && process.platform !== "win32") {
+      if (process.platform !== "win32") {
         // Negative pid = the whole process group, which is what catches a
         // child that spawned its own server (§4.5 OpenCode).
         process.kill(-pid, signal);

@@ -96,9 +96,6 @@ export interface SystemStatusOptions {
    * `protectedPids`; only its descendants become reachable.
    */
   extraRootPids?: () => Iterable<number>;
-  /** Injectable clock + sleep (tests drive the CPU resample path through these). */
-  now?: () => number;
-  sleep?: (ms: number) => Promise<unknown>;
 }
 
 /** A `/proc/<pid>` snapshot row. */
@@ -423,7 +420,7 @@ export function descendsFromRoot(
 }
 
 /** `pid` plus every pid currently under it (depth-capped, cycle-safe). */
-export function collectDescendants(procs: Map<number, { ppid: number }>, pid: number): number[] {
+function collectDescendants(procs: Map<number, { ppid: number }>, pid: number): number[] {
   return [...collectTree(procs, new Map([[pid, undefined]])).keys()];
 }
 
@@ -440,7 +437,7 @@ async function readTextFile(path: string): Promise<string | null> {
 }
 
 /** `items.map(fn)` with at most `limit` calls in flight; order is preserved. */
-export async function mapLimited<T, R>(
+async function mapLimited<T, R>(
   items: readonly T[],
   limit: number,
   fn: (item: T) => Promise<R>
@@ -523,8 +520,6 @@ export type KillResult =
 
 export class SystemStatusService {
   private readonly tmux: Tmux;
-  private readonly now: () => number;
-  private readonly sleep: (ms: number) => Promise<unknown>;
   private cpuSample: TimedCpuSample | null = null;
   private lastCpuPercent = 0;
   private resourcesCache: { at: number; value: SystemResourcesResponse } | null = null;
@@ -534,14 +529,12 @@ export class SystemStatusService {
 
   constructor(private readonly options: SystemStatusOptions) {
     this.tmux = new Tmux(options.tmuxSocket);
-    this.now = options.now ?? Date.now;
-    this.sleep = options.sleep ?? delay;
     // Seed the CPU delta at construction so the first read has something to
     // subtract from (sysinfo does the same); without it the first GET is 0%.
     if (SYSTEM_STATUS_SUPPORTED) {
       try {
         const sample = parseCpuSample(readFileSync("/proc/stat", "utf8"));
-        this.cpuSample = sample ? { sample, at: this.now() } : null;
+        this.cpuSample = sample ? { sample, at: Date.now() } : null;
       } catch {
         this.cpuSample = null;
       }
@@ -552,7 +545,7 @@ export class SystemStatusService {
     if (!SYSTEM_STATUS_SUPPORTED) {
       return unsupportedResources(this.options.fsRoot);
     }
-    const now = this.now();
+    const now = Date.now();
     if (this.resourcesCache && now - this.resourcesCache.at < RESOURCES_CACHE_MS) {
       return this.resourcesCache.value;
     }
@@ -574,7 +567,7 @@ export class SystemStatusService {
     if (!sample) {
       return this.lastCpuPercent;
     }
-    const at = this.now();
+    const at = Date.now();
     const previous = this.cpuSample;
     this.cpuSample = { sample, at };
 
@@ -586,11 +579,11 @@ export class SystemStatusService {
       return this.lastCpuPercent;
     }
 
-    await this.sleep(CPU_RESAMPLE_DELAY_MS);
+    await delay(CPU_RESAMPLE_DELAY_MS);
     const secondRaw = await readTextFile("/proc/stat");
     const second = secondRaw ? parseCpuSample(secondRaw) : null;
     if (second) {
-      this.cpuSample = { sample: second, at: this.now() };
+      this.cpuSample = { sample: second, at: Date.now() };
       const percent = cpuPercentFromSamples(sample, second);
       if (percent !== null) {
         this.lastCpuPercent = percent;
@@ -827,7 +820,7 @@ export class SystemStatusService {
    * `fresh` forces a re-scan — the kill guard must never decide on stale data.
    */
   private async snapshot(fresh = false): Promise<TreeSnapshot> {
-    const now = this.now();
+    const now = Date.now();
     const cached = this.treeCache;
     if (!fresh && cached && now - cached.at < SNAPSHOT_CACHE_MS) {
       return cached;

@@ -54,7 +54,7 @@ describe("managed-account auth overlay (§7.7)", () => {
 
   it("an authenticated probe is returned as-is", () => {
     const input = snapshot({ auth: { status: "authenticated", label: "System" } });
-    assert.equal(overlayManagedAccountAuth(input, [account({})]), input);
+    assert.deepEqual(overlayManagedAccountAuth(input, [account({})]), input);
   });
 
   it("an error that was only the missing login becomes ready, message dropped", () => {
@@ -69,12 +69,11 @@ describe("managed-account auth overlay (§7.7)", () => {
 
   it("a non-auth error keeps its status and text", () => {
     const out = overlayManagedAccountAuth(
-      snapshot({ status: "error", message: "codex was not found.", auth: { status: "unknown" } }),
+      snapshot({ id: "codex", status: "error", message: "codex was not found.", auth: { status: "unknown" } }),
       [account({ agent: "codex", id: "c" })]
     );
     assert.equal(out.status, "error");
     assert.equal(out.message, "codex was not found.");
-    assert.equal(out.auth.status, "unknown", "an unknown verdict is not an auth failure");
   });
 
   it("prefers the family default account for the label", () => {

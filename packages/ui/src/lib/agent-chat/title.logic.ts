@@ -28,7 +28,7 @@ export const DEFAULT_THREAD_TITLE = "New thread";
 export const THREAD_TITLE_MAX_LENGTH = 50;
 
 /** *T3: `packages/shared/src/String.ts:1-8`.* */
-export function truncateTitle(text: string, maxLength = THREAD_TITLE_MAX_LENGTH): string {
+function truncateTitle(text: string, maxLength = THREAD_TITLE_MAX_LENGTH): string {
   const trimmed = text.trim();
   return trimmed.length <= maxLength ? trimmed : `${trimmed.slice(0, maxLength)}...`;
 }
@@ -37,7 +37,7 @@ export function truncateTitle(text: string, maxLength = THREAD_TITLE_MAX_LENGTH)
  * Strip the composer's inline references so the seed is prose, not markup:
  * `$skill` chips, `@path` mentions and fenced code become their plain reading.
  */
-export function stripComposerReferences(text: string): string {
+function stripComposerReferences(text: string): string {
   return text
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]*)`/g, "$1")
@@ -77,17 +77,4 @@ export function deriveThreadTitleSeed(input: {
     return truncateTitle(firstContext.label);
   }
   return DEFAULT_THREAD_TITLE;
-}
-
-/**
- * The host may replace the seed later, but **only while the current title is
- * still exactly the default or exactly the seed**, so a manual rename is never
- * clobbered. Mirrored client-side so a rename dialog can say whether the
- * provider may still improve the name.
- *
- * *T3: `apps/server/src/orchestration/threadTitles.ts:1-13`.*
- */
-export function canReplaceThreadTitle(currentTitle: string, seed: string | null): boolean {
-  const current = currentTitle.trim();
-  return current.length === 0 || current === DEFAULT_THREAD_TITLE || current === seed?.trim();
 }

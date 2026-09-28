@@ -22,7 +22,7 @@
 //      `.system`, or the family's head row when it has no managed accounts), every window through
 //      `currentWindow` (an expired window is the quota refilled, never a reading). `percent ≥ 100`
 //      is always burnt. A window that is absent is not a threshold breach (Grok has no 5h window).
-//      No row, `available: false`, or a reading older than `staleAfterMs` → unknown usage.
+//      No row, `available: false`, or a reading older than 20 minutes → unknown usage.
 //   4. Ranked: least-used by the metric ascending (ties: soonest weekly reset, then label);
 //      soonest-reset by the chosen window's reset ascending (unknown resets last; ties: label);
 //      fixed by the allow-list order. Unknown usage after every known one (or dropped).
@@ -45,7 +45,7 @@ import { currentWindow } from "../../usage-parse.ts";
 import { accountFamilyOf, cooldownKey, cooldownSubject } from "./families.ts";
 
 /** A usage reading older than this is unknown (the usage service polls every 5 minutes). */
-export const DEFAULT_USAGE_STALE_AFTER_MS = 20 * 60_000;
+const DEFAULT_USAGE_STALE_AFTER_MS = 20 * 60_000;
 
 export interface SelectAccountInput {
   chain: AgentChainEntry[];
@@ -60,7 +60,6 @@ export interface SelectAccountInput {
   fromChainIndex?: number;
   /** Consider only this chain entry (the in-session account switch). */
   onlyChainIndex?: number;
-  staleAfterMs?: number;
 }
 
 type ResolvedPolicy = Required<Pick<AccountPolicy, "strategy" | "includeSystem" | "soonestResetWindow" | "leastUsedMetric" | "unknownUsage">> &
@@ -120,7 +119,7 @@ export function readUsage(
   usage: UsageResponse,
   family: string,
   accountId: string,
-  opts: { now: Date; hasManagedAccounts?: boolean; staleAfterMs?: number }
+  opts: { now: Date; hasManagedAccounts?: boolean }
 ): UsageReading {
   const nowMs = opts.now.getTime();
   const empty = { session: null, weekly: null, scoped: [] };
@@ -132,7 +131,7 @@ export function readUsage(
   const asOfMs = asOf ? Date.parse(asOf) : Number.NaN;
   if (Number.isFinite(asOfMs)) {
     const age = nowMs - asOfMs;
-    if (age > (opts.staleAfterMs ?? DEFAULT_USAGE_STALE_AFTER_MS)) {
+    if (age > DEFAULT_USAGE_STALE_AFTER_MS) {
       return { known: false, unknownWhy: `usage reading is ${formatDuration(age)} old`, ...base, ...empty };
     }
   } else if (source.stale) {
@@ -348,8 +347,7 @@ export function rankChainEntry(input: SelectAccountInput, chainIndex: number): C
     if (cooledOrTried(candidate)) continue;
     const reading = readUsage(input.usage, accountFamily, candidate.accountId, {
       now,
-      hasManagedAccounts: managed.length > 0,
-      ...(input.staleAfterMs !== undefined ? { staleAfterMs: input.staleAfterMs } : {})
+      hasManagedAccounts: managed.length > 0
     });
     if (!reading.known) {
       if (policy.unknownUsage === "exclude") skip(candidate, "unknownUsage", `usage unknown (${reading.unknownWhy})`);
@@ -512,7 +510,7 @@ export function formatDuration(ms: number): string {
 }
 
 /** "therealeduard465: weekly 90% ≥ 85%". */
-export function describeSkip(skip: AccountSkip): string {
+function describeSkip(skip: AccountSkip): string {
   return `${skip.label ?? skip.accountId}: ${skip.detail}`;
 }
 

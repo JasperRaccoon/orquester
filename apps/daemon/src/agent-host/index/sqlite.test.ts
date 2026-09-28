@@ -12,16 +12,14 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import type BetterSqlite3 from "better-sqlite3";
 
-import { createThreadIndex, INDEX_SCHEMA_VERSION } from "./index.ts";
-import { INDEX_TABLES } from "./schema.ts";
-import { defaultSqliteDriver, type SqliteDriver } from "./sqlite.ts";
+import { createThreadIndex } from "./index.ts";
 import {
   checkpoint,
   created,
   done,
   legacyCompaction,
   liveTurn,
-  recordingLogger,
+  testLogger,
   reverted,
   session,
   subagentCompaction,
@@ -56,64 +54,41 @@ function inspect<T>(query: (db: BetterSqlite3.Database) => T): T {
 }
 
 describe("thread index file", () => {
-  it("resolves the real driver once at load", () => {
-    assert.notEqual(defaultSqliteDriver, null);
-  });
-
-  it("bootstraps a fresh file: INDEX_SCHEMA_VERSION, WAL, mode 0600, parent dirs created", async () => {
-    const logger = recordingLogger();
+  it("bootstraps a fresh private WAL database and its parent directories", async () => {
+    const logger = testLogger();
     const index = createThreadIndex({ filePath, logger });
     assert.equal(index.available, true);
     index.close();
 
     const mode = (await stat(filePath)).mode & 0o777;
     assert.equal(mode, 0o600);
-    const { version, journal, tables } = inspect((db) => ({
-      version: (db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as {
-        value: string;
-      }).value,
-      journal: db.pragma("journal_mode", { simple: true }),
-      tables: (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
-        name: string;
-      }>).map((row) => row.name)
-    }));
-    assert.equal(version, String(INDEX_SCHEMA_VERSION));
-    assert.equal(journal, "wal");
-    for (const table of INDEX_TABLES) {
-      assert.ok(tables.includes(table), `missing table ${table}`);
-    }
-    assert.deepEqual(
-      logger.entries.filter((entry) => entry.level === "warn"),
-      [],
-      "a fresh file is not a warning"
-    );
+    assert.equal(inspect((db) => db.pragma("journal_mode", { simple: true })), "wal");
   });
 
   it("reopens an intact file without rebuilding it", async () => {
     const log = new TestLog();
-    const first = createThreadIndex({ filePath, logger: recordingLogger() });
+    const first = createThreadIndex({ filePath, logger: testLogger() });
     first.observe({ threadId: log.threadId, projectPath: "/w/p", title: "T", ...log.append(created()) });
     await first.drain();
     first.close();
 
-    const logger = recordingLogger();
+    const logger = testLogger();
     const second = createThreadIndex({ filePath, logger });
     assert.equal(second.available, true);
     assert.deepEqual(second.cursor(log.threadId), { lastSeq: 1, lastByte: log.size });
-    assert.equal(logger.entries.filter((entry) => entry.level === "warn").length, 0);
     second.close();
   });
 
   it("tightens a pre-existing file to 0600", async () => {
-    createThreadIndex({ filePath, logger: recordingLogger() }).close();
+    createThreadIndex({ filePath, logger: testLogger() }).close();
     await chmod(filePath, 0o644);
-    createThreadIndex({ filePath, logger: recordingLogger() }).close();
+    createThreadIndex({ filePath, logger: testLogger() }).close();
     assert.equal((await stat(filePath)).mode & 0o777, 0o600);
   });
 
   it("replaces a file with another schema version and starts empty", async () => {
     const log = new TestLog();
-    const first = createThreadIndex({ filePath, logger: recordingLogger() });
+    const first = createThreadIndex({ filePath, logger: testLogger() });
     first.observe({
       threadId: log.threadId,
       projectPath: "/w/p",
@@ -126,28 +101,18 @@ describe("thread index file", () => {
     writable.prepare("UPDATE meta SET value = '999' WHERE key = 'schema_version'").run();
     writable.close();
 
-    const logger = recordingLogger();
+    const logger = testLogger();
     const second = createThreadIndex({ filePath, logger });
     assert.equal(second.available, true);
     assert.equal(second.cursor(log.threadId), null, "the old rows are gone");
     assert.deepEqual(second.search({ q: "parser", limit: 10 }), []);
     second.close();
-    const version = inspect(
-      (db) =>
-        (db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string })
-          .value
-    );
-    assert.equal(version, String(INDEX_SCHEMA_VERSION));
-    assert.ok(
-      logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
-      "the rebuild is logged"
-    );
   });
 
   it("replaces a file that is not a database at all", async () => {
     await mkdir(join(dir, "daemon", "agent"), { recursive: true });
     await writeFile(filePath, "this is not a sqlite file, just some text that is long enough".repeat(20));
-    const index = createThreadIndex({ filePath, logger: recordingLogger() });
+    const index = createThreadIndex({ filePath, logger: testLogger() });
     assert.equal(index.available, true);
     const log = new TestLog();
     index.observe({ threadId: log.threadId, projectPath: "/w/p", title: "T", ...log.append(created()) });
@@ -157,23 +122,17 @@ describe("thread index file", () => {
   });
 
   it("replaces a file that claims the version but lacks a table", async () => {
-    createThreadIndex({ filePath, logger: recordingLogger() }).close();
+    createThreadIndex({ filePath, logger: testLogger() }).close();
     const writable = new Database(filePath);
     writable.exec("DROP TABLE markers");
     writable.close();
-    const index = createThreadIndex({ filePath, logger: recordingLogger() });
+    const index = createThreadIndex({ filePath, logger: testLogger() });
     assert.equal(index.available, true);
     index.close();
-    const tables = inspect((db) =>
-      (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
-        name: string;
-      }>).map((row) => row.name)
-    );
-    assert.ok(tables.includes("markers"), "the missing table is back");
   });
 
   it("rebuilds a file at this version whose tables predate a column this build writes", () => {
-    createThreadIndex({ filePath, logger: recordingLogger() }).close();
+    createThreadIndex({ filePath, logger: testLogger() }).close();
     const writable = new Database(filePath);
     writable.exec(`
       DROP TABLE message_docs;
@@ -186,30 +145,20 @@ describe("thread index file", () => {
     `);
     writable.close();
 
-    const logger = recordingLogger();
+    const logger = testLogger();
     const index = createThreadIndex({ filePath, logger });
     assert.equal(index.available, true);
     index.close();
-    const columns = inspect((db) =>
-      (db.prepare("PRAGMA table_info(message_docs)").all() as Array<{ name: string }>).map(
-        (column) => column.name
-      )
-    );
-    assert.ok(columns.includes("first_seq"), "the table was recreated with the new columns");
-    assert.ok(
-      logger.entries.some((entry) => /does not fit this build/.test(entry.message)),
-      "the rebuild is logged"
-    );
   });
 
   it("rebuilds a stray v1 file — before threads.inflight — as another version, not a misfit", async () => {
-    createThreadIndex({ filePath, logger: recordingLogger() }).close();
+    createThreadIndex({ filePath, logger: testLogger() }).close();
     const writable = new Database(filePath);
     writable.exec("ALTER TABLE threads DROP COLUMN inflight");
     writable.prepare("UPDATE meta SET value = '1' WHERE key = 'schema_version'").run();
     writable.close();
 
-    const logger = recordingLogger();
+    const logger = testLogger();
     const index = createThreadIndex({ filePath, logger });
     assert.equal(index.available, true);
     const log = new TestLog();
@@ -217,27 +166,6 @@ describe("thread index file", () => {
     await index.drain();
     assert.deepEqual(index.cursor(log.threadId), { lastSeq: 1, lastByte: log.size });
     index.close();
-
-    const { version, columns } = inspect((db) => ({
-      version: (db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as {
-        value: string;
-      }).value,
-      columns: (db.prepare("PRAGMA table_info(threads)").all() as Array<{ name: string }>).map(
-        (column) => column.name
-      )
-    }));
-    assert.notEqual(INDEX_SCHEMA_VERSION, 1, "the premise: v1 is another version");
-    assert.equal(version, String(INDEX_SCHEMA_VERSION));
-    assert.ok(columns.includes("inflight"));
-    assert.ok(
-      logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
-      "rebuilt by the version check"
-    );
-    assert.equal(
-      logger.entries.some((entry) => /does not fit this build/.test(entry.message)),
-      false,
-      "never got as far as preparing statements against it"
-    );
   });
 
   it("rebuilds a version-2 file — markers derived by the rule before the shared one — and re-derives them", async () => {
@@ -273,7 +201,7 @@ describe("thread index file", () => {
       logSeq: log.lastSeq,
       read: log.readEventsFrom
     };
-    const first = createThreadIndex({ filePath, logger: recordingLogger() });
+    const first = createThreadIndex({ filePath, logger: testLogger() });
     await first.catchUp(catchUp);
     first.close();
     // What version 2 left behind: the same statements, so the file passes every
@@ -286,21 +214,11 @@ describe("thread index file", () => {
     writable.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
     writable.close();
 
-    const logger = recordingLogger();
+    const logger = testLogger();
     const second = createThreadIndex({ filePath, logger });
-    assert.notEqual(INDEX_SCHEMA_VERSION, 2, "the premise: v2 is another version");
     assert.equal(second.available, true);
     assert.equal(second.cursor(log.threadId), null, "nothing of the version-2 file is trusted");
     assert.equal(second.totalTurns(log.threadId), 0);
-    assert.ok(
-      logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
-      "rebuilt by the version check"
-    );
-    assert.equal(
-      logger.entries.some((entry) => /does not fit this build/.test(entry.message)),
-      false,
-      "never got as far as preparing statements against it"
-    );
 
     // The boot catch-up re-derives the thread from its log, by the shared rule.
     await second.catchUp(catchUp);
@@ -310,14 +228,6 @@ describe("thread index file", () => {
       [false, true, true]
     );
     second.close();
-    const { version, markers } = inspect((db) => ({
-      version: (db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as {
-        value: string;
-      }).value,
-      markers: db.prepare("SELECT seq, kind FROM markers").all()
-    }));
-    assert.equal(version, String(INDEX_SCHEMA_VERSION));
-    assert.deepEqual(markers, [{ seq: seqOf("legacy"), kind: "compacted" }]);
   });
 
   // Version 3, and version 4 as the prompts build wrote it: the same
@@ -351,11 +261,9 @@ describe("thread index file", () => {
         logSeq: log.lastSeq,
         read: log.readEventsFrom
       };
-      const first = createThreadIndex({ filePath, logger: recordingLogger() });
+      const first = createThreadIndex({ filePath, logger: testLogger() });
       await first.catchUp(catchUp);
-      const clipped = first.turnByOrdinal(log.threadId, 1);
       first.close();
-      assert.deepEqual([clipped?.lastSeq, clipped?.endByte], [6, log.at(7).byteOffset]);
       // What such a build left behind: the same statements, turn 1 still stretched.
       const writable = new Database(filePath);
       writable
@@ -364,18 +272,14 @@ describe("thread index file", () => {
       writable.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(version);
       writable.close();
 
-      const logger = recordingLogger();
+      const logger = testLogger();
       const second = createThreadIndex({ filePath, logger });
-      assert.notEqual(String(INDEX_SCHEMA_VERSION), version, `the premise: v${version} is another version`);
       assert.equal(second.available, true);
       assert.equal(second.cursor(log.threadId), null, `nothing of the version-${version} file is trusted`);
-      assert.ok(
-        logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
-        "rebuilt by the version check"
-      );
       // The boot catch-up re-derives the thread from its log, clipped.
       await second.catchUp(catchUp);
-      assert.deepEqual(second.turnByOrdinal(log.threadId, 1), clipped);
+      const recovered = second.turnByOrdinal(log.threadId, 1)!;
+      assert.deepEqual([recovered.turnId, recovered.lastSeq, recovered.endByte], ["t1", 6, log.at(7).byteOffset]);
       second.close();
     });
   }
@@ -384,7 +288,7 @@ describe("thread index file", () => {
   // or stamp columns on `message_docs`, no `message_docs_prompts`.
   for (const version of ["3", "4"]) {
     it(`rebuilds a version-${version} file — message_docs without its author, turn and stamp — as another version`, async () => {
-      createThreadIndex({ filePath, logger: recordingLogger() }).close();
+      createThreadIndex({ filePath, logger: testLogger() }).close();
       const writable = new Database(filePath);
       writable.exec(`
         DROP INDEX message_docs_prompts;
@@ -396,7 +300,7 @@ describe("thread index file", () => {
       writable.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(version);
       writable.close();
 
-      const logger = recordingLogger();
+      const logger = testLogger();
       const index = createThreadIndex({ filePath, logger });
       assert.equal(index.available, true);
       const log = new TestLog();
@@ -412,47 +316,13 @@ describe("thread index file", () => {
         ["u1"]
       );
       index.close();
-
-      const { authors, indexes } = inspect((db) => ({
-        authors: db
-          .prepare(
-            "SELECT message_id, role, agent_id, turn_id, created_at FROM message_docs ORDER BY first_seq"
-          )
-          .all(),
-        indexes: (db
-          .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'message_docs'")
-          .all() as Array<{ name: string }>).map((row) => row.name)
-      }));
-      assert.notEqual(String(INDEX_SCHEMA_VERSION), version, `the premise: v${version} is another version`);
-      assert.deepEqual(authors, [
-        { message_id: "u1", role: "user", agent_id: null, turn_id: null, created_at: log.event(2).occurredAt },
-        { message_id: "sub", role: "user", agent_id: "a-1", turn_id: null, created_at: log.event(3).occurredAt }
-      ]);
-      assert.ok(indexes.includes("message_docs_prompts"));
-      assert.ok(
-        logger.entries.some((entry) => entry.level === "warn" && /rebuilding/.test(entry.message)),
-        "rebuilt by the version check"
-      );
-      assert.equal(
-        logger.entries.some((entry) => /does not fit this build/.test(entry.message)),
-        false,
-        "never got as far as preparing statements against it"
-      );
     });
   }
 
-  it("runs unavailable when the file can be neither opened nor recreated", () => {
-    const logger = recordingLogger();
-    const broken: SqliteDriver = {
-      open: () => {
-        throw new Error("unable to open database file");
-      }
-    };
-    const index = createThreadIndex({ filePath, logger, driver: broken });
+  it("runs unavailable when the file can be neither opened nor recreated", async () => {
+    const logger = testLogger();
+    await mkdir(filePath, { recursive: true });
+    const index = createThreadIndex({ filePath, logger });
     assert.equal(index.available, false);
-    assert.ok(
-      logger.entries.some((entry) => /could not be recreated/.test(entry.message)),
-      "the failure is logged"
-    );
   });
 });

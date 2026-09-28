@@ -29,33 +29,16 @@ import { slimActivityEvent } from "../ingestion/index.ts";
 
 /**
  * The one non-`AgentChatStreamFrame` line the stream may write: the budget
- * overflow of §6.3, immediately before the close. Exported so the client and
- * its tests name the same shape instead of matching on the message text.
+ * overflow of §6.3, immediately before the close.
  */
-export const STREAM_OVERFLOW_FRAME = {
+const STREAM_OVERFLOW_FRAME = {
   kind: "error" as const,
   message: "The live event buffer is full. Resume from the last received sequence."
 };
 
 /** *T3: `ThreadLiveEventCoalescer.ts:18-19`.* */
-export const COALESCE_WINDOW_MS = 50;
-export const MAX_PENDING_UPDATES = 512;
-
-const sizeCache = new WeakMap<object, number>();
-
-/**
- * Measured once and cached by identity, since one event object is shared by
- * every stream watching that thread (§6.3).
- */
-export function serializedSize(value: object): number {
-  const cached = sizeCache.get(value);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const bytes = Buffer.byteLength(JSON.stringify(value));
-  sizeCache.set(value, bytes);
-  return bytes;
-}
+const COALESCE_WINDOW_MS = 50;
+const MAX_PENDING_UPDATES = 512;
 
 function isToolUpdated(event: DomainEvent): boolean {
   return (
@@ -100,7 +83,7 @@ function stableToolCallIdentity(event: DomainEvent): string | null {
  *
  * *T3: `ThreadLiveEventCoalescer.ts:56-94`.*
  */
-export function coalesceToolUpdates(events: readonly DomainEvent[]): DomainEvent[] {
+function coalesceToolUpdates(events: readonly DomainEvent[]): DomainEvent[] {
   const survivors: DomainEvent[] = [];
   let pending: DomainEvent[] = [];
 
@@ -148,11 +131,6 @@ export interface ThreadStreamOptions {
    * flight (§6.3).
    */
   read(): Promise<AgentChatStreamFrame[]>;
-  heartbeatMs?: number;
-  coalesceWindowMs?: number;
-  bufferLimitBytes?: number;
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
   onClose?: (reason: "client" | "budget" | "host") => void;
 }
 
@@ -173,17 +151,7 @@ export interface ThreadStream {
  * caught up while frames are still queued.
  */
 export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
-  const {
-    response,
-    hostInstanceId,
-    subscribe,
-    read,
-    heartbeatMs = AGENT_CHAT_HEARTBEAT_MS,
-    coalesceWindowMs = COALESCE_WINDOW_MS,
-    bufferLimitBytes = AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES
-  } = options;
-  const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
-  const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
+  const { response, hostInstanceId, subscribe, read } = options;
 
   let closed = false;
   let unsubscribe: (() => void) | null = null;
@@ -192,8 +160,8 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
   const preReadBuffer: DomainEvent[] = [];
   /** Tool updates waiting on the 50 ms coalescing window. */
   let pendingUpdates: DomainEvent[] = [];
-  let windowHandle: unknown = null;
-  let heartbeatHandle: unknown = null;
+  let windowHandle: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatHandle: ReturnType<typeof setTimeout> | null = null;
   /** Bytes handed to the socket that have not drained yet (§6.3). */
   let chargedBytes = 0;
   /**
@@ -209,8 +177,8 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
   const close = (reason: "client" | "budget" | "host" = "host"): void => {
     if (closed) return;
     closed = true;
-    if (windowHandle !== null) clearTimer(windowHandle);
-    if (heartbeatHandle !== null) clearTimer(heartbeatHandle);
+    if (windowHandle !== null) clearTimeout(windowHandle);
+    if (heartbeatHandle !== null) clearTimeout(heartbeatHandle);
     windowHandle = null;
     heartbeatHandle = null;
     unsubscribe?.();
@@ -227,7 +195,7 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     if (closed) return;
     const bytes = Buffer.byteLength(line) + 1;
     chargedBytes += bytes;
-    if (chargedBytes > bufferLimitBytes) {
+    if (chargedBytes > AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES) {
       // A slow client is cut and told to resume by cursor; it is never allowed
       // to grow host memory.
       try {
@@ -280,7 +248,7 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
 
   const flushPending = (): void => {
     if (windowHandle !== null) {
-      clearTimer(windowHandle);
+      clearTimeout(windowHandle);
       windowHandle = null;
     }
     if (pendingUpdates.length === 0) return;
@@ -299,10 +267,10 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
       if (isToolUpdated(event)) {
         pendingUpdates.push(event);
         if (pendingUpdates.length === 1) {
-          windowHandle = setTimer(() => {
+          windowHandle = setTimeout(() => {
             windowHandle = null;
             flushPending();
-          }, coalesceWindowMs);
+          }, COALESCE_WINDOW_MS);
         } else if (pendingUpdates.length >= MAX_PENDING_UPDATES) {
           flushPending();
         }
@@ -364,9 +332,9 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     const beat = (): void => {
       if (closed) return;
       writeLine(AGENT_CHAT_HEARTBEAT_LINE);
-      heartbeatHandle = setTimer(beat, heartbeatMs);
+      heartbeatHandle = setTimeout(beat, AGENT_CHAT_HEARTBEAT_MS);
     };
-    heartbeatHandle = setTimer(beat, heartbeatMs);
+    heartbeatHandle = setTimeout(beat, AGENT_CHAT_HEARTBEAT_MS);
 
     // Everything buffered during the read, then the marker — through the same
     // path, so the client is never told it is caught up early.

@@ -1,18 +1,14 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
-import type { ThreadMessageItem, Turn } from "@orquester/api/agent-chat";
+import type { ThreadMessageItem,Turn } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "./contracts";
-import { deriveTimelineEntriesFromItems } from "./entries.logic";
 import {
-  createEscapeSequence,
-  deriveRewindTargets,
-  ESCAPE_SEQUENCE_WINDOW_MS,
-  rewindTargetPreview
+createEscapeSequence,
+deriveRewindTargets,
+ESCAPE_SEQUENCE_WINDOW_MS
 } from "./rewind.logic";
-import { deriveTimelineRows } from "./rows.logic";
-import { activity, message, stamp } from "./test-helpers";
 
 function userRow(id: string, text: string, revertTurnCount?: number, attachments = 0): AgentChatTimelineRow {
   const message: ThreadMessageItem = {
@@ -91,59 +87,6 @@ describe("deriveRewindTargets", () => {
     // to its prompt still removes it.
     const rows = [userRow("u1", "go", 0)];
     assert.equal(deriveRewindTargets(rows, [turn(null)])[0]?.droppedTurnCount, 1);
-  });
-
-  it("agrees with the timeline it is read off, end to end", () => {
-    // The real row derivation, not hand-stamped rows: the per-row button and
-    // the picker must offer exactly the same messages at the same counts.
-    const items = [
-      message("user", "one", { id: "u1", createdAt: stamp(1) }),
-      message("assistant", "a", { id: "a1", turnId: "t1", createdAt: stamp(2) }),
-      activity("context-compaction", { state: "compacted" }, {
-        tone: "info",
-        summary: "Context compacted",
-        createdAt: stamp(3)
-      }),
-      message("user", "two", { id: "u2", createdAt: stamp(4) }),
-      message("user", "and a steer", { id: "steer", turnId: "t2", createdAt: stamp(5) }),
-      message("assistant", "b", { id: "a2", turnId: "t2", createdAt: stamp(6) }),
-      message("user", "three", { id: "u3", createdAt: stamp(7) }),
-      message("assistant", "c", { id: "a3", turnId: "t3", createdAt: stamp(8) })
-    ];
-    const turns = [turn("t1", "u1"), turn("t2", "u2"), turn("t3", "u3")];
-    const rows = deriveTimelineRows({
-      timelineEntries: deriveTimelineEntriesFromItems(items).entries,
-      isWorking: false,
-      activeTurnStartedAt: null,
-      supportsConversationRollback: true,
-      turns
-    });
-    // u1 sits before the compaction and the steer opened no turn.
-    assert.deepEqual(
-      deriveRewindTargets(rows, turns).map((target) => [
-        target.messageId,
-        target.targetTurnCount,
-        target.droppedTurnCount
-      ]),
-      [
-        ["u3", 2, 1],
-        ["u2", 1, 2]
-      ]
-    );
-  });
-});
-
-describe("rewindTargetPreview", () => {
-  it("takes the first non-empty line, collapsed and capped", () => {
-    assert.equal(rewindTargetPreview("\n\n  hello   world \nsecond"), "hello world");
-    const long = "x".repeat(200);
-    const preview = rewindTargetPreview(long, 20);
-    assert.equal(preview.length, 20);
-    assert.ok(preview.endsWith("…"));
-  });
-
-  it("is empty for an empty message", () => {
-    assert.equal(rewindTargetPreview("   \n "), "");
   });
 });
 

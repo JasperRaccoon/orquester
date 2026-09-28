@@ -15,9 +15,7 @@ import {
   CodexRequestWithdrawn,
   CodexRpcError,
   CodexTransportClosedError,
-  isNoActiveTurnError,
-  MAX_IN_FLIGHT_SERVER_REQUESTS,
-  TOO_MANY_REQUESTS_CODE
+  isNoActiveTurnError
 } from "./protocol.ts";
 
 interface Harness {
@@ -36,7 +34,6 @@ interface Harness {
 function harness(
   options: {
     onRequest?: (method: string, params: unknown) => Promise<object>;
-    maxInFlightServerRequests?: number;
   } = {}
 ): Harness {
   const stdout = new PassThrough();
@@ -62,9 +59,6 @@ function harness(
   const peer = new CodexPeer({
     stdin,
     stdout,
-    ...(options.maxInFlightServerRequests !== undefined
-      ? { maxInFlightServerRequests: options.maxInFlightServerRequests }
-      : {}),
     handlers: {
       onRequest: (request) => {
         if (options.onRequest !== undefined) {
@@ -181,18 +175,17 @@ describe("codex transport — framing", () => {
 });
 
 describe("codex transport — the two id spaces are independent", () => {
-  it("a server request with id 0 does not resolve our request 0", async () => {
+  it("a server request sharing our request id cannot resolve it", async () => {
     const h = harness({ onRequest: () => Promise.resolve({ decision: "accept" }) });
-    // Our own ids start at 1; the server's at 0 (fixtures README obs. 15).
+    // Both directions may use the same numeric id (fixtures README obs. 15).
     const pending = h.peer.request("thread/compact/start", { threadId: "t" });
-    h.deliver({ id: 0, method: "item/fileChange/requestApproval", params: { threadId: "t" } });
+    h.deliver({ id: 1, method: "item/fileChange/requestApproval", params: { threadId: "t" } });
     await tick();
     await tick();
     // The server request was answered, and our request is still parked.
-    assert.deepEqual(h.sent.at(-1), { id: 0, result: { decision: "accept" } });
-    assert.equal(h.peer.pendingRequestCount, 1);
-    h.deliver({ id: 1, result: {} });
-    assert.deepEqual(await pending, {});
+    assert.deepEqual(h.sent.at(-1), { id: 1, result: { decision: "accept" } });
+    h.deliver({ id: 1, result: { from: "server response" } });
+    assert.deepEqual(await pending, { from: "server response" });
   });
 
   it("a response for an unknown id is surfaced, not silently dropped", async () => {
@@ -253,15 +246,17 @@ describe("codex transport — inbound requests", () => {
     // the server may no longer hold the request at all. The handler must not
     // dangle either, or the cap and a Stop's `whenServerRequestsSettled` count
     // it for ever.
-    const h = harness({ maxInFlightServerRequests: 1 });
-    h.deliver({ id: 0, method: "item/commandExecution/requestApproval", params: {} });
+    const h = harness();
+    for (let id = 0; id < 32; id += 1) {
+      h.deliver({ id, method: "item/commandExecution/requestApproval", params: {} });
+    }
     await tick();
-    assert.equal(h.peer.openServerRequestCount, 1);
     const settled = h.peer.whenServerRequestsSettled();
 
-    h.requests[0]!.reject(new CodexRequestWithdrawn("the child's turn ended"));
+    for (const request of h.requests) {
+      request.reject(new CodexRequestWithdrawn("the child's turn ended"));
+    }
     await settled;
-    assert.equal(h.peer.openServerRequestCount, 0);
     assert.deepEqual(
       h.sent.filter((frame) => frame.id === 0),
       [],
@@ -271,37 +266,31 @@ describe("codex transport — inbound requests", () => {
     // The slot is free: the next request reaches its handler instead of -32001.
     h.deliver({ id: 1, method: "item/commandExecution/requestApproval", params: {} });
     await tick();
-    assert.equal(h.requests.length, 2);
+    assert.equal(h.requests.length, 33);
     assert.equal(h.sent.length, 0);
   });
 
   it("answers -32001 past the 32 in-flight cap", async () => {
     const h = harness();
-    for (let index = 0; index < MAX_IN_FLIGHT_SERVER_REQUESTS; index += 1) {
+    for (let index = 0; index < 32; index += 1) {
       h.deliver({ id: index, method: "item/fileChange/requestApproval", params: {} });
     }
     await tick();
-    assert.equal(h.peer.openServerRequestCount, MAX_IN_FLIGHT_SERVER_REQUESTS);
+    assert.equal(h.requests.length, 32);
     h.deliver({ id: 999, method: "item/fileChange/requestApproval", params: {} });
     await tick();
     const refusal = h.sent.at(-1) as { id: number; error: { code: number } };
     assert.equal(refusal.id, 999);
-    assert.equal(refusal.error.code, TOO_MANY_REQUESTS_CODE);
+    assert.equal(refusal.error.code, -32001);
     // Answering one frees a slot.
     h.requests[0]!.resolve({ decision: "cancel" });
     await tick();
     await tick();
-    assert.equal(h.peer.openServerRequestCount, MAX_IN_FLIGHT_SERVER_REQUESTS - 1);
+    h.deliver({ id: 1000, method: "item/fileChange/requestApproval", params: {} });
+    await tick();
+    assert.equal(h.requests.length, 33, "a freed slot accepts the next request");
   });
 
-  it("the cap is configurable, so a test does not need 32 frames to reach it", async () => {
-    const h = harness({ maxInFlightServerRequests: 1 });
-    h.deliver({ id: 0, method: "item/fileChange/requestApproval", params: {} });
-    await tick();
-    h.deliver({ id: 1, method: "item/fileChange/requestApproval", params: {} });
-    await tick();
-    assert.equal((h.sent.at(-1) as { error: { code: number } }).error.code, TOO_MANY_REQUESTS_CODE);
-  });
 });
 
 describe("codex transport — termination", () => {

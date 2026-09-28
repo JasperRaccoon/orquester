@@ -19,21 +19,13 @@ import {
   foldSubagentActivities,
   foldThread,
   openWorkOf,
-  ROSTER_LIMIT,
   slimActivityPayload,
-  toThreadSnapshot,
   type DomainEvent,
   type ThreadActivityItem,
-  type ThreadFoldState,
-  type ThreadItem,
-  type ThreadSnapshotPayload
+  type ThreadFoldState
 } from "@orquester/api/agent-chat";
 
-import { transcriptEntries } from "../../mcp/transcript.ts";
-import { projectSnapshotActivities } from "../ingestion/coalesce.ts";
 import {
-  LEFTOVER_CALL_DETAIL,
-  legacyLaunchId,
   legacyLaunchStarts,
   leftoverWorkClosings,
   type LeftoverClosing
@@ -161,22 +153,6 @@ function asStored(id: string, activityKind: string, payload: Record<string, unkn
   });
 }
 
-/** A snapshot read of `state`, as the host serves one: superseded updates dropped, every payload slimmed. */
-function wireRead(state: ThreadFoldState): ThreadSnapshotPayload {
-  const snapshot = toThreadSnapshot(state);
-  const projected = new Map(
-    projectSnapshotActivities(
-      snapshot.items.filter((item): item is ThreadActivityItem => item.kind === "activity")
-    ).map((activity) => [activity.id, activity])
-  );
-  return {
-    ...snapshot,
-    items: snapshot.items.flatMap((item): ThreadItem[] =>
-      item.kind !== "activity" ? [item] : projected.has(item.id) ? [projected.get(item.id)!] : []
-    )
-  };
-}
-
 /** `state` rewound to its first `turnCount` started turns (§5.5). */
 const rewound = (state: ThreadFoldState, turnCount: number): ThreadFoldState =>
   applyDomainEvent(state, sequenced([event("thread.reverted", { turnCount })], state.seq)[0]!);
@@ -185,6 +161,13 @@ const activityOf = (closing: LeftoverClosing | undefined): ThreadActivityItem =>
   assert.ok(closing !== undefined, "a closing");
   return closing.activity;
 };
+
+/** Titles remain user data; generated explanatory prose is not a storage contract. */
+function withoutPresentation(activity: ThreadActivityItem) {
+  const { summary: _summary, ...rest } = activity;
+  const { detail: _detail, ...payload } = activity.payload as Record<string, unknown>;
+  return { ...rest, payload };
+}
 
 describe("leftoverWorkClosings — what a dead process left open", () => {
   it("closes every open call `failed`, with its latest lifecycle row's item type, title, turn, owner and data", () => {
@@ -223,18 +206,18 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
 
     const closings = closingsOf(state);
     assert.deepEqual(closings.map((closing) => closing.key), ["call:toolu_parent", "call:toolu_agent_call"]);
-    assert.deepEqual(activityOf(closings[0]), {
+    assert.deepEqual(withoutPresentation(activityOf(closings[0])), {
       kind: "activity",
       id: "closing-1",
       tone: "tool",
       activityKind: "tool.completed",
-      summary: "Bash",
+
       payload: {
         itemType: "command_execution",
         toolUseId: "toolu_parent",
         status: "failed",
         title: "Bash",
-        detail: LEFTOVER_CALL_DETAIL,
+
         data: { toolName: "Bash", input: { command: "npm test" } }
       },
       turnId: "turn-1",
@@ -244,18 +227,18 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     });
     // The owner rides the row AND its payload, as ingestion stamps an item's:
     // the closer lands in the agent's own window, beside the call it ends.
-    assert.deepEqual(activityOf(closings[1]), {
+    assert.deepEqual(withoutPresentation(activityOf(closings[1])), {
       kind: "activity",
       id: "closing-2",
       tone: "tool",
       activityKind: "tool.completed",
-      summary: "Edit",
+
       payload: {
         itemType: "file_change",
         toolUseId: "toolu_agent_call",
         status: "failed",
         title: "Edit",
-        detail: LEFTOVER_CALL_DETAIL,
+
         data: { toolName: "Edit", input: { file_path: "/work/project/a.ts" } },
         agentId: "agent-1",
         parentToolUseId: "toolu_launch"
@@ -267,7 +250,6 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
       createdAt: NOW,
       updatedAt: NOW
     });
-    assert.equal(LEFTOVER_CALL_DETAIL, "Stopped when the agent host restarted.");
   });
 
   it("keeps a crash-closed Claude call's command, unmarked: no Load full output, no outputItemId", () => {
@@ -296,23 +278,6 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.deepEqual(payload.data, { command: "npm test", toolName: "Bash" }, "the update's data, all there is");
     assert.equal("truncated" in payload, false);
 
-    // A snapshot read: the update the closer supersedes dropped, every payload
-    // slimmed — what the GUI and the MCP read.
-    const read = wireRead(applied(state, [closing!]));
-    const closer = read.items.find((item) => item.id === closing!.activity.id);
-    assert.ok(closer?.kind === "activity");
-    assert.notEqual((closer.payload as Record<string, unknown>).truncated, true, "no Load full output");
-    assert.equal(read.items.some((item) => item.id === "c-update"), false, "the update is superseded");
-    const [entry] = transcriptEntries(read, {
-      turns: 5,
-      include: new Set(["tools"] as const),
-      maxChars: 100_000
-    }).entries.filter((candidate) => candidate.kind === "tool");
-    assert.deepEqual(
-      [entry?.tool?.command, entry?.tool?.status, entry?.outputItemId],
-      ["npm test", "failed", undefined],
-      "the MCP's entry names the command, and no outputItemId"
-    );
   });
 
   it("never passes a cut output for whole: it takes the opening row's whole data instead, unmarked", () => {
@@ -485,19 +450,6 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.deepEqual(payload.changedFiles, files, "the closer lists the files");
     assert.equal("truncated" in payload, false, "its data holds no cut output: no Load full output");
 
-    // The row the GUI shows once the closer supersedes the update, and the MCP's
-    // last word on the call: a snapshot read keeps the files on it.
-    const read = wireRead(applied(state, [closing!]));
-    const closer = read.items.find((item) => item.id === closing!.activity.id);
-    assert.ok(closer?.kind === "activity");
-    assert.deepEqual((closer.payload as Record<string, unknown>).changedFiles, files);
-    assert.equal(read.items.some((item) => item.id === "f-update"), false, "the update is superseded");
-    const [entry] = transcriptEntries(read, {
-      turns: 5,
-      include: new Set(["tools"] as const),
-      maxChars: 100_000
-    }).entries.filter((candidate) => candidate.kind === "tool");
-    assert.deepEqual([entry?.tool?.status, entry?.tool?.changedFiles], ["failed", files], "the MCP's entry lists them");
   });
 
   it("names a crash-closed file change's files when only its closer can: its opening row gone from the window", () => {
@@ -521,18 +473,7 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     ]);
     const [closing] = closingsOf(state);
     assert.deepEqual((activityOf(closing).payload as Record<string, unknown>).changedFiles, files);
-    const read = wireRead(applied(state, [closing!]));
-    assert.deepEqual(
-      read.items.filter((item) => item.kind === "activity").map((item) => item.id),
-      [closing!.activity.id],
-      "the closer is the call's only row in the read"
-    );
-    const [entry] = transcriptEntries(read, {
-      turns: 5,
-      include: new Set(["tools"] as const),
-      maxChars: 100_000
-    }).entries.filter((candidate) => candidate.kind === "tool");
-    assert.deepEqual([entry?.tool?.status, entry?.tool?.changedFiles], ["failed", files], "the MCP's entry lists them");
+
   });
 
   it("leaves alone an open call no row of the window anchors — what a rewind left of an adopted call — and closes one a row anchors", () => {
@@ -643,12 +584,12 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
       "task:queued-1"
     ]);
     const [shell, agent, nested, waiting, pending] = closings.map(activityOf);
-    assert.deepEqual(shell, {
+    assert.deepEqual(withoutPresentation(shell!), {
       kind: "activity",
       id: "closing-1",
       tone: "info",
       activityKind: "task.completed",
-      summary: "Task stopped",
+
       payload: {
         taskId: "shell-1",
         status: "stopped",
@@ -729,12 +670,12 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.equal(item.activityKind, "tool.completed");
     assert.equal(item.agentId, "shell-1", "the shell's own window, like its output");
     assert.equal(item.turnId, "turn-1");
-    assert.deepEqual(item.payload, {
+    assert.deepEqual(withoutPresentation(item).payload, {
       itemType: "command_execution",
       toolUseId: "bgshell:shell-1",
       status: "failed",
       title: "Background shell",
-      detail: LEFTOVER_CALL_DETAIL,
+
       data: { toolName: "Bash", input: { command: "npm run dev" }, background: true },
       agentId: "shell-1"
     });
@@ -879,23 +820,23 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     ]);
     // The host's own cancellation (`settlePendingRequests`, the Stop path's
     // rows): nobody answered, so nothing says anyone did.
-    assert.deepEqual(activityOf(closings[0]), {
+    assert.deepEqual(withoutPresentation(activityOf(closings[0])), {
       kind: "activity",
       id: "settle-cancel:req-approval",
       tone: "info",
       activityKind: "approval.resolved",
-      summary: "Request cancelled",
+
       payload: { requestId: "req-approval", decision: "cancel" },
       turnId: "turn-5",
       createdAt: NOW,
       updatedAt: NOW
     });
-    assert.deepEqual(activityOf(closings[1]), {
+    assert.deepEqual(withoutPresentation(activityOf(closings[1])), {
       kind: "activity",
       id: "settle-cancel:req-question",
       tone: "info",
       activityKind: "user-input.resolved",
-      summary: "Question cancelled",
+
       payload: { requestId: "req-question" },
       turnId: "turn-5",
       createdAt: NOW,
@@ -1036,14 +977,14 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
 
   it("gives a settled legacy OpenCode agent one start that names a launch id, on its first start's turn and owner", () => {
     const state = foldAs("opencode", [...turn("turn-1"), ...legacyOpenCodeChild("ses_child", "turn-1")]);
-    assert.deepEqual(launchesOf(state), [
+    assert.deepEqual(launchesOf(state).map(withoutPresentation), [
       {
         kind: "activity",
         id: "launch-1",
         tone: "info",
         activityKind: "task.started",
         // The launch row's own summary: this is that agent's anchor again.
-        summary: "task.started",
+
         payload: {
           taskId: "ses_child",
           // Its latest row's linkage — the roster's title does not move back —
@@ -1063,7 +1004,6 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
         updatedAt: "2026-09-24T10:00:05.000Z"
       }
     ]);
-    assert.equal(legacyLaunchId("ses_child"), "legacy-launch:ses_child");
   });
 
   it("changes nothing the roster shows, and lets a later relaunch reopen the agent", () => {
@@ -1143,12 +1083,12 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
       row("p-startless", "task.progress", { taskId: "startless", agentKind: "agent", title: "Seen late" }, { turnId: "turn-1" }),
       row("e-startless", "task.completed", { taskId: "startless", status: "completed", agentKind: "agent" })
     ]);
-    assert.deepEqual(launchesOf(state), []);
+    assert.deepEqual(launchesOf(state).map(withoutPresentation), []);
   });
 
   it("gives none on a Claude thread, whose agents always launched with an id", () => {
     const state = foldAs("claude", [...turn("turn-1"), ...legacyOpenCodeChild("task-1", "turn-1")]);
-    assert.deepEqual(launchesOf(state), []);
+    assert.deepEqual(launchesOf(state).map(withoutPresentation), []);
   });
 
   it("names a settled Grok agent the goals build started with none — a `subagent_spawned` no spawn call explained", () => {
@@ -1185,7 +1125,7 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
   it("keeps the rows a capped roster lists: stamped with the roster's own `updatedAt`, never the load's time", () => {
     // More settled agents than the roster lists: its cap keeps the newest
     // `ROSTER_LIMIT` by `updatedAt`, ties in roster order.
-    const count = ROSTER_LIMIT + 5;
+    const count = 105;
     const stamp = (ms: number): Partial<ThreadActivityItem> => {
       const at = new Date(Date.parse(AT) + ms).toISOString();
       return { createdAt: at, updatedAt: at };
@@ -1212,7 +1152,7 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
     const state = foldAs("opencode", events);
     const listed = (from: ThreadFoldState) => foldSubagentActivities(from.activities).map((agent) => agent.id);
     const before = listed(state);
-    assert.equal(before.length, ROSTER_LIMIT);
+    assert.equal(before.length, 100);
     assert.equal(before.includes("ses_000"), false, "the oldest settled agents are the ones past the cap");
 
     const launches = launchesOf(state);

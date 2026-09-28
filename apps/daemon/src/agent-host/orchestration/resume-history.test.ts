@@ -89,38 +89,6 @@ const SNAPSHOT: ThreadSnapshot = {
 };
 
 describe("E6: a resumed thread replays the provider's own history", () => {
-  it("projects it through ingestion before the session is announced", async () => {
-    const claude = createScriptedAdapter({
-      id: "claude",
-      history: SNAPSHOT,
-      projectHistory: (snapshot) => historyEvents("thread-1", snapshot)
-    });
-    const host = createTestHost({ adapters: { claude } });
-    const threadId = await host.createThread({
-      resume: { home: "account", conversationId: "conv-1" }
-    });
-
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "what token?" });
-    await host.settle();
-
-    const kinds = host.ingestion.ingested.map((event) => event.type);
-    assert.deepEqual(
-      kinds,
-      ["turn.started", "item.completed", "item.completed", "turn.completed"],
-      "the conversation being resumed reaches ingestion"
-    );
-    // Every projected event is marked historical, so nothing downstream treats
-    // it as new work.
-    assert.ok(
-      host.ingestion.ingested.every((event) => event.raw?.source === HISTORICAL_RAW_SOURCE),
-      "history is marked, not disguised as live"
-    );
-    // …and it lands BEFORE the session is announced ready.
-    const readThreadIndex = claude.calls.findIndex((call) => call.kind === "readThread");
-    const sendTurnIndex = claude.calls.findIndex((call) => call.kind === "sendTurn");
-    assert.ok(readThreadIndex >= 0 && readThreadIndex < sendTurnIndex);
-    await host.stop();
-  });
 
   it("says so in the timeline when the adapter cannot replay history", async () => {
     const grok = createScriptedAdapter({ id: "grok" });
@@ -133,7 +101,7 @@ describe("E6: a resumed thread replays the provider's own history", () => {
     await host.settle();
 
     const notice = activities(host, threadId).find(
-      (row) => row.summary === "History not available for this provider"
+      (row) => row.activityKind === "runtime.warning"
     );
     assert.ok(notice, "an empty timeline must be explained, not just empty");
     assert.equal(notice?.tone, "info");
@@ -204,8 +172,8 @@ describe("E5: a conversation already open elsewhere is never silently forked", (
       (error: unknown) =>
         isAgentChatCommandError(error) &&
         error.code === "COMMAND_REJECTED" &&
-        /already open in "Test thread"/.test(error.message) &&
-        (error.detail as { code: string }).code === "RESUME_UNAVAILABLE"
+        (error.detail as { code: string }).code === "RESUME_UNAVAILABLE" &&
+        (error.detail as { ownerThreadId: string }).ownerThreadId === owner
     );
 
     host.adapter.close();

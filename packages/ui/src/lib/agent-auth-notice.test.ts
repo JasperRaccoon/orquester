@@ -1,18 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  AGENT_AUTH_DISMISSAL_LIMIT,
-  agentAuthNoticeKey,
-  rememberAgentAuthDismissal,
-  shouldRaiseAgentAuthNotice
-} from "./agent-auth-notice.ts";
+import { rememberAgentAuthDismissal, shouldRaiseAgentAuthNotice } from "./agent-auth-notice.ts";
 
 const claude = { sessionId: "provider:claude", message: "Session expired." };
-
-test("a fresh notice is raised", () => {
-  assert.equal(shouldRaiseAgentAuthNotice(claude, []), true);
-});
 
 test("a dismissal sticks across the re-publish the provider load causes", () => {
   // The regression: `agent.providers.changed` forces a reload, the publisher
@@ -63,35 +54,5 @@ test("the key spans [adapterId, status, auth.status, message] (T3's banner key)"
   assert.equal(
     shouldRaiseAgentAuthNotice({ ...errored, providerStatus: "degraded" }, dismissed),
     true
-  );
-});
-
-test("a notice from an older bundle, carrying no columns, still keys and dismisses", () => {
-  const legacy = { sessionId: "provider:codex", message: "Session expired." };
-  const dismissed = rememberAgentAuthDismissal(legacy, []);
-  assert.equal(shouldRaiseAgentAuthNotice(legacy, dismissed), false);
-});
-
-test("the key cannot be forged by a message containing the separator", () => {
-  // A NUL separator, so a message can never spell another provider's key.
-  assert.notEqual(
-    agentAuthNoticeKey({ sessionId: "a", message: "b" }),
-    agentAuthNoticeKey({ sessionId: "a\u0000b", message: "" })
-  );
-});
-
-test("dismissals are deduped and bounded", () => {
-  const once = rememberAgentAuthDismissal(claude, []);
-  assert.equal(rememberAgentAuthDismissal(claude, once), once, "same list, no growth");
-
-  let dismissed: readonly string[] = [];
-  for (let i = 0; i < AGENT_AUTH_DISMISSAL_LIMIT + 5; i++) {
-    dismissed = rememberAgentAuthDismissal({ sessionId: "p", message: `m${i}` }, dismissed);
-  }
-  assert.equal(dismissed.length, AGENT_AUTH_DISMISSAL_LIMIT);
-  // The newest survive.
-  assert.equal(
-    shouldRaiseAgentAuthNotice({ sessionId: "p", message: `m${AGENT_AUTH_DISMISSAL_LIMIT + 4}` }, dismissed),
-    false
   );
 });

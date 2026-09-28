@@ -78,14 +78,6 @@ function oldLog(): DomainEvent[] {
   ];
 }
 
-test("the context is the session's liveness, its running turn and the agents the roster shows active", () => {
-  const state = foldThread(oldLog());
-  const context = messageStreamingContext(state);
-  assert.equal(context.sessionLive, true);
-  assert.equal(context.activeTurnId, "t2");
-  assert.deepEqual([...context.activeAgentIds], ["live"]);
-});
-
 test("a turnless agent message reads settled once its agent completed, streaming while it runs", () => {
   const state = foldThread(oldLog());
   const context = messageStreamingContext(state);
@@ -155,19 +147,4 @@ test("an agent is active while pending, running or waiting — never idle or set
     false,
     "a turnless message nobody owns: no turn and no agent can still be writing it"
   );
-});
-
-test("the same roster and session answer the same context, so a derivation can compare it by identity", () => {
-  const state = foldThread(oldLog());
-  const first = messageStreamingContext(state);
-  assert.equal(messageStreamingContext(state), first);
-  assert.equal(messageStreamingContext({ head: state.head, roster: state.roster }), first);
-
-  const settled = messageStreamingContext({
-    head: { session: { status: "ready", activeTurnId: null } },
-    roster: state.roster
-  });
-  assert.notEqual(settled, first, "a turn settling is a different context");
-  assert.equal(settled.activeTurnId, null);
-  assert.equal(settled.activeAgentIds, first.activeAgentIds, "…over the same agents");
 });

@@ -55,7 +55,7 @@ function asStringArray(value: unknown): string[] {
  * guess shows the user one path and writes another, which is worse than
  * showing nothing — this card exists so the user can see what they approve.
  */
-export function findApprovalItem(
+function findApprovalItem(
   approval: Pick<PendingApproval, "toolUseId">,
   entries: readonly ThreadItem[]
 ): ThreadItem | null {
@@ -86,14 +86,12 @@ function detailFromItem(item: ThreadItem): string | null {
 export interface ResolvedApprovalDetail {
   /** The block to render, or `null` when genuinely nothing is known. */
   text: string | null;
-  /** Where it came from, for the card's own wording and for tests. */
-  source: "request" | "item" | "none";
   /** Render with diff colouring: the body has unified-diff lines. */
   isDiff: boolean;
 }
 
 /** `+`/`-` at line starts, but not a `+++`/`---` file header alone. */
-export function looksLikeDiff(text: string): boolean {
+function looksLikeDiff(text: string): boolean {
   let added = false;
   let removed = false;
   for (const line of text.split("\n")) {
@@ -112,14 +110,14 @@ export function resolveApprovalDetail(
 ): ResolvedApprovalDetail {
   const fromRequest = asString(approval.detail);
   if (fromRequest) {
-    return { text: fromRequest, source: "request", isDiff: looksLikeDiff(fromRequest) };
+    return { text: fromRequest, isDiff: looksLikeDiff(fromRequest) };
   }
   const item = findApprovalItem(approval, entries);
   const fromItem = item ? detailFromItem(item) : null;
   if (fromItem) {
-    return { text: fromItem, source: "item", isDiff: looksLikeDiff(fromItem) };
+    return { text: fromItem, isDiff: looksLikeDiff(fromItem) };
   }
-  return { text: null, source: "none", isDiff: false };
+  return { text: null, isDiff: false };
 }
 
 /**

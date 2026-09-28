@@ -439,7 +439,7 @@ function windowCutAfter(
 }
 
 /** How many rows the pages and the bridge hold together. */
-export function historyRowCount(history: AgentChatHistoryState): number {
+function historyRowCount(history: AgentChatHistoryState): number {
   let total = history.bridge.length;
   for (const page of history.pages) {
     total += page.items.length;
@@ -462,19 +462,18 @@ export function historyRowCount(history: AgentChatHistoryState): number {
  * cursor in them, are computed by the host for the window as it now stands.
  */
 export function historyWithinCap(
-  history: AgentChatHistoryState,
-  cap: number = HISTORY_ROW_CAP
+  history: AgentChatHistoryState
 ): { history: AgentChatHistoryState; resync: boolean } {
   let total = historyRowCount(history);
-  if (total <= cap) {
+  if (total <= HISTORY_ROW_CAP) {
     return { history, resync: false };
   }
   let dropped = 0;
-  while (total > cap && history.pages.length - dropped > 1) {
+  while (total > HISTORY_ROW_CAP && history.pages.length - dropped > 1) {
     total -= history.pages[dropped]!.items.length;
     dropped += 1;
   }
-  if (total <= cap) {
+  if (total <= HISTORY_ROW_CAP) {
     return { history: { ...history, pages: history.pages.slice(dropped) }, resync: false };
   }
   return {
@@ -507,7 +506,7 @@ export function withoutOrphanBridge(history: AgentChatHistoryState): AgentChatHi
  * are built (`collectHistoryItems`, `splitLiveItems`) — a page is a block of
  * the log by activity count, so both are expected at its boundaries.
  */
-export function mergeHistoryPage(
+function mergeHistoryPage(
   pages: readonly ThreadHistoryPage[],
   page: ThreadHistoryPage
 ): ThreadHistoryPage[] {
@@ -521,7 +520,7 @@ export function mergeHistoryPage(
  * The transport casts a page rather than parsing it, so this is where the
  * field is checked.
  */
-export function pageEndItemId(page: ThreadHistoryPage): string | null | undefined {
+function pageEndItemId(page: ThreadHistoryPage): string | null | undefined {
   const block: unknown = (page as { page?: unknown }).page;
   if (!isRecord(block)) {
     return undefined;
@@ -549,7 +548,7 @@ export function pageEndItemId(page: ThreadHistoryPage): string | null | undefine
  *   it and the end would lie inside the block and be held too. With nothing
  *   shared it moves nothing.
  */
-export function pageEndCut(windowItems: readonly ThreadItem[], page: ThreadHistoryPage): number {
+function pageEndCut(windowItems: readonly ThreadItem[], page: ThreadHistoryPage): number {
   let cut = 0;
   if (page.items.length > 0) {
     const held = new Set(page.items.map((item) => item.id));
@@ -595,7 +594,7 @@ export function historyWithPage(
  * listed on both of its pages; the NEWEST page's copy supplies the fields
  * (`ordinal` and `rewindable` stay the index's own words, from that page).
  */
-export function historyTurns(pages: readonly ThreadHistoryPage[]): ThreadHistoryTurn[] {
+function historyTurns(pages: readonly ThreadHistoryPage[]): ThreadHistoryTurn[] {
   const newestCopy = new Map<string, ThreadHistoryTurn>();
   const order: string[] = [];
   for (const page of pages) {
@@ -888,7 +887,7 @@ const trimmedPayloadString = (payload: unknown, key: string): string | null => {
  * by — the same identity `entries.logic` collapses on: a tool lifecycle row
  * by turn and `toolUseId`, a task row by `taskId`. `null` for anything else.
  */
-export function lifecycleKeyOf(item: ThreadItem): string | null {
+function lifecycleKeyOf(item: ThreadItem): string | null {
   if (item.kind !== "activity") {
     return null;
   }
@@ -911,7 +910,7 @@ export function lifecycleKeyOf(item: ThreadItem): string | null {
  * splits must not render as two. `null` for anything but an agent's
  * `task.started` (a background task's rows are never a spawn row).
  */
-export function spawnGroupKeyOf(item: ThreadItem): string | null {
+function spawnGroupKeyOf(item: ThreadItem): string | null {
   if (item.kind !== "activity" || item.activityKind !== "task.started") {
     return null;
   }

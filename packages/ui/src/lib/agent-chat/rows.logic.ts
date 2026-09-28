@@ -149,7 +149,7 @@ function expandedWorkGroupRow(
   return { kind: "work", id: `${groupId}:details`, createdAt, groupedEntries, isExpandedToolGroup: true };
 }
 
-export function timelineEntryTurnId(entry: TimelineEntry): string | null {
+function timelineEntryTurnId(entry: TimelineEntry): string | null {
   if (entry.kind === "message") {
     return entry.message.role === "assistant" || entry.message.role === "reasoning"
       ? entry.message.turnId
@@ -172,7 +172,7 @@ function lastUserMessageIndex(entries: readonly TimelineEntry[]): number {
 }
 
 /** Codex commentary is a visible assistant message, but never the final answer. */
-export function isCommentaryAssistantMessage(message: ThreadMessageItem): boolean {
+function isCommentaryAssistantMessage(message: ThreadMessageItem): boolean {
   return message.role === "assistant" && message.messageKind === "commentary";
 }
 
@@ -192,7 +192,7 @@ function isGroupMessage(message: ThreadMessageItem): boolean {
  *
  * *T3: `apps/web/src/components/ChatView.tsx:735-738` (`isCompactCommandMessage`).*
  */
-export function isCompactCommandMessage(message: ThreadMessageItem): boolean {
+function isCompactCommandMessage(message: ThreadMessageItem): boolean {
   return (
     message.role === "user" &&
     (message.attachments?.length ?? 0) === 0 &&
@@ -212,7 +212,7 @@ export function isCompactCommandMessage(message: ThreadMessageItem): boolean {
  * The prefix list is `@orquester/api`'s (`isProviderInternalUserText`), the
  * one the right rail's prompt history filters by too.
  */
-export function isProviderInternalUserMessage(message: ThreadMessageItem): boolean {
+function isProviderInternalUserMessage(message: ThreadMessageItem): boolean {
   return message.role === "user" && isProviderInternalUserText(message.text);
 }
 
@@ -223,7 +223,7 @@ export function isProviderInternalUserMessage(message: ThreadMessageItem): boole
  *
  * *T3: `MessagesTimeline.logic.ts:317-327`.*
  */
-export function isGroupingEntry(entry: TimelineEntry): boolean {
+function isGroupingEntry(entry: TimelineEntry): boolean {
   if (entry.kind === "message") {
     return isGroupMessage(entry.message);
   }
@@ -267,7 +267,7 @@ function isGoalEntry(entry: TimelineEntry): boolean {
 }
 
 /** *T3: `MessagesTimeline.logic.ts:449-466`.* */
-export function computeMessageDurationStart(
+function computeMessageDurationStart(
   messages: readonly ThreadMessageItem[]
 ): Map<string, string> {
   const result = new Map<string, string>();
@@ -342,7 +342,7 @@ function deriveTerminalAssistantMessageIds(
  * terminal in its run. Stable as the list grows: a key names its turn and the
  * prompt above it, never a count.
  */
-export function timelineFoldKeys(entries: readonly TimelineEntry[]): (string | null)[] {
+function timelineFoldKeys(entries: readonly TimelineEntry[]): (string | null)[] {
   let promptId: string | null = null;
   return entries.map((entry) => {
     if (entry.kind === "message" && agentPromptOf(entry.message) !== null) {
@@ -1882,7 +1882,7 @@ function sameArray<T>(left: readonly T[], right: readonly T[]): boolean {
  *
  * *T3: `MessagesTimeline.logic.ts:1573-1675`.*
  */
-export function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow): boolean {
+function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow): boolean {
   if (a.kind !== b.kind || a.id !== b.id) {
     return false;
   }

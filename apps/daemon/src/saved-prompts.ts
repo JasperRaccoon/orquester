@@ -29,7 +29,7 @@ import { describeProjectPath } from "./recent-projects.ts";
  * are stored verbatim; "Plan before coding" ends in `Task: ` on purpose, for
  * the user to type the task after inserting it.
  */
-export const STARTER_PROMPTS: ReadonlyArray<
+const STARTER_PROMPTS: ReadonlyArray<
   Readonly<Pick<SavedPrompt, "title" | "description" | "body" | "pinned">> & { tags: readonly string[] }
 > = [
   {

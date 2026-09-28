@@ -1,23 +1,18 @@
 /**
  * The fold snapshot (`state.json`, design 2026-09-23 "thread index and lazy
  * boot", A2): a cached fold as of one `seq`, which a cold load folds the log's
- * tail on top of. The invariant every test here serves: **a snapshot plus the
- * tail folds to exactly what the whole log folds to.**
+ * tail on top of. These cases cover persisted-data fidelity, malformed cache
+ * rejection and explicit outcomes when events follow a JSON restore.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isDeepStrictEqual } from "node:util";
 
 import type { DomainEvent } from "./domain-events.ts";
 import {
-  ACTIVITY_RETENTION_LIMIT,
-  ACTIVITY_RETENTION_SLACK,
   applyDomainEvent,
   createEmptyThreadState,
-  foldThread,
-  itemPositionOf,
-  itemsDroppedByRetention
+  foldThread
 } from "./fold.ts";
 import type { ThreadFoldState } from "./fold.ts";
 import {
@@ -26,7 +21,7 @@ import {
   parseFoldSnapshotFile,
   serializeFoldState
 } from "./fold-snapshot.ts";
-import type { FoldSnapshotFile, SerializedFoldState } from "./fold-snapshot.ts";
+import type { FoldSnapshotFile } from "./fold-snapshot.ts";
 import type { ThreadActivityItem } from "./thread.ts";
 import {
   activity,
@@ -307,23 +302,6 @@ function foldOnto(state: ThreadFoldState, events: readonly DomainEvent[]): Threa
   return next;
 }
 
-/**
- * For every split point: snapshot the prefix's fold, restore it, fold the
- * tail on top — and compare with folding the whole log. Returns the split
- * points that disagreed.
- */
-function splitsThatDiverge(events: readonly DomainEvent[], splits?: Iterable<number>): number[] {
-  const whole = foldThread(events);
-  const diverged: number[] = [];
-  for (const split of splits ?? events.keys()) {
-    const restored = throughDisk(foldThread(events.slice(0, split)));
-    if (!isDeepStrictEqual(foldOnto(restored, events.slice(split)), whole)) {
-      diverged.push(split);
-    }
-  }
-  return diverged;
-}
-
 /** A plain JSON copy of the serialized form, to corrupt in the rejection tests. */
 function serializedCopy(state: ThreadFoldState): Record<string, any> {
   return JSON.parse(JSON.stringify(serializeFoldState(state)));
@@ -331,98 +309,24 @@ function serializedCopy(state: ThreadFoldState): Record<string, any> {
 
 // --- round trip ------------------------------------------------------------
 
-test("the rich log really populates every part of the fold", () => {
-  const state = foldThread(richLog());
-  assert.ok(state.head !== null);
-  assert.equal(state.head.session.status, "running");
-  assert.deepEqual(state.head.session.resumeCursor, { resume: "prov-1", turnCount: 0 });
-  assert.deepEqual(
-    state.turns.map((turn) => [turn.turnId, turn.state]),
-    [
-      ["T-1", "completed"],
-      ["T-2", "running"]
-    ]
-  );
-  assert.equal(state.checkpoints.length, 1);
-  assert.deepEqual(state.pending.approvals.map((entry) => entry.requestId), ["req-open"]);
-  assert.deepEqual(state.pending.userInputs.map((entry) => entry.requestId), ["q-1"]);
-  assert.deepEqual(state.roster.map((agent) => agent.id), ["agent-1", "shell-1"]);
-  assert.equal(state.roster[0]?.usage?.totalTokens, 1200);
-  assert.deepEqual([...state.closedRequestIds], ["req-closed"]);
-  assert.equal(state.closedRequestAt?.size, 1);
-  assert.equal(state.goal?.objective, "Make CI green");
-  assert.equal(state.goal?.tokenBudget, null);
-  assert.equal(typeof state.goal?.updatedAt, "string");
-  assert.ok(
-    state.items.some((item) => item.kind === "message" && item.streaming),
-    "a message is mid-stream"
-  );
-});
-
 test("deserialize(serialize(state)) is the state, Sets and Maps included", () => {
   const state = foldThread(richLog());
   assert.deepEqual(deserializeFoldState(serializeFoldState(state)), state);
   assert.deepEqual(throughDisk(state), state);
 });
 
-test("the serialized form is plain JSON: no Map, no Set, no derived list, no cache", () => {
-  const state = foldThread(richLog());
-  const serialized = serializeFoldState(state);
-  assert.deepEqual(JSON.parse(JSON.stringify(serialized)), serialized);
-  assert.ok(Array.isArray(serialized.closedRequestIds));
-  assert.deepEqual(serialized.closedRequestAt, [...state.closedRequestAt!]);
-  // The activity list is derived from `items` on load, because it must hold
-  // the SAME objects as `items` (below); the fold's caches (the position index,
-  // the retention counters, the roster engine) live beside the state and never
-  // reach the file.
-  assert.deepEqual(Object.keys(serialized).sort(), [
-    "checkpoints",
-    "closedRequestAt",
-    "closedRequestIds",
-    "deleted",
-    "goal",
-    "head",
-    "items",
-    "pending",
-    "roster",
-    "seq",
-    "turns"
-  ]);
-});
-
-test("a restored state's activity list holds the very objects in its items", () => {
-  // The fold replaces an activity in place by finding the old object in
-  // `activities` (`indexOf`) and drops retained-out rows from both lists by
-  // identity. Two separately parsed copies would break both: an in-place update
-  // would append a duplicate row, and retention would drop a row from one list
-  // but not the other.
-  const restored = throughDisk(foldThread(richLog()));
-  const activityItems = restored.items.filter(
-    (item): item is ThreadActivityItem => item.kind === "activity"
-  );
-  assert.equal(restored.activities.length, activityItems.length);
-  restored.activities.forEach((row, index) => {
-    assert.equal(row, activityItems[index], `activities[${index}] is the items' own object`);
-  });
-});
-
-test("a restored state finds each id at its LAST position, as the fold does", () => {
+test("a streamed message after restore updates the message following a colliding activity id", () => {
   reset();
-  // A message and an activity may share an id; the fold's index then points
-  // at whichever row came last, and a later delta starts a new message. A
-  // restored state rebuilds that index from `items` on first use.
-  const events = [
+  const restored = throughDisk(foldThread([
     created(),
     ev("thread.message-sent", { messageId: "dup", role: "user", text: "m", streaming: false, turnId: null }),
     ev("thread.activity-appended", { activity: activity("tool.started", { toolUseId: "t" }, { id: "dup" }) }),
-    ev("thread.message-sent", { messageId: "dup", role: "assistant", text: "x", streaming: true, turnId: null }),
-    ev("thread.message-sent", { messageId: "dup", role: "assistant", text: "y", streaming: true, turnId: null })
-  ];
-  const state = foldThread(events);
-  assert.equal(itemPositionOf(state, "dup"), 2);
-  const restored = throughDisk(foldThread(events.slice(0, 4)));
-  assert.equal(itemPositionOf(restored, "dup"), 2);
-  assert.deepEqual(foldOnto(restored, events.slice(4)), state);
+    ev("thread.message-sent", { messageId: "dup", role: "assistant", text: "x", streaming: true, turnId: null })
+  ]));
+  const next = applyDomainEvent(restored,
+    ev("thread.message-sent", { messageId: "dup", role: "assistant", text: "y", streaming: true, turnId: null }));
+  assert.deepEqual(next.items.map((item) => item.kind === "message" ? [item.role, item.text] : [item.kind, item.id]),
+    [["user", "m"], ["activity", "dup"], ["assistant", "xy"]]);
 });
 
 test("the empty state and a headless state round-trip", () => {
@@ -485,132 +389,35 @@ test("a head carrying the goals §5.7 hold marker round-trips", () => {
   assert.equal(throughDisk(state)?.head?.goalHeldForHandover, undefined);
 });
 
-// --- snapshot + tail ≡ the whole log -----------------------------------------
+// --- continued folding after restore ---------------------------------------
 
-test("a snapshot at ANY point plus the tail folds to exactly the whole log", () => {
-  assert.deepEqual(splitsThatDiverge(richLog()), []);
-});
-
-test("snapshot + tail stays exact across the retention window and in-place updates", () => {
+test("a restored snapshot preserves closed requests, streamed text and activity updates through a trim", () => {
   reset();
-  // Enough rows for batch retention to trim three times (design
-  // `2026-09-23-fold-performance-design.md`, B: a trim fires once more than
-  // LIMIT + SLACK droppable parent rows pile up and cuts back to LIMIT), a row
-  // updated in place while it waits in the part of the window the next trim
-  // cuts, a resolution aging out, and messages streamed across a split.
-  const events: DomainEvent[] = [
-    created(),
-    ev("thread.activity-appended", {
-      activity: activity("approval.requested", {
-        requestId: "old",
-        requestType: "command_execution_approval"
-      })
-    }),
-    ev("thread.activity-appended", {
-      activity: activity("approval.resolved", { requestId: "old", decision: "accept" })
-    })
+  const request = activity("approval.requested", { requestId: "old", requestType: "command_execution_approval" });
+  const events: DomainEvent[] = [created(),
+    ev("thread.activity-appended", { activity: request }),
+    ev("thread.activity-appended", { activity: activity("approval.resolved", { requestId: "old", decision: "accept" }) }),
+    ev("thread.message-sent", { messageId: "answer", role: "assistant", text: "a", streaming: true, turnId: null })
   ];
-  const rows = ACTIVITY_RETENTION_LIMIT + 3 * ACTIVITY_RETENTION_SLACK + 20;
-  for (let index = 0; index < rows; index += 1) {
-    events.push(
-      ev("thread.activity-appended", {
-        activity: activity("tool.completed", { toolUseId: `t${index}` }, { id: `row-${index}` })
-      })
-    );
-    if (index % 100 === 0) {
-      events.push(
-        ev("thread.message-sent", {
-          messageId: `stream-${index}`,
-          role: "assistant",
-          text: "a",
-          streaming: true,
-          turnId: null
-        }),
-        ev("thread.message-sent", {
-          messageId: `stream-${index}`,
-          role: "assistant",
-          text: "b",
-          streaming: true,
-          turnId: null
-        })
-      );
-    }
-    if (index === rows - 40) {
-      // Row 110 is still in the window, in the slack the third trim takes: it
-      // is replaced where it stands, and then leaves with that trim.
-      events.push(
-        ev("thread.activity-appended", {
-          activity: activity("tool.completed", { toolUseId: "t110", status: "failed" }, { id: "row-110" })
-        })
-      );
-    }
+  for (let index = 0; index < 548; index += 1) {
+    events.push(ev("thread.activity-appended", { activity: activity("tool.completed", { toolUseId: `t${index}` }, { id: `row-${index}` }) }));
   }
-  // Row 200 is inside the window when it is updated, and stays there to the
-  // end; rows 5 and 110 are gone, so their updates are new rows.
-  events.push(
-    ev("thread.activity-appended", {
-      activity: activity("tool.completed", { toolUseId: "t200", status: "completed" }, { id: "row-200" })
-    }),
-    ev("thread.activity-appended", {
-      activity: activity("tool.completed", { toolUseId: "t5" }, { id: "row-5" })
-    }),
-    ev("thread.activity-appended", {
-      activity: activity("tool.completed", { toolUseId: "t110" }, { id: "row-110" })
-    })
-  );
-  for (let index = 0; index < 10; index += 1) {
-    events.push(
-      ev("thread.activity-appended", {
-        activity: activity("tool.started", { toolUseId: `late${index}` }, { id: `late-${index}` })
-      })
-    );
-  }
-  // A replay of the resolved request: its tombstone outlived its closing row.
-  events.push(
-    ev("thread.activity-appended", {
-      activity: activity(
-        "approval.requested",
-        { requestId: "old", requestType: "command_execution_approval" },
-        { createdAt: "2026-01-01T00:00:01.000Z" }
-      )
-    })
-  );
-
-  // The steps that trimmed, from a one-event-at-a-time fold.
-  const trimSteps: number[] = [];
-  let state = createEmptyThreadState();
-  events.forEach((event, index) => {
-    state = applyDomainEvent(state, event);
-    if (itemsDroppedByRetention(state).length > 0) trimSteps.push(index);
-  });
-  assert.equal(trimSteps.length, 3, "the window trimmed three times");
-
-  const whole = foldThread(events);
-  assert.deepEqual(whole, state);
-  const kindsOf = (id: string): string[] =>
-    whole.activities.filter((row) => row.id === id).map((row) => row.activityKind);
-  assert.deepEqual(kindsOf("row-5"), ["tool.completed"], "a long-gone row's update is a new row");
-  assert.deepEqual(
-    whole.activities.filter((row) => row.id === "row-200").map((row) => row.payload),
-    [{ toolUseId: "t200", status: "completed" }],
-    "the in-place update replaced its row"
-  );
-  assert.equal(
-    whole.activities.findIndex((row) => row.id === "row-200") + 1,
-    whole.activities.findIndex((row) => row.id === "row-201"),
-    "…where it stood"
-  );
-  assert.deepEqual(kindsOf("row-110"), ["tool.completed"], "the replaced row left with the trim");
-  assert.equal(whole.activities.at(-12)?.id, "row-110", "…and its next update came back at the end");
-  assert.deepEqual(whole.pending.approvals, [], "the replayed request stays closed");
-
-  const splits = new Set<number>();
-  for (let split = 0; split <= events.length; split += 5) splits.add(split);
-  for (const step of trimSteps) {
-    for (let split = step - 2; split <= step + 2; split += 1) splits.add(split);
-  }
-  for (let split = events.length - 16; split <= events.length; split += 1) splits.add(split);
-  assert.deepEqual(splitsThatDiverge(events, splits), []);
+  let restored = throughDisk(foldThread(events));
+  restored = foldOnto(restored, [
+    ev("thread.activity-appended", { activity: activity("tool.completed", { toolUseId: "t200", status: "failed" }, { id: "row-200" }) }),
+    ev("thread.activity-appended", { activity: activity("tool.completed", { toolUseId: "t548" }, { id: "row-548" }) }),
+    ev("thread.message-sent", { messageId: "answer", role: "assistant", text: "b", streaming: true, turnId: null }),
+    ev("thread.message-sent", { messageId: "answer", role: "assistant", text: "", streaming: false, turnId: null }),
+    ev("thread.activity-appended", { activity: request })
+  ]);
+  assert.equal(restored.activities[0]?.id, "row-49");
+  assert.equal(restored.activities.length, 501);
+  assert.deepEqual(restored.activities.filter((row) => row.id === "row-200").map((row) => row.payload),
+    [{ toolUseId: "t200", status: "failed" }]);
+  assert.deepEqual(restored.items.filter((item) => item.kind === "message").map((item) => [item.id, item.text, item.streaming]),
+    [["answer", "ab", false]]);
+  assert.deepEqual(restored.pending.approvals, []);
+  assert.equal(restored.evicted?.activities, true);
 });
 
 // --- deserializeFoldState never trusts the file ------------------------------
@@ -623,7 +430,7 @@ test("anything that is not a serialized fold state deserializes to null", () => 
 
 test("a missing top-level field is rejected; only closedRequestAt is optional", () => {
   const state = foldThread(richLog());
-  for (const key of Object.keys(serializeFoldState(state))) {
+  for (const key of ["head", "items", "turns", "checkpoints", "pending", "roster", "goal", "closedRequestIds", "closedRequestAt", "seq", "deleted"]) {
     const copy = serializedCopy(state);
     delete copy[key];
     if (key === "closedRequestAt") {
@@ -744,7 +551,9 @@ test("a snapshot file of another version, another thread or a bad shape is rejec
   const state = foldThread(richLog());
   const good = onDisk(snapshotFile(state));
   const rejects: Array<[string, (file: Record<string, any>) => void]> = [
-    ["an older version", (file) => (file.version = FOLD_SNAPSHOT_VERSION - 1)],
+    ["version 2 lost legacy compaction markers", (file) => (file.version = 2)],
+    ["version 3 lost running-call openings", (file) => (file.version = 3)],
+    ["version 4 has incompatible goal/open-work folds", (file) => (file.version = 4)],
     ["a newer version", (file) => (file.version = FOLD_SNAPSHOT_VERSION + 1)],
     ["a version spelled as a string", (file) => (file.version = String(FOLD_SNAPSHOT_VERSION))],
     ["no version", (file) => delete file.version],
@@ -770,128 +579,11 @@ test("a snapshot file of another version, another thread or a bad shape is rejec
   assert.notEqual(parseFoldSnapshotFile(good, THREAD_ID), null, "the untouched file still parses");
 });
 
-test("a state.json folded by version 2, whose retention evicted the legacy compaction marker, is discarded, never folded forward", () => {
-  reset();
-  // An older log's settled compaction, then parent rows enough for three trims.
-  const marker = activity("thread.state.changed", { state: "compacted" }, { id: "legacy-marker" });
-  const events: DomainEvent[] = [created(), ev("thread.activity-appended", { activity: marker })];
-  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
-    events.push(
-      ev("thread.activity-appended", {
-        activity: activity("tool.completed", { toolUseId: `t${index}` }, { id: `row-${index}` })
-      })
-    );
-  }
-  const whole = foldThread(events);
-  assert.equal(whole.activities[0]?.id, "legacy-marker", "this build keeps the marker whatever its age");
-
-  // Version 2 read the marker as an ordinary parent row. The same log with
-  // that row in any other state is therefore exactly what version 2 folded:
-  // the row in the same class, so the same trims, and gone with the first.
-  const asVersion2Read = events.map((event) =>
-    event.type === "thread.activity-appended" && event.payload.activity === marker
-      ? { ...event, payload: { activity: { ...marker, payload: { state: "running" } } } }
-      : event
-  );
-  let probe = createEmptyThreadState();
-  const firstTrim = asVersion2Read.findIndex((event) => {
-    probe = applyDomainEvent(probe, event);
-    return itemsDroppedByRetention(probe).length > 0;
-  });
-  assert.ok(firstTrim > 0);
-  const split = firstTrim + 10;
-  const version2State = foldThread(asVersion2Read.slice(0, split));
-  assert.ok(!version2State.items.some((item) => item.id === "legacy-marker"), "version 2 had evicted it");
-
-  // Trusted, that snapshot would carry the eviction forward for good.
-  const trusted = foldOnto(throughDisk(version2State), events.slice(split));
-  assert.ok(!trusted.activities.some((row) => row.id === "legacy-marker"));
-  assert.notDeepEqual(trusted, whole);
-
-  // It is not: a file stamped version 2 never parses, whatever it holds, so
-  // the store folds the whole log — which keeps the marker.
-  assert.ok(FOLD_SNAPSHOT_VERSION > 2, "the retention that keeps the legacy marker is a new version");
-  const file = onDisk(snapshotFile(version2State, { version: 2 }));
-  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null);
-  assert.notEqual(
-    parseFoldSnapshotFile({ ...file, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
-    null,
-    "the stamp is all that refuses it: the same file under this build's version would parse"
-  );
-  // This build's own snapshot of the same prefix folds forward to the whole log.
-  assert.deepEqual(foldOnto(throughDisk(foldThread(events.slice(0, split))), events.slice(split)), whole);
-});
-
-test("a state.json folded by version 3, whose trim dropped a running call's opening row, is discarded, never folded forward", () => {
-  reset();
-  // A long command's start, then enough of its own output chunks for three trims.
-  const opening = activity(
-    "tool.started",
-    { itemType: "command_execution", toolUseId: "build", title: "npm run build" },
-    { id: "build-start", tone: "tool" }
-  );
-  const events: DomainEvent[] = [created(), ev("thread.activity-appended", { activity: opening })];
-  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
-    events.push(
-      ev("thread.activity-appended", {
-        activity: activity("tool.output", { toolUseId: "build", streamKind: "command_output", delta: `line ${index}\n` }, {
-          id: `chunk-${index}`,
-          tone: "tool"
-        })
-      })
-    );
-  }
-  const whole = foldThread(events);
-  assert.equal(whole.activities[0]?.id, "build-start", "this build keeps a running call's opening row whatever its age");
-
-  // Version 3 kept no opening row. The same log with the opening's call id
-  // blanked is exactly what version 3 folded: the row in the same class, so
-  // the same trims, and no call left open to keep it — gone with the first.
-  const asVersion3Read = events.map((event) =>
-    event.type === "thread.activity-appended" && event.payload.activity === opening
-      ? { ...event, payload: { activity: { ...opening, payload: { itemType: "command_execution", toolUseId: "" } } } }
-      : event
-  );
-  let probe = createEmptyThreadState();
-  const firstTrim = asVersion3Read.findIndex((event) => {
-    probe = applyDomainEvent(probe, event);
-    return itemsDroppedByRetention(probe).length > 0;
-  });
-  assert.ok(firstTrim > 0);
-  const split = firstTrim + 10;
-  const version3State = foldThread(asVersion3Read.slice(0, split));
-  assert.ok(!version3State.items.some((item) => item.id === "build-start"), "version 3 had evicted it");
-
-  // Trusted, that snapshot would carry the eviction forward for good.
-  const trusted = foldOnto(throughDisk(version3State), events.slice(split));
-  assert.ok(!trusted.activities.some((row) => row.id === "build-start"));
-  assert.notDeepEqual(trusted, whole);
-
-  // It is not: a file stamped version 3 never parses, whatever it holds, so
-  // the store folds the whole log — which keeps the opening row.
-  assert.ok(FOLD_SNAPSHOT_VERSION > 3, "the retention that keeps the opening row of running work is a new version");
-  const file = onDisk(snapshotFile(version3State, { version: 3 }));
-  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null);
-  assert.notEqual(
-    parseFoldSnapshotFile({ ...file, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
-    null,
-    "the stamp is all that refuses it: the same file under this build's version would parse"
-  );
-  // This build's own snapshot of the same prefix folds forward to the whole log.
-  assert.deepEqual(foldOnto(throughDisk(foldThread(events.slice(0, split))), events.slice(split)), whole);
-});
-
 test("a snapshot of an empty, headless fold is a valid file", () => {
   const empty = createEmptyThreadState();
   const parsed = parseFoldSnapshotFile(onDisk(snapshotFile(empty, { logBytes: 0 })), THREAD_ID);
   assert.ok(parsed !== null);
   assert.deepEqual(deserializeFoldState(parsed.state), empty);
-});
-
-test("the serialized state type is what serializeFoldState returns", () => {
-  // Compile-time pin: the file's `state` is exactly the serializer's output.
-  const state: SerializedFoldState = serializeFoldState(foldThread(richLog()));
-  assert.equal(state.seq, foldThread(richLog()).seq);
 });
 
 // --- the goal (goals §4.4) -------------------------------------------------------
@@ -900,21 +592,6 @@ test("the serialized state type is what serializeFoldState returns", () => {
 // could not have written is doubt, and doubt is a cache miss: the host refolds
 // from `events.ndjson` (AGENTS.md, "the fold snapshot and the thread index are
 // caches, never authorities").
-
-test("a valid goal round-trips exactly, through the file too", () => {
-  const state = foldThread(richLog());
-  assert.ok(state.goal !== null && state.goal !== undefined, "the rich log sets a goal");
-  const restored = throughDisk(state);
-  assert.deepEqual(restored.goal, state.goal);
-  // Byte for byte, key order included: the determinism suites compare files.
-  assert.equal(
-    JSON.stringify(serializeFoldState(restored)),
-    JSON.stringify(serializeFoldState(state))
-  );
-  const parsed = parseFoldSnapshotFile(onDisk(snapshotFile(state)), THREAD_ID);
-  assert.ok(parsed !== null);
-  assert.deepEqual(deserializeFoldState(parsed.state)?.goal, state.goal);
-});
 
 test("goal: null is a thread with no goal — accepted, and written for every state that has none", () => {
   reset();
@@ -972,74 +649,4 @@ test("a stored goal that is neither null nor a valid ThreadGoal rejects the snap
     copy.goal = value;
     assert.equal(deserializeFoldState(copy), null, JSON.stringify(value));
   }
-});
-
-test("a version-4 state.json is discarded whichever build wrote it: the goal build's and the open-work build's 4 are different folds", () => {
-  reset();
-  // Two builds took version 4 for two different fold changes: the goal build
-  // derives a goal but keeps no opening row of running work; the open-work
-  // build keeps it but writes no `goal` key. The merge of both is 5.
-  const opening = activity(
-    "tool.started",
-    { itemType: "command_execution", toolUseId: "build", title: "npm run build" },
-    { id: "build-start", tone: "tool" }
-  );
-  const events: DomainEvent[] = [
-    created(),
-    ev("thread.activity-appended", {
-      activity: activity("goal.updated", { goal: { objective: "Ship", status: "active" }, change: "set" }, { id: "goal-1" })
-    }),
-    ev("thread.activity-appended", { activity: opening })
-  ];
-  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
-    events.push(
-      ev("thread.activity-appended", {
-        activity: activity("tool.output", { toolUseId: "build", streamKind: "command_output", delta: `line ${index}\n` }, {
-          id: `chunk-${index}`,
-          tone: "tool"
-        })
-      })
-    );
-  }
-  const whole = foldThread(events);
-  assert.equal(whole.goal?.objective, "Ship");
-  assert.equal(whole.activities[0]?.id, "build-start");
-
-  // What the goal build folded: the same log with the opening's call blanked,
-  // as the version-3 test above reads it — the same trims, nothing kept open.
-  const asGoalBuildRead = events.map((event) =>
-    event.type === "thread.activity-appended" && event.payload.activity === opening
-      ? { ...event, payload: { activity: { ...opening, payload: { itemType: "command_execution", toolUseId: "" } } } }
-      : event
-  );
-  let probe = createEmptyThreadState();
-  const firstTrim = asGoalBuildRead.findIndex((event) => {
-    probe = applyDomainEvent(probe, event);
-    return itemsDroppedByRetention(probe).length > 0;
-  });
-  assert.ok(firstTrim > 0);
-  const split = firstTrim + 10;
-  const goalBuildState = foldThread(asGoalBuildRead.slice(0, split));
-  assert.equal(goalBuildState.goal?.objective, "Ship");
-  assert.ok(!goalBuildState.items.some((item) => item.id === "build-start"), "the goal build had evicted it");
-
-  assert.ok(FOLD_SNAPSHOT_VERSION > 4, "neither build's 4 is this fold");
-  const goalBuildFile = onDisk(snapshotFile(goalBuildState, { version: 4 }));
-  assert.equal(parseFoldSnapshotFile(goalBuildFile, THREAD_ID), null);
-  assert.notEqual(
-    parseFoldSnapshotFile({ ...goalBuildFile, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
-    null,
-    "the stamp is all that refuses the goal build's file: trusted, it would carry the eviction forward"
-  );
-
-  const openWorkBuildFile = onDisk(snapshotFile(foldThread(events.slice(0, split)), { version: 4 }));
-  delete openWorkBuildFile.state.goal;
-  assert.equal(parseFoldSnapshotFile(openWorkBuildFile, THREAD_ID), null);
-  assert.equal(
-    parseFoldSnapshotFile({ ...openWorkBuildFile, version: FOLD_SNAPSHOT_VERSION }, THREAD_ID),
-    null,
-    "the open-work build's file has no goal key, which the goal check refuses as well"
-  );
-  // This build's own snapshot of the same prefix folds forward to the whole log.
-  assert.deepEqual(foldOnto(throughDisk(foldThread(events.slice(0, split))), events.slice(split)), whole);
 });

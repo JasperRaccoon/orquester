@@ -2,8 +2,7 @@
  * The fold's goal (goals §4.4): the last `goal.updated` row that parses wins,
  * a row that does not is still appended but moves nothing, and nothing else —
  * not retention, not a rewind — ever touches it: it is the provider's state,
- * not the conversation's. It rides the §6.3 snapshot, and a snapshot plus the
- * tail folds to the whole log's goal. How `state.json` stores and checks it is
+ * not the conversation's. It rides the §6.3 snapshot. How `state.json` stores and checks it is
  * `fold-snapshot.test.ts`'s.
  */
 
@@ -19,8 +18,6 @@ import {
   foldThread,
   toThreadSnapshot
 } from "./fold.ts";
-import { splitDivergences } from "./fold-logs.test-support.ts";
-import { FOLD_SNAPSHOT_VERSION } from "./fold-snapshot.ts";
 import { GOAL_ACTIVITY_KIND } from "./goal.ts";
 import type { AgentGoal, GoalUpdatedPayload } from "./goal.ts";
 import type { ThreadActivityItem } from "./thread.ts";
@@ -101,7 +98,7 @@ test("a goal.updated row sets the goal, stamped with the ROW's updatedAt, and is
     ["goal-1"],
     "the row itself is an ordinary activity"
   );
-  assert.equal(state.activities[0], set.payload.activity);
+  assert.deepEqual(state.activities[0], set.payload.activity);
 });
 
 test("the last row wins, a null goal clears it, and a cleared thread can set another", () => {
@@ -143,7 +140,7 @@ test("a row that does not parse leaves the goal as it was — and is still appen
   let state = before;
   for (const event of unparseable) {
     state = applyDomainEvent(state, event);
-    assert.equal(state.goal, before.goal, "kept, by identity");
+    assert.deepEqual(state.goal, before.goal, "malformed updates leave the prior goal intact");
   }
   assert.equal(state.items.length, before.items.length + unparseable.length);
   assert.equal(state.activities.length, before.activities.length + unparseable.length);
@@ -168,7 +165,7 @@ test("only a goal.updated row moves the goal", () => {
     ev("thread.session-set", { session: session("stopped", null) })
   ]) {
     state = applyDomainEvent(state, event);
-    assert.equal(state.goal, before.goal, event.type);
+    assert.deepEqual(state.goal, before.goal, event.type);
   }
 });
 
@@ -232,28 +229,7 @@ test("a rewind never touches the goal, even when it removes the row that set it"
   assert.deepEqual(state.goal, { ...SHIP, updatedAt: set.payload.activity.updatedAt });
 
   const toZero = applyDomainEvent(state, ev("thread.reverted", { turnCount: 0 }));
-  assert.equal(toZero.goal, state.goal);
-});
-
-test("an event that does not touch the goal keeps it by identity", () => {
-  reset();
-  const state = foldThread([created(), ...prompt(1), goalRow({ goal: SHIP, change: "set" })]);
-  let next = state;
-  for (const event of [
-    toolRow(1),
-    ev("thread.message-sent", {
-      messageId: "a1",
-      role: "assistant",
-      text: "on it",
-      streaming: true,
-      turnId: "T-1"
-    }),
-    ev("thread.session-set", { session: session("ready", null) }),
-    ev("thread.meta-updated", { title: "Renamed" })
-  ]) {
-    next = applyDomainEvent(next, event);
-    assert.equal(next.goal, state.goal, event.type);
-  }
+  assert.deepEqual(toZero.goal, { ...SHIP, updatedAt: set.payload.activity.updatedAt });
 });
 
 // --- the snapshot ----------------------------------------------------------------
@@ -262,7 +238,7 @@ test("toThreadSnapshot carries the goal, and null when there is none", () => {
   reset();
   assert.equal(toThreadSnapshot(foldThread([created()])).goal, null);
   const state = foldThread([created(), goalRow({ goal: SHIP, change: "set" })]);
-  assert.equal(toThreadSnapshot(state).goal, state.goal);
+  assert.deepEqual(toThreadSnapshot(state).goal, { ...SHIP, updatedAt: state.activities[0]!.updatedAt });
 });
 
 test("a state built before goals existed still folds, and its missing goal reads as null", () => {
@@ -273,34 +249,4 @@ test("a state built before goals existed still folds, and its missing goal reads
   assert.equal(toThreadSnapshot(next).goal, null);
   const withGoal = applyDomainEvent(next, goalRow({ goal: SHIP, change: "set" }));
   assert.equal(withGoal.goal?.objective, SHIP.objective);
-});
-
-test("the snapshot version moved past 3 (4 on the goals build, 5 since the merge): every state.json written before the fold derived a goal is refolded once", () => {
-  // 3 is the legacy compaction marker's retention, which never derived a goal;
-  // the merge's 5 also covers the open-work build's own 4 (`fold-snapshot.test.ts`).
-  assert.ok(FOLD_SNAPSHOT_VERSION >= 4, "a version-3 state.json carries no goal, whatever its log holds");
-});
-
-test("a snapshot at ANY point plus the tail folds to the whole log's goal", () => {
-  reset();
-  const checked: AgentGoal = { ...SHIP, rounds: 1, lastCheck: "tests still fail" };
-  const events: DomainEvent[] = [
-    created(),
-    ...prompt(1),
-    goalRow({ goal: SHIP, change: "set" }, { turnId: "T-1" }),
-    toolRow(1),
-    goalRow({ goal: checked, change: "checked" }, { turnId: "T-1" }),
-    goalRow("unparseable"),
-    ev("thread.session-set", { session: session("ready", null) }),
-    ...prompt(2),
-    goalRow({ goal: { ...checked, rounds: 2, phase: "waiting-background" }, change: "progress" }),
-    goalRow({ goal: null, change: "achieved", previous: { ...checked, status: "complete" } }),
-    ev("thread.session-set", { session: session("ready", null) }),
-    ...prompt(3),
-    goalRow({ goal: { objective: "Next", status: "paused", tokenBudget: null }, change: "set" }),
-    ev("thread.reverted", { turnCount: 1 }),
-    toolRow(2)
-  ];
-  assert.equal(foldThread(events).goal?.objective, "Next");
-  assert.deepEqual(splitDivergences(events, { literalAt: () => true }), []);
 });

@@ -31,7 +31,7 @@ import { ComposerMenuRow, ComposerPopover } from "./ComposerPopover";
  */
 
 /** The picker lists at most this many messages, newest first. */
-export const REWIND_PICKER_LIMIT = 50;
+const REWIND_PICKER_LIMIT = 50;
 
 /** Why a rewind control is disabled, in the one place the copy lives. */
 export const REWIND_BUSY_TITLE = "Available when the agent is idle";
@@ -70,13 +70,13 @@ export function rewindDroppedTurnCount(input: {
 }
 
 /** "1 turn" / "3 turns". */
-export function rewindTurnsLabel(count: number): string {
+function rewindTurnsLabel(count: number): string {
   const turns = Math.max(1, count);
   return `${turns} turn${turns === 1 ? "" : "s"}`;
 }
 
 /** The confirm's one sentence: what goes, what stays, where the message ends up. */
-export function rewindConfirmSentence(droppedTurnCount: number): string {
+function rewindConfirmSentence(droppedTurnCount: number): string {
   const turns = Math.max(1, droppedTurnCount);
   return (
     `Removes ${turns} later turn${turns === 1 ? "" : "s"} from this chat. ` +
@@ -86,7 +86,7 @@ export function rewindConfirmSentence(droppedTurnCount: number): string {
 }
 
 /** A picker row's second line: when it was sent, and what going back to it costs. */
-export function rewindTargetHint(target: Pick<RewindTarget, "createdAt" | "droppedTurnCount">): string {
+function rewindTargetHint(target: Pick<RewindTarget, "createdAt" | "droppedTurnCount">): string {
   const when = formatRowTimestamp(target.createdAt);
   const cost = `removes ${rewindTurnsLabel(target.droppedTurnCount)}`;
   return when.length > 0 ? `${when} · ${cost}` : cost;
@@ -318,7 +318,7 @@ function RewindTargetList({
   );
 }
 
-export interface RewindPickerPanelProps {
+interface RewindPickerPanelProps {
   /** Newest first, as `deriveRewindTargets` returns them. */
   targets: readonly RewindTarget[];
   /** Something is in flight: the confirm's Rewind waits for idle. */
@@ -332,7 +332,7 @@ export interface RewindPickerPanelProps {
  * to the list. Mounted fresh on every open (the popover renders its panel only
  * while open), so a closed picker always reopens on the list.
  */
-export function RewindPickerPanel({
+function RewindPickerPanel({
   targets,
   busy = false,
   onRewind

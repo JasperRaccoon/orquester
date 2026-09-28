@@ -166,12 +166,7 @@ function mintPageId(): string {
 }
 
 /** This page's id: every entry it writes or adopts carries it. */
-let pageId = mintPageId();
-
-/** Test seam: this page forgets everything it wrote — what a reload is. The storage stays. */
-export function resetComposerOutbox(): void {
-  pageId = mintPageId();
-}
+const pageId = mintPageId();
 
 function commandIdOf(entry: OutboxEntry): string {
   return entry.kind === "send" ? entry.commandId : entry.message.commandId;

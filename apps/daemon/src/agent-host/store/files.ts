@@ -166,7 +166,7 @@ async function readInto(handle: FileHandle, buffer: Buffer, position: number): P
  * line ends with its newline, whether or not it decodes, and is left alone.
  * Answers the file's size afterwards (0 when it does not exist).
  */
-export async function truncateTornTail(filePath: string, windowBytes = 64 * 1024): Promise<number> {
+export async function truncateTornTail(filePath: string): Promise<number> {
   let handle;
   try {
     handle = await fs.open(filePath, "r");
@@ -188,7 +188,7 @@ export async function truncateTornTail(filePath: string, windowBytes = 64 * 1024
     // already known not to be one.
     let end = size - 1;
     while (end > 0) {
-      const start = Math.max(0, end - windowBytes);
+      const start = Math.max(0, end - 64 * 1024);
       const window = Buffer.allocUnsafe(end - start);
       const newline = window.subarray(0, await readInto(handle, window, start)).lastIndexOf(0x0a);
       if (newline !== -1) {
@@ -209,8 +209,7 @@ export async function truncateTornTail(filePath: string, windowBytes = 64 * 1024
  * Returns null for an empty file, a file of one torn line, or a read error.
  */
 export async function readLastCompleteLine(
-  filePath: string,
-  windowBytes = 64 * 1024
+  filePath: string
 ): Promise<string | null> {
   let handle;
   try {
@@ -226,7 +225,7 @@ export async function readLastCompleteLine(
     let end = size;
     // Walk backwards a window at a time until a complete line is in hand.
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const start = Math.max(0, end - windowBytes * (attempt + 1));
+      const start = Math.max(0, end - 64 * 1024 * (attempt + 1));
       const length = end - start;
       const buffer = Buffer.alloc(length);
       await handle.read(buffer, 0, length, start);

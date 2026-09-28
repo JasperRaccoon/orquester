@@ -104,7 +104,7 @@ const MAX_OPEN_STREAMS = 256;
  * task naming its launching turn for an hour must not turn that turn's page
  * into a read of everything since.
  */
-export const MAX_LATE_REFERENCE_BYTES = 2 * 1024 * 1024;
+const MAX_LATE_REFERENCE_BYTES = 2 * 1024 * 1024;
 /**
  * Threads whose turn fold stays in memory. The index grows with the log ON
  * DISK (invariant 3): a quiet thread beyond this is dropped, least recently
@@ -112,7 +112,7 @@ export const MAX_LATE_REFERENCE_BYTES = 2 * 1024 * 1024;
  * something in flight that exists nowhere else — a message mid-stream, a
  * turn not started yet — is never dropped by count (`isQuiescent`).
  */
-export const MAX_RESIDENT_THREADS = 16;
+const MAX_RESIDENT_THREADS = 16;
 
 interface Position {
   seq: number;
@@ -231,11 +231,6 @@ export interface ThreadIndexer {
   cursor(threadId: string): { lastSeq: number; lastByte: number } | null;
   /** Delete every row of the thread and forget its memory. */
   resetThread(threadId: string): void;
-  /**
-   * Test seam: the threads whose memory is resident, least recently used
-   * first — the order {@link MAX_RESIDENT_THREADS} evicts in.
-   */
-  residentThreadIds(): readonly string[];
 }
 
 export function createThreadIndexer(input: {
@@ -1448,10 +1443,6 @@ export function createThreadIndexer(input: {
     resetThread(threadId) {
       resident.delete(threadId);
       resetThreadRows(threadId);
-    },
-
-    residentThreadIds() {
-      return [...resident.keys()];
     }
   };
 }
@@ -1549,7 +1540,7 @@ function isHiddenGoalRow(kind: string, payload: unknown): boolean {
  * the unit at the cut is looked at, never the whole body (no `Array.from`
  * over 128 K code units to find a boundary one comparison finds).
  */
-export function capText(text: string): string {
+function capText(text: string): string {
   if (text.length <= MAX_INDEXED_TEXT_CHARS) {
     return text;
   }

@@ -44,7 +44,7 @@ import type {
 import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES, isUnfinishedGoal } from "@orquester/api/agent-chat";
 
 import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
-import { TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
+import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { FileTail, TAIL_MAX_READ_BYTES, TAIL_MAX_TOTAL_BYTES, resolveTildePath } from "../../support/tail-file.ts";
 import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
@@ -61,7 +61,7 @@ import {
   permissionResultForDecision,
   shouldShortCircuitToAllow
 } from "./decisions.ts";
-import type { ClaudeAdapterDeps } from "./deps.ts";
+import { CLAUDE_COMPACT_DEADLINE_MS, CLAUDE_CONTEXT_USAGE_DEADLINE_MS, type ClaudeAdapterDeps } from "./deps.ts";
 import { transcriptGoalFromLastRow } from "./goal.ts";
 import { claudeConfigDir } from "./config-dir.ts";
 import { ClaudeGoalTranscript } from "./goal-transcript.ts";
@@ -106,14 +106,14 @@ export const COMPACT_COMMAND = "/compact";
  * 750 ms is a compromise: fast enough to read as live, slow enough that a
  * chatty command costs a handful of `stat`s a second.
  */
-export const BACKGROUND_SHELL_TAIL_INTERVAL_MS = 750;
+const BACKGROUND_SHELL_TAIL_INTERVAL_MS = 750;
 
 /**
  * A file read that has not answered in this long is treated as failed, like
  * every other wait on a child (§3.1). A stuck FUSE/NFS mount must not hold the
  * message loop, which is what the final drain awaits.
  */
-export const BACKGROUND_SHELL_TAIL_READ_DEADLINE_MS = 5_000;
+const BACKGROUND_SHELL_TAIL_READ_DEADLINE_MS = 5_000;
 
 /** The final drain's bound: the per-shell cap divided by one read, plus one. */
 const BACKGROUND_SHELL_DRAIN_MAX_READS = Math.ceil(TAIL_MAX_TOTAL_BYTES / TAIL_MAX_READ_BYTES) + 1;
@@ -123,7 +123,7 @@ const BACKGROUND_SHELL_DRAIN_MAX_READS = Math.ceil(TAIL_MAX_TOTAL_BYTES / TAIL_M
  * set-point jump (goals §6.1.4). Local-file work of a turn's worth of bytes;
  * past this a stuck mount is given up on, like a background shell's tail.
  */
-export const GOAL_TRANSCRIPT_READ_DEADLINE_MS = 5_000;
+const GOAL_TRANSCRIPT_READ_DEADLINE_MS = 5_000;
 
 /**
  * The resume scan reads a WHOLE transcript for its last `goal_status` row
@@ -150,7 +150,7 @@ export const GOAL_WORK_SETTLE_DEADLINE_MS = 5_000;
  * write timer (2.1.280). Read at `result` alone, the verdict was missed and
  * the goal read "active" until the next turn ended.
  */
-export const GOAL_VERDICT_REREAD_DELAYS_MS = [300, 1_200] as const;
+const GOAL_VERDICT_REREAD_DELAYS_MS = [300, 1_200] as const;
 
 /**
  * One read of the transcript's new rows, walked chunk by chunk (goals
@@ -175,7 +175,7 @@ interface TranscriptWalk {
 
 interface BackgroundShellTail {
   tail: FileTail;
-  timer: NodeJS.Timeout | number | undefined;
+  timer: NodeJS.Timeout | undefined;
   stopped: boolean;
 }
 
@@ -252,7 +252,7 @@ export class ClaudeSession {
   private hostInitiatedStop = false;
   private streamDone: Promise<void> | undefined;
   private turnSettled: Deferred<void> | undefined;
-  private watchdog: NodeJS.Timeout | number | undefined;
+  private watchdog: NodeJS.Timeout | undefined;
   /** One live tail per background shell, keyed by task id. */
   private readonly backgroundShells = new Map<string, BackgroundShellTail>();
   private lastActivityMs = 0;
@@ -275,9 +275,8 @@ export class ClaudeSession {
   private readonly goalTranscript: ClaudeGoalTranscript;
   /** Goal transcript work, one item at a time, never on the message loop. */
   private goalWork: Promise<void> = Promise.resolve();
-  private goalWorkPending = 0;
   /** A throttled goal `progress`, flushed when its window ends (goals §6). */
-  private goalFlushTimer: NodeJS.Timeout | number | undefined;
+  private goalFlushTimer: NodeJS.Timeout | undefined;
   /** False once `session.exited` is out: nothing may follow it. */
   private goalOutputOpen = true;
   /** The one teardown, once it has begun (see {@link teardown}). */
@@ -286,7 +285,7 @@ export class ClaudeSession {
   private transcriptWalking = false;
   private readonly transcriptWalksWaiting: TranscriptWalk[] = [];
   /** The pending verdict re-read, if any ({@link GOAL_VERDICT_REREAD_DELAYS_MS}). */
-  private verdictRereadTimer: NodeJS.Timeout | number | undefined;
+  private verdictRereadTimer: NodeJS.Timeout | undefined;
 
   constructor(options: ClaudeSessionOptions) {
     this.options = options;
@@ -444,7 +443,7 @@ export class ClaudeSession {
     try {
       await withDeadline(this.query.initializationResult(), {
         label: "claude/handshake",
-        timeoutMs: this.options.deps.deadlines.handshakeMs,
+        timeoutMs: AGENT_HOST_DEADLINES.handshakeMs,
         onTimeout: () => {
           // An expired deadline kills the child rather than leaving the thread
           // `starting` forever (§3.1).
@@ -500,7 +499,7 @@ export class ClaudeSession {
     try {
       response = await withDeadline(query.getContextUsage({ detail: "summary" }), {
         label: "claude/context-usage",
-        timeoutMs: this.options.deps.deadlines.contextUsageMs
+        timeoutMs: CLAUDE_CONTEXT_USAGE_DEADLINE_MS
       });
     } catch (error) {
       if (!this.contextUsageUnavailableLogged) {
@@ -654,7 +653,7 @@ export class ClaudeSession {
     if (entry.stopped || this.closed) {
       return;
     }
-    entry.timer = this.options.deps.setTimer(() => {
+    entry.timer = setTimeout(() => {
       entry.timer = undefined;
       this.pollBackgroundShell(taskId).catch((error: unknown) => {
         // The host installs no `unhandledRejection` handler; a throw from a
@@ -712,7 +711,7 @@ export class ClaudeSession {
       return;
     }
     if (entry.timer !== undefined) {
-      this.options.deps.clearTimer(entry.timer);
+      clearTimeout(entry.timer);
       entry.timer = undefined;
     }
     for (let read = 0; read < BACKGROUND_SHELL_DRAIN_MAX_READS; read += 1) {
@@ -732,7 +731,7 @@ export class ClaudeSession {
     }
     entry.stopped = true;
     if (entry.timer !== undefined) {
-      this.options.deps.clearTimer(entry.timer);
+      clearTimeout(entry.timer);
       entry.timer = undefined;
     }
     this.backgroundShells.delete(taskId);
@@ -881,7 +880,7 @@ export class ClaudeSession {
       return;
     }
     this.cancelVerdictReread();
-    const timer = this.options.deps.setTimer(() => {
+    const timer = setTimeout(() => {
       if (this.verdictRereadTimer !== timer) {
         // Superseded — a new walk, a new turn, or the teardown — after this
         // timer had already been handed to the loop.
@@ -902,7 +901,7 @@ export class ClaudeSession {
 
   private cancelVerdictReread(): void {
     if (this.verdictRereadTimer !== undefined) {
-      this.options.deps.clearTimer(this.verdictRereadTimer);
+      clearTimeout(this.verdictRereadTimer);
       this.verdictRereadTimer = undefined;
     }
   }
@@ -998,14 +997,11 @@ export class ClaudeSession {
     /** Runs last, whatever happened: applied, failed, timed out or skipped. */
     settled?: () => void;
   }): void {
-    this.goalWorkPending += 1;
     this.goalWork = this.goalWork.then(async () => {
       try {
         if (!this.goalOutputOpen) {
           return;
         }
-        // A test parks a read here; production passes no gate.
-        await this.options.deps.goalReadGate?.(this.threadId, work.label);
         let result: T;
         try {
           result = await withDeadline(work.read, {
@@ -1038,19 +1034,6 @@ export class ClaudeSession {
             error
           );
         }
-        this.goalWorkPending -= 1;
-        if (this.goalWorkPending === 0) {
-          try {
-            this.options.deps.onGoalWorkIdle?.(this.threadId);
-          } catch (error) {
-            // A test hook; a throw from it must not reject the chain every
-            // later goal read hangs off.
-            this.options.context.logger.error(
-              `claude: the goal-work idle hook for thread ${this.threadId} threw`,
-              error
-            );
-          }
-        }
       }
     });
   }
@@ -1060,7 +1043,7 @@ export class ClaudeSession {
       return;
     }
     const delay = Math.max(0, dueAtMs - this.options.context.clock.now().getTime());
-    this.goalFlushTimer = this.options.deps.setTimer(() => {
+    this.goalFlushTimer = setTimeout(() => {
       this.goalFlushTimer = undefined;
       if (this.closed || !this.goalOutputOpen) {
         return;
@@ -1202,7 +1185,7 @@ export class ClaudeSession {
       step("the watchdog", () => {
         this.clearWatchdog();
         if (this.goalFlushTimer !== undefined) {
-          this.options.deps.clearTimer(this.goalFlushTimer);
+          clearTimeout(this.goalFlushTimer);
           this.goalFlushTimer = undefined;
         }
         this.cancelVerdictReread();
@@ -1731,7 +1714,7 @@ export class ClaudeSession {
     // no recovery short of restarting the host.
     await withDeadline(settled.promise, {
       label: "claude/compact",
-      timeoutMs: this.options.deps.deadlines.compactMs,
+      timeoutMs: CLAUDE_COMPACT_DEADLINE_MS,
       onTimeout: () => {
         this.emit([
           this.normalizer.warning(
@@ -1776,7 +1759,7 @@ export class ClaudeSession {
     }
     return (await withDeadline(this.query.backgroundTasks(toolUseId), {
       label: "claude/background_tasks",
-      timeoutMs: this.options.deps.deadlines.cancelMs
+      timeoutMs: AGENT_HOST_DEADLINES.cancelMs
     })) as boolean;
   }
 
@@ -1810,7 +1793,7 @@ export class ClaudeSession {
     try {
       receipt = (await withDeadline(this.query!.interrupt(), {
         label: "claude/interrupt",
-        timeoutMs: this.options.deps.deadlines.cancelMs
+        timeoutMs: AGENT_HOST_DEADLINES.cancelMs
       })) as { still_queued?: string[] } | undefined;
     } catch {
       // The interrupt RPC is the graceful path; the hard one follows.
@@ -1831,7 +1814,7 @@ export class ClaudeSession {
     try {
       await withDeadline(settled.promise, {
         label: "claude/interrupt/settle",
-        timeoutMs: this.options.deps.deadlines.cancelMs
+        timeoutMs: AGENT_HOST_DEADLINES.cancelMs
       });
     } catch {
       await this.stop("Stop: the turn did not settle after the interrupt.");
@@ -1863,15 +1846,15 @@ export class ClaudeSession {
     // timer is CLEARED when the loop wins — `support/deadline.ts` deliberately
     // does not unref, so a leaked one per stop would hold the event loop open
     // and delay the drain-restart the shutdown design depends on.
-    let timer: NodeJS.Timeout | number | undefined;
+    let timer: NodeJS.Timeout | undefined;
     const guard = new Promise<void>((resolve) => {
-      timer = this.options.deps.setTimer(resolve, this.options.deps.deadlines.cancelMs);
+      timer = setTimeout(resolve, AGENT_HOST_DEADLINES.cancelMs);
     });
     try {
       await Promise.race([this.streamDone ?? Promise.resolve(), guard]);
     } finally {
       if (timer !== undefined) {
-        this.options.deps.clearTimer(timer);
+        clearTimeout(timer);
       }
     }
   }
@@ -2321,7 +2304,7 @@ export class ClaudeSession {
     const window = this.hasOpenTool
       ? TURN_LIVENESS_WINDOWS.activeToolMs
       : TURN_LIVENESS_WINDOWS.idleMs;
-    this.watchdog = this.options.deps.setTimer(() => {
+    this.watchdog = setTimeout(() => {
       this.checkLiveness().catch((error: unknown) => {
         // The host installs no `unhandledRejection` handler; a throw from a
         // timer callback would take it down.
@@ -2332,7 +2315,7 @@ export class ClaudeSession {
 
   private clearWatchdog(): void {
     if (this.watchdog !== undefined) {
-      this.options.deps.clearTimer(this.watchdog);
+      clearTimeout(this.watchdog);
       this.watchdog = undefined;
     }
   }

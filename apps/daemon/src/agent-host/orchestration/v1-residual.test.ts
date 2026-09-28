@@ -19,9 +19,7 @@ import type {
 import type { StartSessionInput } from "../adapter.ts";
 import type { AppendableDomainEvent } from "../services.ts";
 
-import { projectDirFor } from "../adapters/opencode/index.ts";
 import { isAgentChatCommandError } from "./errors.ts";
-import { stampHistoryTimes } from "./orchestrator.ts";
 import { createScriptedAdapter, createTestHost, type TestHost } from "./testing/index.ts";
 
 let seq = 0;
@@ -60,9 +58,6 @@ describe("R4-6: the production start passes the PROJECT, not just the cwd", () =
     const input = startInput(host);
     assert.equal(input.projectPath, "/work/project");
     assert.equal(input.cwd, "/work/project/packages/ui");
-    // The real key function, not a restatement of it: this is what the pool
-    // hashes, and it took the `cwd` fallback for the whole fix wave.
-    assert.equal(projectDirFor(input), "/work/project");
     await host.stop();
   });
 });
@@ -221,16 +216,15 @@ const RESUMED: ThreadSnapshot = {
   ]
 };
 
-function historyEvents(threadId: string, snapshot: ThreadSnapshot): RuntimeEvent[] {
+function historyEvents(threadId: string, snapshot: ThreadSnapshot, createdAt = "not a date"): RuntimeEvent[] {
   const out: RuntimeEvent[] = [];
   const raw = { source: HISTORICAL_RAW_SOURCE, payload: null };
   for (const turn of snapshot.turns) {
     out.push({
       eventId: `h-${turn.id}-start`,
       threadId,
-      // Stamped "now", as every adapter did at first — the host is what must
-      // push these behind the thread's own rows.
-      createdAt: new Date(1_700_000_000_000).toISOString(),
+      // Missing/bad adapter timestamps are placed before this thread's own rows.
+      createdAt,
       turnId: turn.id,
       type: "turn.started",
       payload: {},
@@ -241,7 +235,7 @@ function historyEvents(threadId: string, snapshot: ThreadSnapshot): RuntimeEvent
       out.push({
         eventId: `h-${turn.id}-${index}`,
         threadId,
-        createdAt: new Date(1_700_000_000_000).toISOString(),
+        createdAt,
         turnId: turn.id,
         itemId: `h-${turn.id}-${index}`,
         type: "item.completed",
@@ -257,7 +251,7 @@ function historyEvents(threadId: string, snapshot: ThreadSnapshot): RuntimeEvent
     out.push({
       eventId: `h-${turn.id}-end`,
       threadId,
-      createdAt: new Date(1_700_000_000_000).toISOString(),
+      createdAt,
       turnId: turn.id,
       type: "turn.completed",
       payload: { state: "completed", tokenUsage: { usageStatus: "unavailable" } },
@@ -302,7 +296,7 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
     const claude = createScriptedAdapter({
       id: "claude",
       history: RESUMED,
-      projectHistory: (snapshot) => historyEvents("thread-1", snapshot)
+      projectHistory: (snapshot) => historyEvents("thread-1", snapshot, "2000-01-01T00:00:00.000Z")
     });
     const host = createTestHost({ adapters: { claude } });
     host.ingestion.translate = translateHistoryMessages;
@@ -319,6 +313,8 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
       ["Remember this token: KIWI-3355", "OK"],
       "the tab is not blank before the user types"
     );
+    const historical = (host.store.logs.get(threadId) ?? []).filter((event) => event.type === "thread.message-sent");
+    assert.ok(historical.every((event) => event.occurredAt === "2000-01-01T00:00:00.000Z"));
     await host.stop();
   });
 
@@ -326,7 +322,9 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
     const claude = createScriptedAdapter({
       id: "claude",
       history: RESUMED,
-      projectHistory: (snapshot) => historyEvents("thread-1", snapshot)
+      projectHistory: (snapshot) => historyEvents("thread-1", snapshot).map((event, index) =>
+        index === 2 ? { ...event, createdAt: "2099-01-01T00:00:00.000Z" } : event
+      )
     });
     const host = createTestHost({ adapters: { claude } });
     host.ingestion.translate = translateHistoryMessages;
@@ -352,36 +350,9 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
     const created = host.store.heads.get(threadId)?.createdAt;
     assert.ok(created !== undefined);
     assert.ok(
-      Date.parse(rows[0]!.occurredAt) < Date.parse(created),
+      rows.slice(0, 2).every((event) => Date.parse(event.occurredAt) < Date.parse(created)),
       "history is stamped before the thread was created, so a time sort agrees with the log"
     );
     await host.stop();
-  });
-});
-
-describe("stampHistoryTimes: history never claims to have happened just now", () => {
-  const anchor = "2026-09-01T12:00:00.000Z";
-
-  it("pushes a `now`-stamped row behind the thread's creation, in order", () => {
-    const stamped = stampHistoryTimes(
-      [{ createdAt: "2026-09-01T12:00:05.000Z" }, { createdAt: "2026-09-01T12:00:06.000Z" }],
-      anchor
-    );
-    const times = stamped.map((row) => Date.parse(row.createdAt));
-    assert.ok(times[0]! < Date.parse(anchor));
-    assert.ok(times[1]! < Date.parse(anchor));
-    assert.ok(times[0]! < times[1]!, "the adapter's order survives");
-  });
-
-  it("keeps a real transcript timestamp exactly as the adapter read it", () => {
-    const real = "2026-08-30T09:15:00.000Z";
-    const stamped = stampHistoryTimes([{ createdAt: real }], anchor);
-    assert.equal(stamped[0]?.createdAt, real);
-  });
-
-  it("treats an unparseable stamp as missing rather than dropping the row", () => {
-    const stamped = stampHistoryTimes([{ createdAt: "not a date" }], anchor);
-    assert.equal(stamped.length, 1);
-    assert.ok(Date.parse(stamped[0]!.createdAt!) < Date.parse(anchor));
   });
 });

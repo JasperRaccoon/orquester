@@ -4,17 +4,15 @@
  */
 
 export { ChatStatusLine } from "./ChatStatusLine";
-export { ContextMeter, ContextMeterPanel, type ContextMeterProps } from "./ContextMeter";
-export { GoalChip, GoalPanel, type GoalChipProps, type GoalPanelProps } from "./GoalChip";
+export { ContextMeter, type ContextMeterProps } from "./ContextMeter";
+export { GoalChip, type GoalChipProps } from "./GoalChip";
 
 export {
   deriveGoalChip,
   deriveGoalPanel,
-  formatGoalPhase,
   goalActions,
   goalActionsNote,
   GOAL_ACTION_TEXT,
-  GOAL_ACTIONS_WAIT_NOTE,
   type GoalActionModel,
   type GoalActionsInput,
   type GoalChipModel,

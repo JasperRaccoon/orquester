@@ -30,7 +30,7 @@
  * chat adapter's bindings are not touched by this feature.
  */
 
-import { withDeadline, DeadlineExceededError, type DeadlineTimers } from "../../../agent-host/support/deadline.ts";
+import { withDeadline, DeadlineExceededError } from "../../../agent-host/support/deadline.ts";
 import { spawnProviderChild, type ProviderChild } from "../../../agent-host/support/spawn.ts";
 import { CodexPeer, CodexRequestRefusal, CodexRpcError } from "../../../agent-host/adapters/codex/protocol.ts";
 import { AgentProfileError, profileErrors } from "../../errors.ts";
@@ -233,7 +233,10 @@ export interface CodexConfigClient {
     params: CodexConfigMethods[M]["params"],
     options?: { timeoutMs?: number }
   ): Promise<CodexConfigMethods[M]["result"]>;
-  /** Stops the app-server (if running). The client can be used again afterwards. */
+  /**
+   * Stops the app-server (if running) and resolves once every child this
+   * client stopped is gone. The client can be used again afterwards.
+   */
   close(): Promise<void>;
 }
 
@@ -254,17 +257,10 @@ export interface CodexAppServerClientOptions extends CodexConfigClientOptions {
   args?: readonly string[];
   idleMs?: number;
   callTimeoutMs?: number;
-  /** The idle timer and every call's deadline run on these (tests expire them by hand). */
-  timers?: DeadlineTimers;
   killGraceMs?: number;
   /** Added to the child's env (a test's fake reads its knobs from it). */
   extraEnv?: Readonly<Record<string, string>>;
 }
-
-const realTimers: DeadlineTimers = {
-  set: (fire, ms) => setTimeout(fire, ms),
-  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
-};
 
 interface Running {
   child: ProviderChild;
@@ -275,14 +271,14 @@ interface Running {
 
 export class CodexAppServerClient implements CodexConfigClient {
   private running: Running | null = null;
+  /** Kills in flight (idle close, a missed deadline, `close`), until each child is gone. */
+  private readonly stopping = new Set<Promise<unknown>>();
   private pending = 0;
-  private idleHandle: unknown = null;
-  private readonly timers: DeadlineTimers;
+  private idleHandle: ReturnType<typeof setTimeout> | null = null;
   private readonly idleMs: number;
   private readonly callTimeoutMs: number;
 
   constructor(private readonly options: CodexAppServerClientOptions) {
-    this.timers = options.timers ?? realTimers;
     this.idleMs = options.idleMs ?? CODEX_CONFIG_IDLE_MS;
     this.callTimeoutMs = options.callTimeoutMs ?? CODEX_CONFIG_CALL_TIMEOUT_MS;
   }
@@ -316,7 +312,6 @@ export class CodexAppServerClient implements CodexConfigClient {
       return (await withDeadline(work, {
         label: `codex app-server ${method}`,
         timeoutMs,
-        timers: this.timers,
         onTimeout: () => {
           this.stop(current, `${method} timed out`);
         }
@@ -336,8 +331,8 @@ export class CodexAppServerClient implements CodexConfigClient {
     const running = this.running;
     if (running !== null) {
       this.stop(running, "closed");
-      await running.child.exited;
     }
+    await Promise.all([...this.stopping]);
   }
 
   private ensureRunning(): Running {
@@ -408,12 +403,16 @@ export class CodexAppServerClient implements CodexConfigClient {
     if (this.running === running) {
       this.running = null;
     }
-    void running.child.kill();
+    const gone = running.child.kill().catch(() => undefined);
+    this.stopping.add(gone);
+    void gone.then(() => {
+      this.stopping.delete(gone);
+    });
   }
 
   private armIdle(): void {
     this.cancelIdle();
-    this.idleHandle = this.timers.set(() => {
+    this.idleHandle = setTimeout(() => {
       this.idleHandle = null;
       const running = this.running;
       if (running !== null && this.pending === 0) {
@@ -424,7 +423,7 @@ export class CodexAppServerClient implements CodexConfigClient {
 
   private cancelIdle(): void {
     if (this.idleHandle !== null) {
-      this.timers.clear(this.idleHandle);
+      clearTimeout(this.idleHandle);
       this.idleHandle = null;
     }
   }

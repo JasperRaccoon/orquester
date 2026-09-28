@@ -68,7 +68,7 @@ function useAccountRepos(account: AccountSummary | null): {
 }
 
 /** The repo a URL names, when it is one of the listed repos' clone URLs. */
-export function repoForUrl(repos: RepoSummary[] | null, url: string): RepoSummary | null {
+function repoForUrl(repos: RepoSummary[] | null, url: string): RepoSummary | null {
   const value = url.trim();
   if (!repos || !value) return null;
   return repos.find((repo) => repo.sshUrl === value || repo.httpsUrl === value || repo.fullName === value) ?? null;

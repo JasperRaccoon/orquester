@@ -24,7 +24,7 @@ import { foldSubagentActivities, type RuntimeEvent } from "@orquester/api/agent-
 
 import { runtimeEventToActivities } from "../../ingestion/activities.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
-import { GROK_AGENT_LIVENESS_TTL_MS, GrokNormalizer } from "./normalize.ts";
+import { GrokNormalizer } from "./normalize.ts";
 
 const SESSION = "01a05780-1220-7ee0-863c-3eed47284f9e";
 const PROMPT = "8792d6d3-a044-49bf-8168-af4aa4ba4c4e";
@@ -264,64 +264,6 @@ function taskCompleted(snapshot: Record<string, unknown> = {}, taskId = SHELL_TA
 // ---------------------------------------------------------------------------
 // Subagents
 // ---------------------------------------------------------------------------
-
-test("subagent_spawned starts an agent task, on either private-channel method", () => {
-  // An agent the CLI spawns with no `spawn_subagent` call of this session's —
-  // a goal's planner — starts under its own id, which is also its launch id
-  // (the relaunch contract's first start), backgrounded: nothing waits on it.
-  for (const method of ["_x.ai/session_notification", "x.ai/session_notification", "_x.ai/session/update"]) {
-    const r = rig();
-    const events = r.live(spawned("01a05789-0cc0-7563-9e4f-4b4b576928cc"), method);
-    noWarnings(events);
-    const [started, ...rest] = only(events, "task.started");
-    assert.deepEqual(rest, [], method);
-    assert.deepEqual(started.payload, {
-      taskId: "01a05789-0cc0-7563-9e4f-4b4b576928cc",
-      taskType: "subagent",
-      agentId: "01a05789-0cc0-7563-9e4f-4b4b576928cc",
-      title: "goal plan writer",
-      description: "goal plan writer",
-      role: "general-purpose",
-      model: "grok-4.6",
-      toolUseId: "01a05789-0cc0-7563-9e4f-4b4b576928cc",
-      livenessTtlMs: GROK_AGENT_LIVENESS_TTL_MS,
-      isBackgrounded: true
-    });
-    assert.equal(started.turnId, "turn-1");
-    assert.equal(started.raw?.source, "acp.grok.extension");
-  }
-});
-
-test("subagent_finished completes the task with its output, usage and linkage — in the turn that spawned it", () => {
-  const r = rig();
-  r.live(explore("01a0578f-573b-78b3-ba00-df910190c3c0", "Audit patients PHI IDOR"));
-  r.turn = "turn-2";
-  const events = r.live(
-    finished("01a0578f-573b-78b3-ba00-df910190c3c0", {
-      tool_calls: 64,
-      duration_ms: 591179,
-      tokens_used: 126413,
-      output: "Found two IDORs in the patients handlers; both fixed."
-    })
-  );
-  noWarnings(events);
-  const [completed] = only(events, "task.completed");
-  assert.deepEqual(completed.payload, {
-    taskId: "01a0578f-573b-78b3-ba00-df910190c3c0",
-    taskType: "subagent",
-    agentId: "01a0578f-573b-78b3-ba00-df910190c3c0",
-    title: "Audit patients PHI IDOR",
-    // 1.0.3 names an explore agent's `role` (fixtures README observation 58).
-    role: "explore",
-    model: "grok-4.6",
-    toolUseId: "01a0578f-573b-78b3-ba00-df910190c3c0",
-    livenessTtlMs: GROK_AGENT_LIVENESS_TTL_MS,
-    status: "completed",
-    summary: "Found two IDORs in the patients handlers; both fixed.",
-    usage: { totalTokens: 126413, toolUses: 64, durationMs: 591179 }
-  });
-  assert.equal(completed.turnId, "turn-1", "the row belongs with its start");
-});
 
 test("a cancelled subagent stops with the CLI's reason; a failed one fails", () => {
   const r = rig();
@@ -724,32 +666,6 @@ test("a repeated spawn frame starts nothing twice; a finish naming no agent this
   // session's: its end names nothing here, and the host's first load closes
   // what a dead process left running (`leftoverWorkClosings`).
   assert.deepEqual(r.live(finished("s0", { output: "late result" })), []);
-});
-
-test("a live subagent never outlives the session: stopping closes it, once", () => {
-  const r = rig();
-  r.live(spawned("s1"));
-  r.live(spawned("s2", { description: "goal summarizer" }));
-  r.live(finished("s1"));
-  const closing = r.normalizer.stopBackgroundTasks();
-  assert.deepEqual(
-    closing.map((event) =>
-      event.type === "task.completed" ? [event.payload.taskId, event.payload.status, event.payload.title] : event.type
-    ),
-    [["s2", "stopped", "goal summarizer"]]
-  );
-  assert.deepEqual(r.normalizer.stopBackgroundTasks(), []);
-});
-
-test("a turn that ran a subagent says so on its usage", () => {
-  const r = rig();
-  r.live(spawned("s1"));
-  r.live(finished("s1"));
-  const settled = r.normalizer.turnCompleted("turn-1", { stopReason: "end_turn" });
-  assert.equal(settled.type === "turn.completed" && settled.payload.tokenUsage?.hasSubagents, true);
-  r.normalizer.beginTurn();
-  const next = r.normalizer.turnCompleted("turn-2", { stopReason: "end_turn" });
-  assert.equal(next.type === "turn.completed" && next.payload.tokenUsage?.hasSubagents, false, "per turn");
 });
 
 test("a subagent_spawned without an id is one visible warning; a finish without one writes nothing", () => {

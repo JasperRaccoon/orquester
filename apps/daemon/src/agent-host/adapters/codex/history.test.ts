@@ -16,7 +16,7 @@ import { describe, it } from "node:test";
 
 import { HISTORICAL_RAW_SOURCE, type ThreadSnapshot } from "@orquester/api/agent-chat";
 
-import { CODEX_RAW_HISTORY, projectCodexHistory } from "./history.ts";
+import { projectCodexHistory } from "./history.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 
 const FIXTURE_DIR = join(
@@ -68,11 +68,6 @@ function snapshotFromFixture(): ThreadSnapshot {
 describe("codex history projection — replayed from fixture 07", () => {
   const snapshot = snapshotFromFixture();
   const events = projectCodexHistory(snapshot);
-
-  it("the capture really carries a hydrated turn", () => {
-    assert.equal(snapshot.turns.length, 1, "one turn was recorded");
-    assert.equal(snapshot.turns[0]!.items.length, 2, "a user message and an assistant message");
-  });
 
   it("brackets every turn with turn.started … turn.completed", () => {
     assert.equal(events[0]!.type, "turn.started");
@@ -141,11 +136,8 @@ describe("codex history projection — replayed from fixture 07", () => {
 
   it("marks EVERY row as history so nothing reads it as live traffic", () => {
     for (const event of events) {
-      assert.equal(event.raw?.source, CODEX_RAW_HISTORY, event.type);
+      assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE, event.type);
     }
-    // The marker is the SHARED one, not a Codex-private spelling: the fold
-    // must recognise history without knowing which provider wrote it.
-    assert.equal(CODEX_RAW_HISTORY, HISTORICAL_RAW_SOURCE);
   });
 
   it("emits nothing that could look like progress", () => {

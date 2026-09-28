@@ -28,7 +28,6 @@ import {
 import { createIngestion } from "../../ingestion/index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen,
@@ -107,15 +106,13 @@ test("fixture 05: commentary closed by the question ask folds to its text exactl
   const closingText = partFrame(mutated[closingIndex]!)!.properties.part.text!;
 
   const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
+
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
     idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
   });
   const state = createSessionState({
     threadId: "t1",

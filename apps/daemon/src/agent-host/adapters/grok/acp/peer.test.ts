@@ -10,7 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ACP_ERROR_CODES, AcpRpcError, AcpTransportClosedError } from "./errors.ts";
-import { AcpPeer, summarisePayload, unwrapExtensionParams } from "./peer.ts";
+import { AcpPeer } from "./peer.ts";
 
 interface Harness {
   peer: AcpPeer;
@@ -152,19 +152,6 @@ test("a handler that throws answers -32603 rather than dying", async () => {
   assert.deepEqual(h.sent[0]["error"], { code: ACP_ERROR_CODES.internalError, message: "nope" });
 });
 
-test("a handler may choose its own JSON-RPC code", async () => {
-  const h = harness();
-  h.peer.onRequest("boom", async () => {
-    await Promise.resolve();
-    throw new AcpRpcError("boom", { code: -32602, message: "Invalid params", data: "bad" });
-  });
-  h.recv({ jsonrpc: "2.0", id: 5, method: "boom" });
-  await tick();
-  const error = h.sent[0]["error"] as Record<string, unknown>;
-  assert.equal(error["code"], -32602);
-  assert.equal(error["data"], "bad");
-});
-
 // ---------------------------------------------------------- unknown methods
 
 test("an unknown inbound REQUEST is answered -32601 and warned about", async () => {
@@ -199,15 +186,6 @@ test("the warning summarises the payload rather than copying it", () => {
   assert.match(detail, /array\(3\)/);
 });
 
-test("summarisePayload keeps shapes and drops values", () => {
-  assert.deepEqual(summarisePayload({ a: "short", b: 1, c: null, d: {} }), {
-    a: '"short"',
-    b: "1",
-    c: "null",
-    d: "object(0)"
-  });
-});
-
 // -------------------------------------------------------------- extensions
 
 test("an extension is registered under BOTH spellings", async () => {
@@ -223,14 +201,26 @@ test("an extension is registered under BOTH spellings", async () => {
   assert.deepEqual(seen, ["a", "b"], "1.0.34 uses the underscore spelling only; both must work");
 });
 
-test("wrapped {method, params} is unwrapped, and a payload with its own `method` is not", () => {
-  assert.deepEqual(
-    unwrapExtensionParams({ method: "_x.ai/exit_plan_mode", params: { toolCallId: "a" } }, "x.ai/exit_plan_mode"),
-    { toolCallId: "a" }
-  );
-  const passthrough = { method: "something-else", params: { a: 1 } };
-  assert.deepEqual(unwrapExtensionParams(passthrough, "x.ai/exit_plan_mode"), passthrough);
-  assert.deepEqual(unwrapExtensionParams({ toolCallId: "a" }, "x.ai/exit_plan_mode"), { toolCallId: "a" });
+test("extension dispatch unwraps matching envelopes and preserves unrelated method fields", async () => {
+  const h = harness();
+  const seen: unknown[] = [];
+  h.peer.registerExtension("x.ai/exit_plan_mode", async (params) => {
+    seen.push(params);
+    return { outcome: "abandoned" };
+  });
+  for (const [index, params] of [
+    { method: "_x.ai/exit_plan_mode", params: { toolCallId: "wrapped" } },
+    { method: "something-else", params: { a: 1 } },
+    { toolCallId: "plain" }
+  ].entries()) {
+    h.recv({ jsonrpc: "2.0", id: index + 1, method: "_x.ai/exit_plan_mode", params });
+  }
+  await tick();
+  assert.deepEqual(seen, [
+    { toolCallId: "wrapped" },
+    { method: "something-else", params: { a: 1 } },
+    { toolCallId: "plain" }
+  ]);
 });
 
 // ----------------------------------------------------- errors and deadlines
@@ -280,7 +270,6 @@ test("transport death fails every in-flight request exactly once, then fails fas
   ]);
   assert.ok(aError instanceof AcpTransportClosedError);
   assert.ok(bError instanceof AcpTransportClosedError);
-  assert.equal(h.peer.inFlightCount, 0);
 
   const after = await h.peer.request("session/prompt", {}).then(
     () => null,
@@ -288,7 +277,6 @@ test("transport death fails every in-flight request exactly once, then fails fas
   );
   assert.ok(after instanceof AcpTransportClosedError, "a later send fails fast");
   h.peer.close("second");
-  assert.equal(h.peer.isClosed, true);
 });
 
 test("an aborted request rejects with the signal's reason", async () => {

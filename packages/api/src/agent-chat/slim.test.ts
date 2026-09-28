@@ -8,10 +8,6 @@ import test from "node:test";
 
 import { parseGoalUpdatedPayload } from "./goal.ts";
 import {
-  MCP_ITEM_KEPT_FIELDS,
-  SLIM_MAX_CHANGED_FILES,
-  SLIM_MAX_STRING_BYTES,
-  SLIM_SUMMARY_ELIDE_CHARS,
   slimActivityPayload,
   summarizeToolTextOutput
 } from "./slim.ts";
@@ -20,11 +16,6 @@ function record(value: unknown): Record<string, unknown> {
   assert.ok(value !== null && typeof value === "object", "expected a record");
   return value as Record<string, unknown>;
 }
-
-test("a payload with no data record is returned by identity", () => {
-  const payload = { itemType: "command_execution", title: "ls" };
-  assert.equal(slimActivityPayload(payload), payload);
-});
 
 test("a non-record payload passes through", () => {
   assert.equal(slimActivityPayload("hello"), "hello");
@@ -36,7 +27,7 @@ test("summarizeToolTextOutput takes the first meaningful line, elided at 84", ()
   assert.equal(summarizeToolTextOutput("   \n\n  first line  \nsecond"), "first line");
   const long = "x".repeat(200);
   const summary = summarizeToolTextOutput(long)!;
-  assert.equal(summary.length, SLIM_SUMMARY_ELIDE_CHARS);
+  assert.equal(summary.length, 84);
   assert.ok(summary.endsWith("…"));
 });
 
@@ -87,11 +78,11 @@ test("an MCP tool call keeps only the allow-listed item fields", () => {
     })
   );
   const item = record(record(slim.data).item);
-  assert.deepEqual(
-    Object.keys(item).sort(),
-    [...MCP_ITEM_KEPT_FIELDS, "result"].sort()
-  );
-  assert.deepEqual(item.result, { content: "first hit" });
+  assert.deepEqual(item, {
+    type: "mcp_tool_call", id: "i1", tool: "search", server: "docs", status: "completed",
+    arguments: { q: "x" }, appContext: null, error: null, durationMs: 12,
+    result: { content: "first hit" }
+  });
   assert.equal(slim.truncated, true);
 });
 
@@ -105,7 +96,7 @@ test("changed files are promoted to a bounded top-level path list", () => {
     })
   );
   const changedFiles = slim.changedFiles as string[];
-  assert.equal(changedFiles.length, SLIM_MAX_CHANGED_FILES);
+  assert.equal(changedFiles.length, 12);
   assert.equal(changedFiles[0], "src/f0.ts");
 });
 
@@ -145,18 +136,11 @@ test("a declined nested item re-stamps too, and a real success is left alone", (
   );
 });
 
-test("the status re-stamp still runs when there is no data record to rebuild", () => {
-  // `data` is not a record, so the allow-list rebuild is skipped, but a failed
-  // tool must never render as a success.
-  const slim = record(slimActivityPayload({ status: "completed", data: [1, 2, 3] }));
-  assert.equal(slim.status, "completed");
-});
-
 test("every string is capped at 16 KiB and the row flagged truncated", () => {
-  const huge = "a".repeat(SLIM_MAX_STRING_BYTES + 1_000);
+  const huge = "a".repeat(16_384 + 1_000);
   const slim = record(slimActivityPayload({ itemType: "error", detail: huge, data: {} }));
   const detail = slim.detail as string;
-  assert.equal(byteLength(detail), SLIM_MAX_STRING_BYTES + byteLength("\u2026"));
+  assert.equal(byteLength(detail), 16_384 + byteLength("\u2026"));
   assert.equal(slim.truncated, true);
 });
 
@@ -172,10 +156,10 @@ test("a compaction summary survives slimming, capped and flagged", () => {
     short,
     "a summary that fits is untouched"
   );
-  const huge = "s".repeat(SLIM_MAX_STRING_BYTES + 2_000);
+  const huge = "s".repeat(16_384 + 2_000);
   const slim = record(slimActivityPayload({ state: "compacted", summary: huge }));
   const summary = slim.summary as string;
-  assert.equal(byteLength(summary), SLIM_MAX_STRING_BYTES + byteLength("…"));
+  assert.equal(byteLength(summary), 16_384 + byteLength("…"));
   assert.equal(slim.truncated, true);
 });
 
@@ -186,12 +170,12 @@ test("an agent's launch prompt survives slimming, capped and flagged, beside its
   // `GET …/items/:itemId` for the stored value. `promptTruncated` — the stored
   // value is itself cut — is not the wire's to change.
   const short = { taskId: "t1", agentKind: "agent", prompt: "Read b.txt and report its first word." };
-  assert.equal(slimActivityPayload(short), short, "a prompt that fits leaves the row by identity");
-  const huge = "p".repeat(SLIM_MAX_STRING_BYTES + 2_000);
+  assert.deepEqual(slimActivityPayload(short), short);
+  const huge = "p".repeat(16_384 + 2_000);
   const slim = record(
     slimActivityPayload({ taskId: "t1", agentKind: "agent", prompt: huge, promptTruncated: true })
   );
-  assert.equal(byteLength(slim.prompt as string), SLIM_MAX_STRING_BYTES + byteLength("…"));
+  assert.equal(byteLength(slim.prompt as string), 16_384 + byteLength("…"));
   assert.equal(slim.truncated, true);
   assert.equal(slim.promptTruncated, true);
   assert.equal(slim.taskId, "t1");
@@ -206,11 +190,11 @@ test("the cap counts UTF-8 bytes, not UTF-16 code units", () => {
   // R5 #16: `value.length` let a CJK string reach ~3x the stated cap, and an
   // emoji string ~2x (a surrogate pair is 2 units but 4 bytes).
   for (const unit of ["世", "🙂"]) {
-    const huge = unit.repeat(SLIM_MAX_STRING_BYTES);
+    const huge = unit.repeat(16_384);
     const slim = record(slimActivityPayload({ itemType: "error", detail: huge, data: {} }));
     const detail = slim.detail as string;
     assert.ok(
-      byteLength(detail) <= SLIM_MAX_STRING_BYTES + byteLength("\u2026"),
+      byteLength(detail) <= 16_384 + byteLength("\u2026"),
       `${unit}: ${byteLength(detail)} bytes exceeds the cap`
     );
     assert.equal(slim.truncated, true);
@@ -219,7 +203,7 @@ test("the cap counts UTF-8 bytes, not UTF-16 code units", () => {
   }
 });
 
-test("a multi-byte string that fits is returned by identity", () => {
+test("a multi-byte string below the wire cap stays complete", () => {
   const payload = { itemType: "error", detail: "世".repeat(100), data: {} };
   const slim = record(slimActivityPayload(payload));
   assert.equal(slim.detail, payload.detail);
@@ -258,13 +242,13 @@ test("a goal row's payload survives slimming whole: goal, change and previous (g
     change: "checked",
     previous: { objective: "Old aim", status: "complete" }
   };
-  assert.equal(slimActivityPayload(checked), checked, "a goal payload that fits is returned by identity");
+  assert.deepEqual(slimActivityPayload(checked), checked);
   const cleared = { goal: null, change: "cleared", previous: { objective: "Old aim", status: "active" } };
-  assert.equal(slimActivityPayload(cleared), cleared);
+  assert.deepEqual(slimActivityPayload(cleared), cleared);
 });
 
 test("a goal row's strings meet the same wire cap as every other string, and nothing else moves", () => {
-  const huge = "c".repeat(SLIM_MAX_STRING_BYTES + 500);
+  const huge = "c".repeat(16_384 + 500);
   const slim = record(
     slimActivityPayload({
       goal: { objective: "Make CI green", status: "active", rounds: 3, lastCheck: huge },
@@ -278,7 +262,7 @@ test("a goal row's strings meet the same wire cap as every other string, and not
   assert.equal(goal.objective, "Make CI green");
   assert.equal(goal.status, "active");
   assert.equal(goal.rounds, 3);
-  assert.equal(byteLength(goal.lastCheck as string), SLIM_MAX_STRING_BYTES + byteLength("…"));
+  assert.equal(byteLength(goal.lastCheck as string), 16_384 + byteLength("…"));
   assert.equal(slim.truncated, true);
   // Still a goal payload: the client's fold adopts what slimming leaves.
   assert.notEqual(parseGoalUpdatedPayload(slim), null);

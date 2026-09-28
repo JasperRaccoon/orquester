@@ -7,12 +7,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  isEnterPlanToolCall,
-  isExitPlanToolCall,
-  isPlanMarkdownPath,
   nextPlanModeActive,
   planMarkdownFromToolCall,
-  planSessionPrefixes,
   type PlanPathHost
 } from "./plan.ts";
 
@@ -21,55 +17,52 @@ const host: PlanPathHost = { platform: "linux", env: { GROK_HOME, HOME: "/var/li
 
 const REAL_PLAN_PATH = `${GROK_HOME}/sessions/%2Fvar%2Flib%2Fworkspace/01a0c1a4-d265-7c63-825d-4896587d488c/plan.md`;
 
-test("the managed account home's session plan matches", () => {
-  // T3's canonical regex requires a literal `.grok` component under a real
-  // home root; a `GROK_HOME`-bound plan has neither.
-  assert.equal(isPlanMarkdownPath(REAL_PLAN_PATH, host), true);
-});
+function planAt(path: unknown, owner: PlanPathHost): string | undefined {
+  return planMarkdownFromToolCall({ rawInput: { file_path: path, content: "# Plan" } }, owner);
+}
 
 test("a workspace plan.md never matches", () => {
-  assert.equal(isPlanMarkdownPath("/work/project/docs/plan.md", host), false);
-  assert.equal(isPlanMarkdownPath("/work/project/.grok/sessions/a/b/plan.md", host), false);
+  assert.equal(planAt("/work/project/docs/plan.md", host), undefined);
+  assert.equal(planAt("/work/project/.grok/sessions/a/b/plan.md", host), undefined);
 });
 
 test("a `..` segment is refused outright, not normalised", () => {
   assert.equal(
-    isPlanMarkdownPath(`${GROK_HOME}/sessions/x/../../../workspace/plan.md`, host),
-    false,
+    planAt(`${GROK_HOME}/sessions/x/../../../workspace/plan.md`, host),
+    undefined,
     "otherwise the prefix test becomes a path-confusion write primitive"
   );
 });
 
 test("at least one intermediate directory is required", () => {
-  assert.equal(isPlanMarkdownPath(`${GROK_HOME}/sessions/plan.md`, host), false);
-  assert.equal(isPlanMarkdownPath(`${GROK_HOME}/sessions/a/plan.md`, host), true);
+  assert.equal(planAt(`${GROK_HOME}/sessions/plan.md`, host), undefined);
+  assert.equal(planAt(`${GROK_HOME}/sessions/a/plan.md`, host), "# Plan");
 });
 
 test("a non-plan file under the sessions dir does not match", () => {
-  assert.equal(isPlanMarkdownPath(`${GROK_HOME}/sessions/a/b/notes.md`, host), false);
-  assert.equal(isPlanMarkdownPath(`${GROK_HOME}/sessions/a/b/plan.md.bak`, host), false);
+  assert.equal(planAt(`${GROK_HOME}/sessions/a/b/notes.md`, host), undefined);
+  assert.equal(planAt(`${GROK_HOME}/sessions/a/b/plan.md.bak`, host), undefined);
 });
 
 test("a `~/.grok` layout still matches, for a system-identity thread", () => {
   const systemHost: PlanPathHost = { platform: "linux", env: { HOME: "/home/dev" } };
-  assert.equal(isPlanMarkdownPath("/home/dev/.grok/sessions/a/b/plan.md", systemHost), true);
+  assert.equal(planAt("/home/dev/.grok/sessions/a/b/plan.md", systemHost), "# Plan");
 });
 
 test("matching is case-insensitive only on win32", () => {
   const win: PlanPathHost = { platform: "win32", env: { GROK_HOME: "C:/Users/dev/.grok" } };
-  assert.equal(isPlanMarkdownPath("C:\\Users\\Dev\\.grok\\sessions\\a\\b\\PLAN.MD", win), true);
-  assert.equal(isPlanMarkdownPath(`${GROK_HOME.toUpperCase()}/sessions/a/b/plan.md`, host), false);
+  assert.equal(planAt("C:\\Users\\Dev\\.grok\\sessions\\a\\b\\PLAN.MD", win), "# Plan");
+  assert.equal(planAt(`${GROK_HOME.toUpperCase()}/sessions/a/b/plan.md`, host), undefined);
 });
 
 test("both GROK_HOME layouts are accepted", () => {
-  const prefixes = planSessionPrefixes(host);
-  assert.ok(prefixes.includes(`${GROK_HOME}/sessions/`));
-  assert.ok(prefixes.includes(`${GROK_HOME}/.grok/sessions/`));
+  assert.equal(planAt(`${GROK_HOME}/sessions/a/b/plan.md`, host), "# Plan");
+  assert.equal(planAt(`${GROK_HOME}/.grok/sessions/a/b/plan.md`, host), "# Plan");
 });
 
 test("a non-string path is never a plan", () => {
-  assert.equal(isPlanMarkdownPath(undefined, host), false);
-  assert.equal(isPlanMarkdownPath(7, host), false);
+  assert.equal(planAt(undefined, host), undefined);
+  assert.equal(planAt(7, host), undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -126,17 +119,17 @@ const exitMeta = {
 };
 
 test("plan mode is DECLARED by _meta['x.ai/tool'].kind, not matched on a title", () => {
-  assert.equal(isEnterPlanToolCall({ title: "anything at all", meta: enterMeta }), true);
-  assert.equal(isExitPlanToolCall({ title: "anything at all", meta: exitMeta }), true);
+  assert.equal(nextPlanModeActive(false, { status: "completed", title: "anything at all", meta: enterMeta }), true);
+  assert.equal(nextPlanModeActive(true, { status: "completed", title: "anything at all", meta: exitMeta }), false);
   // The vendor kind wins over a misleading title.
-  assert.equal(isEnterPlanToolCall({ title: "enter_plan_mode", meta: exitMeta }), false);
+  assert.equal(nextPlanModeActive(false, { status: "completed", title: "enter_plan_mode", meta: exitMeta }), false);
 });
 
 test("the title heuristic is the fallback when no vendor meta is present", () => {
-  assert.equal(isEnterPlanToolCall({ title: "Plan: Enter" }), true);
-  assert.equal(isEnterPlanToolCall({ title: "plan mode entered" }), true);
-  assert.equal(isEnterPlanToolCall({ rawInput: { variant: "EnterPlanMode" } }), true);
-  assert.equal(isEnterPlanToolCall({ title: "Write `/tmp/a`" }), false);
+  assert.equal(nextPlanModeActive(false, { status: "completed", title: "Plan: Enter" }), true);
+  assert.equal(nextPlanModeActive(false, { status: "completed", title: "plan mode entered" }), true);
+  assert.equal(nextPlanModeActive(false, { status: "completed", rawInput: { variant: "EnterPlanMode" } }), true);
+  assert.equal(nextPlanModeActive(false, { status: "completed", title: "Write `/tmp/a`" }), false);
 });
 
 test("a FAILED enter_plan_mode must not leave the flag stuck on", () => {

@@ -186,7 +186,7 @@ export function createSessionManager(
   return new LocalSessionManager(registry, options, indexPath);
 }
 
-export function buildLaunchCommand(
+function buildLaunchCommand(
   entry: RegistryEntry,
   opts: { tmux: boolean; resumeArgs?: readonly string[] }
 ): { bin: string; args: string[] } {

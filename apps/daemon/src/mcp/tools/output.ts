@@ -17,9 +17,9 @@ import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../resu
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 
 /** A window's default size, in UTF-8 bytes of the text. */
-export const DEFAULT_OUTPUT_BYTES = 40_000;
+const DEFAULT_OUTPUT_BYTES = 40_000;
 /** The largest window one call takes: 5 000 under ok()'s 60 000-byte cap (result.ts), as read_transcript's maxChars is. */
-export const MAX_OUTPUT_BYTES = 55_000;
+const MAX_OUTPUT_BYTES = 55_000;
 
 /** What the text is: a command's output, a message's text, or the item's payload. */
 type ToolOutputKind = "command-output" | "message" | "payload";

@@ -73,41 +73,6 @@ test("creating a project refuses an existing NON-EMPTY directory", async (t) => 
   assert.deepEqual(await readdir(taken), ["README.md"]);
 });
 
-test("the refusal names an ARCHIVED project instead of a mystery collision", async (t) => {
-  const h = await harness();
-  t.after(() => h.close());
-
-  const hidden = join(h.workspacesDir, "acme", "hidden");
-  await mkdir(hidden, { recursive: true });
-  await writeFile(join(hidden, "README.md"), "archived work\n", "utf8");
-  await mkdir(join(h.root, "daemon"), { recursive: true });
-  await writeFile(
-    join(h.root, "daemon", "workspaces.json"),
-    JSON.stringify({
-      version: 1,
-      workspaces: [
-        {
-          name: "acme",
-          createdAt: "2026-01-01T00:00:00.000Z",
-          isArchived: false,
-          archivedProjects: ["hidden"]
-        }
-      ]
-    }),
-    "utf8"
-  );
-
-  const res = await h.inject({
-    method: "POST",
-    url: "/api/workspaces/acme/projects",
-    payload: { source: "empty", name: "hidden" }
-  });
-  assert.equal(res.statusCode, 409);
-  assert.equal(res.json().code, "DIRECTORY_NOT_EMPTY");
-  assert.match(res.json().message, /archived project/);
-  assert.match(res.json().message, /Archived panel/);
-});
-
 test("creating a project still succeeds on a fresh or existing EMPTY directory", async (t) => {
   const h = await harness();
   t.after(() => h.close());

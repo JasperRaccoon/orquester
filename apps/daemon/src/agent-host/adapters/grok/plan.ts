@@ -67,7 +67,7 @@ function hasTraversalSegment(normalized: string): boolean {
  * `GROK_HOME` entries come first because they are the ones Orquester creates;
  * the `~/.grok` ones remain for a `system`-identity thread.
  */
-export function planSessionPrefixes(host: PlanPathHost): readonly string[] {
+function planSessionPrefixes(host: PlanPathHost): readonly string[] {
   const prefixes = new Set<string>();
   const add = (root: string | undefined, nested: boolean): void => {
     if (root === undefined) {
@@ -103,7 +103,7 @@ export function planSessionPrefixes(host: PlanPathHost): readonly string[] {
  * user-visible proposal, so a file the agent edits for unrelated reasons must
  * not hijack that row.
  */
-export function isPlanMarkdownPath(path: unknown, host: PlanPathHost): boolean {
+function isPlanMarkdownPath(path: unknown, host: PlanPathHost): boolean {
   if (typeof path !== "string") {
     return false;
   }
@@ -204,7 +204,7 @@ export interface PlanToolCallView {
  * "enter_plan"` is authoritative; the title/`variant` heuristic below is the
  * fallback for a frame that carries no vendor meta.
  */
-export function isEnterPlanToolCall(call: PlanToolCallView): boolean {
+function isEnterPlanToolCall(call: PlanToolCallView): boolean {
   const meta = xaiToolMeta(call.meta);
   if (meta !== undefined) {
     return meta.kind === "enter_plan";
@@ -226,7 +226,7 @@ export function isEnterPlanToolCall(call: PlanToolCallView): boolean {
 }
 
 /** True for the tool call that EXITS it. */
-export function isExitPlanToolCall(call: PlanToolCallView): boolean {
+function isExitPlanToolCall(call: PlanToolCallView): boolean {
   const meta = xaiToolMeta(call.meta);
   if (meta !== undefined) {
     return meta.kind === "exit_plan";

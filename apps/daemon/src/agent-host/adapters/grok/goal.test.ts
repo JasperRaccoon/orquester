@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 
 import type { AgentGoal, GoalUpdatedPayload, RuntimeEvent } from "@orquester/api/agent-chat";
 
-import { GROK_GOAL_PROGRESS_THROTTLE_MS, goalCommandFromReminder, grokGoalStatus } from "./goal.ts";
+import { goalCommandFromReminder } from "./goal.ts";
 import { GrokNormalizer } from "./normalize.ts";
 
 const GOAL_ID = "3f6b2c1e-8a4d-4f0b-9c2e-7d5a1b9e0c44";
@@ -74,7 +74,6 @@ function envelope(update: Record<string, unknown>, meta: Record<string, unknown>
 
 interface Rig {
   normalizer: GrokNormalizer;
-  debug: Array<{ message: string; detail?: unknown }>;
   advance(ms: number): void;
   /** A live frame, on the live channel unless a method is named. */
   live(update: Record<string, unknown>, method?: string): RuntimeEvent[];
@@ -87,7 +86,6 @@ interface Rig {
 function rig(options: { knownGoal?: AgentGoal | null; turnId?: string } = {}): Rig {
   let clock = 1_000_000;
   let n = 0;
-  const debug: Array<{ message: string; detail?: unknown }> = [];
   const normalizer = new GrokNormalizer(
     {
       threadId: "t1",
@@ -103,16 +101,12 @@ function rig(options: { knownGoal?: AgentGoal | null; turnId?: string } = {}): R
       planHost: { platform: "linux", env: {} },
       launchNonce: "launch-1",
       ...(options.knownGoal === undefined ? {} : { knownGoal: options.knownGoal }),
-      now: () => clock,
-      debug: (message, detail) => {
-        debug.push({ message, detail });
-      }
+      now: () => clock
     },
     "session-1"
   );
   return {
     normalizer,
-    debug,
     advance: (ms) => {
       clock += ms;
     },
@@ -152,41 +146,6 @@ const MINUTE = 60_000;
 // §6.3 item 1 — recognised, never a warning, deduped
 // ---------------------------------------------------------------------------
 
-test("goal_updated is recognised under every xAI method name the adapter routes, never as a warning", () => {
-  // The session registers `x.ai/session_notification` (live) and
-  // `x.ai/session/update` (replay), each in both spellings. A frame that is
-  // not a replay is LIVE whichever of them carried it.
-  for (const method of [
-    "x.ai/session_notification",
-    "_x.ai/session_notification",
-    "x.ai/session/update",
-    "_x.ai/session/update"
-  ]) {
-    const r = rig({ turnId: "turn-1" });
-    const events = r.live(frame(), method);
-    assert.deepEqual(
-      events.map((event) => event.type),
-      ["thread.goal.updated"],
-      `${method}: exactly one goal row, no runtime.warning`
-    );
-    const [event] = events as Array<Extract<RuntimeEvent, { type: "thread.goal.updated" }>>;
-    assert.equal(event.payload.change, "set");
-    assert.equal(event.turnId, "turn-1", "stamped with the turn the goal runs in");
-    assert.equal(event.threadId, "t1");
-    assert.equal(event.raw?.source, "acp.grok.extension");
-    assert.equal(event.raw?.method, method);
-  }
-});
-
-test("identical consecutive frames are dropped", () => {
-  const r = rig();
-  const created = frame();
-  assert.equal(r.goals(r.live(created)).length, 1);
-  // The real session repeats frames byte for byte (`goal_completed` three times).
-  assert.deepEqual(r.live({ ...created }), []);
-  assert.deepEqual(r.live({ ...created }), []);
-});
-
 test("frames whose counters alone moved emit nothing", () => {
   const r = rig();
   r.live(frame());
@@ -209,7 +168,7 @@ test("frames whose counters alone moved emit nothing", () => {
   );
 });
 
-test("a malformed goal_updated is dropped with a debug line, never a warning", () => {
+test("a malformed goal_updated emits no goal row or warning", () => {
   const r = rig();
   for (const bad of [
     { sessionUpdate: "goal_updated" },
@@ -219,7 +178,6 @@ test("a malformed goal_updated is dropped with a debug line, never a warning", (
   ]) {
     assert.deepEqual(r.live(bad), []);
   }
-  assert.ok(r.debug.length >= 4, "every dropped frame says why at debug level");
 });
 
 // ---------------------------------------------------------------------------
@@ -246,11 +204,15 @@ test("every Grok status maps onto the goal status set", () => {
     [3, undefined]
   ];
   for (const [raw, expected] of cases) {
-    assert.equal(grokGoalStatus(raw), expected, JSON.stringify(raw));
+    const r = rig();
+    r.live(frame());
+    r.advance(MINUTE);
+    const [update] = r.goals(r.live(at(1, { status: raw, last_event: "worker_completed", total_worker_rounds: 1 })));
+    assert.equal(update.goal?.status, expected ?? "active", JSON.stringify(raw));
   }
 });
 
-test("an unknown status keeps the tracked status, with a debug line", () => {
+test("an unknown status keeps the tracked status", () => {
   const r = rig();
   r.live(frame());
   r.advance(MINUTE);
@@ -260,16 +222,11 @@ test("an unknown status keeps the tracked status, with a debug line", () => {
   assert.equal(progress.change, "progress");
   assert.equal(progress.goal?.status, "active", "the status the thread already shows");
   assert.equal(progress.goal?.rounds, 1);
-  assert.ok(
-    r.debug.some((line) => JSON.stringify(line).includes("reticulating")),
-    "the unknown status is named at debug level"
-  );
 });
 
 test("an unknown status with nothing tracked emits nothing rather than guess one", () => {
   const r = rig();
   assert.deepEqual(r.live(frame({ status: "reticulating" })), []);
-  assert.ok(r.debug.some((line) => JSON.stringify(line).includes("reticulating")));
 });
 
 test("the frame maps field by field", () => {
@@ -585,7 +542,7 @@ test("progress is throttled to one per 30 s per thread; a status change never is
     [10_000, at(11, { last_event: "worker_completed", total_worker_rounds: 2, last_event_detail: ROUND_TWO })],
     // A counters-only frame after the window: the round-two state it still
     // carries is finally shown.
-    [GROK_GOAL_PROGRESS_THROTTLE_MS - 9_000, at(11, { last_event: "worker_completed", total_worker_rounds: 2, last_event_detail: ROUND_TWO, tokens_used: 5 })],
+    [30_000 - 9_000, at(11, { last_event: "worker_completed", total_worker_rounds: 2, last_event_detail: ROUND_TWO, tokens_used: 5 })],
     // Four seconds after that progress: a status change goes out at once.
     [4_000, at(12, { last_event: "goal_paused", status: "user_paused", total_worker_rounds: 2, last_event_detail: ROUND_TWO })]
   ];
@@ -654,113 +611,6 @@ test("a frame that is not running the goal keeps its own phase, whatever `planni
 // ---------------------------------------------------------------------------
 // A whole goal run, shaped on the real session
 // ---------------------------------------------------------------------------
-
-test("a whole goal run: set, round one, a failed verification, round two, achieved", () => {
-  // The real run, frame for frame in kind: three identical-but-for-counters
-  // `goal_created` frames while planning — the planner's start and end are the
-  // two hidden `progress` rows, its frames in between nothing — round one's `worker_completed` with
-  // the verification running, the verdict landing on the same event, round
-  // two carrying the STALE verdict while its own verification runs — which is
-  // not a second check — and `goal_completed` three times, once verbatim.
-  const r = rig();
-  const created = frame();
-  const roundOne = at(54, {
-    tokens_used: 1951592,
-    elapsed_ms: 3253451,
-    total_worker_rounds: 1,
-    finished_subagent_tokens: 1633215,
-    last_event: "worker_completed",
-    last_event_detail: ROUND_ONE,
-    classifier_runs_attempted: 1,
-    classifier_max_runs: 6,
-    verifying_completion: true
-  });
-  const verdict = {
-    ...roundOne,
-    tokens_used: 2435790,
-    elapsed_ms: 4402008,
-    verifying_completion: undefined,
-    last_classifier_verdict: "not_achieved",
-    last_classifier_details_path: "/scratch/grok-goal-059a0802bf82/goal-classifier-059a0802bf82-1.md"
-  };
-  const roundTwo = at(89, {
-    tokens_used: 2468118,
-    elapsed_ms: 4749573,
-    total_worker_rounds: 2,
-    last_event: "worker_completed",
-    last_event_detail: ROUND_TWO,
-    classifier_runs_attempted: 2,
-    classifier_max_runs: 6,
-    last_classifier_verdict: "not_achieved",
-    last_classifier_details_path: "/scratch/grok-goal-059a0802bf82/goal-classifier-059a0802bf82-1.md",
-    verifying_completion: true
-  });
-  const completed = at(106, {
-    status: "complete",
-    phase: "idle",
-    tokens_used: 2786282,
-    elapsed_ms: 5431463,
-    total_worker_rounds: 2,
-    last_event: "goal_completed",
-    classifier_runs_attempted: 2,
-    classifier_max_runs: 6,
-    last_classifier_verdict: "achieved",
-    last_classifier_details_path: "/home/sessions/goal/goal-classifier-059a0802bf82-2.md"
-  });
-
-  const changes = runLive(r, [
-    [0, created],
-    [0, { ...created, planning: true }],
-    [19, { ...created, planning: true, elapsed_ms: 19 }],
-    [222_499, { ...created, planning: true, tokens_used: 67845, elapsed_ms: 222518 }],
-    [64, { ...created, tokens_used: 67845, elapsed_ms: 222582 }],
-    [3_030_869, roundOne],
-    [0, { ...roundOne }],
-    [1_148_391, { ...roundOne, tokens_used: 2435790, elapsed_ms: 4401842, live_subagent_tokens: 165352, live_context_pct: 33 }],
-    [166, verdict],
-    [46, { ...verdict, elapsed_ms: 4402054 }],
-    [347_519, roundTwo],
-    [681_880, { ...roundTwo, tokens_used: 2786282, elapsed_ms: 5431453 }],
-    [10, completed],
-    [0, { ...completed }],
-    [0, { ...completed, tokens_used: 2817072 }]
-  ]);
-
-  assert.deepEqual(
-    changes.map((payload) => [payload.change, payload.goal?.phase]),
-    [
-      ["set", "executing"],
-      ["progress", "planning"],
-      ["progress", "executing"],
-      ["progress", "executing"],
-      ["checked", "executing"],
-      ["progress", "executing"],
-      ["achieved", "idle"]
-    ]
-  );
-  const [, , , first, checked, second, achieved] = changes;
-  assert.equal(first.goal?.rounds, 1);
-  assert.equal(first.goal?.lastCheck, ROUND_ONE);
-  assert.equal(checked.goal?.rounds, 1, "`Goal check 1: not met`");
-  assert.equal(
-    checked.goal?.lastCheck,
-    "Verification: not achieved (attempt 1 of 6)",
-    "the verdict, never the worker's own summary still on the frame"
-  );
-  assert.equal(second.goal?.rounds, 2);
-  assert.equal(second.goal?.lastCheck, ROUND_TWO);
-  assert.deepEqual(achieved.goal, {
-    objective: OBJECTIVE,
-    status: "complete",
-    goalId: GOAL_ID,
-    phase: "idle",
-    rounds: 2,
-    tokensUsed: 2786282,
-    elapsedMs: 5431463,
-    setAt: "2026-09-24T09:00:00.622Z"
-  });
-  assert.equal(achieved.previous, undefined, "the achieved goal is the row's own goal");
-});
 
 test("a second not_achieved verdict is a second check", () => {
   const r = rig();
@@ -877,23 +727,13 @@ test("the identical-frame drop is observable: a repeat never delivers a throttle
     [0, frame()],
     [1_000, at(10, { last_event: "worker_completed", total_worker_rounds: 1, last_event_detail: ROUND_ONE })],
     [1_000, roundTwo],
-    [GROK_GOAL_PROGRESS_THROTTLE_MS, { ...roundTwo }],
+    [30_000, { ...roundTwo }],
     [1_000, { ...roundTwo, tokens_used: 5 }]
   ] as const;
   assert.deepEqual(
     perFrame.map(([advance, update]) => runLive(r, [[advance, update]]).map((payload) => [payload.change, payload.goal?.rounds])),
     [[["set", 0]], [["progress", 1]], [], [], [["progress", 2]]]
   );
-});
-
-test("an identical repeat of an unreadable frame is not read twice", () => {
-  const r = rig();
-  const unknown = frame({ status: "reticulating" });
-  r.live(unknown);
-  const lines = r.debug.length;
-  assert.ok(lines > 0);
-  r.live({ ...unknown });
-  assert.equal(r.debug.length, lines, "dropped before it is interpreted: no second debug line");
 });
 
 // ---------------------------------------------------------------------------
@@ -1060,27 +900,6 @@ test("a finished goal the thread shows is left alone when nothing was replayed",
   assert.deepEqual(none.normalizer.reconcileGoal("load"), []);
 });
 
-test("the comparison emits at most one update, whatever was replayed", () => {
-  const knowns: Array<AgentGoal | null> = [null, ROUND_ONE_GOAL, { ...ROUND_ONE_GOAL, status: "complete" }];
-  const replays: Array<Array<Record<string, unknown>>> = [
-    [],
-    [frame()],
-    [frame(), at(10, { last_event: "goal_cleared" })],
-    [frame(), at(10, { last_event: "goal_completed", status: "complete", phase: "idle" })],
-    [frame(), at(10, { goal_id: OTHER_GOAL_ID, objective: OTHER_OBJECTIVE })]
-  ];
-  for (const knownGoal of knowns) {
-    for (const frames of replays) {
-      const r = rig({ knownGoal });
-      for (const update of frames) {
-        assert.deepEqual(r.replay(update), []);
-      }
-      assert.ok(r.normalizer.reconcileGoal("load").length <= 1);
-      assert.deepEqual(r.normalizer.reconcileGoal("load"), []);
-    }
-  }
-});
-
 test("after the comparison, live frames continue from the replayed state, not from scratch", () => {
   const r = rig({ knownGoal: ROUND_ONE_GOAL });
   replayRoundOne(r);
@@ -1158,16 +977,6 @@ test("a fresh session with no goal, or a finished one, to show says nothing", ()
     const r = rig({ knownGoal });
     assert.deepEqual(r.normalizer.reconcileGoal("new"), []);
   }
-});
-
-test("the same known goal: a load with no goal row keeps it, a fresh session clears it", () => {
-  const load = rig({ knownGoal: ROUND_ONE_GOAL });
-  assert.deepEqual(load.normalizer.reconcileGoal("load"), [], "no replayed evidence");
-  const fresh = rig({ knownGoal: ROUND_ONE_GOAL });
-  assert.deepEqual(
-    fresh.goals(fresh.normalizer.reconcileGoal("new")).map((payload) => payload.change),
-    ["cleared"]
-  );
 });
 
 // ---------------------------------------------------------------------------

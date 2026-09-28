@@ -36,7 +36,7 @@ export type LogStream = "stdout" | "stderr";
 /** A layout effect in the browser, a plain one in the static render checks (which run neither). */
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
-export interface LogViewerViewProps {
+interface LogViewerViewProps {
   lines: readonly string[];
   stream: LogStream;
   onStreamChange: (stream: LogStream) => void;
@@ -55,7 +55,7 @@ export interface LogViewerViewProps {
 }
 
 /** The viewer as a picture of its props (no stream) — what the container and the render checks draw. */
-export const LogViewerView: React.FC<LogViewerViewProps> = ({
+const LogViewerView: React.FC<LogViewerViewProps> = ({
   lines,
   stream,
   onStreamChange,

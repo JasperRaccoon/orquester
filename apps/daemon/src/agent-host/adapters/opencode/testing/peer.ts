@@ -1,6 +1,6 @@
 /**
- * The scripted OpenCode mock peer (spec §9), shared by the server-pool tests
- * and the snapshot-budget tests.
+ * The scripted OpenCode mock peer (spec §9), shared by the server-pool tests,
+ * the snapshot-budget tests and the server-recycle tests.
  *
  * A tiny Node script written into a temp dir and launched through the *same*
  * `spawnProviderChild` path the real `opencode serve` uses, behind a shell shim
@@ -40,10 +40,19 @@ import { MINIMUM_OPENCODE_VERSION } from "../semver.ts";
  * `MOCK_PROVIDER_STATUS` makes `GET /provider` answer that status instead of a
  * catalogue, which is how a catalogue failure is told apart from a start
  * failure. Every other catalogue route always answers.
+ *
+ * `MOCK_UPSTREAM` (an `http://` origin the test listens on) makes the peer a
+ * real server process in front of the test's own OpenCode fake: it announces
+ * itself there (`POST /__peer/up` with its pid and origin) before printing the
+ * readiness line, then forwards every non-catalogue request — streamed, so
+ * `GET /event` stays an SSE stream — with an `x-peer-origin` header naming the
+ * server it reached. The session routes then run against one store across
+ * server restarts, as the real data directory does.
  */
 const PEER_SOURCE = `
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 
+const upstream = process.env.MOCK_UPSTREAM;
 const mode = process.env.MOCK_MODE ?? "ok";
 const version = process.env.MOCK_VERSION ?? "${MINIMUM_OPENCODE_VERSION}";
 const providerStatus = Number(process.env.MOCK_PROVIDER_STATUS ?? "200");
@@ -63,6 +72,38 @@ const CATALOGUE = {
   "/command": [{ name: "init", description: "Initialise AGENTS.md" }],
   "/skill": [{ name: "review", description: "Review a diff", location: "/skills/review/SKILL.md" }]
 };
+
+let origin = "";
+
+function forward(req, res) {
+  const target = new URL(req.url ?? "/", upstream);
+  const out = request(
+    target,
+    { method: req.method, headers: { ...req.headers, host: target.host, "x-peer-origin": origin } },
+    (answer) => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers);
+      res.flushHeaders();
+      answer.pipe(res);
+    }
+  );
+  out.on("error", () => {
+    if (!res.headersSent) res.writeHead(502);
+    res.end();
+  });
+  res.on("close", () => out.destroy());
+  req.pipe(out);
+}
+
+function announceUpstream() {
+  return new Promise((resolve, reject) => {
+    const out = request(new URL("/__peer/up", upstream), { method: "POST", headers: { "content-type": "application/json" } }, (answer) => {
+      answer.resume();
+      answer.on("end", resolve);
+    });
+    out.on("error", reject);
+    out.end(JSON.stringify({ pid: process.pid, origin }));
+  });
+}
 
 if (mode === "die") {
   process.stderr.write("mock peer: fatal error\\n");
@@ -94,9 +135,15 @@ if (mode === "silent") {
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(CATALOGUE[route]));
       return;
     }
+    if (upstream !== undefined) {
+      forward(req, res);
+      return;
+    }
     res.writeHead(200, { "content-type": "application/json" }).end("{}");
   });
-  server.listen(port, host, () => {
+  server.listen(port, host, async () => {
+    origin = "http://" + host + ":" + server.address().port;
+    if (upstream !== undefined) await announceUpstream();
     const announce = () => {
       if (mode === "noisy") {
         process.stdout.write("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\\n");

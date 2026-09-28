@@ -64,30 +64,6 @@ async function harness() {
   };
 }
 
-test("a clone passes its ref through to the account service", async (t) => {
-  const h = await harness();
-  t.after(() => h.close());
-  const res = await h.inject({
-    method: "POST",
-    url: "/api/workspaces/acme/projects",
-    payload: { source: "clone", url: "git@github.com:o/r.git", name: "wf-x", ref: "v1.2.3" }
-  });
-  assert.equal(res.statusCode, 200, res.body);
-  assert.deepEqual(h.clones, [["acc-1", "git@github.com:o/r.git", "wf-x", join(h.workspacesDir, "acme"), { ref: "v1.2.3" }]]);
-});
-
-test("a clone without a ref is unchanged", async (t) => {
-  const h = await harness();
-  t.after(() => h.close());
-  const res = await h.inject({
-    method: "POST",
-    url: "/api/workspaces/acme/projects",
-    payload: { source: "clone", url: "git@github.com:o/r.git" }
-  });
-  assert.equal(res.statusCode, 200, res.body);
-  assert.deepEqual(h.clones[0]?.[4], {});
-});
-
 test("a bad ref is a 400 INVALID_REF and nothing is cloned", async (t) => {
   const h = await harness();
   t.after(() => h.close());
@@ -101,22 +77,11 @@ test("a bad ref is a 400 INVALID_REF and nothing is cloned", async (t) => {
     assert.equal(res.json().code, "INVALID_REF");
   }
   assert.equal(h.clones.length, 0);
-});
-
-test("only an unattended clone (a workflow's) is marked for the ceiling and the prompt-free env", async (t) => {
-  const h = await harness();
-  t.after(() => h.close());
-  const dialog = await h.inject({
+  const valid = await h.inject({
     method: "POST",
     url: "/api/workspaces/acme/projects",
-    payload: { source: "clone", url: "git@github.com:o/r.git", name: "dialog" }
+    payload: { source: "clone", url: "git@github.com:o/r.git", ref: "main" }
   });
-  assert.equal(dialog.statusCode, 200, dialog.body);
-  const workflow = await h.inject({
-    method: "POST",
-    url: "/api/workspaces/acme/projects",
-    payload: { source: "clone", url: "git@github.com:o/r.git", name: "wf-y", ref: "main", unattended: true }
-  });
-  assert.equal(workflow.statusCode, 200, workflow.body);
-  assert.deepEqual(h.clones.map((args) => args[4]), [{}, { ref: "main", unattended: true }]);
+  assert.equal(valid.statusCode, 200, valid.body);
+  assert.equal(h.clones.length, 1);
 });

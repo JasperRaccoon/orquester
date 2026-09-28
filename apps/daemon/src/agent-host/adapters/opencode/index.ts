@@ -61,11 +61,7 @@ import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { OpenCodeThreadSession } from "./session.ts";
-import {
-  OpenCodeServerPool,
-  type OpenCodeServerHandle,
-  type OpenCodeServerPoolOptions
-} from "./server.ts";
+import { OpenCodeServerPool, type OpenCodeServerHandle } from "./server.ts";
 import { meetsMinimumOpenCodeVersion, parseSemver } from "./semver.ts";
 import { loadInventoryFromCli } from "./cli-inventory.ts";
 import { projectOpenCodeHistory } from "./history.ts";
@@ -175,13 +171,9 @@ class OpenCodeAdapterImpl implements AgentAdapter {
    */
   private readonly inFlight = new Map<string, number>();
 
-  constructor(
-    ctx: AdapterContext,
-    seams: { pool?: Pick<OpenCodeServerPoolOptions, "startServer" | "fetchImpl"> } = {}
-  ) {
+  constructor(ctx: AdapterContext) {
     this.ctx = ctx;
     this.pool = new OpenCodeServerPool({
-      ...seams.pool,
       onRelease: (projectDir) => this.scheduleRecycleCheck(projectDir),
       logger: ctx.logger,
       resolveBin: () => this.resolveBin(),

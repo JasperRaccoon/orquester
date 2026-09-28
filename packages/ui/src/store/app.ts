@@ -3270,7 +3270,7 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
  * Drop every workflow editor tab (a connection switch, a sign-out: they name
  * the previous daemon's workflows), and any active-tab pointer at one.
  */
-export function withoutWorkflowTabs(
+function withoutWorkflowTabs(
   state: Pick<AppState, "workflowTabsByProject" | "activeTabByProject">
 ): Pick<AppState, "workflowTabsByProject" | "activeTabByProject"> {
   const ids = new Set<string>();

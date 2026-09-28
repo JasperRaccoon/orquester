@@ -98,8 +98,6 @@ export interface WorkflowRuntimeDeps {
   /** A sandbox runner other than the default detached one (tests). */
   sandbox?: SandboxRunner;
   limits?: Partial<EngineLimits>;
-  /** Global days a workflow tab is kept after its run (default 7). */
-  workflowTabRetentionDays?: number;
 }
 
 /** What `createAgentExecutor` (agent/executor.ts `AgentExecutorDeps`) is handed. */
@@ -202,8 +200,7 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
     projects,
     api: () => api,
     activeRunIds: () => engine.activeRunIds(),
-    logger: deps.logger,
-    ...(deps.workflowTabRetentionDays !== undefined ? { workflowTabRetentionDays: deps.workflowTabRetentionDays } : {})
+    logger: deps.logger
   });
 
   let started = false;

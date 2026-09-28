@@ -29,9 +29,6 @@ test("parseAgentAccounts rejects an unknown agent", () => {
 });
 
 test("path helpers compose under the daemon dir", () => {
-  assert.match(agentAccountsFile("/base"), /agent-accounts\.json$/);
-  assert.equal(
-    agentAccountHome("/base", "codex", "id9").endsWith("agent-accounts/codex/id9/home"),
-    true
-  );
+  assert.equal(agentAccountsFile("/base"), "/base/daemon/agent-accounts.json");
+  assert.equal(agentAccountHome("/base", "codex", "id9"), "/base/daemon/agent-accounts/codex/id9/home");
 });

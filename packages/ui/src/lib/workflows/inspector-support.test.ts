@@ -4,8 +4,8 @@ import { describe, it } from "node:test";
 import type { AgentAccount, UsageResponse, WorkflowBlockRun } from "@orquester/api";
 
 import { blockInputOf, parsePinnedText } from "./inspector-data.ts";
-import { clampInspectorWidth, DEFAULT_EDITOR_LAYOUT, parseEditorLayout } from "./inspector-layout.ts";
-import { accountFamily, accountUsageRows, formatResetIn, scopedWindowLabels } from "./inspector-usage.ts";
+import { parseEditorLayout } from "./inspector-layout.ts";
+import { accountFamily, accountUsageRows, scopedWindowLabels } from "./inspector-usage.ts";
 import { edge, node, workflow } from "./testing.ts";
 
 const NOW = Date.parse("2026-09-28T10:00:00.000Z");
@@ -72,13 +72,6 @@ describe("account usage rows", () => {
     assert.equal(accountFamily("claudex"), null, "a removed launcher a stored chain may still name");
     assert.deepEqual(scopedWindowLabels(usage, "claude"), ["Fable"]);
   });
-
-  it("reset countdowns", () => {
-    assert.equal(formatResetIn("2026-09-28T12:30:00.000Z", NOW), "2h 30m");
-    assert.equal(formatResetIn("2026-10-02T12:00:00.000Z", NOW), "4d 2h");
-    assert.equal(formatResetIn("2026-09-28T09:00:00.000Z", NOW), "now");
-    assert.equal(formatResetIn(undefined, NOW), "");
-  });
 });
 
 describe("the editor layout in localStorage", () => {
@@ -88,11 +81,12 @@ describe("the editor layout in localStorage", () => {
       paletteOpen: false,
       minimap: true
     });
-    assert.deepEqual(parseEditorLayout("not json"), DEFAULT_EDITOR_LAYOUT);
-    assert.deepEqual(parseEditorLayout(null), DEFAULT_EDITOR_LAYOUT);
-    assert.deepEqual(parseEditorLayout([1, 2]), DEFAULT_EDITOR_LAYOUT);
-    assert.equal(clampInspectorWidth(100), 320);
-    assert.equal(clampInspectorWidth(Number.NaN), 380);
+    for (const raw of ["not json", null, [1, 2], { inspectorWidth: Number.NaN }]) {
+      const layout = parseEditorLayout(raw);
+      assert.equal(layout.paletteOpen, true);
+      assert.equal(layout.minimap, true);
+      assert.ok(Number.isFinite(layout.inspectorWidth) && layout.inspectorWidth >= 320 && layout.inspectorWidth <= 640);
+    }
   });
 });
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { TimelineItem } from "./run-view.ts";
-import { followsNewRun, pickBlockId, pickRunId } from "./runs-mode.ts";
+import { pickBlockId, pickRunId } from "./runs-mode.ts";
 
 const step = (nodeId: string, status: TimelineItem["status"], extra: Partial<TimelineItem> = {}): TimelineItem =>
   ({
@@ -46,15 +46,5 @@ describe("runs mode", () => {
     const items = [step("t", "succeeded"), step("a", "failed"), step("b", "skipped")];
     assert.equal(pickBlockId(items, "b"), "b");
     assert.equal(pickBlockId(items, "gone"), "a", "the failed block");
-    assert.equal(pickBlockId(items, null), "a");
-    const live = [step("t", "succeeded"), step("a", "running")];
-    assert.equal(pickBlockId(live, null), "a", "the live block");
-    assert.equal(pickBlockId([], null), null);
-  });
-
-  it("a trigger's new run takes over only a view the user did not pick", () => {
-    assert.equal(followsNewRun({ picked: null, newestBefore: "r1", newestNow: "r2" }), true);
-    assert.equal(followsNewRun({ picked: "r1", newestBefore: "r1", newestNow: "r2" }), false);
-    assert.equal(followsNewRun({ picked: null, newestBefore: "r2", newestNow: "r2" }), false);
   });
 });

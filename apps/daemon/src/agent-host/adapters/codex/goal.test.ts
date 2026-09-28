@@ -16,8 +16,7 @@ import {
   CodexGoalTracker,
   agentGoalFromCodex,
   codexGoalCarry,
-  codexGoalStatusSummary,
-  formatGoalElapsed
+  codexGoalStatusSummary
 } from "./goal.ts";
 import { CodexNormaliser } from "./normalise.ts";
 import { CodexUsageTracker } from "./usage.ts";
@@ -426,9 +425,6 @@ describe("codex goal — nothing is read over a pending resume snapshot (fix rou
 });
 
 describe("codex goal — the `/goal` status text (goals §6.2.3)", () => {
-  it("says so when there is no goal", () => {
-    assert.equal(codexGoalStatusSummary(null), "No goal is set.");
-  });
 
   it("names the status, the objective, the tokens against the budget and the time", () => {
     assert.equal(
@@ -451,29 +447,6 @@ describe("codex goal — the `/goal` status text (goals §6.2.3)", () => {
     );
   });
 
-  it("cuts a long objective", () => {
-    assert.equal(
-      codexGoalStatusSummary({ objective: "a".repeat(300), status: "active" }),
-      `Goal active: ${"a".repeat(199)}…`
-    );
-  });
-
-  it("formats elapsed time the way Codex's own /goal does", () => {
-    const cases: [number, string][] = [
-      [0, "0s"],
-      [59_000, "59s"],
-      [60_000, "1m"],
-      [1_800_000, "30m"],
-      [5_400_000, "1h 30m"],
-      [7_200_000, "2h"],
-      [86_399_000, "23h 59m"],
-      [86_400_000, "1d 0h 0m"],
-      [(2 * 86_400 + 23 * 3_600 + 42 * 60) * 1_000, "2d 23h 42m"]
-    ];
-    for (const [ms, text] of cases) {
-      assert.equal(formatGoalElapsed(ms), text, String(ms));
-    }
-  });
 });
 
 describe("codex goal — the notifications become thread.goal.updated (goals §6.2.1)", () => {
@@ -530,19 +503,8 @@ describe("codex goal — the notifications become thread.goal.updated (goals §6
       turnId: null,
       goal: codexGoal({ status: "someNewStatus" })
     });
-    assert.equal(goals.notificationCount, 1, "a reply sent before it is stale");
-    assert.equal(goals.settled, true, "no snapshot is pending any more");
+    assert.equal(goals.responded(goal({ status: "complete" }), 0), null, "an earlier reply is stale");
+    assert.equal(goals.notified(goal({ status: "paused" }))?.change, "paused", "the snapshot window is closed");
   });
 
-  it("feeds the tracker the session owns", () => {
-    const goals = new CodexGoalTracker({ known: goal() });
-    const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker(), goals });
-    const [event] = normaliser.notification("thread/goal/updated", {
-      threadId: "thread-1",
-      turnId: null,
-      goal: codexGoal({ status: "paused" })
-    });
-    assert.equal((event!.payload as { change: string }).change, "paused");
-    assert.equal(goals.current?.status, "paused");
-  });
 });

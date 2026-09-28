@@ -54,8 +54,6 @@ export interface WorkflowServiceOptions {
   /** `workflowsPath(baseDir)`. */
   file: string;
   logger?: Pick<Console, "warn" | "error">;
-  now?: () => Date;
-  mintId?: () => string;
   /** Secret names a workflow can read (global + its own) — validation context. */
   secretNames?: (workflowId: string | undefined) => readonly string[];
   /** Saved prompt ids — validation context. */
@@ -95,8 +93,6 @@ export class WorkflowService implements WorkflowStore {
   private blockedReason: string | null = null;
   private readonly file: string;
   private readonly logger: Pick<Console, "warn" | "error">;
-  private readonly now: () => Date;
-  private readonly mintId: () => string;
   private readonly secretNames: (workflowId: string | undefined) => readonly string[];
   private readonly savedPromptIds: () => readonly string[];
   private readonly agentCatalog: () => WorkflowAgentCatalog | undefined;
@@ -104,8 +100,6 @@ export class WorkflowService implements WorkflowStore {
   constructor(options: WorkflowServiceOptions) {
     this.file = options.file;
     this.logger = options.logger ?? console;
-    this.now = options.now ?? (() => new Date());
-    this.mintId = options.mintId ?? randomUUID;
     this.secretNames = options.secretNames ?? (() => []);
     this.savedPromptIds = options.savedPromptIds ?? (() => []);
     this.agentCatalog = options.agentCatalog ?? (() => undefined);
@@ -213,7 +207,7 @@ export class WorkflowService implements WorkflowStore {
     this.requireRoom();
     let draft: Workflow;
     try {
-      draft = createWorkflowFromRequest(request, { mintId: this.mintId, now: this.now });
+      draft = createWorkflowFromRequest(request, { mintId: randomUUID, now: () => new Date() });
     } catch (error) {
       throw patchError(error, "item");
     }
@@ -233,7 +227,7 @@ export class WorkflowService implements WorkflowStore {
       id: current.id,
       revision: current.revision + 1,
       createdAt: current.createdAt,
-      updatedAt: this.now().toISOString()
+      updatedAt: new Date().toISOString()
     };
     return this.write(this.check(candidate));
   }
@@ -245,7 +239,7 @@ export class WorkflowService implements WorkflowStore {
     this.requireRevision(current, body.revision);
     let next: Workflow;
     try {
-      next = applyWorkflowPatch(current, body.ops, { mintId: this.mintId, now: this.now });
+      next = applyWorkflowPatch(current, body.ops, { mintId: randomUUID, now: () => new Date() });
     } catch (error) {
       throw patchError(error, "op");
     }
@@ -261,11 +255,11 @@ export class WorkflowService implements WorkflowStore {
     this.requireRoom();
     const copy = structuredClone(source);
     const nodeIds = new Map<string, string>();
-    for (const node of copy.nodes) nodeIds.set(node.id, this.mintId());
+    for (const node of copy.nodes) nodeIds.set(node.id, randomUUID());
     copy.nodes = copy.nodes.map((node) => ({ ...node, id: nodeIds.get(node.id)! }));
     copy.edges = copy.edges.map((edge) => ({
       ...edge,
-      id: this.mintId(),
+      id: randomUUID(),
       source: nodeIds.get(edge.source) ?? edge.source,
       target: nodeIds.get(edge.target) ?? edge.target
     }));
@@ -275,10 +269,10 @@ export class WorkflowService implements WorkflowStore {
       );
     }
     const suffix = " (copy)";
-    const stamp = this.now().toISOString();
+    const stamp = new Date().toISOString();
     const candidate: Workflow = {
       ...copy,
-      id: this.mintId(),
+      id: randomUUID(),
       name: `${source.name.slice(0, WORKFLOW_LIMITS.maxNameLength - suffix.length).trimEnd()}${suffix}`,
       enabled: false,
       revision: 0,
@@ -397,7 +391,7 @@ export class WorkflowService implements WorkflowStore {
   }
 
   private async quarantine(detail: string): Promise<void> {
-    const aside = `${this.file}.corrupt-${this.now().toISOString().replace(/[:.]/g, "-")}`;
+    const aside = `${this.file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
     try {
       await rename(this.file, aside);
     } catch (error) {

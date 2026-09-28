@@ -7,7 +7,7 @@
  * instead of sleeping).
  *
  * Wires a real {@link createOrchestrator} onto the in-memory fakes, a scripted
- * adapter, a manual clock and a manual timer wheel, and hands back the drain
+ * adapter, a manual clock, and hands back the drain
  * seams. No test that uses it needs a timeout to pass.
  */
 
@@ -29,21 +29,19 @@ import {
 } from "../orchestrator.ts";
 import {
   createFakeCheckpointService,
+  createMemoryLaunchConfigStore,
   createFakeIngestion,
   createFakeThreadStore,
   createRecordingLogger,
   createTestClock,
   createTestIdGen,
-  createTestTimers,
   type FakeCheckpointService,
   type FakeIngestion,
   type FakeThreadStore,
   type RecordingLogger,
-  type TestClock,
-  type TestTimers
+  type TestClock
 } from "./fakes.ts";
 import {
-  createMemoryLaunchConfigStore,
   type LaunchConfigStore,
   type ThreadLaunchConfig
 } from "../launch-config.ts";
@@ -60,12 +58,11 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   store?: S;
   continuationEnabled?: (projectPath: string) => boolean;
   isThreadClosed?: (threadId: string) => boolean;
-  minimumVersions?: OrchestratorOptions["minimumVersions"];
   /** Leave the gate shut so queue-before-ready can be asserted. */
   openGate?: boolean;
   /** Reuse a launch-config store, to assert what survives a host restart. */
   launchConfigs?: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
-  /** The thread index (design 2026-09-23, C) — `createFakeThreadIndex()` or a real one. */
+  /** The production thread-index interface (design 2026-09-23, C). */
   index?: ThreadIndex;
 }
 
@@ -83,7 +80,6 @@ export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
   logger: RecordingLogger;
   launchConfigs: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
   clock: TestClock;
-  timers: TestTimers;
   /** Every event published to subscribers, in order. */
   published: DomainEvent[];
   createThread(input?: {
@@ -132,7 +128,6 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
   options: TestHostOptions<S> = {}
 ): TestHost<S> {
   const clock = createTestClock(1_700_000_000_000);
-  const timers = createTestTimers();
   const ids = createTestIdGen();
   const logger = createRecordingLogger();
   // Without one handed in, `S` is the default: the fake.
@@ -178,13 +173,10 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     },
     ...(options.continuationEnabled ? { continuationEnabled: options.continuationEnabled } : {}),
     ...(options.isThreadClosed ? { isThreadClosed: options.isThreadClosed } : {}),
-    ...(options.minimumVersions ? { minimumVersions: options.minimumVersions } : {}),
     ...(options.index ? { index: options.index } : {}),
     launchConfigs,
     clock,
-    ids,
-    setTimer: (fn, ms) => timers.setTimer(fn, ms),
-    clearTimer: (handle) => timers.clearTimer(handle)
+    ids
   });
 
   if (options.openGate !== false) {
@@ -204,7 +196,6 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     logger,
     launchConfigs,
     clock,
-    timers,
     published,
     async createThread(input = {}): Promise<string> {
       const threadId = input.threadId ?? "thread-1";

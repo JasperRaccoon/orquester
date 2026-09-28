@@ -16,9 +16,6 @@ import type { AgentGoal } from "@orquester/api/agent-chat";
 import type { Clock } from "../../adapter.ts";
 import {
   ClaudeGoalTracker,
-  GOAL_PROGRESS_THROTTLE_MS,
-  GOAL_WAITING_BACKGROUND_PHASE,
-  STOP_HOOK_CONDITION_CUT,
   localCommandOutputText,
   matchGoalStopHookFeedback,
   parseActiveGoalValue,
@@ -182,7 +179,7 @@ describe("claude goal — Stop-hook feedback and the check-in (goals §6.1.3)", 
 
   it("matches a condition the CLI cut to 500 characters, marker and all", () => {
     const objective = `${"a".repeat(700)} and then stop`;
-    const cut = objective.slice(0, STOP_HOOK_CONDITION_CUT);
+    const cut = objective.slice(0, 500);
     const hidden = objective.length - cut.length;
     assert.deepEqual(
       matchGoalStopHookFeedback(
@@ -418,7 +415,7 @@ describe("claude goal — the tracker (goals §6 preamble)", () => {
   it("throttles progress to one per 30 s and flushes the latest one when due", () => {
     const clock = movableClock();
     const tracker = new ClaudeGoalTracker({ clock, knownGoal: active() });
-    const first = active({ phase: GOAL_WAITING_BACKGROUND_PHASE });
+    const first = active({ phase: "waiting-background" });
     assert.equal(tracker.apply("progress", first).kind, "emit");
 
     clock.advance(10_000);
@@ -426,7 +423,7 @@ describe("claude goal — the tracker (goals §6 preamble)", () => {
     const deferred = tracker.apply("progress", second);
     assert.deepEqual(deferred, {
       kind: "deferred",
-      dueAtMs: Date.parse("2026-09-24T10:00:00.000Z") + GOAL_PROGRESS_THROTTLE_MS
+      dueAtMs: Date.parse("2026-09-24T10:00:00.000Z") + 30_000
     });
     assert.deepEqual(tracker.goal, second, "the latest state is kept for the next decision");
     assert.deepEqual(tracker.lastEmitted, first, "but nothing was emitted");
@@ -440,14 +437,14 @@ describe("claude goal — the tracker (goals §6 preamble)", () => {
     assert.equal(tracker.pendingProgressDueAtMs, undefined);
     assert.deepEqual(tracker.flushProgress(), { kind: "unchanged" });
 
-    clock.advance(GOAL_PROGRESS_THROTTLE_MS);
+    clock.advance(30_000);
     assert.equal(tracker.apply("progress", active({ rounds: 3 })).kind, "emit");
   });
 
   it("never throttles anything but progress, and a real change supersedes a deferred one", () => {
     const clock = movableClock();
     const tracker = new ClaudeGoalTracker({ clock, knownGoal: active() });
-    assert.equal(tracker.apply("progress", active({ phase: GOAL_WAITING_BACKGROUND_PHASE })).kind, "emit");
+    assert.equal(tracker.apply("progress", active({ phase: "waiting-background" })).kind, "emit");
     clock.advance(1_000);
     assert.equal(tracker.apply("progress", active({ rounds: 5 })).kind, "deferred");
     clock.advance(1_000);

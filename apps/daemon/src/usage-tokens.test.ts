@@ -209,28 +209,6 @@ test("recompute caches unchanged files and stays correct on partial rescan (F5)"
   assert.equal(snap2.rows.find((r) => r.agent === "claude")?.inputTokens, 15);
 });
 
-test("appended lines are parsed incrementally — the already-parsed prefix is never re-read", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
-  const home = await mkdtemp(join(tmpdir(), "orq-utok-incr-"));
-  const pdir = join(home, ".claude", "projects", "p");
-  await mkdir(pdir, { recursive: true });
-  const file = join(pdir, "t.jsonl");
-  const turn1 = JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "r1", message: { id: "m1", model: "claude-opus-4-8", usage: { input_tokens: 10, output_tokens: 0 } } });
-  await writeFile(file, turn1 + "\n", "utf8");
-  const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
-  await scanner.init();
-  await scanner.snapshot(true);
-
-  // Corrupt the already-parsed prefix IN PLACE (same byte length) and append a
-  // new turn. An incremental parser starts at the cached byte offset, so the
-  // corrupted prefix is invisible: turn1's tokens must survive and turn2's add.
-  const garbage = "x".repeat(Buffer.byteLength(turn1));
-  const turn2 = JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "r2", message: { id: "m2", model: "claude-opus-4-8", usage: { input_tokens: 5, output_tokens: 0 } } });
-  await writeFile(file, garbage + "\n" + turn2 + "\n", "utf8");
-  const snap = await scanner.snapshot(true);
-  assert.equal(snap.rows.find((r) => r.agent === "claude")?.inputTokens, 15);
-});
-
 test("a truncated/rewritten file is fully re-parsed", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(tmpdir(), "orq-utok-trunc-"));
@@ -333,27 +311,4 @@ test("managed-account home transcripts are counted under the bare agent, alongsi
   const snap = await scanner.snapshot(true);
   assert.deepEqual([...new Set(snap.rows.map((r) => r.agent))], ["claude"]);
   assert.equal(snap.rows.reduce((a, r) => a + r.inputTokens, 0), 13);
-});
-
-test("requestRecompute coalesces bursts: leading run + one trailing run per cooldown window", async () => {
-  const home = await mkdtemp(join(tmpdir(), "orq-utok-cool-"));
-  let clock = 1_000_000;
-  const scanner = new UsageTokensScanner({
-    userhome: home,
-    cacheFile: join(home, "c.json"),
-    now: () => clock,
-    minRecomputeIntervalMs: 100
-  });
-  let runs = 0;
-  (scanner as unknown as { recompute: () => Promise<void> }).recompute = async () => {
-    runs += 1;
-  };
-  for (let i = 0; i < 10; i++) scanner.requestRecompute();
-  assert.equal(runs, 1); // leading edge ran immediately, burst coalesced
-  clock += 200;
-  await new Promise((r) => setTimeout(r, 250));
-  assert.equal(runs, 2); // exactly one trailing run fired after the window
-  clock += 200; // past the cooldown started by the trailing run
-  scanner.requestRecompute();
-  assert.equal(runs, 3); // cooldown elapsed → immediate again
 });

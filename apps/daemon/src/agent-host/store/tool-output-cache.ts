@@ -58,13 +58,13 @@ import type { EventPosition } from "../services.ts";
 import { ToolOutputJoin, nextItemWrite, type ItemWrite } from "./tool-output.ts";
 
 /** The join buffers the cache holds at most: room for four full 8 MiB joins. */
-export const TOOL_OUTPUT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const TOOL_OUTPUT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
 /** The item cursors the cache holds at most (a few hundred bytes each), and as many joins. */
-export const TOOL_OUTPUT_CACHE_MAX_ENTRIES = 1024;
+const TOOL_OUTPUT_CACHE_MAX_ENTRIES = 1024;
 
 /** An entry nobody read for this long is dropped the next time the cache is touched. */
-export const TOOL_OUTPUT_CACHE_IDLE_MS = 10 * 60 * 1000;
+const TOOL_OUTPUT_CACHE_IDLE_MS = 10 * 60 * 1000;
 
 /** How much of the log one read takes while an entry catches up. */
 const SCAN_WINDOW_BYTES = 4 * 1024 * 1024;
@@ -81,14 +81,9 @@ export interface ToolOutputCacheOptions {
   decodeLine(line: string): DomainEvent | null;
   /** Milliseconds, for the idle expiry. */
   now(): number;
-  maxJoinBytes: number;
-  maxEntries: number;
-  idleMs: number;
   /** A scan yields to the loop after this much synchronous decoding (the store's `DECODE_SLICE_MS`). */
   decodeSliceMs: number;
   yieldToLoop(): Promise<void>;
-  /** Test seam: every read of a log, `[fromByte, toByte)`. */
-  onLogRead?: (threadId: string, fromByte: number, toByte: number) => void;
 }
 
 export interface ToolOutputCache {
@@ -171,7 +166,7 @@ export function createToolOutputCache(options: ToolOutputCacheOptions): ToolOutp
 
   /** Drop every entry nobody has read for `idleMs`: the maps are in least-recently-used order. */
   function expireIdle(): void {
-    const cutoff = options.now() - options.idleMs;
+    const cutoff = options.now() - TOOL_OUTPUT_CACHE_IDLE_MS;
     for (const map of [items, joins] as Array<Map<string, Entry>>) {
       for (const [key, entry] of map) {
         if (entry.usedAt > cutoff) break;
@@ -196,7 +191,6 @@ export function createToolOutputCache(options: ToolOutputCacheOptions): ToolOutp
   ): Promise<"ok" | "mismatch"> {
     const from = entry.cursor.byteOffset;
     const warm = entry.cursor.seq > 0;
-    options.onLogRead?.(entry.threadId, from, to);
     let handle: fsp.FileHandle;
     try {
       handle = await fsp.open(options.eventsPath(entry.threadId), "r");
@@ -333,7 +327,7 @@ export function createToolOutputCache(options: ToolOutputCacheOptions): ToolOutp
       );
       if (entry === STALE) return STALE;
       for (const other of items.keys()) {
-        if (items.size <= options.maxEntries) break;
+        if (items.size <= TOOL_OUTPUT_CACHE_MAX_ENTRIES) break;
         if (other !== key) items.delete(other);
       }
       return entry.write;
@@ -359,7 +353,7 @@ export function createToolOutputCache(options: ToolOutputCacheOptions): ToolOutp
       let bytes = 0;
       for (const other of joins.values()) bytes += other.join.capacity;
       for (const [other, evicted] of joins) {
-        if (bytes <= options.maxJoinBytes && joins.size <= options.maxEntries) break;
+        if (bytes <= TOOL_OUTPUT_CACHE_MAX_BYTES && joins.size <= TOOL_OUTPUT_CACHE_MAX_ENTRIES) break;
         if (other === key) continue;
         joins.delete(other);
         bytes -= evicted.join.capacity;

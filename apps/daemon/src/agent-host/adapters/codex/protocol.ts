@@ -50,15 +50,15 @@ import {
  *
  * *T3: `packages/effect-codex-app-server/src/protocol.ts:18, 300-314`.*
  */
-export const MAX_IN_FLIGHT_SERVER_REQUESTS = 32;
+const MAX_IN_FLIGHT_SERVER_REQUESTS = 32;
 
 /** The code T3 answers when the cap is hit. Codex has no reserved meaning for it. */
-export const TOO_MANY_REQUESTS_CODE = -32001;
-export const TOO_MANY_REQUESTS_MESSAGE = "Too many Codex requests are already active.";
+const TOO_MANY_REQUESTS_CODE = -32001;
+const TOO_MANY_REQUESTS_MESSAGE = "Too many Codex requests are already active.";
 
 /** Every unhandled server→client request is refused with this (§4.5). */
-export const METHOD_NOT_FOUND_CODE = -32601;
-export const METHOD_NOT_FOUND_MESSAGE = "methodNotFound";
+const METHOD_NOT_FOUND_CODE = -32601;
+const METHOD_NOT_FOUND_MESSAGE = "methodNotFound";
 
 /** A JSON-RPC error object as this server spells it — no `jsonrpc`, no `data` guarantee. */
 export interface CodexRpcErrorShape {
@@ -208,7 +208,6 @@ export interface CodexPeerOptions {
   handlers: CodexPeerHandlers;
   /** Every outbound and inbound frame, for `raw.ndjson`. Best-effort. */
   onFrame?: (direction: "send" | "recv", frame: unknown) => void;
-  maxInFlightServerRequests?: number;
 }
 
 interface PendingRequest {
@@ -234,12 +233,10 @@ export class CodexPeer {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly inFlightServerRequests = new Set<number | string>();
   private readonly settledWaiters: (() => void)[] = [];
-  private readonly maxInFlight: number;
   private nextId = 1;
   private closedReason: string | null = null;
 
   constructor(private readonly options: CodexPeerOptions) {
-    this.maxInFlight = options.maxInFlightServerRequests ?? MAX_IN_FLIGHT_SERVER_REQUESTS;
     options.stdout.on("data", (chunk: Buffer | string) => {
       for (const line of this.reader.push(typeof chunk === "string" ? chunk : chunk)) {
         this.handleLine(line);
@@ -254,16 +251,6 @@ export class CodexPeer {
 
   get isClosed(): boolean {
     return this.closedReason !== null;
-  }
-
-  /** Requests still parked on this transport. */
-  get pendingRequestCount(): number {
-    return this.pending.size;
-  }
-
-  /** Server→client requests whose handler has not answered yet. */
-  get openServerRequestCount(): number {
-    return this.inFlightServerRequests.size;
   }
 
   /**
@@ -425,7 +412,7 @@ export class CodexPeer {
       return;
     }
 
-    if (this.inFlightServerRequests.size >= this.maxInFlight) {
+    if (this.inFlightServerRequests.size >= MAX_IN_FLIGHT_SERVER_REQUESTS) {
       this.respondError(id, TOO_MANY_REQUESTS_CODE, TOO_MANY_REQUESTS_MESSAGE);
       return;
     }

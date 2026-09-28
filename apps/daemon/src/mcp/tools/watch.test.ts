@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp,mkdir,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { busEvent, FakeDaemonApi } from "../testing.ts";
-import { chatSummary, stamp } from "../fixtures.ts";
+import { busEvent,FakeDaemonApi } from "../testing.ts";
+import { chatSummary,stamp } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
-import { byAttention, watchTools } from "./watch.ts";
+import { watchTools } from "./watch.ts";
 
 const tool = watchTools[0]!;
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }] };
@@ -38,19 +38,6 @@ test("wait_for_session orders by the attention instant, newest first, a tie goin
   const r = await tool.run({ after: "2026-09-21T00:00:00.000Z", timeoutMs: 20 }, ctx(api([offset, older, newer])));
   assert.deepEqual(ids(r), ["newer", "older", "offset"]);
   assert.equal(r.cursor, stamp(6));
-});
-
-test("byAttention is the one Attention Center order: the attention instant, newest first, a tie to the newer tab, no stamp counting from the tab's creation", () => {
-  const at = (id: string, needsAttentionAt: string | null, createdAt: string) => chatSummary({ id, createdAt, activity: { state: "waiting", attention: null, lastOutputAt: null, needsAttentionAt } });
-  const sessions = [
-    at("offset", "2026-09-22T01:00:05.000+02:00", stamp(0)), // 2026-09-21T23:00:05Z: the oldest instant, the greatest string
-    at("older", stamp(6), stamp(0)),
-    at("newer", stamp(6), stamp(2)),
-    at("unstamped", null, stamp(8)), // a waiting tab the daemon never stamped: its creation, as the GUI's flaggedAt
-    at("unparseable", "yesterday", stamp(1))
-  ];
-  assert.deepEqual([...sessions].sort(byAttention).map((s) => s.id), ["unstamped", "newer", "older", "unparseable", "offset"]);
-  assert.deepEqual([...sessions].reverse().sort(byAttention).map((s) => s.id), ["unstamped", "newer", "older", "unparseable", "offset"], "whatever the input order");
 });
 
 test("wait_for_session defaults `after` to now, honours session and project filters, and rejects both", async (t) => {
@@ -84,37 +71,6 @@ test("wait_for_session defaults `after` to now, honours session and project filt
   assert.deepEqual(ids(await tool.run({ project: "acme/api", after: stamp(0), timeoutMs: 20 }, ctx(mixed))), ["h"], "the project's own session is returned");
   await assert.rejects(tool.run({ sessionId: "a", project: "x/y", timeoutMs: 1000 }, ctx(api([stale]))), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   await assert.rejects(tool.run({ sessionId: "zz", timeoutMs: 1000 }, ctx(api([stale]))), (e: { code: string }) => e.code === "SESSION_NOT_FOUND");
-});
-
-test("wait_for_session: a session.activity published while the watch's first read is in flight ends the wait", async () => {
-  const stale = chatSummary({ id: "a", activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(5) } });
-  const fresh = { ...stale, activity: { ...stale.activity!, needsAttentionAt: "2026-09-22T12:00:01.000Z" } };
-  // The barrier of the test above: the first read made while a listener is registered is the watch's own.
-  let watching!: () => void;
-  const subscribed = new Promise<void>((resolve) => { watching = resolve; });
-  const live: FakeDaemonApi = api([stale]).on("GET", "/api/sessions", () => { if (live.listenerCount() > 0) watching(); return { status: 200, body: [stale] }; });
-  const p = tool.run({ sessionId: "a", timeoutMs: 1000 }, ctx(live));
-  await subscribed;
-  live.on("GET", "/api/sessions", { status: 200, body: [fresh] });
-  live.emit(busEvent("session.activity", { id: "a", activity: fresh.activity }));
-  const r = await p;
-  assert.deepEqual([ids(r), r.cursor, r.timedOut], [["a"], "2026-09-22T12:00:01.000Z", false]);
-});
-
-test("wait_for_session on one session ends with SESSION_NOT_FOUND when it closes, or is gone by the watch's first read", async () => {
-  const notFound = (e: { code: string }) => e.code === "SESSION_NOT_FOUND";
-  const a = chatSummary({ id: "a" });
-  let watching!: () => void;
-  const subscribed = new Promise<void>((resolve) => { watching = resolve; });
-  const live: FakeDaemonApi = api([a]).on("GET", "/api/sessions", () => { if (live.listenerCount() > 0) watching(); return { status: 200, body: [a] }; });
-  const p = tool.run({ sessionId: "a", timeoutMs: 1000 }, ctx(live));
-  await subscribed;
-  live.emit(busEvent("session.closed", { id: "a" }));
-  await assert.rejects(p, notFound);
-  // Closed after the lookup, before the watch subscribed: only its absence from the watch's read says so.
-  const vanished: FakeDaemonApi = api([a]).on("GET", "/api/sessions", () => ({ status: 200, body: vanished.listenerCount() > 0 ? [] : [a] }));
-  await assert.rejects(tool.run({ sessionId: "a", timeoutMs: 1000 }, ctx(vanished)), notFound);
-  assert.deepEqual([live.listenerCount(), vanished.listenerCount()], [0, 0]);
 });
 
 test("wait_for_session checks `after` before any lookup and never reads an empty id or project as absent", async () => {

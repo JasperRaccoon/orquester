@@ -16,7 +16,7 @@
 
 import type { TokenClass } from "./highlight-core";
 
-export type TokenPalette = Record<TokenClass, string>;
+type TokenPalette = Record<TokenClass, string>;
 
 const DARK: TokenPalette = {
   keyword: "#c678dd",
@@ -64,7 +64,7 @@ const LIGHT: TokenPalette = {
   invalid: "#e45649"
 };
 
-export function tokenPalette(mode: "light" | "dark"): TokenPalette {
+function tokenPalette(mode: "light" | "dark"): TokenPalette {
   return mode === "light" ? LIGHT : DARK;
 }
 

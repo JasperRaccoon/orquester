@@ -134,7 +134,7 @@ export function dropStaleContextWindowActivities(
  * completion's title may gain a trailing "complete"/"completed" the in-flight
  * updates lack.
  */
-export function toolLifecycleIdentity(activity: ThreadActivityItem): string | null {
+function toolLifecycleIdentity(activity: ThreadActivityItem): string | null {
   const payload = asRecord(activity.payload);
   if (payload === null) {
     return null;

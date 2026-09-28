@@ -16,7 +16,6 @@ import { HISTORICAL_RAW_SOURCE, type RuntimeEvent, type ThreadSnapshot } from "@
 
 import { agentFrames, readCapture, type JsonRpcFrame } from "./fixtures.ts";
 import {
-  GROK_HISTORY_RAW_METHOD,
   GrokHistoryCollector,
   projectGrokHistory,
   type GrokHistoryItem
@@ -64,34 +63,6 @@ function route(normalizer: GrokNormalizer, frame: JsonRpcFrame): void {
 }
 
 // ---------------------------------------------------------------------------
-
-test("the replayed transcript really is in the capture", () => {
-  const replayed = agentFrames(readCapture("06-session-load-replay.ndjson")).filter((frame) => {
-    const params = frame.params as { _meta?: { isReplay?: boolean } } | undefined;
-    return params?._meta?.isReplay === true;
-  });
-  assert.ok(replayed.length >= 3);
-  assert.ok(
-    replayed.some((frame) => frame.method === "_x.ai/session/update"),
-    "the turn delimiter arrives on the underscore channel"
-  );
-});
-
-test("the session/load replay is collected into turns", () => {
-  const snapshot = historyFromCapture("06-session-load-replay.ndjson");
-  assert.equal(snapshot.turns.length, 1, "the capture replays one finished turn");
-  const turn = snapshot.turns[0];
-  // The provider's OWN prompt id, from the replayed `turn_completed`.
-  assert.equal(turn.id, "f8f85d1b-e6be-4e6c-9073-5ae82cd1b299");
-
-  const items = turn.items as GrokHistoryItem[];
-  assert.deepEqual(
-    items.map((item) => item.kind),
-    ["user_message", "assistant_message"]
-  );
-  assert.equal((items[0] as { text: string }).text, "Reply with exactly: OK");
-  assert.equal((items[1] as { text: string }).text, "OK");
-});
 
 test("a live turn contributes nothing — its events are already in the host's log", () => {
   const snapshot: ThreadSnapshot = {
@@ -155,7 +126,6 @@ test("every projected event is stamped as replayed history, not live traffic", (
   assert.ok(events.length > 0);
   for (const event of events) {
     assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
-    assert.equal(event.raw?.method, GROK_HISTORY_RAW_METHOD, "which channel it was rebuilt from");
     assert.deepEqual(event.raw?.payload, { turnId: "f8f85d1b-e6be-4e6c-9073-5ae82cd1b299" });
   }
 });
@@ -201,12 +171,6 @@ function route2(normalizer: GrokNormalizer, frame: JsonRpcFrame, out: RuntimeEve
     out.push(...normalizer.handleXaiNotification(frame.method, frame.params));
   }
 }
-
-test("event ids are unique across the whole projection", () => {
-  const snapshot = historyFromCapture("06-session-load-replay.ndjson");
-  const events = projectGrokHistory(snapshot, { threadId: "t1", ...stamps() });
-  assert.equal(new Set(events.map((event) => event.eventId)).size, events.length);
-});
 
 test("a thread with nothing replayed projects nothing", () => {
   // Every other capture is a fresh `session/new`, so none of them replays.

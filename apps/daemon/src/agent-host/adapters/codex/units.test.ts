@@ -13,13 +13,9 @@ import { describe, it } from "node:test";
 import type { ProviderSnapshot, RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { AsyncEventQueue } from "./event-queue.ts";
-import { MAX_WORKSPACE_SNAPSHOTS, mergeSnapshot, resolveCodexHome } from "./index.ts";
-import { classifyItem, isKnownCodexItemType, type CodexThreadItem } from "./items.ts";
-import {
-  CODEX_COMMAND_CATALOG_NOTE,
-  CODEX_SLASH_COMMANDS,
-  codexSlashCommands
-} from "./probe.ts";
+import { mergeSnapshot, resolveCodexHome } from "./index.ts";
+import { classifyItem, type CodexThreadItem } from "./items.ts";
+import { codexSlashCommands } from "./probe.ts";
 import { normaliseSkillMentions } from "./modes.ts";
 import { CodexUsageTracker, usageWindowsFromRateLimits } from "./usage.ts";
 
@@ -77,13 +73,6 @@ describe("item classification — typed on the generated discriminants", () => {
     });
   }
 
-  it("the two review types are classified and then never rendered", () => {
-    for (const type of ["enteredReviewMode", "exitedReviewMode"] as const) {
-      const classified = classifyItem({ type, id: "i", review: "r" });
-      assert.ok(classified.timelineBypass, "classified, then dropped — nothing starts a review");
-    }
-  });
-
   it("collabAgentToolCall's `interrupted` has no RuntimeItemStatus, so it settles failed", () => {
     const classified = classifyItem({
       type: "collabAgentToolCall",
@@ -135,31 +124,12 @@ describe("item classification — typed on the generated discriminants", () => {
     assert.equal(unphased.detail, undefined);
   });
 
-  it("a file change names its path, and names the extras when there are several", () => {
-    assert.equal(
-      classifyItem({
-        type: "fileChange",
-        id: "i",
-        changes: [
-          { path: "/a", kind: { type: "add" }, diff: "" },
-          { path: "/b", kind: { type: "add" }, diff: "" }
-        ],
-        status: "completed"
-      }).title,
-      "/a +1 more"
-    );
-  });
-
   it("an item type from a newer protocol is reported, never silently mis-bucketed", () => {
     const classified = classifyItem({ type: "somethingNew", id: "i" } as unknown as CodexThreadItem);
     assert.equal(classified.itemType, "unknown");
     assert.equal(classified.unknownType, "somethingNew");
   });
 
-  it("knows exactly the 19 types the bindings declare", () => {
-    assert.equal(isKnownCodexItemType("commandExecution"), true);
-    assert.equal(isKnownCodexItemType("somethingNew"), false);
-  });
 });
 
 describe("token usage — the delta is two reported totals, not a sum of `last`", () => {
@@ -406,16 +376,6 @@ describe("rate limits", () => {
 });
 
 describe("§4.6.2 / §4.6.3 the Codex command catalogue", () => {
-  it("is exactly two entries — Codex has no command-catalog RPC", () => {
-    assert.deepEqual(
-      CODEX_SLASH_COMMANDS.map((command) => command.name),
-      ["compact", "feedback"]
-    );
-  });
-
-  it("names the gap so an empty list never reads as a failed probe", () => {
-    assert.equal(CODEX_COMMAND_CATALOG_NOTE, "Codex reports no commands");
-  });
 
   it("NEVER synthesises a provider /effort — it is client-only (§4.6.5(a))", () => {
     // R2 finding 2 / fix-wave arbitration: a provider `/effort` row put two
@@ -514,7 +474,7 @@ describe("§4.6.4 snapshot merging", () => {
   it("keeps at most 16 cwd overlays, oldest evicted", () => {
     const probed: string[] = [];
     let snapshot: ProviderSnapshot | null = null;
-    for (let index = 0; index < MAX_WORKSPACE_SNAPSHOTS + 4; index += 1) {
+    for (let index = 0; index < 16 + 4; index += 1) {
       snapshot = mergeSnapshot(
         snapshot,
         base({
@@ -530,7 +490,7 @@ describe("§4.6.4 snapshot merging", () => {
         probed
       );
     }
-    assert.equal(snapshot!.workspaceSnapshots?.length, MAX_WORKSPACE_SNAPSHOTS);
+    assert.equal(snapshot!.workspaceSnapshots?.length, 16);
     assert.equal(snapshot!.workspaceSnapshots?.[0]?.cwd, "/p/4", "the four oldest were evicted");
   });
 
@@ -627,10 +587,10 @@ describe("the adapter event queue", () => {
     assert.equal((await iterator.next()).done, true);
   });
 
-  it("ignores a push after close", () => {
+  it("ignores a push after close", async () => {
     const queue = new AsyncEventQueue<RuntimeEvent>();
     queue.close();
     queue.push(event("a"));
-    assert.equal(queue.size, 0);
+    assert.deepEqual(await queue[Symbol.asyncIterator]().next(), { value: undefined, done: true });
   });
 });

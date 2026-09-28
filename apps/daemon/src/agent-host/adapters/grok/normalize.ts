@@ -98,27 +98,18 @@ import {
   subagentFinished,
   subagentProgress,
   subagentSpawned,
-  type ChildSession,
-  type GROK_AGENT_LIVENESS_TTL_MS
+  type ChildSession
 } from "./subagents.ts";
 import { failTool, toolCall } from "./tool-calls.ts";
 import { parseResponseCompletedUsage, parseXaiUsage, turnTokenUsage } from "./usage.ts";
 import { contextTokensOf, isReplayFrame } from "./xai-meta.ts";
 
-export { ENDED_TASKS_REMEMBERED, normalizeTaskStatus } from "./background-tasks.ts";
 export {
   ACP_RAW_SOURCE,
   XAI_RAW_SOURCE,
   type GrokEventStamp,
   type GrokNormalizerDeps
 } from "./normalizer-state.ts";
-export {
-  GROK_AGENT_LIVENESS_TTL_MS,
-  SPAWN_SUBAGENT_TOOL,
-  SUBAGENTS_REMEMBERED,
-  subagentAnswerText
-} from "./subagents.ts";
-export { FINISHED_CALLS_REMEMBERED } from "./tool-calls.ts";
 
 /** What a settled turn looks like once every source has been consulted. */
 export interface GrokTurnOutcome {
@@ -393,7 +384,7 @@ export class GrokNormalizer {
    * `subagent_finished {status: "cancelled"}` 42 ms after the cancel, and that
    * is what ends the run ({@link subagentFinished}). Until then it stays live;
    * without it, Stop, the session's stop or the exit ends it, and its liveness
-   * lapses an hour after its latest row ({@link GROK_AGENT_LIVENESS_TTL_MS}).
+   * lapses an hour after its latest row.
    */
   endTurn(): RuntimeEvent[] {
     this.state.assistantUpdatesOpen = false;
@@ -1260,7 +1251,7 @@ function ridingTurn(event: RuntimeEvent, turnId: string | null | undefined): Run
  * "no cancel was sent" instead. Both fallbacks are still honoured through
  * `errorMessage` when the category is absent.
  */
-export function turnStateFromOutcome(
+function turnStateFromOutcome(
   outcome: GrokTurnOutcome,
   errorMessage: string | undefined
 ): "completed" | "failed" | "interrupted" | "cancelled" {

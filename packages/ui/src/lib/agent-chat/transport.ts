@@ -74,10 +74,6 @@ export interface AgentChatStreamOptions {
    * with a different one, the client re-reads instead of resuming (§6.3, §8).
    */
   hostInstanceId?: string | null;
-  /** Injected in tests. Defaults to `setTimeout`/`clearTimeout`. */
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
-  random?: () => number;
 }
 
 /** A stream that reconnects itself; `close()` retires it for good. */
@@ -565,10 +561,6 @@ function openAgentChatStream(
   options: AgentChatStreamOptions,
   handlers: AgentChatStreamHandlers
 ): AgentChatStreamHandle {
-  const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms) as unknown);
-  const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as never));
-  const random = options.random ?? Math.random;
-
   let closed = false;
   let attempt = 0;
   let lastSeq = options.after ?? 0;
@@ -580,20 +572,20 @@ function openAgentChatStream(
    */
   let knownHostInstanceId: string | null = options.hostInstanceId ?? null;
   let inner: StreamHandle | null = null;
-  let retryTimer: unknown = null;
-  let stallTimer: unknown = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
   const lines = new NdjsonLineBuffer();
 
   const clearStall = (): void => {
     if (stallTimer !== null) {
-      clearTimer(stallTimer);
+      clearTimeout(stallTimer);
       stallTimer = null;
     }
   };
 
   const armStall = (): void => {
     clearStall();
-    stallTimer = setTimer(() => {
+    stallTimer = setTimeout(() => {
       // No byte for three heartbeats: the proxy or the socket is wedged.
       // Drop it ourselves and resume by cursor rather than wait forever.
       inner?.close();
@@ -607,10 +599,10 @@ function openAgentChatStream(
       return;
     }
     clearStall();
-    const delayMs = reconnectDelayMs(attempt, random);
+    const delayMs = reconnectDelayMs(attempt);
     attempt = Math.min(attempt + 1, 32);
     handlers.onReconnect?.({ attempt, delayMs, reason });
-    retryTimer = setTimer(() => {
+    retryTimer = setTimeout(() => {
       retryTimer = null;
       connect();
     }, Math.min(delayMs, RECONNECT_MAX_MS));
@@ -703,7 +695,7 @@ function openAgentChatStream(
       closed = true;
       clearStall();
       if (retryTimer !== null) {
-        clearTimer(retryTimer);
+        clearTimeout(retryTimer);
         retryTimer = null;
       }
       inner?.close();

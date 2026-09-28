@@ -5,19 +5,21 @@
  *   node scripts/smoke-web.mjs https://your-orquester-host
  *
  * Loads the deployed URL once with clean storage and once per fixture set in
- * scripts/smoke-web-fixtures.json (real localStorage payloads written by OLD
- * bundles — persisted state outlives deploys, and a stale blob once crashed
- * the whole app on load). Each pass waits ~3s past first render and fails on:
+ * scripts/smoke-web-fixtures.json (a localStorage payload written by an old
+ * bundle that once crashed the whole app on load). Each pass fails on:
  *   - any uncaught page error (window.onerror / unhandled rejection),
  *   - any console.error (expected auth 401s are allowlisted),
- *   - an empty #root (the "loads then goes gray" symptom).
+ *   - failure to render the app's Settings control.
+ * Writes a screenshot per scenario and results.json to SMOKE_ARTIFACT_DIR or
+ * a fresh temporary directory, whose path is printed at completion.
  *
  * Uses puppeteer-core from the daemon's dependencies + a system Chrome/Chromium
  * (override the binary with SMOKE_CHROME=/path/to/chrome). Exit 0 = pass.
  */
 import { createRequire } from "node:module";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -70,7 +72,9 @@ const scenarios = [
 // the 401 responses of authenticated API calls as console errors.
 const ALLOWED_CONSOLE = [/the server responded with a status of 401/i];
 
-const SETTLE_MS = 3000;
+const artifactDir = process.env.SMOKE_ARTIFACT_DIR ?? await mkdtemp(join(tmpdir(), "orquester-smoke-"));
+await mkdir(artifactDir, { recursive: true });
+const results = [];
 const browser = await puppeteer.launch({
   executablePath,
   headless: true,
@@ -98,15 +102,19 @@ try {
     }, scenario.storage);
 
     try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      await page.waitForSelector("#root", { timeout: 15_000 });
-      await new Promise((r) => setTimeout(r, SETTLE_MS));
-      const rootHtml = await page.$eval("#root", (el) => el.innerHTML.trim());
-      if (!rootHtml) problems.push("empty #root after settle (blank page)");
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 30_000 });
+      await page.waitForSelector('button[aria-label="Settings"]', { visible: true, timeout: 15_000 });
     } catch (err) {
       problems.push(`navigation: ${err.message ?? err}`);
     }
 
+    const screenshot = `${scenario.name}.png`;
+    try {
+      await page.screenshot({ path: join(artifactDir, screenshot) });
+    } catch (err) {
+      problems.push(`artifact: ${err.message ?? err}`);
+    }
+    results.push({ scenario: scenario.name, passed: problems.length === 0, problems, screenshot });
     if (problems.length > 0) {
       failed = true;
       console.error(`✗ ${scenario.name}`);
@@ -118,6 +126,8 @@ try {
   }
 } finally {
   await browser.close();
+  await writeFile(join(artifactDir, "results.json"), `${JSON.stringify(results, null, 2)}\n`);
+  console.log(`Smoke artifacts: ${artifactDir}`);
 }
 
 if (failed) {

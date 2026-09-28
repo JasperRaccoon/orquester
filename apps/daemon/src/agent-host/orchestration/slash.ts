@@ -56,7 +56,7 @@ export function isHostNativeCompact(input: {
  * `chars().count()`, i.e. code points, not UTF-16 units — so the host never
  * refuses an objective the provider would take, nor forwards one it refuses.
  */
-export const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
+const MAX_GOAL_OBJECTIVE_CHARS = 4_000;
 
 const GOAL_EDIT_PATTERN = /^edit(?:\s+([\s\S]*))?$/i;
 const GOAL_OBJECTIVE_TOO_LONG_MESSAGE = `A goal is limited to ${MAX_GOAL_OBJECTIVE_CHARS} characters.`;

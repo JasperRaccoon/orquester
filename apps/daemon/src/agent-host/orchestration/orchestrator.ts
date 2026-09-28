@@ -35,6 +35,9 @@ import {
   THREAD_HISTORY_MAX_TURNS,
   THREAD_PROMPTS_DEFAULT_LIMIT,
   THREAD_SEARCH_MAX_RESULTS,
+  applyDomainEvent,
+  createEmptyThreadState,
+  toThreadSnapshot,
   decodeHistoryCursor,
   deserializeFoldState,
   encodeHistoryCursor,
@@ -163,10 +166,9 @@ import {
   replayRecordedRejection,
   threadNotFound
 } from "./errors.ts";
-import { applyEventsChunked, DEFAULT_FOLD_OPS, type FoldOps } from "./fold-ops.ts";
+import { applyEventsChunked } from "./fold-ops.ts";
 import { legacyLaunchStarts, leftoverWorkClosings } from "./leftover-work.ts";
 import {
-  createMemoryLaunchConfigStore,
   launchConfigFromRequest,
   type LaunchConfigStore,
   type ThreadLaunchConfig
@@ -196,7 +198,7 @@ import {
   providerInputFor
 } from "./slash.ts";
 import { createTurnWatchdog, stalledTurnMessage, type TurnWatchdog } from "./turn-watchdog.ts";
-import { checkMinimumVersion, MINIMUM_CLI_VERSIONS } from "./version-gate.ts";
+import { checkMinimumVersion } from "./version-gate.ts";
 import {
   parseAnswers,
   parseApprovalDecision,
@@ -291,13 +293,9 @@ export interface OrchestratorOptions {
    * daemon sends them once, at create; a session may be started much later by
    * lazy recovery or by the reconcile, so they must survive a host restart.
    */
-  launchConfigs?: LaunchConfigStore;
+  launchConfigs: LaunchConfigStore;
   clock?: Clock;
   ids?: IdGen;
-  fold?: FoldOps;
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
-  minimumVersions?: Readonly<Record<AgentAdapterId, string | null>>;
   /**
    * The host-wide thread index (design 2026-09-23, C): a disposable cache of
    * turn boundaries and full text, fed from `commit` strictly after the log.
@@ -492,7 +490,7 @@ const HEAD_SAVE_EVENT_INTERVAL = 50;
  * events AND {@link FOLD_SNAPSHOT_MIN_INTERVAL_MS} have passed since the last
  * one (design 2026-09-23, A2); every session transition writes one anyway.
  */
-export const FOLD_SNAPSHOT_EVENT_INTERVAL = 200;
+const FOLD_SNAPSHOT_EVENT_INTERVAL = 200;
 
 /**
  * The time half of the in-turn gate. Serializing a big thread's state blocks
@@ -500,7 +498,7 @@ export const FOLD_SNAPSHOT_EVENT_INTERVAL = 200;
  * subagent-heavy turn appending hundreds of events a minute must not write one
  * every 200 events — that is a loop-stalling, disk-churning loop.
  */
-export const FOLD_SNAPSHOT_MIN_INTERVAL_MS = 30_000;
+const FOLD_SNAPSHOT_MIN_INTERVAL_MS = 30_000;
 
 /** `ThreadRuntime.logDerived`: the two derivations a fold snapshot carries in `extras`. */
 interface LogDerived {
@@ -516,7 +514,7 @@ const EMPTY_LOG_DERIVED: LogDerived = { revertedTo: null, titleManual: false };
  * happened; anything shorter would settle a turn that is merely slow to reach
  * the provider.
  */
-export const PENDING_TURN_GRACE_MS = 5 * 60_000;
+const PENDING_TURN_GRACE_MS = 5 * 60_000;
 
 /**
  * Goals §5.7: the row a goal held for a deploy leaves on its timeline, the one
@@ -524,7 +522,7 @@ export const PENDING_TURN_GRACE_MS = 5 * 60_000;
  * `goal.status` row, like a `/goal status` answer, so it carries the payload
  * flag {@link GOAL_HELD_FOR_UPDATE_KEY} for a reader to tell the two apart by.
  */
-export const GOAL_HELD_FOR_UPDATE_SUMMARY =
+const GOAL_HELD_FOR_UPDATE_SUMMARY =
   "Goal paused for an Orquester update. It resumes by itself once the agent host has restarted.";
 
 /**
@@ -534,14 +532,14 @@ export const GOAL_HELD_FOR_UPDATE_SUMMARY =
  * it refuses the hold's resume. None of them answers a `/goal` the user sent,
  * which is what the MCP's wait for a `/goal` answer must not mistake them for.
  */
-export const GOAL_HELD_FOR_UPDATE_KEY = "heldForUpdate";
+const GOAL_HELD_FOR_UPDATE_KEY = "heldForUpdate";
 
 /**
  * Goals §5.7: the row that takes back the hold's promise when the resume it
  * promised did not happen — the provider failed or ran out of time, or the
  * held session could not be started again — and the goal stays paused.
  */
-export const GOAL_RESUME_FAILED_SUMMARY =
+const GOAL_RESUME_FAILED_SUMMARY =
   "The goal could not be resumed after the update. Send /goal resume to continue it.";
 
 
@@ -756,11 +754,8 @@ export interface Orchestrator {
 export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? systemIdGen;
-  const fold = options.fold ?? DEFAULT_FOLD_OPS;
-  const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms).unref());
-  const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   const buildEvent: BuildEvent = createEventBuilder({ clock, ids });
-  const launchConfigs = options.launchConfigs ?? createMemoryLaunchConfigStore();
+  const launchConfigs = options.launchConfigs;
   const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
 
   const runtimes = new Map<string, ThreadRuntime>();
@@ -910,9 +905,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     logBytes: number | null;
     truncated: boolean;
   }> => {
-    const foldOnto = (state: ThreadFoldState, events: readonly DomainEvent[]) =>
-      applyEventsChunked(state, events, { apply: fold.apply });
-
     const snapshot = await loadUsableSnapshot(threadId);
     if (snapshot !== null) {
       const tail = await store.readEventsFrom(threadId, {
@@ -928,7 +920,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         (tail.events.length === 0 && (await store.lastSeq(threadId)) !== snapshot.seq);
       if (!stale) {
         return {
-          state: await foldOnto(snapshot.state, tail.events),
+          state: await applyEventsChunked(snapshot.state, tail.events),
           derived: advanceLogDerived(snapshot.derived, tail.events),
           folded: tail.events.length,
           logBytes: tail.logBytes,
@@ -944,7 +936,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const whole = await store.readEventsFrom(threadId, { byteOffset: 0, afterSeq: 0 });
     if (!whole.mismatch) {
       return {
-        state: await foldOnto(fold.createEmpty(), whole.events),
+        state: await applyEventsChunked(createEmptyThreadState(), whole.events),
         derived: advanceLogDerived(EMPTY_LOG_DERIVED, whole.events),
         folded: whole.events.length,
         logBytes: whole.logBytes,
@@ -955,7 +947,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // is folded exactly as it always was, and never snapshotted.
     const tail = await store.readAll(threadId);
     return {
-      state: await foldOnto(fold.createEmpty(), tail.events),
+      state: await applyEventsChunked(createEmptyThreadState(), tail.events),
       derived: advanceLogDerived(EMPTY_LOG_DERIVED, tail.events),
       folded: tail.events.length,
       logBytes: null,
@@ -1184,7 +1176,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : {})
     });
     for (const event of result.events) {
-      runtime.state = fold.apply(runtime.state, event);
+      runtime.state = applyDomainEvent(runtime.state, event);
       if (event.type === "thread.deleted") {
         runtime.deleted = true;
       }
@@ -1688,8 +1680,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // message rather than started and allowed to fail on the first frame.
     const gateResult = checkMinimumVersion({
       adapter: head.adapter,
-      version: snapshots.get(head.adapter)?.version ?? null,
-      minimums: options.minimumVersions ?? MINIMUM_CLI_VERSIONS
+      version: snapshots.get(head.adapter)?.version ?? null
     });
     if (!gateResult.ok) {
       throw new Error(gateResult.message);
@@ -2041,8 +2032,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const watchdog = createTurnWatchdog({
       threadId: runtime.id,
       clock,
-      setTimer,
-      clearTimer,
       // A card the user holds is never a stall — an earlier turn's included
       // (a question whose asker outlived its turn rides none, and the
       // watchdog's own per-turn pause forgets it when that turn ends). Only a
@@ -3944,7 +3933,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   // -------------------------------------------------------------------------
 
   const snapshotOf = (runtime: ThreadRuntime): ThreadSnapshotPayload => {
-    const payload = fold.snapshot(runtime.state);
+    const payload = toThreadSnapshot(runtime.state);
     // §5.6's two snapshot-time drops are not applied on the write path, so the
     // read applies them: a superseded `tool.updated` and a stale
     // `context-window.updated` never reach a client that loads the thread cold.
@@ -4120,7 +4109,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           );
         }
       }
-      let state = await applyEventsChunked(fold.createEmpty(), block.events, { apply: fold.apply });
+      let state = await applyEventsChunked(createEmptyThreadState(), block.events);
       let gapTurns = block.gapTurns;
       if (
         (block.gapActivities.size > 0 && state.evicted?.activities === true) ||
@@ -4132,7 +4121,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         });
         served = plan;
         gapTurns = [];
-        state = await applyEventsChunked(fold.createEmpty(), whole.inRange, { apply: fold.apply });
+        state = await applyEventsChunked(createEmptyThreadState(), whole.inRange);
       }
       return {
         threadId,
@@ -6152,7 +6141,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    */
   let goalHoldUntil: number | null = null;
   /** The one timer that notices the lease ran out; re-armed for the rest of a renewed one. */
-  let goalHoldTimer: unknown = null;
+  let goalHoldTimer: NodeJS.Timeout | null = null;
   /** Threads THIS host paused under the lease — each owed a resume. */
   const goalsHeld = new Set<string>();
   /**
@@ -6404,14 +6393,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   const armGoalHoldTimer = (ms: number): void => {
-    if (goalHoldTimer !== null) clearTimer(goalHoldTimer);
-    goalHoldTimer = setTimer(
+    if (goalHoldTimer !== null) clearTimeout(goalHoldTimer);
+    goalHoldTimer = setTimeout(
       () => {
         goalHoldTimer = null;
         checkGoalHoldLease();
       },
       Math.max(0, ms)
-    );
+    ).unref();
   };
 
   /**
@@ -6612,7 +6601,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // Goals §5.7: a held goal is the next host's to resume — its mark is on
     // the head, which the saves below rewrite with it — never this host's.
     if (goalHoldTimer !== null) {
-      clearTimer(goalHoldTimer);
+      clearTimeout(goalHoldTimer);
       goalHoldTimer = null;
     }
     for (const runtime of runtimes.values()) {
@@ -6866,7 +6855,7 @@ function slimItemsForRead(items: readonly ThreadItem[]): ThreadItem[] {
  * Activities per history block (design 2026-09-23, C, "History page") — below
  * the fold's 500-row window, so folding a block never evicts one of its rows.
  */
-export const HISTORY_PAGE_ACTIVITIES = 400;
+const HISTORY_PAGE_ACTIVITIES = 400;
 
 /** Where a history block ends (`historyBlockEnd`): the first line it does not hold. */
 interface BlockEnd {
@@ -7510,7 +7499,7 @@ const sizeCache = new WeakMap<object, number>();
  * A stamp that is merely unparseable is treated as missing, not as a reason to
  * drop the row: history that renders at an approximate time beats no history.
  */
-export function stampHistoryTimes<TEvent extends { createdAt?: string }>(
+function stampHistoryTimes<TEvent extends { createdAt?: string }>(
   events: readonly TEvent[],
   createdAt: string
 ): TEvent[] {

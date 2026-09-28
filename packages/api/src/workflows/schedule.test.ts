@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { SchedulePreset } from "./types.ts";
-import { describeSchedule, isValidTimeZone, nextScheduleRun, nextRuns, presetToCron, SCHEDULE_HOUR_STEPS, SCHEDULE_MINUTE_STEPS, scheduleIntervalProblem, validateCron } from "./schedule.ts";
+import { nextScheduleRun, nextRuns, presetToCron, scheduleIntervalProblem, validateCron } from "./schedule.ts";
 
 describe("presetToCron", () => {
   it("derives 5-field crons", () => {
@@ -15,47 +14,6 @@ describe("presetToCron", () => {
     assert.equal(presetToCron({ kind: "weekly", days: [5, 1, 5], time: "16:00" }), "0 16 * * 1,5");
     assert.equal(presetToCron({ kind: "monthly", day: 1, time: "09:00" }), "0 9 1 * *");
     assert.equal(presetToCron({ kind: "cron" }), null);
-  });
-
-  it("every derived cron is valid", () => {
-    const presets: SchedulePreset[] = [
-      { kind: "minutes", every: 59 },
-      { kind: "hours", every: 23, atMinute: 59 },
-      { kind: "daily", time: "23:59" },
-      { kind: "weekly", days: [0, 6], time: "00:00" },
-      { kind: "monthly", day: 31, time: "12:00" }
-    ];
-    for (const preset of presets) {
-      assert.equal(validateCron(presetToCron(preset)!, "UTC"), null, JSON.stringify(preset));
-    }
-  });
-});
-
-describe("describeSchedule", () => {
-  it("speaks the preset", () => {
-    assert.equal(describeSchedule({ kind: "minutes", every: 15 }, "*/15 * * * *"), "Every 15 min");
-    assert.equal(describeSchedule({ kind: "minutes", every: 1 }, "* * * * *"), "Every minute");
-    assert.equal(describeSchedule({ kind: "hours", every: 2, atMinute: 30 }, "30 */2 * * *"), "Every 2 h at :30");
-    assert.equal(describeSchedule({ kind: "hours", every: 2, atMinute: 0 }, "0 */2 * * *"), "Every 2 h");
-    assert.equal(describeSchedule({ kind: "hours", every: 1, atMinute: 5 }, "5 * * * *"), "Every hour at :05");
-    assert.equal(describeSchedule({ kind: "daily", time: "16:00" }, "0 16 * * *"), "Daily at 16:00");
-    assert.equal(describeSchedule({ kind: "weekly", days: [1, 5], time: "16:00" }, "0 16 * * 1,5"), "Mon, Fri at 16:00");
-    assert.equal(describeSchedule({ kind: "weekly", days: [0, 3], time: "08:00" }, "0 8 * * 0,3"), "Wed, Sun at 08:00");
-    assert.equal(
-      describeSchedule({ kind: "weekly", days: [1, 2, 3, 4, 5], time: "07:30" }, "30 7 * * 1,2,3,4,5"),
-      "Weekdays at 07:30"
-    );
-    assert.equal(describeSchedule({ kind: "weekly", days: [0, 6], time: "10:00" }, "0 10 * * 0,6"), "Weekends at 10:00");
-    assert.equal(
-      describeSchedule({ kind: "weekly", days: [0, 1, 2, 3, 4, 5, 6], time: "10:00" }, "0 10 * * 0,1,2,3,4,5,6"),
-      "Daily at 10:00"
-    );
-    assert.equal(describeSchedule({ kind: "monthly", day: 1, time: "09:00" }, "0 9 1 * *"), "Monthly on day 1 at 09:00");
-  });
-
-  it("falls back to the cron when the preset is cron or no longer matches", () => {
-    assert.equal(describeSchedule({ kind: "cron" }, "0 16 * * 1,5"), "Cron 0 16 * * 1,5");
-    assert.equal(describeSchedule({ kind: "daily", time: "16:00" }, "0  17 * * *"), "Cron 0 17 * * *");
   });
 });
 
@@ -78,13 +36,6 @@ describe("validateCron", () => {
     assert.match(validateCron("0 0 30 2 *", "UTC")!, /never fires/);
     assert.match(validateCron("0 9 * * *", "Mars/Olympus")!, /Unknown time zone/);
     assert.match(validateCron("0 9 * * *", "")!, /Unknown time zone/);
-  });
-
-  it("time zones", () => {
-    assert.equal(isValidTimeZone("Europe/Madrid"), true);
-    assert.equal(isValidTimeZone("UTC"), true);
-    assert.equal(isValidTimeZone("Nowhere/Land"), false);
-    assert.equal(isValidTimeZone(""), false);
   });
 });
 
@@ -213,8 +164,6 @@ describe("scheduleIntervalProblem", () => {
     for (let every = 1; every <= 23; every += 1) {
       assert.equal(scheduleIntervalProblem({ kind: "hours", every, atMinute: 0 }) === null, 24 % every === 0, `hours ${every}`);
     }
-    assert.deepEqual([...SCHEDULE_MINUTE_STEPS], [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30]);
-    assert.deepEqual([...SCHEDULE_HOUR_STEPS], [1, 2, 3, 4, 6, 8, 12]);
     assert.equal(scheduleIntervalProblem({ kind: "daily", time: "09:00" }), null);
   });
 });

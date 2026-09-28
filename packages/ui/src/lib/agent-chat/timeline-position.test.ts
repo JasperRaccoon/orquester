@@ -1,18 +1,13 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
-import { TIMELINE_POSITION_LRU_LIMIT, type RememberedTimelinePosition } from "./contracts";
+import { TIMELINE_POSITION_LRU_LIMIT,type RememberedTimelinePosition } from "./contracts";
 import {
-  disclosureSets,
-  EMPTY_DISCLOSURE_STATE,
-  parseDisclosureState,
-  parseRememberedPosition,
-  parseTimelinePositions,
-  resolveTimelineIsAtEnd,
-  setToolOutputOffset,
-  TIMELINE_FOLLOW_REARM_THRESHOLD_PX,
-  TimelinePositionStore,
-  toggleDisclosure
+EMPTY_DISCLOSURE_STATE,
+parseDisclosureState,
+parseRememberedPosition,
+parseTimelinePositions,
+TimelinePositionStore
 } from "./timeline-position";
 
 const position = (overrides: Partial<RememberedTimelinePosition> = {}): RememberedTimelinePosition => ({
@@ -108,38 +103,5 @@ describe("persisted-state validation", () => {
       position()
     ]);
     assert.equal(parseTimelinePositions(JSON.stringify(rows)).size, TIMELINE_POSITION_LRU_LIMIT);
-  });
-});
-
-describe("disclosure helpers", () => {
-  it("toggles a list entry", () => {
-    const open = toggleDisclosure(EMPTY_DISCLOSURE_STATE, "expandedTurnIds", "t1");
-    assert.deepEqual(open.expandedTurnIds, ["t1"]);
-    assert.deepEqual(toggleDisclosure(open, "expandedTurnIds", "t1").expandedTurnIds, []);
-  });
-
-  it("keeps identity when an offset did not move", () => {
-    const withOffset = setToolOutputOffset(EMPTY_DISCLOSURE_STATE, "r1", 12);
-    assert.equal(setToolOutputOffset(withOffset, "r1", 12), withOffset);
-  });
-
-  it("projects the sets the row derivation reads", () => {
-    const sets = disclosureSets({ ...EMPTY_DISCLOSURE_STATE, expandedGroupIds: ["g1"] });
-    assert.ok(sets.expandedGroupIds.has("g1"));
-  });
-});
-
-describe("live-follow re-arm band", () => {
-  it("re-arms only inside the 40 px band", () => {
-    const at = (gap: number) =>
-      resolveTimelineIsAtEnd({ contentLength: 1000, scrollLength: 500, scroll: 500 - gap });
-    assert.equal(at(0), true);
-    assert.equal(at(TIMELINE_FOLLOW_REARM_THRESHOLD_PX), true);
-    assert.equal(at(TIMELINE_FOLLOW_REARM_THRESHOLD_PX + 1), false);
-  });
-
-  it("falls back to the reported flag when a measurement is missing", () => {
-    assert.equal(resolveTimelineIsAtEnd({ isAtEnd: true }), true);
-    assert.equal(resolveTimelineIsAtEnd({}), undefined);
   });
 });

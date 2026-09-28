@@ -31,6 +31,7 @@ import { Target } from "lucide-react";
 import type { AgentGoal, GoalAction } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import { dismissWhenChatTabLeaves } from "../../../lib/agent-chat-active-tab";
 import { Button } from "../../ui/button";
 import { Dropdown, DropdownContext } from "../../ui/dropdown";
 import { DROPDOWN_DESTRUCTIVE_ATTRIBUTE } from "../../ui/dropdown-logic";
@@ -38,7 +39,6 @@ import { ShimmerText } from "../primitives";
 import {
   deriveGoalChip,
   deriveGoalPanel,
-  goalPopoverProps,
   type GoalActionModel,
   type GoalChipTone
 } from "./goal-chip";
@@ -91,7 +91,7 @@ export function GoalChip({
   onAction
 }: GoalChipProps): React.ReactElement | null {
   // One identity per thread: the Dropdown's dismiss effect is keyed on it.
-  const popoverProps = React.useMemo(() => goalPopoverProps(sessionId ?? null), [sessionId]);
+  const dismissOn = React.useMemo(() => dismissWhenChatTabLeaves(sessionId ?? null), [sessionId]);
   const chip = deriveGoalChip(goal, turnRunning, { heldForUpdate });
   if (chip === null) return null;
   return (
@@ -100,7 +100,10 @@ export function GoalChip({
       width="w-72"
       className="p-0"
       triggerClassName={TRIGGER_CLASS}
-      {...popoverProps}
+      role="dialog"
+      ariaLabel="Goal"
+      focusOnOpen
+      dismissOn={dismissOn}
       trigger={
         <span
           title={chip.title}
@@ -144,7 +147,7 @@ export function GoalChip({
   );
 }
 
-export interface GoalPanelProps {
+interface GoalPanelProps {
   goal: AgentGoal;
   /** The paused goal is held for an Orquester update (goals §5.7): its status says so. */
   heldForUpdate?: boolean;
@@ -174,11 +177,9 @@ function Fact({
 }
 
 /**
- * The popover's contents, exported so the readout can be rendered — and
- * asserted — without driving the popover open (the `ContextMeterPanel`
- * pattern). An action closes the popover as it fires.
+ * The popover's contents. An action closes the popover as it fires.
  */
-export function GoalPanel({
+function GoalPanel({
   goal,
   heldForUpdate = false,
   actions,
@@ -186,7 +187,7 @@ export function GoalPanel({
   onAction
 }: GoalPanelProps): React.ReactElement {
   const { close } = React.useContext(DropdownContext);
-  const panel = deriveGoalPanel(goal, new Date(), { heldForUpdate });
+  const panel = deriveGoalPanel(goal, { heldForUpdate });
   return (
     <div className="flex flex-col gap-2 p-3">
       <div className="flex items-baseline justify-between gap-3">

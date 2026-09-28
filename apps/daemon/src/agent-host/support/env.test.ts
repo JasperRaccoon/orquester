@@ -1,13 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  ACCOUNT_HOME_ENV_VAR,
-  AMBIENT_CREDENTIAL_ENV_VARS,
-  buildProviderEnv,
-  needsShellExpansion
-} from "./env.ts";
-import { AGENT_LAUNCH_ENV_VAR } from "./leftover-processes.ts";
+import { buildProviderEnv } from "./env.ts";
 
 const base = {
   sessionPath: "/usr/local/bin:/usr/bin:/home/orq/.local/bin",
@@ -35,9 +29,9 @@ test("the env is built from nothing — process.env is never spread", () => {
 });
 
 test("every adapter binds its account home through its own variable", () => {
-  for (const [adapter, variable] of Object.entries(ACCOUNT_HOME_ENV_VAR)) {
+  for (const [adapter, variable] of [["claude", "CLAUDE_CONFIG_DIR"], ["codex", "CODEX_HOME"], ["opencode", "OPENCODE_DATA"], ["grok", "GROK_HOME"]] as const) {
     const env = buildProviderEnv({
-      adapter: adapter as keyof typeof ACCOUNT_HOME_ENV_VAR,
+      adapter,
       ...base,
       accountHomeDir: "/var/lib/orquester/daemon/agent-accounts/x/home"
     });
@@ -61,7 +55,18 @@ test("ambient vendor credentials are stripped from extraEnv", () => {
   });
   assert.equal(env.XAI_API_KEY, undefined);
   assert.equal(env.GROK_OAUTH2_REFERRER, "https://x.ai");
-  assert.ok(AMBIENT_CREDENTIAL_ENV_VARS.grok.includes("XAI_API_KEY"));
+  const claude = buildProviderEnv({
+    adapter: "claude",
+    ...base,
+    extraEnv: {
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
+      ANTHROPIC_AUTH_TOKEN: "retired-proxy-token",
+      ANTHROPIC_API_KEY: "someone-elses-key"
+    }
+  });
+  assert.equal(claude.ANTHROPIC_BASE_URL, "http://127.0.0.1:9");
+  assert.equal(claude.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(claude.ANTHROPIC_API_KEY, undefined);
 });
 
 test("extraEnv can never move a child off the session PATH, TMPDIR or HOME", () => {
@@ -97,24 +102,18 @@ test("undefined values are dropped, never stringified", () => {
 });
 
 test("every adapter's launch carries its own launch marker, which no launcher env shadows", () => {
-  for (const adapter of Object.keys(ACCOUNT_HOME_ENV_VAR) as Array<keyof typeof ACCOUNT_HOME_ENV_VAR>) {
+  for (const adapter of ["claude", "codex", "opencode", "grok"] as const) {
     const env = buildProviderEnv({
       adapter,
       ...base,
       launchId: `launch-of-${adapter}`,
-      extraEnv: { [AGENT_LAUNCH_ENV_VAR]: "a-launcher-env-value" }
+      extraEnv: { ["ORQUESTER_AGENT_LAUNCH"]: "a-launcher-env-value" }
     });
-    assert.equal(env[AGENT_LAUNCH_ENV_VAR], `launch-of-${adapter}`, adapter);
+    assert.equal(env["ORQUESTER_AGENT_LAUNCH"], `launch-of-${adapter}`, adapter);
   }
 });
 
 test("ORQUESTER_SESSION_ID is always stamped", () => {
   const env = buildProviderEnv({ adapter: "claude", ...base });
   assert.equal(env.ORQUESTER_SESSION_ID, "sess-1");
-});
-
-test("needsShellExpansion flags the values a child would receive verbatim", () => {
-  assert.equal(needsShellExpansion("~/.codex_work"), true);
-  assert.equal(needsShellExpansion("$HOME/.codex"), true);
-  assert.equal(needsShellExpansion("/var/lib/orquester/.codex"), false);
 });

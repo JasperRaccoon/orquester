@@ -22,7 +22,7 @@ export function tmuxName(id: string): string {
 }
 
 /** Build the `capture-pane` argv. Pure (testable without tmux). `name` is the full orq-<id>. */
-export function captureArgs(
+function captureArgs(
   name: string,
   opts: { escapes?: boolean; lines?: number | "all" } = {}
 ): string[] {

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { openLayerEffect } from "../lib/open-layers";
+import { openLayer } from "../lib/open-layers";
 
 /**
  * Count the calling layer as open while `open` is true and it is mounted, so
@@ -26,5 +26,5 @@ import { openLayerEffect } from "../lib/open-layers";
  * render checks use.)
  */
 export function useOpenLayer(open: boolean): void {
-  useEffect(() => openLayerEffect(open), [open]);
+  useEffect(() => open ? openLayer() : undefined, [open]);
 }

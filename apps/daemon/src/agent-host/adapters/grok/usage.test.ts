@@ -8,8 +8,6 @@ import assert from "node:assert/strict";
 
 import { readCapture, promptResults } from "./fixtures.ts";
 import {
-  COST_USD_TICKS_PER_DOLLAR,
-  costUsdFromTicks,
   parsePromptResultUsage,
   parseResponseCompletedUsage,
   parseXaiUsage,
@@ -18,10 +16,10 @@ import {
 import { contextTokensOf, contextWindowFromModelState } from "./xai-meta.ts";
 
 test("costUsdTicks is USD x 1e9", () => {
-  assert.equal(COST_USD_TICKS_PER_DOLLAR, 1_000_000_000);
-  assert.equal(costUsdFromTicks(121_754_000)?.toFixed(6), "0.121754");
-  assert.equal(costUsdFromTicks(undefined), undefined);
-  assert.equal(costUsdFromTicks(-1), undefined);
+  const parseCost = (costUsdTicks: unknown) => parsePromptResultUsage({ usage: { inputTokens: 1, outputTokens: 1, costUsdTicks } }).costUsd;
+  assert.equal(parseCost(121_754_000), 0.121754);
+  assert.equal(parseCost(undefined), undefined);
+  assert.equal(parseCost(-1), undefined);
 });
 
 test("the recorded prompt result parses into a complete TurnTokenUsage", () => {

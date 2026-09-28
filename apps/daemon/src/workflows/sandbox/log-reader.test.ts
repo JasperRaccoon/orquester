@@ -58,7 +58,7 @@ describe("readLogWindow", () => {
     const redactor = createRedactor({ KEY: "sk-live-ÄBC-123", SHORT: "pw12" });
     const content = `x sk-live-ÄBC-123 y pw12 z ${"sk-live-ÄBC-123"}${"pw12"} end sk-live-ÄBC-12`;
     const path = await logFile(content);
-    const expected = redactor.text(content);
+    const expected = "x «secret:KEY» y «secret:SHORT» z «secret:KEY»«secret:SHORT» end sk-live-ÄBC-12";
     for (let size = 1; size <= 40; size += 1) {
       const windows = await readAllWindows(path, size, redactor);
       assert.equal(windows.join(""), expected, `windows of ${size} bytes join to the redacted text`);
@@ -104,7 +104,7 @@ describe("followLog", () => {
     const path = await logFile("");
     let live = true;
     const chunks: string[] = [];
-    const follow = followLog(path, { isLive: () => live, redactor, pollMs: 5, chunkBytes: 7 });
+    const follow = followLog(path, { isLive: () => live, redactor });
     const reading = (async () => {
       for await (const chunk of follow) {
         chunks.push(chunk);
@@ -128,7 +128,7 @@ describe("followLog", () => {
     const path = await logFile("abc");
     const controller = new AbortController();
     const chunks: string[] = [];
-    for await (const chunk of followLog(path, { isLive: () => true, signal: controller.signal, pollMs: 5 })) {
+    for await (const chunk of followLog(path, { isLive: () => true, signal: controller.signal })) {
       chunks.push(chunk);
       controller.abort();
     }

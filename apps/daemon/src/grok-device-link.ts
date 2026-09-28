@@ -1,21 +1,17 @@
 import { EventEmitter } from "node:events";
 import type { GrokDeviceLink, GrokDeviceLinkStatus } from "@orquester/api";
-import { grokAuthJsonFromDeviceTokens, httpGrokDeviceAuth, type GrokDeviceAuth, type GrokDeviceTokens } from "./grok-device-auth.ts";
+import { grokAuthJsonFromDeviceTokens, httpGrokDeviceAuth, type GrokDeviceTokens } from "./grok-device-auth.ts";
 
 /** Floor for the poll interval, whatever the authorization server asks for. */
 const POLL_INTERVAL_MS = 3000;
 
-export type GrokLinkStartResult =
+type GrokLinkStartResult =
   | { ok: true; link: GrokDeviceLink }
   | { ok: false; code: "conflict" | "upstream"; error: string; status?: number };
 
-export interface GrokDeviceLinkOptions {
+interface GrokDeviceLinkOptions {
   /** Import a grok-CLI-shaped `auth.json` blob as a managed grok account. */
   importAccount(content: string): Promise<unknown>;
-  /** Defaults to the real auth.x.ai client; tests inject a fake. */
-  deviceAuth?: GrokDeviceAuth;
-  now?(): number;
-  sleep?(ms: number): Promise<void>;
 }
 
 /**
@@ -47,11 +43,11 @@ export class GrokDeviceLinkService {
    *  for the verdict. */
   async start(): Promise<GrokLinkStartResult> {
     if (this.pending) return { ok: false, code: "conflict", error: "a Grok link is already in progress" };
-    const res = await this.deviceAuth().start();
+    const res = await httpGrokDeviceAuth.start();
     if (!res.ok) return { ok: false, code: "upstream", error: res.error, ...(res.status ? { status: res.status } : {}) };
     // A start that raced another one lost: the first stays the pending link.
     if (this.pending) return { ok: false, code: "conflict", error: "a Grok link is already in progress" };
-    const expiresAtMs = this.now() + res.value.expiresIn * 1000;
+    const expiresAtMs = Date.now() + res.value.expiresIn * 1000;
     const link: GrokDeviceLink = {
       url: res.value.url,
       userCode: res.value.userCode,
@@ -82,7 +78,7 @@ export class GrokDeviceLinkService {
 
   /**
    * Watch a device-code grant to its verdict. Bounded by both the code's expiry
-   * and an attempt cap, so neither a frozen clock (tests) nor an endpoint stuck
+   * and an attempt cap, so neither a frozen clock nor an endpoint stuck
    * on `authorization_pending` can spin forever. Honors RFC 8628 `slow_down` by
    * widening the interval.
    */
@@ -90,11 +86,11 @@ export class GrokDeviceLinkService {
     let intervalMs = this.pending?.intervalMs ?? POLL_INTERVAL_MS;
     const maxAttempts = Math.ceil((expiresIn * 1000) / intervalMs) + 1;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await this.sleep(intervalMs);
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
       // Cancelled or superseded — this poll is stale.
       if (this.pending?.deviceCode !== deviceCode) return;
-      if (this.now() >= this.pending.expiresAtMs) break;
-      const res = await this.deviceAuth().poll(deviceCode);
+      if (Date.now() >= this.pending.expiresAtMs) break;
+      const res = await httpGrokDeviceAuth.poll(deviceCode);
       if (res.status === "wait") {
         if (res.slowDown) intervalMs += 5000; // RFC 8628 §3.5
         continue;
@@ -113,7 +109,7 @@ export class GrokDeviceLinkService {
     if (this.pending?.deviceCode !== deviceCode) return;
     this.pending = null;
     try {
-      await this.opts.importAccount(JSON.stringify(grokAuthJsonFromDeviceTokens(tokens, this.now())));
+      await this.opts.importAccount(JSON.stringify(grokAuthJsonFromDeviceTokens(tokens, Date.now())));
       this.lastError = null;
     } catch (error) {
       console.error("grok device link: importing the linked account failed", error);
@@ -131,18 +127,5 @@ export class GrokDeviceLinkService {
 
   private changed(): void {
     this.events.emit("changed", this.status());
-  }
-
-  private deviceAuth(): GrokDeviceAuth {
-    return this.opts.deviceAuth ?? httpGrokDeviceAuth;
-  }
-
-  private now(): number {
-    return this.opts.now ? this.opts.now() : Date.now();
-  }
-
-  private sleep(ms: number): Promise<void> {
-    if (this.opts.sleep) return this.opts.sleep(ms);
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

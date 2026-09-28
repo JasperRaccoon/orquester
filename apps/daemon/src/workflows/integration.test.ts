@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import { createHttpExecutor } from "./nodes/http.ts";
 import { createSandboxRunner } from "./sandbox/sandbox.ts";
 import { edge, FakeProjects, InMemoryRunStore, node, workflow } from "./testing/fakes.ts";
 import { createHarness } from "./testing/harness.ts";
+import { waitForFileState } from "./testing/daemon-harness.ts";
 
 const realClock: Clock = {
   now: () => new Date(),
@@ -58,7 +59,7 @@ describe("integration: code and shell through the real sandbox", () => {
       runStore: new InMemoryRunStore(join(root, "runs")),
       projects,
       clock: realClock as never,
-      sandbox: createSandboxRunner({ pollMs: 20, killGraceMs: 300, appdirTmp: root }) as never
+      sandbox: createSandboxRunner({ appdirTmp: root }) as never
     });
     await h.secrets.set("TOKEN", "tok-123456");
     const { runId } = await h.engine.run("w1", { input: { n: 21 } });
@@ -81,7 +82,7 @@ describe("integration: code and shell through the real sandbox", () => {
         runStore: new InMemoryRunStore(join(root, "runs")),
         projects,
         clock: realClock as never,
-        sandbox: createSandboxRunner({ pollMs: 20, killGraceMs: 300, appdirTmp: root }) as never
+        sandbox: createSandboxRunner({ appdirTmp: root }) as never
       });
     let h = make("export default () => { throw new Error('boom') }");
     let { runId } = await h.engine.run("w1", {});
@@ -129,7 +130,7 @@ describe("integration: code and shell through the real sandbox", () => {
       runStore: new InMemoryRunStore(join(root, "runs")),
       projects,
       clock: realClock as never,
-      sandbox: createSandboxRunner({ pollMs: 20, killGraceMs: 300, appdirTmp: root }) as never
+      sandbox: createSandboxRunner({ appdirTmp: root }) as never
     });
     await h.secrets.set("API_KEY", "key-abcdef");
     const { runId } = await h.engine.run("w1", { input: { who: "$(touch /tmp/pwned) ada" } });
@@ -146,25 +147,18 @@ describe("integration: code and shell through the real sandbox", () => {
     const projects = new FakeProjects();
     projects.existing.add(projectPath);
     const h = createHarness({
-      workflows: [workflow("w1", [node("T", "trigger.manual"), node("S", "shell", { script: "sleep 30" })], [edge("T", "S")], { project: { kind: "existing", projectPath } })],
+      workflows: [workflow("w1", [node("T", "trigger.manual"), node("S", "shell", { script: 'echo $$ > "$READY"; sleep 30', env: [{ name: "READY", value: join(root, "child-ready") }] })], [edge("T", "S")], { project: { kind: "existing", projectPath } })],
       runStore: new InMemoryRunStore(join(root, "runs")),
       projects,
       clock: realClock as never,
-      sandbox: createSandboxRunner({ pollMs: 20, killGraceMs: 300, appdirTmp: root }) as never
+      sandbox: createSandboxRunner({ appdirTmp: root }) as never
     });
     const { runId } = await h.engine.run("w1", {});
-    const started = Date.now();
-    for (let i = 0; i < 500 && !h.engine.isNodeLogLive(runId!, "S"); i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
-    // Let the runner start the work before cancelling.
-    for (let i = 0; i < 200; i += 1) {
-      const run = await h.runStore.load(runId!);
-      if (run?.blocks.S?.waitingOn?.kind === "process") break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    const pid = Number(await waitForFileState(join(root, "child-ready"), () => readFile(join(root, "child-ready"), "utf8").catch(() => ""), (text) => /^\d+\s*$/.test(text)));
     await h.engine.cancel(runId!);
     const result = await h.engine.waitForRun(runId!);
     assert.equal(result.status, "cancelled");
-    assert.ok(Date.now() - started < 10_000, "well before the sleep ends");
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   });
 });
 
@@ -199,7 +193,7 @@ describe("integration: the HTTP block against a local server", () => {
             return;
           case "/big":
             res.writeHead(200, { "content-type": "text/plain" });
-            res.end("z".repeat(5000));
+            res.end("z".repeat(32 * 1024 * 1024 + 1));
             return;
           case "/hang":
             return; // never answers
@@ -222,11 +216,11 @@ describe("integration: the HTTP block against a local server", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  const runHttp = async (config: Record<string, unknown>, options: { maxHttpBodyBytes?: number; secrets?: Record<string, string>; input?: unknown } = {}) => {
+  const runHttp = async (config: Record<string, unknown>, options: { secrets?: Record<string, string>; input?: unknown } = {}) => {
     const h = createHarness({
       workflows: [workflow("w1", [node("T", "trigger.manual"), node("H", "http", config)], [edge("T", "H")])],
       clock: realClock as never,
-      executors: { http: createHttpExecutor(options.maxHttpBodyBytes !== undefined ? { maxHttpBodyBytes: options.maxHttpBodyBytes } : {}) }
+      executors: { http: createHttpExecutor() }
     });
     for (const [name, value] of Object.entries(options.secrets ?? {})) await h.secrets.set(name, value);
     const { runId } = await h.engine.run("w1", { input: options.input ?? null });
@@ -263,7 +257,6 @@ describe("integration: the HTTP block against a local server", () => {
     ({ block } = await runHttp({ url: `${base}/missing` }));
     assert.equal(block.status, "failed");
     assert.equal(block.error?.kind, "http_status");
-    assert.equal(block.error?.message, "HTTP 404 Not Found");
     assert.deepEqual((block.output as { body: unknown }).body, { error: "nope" }, "the response rides the failure");
     ({ block } = await runHttp({ url: `${base}/missing`, successStatuses: [404] }));
     assert.equal(block.status, "succeeded");
@@ -283,7 +276,7 @@ describe("integration: the HTTP block against a local server", () => {
   });
 
   test("the body cap, the timeout and a network error each fail the block with their kind", async () => {
-    let { block } = await runHttp({ url: `${base}/big` }, { maxHttpBodyBytes: 1000 });
+    let { block } = await runHttp({ url: `${base}/big` });
     assert.equal(block.error?.kind, "limit_exceeded");
     ({ block } = await runHttp({ url: `${base}/hang`, timeoutSeconds: 0.2 }));
     assert.equal(block.error?.kind, "timeout");

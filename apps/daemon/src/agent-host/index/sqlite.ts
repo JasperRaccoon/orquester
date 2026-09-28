@@ -36,13 +36,13 @@ import {
 // The driver seam
 // ---------------------------------------------------------------------------
 
-export interface SqliteRunResult {
+interface SqliteRunResult {
   changes: number;
   lastInsertRowid: number | bigint;
 }
 
 /** The subset of a better-sqlite3 `Statement` the index uses. */
-export interface SqliteStatement {
+interface SqliteStatement {
   run(...params: unknown[]): SqliteRunResult;
   get(...params: unknown[]): unknown;
   all(...params: unknown[]): unknown[];
@@ -58,8 +58,8 @@ export interface SqliteDatabase {
   close(): void;
 }
 
-/** Test seam: how a database file is opened. */
-export interface SqliteDriver {
+/** The resolved native driver used by the file lifecycle. */
+interface SqliteDriver {
   open(filePath: string): SqliteDatabase;
 }
 

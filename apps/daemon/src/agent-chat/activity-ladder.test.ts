@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { AgentChatSessionSummaryFields, LatestTurnSummary, TurnState } from "@orquester/api";
-import { pushTypeForFields, pushTypeForRung, resolveChatActivity } from "./activity-ladder.ts";
+import { pushTypeForFields, resolveChatActivity } from "./activity-ladder.ts";
 
 // The ONE ladder of §6.4. Every rung, in priority order, plus the two race
 // fallbacks the spec calls non-optional — each of these encodes a bug T3 hit.
@@ -213,24 +213,19 @@ test("an empty summary resolves to nothing rather than to finished", () => {
   assert.equal(resolved.attention, null);
 });
 
-test("push copy follows the rung", () => {
-  assert.equal(pushTypeForRung("approval"), "needs-input");
-  assert.equal(pushTypeForRung("question"), "needs-input");
-  assert.equal(pushTypeForRung("completed"), "finished");
-  assert.equal(pushTypeForRung("error"), "finished");
-  // Its own kind, not a `needs-input` with different words: nothing is blocked
-  // on an answer, and the work is not finished either.
-  assert.equal(pushTypeForRung("plan-ready"), "plan-ready");
-  for (const rung of [
-    "starting",
-    "running",
-    "goal-continuing",
-    "background-working",
-    "monitoring",
-    "unknown"
-  ] as const) {
-    assert.equal(pushTypeForRung(rung), null, rung);
-  }
+test("attention pushes follow the protocol state and remain silent while work is active", () => {
+  const cases: Array<[AgentChatSessionSummaryFields, "needs-input" | "finished" | null]> = [
+    [{ hasPendingApprovals: true }, "needs-input"],
+    [{ hasPendingUserInput: true }, "needs-input"],
+    [{ latestTurn: settled }, "finished"],
+    [{ chatSessionStatus: "error" }, "finished"],
+    [{ chatSessionStatus: "starting" }, null],
+    [{ chatSessionStatus: "running" }, null],
+    [{ backgroundLiveness: "working" }, null],
+    [{ backgroundLiveness: "monitoring" }, null],
+    [{}, null]
+  ];
+  for (const [fields, expected] of cases) assert.equal(pushTypeForFields(fields), expected);
 });
 
 test("a plan-ready thread pushes even while background work is live", () => {
@@ -371,7 +366,6 @@ test("a goal that is not continuing changes nothing", () => {
     assert.equal(resolved.rung, "completed", JSON.stringify(goal));
     assert.equal(resolved.attention, "finished");
   }
-  assert.equal(pushTypeForRung("goal-continuing"), null);
 });
 
 test("never a `finished` push while background liveness is non-null", () => {

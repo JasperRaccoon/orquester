@@ -34,7 +34,7 @@ import {
   subagentReport,
   type subagentProgress
 } from "./subagents.ts";
-import { isTerminalToolStatus, type FINISHED_CALLS_REMEMBERED } from "./tool-calls.ts";
+import { isTerminalToolStatus } from "./tool-calls.ts";
 
 /**
  * Where a background task was started: `session` is the ACP session whose
@@ -106,11 +106,11 @@ export function isEndedTaskStatus(status: RuntimeTaskStatus): boolean {
 
 /**
  * How many ended background task ids the normaliser remembers, oldest
- * forgotten first — {@link FINISHED_CALLS_REMEMBERED}'s rule for tasks. A
+ * forgotten first, as with finished tool calls. A
  * task's track is dropped at its end, so this is what tells a snapshot that
  * still lists a finished task from a new task's first sighting.
  */
-export const ENDED_TASKS_REMEMBERED = 1_024;
+const ENDED_TASKS_REMEMBERED = 1_024;
 
 /**
  * The `rawOutput` tag of a `monitor` call's answer — `{type: "Monitor",
@@ -981,7 +981,7 @@ export function shellLinkage(
 }
 
 /** `killed`→`cancelled`, `paused`→`idle`, normalised at the adapter (§4.2). */
-export function normalizeTaskStatus(status: string | undefined): RuntimeTaskStatus {
+function normalizeTaskStatus(status: string | undefined): RuntimeTaskStatus {
   switch (status?.trim().toLowerCase()) {
     case "pending":
       return "pending";

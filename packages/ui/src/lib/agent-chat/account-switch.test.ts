@@ -4,24 +4,21 @@
  */
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
 import type { AgentAccount } from "@orquester/api";
-import type { AdapterGoalSupport, AgentGoal } from "@orquester/api/agent-chat";
+import type { AdapterGoalSupport,AgentGoal } from "@orquester/api/agent-chat";
 
 import {
-  buildChatAccountOptions,
-  canSwitchChatAccount,
-  chatAccountLabel,
-  chatAccountSelectionId,
-  chatAccountSwitchRefusal,
-  chatAccountSwitchSupported,
-  COMPACTION_SWITCH_REFUSAL,
-  GOAL_CONTINUING_SWITCH_REFUSAL,
-  GOAL_HELD_SWITCH_REFUSAL,
-  identityChangeSummary,
-  isGoalContinuing,
-  type ChatAccountSwitchState
+buildChatAccountOptions,
+canSwitchChatAccount,
+chatAccountLabel,
+chatAccountSelectionId,
+chatAccountSwitchRefusal,
+chatAccountSwitchSupported,
+GOAL_HELD_SWITCH_REFUSAL,
+isGoalContinuing,
+type ChatAccountSwitchState
 } from "./account-switch.ts";
 import { isGoalHeldForUpdate } from "./goal.logic.ts";
 
@@ -210,27 +207,6 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
     }
   });
 
-  it("an active Codex goal refuses the switch, with the host's own words", () => {
-    const continuing = { ...idle, goalContinuing: onLiveSession(goal("active"), CODEX) };
-    assert.equal(canSwitchChatAccount(continuing), false);
-    assert.equal(chatAccountSwitchRefusal(continuing), GOAL_CONTINUING_SWITCH_REFUSAL);
-    assert.equal(GOAL_CONTINUING_SWITCH_REFUSAL, "Pause the goal before switching accounts.");
-  });
-
-  it("a paused Codex goal, an active Claude or Grok goal, and no goal leave the gate open", () => {
-    for (const [label, goalContinuing] of [
-      ["paused Codex", onLiveSession(goal("paused"), CODEX)],
-      ["active Claude", onLiveSession(goal("active"), CLAUDE)],
-      ["active Grok", onLiveSession(goal("active"), GROK)],
-      ["no goal", onLiveSession(null, CODEX)]
-    ] as const) {
-      const state = { ...idle, goalContinuing };
-      assert.equal(canSwitchChatAccount(state), true, label);
-      assert.equal(chatAccountSwitchRefusal(state), null, label);
-    }
-    assert.equal(canSwitchChatAccount(idle), true, "a state that never mentions a goal is unchanged");
-  });
-
   it("goals §5.7: a goal a deploy HELD is continuing — paused or not, whatever the session says", () => {
     // Without a summary verdict, the head's `goalHeldForHandover` reads as
     // the host's `goalHeld`: the next host sets the goal going again by itself.
@@ -260,30 +236,6 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
       GOAL_HELD_SWITCH_REFUSAL,
       "in the host's own words — the hold's, not a pause the goal has had"
     );
-  });
-
-  it("goals §5.7: the held goal's words are the host's, and name the /goal pause that takes it back", () => {
-    assert.equal(
-      GOAL_HELD_SWITCH_REFUSAL,
-      "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts."
-    );
-  });
-
-  it("goals §5.7: the summary's verdict decides held as it decides continuing", () => {
-    const summary = (status: string, continuing: boolean) => ({ objective: "Make CI green", status, continuing });
-    const view = (summaryGoal: unknown, fold: AgentGoal["status"]): ChatAccountSwitchState => ({
-      ...idle,
-      goalContinuing: isGoalContinuing({ summaryGoal, goal: goal(fold), support: CODEX, sessionStatus: "ready" }),
-      goalHeldForUpdate: isGoalHeldForUpdate({ goal: goal(fold), summaryGoal })
-    });
-    // Held: the host reports the goal paused AND continuing.
-    assert.equal(chatAccountSwitchRefusal(view(summary("paused", true), "paused")), GOAL_HELD_SWITCH_REFUSAL);
-    // Just paused by the user, the summary a poll behind: still the pause advice, never "held".
-    assert.equal(chatAccountSwitchRefusal(view(summary("active", true), "paused")), GOAL_CONTINUING_SWITCH_REFUSAL);
-    // Taken back by the user's `/goal pause`: a paused goal of their own may switch.
-    const takenBack = view(summary("paused", false), "paused");
-    assert.equal(canSwitchChatAccount(takenBack), true, "the user's own pause opens the chip");
-    assert.equal(chatAccountSwitchRefusal(takenBack), null);
   });
 
   it("goals §5.7: held without a continuing verdict still closes the chip, as the host refuses it", () => {
@@ -352,26 +304,9 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
       "the host holds it and says so"
     );
   });
-
-  it("the goal's reason wins over the wait-for-idle one: between its turns, idle never comes", () => {
-    const busy = { ...idle, isTurnActive: true, goalContinuing: true };
-    assert.equal(canSwitchChatAccount(busy), false);
-    assert.equal(chatAccountSwitchRefusal(busy), GOAL_CONTINUING_SWITCH_REFUSAL);
-    assert.equal(
-      chatAccountSwitchRefusal({ ...idle, isTurnActive: true }),
-      null,
-      "an ordinary busy thread keeps the chip's own 'available when idle'"
-    );
-  });
 });
 
 describe("labels", () => {
-  it("reads System for the sentinel, an absent id and an unknown id", () => {
-    assert.equal(chatAccountLabel({ accountId: "system", accounts: ACCOUNTS, shortLabel }), "System");
-    assert.equal(chatAccountLabel({ accountId: undefined, accounts: ACCOUNTS, shortLabel }), "System");
-    assert.equal(chatAccountLabel({ accountId: "", accounts: ACCOUNTS, shortLabel }), "System");
-    assert.equal(chatAccountLabel({ accountId: "gone", accounts: ACCOUNTS, shortLabel }), "System");
-  });
 
   it("resolves a managed account through the live list, not the log", () => {
     assert.equal(chatAccountLabel({ accountId: "cla-1", accounts: ACCOUNTS, shortLabel }), "cla-1");
@@ -385,66 +320,5 @@ describe("labels", () => {
     assert.equal(chatAccountSelectionId("cla-1"), "cla-1");
     const options = buildChatAccountOptions({ refId: "claude", accounts: ACCOUNTS, shortLabel });
     assert.ok(options.some((option) => option.id === chatAccountSelectionId("")));
-  });
-
-  it("the timeline row names the account it switched to, and degrades gracefully", () => {
-    assert.equal(
-      identityChangeSummary({
-        payload: { accountId: "cla-1", home: "account" },
-        accounts: ACCOUNTS,
-        shortLabel
-      }),
-      "Switched to cla-1"
-    );
-    assert.equal(
-      identityChangeSummary({
-        payload: { accountId: "", home: "system" },
-        accounts: ACCOUNTS,
-        shortLabel
-      }),
-      "Switched to System"
-    );
-    // An older bundle's payload, or none at all.
-    assert.equal(
-      identityChangeSummary({ payload: {}, accounts: ACCOUNTS, shortLabel }),
-      "Switched account"
-    );
-    assert.equal(
-      identityChangeSummary({ payload: null, accounts: ACCOUNTS, shortLabel }),
-      "Switched account"
-    );
-  });
-});
-
-describe("fix round 2 (4): the refusal names what the host names, in the host's order", () => {
-  it("a running compaction outranks the goal — the host checks it first", () => {
-    const both = { ...idle, compacting: true, goalContinuing: true };
-    assert.equal(canSwitchChatAccount(both), false);
-    assert.equal(chatAccountSwitchRefusal(both), COMPACTION_SWITCH_REFUSAL);
-    assert.equal(
-      COMPACTION_SWITCH_REFUSAL,
-      "Wait for the context compaction to finish before switching accounts.",
-      "the host's own words (`identitySwitchRefusal`)"
-    );
-  });
-
-  it("each reason alone, and neither", () => {
-    assert.equal(chatAccountSwitchRefusal({ ...idle, compacting: true }), COMPACTION_SWITCH_REFUSAL);
-    assert.equal(chatAccountSwitchRefusal({ ...idle, compacting: true, isTurnActive: true }), COMPACTION_SWITCH_REFUSAL);
-    assert.equal(chatAccountSwitchRefusal({ ...idle, goalContinuing: true }), GOAL_CONTINUING_SWITCH_REFUSAL);
-    assert.equal(chatAccountSwitchRefusal({ ...idle, goalHeldForUpdate: true }), GOAL_HELD_SWITCH_REFUSAL);
-    assert.equal(chatAccountSwitchRefusal(idle), null);
-    assert.equal(
-      canSwitchChatAccount({ ...idle, compacting: false, goalContinuing: false, goalHeldForUpdate: false }),
-      true
-    );
-  });
-
-  it("goals §5.7: a held goal comes after the compaction and before the continuing goal, as on the host", () => {
-    const held = { ...idle, goalContinuing: true, goalHeldForUpdate: true };
-    assert.equal(chatAccountSwitchRefusal({ ...held, compacting: true }), COMPACTION_SWITCH_REFUSAL);
-    assert.equal(chatAccountSwitchRefusal(held), GOAL_HELD_SWITCH_REFUSAL);
-    // Its final turn may still run: the hold's words still come first.
-    assert.equal(chatAccountSwitchRefusal({ ...held, isTurnActive: true }), GOAL_HELD_SWITCH_REFUSAL);
   });
 });

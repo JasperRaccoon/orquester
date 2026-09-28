@@ -204,10 +204,6 @@ export interface FollowLogOptions {
   isLive(): boolean;
   signal?: AbortSignal;
   redactor?: Redactor;
-  /** How long to wait for new bytes at the end of a live file (default 250 ms). */
-  pollMs?: number;
-  /** Bytes per read (default 256 KiB). */
-  chunkBytes?: number;
 }
 
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
@@ -232,13 +228,11 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
  */
 export async function* followLog(path: string, options: FollowLogOptions): AsyncGenerator<string, void, void> {
   let offset = Math.max(0, options.offset ?? 0);
-  const pollMs = options.pollMs ?? 250;
-  const chunkBytes = options.chunkBytes ?? DEFAULT_WINDOW_BYTES;
   while (!options.signal?.aborted) {
     // Decide liveness BEFORE reading, so a writer that finished just after the read is caught by
     // one more read rather than lost.
     const live = options.isLive();
-    const window = await readLogWindow(path, offset, chunkBytes, options.redactor, { holdTail: live });
+    const window = await readLogWindow(path, offset, DEFAULT_WINDOW_BYTES, options.redactor, { holdTail: live });
     const advanced = window.nextOffset !== offset;
     offset = window.nextOffset;
     if (window.text.length > 0) {
@@ -252,6 +246,6 @@ export async function* followLog(path: string, options: FollowLogOptions): Async
       return;
     }
     // At the end of a live file, or holding back its last bytes: wait for more.
-    await pause(pollMs, options.signal);
+    await pause(250, options.signal);
   }
 }

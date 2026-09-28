@@ -10,7 +10,7 @@
  * Ported from T3 Code (MIT): apps/server/src/checkpointing/Utils.ts
  */
 
-export const CHECKPOINT_REFS_PREFIX = "refs/orquester/checkpoints";
+const CHECKPOINT_REFS_PREFIX = "refs/orquester/checkpoints";
 
 /**
  * The per-thread ref namespace. base64url keeps every thread id — which may

@@ -10,7 +10,7 @@
 
 import { extOf } from "./file-kind";
 
-export const FILE_ICON_IDS = [
+const FILE_ICON_IDS = [
   "table", "word", "powerpoint", "pdf", "json", "yaml", "toml", "xml", "database", "jupyter",
   "zip", "typescript", "react_ts", "javascript", "react", "python", "rust", "go", "java", "c",
   "cpp", "csharp", "ruby", "php", "swift", "console", "powershell", "html", "css", "sass",

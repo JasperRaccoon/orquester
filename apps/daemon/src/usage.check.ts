@@ -9,17 +9,14 @@ const allOn: UsagePrefs = { enabled: true, agents: { claude: true, codex: true }
 
 function make(over: Partial<UsagePrefs> = {}, c: AgentUsage | null = claude) {
   const changed: unknown[] = [];
-  let now = 1_000;
   const svc = new UsageService({
     fetchClaude: async () => c,
     readCodex: async () => codex,
     getPrefs: async () => ({ ...allOn, ...over }),
-    now: () => now,
-    activeMs: 60_000,
-    idleMs: 300_000
+    now: () => 1_000
   });
   svc.events.on("changed", (u) => changed.push(u));
-  return { svc, changed, setNow: (n: number) => (now = n) };
+  return { svc, changed };
 }
 
 const t = async () => {

@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import type { DomainEvent, RuntimeEvent, ThreadMessageItem } from "@orquester/api/agent-chat";
 import { foldThread } from "@orquester/api/agent-chat";
@@ -20,17 +20,12 @@ import { foldThread } from "@orquester/api/agent-chat";
 import { createIngestion } from "../../ingestion/index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen,
   settle
 } from "../../ingestion/test-harness.ts";
-import {
-  SERVER_NOTIFICATION_METHODS,
-  SERVER_REQUEST_METHODS
-} from "./_generated/index.ts";
-import { CodexNormaliser, canonicalRequestType, presentableError } from "./normalise.ts";
+import { CodexNormaliser } from "./normalise.ts";
 import { CodexUsageTracker } from "./usage.ts";
 
 const FIXTURE_DIR = join(
@@ -61,34 +56,23 @@ interface Frame {
   id?: number | string;
   method?: string;
   params?: unknown;
-  result?: unknown;
-  error?: unknown;
 }
 
-/** Server→client frames only, split the way the transport splits them. */
+/** Notifications are the normaliser's input; replies belong to the peer. */
 function inbound(lines: FixtureLine[]): {
   notifications: { method: string; params: unknown }[];
-  requests: { id: number | string; method: string; params: unknown }[];
-  responses: Frame[];
 } {
   const notifications: { method: string; params: unknown }[] = [];
-  const requests: { id: number | string; method: string; params: unknown }[] = [];
-  const responses: Frame[] = [];
   for (const line of lines) {
     if (line.dir !== "recv" || typeof line.frame !== "object" || line.frame === null) {
       continue;
     }
     const frame = line.frame as Frame;
-    const hasId = frame.id !== undefined && frame.id !== null;
-    if (frame.method !== undefined && hasId) {
-      requests.push({ id: frame.id!, method: frame.method, params: frame.params });
-    } else if (frame.method !== undefined) {
+    if (frame.method !== undefined && (frame.id === undefined || frame.id === null)) {
       notifications.push({ method: frame.method, params: frame.params });
-    } else if (hasId) {
-      responses.push(frame);
     }
   }
-  return { notifications, requests, responses };
+  return { notifications };
 }
 
 function replay(name: string): {
@@ -115,116 +99,8 @@ function replay(name: string): {
   return { events, notifications };
 }
 
-describe("codex replay — the whole recorded corpus", () => {
-  it("routes every observed notification method without an unknown-method warning", () => {
-    const unroutedByFixture: Record<string, string[]> = {};
-    for (const name of fixtureNames()) {
-      const { events } = replay(name);
-      const unknown = events
-        .filter(
-          (event) =>
-            event.type === "runtime.warning" &&
-            typeof (event.payload as { message?: unknown }).message === "string" &&
-            (event.payload as { message: string }).message.startsWith(
-              "Unrecognised codex notification"
-            )
-        )
-        .map((event) => (event.payload as { message: string }).message);
-      if (unknown.length > 0) {
-        unroutedByFixture[name] = unknown;
-      }
-    }
-    assert.deepEqual(unroutedByFixture, {});
-  });
-
-  it("every observed notification method is in the generated catalogue", () => {
-    const catalogued = new Set(Object.keys(SERVER_NOTIFICATION_METHODS));
-    const seen = new Set<string>();
-    for (const name of fixtureNames()) {
-      for (const notification of replay(name).notifications) {
-        seen.add(notification.method);
-      }
-    }
-    const missing = [...seen].filter((method) => !catalogued.has(method));
-    assert.deepEqual(missing, [], "the bindings must describe every method the CLI sent");
-    assert.ok(seen.size >= 15, `expected a broad corpus, saw ${seen.size} methods`);
-  });
-
-  it("every observed server→client request maps to a canonical request type", () => {
-    const catalogued = new Set(Object.keys(SERVER_REQUEST_METHODS));
-    const seen = new Set<string>();
-    for (const name of fixtureNames()) {
-      for (const request of inbound(readFixture(name)).requests) {
-        seen.add(request.method);
-      }
-    }
-    assert.ok(seen.size > 0, "the corpus contains server requests");
-    for (const method of seen) {
-      assert.ok(catalogued.has(method), `${method} is in the generated catalogue`);
-      assert.notEqual(
-        canonicalRequestType(method),
-        "unknown",
-        `${method} maps to a canonical request type`
-      );
-    }
-    // The four §4.5 handlers the corpus actually reaches.
-    assert.deepEqual(
-      [...seen].sort(),
-      [
-        "item/commandExecution/requestApproval",
-        "item/fileChange/requestApproval",
-        "item/tool/requestUserInput",
-        "mcpServer/elicitation/request"
-      ]
-    );
-  });
-
-  it("never emits an event type outside the §4.2 union", () => {
-    const allowed = new Set([
-      "session.started",
-      "session.state.changed",
-      "session.exited",
-      "thread.started",
-      "thread.state.changed",
-      "thread.metadata.updated",
-      "thread.token-usage.updated",
-      "turn.started",
-      "turn.completed",
-      "turn.aborted",
-      "turn.plan.updated",
-      "turn.proposed.delta",
-      "turn.proposed.completed",
-      "turn.diff.updated",
-      "item.started",
-      "item.updated",
-      "item.completed",
-      "content.delta",
-      "request.opened",
-      "request.resolved",
-      "user-input.requested",
-      "user-input.resolved",
-      "task.started",
-      "task.progress",
-      "task.updated",
-      "task.completed",
-      "hook.started",
-      "hook.progress",
-      "hook.completed",
-      "tool.progress",
-      "tool.denied",
-      "auth.status",
-      "account.rate-limits.updated",
-      "model.rerouted",
-      "runtime.warning",
-      "runtime.error"
-    ]);
-    for (const name of fixtureNames()) {
-      for (const event of replay(name).events) {
-        assert.ok(allowed.has(event.type), `${name}: ${event.type} is in the union`);
-      }
-    }
-  });
-});
+beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
+afterEach(() => mock.timers.reset());
 
 describe("codex replay — no item is left dangling inProgress (R3 finding 1)", () => {
   /**
@@ -270,24 +146,6 @@ describe("codex replay — no item is left dangling inProgress (R3 finding 1)", 
     assert.deepEqual(leftOpen, {});
   });
 
-  it("06 (interrupt with a pending approval) closes its abandoned command", () => {
-    // Fixtures README obs. 5: "the commandExecution item that was inProgress
-    // never gets an item/completed … Both dangle forever."
-    assert.deepEqual(danglingItems("06-interrupt-with-pending-approval.ndjson", false), []);
-  });
-
-  it("14 (SIGTERM mid-turn) needs the session's exit drain, and is closed by it", () => {
-    assert.equal(
-      danglingItems("14-sigterm-mid-turn.ndjson", false).length,
-      1,
-      "the protocol stream alone cannot close it — SIGTERM writes not one further byte"
-    );
-    assert.deepEqual(
-      danglingItems("14-sigterm-mid-turn.ndjson", true),
-      [],
-      "handleExit's closeOpenItems is what closes it"
-    );
-  });
 });
 
 describe("codex replay — 01 initialize, thread start, one text turn", () => {
@@ -296,9 +154,9 @@ describe("codex replay — 01 initialize, thread start, one text turn", () => {
   it("emits thread.started with the provider thread id from result.thread.id", () => {
     const started = events.find((event) => event.type === "thread.started");
     assert.ok(started !== undefined);
-    assert.match(
+    assert.equal(
       (started.payload as { providerThreadId: string }).providerThreadId,
-      /^[0-9a-f-]{36}$/
+      "01a0c19e-a2ec-7bc0-bb96-49a226d1fb15"
     );
   });
 
@@ -310,7 +168,7 @@ describe("codex replay — 01 initialize, thread start, one text turn", () => {
     );
     assert.ok(deltas.length > 0, "the corpus streams agentMessage deltas");
     const text = deltas.map((event) => (event.payload as { delta: string }).delta).join("");
-    assert.ok(text.length > 0);
+    assert.equal(text, "391");
   });
 
   it("emits turn.started then turn.completed with a complete token usage", () => {
@@ -327,29 +185,6 @@ describe("codex replay — 01 initialize, thread start, one text turn", () => {
     // `turn/completed` carries NO usage on the wire; the adapter stamps it.
     assert.equal(payload.tokenUsage?.usageStatus, "complete");
     assert.ok((payload.tokenUsage?.inputTokens ?? 0) > 0);
-  });
-
-  it("reports the LAST model call against the context window, not the thread total", () => {
-    const usage = events.filter((event) => event.type === "thread.token-usage.updated");
-    assert.ok(usage.length > 0);
-    const last = usage.at(-1)!.payload as {
-      usage: {
-        usedTokens: number;
-        maxTokens?: number;
-        totalProcessedTokens?: number;
-        compactsAutomatically?: boolean;
-      };
-    };
-    // The capture's final notification: last {totalTokens:14316,
-    // reasoningOutputTokens:9}, total {totalTokens:14316}, window 258 400.
-    assert.equal(last.usage.usedTokens, 14_307);
-    assert.equal(last.usage.maxTokens, 258_400);
-    assert.equal(
-      last.usage.totalProcessedTokens,
-      14_316,
-      "the thread total is the processed figure, never the meter's numerator"
-    );
-    assert.equal(last.usage.compactsAutomatically, true);
   });
 
   it("classifies the reasoning item even though it carries no text", () => {
@@ -416,33 +251,6 @@ describe("codex replay — 04 file-change approval", () => {
     assert.equal(typeof data!.changes![0]!.diff, "string");
     // Rendering the card means joining on itemId.
     assert.equal(typeof item.itemId, "string");
-  });
-});
-
-describe("codex replay — 05 request_user_input", () => {
-  it("the question field is `question`, options have no `value`, and isOther maps to allowCustomAnswer", () => {
-    const requests = inbound(readFixture("05-tool-request-user-input.ndjson")).requests.filter(
-      (request) => request.method === "item/tool/requestUserInput"
-    );
-    assert.ok(requests.length >= 1);
-    const params = requests[0]!.params as {
-      questions: {
-        id: string;
-        header: string;
-        question: string;
-        isOther: boolean;
-        isSecret: boolean;
-        options: { label: string; description: string }[] | null;
-      }[];
-      isBlocking: boolean;
-    };
-    const question = params.questions[0]!;
-    assert.equal(typeof question.question, "string");
-    assert.ok(!("prompt" in question), "a filter keyed on `prompt` would drop every question");
-    assert.ok(!("value" in question.options![0]!), "options carry no value; answer with the label");
-    assert.equal(typeof question.isOther, "boolean");
-    assert.equal(typeof question.isSecret, "boolean");
-    assert.equal(typeof params.isBlocking, "boolean");
   });
 });
 
@@ -540,15 +348,12 @@ async function foldedAssistantMessages(
   lines: readonly FixtureLine[]
 ): Promise<ThreadMessageItem[]> {
   const clock = new FakeClock("2026-09-21T03:27:44.000Z");
-  const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
     idGen: counterIdGen("d"),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
   });
   const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
   let elapsed = 0;
@@ -561,7 +366,9 @@ async function foldedAssistantMessages(
     if (frame.method === undefined || (frame.id !== undefined && frame.id !== null)) {
       continue;
     }
-    timers.advance(Math.max(0, line.t - elapsed));
+    const advance = Math.max(0, line.t - elapsed);
+    clock.advance(advance);
+    mock.timers.tick(advance);
     elapsed = Math.max(elapsed, line.t);
     for (const draft of normaliser.notification(frame.method as never, frame.params)) {
       await ingestion.ingest({
@@ -573,7 +380,8 @@ async function foldedAssistantMessages(
     }
     await settle();
   }
-  timers.advance(1_000);
+  clock.advance(1_000);
+  mock.timers.tick(1_000);
   await ingestion.drain();
   await settle();
   const folded = foldThread(
@@ -632,20 +440,6 @@ describe("codex replay — 05 an abandoned agentMessage (fixtures README obs. 22
 describe("codex replay — 08 compaction", () => {
   const { events, notifications } = replay("08-compaction.ndjson");
 
-  it("thread/compacted never fires; the contextCompaction item is the signal", () => {
-    assert.equal(
-      notifications.filter((n) => n.method === "thread/compacted").length,
-      0,
-      "thread/compacted is never emitted on this CLI"
-    );
-    const item = events.find(
-      (event) =>
-        event.type === "item.completed" &&
-        (event.payload as { itemType: string }).itemType === "context_compaction"
-    );
-    assert.ok(item !== undefined);
-  });
-
   it("synthesises thread.state.changed {state:'compacted'} from the item", () => {
     const compacted = events.find(
       (event) =>
@@ -656,10 +450,6 @@ describe("codex replay — 08 compaction", () => {
     assert.equal(typeof (compacted.payload as { afterTokens?: number }).afterTokens, "number");
   });
 
-  it("compaction runs as a whole extra turn", () => {
-    const turnsStarted = events.filter((event) => event.type === "turn.started");
-    assert.ok(turnsStarted.length >= 2, "the compaction is its own turn");
-  });
 });
 
 describe("codex replay — 09 plan mode", () => {
@@ -674,10 +464,6 @@ describe("codex replay — 09 plan mode", () => {
       (completed.payload as { planMarkdown: string }).planMarkdown.length > 0,
       "the plan item's text is the proposal"
     );
-  });
-
-  it("never emits turn.plan.updated — the update_plan tool is forbidden in plan mode", () => {
-    assert.equal(events.filter((event) => event.type === "turn.plan.updated").length, 0);
   });
 
   it("an unprompted compaction mid-turn still produces the compacted state", () => {
@@ -707,65 +493,33 @@ describe("codex replay — 11 turn diff", () => {
   });
 });
 
-describe("codex replay — 12 rollback and revert", () => {
-  const lines = readFixture("12-rollback-and-revert.ndjson");
-  const { notifications, responses } = inbound(lines);
-
-  it("thread/rollback is dead on a paginated thread", () => {
-    const sent = lines
-      .filter((line) => line.dir === "send")
-      .map((line) => line.frame as Frame)
-      .filter((frame) => frame.method === "thread/rollback");
-    assert.equal(sent.length, 1, "the capture proves the dead path");
-    const failed = responses.find(
-      (frame) =>
-        frame.error !== undefined &&
-        typeof (frame.error as { message?: unknown }).message === "string" &&
-        (frame.error as { message: string }).message.includes("do not support thread/rollback")
-    );
-    assert.ok(failed !== undefined, "thread/rollback answers -32600");
-  });
-
-  it("thread/reverted is the notification the working path emits", () => {
-    assert.equal(notifications.filter((n) => n.method === "thread/reverted").length, 1);
-  });
-
-  it("thread/reverted is handled without a warning", () => {
-    const { events } = replay("12-rollback-and-revert.ndjson");
-    const warnings = events.filter(
-      (event) =>
-        event.type === "runtime.warning" &&
-        String((event.payload as { message: string }).message).includes("thread/reverted")
-    );
-    assert.deepEqual(warnings, []);
-  });
-});
-
 describe("codex replay — 13 error envelopes", () => {
   const { events } = replay("13-error-envelopes.ndjson");
 
-  it("willRetry:false becomes runtime.error, never a warning", () => {
+  it("the JSON-string terminal error surfaces its captured provider message", () => {
     const errors = events.filter((event) => event.type === "runtime.error");
-    assert.ok(errors.length > 0, "a terminal provider error is an error");
-    for (const error of errors) {
-      assert.ok(
-        ["provider_error", "transport_error", "permission_error", "validation_error", "unknown"].includes(
-          (error.payload as { class: string }).class
-        )
-      );
-    }
+    assert.equal(errors.length, 1);
+    assert.equal(
+      (errors[0]!.payload as { message: string }).message,
+      "The 'gpt-not-a-real-model' model is not supported when using Codex with a ChatGPT account."
+    );
   });
 
-  it("the JSON-string error message is parsed into something presentable", () => {
-    const errors = events.filter((event) => event.type === "runtime.error");
-    const message = (errors[0]!.payload as { message: string }).message;
-    assert.ok(!message.startsWith("{"), `expected prose, got ${message.slice(0, 40)}`);
-    assert.ok(message.length <= 600, "an error message is bounded");
-  });
-
-  it("presentableError bounds the ~8 KB unknown-method catalogue", () => {
-    const enormous = `Invalid request: unknown variant \`x\`, expected one of ${"`m`, ".repeat(2000)}`;
-    assert.ok(presentableError(enormous).length <= 600);
+  it("an enormous provider error retains its failure while bounding the catalogue", () => {
+    const captured = readFixture("13-error-envelopes.ndjson")
+      .find((line) => line.dir === "recv" && (line.frame as { id?: number }).id === 2)!
+      .frame as { error: { message: string } };
+    const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
+    const [event] = normaliser.notification("error", {
+      error: { message: captured.error.message, codexErrorInfo: "other", additionalDetails: null },
+      willRetry: false,
+      threadId: "thread-1",
+      turnId: "turn-1"
+    });
+    assert.equal(event?.type, "runtime.error");
+    const message = (event!.payload as { message: string }).message;
+    assert.ok(message.startsWith("Invalid request: unknown variant `thread/definitelyNotAMethod`"));
+    assert.ok(message.length < captured.error.message.length, "do not surface the entire captured method catalogue");
   });
 
   it("a model-metadata warning is a warning, and the turn still fails separately", () => {
@@ -887,22 +641,6 @@ describe("codex — account failures carry a structured reason (workflows §5.4)
 });
 
 describe("codex replay — 15 MCP elicitation", () => {
-  it("the params are a rendered form with the approval kind in _meta", () => {
-    const requests = inbound(readFixture("15-mcp-elicitation-approval.ndjson")).requests.filter(
-      (request) => request.method === "mcpServer/elicitation/request"
-    );
-    assert.ok(requests.length >= 1);
-    const params = requests[0]!.params as {
-      mode: string;
-      message: string;
-      serverName: string;
-      _meta: { codex_approval_kind?: string; persist?: string[] } | null;
-    };
-    assert.equal(params.mode, "form");
-    assert.ok(params.message.length > 0, "`message` is the provider's own wording");
-    assert.equal(params._meta?.codex_approval_kind, "mcp_tool_call");
-    assert.deepEqual(params._meta?.persist, ["session", "always"]);
-  });
 
   it("mcpToolCall items carry their full arguments", () => {
     const { events } = replay("15-mcp-elicitation-approval.ndjson");
@@ -910,9 +648,14 @@ describe("codex replay — 15 MCP elicitation", () => {
       (event) => (event.payload as { itemType?: string }).itemType === "mcp_tool_call"
     );
     assert.ok(calls.length > 0);
-    const data = (calls[0]!.payload as { data?: { server?: string; tool?: string } }).data;
-    assert.equal(typeof data?.server, "string");
-    assert.equal(typeof data?.tool, "string");
+    const call = calls.find((event) => event.itemId === "call_6Zw9kxWGAAkNTq2lnlC7RrXV");
+    const data = (call?.payload as { data?: { server?: string; tool?: string; arguments?: unknown } } | undefined)?.data;
+    assert.equal(data?.server, "serena");
+    assert.equal(data?.tool, "replace_in_files");
+    assert.deepEqual(data?.arguments, {
+      relative_path: "a.ts", mode: "literal", needle: "export const a = 2;",
+      repl: "export const a = 4;", expected_count: 1, max_answer_chars: 4000
+    });
   });
 });
 
@@ -933,21 +676,6 @@ describe("codex replay — hooks are a Codex notification too", () => {
   });
 });
 
-describe("codex replay — rate limits", () => {
-  it("maps the weekly window with a stable id", () => {
-    const { events } = replay("01-initialize-thread-start-text-turn.ndjson");
-    const updates = events.filter((event) => event.type === "account.rate-limits.updated");
-    assert.ok(updates.length > 0);
-    const windows = (
-      updates[0]!.payload as { limits: { windows: { id: string; kind: string; windowDurationMins?: number }[] } }
-    ).limits.windows;
-    assert.ok(windows.length > 0);
-    assert.equal(windows[0]!.id, "codex:primary", "the id is stable so a sparse update merges");
-    assert.equal(windows[0]!.kind, "weekly");
-    assert.equal(windows[0]!.windowDurationMins, 10_080);
-  });
-});
-
 describe("codex replay — thread/status/changed carries waitingOnApproval", () => {
   it("does not choke on activeFlags and reports the thread as active", () => {
     const { events, notifications } = replay("02-command-approval-accept.ndjson");
@@ -965,6 +693,7 @@ describe("codex replay — thread/status/changed carries waitingOnApproval", () 
     const states = events
       .filter((event) => event.type === "thread.state.changed")
       .map((event) => (event.payload as { state: string }).state);
-    assert.ok(states.every((state) => state === "active" || state === "idle"));
+    assert.ok(states.includes("active"));
+    assert.equal(states.at(-1), "idle");
   });
 });

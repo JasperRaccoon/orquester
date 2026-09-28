@@ -35,7 +35,7 @@ const API = "https://api.bitbucket.org/2.0";
 const SSH_HOST = "ssh.bitbucket.org";
 
 /** Fixed git-over-HTTPS username that pairs with an Atlassian API token. */
-export const CLOUD_GIT_USERNAME = "x-bitbucket-api-token-auth";
+const CLOUD_GIT_USERNAME = "x-bitbucket-api-token-auth";
 
 const SCOPES =
   "read:repository, write:repository, read:workspace, read:user, read:ssh-key, write:ssh-key (all :bitbucket, on a SCOPED API token)";
@@ -81,7 +81,7 @@ class CloudHttpError extends GitRemoteError {
  * scopes.", "detail": {"granted": [...], "required": [...]}}}`; null when the
  * body is not that shape.
  */
-export function missingScopesOf(body: string): string[] | null {
+function missingScopesOf(body: string): string[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -221,7 +221,7 @@ async function bbAll(creds: ProviderCreds, firstPath: string): Promise<Json[]> {
 }
 
 /** Map one Bitbucket Cloud repo JSON object to the wire `RepoSummary`. */
-export function toCloudRepoSummary(repo: Json): RepoSummary {
+function toCloudRepoSummary(repo: Json): RepoSummary {
   const fullName = str(repo.full_name) ?? "";
   const [owner, nameFromFullName] = fullName.split("/");
   const links = (repo.links ?? {}) as { clone?: unknown };
@@ -254,7 +254,7 @@ export function toCloudRepoSummary(repo: Json): RepoSummary {
  * Clone dialog actually puts on the clipboard (`https://<nickname>@…`); it is
  * ignored — git gets credentials from the credential store instead.
  */
-export function parseCloudRepoUrl(input: string): ParsedRepo | null {
+function parseCloudRepoUrl(input: string): ParsedRepo | null {
   const part = "[A-Za-z0-9._-]+";
   const httpsRe = new RegExp(
     `^https?://(?:[^@/]+@)?bitbucket\\.org/(${part})/(${part}?)(?:\\.git)?/?$`,
@@ -483,7 +483,7 @@ export const bitbucketCloudProvider: GitProvider = {
 };
 
 /** Map one Bitbucket Cloud pull request JSON object to `PullRequestInfo`. */
-export function toCloudPullRequest(pr: Json): PullRequestInfo {
+function toCloudPullRequest(pr: Json): PullRequestInfo {
   const obj = (value: unknown): Json => (value && typeof value === "object" ? (value as Json) : {});
   const source = obj(pr.source);
   const destination = obj(pr.destination);

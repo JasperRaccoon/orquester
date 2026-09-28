@@ -43,17 +43,17 @@ import { OpenCodeClient } from "./http.ts";
 import { meetsMinimumOpenCodeVersion, tooOldMessage } from "./semver.ts";
 
 /** T3's ready prefix; the scrape stays **line-oriented** (observation 1). */
-export const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
+const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const READY_URL_RE = /on\s+(https?:\/\/[^\s]+)/;
 /** Startup output is capped, then discarded while the pipes keep draining. */
 const STARTUP_CAPTURE_MAX_CHARS = 64 * 1024;
 /** How long a project's server survives its last thread (T3's 30 s). */
-export const SERVER_IDLE_CLOSE_MS = 30_000;
+const SERVER_IDLE_CLOSE_MS = 30_000;
 /**
  * §4.5: "SIGTERM to the **process group**, 1 s, then SIGKILL". `spawn.ts`
  * defaults to 2 s, which doubles teardown latency on host shutdown.
  */
-export const OPENCODE_KILL_GRACE_MS = 1_000;
+const OPENCODE_KILL_GRACE_MS = 1_000;
 
 /**
  * Scrape the readiness URL out of accumulated stdout. Line-oriented on
@@ -88,7 +88,7 @@ export function trimToLastLines(text: string, maxChars: number): string {
 }
 
 /** Bind :0, read the assigned port, release it. */
-export async function probeFreePort(host: string): Promise<number> {
+async function probeFreePort(host: string): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const probe = createServer();
     probe.once("error", reject);
@@ -112,7 +112,6 @@ export interface OpenCodeHealth {
 export interface OpenCodeServerHandle {
   readonly url: string;
   readonly version: string;
-  readonly serverPassword: string | undefined;
   readonly projectDir: string;
   readonly pid: number | undefined;
   /** A client for this server scoped to `directory`. */
@@ -134,24 +133,12 @@ export interface OpenCodeServerPoolOptions {
   signal: AbortSignal;
   /** Surfaced as `runtime.warning` / `runtime.error` on the owning thread. */
   onStderr?: (projectDir: string, line: ClassifiedStderrLine) => void;
-  hostname?: string;
-  idleCloseMs?: number;
-  /** Test seam; `undefined` means "generate one". */
-  serverPassword?: string | null;
-  fetchImpl?: typeof fetch;
-  /**
-   * Test seam: start the project's server without spawning `opencode serve`
-   * (the adapter's recycle tests hand back a fake child over a fake transport).
-   */
-  startServer?: (projectDir: string) => Promise<OpenCodeStartedServer>;
   /**
    * A reference to this project's server was dropped. The adapter re-checks a
    * recycle it had to defer (agent profile §4.8): a snapshot probe holding the
    * server is in-flight work too.
    */
   onRelease?: (projectDir: string) => void;
-  setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
-  clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
 interface PoolEntry {
@@ -163,15 +150,12 @@ interface PoolEntry {
   closing?: Promise<void>;
 }
 
-/** A started server: what the pool keeps of it (`startServer`'s answer). */
-export interface OpenCodeStartedServer {
+interface Started {
   url: string;
   version: string;
-  serverPassword: string | undefined;
-  child: Pick<ProviderChild, "pid" | "exited" | "hasExited" | "kill">;
+  serverPassword: string;
+  child: ProviderChild;
 }
-
-type Started = OpenCodeStartedServer;
 
 /**
  * One `opencode serve` per project directory, ref-counted by its threads and
@@ -199,17 +183,10 @@ export class OpenCodeServerPool {
    */
   private readonly retiring = new Map<string, Promise<void>>();
   private readonly options: OpenCodeServerPoolOptions;
-  private readonly hostname: string;
-  private readonly idleCloseMs: number;
-  private readonly setTimer: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
-  private readonly clearTimer: (handle: ReturnType<typeof setTimeout>) => void;
+  private readonly hostname = "127.0.0.1";
 
   constructor(options: OpenCodeServerPoolOptions) {
     this.options = options;
-    this.hostname = options.hostname ?? "127.0.0.1";
-    this.idleCloseMs = options.idleCloseMs ?? SERVER_IDLE_CLOSE_MS;
-    this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
-    this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
   }
 
   /**
@@ -226,7 +203,7 @@ export class OpenCodeServerPool {
       this.entries.set(projectDir, entry);
     }
     if (entry.idleTimer !== undefined) {
-      this.clearTimer(entry.idleTimer);
+      clearTimeout(entry.idleTimer);
       entry.idleTimer = undefined;
     }
     // A server whose child died while parked must not be handed out again.
@@ -299,7 +276,7 @@ export class OpenCodeServerPool {
     }
     this.entries.delete(projectDir);
     if (entry.idleTimer !== undefined) {
-      this.clearTimer(entry.idleTimer);
+      clearTimeout(entry.idleTimer);
       entry.idleTimer = undefined;
     }
     const started = entry.started;
@@ -349,7 +326,7 @@ export class OpenCodeServerPool {
     for (const entry of entries) {
       const stop = (async () => {
         if (entry.idleTimer !== undefined) {
-          this.clearTimer(entry.idleTimer);
+          clearTimeout(entry.idleTimer);
         }
         const started = entry.started ?? (await entry.starting?.catch(() => undefined));
         if (started !== undefined) {
@@ -375,7 +352,6 @@ export class OpenCodeServerPool {
     return {
       url: started.url,
       version: started.version,
-      serverPassword: started.serverPassword,
       projectDir: entry.projectDir,
       pid: started.child.pid,
       exited: started.child.exited,
@@ -384,11 +360,8 @@ export class OpenCodeServerPool {
         return new OpenCodeClient({
           baseUrl: started.url,
           directory,
-          ...(started.serverPassword !== undefined
-            ? { serverPassword: started.serverPassword }
-            : {}),
-          signal: signal ?? pool.options.signal,
-          ...(pool.options.fetchImpl !== undefined ? { fetchImpl: pool.options.fetchImpl } : {})
+          serverPassword: started.serverPassword,
+          signal: signal ?? pool.options.signal
         });
       },
       release(): void {
@@ -407,7 +380,7 @@ export class OpenCodeServerPool {
     if (entry.refs > 0 || entry.idleTimer !== undefined) {
       return;
     }
-    entry.idleTimer = this.setTimer(() => {
+    entry.idleTimer = setTimeout(() => {
       entry.idleTimer = undefined;
       if (entry.refs > 0 || this.entries.get(entry.projectDir) !== entry) {
         return;
@@ -420,21 +393,15 @@ export class OpenCodeServerPool {
         // `opencode serve` is a bun binary that spawns its own children.
         void started.child.kill().catch(() => undefined);
       }
-    }, this.idleCloseMs);
+    }, SERVER_IDLE_CLOSE_MS);
     entry.idleTimer.unref?.();
   }
 
   private async start(projectDir: string): Promise<Started> {
     await this.retiring.get(projectDir);
-    if (this.options.startServer !== undefined) {
-      return await this.options.startServer(projectDir);
-    }
     const bin = await this.options.resolveBin();
     const port = await probeFreePort(this.hostname);
-    const password =
-      this.options.serverPassword === null
-        ? undefined
-        : (this.options.serverPassword ?? randomBytes(24).toString("base64url"));
+    const password = randomBytes(24).toString("base64url");
 
     const env = this.options.buildEnv({ projectDir });
     // `extendEnv` has no analogue here — `buildProviderEnv` never spreads
@@ -446,7 +413,7 @@ export class OpenCodeServerPool {
     const childEnv: Record<string, string> = {
       ...env,
       OPENCODE_CONFIG_CONTENT: configContent,
-      ...(password !== undefined ? { OPENCODE_SERVER_PASSWORD: password } : {})
+      OPENCODE_SERVER_PASSWORD: password
     };
 
     const child = spawnProviderChild({
@@ -456,7 +423,6 @@ export class OpenCodeServerPool {
       cwd: projectDir,
       // The whole process group is what a kill must signal (§3.1): `opencode
       // serve` is a Bun binary that spawns its own children.
-      detached: true,
       killGraceMs: OPENCODE_KILL_GRACE_MS
     });
 
@@ -538,9 +504,8 @@ export class OpenCodeServerPool {
     const client = new OpenCodeClient({
       baseUrl: url,
       directory: projectDir,
-      ...(password !== undefined ? { serverPassword: password } : {}),
-      signal: this.options.signal,
-      ...(this.options.fetchImpl !== undefined ? { fetchImpl: this.options.fetchImpl } : {})
+      serverPassword: password,
+      signal: this.options.signal
     });
 
     let version: string;
@@ -568,7 +533,7 @@ export class OpenCodeServerPool {
  * the binary, because an already-running server can be older than the
  * `opencode` on PATH (§3.2).
  */
-export async function verifyServerVersion(client: OpenCodeClient): Promise<string> {
+async function verifyServerVersion(client: OpenCodeClient): Promise<string> {
   const health = await client.get<Partial<OpenCodeHealth>>("/global/health", {
     label: "opencode global.health",
     timeoutMs: AGENT_HOST_DEADLINES.healthMs

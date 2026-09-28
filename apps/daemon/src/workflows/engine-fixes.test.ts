@@ -63,7 +63,7 @@ describe("engine fixes: nothing runs unrecorded after stop()", () => {
     await assert.rejects(ctx.setWaitingOn({ kind: "http", method: "POST", startedAt: new Date().toISOString() }), EngineStoppedError);
   });
 
-  test("an HTTP POST reached after stop() is not sent; the resumed run sends it exactly once", async () => {
+  test("an HTTP POST reached after stop() is not sent; the resumed run sends it exactly once", async (t) => {
     const env = restartable([workflow("w1", [T(), node("H", "http", { method: "POST", url: "https://api.test/x" })], [edge("T", "H")])]);
     const gate = deferred();
     const original = env.shared.projects.currentBranch.bind(env.shared.projects);
@@ -72,14 +72,11 @@ describe("engine fixes: nothing runs unrecorded after stop()", () => {
       return original();
     };
     const calls: string[] = [];
-    const answer = () =>
-      createHttpExecutor({
-        fetch: async (input) => {
-          calls.push(String(input));
-          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-        }
-      });
-    const first = env.boot({ http: answer() });
+    t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const first = env.boot({ http: createHttpExecutor() });
     const { runId } = await first.engine.run("w1", {});
     await flush();
     await first.engine.stop();
@@ -88,7 +85,7 @@ describe("engine fixes: nothing runs unrecorded after stop()", () => {
     assert.deepEqual(calls, [], "the stopped engine's block never sent its POST");
 
     env.shared.projects.currentBranch = original;
-    const second = env.boot({ http: answer() });
+    const second = env.boot({ http: createHttpExecutor() });
     await second.engine.resume();
     const result = await second.engine.waitForRun(runId!);
     assert.equal(result.status, "succeeded");

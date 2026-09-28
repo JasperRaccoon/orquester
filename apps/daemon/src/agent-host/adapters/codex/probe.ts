@@ -43,7 +43,7 @@ import { usageWindowsFromRateLimits } from "./usage.ts";
  * *T3: `apps/server/src/provider/Layers/CodexProvider.ts:680-687` — the whole
  * Codex command catalog is these two hard-coded rows.*
  */
-export const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
+const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "compact", description: "Summarise the conversation to free context" },
   { name: "feedback", description: "Send feedback about Codex to OpenAI" }
 ] as const;
@@ -72,7 +72,7 @@ export function codexSlashCommands(models: readonly ProviderModel[]): SlashComma
  * Carried on the snapshot as `commandCatalogNote` so the composer can render
  * it; a constant nothing reads never reaches a user (R2 finding 9).
  */
-export const CODEX_COMMAND_CATALOG_NOTE = "Codex reports no commands";
+const CODEX_COMMAND_CATALOG_NOTE = "Codex reports no commands";
 
 /**
  * The oldest `codex` this adapter speaks to. Below it the session is refused

@@ -25,7 +25,7 @@ const DEVICE_SCOPE =
   "conversations:read conversations:write workspaces:read workspaces:write";
 const REQUEST_TIMEOUT_MS = 10_000;
 
-export interface GrokDevicePrompt {
+interface GrokDevicePrompt {
   url: string;
   userCode: string;
   /** Opaque polling handle — never shown to the user. */
@@ -42,17 +42,17 @@ export interface GrokDeviceTokens {
   id_token?: string;
 }
 
-export type GrokDeviceStart =
+type GrokDeviceStart =
   | { ok: true; value: GrokDevicePrompt }
   | { ok: false; error: string; status?: number };
 
-export type GrokDevicePoll =
+type GrokDevicePoll =
   | { status: "wait"; slowDown?: boolean }
   | { status: "ok"; tokens: GrokDeviceTokens }
   | { status: "error"; error: string };
 
-/** Injected into the manager so tests never touch the network. */
-export interface GrokDeviceAuth {
+/** The RFC 8628 authorization and token-polling protocol. */
+interface GrokDeviceAuth {
   start(): Promise<GrokDeviceStart>;
   poll(deviceCode: string): Promise<GrokDevicePoll>;
 }

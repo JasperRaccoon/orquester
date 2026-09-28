@@ -37,7 +37,7 @@ const STATUS_LETTER: Record<GitFileChange["status"], string> = {
 };
 
 /** `git status --short`-style lines from the daemon's parsed status. */
-export function shortStatusLines(status: GitStatusResponse): string[] {
+function shortStatusLines(status: GitStatusResponse): string[] {
   return status.files.map((file) => {
     const letter = STATUS_LETTER[file.status] ?? "M";
     const xy = file.status === "untracked" ? "??" : file.status === "conflicted" ? "UU" : `${file.staged ? letter : " "}${file.unstaged ? letter : " "}`;

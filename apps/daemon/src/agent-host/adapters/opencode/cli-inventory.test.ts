@@ -8,14 +8,18 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import childProcess, { type SpawnOptions } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { MessageChannel } from "node:worker_threads";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   loadInventoryFromCli,
   parseAgentListCliOutput,
   parseModelsCliOutput,
-  parseSkillsCliOutput,
-  type CliCommandResult,
-  type RunOpenCodeCliInput
+  parseSkillsCliOutput
 } from "./cli-inventory.ts";
 
 // ---------------------------------------------------------------------------
@@ -189,137 +193,76 @@ test("malformed skill output degrades to an empty list", () => {
 // loadInventoryFromCli
 // ---------------------------------------------------------------------------
 
-interface Recorded {
-  args: string[];
-  at: number;
+async function harness(t: test.TestContext, mode = "ok") {
+  // The daemon supplies other active handles while its retry timer is unref'd.
+  // Keep that lifecycle condition here without wall-clock sleeps or a server.
+  const lifetime = new MessageChannel();
+  lifetime.port1.on("message", () => undefined);
+  t.after(() => { lifetime.port1.close(); lifetime.port2.close(); });
+  const dir = await mkdtemp(join(tmpdir(), "opencode-inventory-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "models.json"), MODELS_OUTPUT);
+  await writeFile(join(dir, "agents.json"), AGENTS_OUTPUT);
+  const bin = join(dir, "opencode-fixture");
+  await writeFile(bin, `#!${process.execPath}
+const fs = require("node:fs");
+const command = process.argv[2];
+const mode = process.env.FIXTURE_MODE;
+if (command === "models" && mode === "unavailable") process.exit(127);
+if (command === "models" && mode === "retry" && !fs.existsSync("first-attempt")) {
+  fs.writeFileSync("first-attempt", "failed");
+  process.exit(1);
 }
-
-function harness(
-  answers: (args: readonly string[], call: number) => CliCommandResult
-): {
-  run: (input: RunOpenCodeCliInput) => Promise<CliCommandResult>;
-  calls: Recorded[];
-  sleeps: number[];
-  inFlight: () => number;
-  maxInFlight: () => number;
-} {
-  const calls: Recorded[] = [];
-  const sleeps: number[] = [];
+if (command !== "models" && mode === "optional-failure") process.exit(2);
+process.stdout.write(command === "models" ? fs.readFileSync("models.json") : command === "agent" ? fs.readFileSync("agents.json") : "[]");
+`, { mode: 0o755 });
+  const spawn = childProcess.spawn;
   let live = 0;
   let peak = 0;
-  const run = async (input: RunOpenCodeCliInput): Promise<CliCommandResult> => {
+  let modelsStarted = 0;
+  const mocked = t.mock.method(childProcess, "spawn", (command: string, args: readonly string[], options: SpawnOptions) => {
+    const child = spawn(command, args, options);
     live += 1;
     peak = Math.max(peak, live);
-    const call = calls.filter((entry) => entry.args.join(" ") === input.args.join(" ")).length;
-    calls.push({ args: [...input.args], at: calls.length });
-    await Promise.resolve();
-    try {
-      return answers(input.args, call);
-    } finally {
-      live -= 1;
-    }
+    if (args[0] === "models") modelsStarted += 1;
+    child.once("close", () => { live -= 1; });
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  return {
+    input: { bin, cwd: dir, env: { FIXTURE_MODE: mode } },
+    maxInFlight: () => peak,
+    modelAttempts: () => modelsStarted
   };
-  return { run, calls, sleeps, inFlight: () => live, maxInFlight: () => peak };
 }
 
-const OK = (stdout: string): CliCommandResult => ({ stdout, code: 0 });
-
-test("the three probes run SEQUENTIALLY — concurrent runs hit one SQLite file", async () => {
-  const h = harness((args) => {
-    if (args[0] === "models") {
-      return OK(MODELS_OUTPUT);
-    }
-    if (args[0] === "agent") {
-      return OK(AGENTS_OUTPUT);
-    }
-    return OK("[]");
-  });
-  const inventory = await loadInventoryFromCli({
-    bin: "/usr/bin/opencode",
-    cwd: "/tmp",
-    env: {},
-    run: h.run,
-    sleep: async () => undefined
-  });
-  assert.equal(h.maxInFlight(), 1, "never more than one CLI process at a time");
-  assert.deepEqual(
-    h.calls.map((call) => call.args.join(" ")),
-    ["models --verbose", "agent list", "debug skill"]
-  );
+test("the three probes run SEQUENTIALLY — concurrent runs hit one SQLite file", async (t) => {
+  const h = await harness(t);
+  const inventory = await loadInventoryFromCli(h.input);
+  assert.equal(h.maxInFlight(), 1, "provider CLI processes never overlap");
   assert.deepEqual(inventory.providers.connected.sort(), ["opencode", "openrouter"]);
-  assert.equal(inventory.agents.length, 3);
-  assert.deepEqual(inventory.commands, [], "the CLI has no command-list equivalent");
+  assert.ok(inventory.agents.some((agent) => agent.name === "build"));
 });
 
-test("a non-zero exit is retried once, after a pause, still sequentially", async () => {
-  let slept = 0;
-  const h = harness((args, call) => {
-    if (args[0] === "models") {
-      // A `database is locked` on the first attempt, fine on the retry.
-      return call === 0 ? { stdout: "", code: 1 } : OK(MODELS_OUTPUT);
-    }
-    return OK(args[0] === "agent" ? AGENTS_OUTPUT : "[]");
-  });
-  const inventory = await loadInventoryFromCli({
-    bin: "/usr/bin/opencode",
-    cwd: "/tmp",
-    env: {},
-    run: h.run,
-    sleep: async (ms) => {
-      slept = ms;
-    }
-  });
-  assert.equal(slept, 1_000, "the SQLite-lock retry waits a second");
+test("a non-zero exit is retried once and recovers the catalogue sequentially", async (t) => {
+  const h = await harness(t, "retry");
+  const inventory = await loadInventoryFromCli(h.input);
   assert.equal(h.maxInFlight(), 1);
-  assert.equal(
-    h.calls.filter((call) => call.args[0] === "models").length,
-    2,
-    "models is retried exactly once"
-  );
-  assert.equal(
-    h.calls.filter((call) => call.args[0] === "agent").length,
-    1,
-    "a command that succeeded is not re-run"
-  );
+  assert.equal(h.modelAttempts(), 2);
   assert.deepEqual(inventory.providers.connected.sort(), ["opencode", "openrouter"]);
 });
 
-test("agents and skills may each degrade to an empty list", async () => {
-  const h = harness((args) =>
-    args[0] === "models" ? OK(MODELS_OUTPUT) : { stdout: "", code: 2 }
-  );
-  const warnings: unknown[] = [];
-  const inventory = await loadInventoryFromCli({
-    bin: "/usr/bin/opencode",
-    cwd: "/tmp",
-    env: {},
-    run: h.run,
-    sleep: async () => undefined,
-    logger: {
-      debug: () => undefined,
-      info: () => undefined,
-      warn: (message) => warnings.push(message),
-      error: () => undefined
-    }
-  });
+test("agents and skills may each degrade to an empty list", async (t) => {
+  const h = await harness(t, "optional-failure");
+  const inventory = await loadInventoryFromCli(h.input);
   assert.deepEqual(inventory.agents, []);
   assert.deepEqual(inventory.skills, []);
-  assert.ok(inventory.providers.all.length > 0, "models is still authoritative");
-  assert.equal(warnings.length, 1);
+  assert.deepEqual(inventory.providers.connected.sort(), ["opencode", "openrouter"]);
 });
 
-test("a models failure rejects — that one IS the catalogue", async () => {
-  const h = harness((args) =>
-    args[0] === "models" ? { stdout: "", code: 127, failure: "command not found" } : OK("[]")
-  );
-  await assert.rejects(
-    loadInventoryFromCli({
-      bin: "/usr/bin/opencode",
-      cwd: "/tmp",
-      env: {},
-      run: h.run,
-      sleep: async () => undefined
-    }),
-    /models --verbose.*command not found/s
-  );
+test("a models failure rejects — that one IS the catalogue", async (t) => {
+  const h = await harness(t, "unavailable");
+  await assert.rejects(loadInventoryFromCli(h.input));
+  assert.equal(h.modelAttempts(), 2, "a permanent failure stops after one retry");
 });

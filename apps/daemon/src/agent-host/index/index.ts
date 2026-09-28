@@ -40,32 +40,17 @@ import {
   describeError,
   openIndexFile,
   removeIndexFiles,
-  type SqliteDatabase,
-  type SqliteDriver
+  type SqliteDatabase
 } from "./sqlite.ts";
-
-export type {
-  SqliteDatabase,
-  SqliteDriver,
-  SqliteRunResult,
-  SqliteStatement
-} from "./sqlite.ts";
-export { defaultSqliteDriver } from "./sqlite.ts";
-export { INDEX_SCHEMA_VERSION } from "./schema.ts";
 
 /** Events applied per transaction during a catch-up, with a loop yield between. */
-export const INDEX_CATCH_UP_CHUNK = 500;
+const INDEX_CATCH_UP_CHUNK = 500;
 
 export interface ThreadIndexOptions {
   /** `agentChatIndexPath(appdir)`. */
   filePath: string;
   logger: AdapterLogger;
   clock?: Clock;
-  /**
-   * Test seam: inject the driver; `null` simulates a host without the native
-   * binding. Default: better-sqlite3, resolved once when `sqlite.ts` loads.
-   */
-  driver?: SqliteDriver | null;
 }
 
 export interface IndexedThreadMeta {
@@ -349,10 +334,10 @@ export interface ThreadIndex {
 export function createThreadIndex(options: ThreadIndexOptions): ThreadIndex {
   const { logger } = options;
   const clock = options.clock ?? systemClock;
-  const driver = options.driver === undefined ? defaultSqliteDriver : options.driver;
+  const driver = defaultSqliteDriver;
   if (driver === null) {
     logger.warn("agent-host: thread index disabled — the SQLite driver is unavailable", {
-      error: options.driver === null ? "disabled by the caller" : defaultSqliteDriverError
+      error: defaultSqliteDriverError
     });
     return createUnavailableThreadIndex();
   }

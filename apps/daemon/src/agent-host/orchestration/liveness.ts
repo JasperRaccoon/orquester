@@ -60,7 +60,7 @@ import { systemClock, type Clock } from "./runtime-seams.ts";
  * minutes, the same horizon as the turn watchdog's idle window (§3.1): if
  * nothing has happened for that long, nothing is happening.
  */
-export const BACKGROUND_LIVENESS_TTL_MS = 10 * 60_000;
+const BACKGROUND_LIVENESS_TTL_MS = 10 * 60_000;
 
 interface ThreadLivenessState {
   /**
@@ -80,8 +80,6 @@ interface ThreadLivenessState {
 
 export interface LivenessRegistryOptions {
   clock?: Clock;
-  /** Overridable so a test drives the TTL with a set clock (§9). */
-  backgroundTtlMs?: number;
 }
 
 /** *T3: `ThreadBackgroundLiveness.ts:35-41`.* */
@@ -155,7 +153,6 @@ export function createLivenessRegistry(
   options: LivenessRegistryOptions = {}
 ): LivenessRegistry {
   const clock = options.clock ?? systemClock;
-  const backgroundTtlMs = options.backgroundTtlMs ?? BACKGROUND_LIVENESS_TTL_MS;
   const stateByThreadId = new Map<string, ThreadLivenessState>();
 
   const stateFor = (threadId: string): ThreadLivenessState => {
@@ -199,7 +196,7 @@ export function createLivenessRegistry(
    */
   const expire = (state: ThreadLivenessState): void => {
     const now = clock.now().getTime();
-    const cutoff = now - backgroundTtlMs;
+    const cutoff = now - BACKGROUND_LIVENESS_TTL_MS;
     for (const [taskId, lastSeenAt] of [...state.monitors]) {
       if (lastSeenAt <= cutoff) {
         state.monitors.delete(taskId);

@@ -31,20 +31,14 @@ export {
 export {
   RewindConfirmPanel,
   RewindControl,
-  RewindPickerPanel,
   REWIND_BUSY_TITLE,
   REWIND_DISABLED_EXPLAINS_ITSELF,
   REWIND_ESCAPE_HINT,
   REWIND_ESCAPE_HINT_MS,
-  REWIND_PICKER_LIMIT,
-  rewindConfirmSentence,
   rewindDroppedTurnCount,
   rewindPickerEnabled,
-  rewindTargetHint,
-  rewindTurnsLabel,
   type RewindConfirmPanelProps,
-  type RewindControlProps,
-  type RewindPickerPanelProps
+  type RewindControlProps
 } from "./RewindControl";
 
 export {
@@ -65,7 +59,6 @@ export {
 export {
   beginComposerSend,
   isComposerSending,
-  resetComposerSends,
   subscribeComposerSends
 } from "./composer-sends";
 export { useComposerSending } from "./use-composer-sending";
@@ -73,7 +66,6 @@ export { useComposerSending } from "./use-composer-sending";
 export {
   detectComposerTrigger,
   extendReplacementRangeForTrailingSpace,
-  isStandaloneCompactCommand,
   isTriggerAtPromptStart,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
@@ -150,7 +142,6 @@ export {
 } from "./composer-draft";
 
 export {
-  COMPOSER_RESTING_EXPANSION_MIN_PX,
   isComposerCollapsedMobile,
   resolveComposerTimelineInset
 } from "./composer-inset";
@@ -167,7 +158,6 @@ export {
 export {
   composerOwnsEscape,
   isChatTabListenerActive,
-  shellOwnsEscape
 } from "./tab-visibility";
 
 export {

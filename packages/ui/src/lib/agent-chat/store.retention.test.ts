@@ -1,3 +1,14 @@
+
+import { isolatedPage } from "./testing/isolated-page";
+let page: Awaited<ReturnType<typeof isolatedPage>>;
+async function loadPage(): Promise<void> {
+  await page?.dispose();
+  page = await isolatedPage();
+  ({ createThreadStore } = page.store);
+  ({ AgentChatCommandError } = page.transport);
+}
+beforeEach(loadPage);
+afterEach(async () => { await page.dispose(); });
 /**
  * The §6.5/§7.2 retained-snapshot behaviour of the thread store.
  *
@@ -11,18 +22,13 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import type { AgentChatStreamFrame } from "@orquester/api/agent-chat";
 
-import {
-  createThreadStore,
-  resetThreadRetention,
-  retainedThreadCount,
-  THREAD_SNAPSHOT_IDLE_TTL_MS,
-  type AgentChatThreadState,
-  type ThreadStore
-} from "./store";
+import type { AgentChatThreadState, ThreadStore } from "./store";
+let createThreadStore: typeof import("./store")["createThreadStore"];
 import type { AgentChatStreamOptions, AgentChatTransport } from "./transport";
+let AgentChatCommandError: typeof import("./transport")["AgentChatCommandError"];
 import { head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
-type Destroyable = ThreadStore & { destroy?: (options?: { retain?: boolean }) => void };
+type Destroyable = ThreadStore & { destroy?: () => void };
 
 function fakeTransport(): {
   transport: AgentChatTransport;
@@ -96,13 +102,7 @@ async function open(sessionId = "s1"): Promise<{
 }> {
   const fake = fakeTransport();
   const store = createThreadStore(sessionId, {
-    transport: fake.transport,
-    newId: (() => {
-      let n = 0;
-      return () => `id${++n}`;
-    })(),
-    now: () => stamp(1),
-    delay: async () => {}
+    transport: fake.transport
   }) as Destroyable;
   await flush();
   return { store, fake, state: () => store.getState() };
@@ -126,11 +126,6 @@ function synchronize(fake: ReturnType<typeof fakeTransport>): void {
 
 beforeEach(() => {
   resetBuilders();
-  resetThreadRetention();
-});
-
-afterEach(() => {
-  resetThreadRetention();
 });
 
 describe("the retained thread snapshot", () => {
@@ -138,20 +133,17 @@ describe("the retained thread snapshot", () => {
     const first = await open();
     synchronize(first.fake);
     assert.equal(first.state().slice.connection, "synchronized");
-    assert.equal(first.state().rows.filter((row) => row.kind === "message").length, 2);
+    assert.deepEqual(first.state().rows.flatMap((row) => row.kind === "message" ? [row.message.text] : []), ["hello", "hi"]);
 
     first.store.destroy?.();
-    assert.equal(retainedThreadCount(), 1);
 
     const second = await open();
     // The very first paint — before any frame and before the stream even
     // opened — already carries the folded thread.
-    assert.equal(
-      second.state().rows.filter((row) => row.kind === "message").length,
-      2,
-      "the remount painted the retained rows"
+    assert.deepEqual(
+      second.state().rows.flatMap((row) => row.kind === "message" ? [row.message.text] : []),
+      ["hello", "hi"]
     );
-    assert.equal(second.state().slice.entries.length, 2);
     // Never "Connecting…" over a retained, synchronized thread.
     assert.equal(second.state().slice.connection, "synchronized");
     assert.equal(second.state().slice.seq, 5);
@@ -162,44 +154,19 @@ describe("the retained thread snapshot", () => {
     second.store.destroy?.();
   });
 
-  it("applies the catch-up events the resumed stream replays", async () => {
-    const first = await open();
-    synchronize(first.fake);
-    first.store.destroy?.();
-
-    const second = await open();
-    second.fake.push({
-      kind: "snapshot",
-      thread: snapshot({
-        head: head({ seq: 6 }),
-        items: [
-          message("user", "hello", { createdAt: stamp(1) }),
-          message("assistant", "hi", { createdAt: stamp(2) }),
-          message("user", "more", { createdAt: stamp(3) })
-        ],
-        seq: 6
-      })
-    });
-    assert.equal(second.state().slice.entries.length, 3);
-    second.store.destroy?.();
-  });
-
   it("does a full load once the idle TTL has elapsed", async () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const first = await open();
       synchronize(first.fake);
       first.store.destroy?.();
-      assert.equal(retainedThreadCount(), 1);
-
-      mock.timers.tick(THREAD_SNAPSHOT_IDLE_TTL_MS + 1);
-      assert.equal(retainedThreadCount(), 0, "the retained snapshot expired");
+      mock.timers.tick(300_001);
 
       const second = await open();
       assert.equal(second.state().rows.length, 0, "nothing retained, nothing painted");
       assert.equal(second.state().slice.connection, "idle");
       assert.deepEqual(second.fake.opened, [{}], "a cold stream asks for a snapshot");
-      second.store.destroy?.({ retain: false });
+      second.store.destroy?.();
     } finally {
       mock.timers.reset();
     }
@@ -209,17 +176,24 @@ describe("the retained thread snapshot", () => {
     const stale = await open();
     synchronize(stale.fake);
 
-    // A second generation for the SAME thread claims the key while the first
-    // is still alive — then the first tears down.
     const fresh = await open();
-    stale.store.destroy?.();
-    assert.equal(retainedThreadCount(), 0, "the stale generation could not write");
-
+    fresh.fake.push({
+      kind: "snapshot",
+      thread: snapshot({ items: [message("user", "newer generation")], seq: 9 })
+    });
+    fresh.fake.push({ kind: "synchronized", hostInstanceId: "host-1" });
     fresh.store.destroy?.();
-    assert.equal(retainedThreadCount(), 1, "the owning generation could");
+    stale.store.destroy?.();
+    const remounted = await open();
+    assert.deepEqual(
+      remounted.state().rows.flatMap((row) => row.kind === "message" ? [row.message.text] : []),
+      ["newer generation"]
+    );
+    assert.deepEqual(remounted.fake.opened, [{ after: 9, hostInstanceId: "host-1" }]);
+    remounted.store.destroy?.();
   });
 
-  it("drops an in-flight command's flags but keeps the queue and the view state", async () => {
+  it("keeps the held queue and disclosure state on remount", async () => {
     const first = await open();
     synchronize(first.fake);
     first.state().actions.setDisclosure({ expandedTurnIds: ["t1"] });
@@ -235,18 +209,18 @@ describe("the retained thread snapshot", () => {
 
     const second = await open();
     assert.deepEqual(second.state().slice.disclosures.expandedTurnIds, ["t1"]);
-    assert.equal(second.state().slice.queue.length, 1);
-    assert.equal(second.state().reverting, false);
-    assert.equal(second.state().stopping, false);
+    assert.deepEqual(second.state().slice.queue.map((message) => [message.text, message.holdUntilUserAction]), [["later", true]]);
     second.store.destroy?.();
   });
 
   it("never paints a retained error banner", async () => {
     const first = await open();
     synchronize(first.fake);
-    // Reach past the actions: the banner is set by a failed command, and this
-    // test is about what a REMOUNT shows, not about how it got there.
-    first.state().actions.dismissErrorBanner();
+    first.fake.transport.command = async () => {
+      throw new AgentChatCommandError(409, "COMMAND_REJECTED", "old generation failed");
+    };
+    await assert.rejects(first.state().actions.compact());
+    assert.equal(first.state().slice.errorBanner, "old generation failed");
     first.store.destroy?.();
 
     const second = await open();

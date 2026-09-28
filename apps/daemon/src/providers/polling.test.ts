@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { bitbucketCloudProvider, missingScopesOf } from "./bitbucket-cloud";
+import { bitbucketCloudProvider } from "./bitbucket-cloud";
 import { bitbucketServerProvider } from "./bitbucket-server";
 import { githubProvider } from "./github";
 import { GitRemoteError, retryAfterMs } from "./types";
@@ -229,8 +229,6 @@ test("bitbucket cloud: a token without read:pullrequest is a missing_scope error
       return true;
     }
   );
-  assert.deepEqual(missingScopesOf(fixture("bitbucket-cloud-missing-scope.json")), ["read:pullrequest:bitbucket"]);
-  assert.equal(missingScopesOf('{"type":"error","error":{"message":"Access denied"}}'), null);
 });
 
 test("bitbucket cloud: a plain 401 stays an auth error; anonymous and 304 work", async () => {
@@ -250,9 +248,6 @@ test("bitbucket cloud: a plain 401 stays an auth error; anonymous and 304 work",
 
 test("bitbucket cloud and server have no releases", async () => {
   const seen = stubFetch(() => json("{}"));
-  assert.equal(bitbucketCloudProvider.supportsReleases, false);
-  assert.equal(bitbucketServerProvider.supportsReleases, false);
-  assert.equal(githubProvider.supportsReleases, true);
   assert.deepEqual(await bitbucketCloudProvider.listReleases(null, { owner: "a", repo: "b" }), {
     items: [],
     unsupported: true

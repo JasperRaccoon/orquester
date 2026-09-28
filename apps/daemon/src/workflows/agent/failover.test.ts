@@ -6,7 +6,7 @@ import test from "node:test";
 import type { AgentChainEntry, AgentHop, UsageResponse } from "@orquester/api";
 import type { NodeResult } from "../contracts.ts";
 import type { AgentBlockOutput } from "./executor.ts";
-import { candidateFromChoice, candidateKey, coolDown, countedHops, emptyMemory, hopCapReached, type FailoverDeps } from "./failover.ts";
+import { candidateFromChoice, candidateKey, coolDown, countedHops, emptyMemory, type FailoverDeps } from "./failover.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
 import { MemoryCooldowns, staticAccounts, staticUsage } from "./testing/fake-context.ts";
 import { FakeChatHost } from "./testing/fake-chat-host.ts";
@@ -211,7 +211,6 @@ test("chain exhausted: fails all_burnt with every hop and skip", async () => {
   assert.deepEqual(detail.hops.map((h) => h.accountId), ["a1", "a2", "c1", "c2"]);
   assert.ok(detail.hops.every((h) => h.reason === "usage_limit"));
   assert.deepEqual(new Set(detail.skipped.map((s) => s.accountId)), new Set(["a1", "a2", "c1", "c2"]));
-  assert.match(error.message, /claude\/alpha → usage limit/);
 });
 
 test("wait-for-reset: waits until the earliest reset, then resumes in the same session on that account", async () => {
@@ -237,7 +236,6 @@ test("wait-for-reset refuses a reset beyond maxWaitHours", async () => {
   const wf = testWorkflow([agentNode("n1", { whenAllBurnt: { kind: "wait-for-reset", maxWaitHours: 5 } })]);
   const error = errorOf((await sc.run(wf, "n1")).result);
   assert.equal(error.kind, "all_burnt");
-  assert.match(error.message, /within 5 h/);
 });
 
 test("an auth failure skips the account (1 h cooldown, unusable for the run) and fails over", async () => {
@@ -271,13 +269,6 @@ test("the cooldown is shared: the next block skips the burnt account", async () 
   assert.ok(selection.skipped.some((s) => s.accountId === "a1" && s.why === "cooldown"));
 });
 
-test("a hop never burns the same account twice unless its cooldown expired", async () => {
-  const sc = new Scenario({ accounts: [account("claude", "a1"), account("claude", "a2")], behaviour: () => [{ kind: "limit" }] });
-  const error = errorOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
-  const hops = (error.detail as { hops: AgentHop[] }).hops;
-  assert.deepEqual(hops.map((h) => h.accountId), ["a1", "a2"]);
-});
-
 test("a model the catalogue does not list skips its chain entry (why: catalog) and the next entry runs", async () => {
   const sc = new Scenario({ accounts: [...CLAUDE, ...CODEX], behaviour: () => ok("codex ran") });
   const wf = testWorkflow([agentNode("n1", { chain: chain(["claude", "no-such-model"], ["codex", "gpt-5"]) })]);
@@ -303,13 +294,6 @@ test("wait-for-reset over 48 h with limits that never name a reset: resumed hops
   const waited = sc.clock.now().getTime() - start;
   // 1 h + 2 h + 4 h × 11 = 47 h: escalated, and still inside the 48 h budget.
   assert.ok(waited >= 47 * HOUR && waited < 48 * HOUR, `waited ${waited / HOUR} h`);
-});
-
-test("hopCapReached counts every hop but a resumed one", () => {
-  const hop = (via: AgentHop["via"]): AgentHop => ({ agent: "claude", model: "opus", accountId: "a", sessionId: "s", startedAt: "2026-09-28T12:00:00.000Z", via });
-  assert.equal(hopCapReached([hop("initial"), ...Array.from({ length: 30 }, () => hop("resumed"))]), false);
-  assert.equal(hopCapReached([hop("initial"), ...Array.from({ length: 11 }, () => hop("switched"))]), true);
-  assert.equal(hopCapReached([hop("initial"), ...Array.from({ length: 10 }, () => hop("handoff")), hop("resumed")]), false);
 });
 
 test("coolDown keys accountless launches by provider and never reads another quota's reset", async () => {

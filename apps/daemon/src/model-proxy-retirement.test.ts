@@ -1,6 +1,6 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { retireModelProxy } from "./model-proxy-retirement.ts";
@@ -21,8 +21,9 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
-async function setup() {
+async function setup(t: TestContext) {
   const appdir = await mkdtemp(join(tmpdir(), "orq-retire-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const daemonDir = join(appdir, "daemon");
   const proxyDir = join(daemonDir, "cliproxy");
   await mkdir(join(proxyDir, "auth"), { recursive: true });
@@ -45,8 +46,8 @@ async function setup() {
   return { appdir, daemonDir, proxyDir, cred, write };
 }
 
-test("the proxy's fresher tokens are handed back, its launcher files removed, and it runs once", async () => {
-  const h = await setup();
+test("the proxy's fresher tokens are handed back, its launcher files removed, and it runs once", async (t) => {
+  const h = await setup(t);
   const later = "2026-10-01T12:00:00Z";
   const earlier = "2026-09-01T12:00:00Z";
 
@@ -115,8 +116,9 @@ test("the proxy's fresher tokens are handed back, its launcher files removed, an
   assert.equal(JSON.parse(await readFile(h.cred("grok", GROK_ID), "utf8"))[GROK_KEY].key, "proxy-at");
 });
 
-test("no proxy directory: nothing happens", async () => {
+test("no proxy directory: nothing happens", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "orq-retire-none-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
   const killed: string[] = [];
   await retireModelProxy({
     daemonDir: join(appdir, "daemon"),

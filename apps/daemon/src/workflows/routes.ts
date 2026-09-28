@@ -101,8 +101,6 @@ export interface WorkflowRouteDeps {
    * path's parent directory name as the workspace.
    */
   projectPathFilter?: (projectPath: string) => { path: string; workspace: string } | null;
-  /** How often a followed log is re-read at its end (tests shorten it). */
-  logPollMs?: number;
   /**
    * Deletes a kept temporary project when the engine cannot (not attached yet, or its delete
    * failed) — the delete cascade must not drop the only record naming a directory it left behind.
@@ -116,7 +114,7 @@ export interface WorkflowRouteDeps {
 }
 
 /** Definitions may be 2 MiB (`maxDefinitionBytes`); a JSON body carrying one needs room around it. */
-export const WORKFLOW_WRITE_BODY_LIMIT = 3 * 1024 * 1024;
+const WORKFLOW_WRITE_BODY_LIMIT = 3 * 1024 * 1024;
 
 /** Default and maximum page sizes for the run history. */
 const RUNS_PAGE_DEFAULT = 20;
@@ -148,7 +146,7 @@ const CONFIG_SCHEMAS: Record<WorkflowNodeType, ZodTypeAny> = {
 let blockTypesCache: WorkflowBlockTypesResponse | null = null;
 
 /** The block catalogue with each type's config as JSON schema (built once). */
-export function workflowBlockTypes(): WorkflowBlockTypesResponse {
+function workflowBlockTypes(): WorkflowBlockTypesResponse {
   if (blockTypesCache !== null) return blockTypesCache;
   const types: WorkflowBlockTypeInfo[] = WORKFLOW_NODE_TYPES.map((type) => {
     const entry = WORKFLOW_BLOCK_CATALOG[type];
@@ -168,7 +166,7 @@ export function workflowBlockTypes(): WorkflowBlockTypesResponse {
 }
 
 /** A workflow's rail row: the engine's (live trigger state) when attached, else the store's. */
-export function summarizeWorkflow(
+function summarizeWorkflow(
   deps: Pick<WorkflowRouteDeps, "service" | "runStore" | "engine">,
   workflow: Workflow
 ): WorkflowSummary {
@@ -618,8 +616,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
               offset,
               isLive,
               signal: abort.signal,
-              redactor,
-              ...(deps.logPollMs !== undefined ? { pollMs: deps.logPollMs } : {})
+              redactor
             })) {
               if (abort.signal.aborted) break;
               if (!reply.raw.write(chunk)) {

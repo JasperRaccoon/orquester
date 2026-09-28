@@ -39,7 +39,7 @@ import { parseAgentGoal, sameGoalState } from "@orquester/api/agent-chat";
 import type { Clock } from "../../adapter.ts";
 
 /** At most one `progress` update per this window, per thread (goals §6). */
-export const GOAL_PROGRESS_THROTTLE_MS = 30_000;
+const GOAL_PROGRESS_THROTTLE_MS = 30_000;
 
 /**
  * The phase of a goal whose evaluation the CLI deferred because background
@@ -63,7 +63,7 @@ export const GOAL_CHECK_IN_PREFIX = "Goal check-in: «";
  * conversation already holds it whole: 500 UTF-16 units (one fewer when that
  * would split a surrogate pair), then `… [+<n> chars]`.
  */
-export const STOP_HOOK_CONDITION_CUT = 500;
+const STOP_HOOK_CONDITION_CUT = 500;
 
 // ---------------------------------------------------------------------------
 // The /goal command's output (goals §6.1.2)
