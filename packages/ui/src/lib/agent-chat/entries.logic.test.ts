@@ -387,9 +387,9 @@ describe("a started call's own row", () => {
 
   it("an unkeyed start, and a start with neither a turn nor an owner, are dropped as before", () => {
     const unkeyed = activity("tool.started", { itemType: "command_execution", command: "ls", status: "inProgress" }, { turnId: "t1" });
-    // A Claude parent call registered with no turn open outside a held message (an interrupted message's tail, or a
-    // woken call in a log from before the hold) emits its start and early input update turnless, and a rewind of the
-    // turn that adopts it leaves those alone.
+    // In a log written before 2026-09-28, a Claude parent call registered with no turn open outside a held message
+    // (an interrupted message's tail; before the hold, a woken call) emitted its start and early input update
+    // turnless, and a rewind of the turn that adopted it leaves those alone.
     const turnless = activity("tool.started", { itemType: "command_execution", toolUseId: "call-2", command: "ls", status: "inProgress" });
     assert.deepEqual(deriveWorkLogEntries([unkeyed, turnless]), []);
     // An agent's call started while no parent turn was open has an owner: in its own view, it is its row.
@@ -409,8 +409,8 @@ describe("a started call's own row", () => {
       { turnId: "t1" }
     );
     assert.deepEqual(deriveWorkLogEntries([start]), []);
-    // The update that adopts a woken call before its input parsed names the tool alone (the Claude normaliser's
-    // `adoptedToolEvent`): still the plan boundary.
+    // In a log written before 2026-09-28, the update that adopted a call before its input parsed names the tool alone
+    // (the since-removed `adoptedToolEvent`): still the plan boundary.
     const adopted = activity(
       "tool.updated",
       { itemType: "dynamic_tool_call", toolUseId: "call-5", title: "Tool call", detail: "ExitPlanMode", status: "inProgress" },

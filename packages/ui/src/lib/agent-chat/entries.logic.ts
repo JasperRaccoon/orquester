@@ -547,13 +547,13 @@ function inheritedChunkOwner(
  * it closes (`open-work.ts`), and the call then reads as running again.
  *
  * Still dropped: an unkeyed start, which nothing ties to its call; and a start
- * with neither a turn nor an owner. A Claude PARENT call registered while no
- * turn was open outside a held message — the tail of a message an interrupt's
- * turn end left streaming, and every woken call in a log written before the
- * held opening message — emits its start and any early input update
- * turnless. The turn adopts the call as it opens, with one update on it (the
- * Claude normaliser's `adoptedToolEvent`), which is the running call's live
- * row. A rewind of that
+ * with neither a turn nor an owner. The Claude normaliser writes none any
+ * more, but a log written before 2026-09-28 holds them: a PARENT call
+ * registered while no turn was open outside a held message — the tail of an
+ * interrupted message, and every woken call before the held opening message —
+ * emitted its start and any early input update turnless, and the turn that
+ * opened adopted it with one update on it (the since-removed
+ * `adoptedToolEvent`), the running call's live row. A rewind of that
  * turn leaves the turnless rows as all there is of the call, and none reads
  * as running: the start is dropped here (superseded by the update, else as
  * turnless and ownerless — a start that does not anchor its call,
@@ -723,9 +723,10 @@ function isNoContentRuntimeWarning(activity: ThreadActivityItem): boolean {
 /**
  * `ExitPlanMode` is a plan boundary, not a tool the user cares about. *T3:
  * `:528-540`; differs: a start is a row too (`startIsCallRow`), and Claude's
- * reads `ExitPlanMode: {}` until the plan streams into the call's input — and
- * the update that adopts a woken call before its input parsed names the tool
- * alone (the Claude normaliser's `adoptedToolEvent`).*
+ * reads `ExitPlanMode: {}` until the plan streams into the call's input — and,
+ * in a log written before 2026-09-28, the update that adopted a call before
+ * its input parsed names the tool alone (the since-removed
+ * `adoptedToolEvent`).*
  */
 function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
   if (

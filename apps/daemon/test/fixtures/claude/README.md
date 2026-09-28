@@ -576,6 +576,13 @@ synthetic transcript entry the timeline should recognise:
 Note this one has `content` as an array while the compaction ones (observation 7) do not — both
 shapes occur for the same message type.
 
+Order after the interrupt: the cut message's complete `assistant` frame (the `"Started"` it had
+streamed, with no `content_block_stop` or `message_stop` ever sent for it), then the synthetic user
+message above, then the `result` — and no stream frame of that message after the `result`: the
+aborted API stream is over, and so is the run it belonged to. The normaliser relies on it: a call a
+message's tail would stream after its turn's `result` can never run, so it is closed at once on
+that message's turn (observation 22 b).
+
 ### 15. The probe works as designed, and returns more than §4.5 expects
 
 `13-probe-never-yielding.ndjson`, with the exact options §4.5 prescribes. No API call is made; the
@@ -905,13 +912,16 @@ frame that opens the adapter's synthetic turn, and whose uuid is that turn's rew
 synthetic turn, or a user turn if the user sends a message in that window (`preTurnStream`) — so a
 `tool_use` it streams starts on that turn, and its turn's fold holds all of it and a rewind to before
 the turn removes it. A parent call that still registers with no turn — outside a held message: the
-tail of a message whose turn an interrupt ended while it still streamed — adopts the next turn to
-open, so everything it emits from then on rides it, while what it emitted before (its start, an
-early input update) stays turnless. The turn that opens carries nothing new for such a call, and its
-next frame is its `tool_result`, so the adapter marks the adoption with one `item.updated` on the
-turn, the call's state so far (`adoptedToolEvent`): without it a foreground command's whole run had
-no row that carried its turn. Logs written before the hold (acd40a47; on this machine, every log up
-to the 2026-09-27 merge) keep turnless starts for every woken call.
+tail of a message whose turn ended while it still streamed — is its MESSAGE's turn's, never the
+next turn's (`streamMessageTurnId`). After the CLI's `result` nothing of that message can run —
+observation 14: nothing of an interrupted message streams after its `result` — so such a call is
+closed at once, `failed`, on that turn; after the adapter settled the turn itself (`sendTurn`
+closing a stale synthetic turn while the CLI's own message streams on) the run goes on and the call
+runs on its message's turn. Until 2026-09-28 such a call adopted the next turn to open — the user's
+next prompt — with one `item.updated` (`adoptedToolEvent`, gone), its start and early input update
+left turnless. Logs written before the hold (acd40a47; on this machine, every log up to the
+2026-09-27 merge) keep turnless starts for every woken call, and logs written before 2026-09-28 an
+adopted tail's.
 
 **c. Nested `tool_progress` frames carry no `task_id`.** The live windows held 6 / 10 / 46
 `tool_progress` frames — every one nested (a subagent's `Bash`), and not one with `task_id`; the SDK

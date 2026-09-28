@@ -59,11 +59,12 @@
  *   stored as `data: {}` beside them, and a closer that copied the data alone
  *   listed no files — the GUI's row and the MCP's entry read them there.
  *   **Except a call no row of the window anchors** ({@link anchorsCall}:
- *   every row of it turnless and ownerless) — what a rewind leaves of a Claude
- *   parent call a later turn adopted, its start and early input update (the
- *   tail of a message an interrupt's turn end left streaming; in a log written
- *   before a woken parent's first message was held for its turn, any woken
- *   call), or such a call no turn ever adopted. No view shows it
+ *   every row of it turnless and ownerless) — in a log written before
+ *   2026-09-28, what a rewind leaves of a Claude parent call a later turn
+ *   adopted, its start and early input update (the tail of an interrupted
+ *   message; before a woken parent's first message was held for its turn, any
+ *   woken call), or such a call no turn ever adopted. The normaliser writes no
+ *   such rows any more: the tail's call rides its message's turn. No view shows it
  *   (`@orquester/api`'s `call-anchor.ts`, the rule the GUI and the MCP hide it
  *   by), and a closer would anchor it: the call would come back as a failed row
  *   after any host start. It stays open in the fold, under the open-work caps

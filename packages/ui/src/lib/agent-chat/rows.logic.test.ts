@@ -806,9 +806,9 @@ describe("a command's streamed output is the inside of its row", () => {
   });
 
   it("a parent call a turn adopts is that turn's live row; what a rewind of that turn leaves of it renders nothing", () => {
-    // What a Claude parent call emits with no turn open (an interrupted message's tail, or a woken call in a log from
-    // before the hold) stays turnless: its start and an early input update. The turn that opens adopts it with one
-    // update on that turn, its first row the live run holds.
+    // A log written before 2026-09-28: what a Claude parent call emitted with no turn open (an interrupted message's
+    // tail; before the hold, a woken call) stayed turnless — its start and an early input update — and the turn that
+    // opened adopted it with one update on that turn, its first row the live run holds.
     const row = (activityKind: string, id: string, at: number, turnId: string | null) =>
       activity(activityKind, { itemType: "command_execution", toolUseId: "call-w", title: "Command run", status: "inProgress", data: { command: "cat out.txt" } }, { id, turnId, createdAt: stamp(at) });
     const turnless = [row("tool.started", "ws", 3, null), row("tool.updated", "wu", 4, null)];

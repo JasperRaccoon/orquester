@@ -445,11 +445,12 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
     its read-side liveness (`isMessageStreaming`): a message a dead host left flagged is never
     dropped, only possibly left in (the conservative side).
 
-  A call in that held message starts on the turn it is replayed into. Adoption
-  (`adoptedToolEvent`, rule (6) of "Agent rows must survive…") now covers only a parent call
-  registered with no turn outside a held message — the tail of a message an interrupt's turn end
-  left streaming — and logs written before the hold keep turnless starts for every woken call,
-  which the read-side rules still handle.
+  A call in that held message starts on the turn it is replayed into, and a parent call that
+  registers with no turn OUTSIDE a held message — the tail of a message whose turn ended while it
+  still streamed — is its message's turn's (rule (6) of "Agent rows must survive…"), never the next
+  turn's. Nothing adopts a call any more; logs written before the hold keep turnless starts for
+  every woken call, and logs written before 2026-09-28 an adopted tail's, which the read-side rules
+  still handle.
 - **A completion's `detail` stands in only for a message that delivered no text this turn.**
   Ingestion keeps `turnDeliveredMessageIds` past `finalizeMessage` because a prompt
   (`request.opened`, `user-input.requested`) closes an open message before its provider
@@ -1141,18 +1142,24 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   and rides `ToolInFlight.turnId`, the turn active when the call STARTED (absent between parent
   turns), never the one active when the event is emitted — one call, one `tool:<turn>:<id>` key.
   A woken parent's first message is held and replayed into the turn that opens next (the "A turn
-  the CLI starts by itself" gotcha), so its calls start on that turn. The one late assignment left:
-  a parent call registered while no turn was open outside a held message — the tail of a message an
-  interrupt's turn end left streaming — adopts the next turn to open (`beginTurn`: a synthetic
-  turn, or a user turn sent in the window) and says so at once with ONE
-  `item.updated` on that turn carrying the call's state so far (`adoptedToolEvent`, the tool's name
-  alone as its detail while its input has not parsed) — the frame that opens the turn emits nothing
-  for the call, and its next rows come only with its result, so a running call had no turn-carrying
-  row: no MCP entry and no live row for a foreground command's whole run. The turn's fold holds the
-  call and a rewind to before the turn removes it (`reduceReverted` keeps turnless rows); what it
-  emitted before the turn opened — its start and any early input update — stays turnless, and after
-  a rewind of the turn that is all there is of the call, so neither view shows it running: the GUI
-  drops the start (superseded by the update, else as turnless and ownerless — `startIsCallRow`,
+  the CLI starts by itself" gotcha), so its calls start on that turn. **No call is assigned a turn
+  late:** a parent call that registers while no turn is open outside a held message — the tail of a
+  message whose turn ended while it still streamed — rides the turn its MESSAGE streamed in
+  (`streamMessageTurnId`, set at the message's `message_start`), never the next turn to open,
+  which is the user's next prompt and has nothing to do with it. How its turn ended decides the
+  rest (`streamRunEnded`): after the CLI's `result` the run that message belonged to is over —
+  capture 10 shows nothing of an interrupted message after its `result` (fixtures README
+  observations 13, 14, 22) — so the call can never run and is closed at once, `failed`, on that
+  turn, as the turn's end closes a call it cut (and one of a held message dropped with its run has
+  no turn and is dropped with it); after the adapter settled the turn itself (`sendTurn` closing a
+  stale synthetic turn while the CLI's own message streams on) the run goes on and the call runs,
+  its rows on its message's turn. Until 2026-09-28 such a call ADOPTED the next turn to open with
+  one `item.updated` (`adoptedToolEvent`, gone), leaving its start and any early input update
+  turnless — the interrupted turn's call then read running in the user's next turn. A log written
+  before then (or before the hold, for every woken call) keeps those turnless rows: the adopting
+  turn's fold holds the call and a rewind to before it removes it (`reduceReverted` keeps turnless
+  rows); what is left after such a rewind is all turnless, so neither view shows it running: the
+  GUI drops the start (superseded by the update, else as turnless and ownerless — `startIsCallRow`,
   `entries.logic.ts`) and hides an in-progress update as a neutral row, and the MCP transcript
   builds no entry from a call whose rows are all turnless, ownerless and unclosed. That is one
   rule, `anchorsCall` (`packages/api/src/agent-chat/call-anchor.ts`: a row anchors its call by its

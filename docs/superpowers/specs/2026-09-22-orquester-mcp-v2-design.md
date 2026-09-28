@@ -882,15 +882,17 @@ subagent's roster row names none of the calls it runs and is never used. And a c
 turnless, ownerless (`isAgentOwnedActivity`) and unclosed — no `tool.completed` or `tool.denied` — builds no entry, as
 the GUI shows it none: a Claude parent call can start while no turn is open (when this was built, every call a woken
 parent made before the synthetic turn its own message opens; since the 2026-09-27 merge that message is held and
-replayed into the next turn to open — acd40a47 — so its calls start on that turn, and what is left is the tail of a
-message an interrupt's turn end left streaming, and logs written before the hold), what it emits before the next turn
+replayed into the next turn to open — acd40a47 — so its calls start on that turn; since 2026-09-28 the tail of a
+message whose turn ended while it still streamed — an interrupted message's — rides that message's turn too, so the
+normaliser writes no such rows, and what is left is logs written before then), what it emits before the next turn
 opens — its start and any early input update — stays turnless, and only its later rows carry the turn. A rewind of
 that turn used to leave an `inProgress` entry here that the GUI never showed: it drops the start (superseded by the
 update, else as turnless and ownerless — `startIsCallRow`, `entries.logic.ts`) and hides an update still in progress as
 a neutral row. (Fix round 1: the first build skipped only a lone turnless start, and a start with its early
 input update still made an entry. Fix round 2: that rule alone hid a woken call for its whole run — the frame that opens
-the turn emits nothing for the call, and its next rows come only with its result — so the Claude normaliser now marks
-the adoption with one update on the turn (`adoptedToolEvent`), a running call always has a row that carries its turn,
+the turn emits nothing for the call, and its next rows come only with its result — so the Claude normaliser marked
+the adoption with one update on the turn (`adoptedToolEvent`, removed on 2026-09-28 with the adoption itself), a
+running call always has a row that carries its turn,
 and "all turnless, ownerless and unclosed" means a rewind's leftover again. Final fix wave: the rule is `anchorsCall`
 (`packages/api/src/agent-chat/call-anchor.ts`), shared with the GUI's `startIsCallRow` and with the host's first load,
 which writes such a call no closer — a closer anchored it, and the next host start brought the rewound call back as a

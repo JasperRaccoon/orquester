@@ -1274,4 +1274,89 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
     assert.deepEqual(rowsOf(reloaded), []);
     assert.deepEqual(entriesOf(reloaded), []);
   });
+
+  it("a call an interrupted message's tail streams after its turn ended is that turn's, closed on it — the next turn holds none of it", async () => {
+    const normalizer = new ClaudeNormalizer({
+      threadId: THREAD_ID,
+      clock: fixedClock(),
+      ids: countingIds()
+    });
+    const base = {
+      type: "result",
+      result: "",
+      num_turns: 1,
+      usage: {},
+      modelUsage: {},
+      total_cost_usd: 0,
+      duration_ms: 1,
+      duration_api_ms: 1,
+      permission_denials: []
+    };
+    // Capture 10's interrupt: the `result` that ends the run, and no stream frame of the cut message after it.
+    const interrupted = {
+      ...base,
+      subtype: "error_during_execution",
+      is_error: true,
+      stop_reason: "tool_use",
+      terminal_reason: "aborted_streaming",
+      errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"]
+    };
+    const success = { ...base, subtype: "success", is_error: false, stop_reason: "end_turn" };
+    const events = [...normalizer.beginTurn({ turnId: "turn-1" })];
+    const feed = (frame: Record<string, unknown>): void => {
+      events.push(...normalizer.handleMessage({ uuid: "u", session_id: "s", ...frame } as unknown as SDKMessage));
+    };
+    const stream = (event: Record<string, unknown>): void => feed({ type: "stream_event", parent_tool_use_id: null, event });
+    stream({ type: "message_start", message: { id: "msg_cut", role: "assistant", content: [], usage: {} } });
+    feed(interrupted);
+    // Were a tail to stream anyway, its call could never run: the run it belonged to is over.
+    stream({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_W", name: "Bash", input: {} } });
+    stream({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"command":"npm test"}' } });
+    // The user's next prompt: a turn of its own, which the call has nothing to do with.
+    events.push(...normalizer.beginTurn({ turnId: "turn-2" }));
+    feed(success);
+
+    const { ingestion, sink } = harness();
+    for (const event of events) {
+      await ingestion.ingest(event);
+    }
+    await ingestion.drain();
+    const state = fold(sink.events());
+    const rowsOf = (folded: ReturnType<typeof fold>) =>
+      (callRows(folded).get("toolu_W") ?? []).map((row) => [row.activityKind, row.turnId]);
+    assert.deepEqual(state.turns.map((turn) => turn.turnId), ["turn-1", "turn-2"]);
+    assert.deepEqual(rowsOf(state), [
+      ["tool.started", "turn-1"],
+      ["tool.completed", "turn-1"]
+    ]);
+    const statusOf = (folded: ReturnType<typeof fold>) =>
+      transcriptEntries(toThreadSnapshot(folded), { turns: 5, include: new Set(["tools"] as const), maxChars: 100_000 })
+        .entries.filter((entry) => entry.kind === "tool")
+        .map((entry) => [entry.turn, entry.tool!.status]);
+    assert.deepEqual(statusOf(state), [[1, "failed"]], "a call of the interrupted turn, never running");
+
+    // A rewind to before the user's prompt keeps it with its turn; nothing of it is turnless, and the next host
+    // start finds nothing of it to close.
+    const reverted = applyDomainEvent(state, {
+      seq: state.seq + 1,
+      eventId: "revert",
+      threadId: THREAD_ID,
+      occurredAt: "2026-09-21T10:05:00.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {},
+      type: "thread.reverted",
+      payload: { turnCount: 1 }
+    });
+    assert.deepEqual(rowsOf(reverted), [
+      ["tool.started", "turn-1"],
+      ["tool.completed", "turn-1"]
+    ]);
+    let closingIds = 0;
+    const closings = leftoverWorkClosings(reverted, {
+      now: "2026-09-21T11:00:00.000Z",
+      nextId: () => `closing-${(closingIds += 1)}`
+    });
+    assert.deepEqual(closings.map((closing) => closing.key), []);
+  });
 });

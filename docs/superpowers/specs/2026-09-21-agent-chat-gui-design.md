@@ -1350,7 +1350,12 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `result` flushed that one below the final summary (live thread 19976137; see AGENTS.md). For
   the same reason the join is scoped to the message, not the turn — a message outlives the stale
   synthetic turn `sendTurn` settles under it — and a turn that begins while a synthetic one is
-  still open (it can open during `sendTurn`'s own awaits) settles it rather than overwriting it.*
+  still open (it can open during `sendTurn`'s own awaits) settles it rather than overwriting it.
+  A call the tail of a message streams after its turn ended rides the turn its message streamed in,
+  never the next one to open (the user's next prompt): after the CLI's `result` that message's run
+  is over (capture 10: nothing of an interrupted message streams after its `result`), so the call
+  is closed there at once as `failed`; after `sendTurn` settled a stale synthetic turn itself it
+  runs on, on that turn. Until 2026-09-28 the next turn to open adopted it.*
 - **Compaction** is the slash command `/compact`, sent as an ordinary turn and awaited to a
   terminal turn state (§4.1's `compaction` capability). `thread.state.changed {compacted,
   beforeTokens, afterTokens}` comes from the SDK's `compact_boundary` system message.
@@ -3968,13 +3973,15 @@ row of the call (`tool.updated`, `tool.completed`, `tool.denied`), which superse
 call the history began — its denial included — are derived together, so a call's close is in its
 start's input whenever both are loaded (the fold's own limit aside: a close written in another
 owner's window can age out before the opening row it closes, `open-work.ts`). An unkeyed start is
-still dropped, and so is a start with neither a turn nor an owner. A Claude parent call starts
-before a turn opens only outside a held message (the tail of a message an interrupt's turn end left
-streaming), and in logs written before the hold (§4.5's Steering note: a woken parent's first
-message is held and replayed into the turn it opens) for every woken call: what it emitted before
-that turn opened — its start and any early input update — stays turnless; the turn adopts it as it
-opens, with one update on the turn (the Claude normaliser's `adoptedToolEvent`), which is the
-running call's live row until its result; after a rewind of that turn the turnless rows are all there is of the call. None reads
+still dropped, and so is a start with neither a turn nor an owner. The Claude normaliser writes
+no such start any more — a woken parent's first message is held and replayed into the turn it opens
+(§4.5's Steering note), and a call the tail of a message streams after its turn ended rides that
+message's turn (closed there `failed` when the CLI's `result` had already ended its run) — but logs
+written before 2026-09-28 hold them: a parent call that started with no turn open outside a held
+message (an interrupted message's tail) and, before the hold, every woken call emitted its start and
+any early input update turnless; the next turn to open adopted it, with one update on the turn (the
+since-removed `adoptedToolEvent`), the running call's live row until its result; after a rewind of
+that turn the turnless rows are all there is of the call. None reads
 as running: the start is dropped (superseded by the update, else as turnless and ownerless), and an
 update still in progress is a neutral row a group hides. A host's next start writes such a call no
 closer either: no row of it anchors it (`anchorsCall`, `packages/api/src/agent-chat/call-anchor.ts`,

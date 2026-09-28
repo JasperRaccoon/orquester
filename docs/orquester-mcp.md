@@ -805,17 +805,16 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
     `tool.command` is the command the call runs, from its payload or its data. Other tools keep the
     provider's detail as it came.
   - A call whose rows in the read are all turnless, ownerless and unclosed is no row, as the GUI
-    shows it none. A Claude parent call can start while no turn is open: in the tail of a message
-    that was still streaming when an interrupt ended its turn, and, in history written before the
-    agent host held a woken parent's first message for the next turn to open, in every call a woken
-    parent made. (Today a woken parent's calls start on that turn, and a rewind of the turn
-    removes all of them.) What such a call emits before the next turn opens — its start and any
-    early input update — stays turnless. The turn adopts the call as it opens, and the adapter says
-    so with one update on the turn, so a running call always has a row that carries it. A rewind of
-    that turn removes that row and every later one, leaving the turnless rows as all there is of the
-    call, and that is no running call — nor does the agent host's next start close it, which would
-    make it a failed row. A row with a turn or an owner, or the call's completion or denial, makes
-    it a row as before.
+    shows it none. Today every row of a Claude parent call carries a turn: a woken parent's calls
+    start on the turn its message opens, and a call the tail of a message streams after its turn
+    ended is that message's turn's (closed there as failed when the agent's run was already over,
+    as after a Stop). History written before 2026-09-28 is different: such a tail's call — and,
+    before the agent host held a woken parent's first message for the next turn to open, every call
+    a woken parent made — sent its start and any early input update turnless, and the next turn to
+    open adopted the call with one update on it. A rewind of that turn removes that row and every
+    later one, leaving the turnless rows as all there is of the call, and that is no running call —
+    nor does the agent host's next start close it, which would make it a failed row. A row with a
+    turn or an owner, or the call's completion or denial, makes it a row as before.
   - A tool row carries `outputItemId` where more of the call's output can be read, and
     `read_tool_output` reads it (§6, Tool output):
     - the call's completion (or denial) when its payload was cut on its way to you — the row the

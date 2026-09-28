@@ -129,12 +129,12 @@ interface ToolInFlight {
    * lands after the parent's turn has ended, and a call whose rows carry two
    * turn ids reads as two calls (the GUI keys a call `tool:<turn>:<id>`). A
    * woken parent's first message is held and replayed into the turn that
-   * opens next (`preTurnStream`), so its calls start on that turn. The one
-   * late assignment left: a parent call registered while no turn was open
-   * outside a held message — the tail of a message an interrupt's turn end
-   * left streaming — adopts the next turn to open (`beginTurn`: a synthetic
-   * turn, or a user turn sent in that window) and says so with one update on
-   * it (`adoptedToolEvent`).
+   * opens next (`preTurnStream`), so its calls start on that turn. A parent
+   * call registered while no turn is open outside a held message — the tail
+   * of a message whose turn ended while it still streamed — rides the turn
+   * its MESSAGE streamed in (`streamMessageTurnId`), never the next turn to
+   * open: that is the user's next prompt, which the call has nothing to do
+   * with. No call is ever assigned a turn late.
    */
   turnId?: string;
 }
@@ -398,6 +398,21 @@ export class ClaudeNormalizer {
    * a message's per-block frames all precede its stop.
    */
   private streamMessageId: string | null = null;
+  /**
+   * The turn the parent message streaming now started in — undefined for a
+   * message held with no turn open until its replay starts it again — and
+   * whether the CLI's run that message belongs to has ENDED: a `result` came
+   * while it still streamed. A call its tail streams after its turn ended is
+   * that turn's, not the next one's (`handleContentBlockStart`). The two ends
+   * differ: after a `result` nothing of the message can run — capture 10
+   * shows no stream frame of an aborted message after its `result` (fixtures
+   * README observations 13, 14 and 22) — so such a call is closed at once;
+   * after the adapter settled the turn itself (`sendTurn` closing a stale
+   * synthetic turn while the CLI's own message streams on) the run goes on
+   * and the call runs, on its message's turn.
+   */
+  private streamMessageTurnId: string | undefined;
+  private streamRunEnded = false;
   private readonly streamedBlocks = new Map<string, Array<{ index: number; type: string }>>();
   private readonly snapshotBlockCursor = new Map<string, number>();
 
@@ -811,26 +826,14 @@ export class ClaudeNormalizer {
       announcedUsageLimitKeys: new Set()
     };
     this.turnState = turn;
-    // A turn that opens adopts every in-flight call with neither an owner nor a
-    // turn: a parent call streamed while none was open. A woken parent (each
+    // A turn that opens takes no call already in flight. A woken parent (each
     // background agent that finishes wakes it) streams before the complete
     // frame that opens its synthetic turn, but that message is HELD and
     // replayed below (`replayPreTurnStream`), so its calls start on the turn
     // that opens — the synthetic one, or a user's turn sent in that window.
-    // What is left to adopt is a call registered outside a held message: the
-    // tail of a message whose turn an interrupt ended while it still
-    // streamed. Everything such a call emits from here rides the turn that
-    // opened under it, so the turn's fold holds it and a rewind to before the
-    // turn removes it; what it emitted before (its start, an early input
-    // update) stays turnless. The parent's calls are settled at every turn
-    // end, and a subagent's call is its own: it never joins a parent turn.
-    const adopted: ToolInFlight[] = [];
-    for (const tool of this.inFlightTools.values()) {
-      if (tool.agentId === undefined && tool.turnId === undefined) {
-        tool.turnId = input.turnId;
-        adopted.push(tool);
-      }
-    }
+    // A call the tail of an older message streamed after its turn ended is
+    // that message's turn's (`handleContentBlockStart`); a subagent's call is
+    // its own and never joins a parent turn.
     const anchorUuid = input.anchorUuid ?? input.turnId;
     this.turnStartMessageIds.push(anchorUuid);
     this.turnBoundaries.push({ turnId: input.turnId, uuid: anchorUuid });
@@ -846,44 +849,8 @@ export class ClaudeNormalizer {
       }
     ];
     events.push(...this.sessionStateChanged("running", "turn:started"));
-    events.push(...adopted.map((tool) => this.adoptedToolEvent(tool)));
     events.push(...this.replayPreTurnStream());
     return events;
-  }
-
-  /**
-   * The one update that tells a call's adoption (`beginTurn`): its state so
-   * far, on the turn that adopted it. A woken parent's first message is held
-   * and replayed into the turn that opens (`preTurnStream`), so its calls
-   * start on that turn; what is left to adopt is a parent call registered
-   * with no turn OUTSIDE a held message — the tail of a message whose turn an
-   * interrupt ended while it still streamed. The turn that opens emits
-   * nothing for it, and the call's next rows come only with its result — a
-   * foreground `npm test` runs for minutes — so without this a running call's
-   * rows are all turnless: the MCP builds no entry for such a call (a rewind's
-   * leftover) and the GUI's live run holds only rows of the running turn. The shape is the call's own input
-   * update's; an input that has not parsed whole yet (the JSON streams, and a
-   * `Write` can take seconds) is named by the tool alone, as the GUI reads a
-   * start's "Write: {}".
-   */
-  private adoptedToolEvent(tool: ToolInFlight): RuntimeEvent {
-    const inputParsed = Object.keys(tool.input).length > 0;
-    return {
-      ...this.base({ turnId: tool.turnId, itemId: tool.itemId, providerItemId: tool.itemId }),
-      type: "item.updated",
-      payload: {
-        itemType: tool.itemType,
-        status: "inProgress",
-        title: tool.title,
-        ...(inputParsed
-          ? tool.detail !== undefined
-            ? { detail: tool.detail }
-            : {}
-          : { detail: tool.toolName }),
-        ...(tool.parentToolUseId !== undefined ? { parentToolUseId: tool.parentToolUseId } : {}),
-        data: { toolName: tool.toolName, input: tool.input }
-      }
-    };
   }
 
   /**
@@ -896,6 +863,9 @@ export class ClaudeNormalizer {
     const type = message.event.type;
     if (type === "message_start") {
       this.preTurnStream = { frames: [message] };
+      // No turn yet: its replay's `message_start` names the one it opens.
+      this.streamMessageTurnId = undefined;
+      this.streamRunEnded = false;
       return true;
     }
     const held = this.preTurnStream;
@@ -1443,6 +1413,9 @@ export class ClaudeNormalizer {
         }
         this.streamMessageId = started.id;
       }
+      // Processed, never held: a turn is open (`holdPreTurnFrame`).
+      this.streamMessageTurnId = this.turnState?.turnId;
+      this.streamRunEnded = false;
       return events;
     }
 
@@ -1661,6 +1634,17 @@ export class ClaudeNormalizer {
     const itemType = classifyToolItemType(toolName, toolInput);
     const parentToolUseId = message.parent_tool_use_id ?? undefined;
     const owningAgentId = this.agentIdForParentToolUse(parentToolUseId);
+    // With no turn open, a call processed here is the tail of a message whose
+    // turn ended while it still streamed (a message that begins with no turn
+    // is held, `preTurnStream`): it is that message's turn's. When the CLI's
+    // run ended under it (`streamRunEnded`) the call can never run — it is
+    // closed at once, `failed`, as that turn's end closes a call it cut, and
+    // one of a message that never had a turn is dropped with the rest of it.
+    const turnId = this.activeTurnId ?? this.streamMessageTurnId;
+    const runEnded = this.activeTurnId === undefined && this.streamRunEnded;
+    if (runEnded && turnId === undefined) {
+      return [];
+    }
     const tool: ToolInFlight = {
       itemId: block.id,
       itemType,
@@ -1674,22 +1658,25 @@ export class ClaudeNormalizer {
         : {}),
       ...(owningAgentId !== undefined ? { agentId: owningAgentId } : {}),
       ...(parentToolUseId !== undefined ? { parentToolUseId } : {}),
-      ...(this.activeTurnId !== undefined ? { turnId: this.activeTurnId } : {})
+      ...(turnId !== undefined ? { turnId } : {})
     };
-    this.inFlightTools.set(event.index, tool);
+    const raw: RuntimeEventRaw = {
+      source: RAW_SDK_MESSAGE,
+      method: "claude/stream_event/content_block_start",
+      payload: message
+    };
+    if (!runEnded) {
+      this.inFlightTools.set(event.index, tool);
+    }
 
-    return [
+    const started: RuntimeEvent[] = [
       {
         ...this.base({
           turnId: tool.turnId,
           itemId: tool.itemId,
           providerItemId: tool.itemId,
           ...(tool.agentId !== undefined ? { agentId: tool.agentId } : {}),
-          raw: {
-            source: RAW_SDK_MESSAGE,
-            method: "claude/stream_event/content_block_start",
-            payload: message
-          }
+          raw
         }),
         type: "item.started",
         payload: {
@@ -1705,6 +1692,7 @@ export class ClaudeNormalizer {
         }
       }
     ];
+    return runEnded ? [...started, this.forcedToolCompletion(tool, "failed", raw)] : started;
   }
 
   // -------------------------------------------------------------------------
@@ -2084,8 +2072,8 @@ export class ClaudeNormalizer {
     if (!this.turnState) {
       // Background assistant output between prompts opens a synthetic turn —
       // on this COMPLETE frame, never earlier: its uuid is the turn's rewind
-      // anchor. A call this message's stream already registered adopts the
-      // turn as it opens (`beginTurn`).
+      // anchor. The message's stream, held until now, is replayed into it
+      // (`beginTurn`), so its calls start on this turn.
       events.push(
         ...this.beginTurn({
           turnId: this.ids.uuid(),
@@ -2260,6 +2248,9 @@ export class ClaudeNormalizer {
         ? "Claude usage limit reached. Send the message again once the limit resets."
         : undefined);
     const { status, errorMessage } = resultOutcome(message, failureHint);
+    // The CLI's run is over: nothing of a message still streaming can run
+    // after this (see `streamRunEnded`).
+    this.streamRunEnded = true;
 
     const events: RuntimeEvent[] = [];
     if (status === "failed") {

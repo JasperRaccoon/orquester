@@ -3271,34 +3271,138 @@ describe("claude normaliser — a background subagent outlives the parent's turn
     );
   });
 
-  it("a call adopted before its input parsed is named by its tool alone, as its start reads", () => {
-    // What adoption still covers now that a woken parent's message is held: a
-    // parent call registered with no turn OUTSIDE a held message — the tail of
-    // a message whose turn an interrupt ended while it still streamed.
+  /**
+   * The `result` an interrupt ends a turn with, as capture 10 records it
+   * (fixtures README observations 13 and 14): the CLI sends the cut message's
+   * complete frame, the "[Request interrupted by user]" row, then this — and
+   * no stream frame of that message after it.
+   */
+  const INTERRUPTED_RESULT = {
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    num_turns: 4,
+    stop_reason: "tool_use",
+    terminal_reason: "aborted_streaming",
+    errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+    session_id: "s",
+    uuid: "u-result",
+    usage: {},
+    modelUsage: {},
+    total_cost_usd: 0,
+    duration_ms: 1,
+    duration_api_ms: 1,
+    permission_denials: []
+  };
+
+  it("a call streamed after its message's run ended rides that message's turn, closed at once — the next turn takes none of it", () => {
+    // A parent call registered with no turn open outside a held message: the
+    // tail of a message whose turn the CLI's `result` ended while it still
+    // streamed. The run that message belonged to is over — capture 10 shows
+    // nothing of an aborted message after its `result`, and nothing of it
+    // runs — so the call can never run: it is its message's turn's, and is
+    // closed there as that turn's end closes a call it cut. It used to adopt
+    // the next turn to open, the user's next prompt, and read running in it.
     const { normalizer, feed } = feedable();
     const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
       feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
     normalizer.beginTurn({ turnId: "turn-1" });
     stream({ type: "message_start", message: { id: "msg_cut", role: "assistant", content: [], usage: {} } });
-    normalizer.completeTurn("interrupted");
-    // Claude parses a call's input once its JSON is whole: a Write's content can stream for seconds.
+    const ended = feed(INTERRUPTED_RESULT);
+    assert.equal(allOf(ended, "turn.completed")[0]?.payload.state, "interrupted");
     const tail = [
       stream({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_W", name: "Write", input: {} } }),
       stream({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"file_path":"/w/a.txt","con' } })
     ].flat();
     assert.deepEqual(
-      tail.filter((event) => event.itemId === "toolu_W").map((event) => [event.type, event.turnId]),
-      [["item.started", undefined]],
-      "the tail of a message its turn left is processed as it comes, turnless"
+      tail
+        .filter((event) => event.itemId === "toolu_W")
+        .map((event) => [event.type, event.turnId, (event.payload as { status?: string }).status]),
+      [
+        ["item.started", "turn-1", "inProgress"],
+        ["item.completed", "turn-1", "failed"]
+      ],
+      "the call rides the interrupted turn and is closed on it at once"
     );
-    const adopted = allOf(normalizer.beginTurn({ turnId: "turn-user" }), "item.updated");
+    const next = [
+      ...normalizer.beginTurn({ turnId: "turn-user" }),
+      ...stream({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: 'tent":"x"}' } }),
+      ...feed(PARENT_RESULT)
+    ];
     assert.deepEqual(
-      adopted.map((event) => [event.itemId, event.turnId, event.payload.title, event.payload.detail, event.payload.data]),
-      [["toolu_W", "turn-user", "File change", "Write", { toolName: "Write", input: {} }]]
+      next.filter((event) => event.itemId === "toolu_W"),
+      [],
+      "the user's next turn neither adopts it nor closes it again"
     );
   });
 
-  it("a call that already rides a turn is never adopted again", () => {
+  it("a call a held message streams after that message was dropped with its run goes nowhere", () => {
+    // A message that began with no turn open is held (`preTurnStream`); a
+    // turn-less `result` ends the run it belonged to and drops it. A call its
+    // tail streams after that has no turn and can never run.
+    const { normalizer, feed } = feedable();
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
+    stream({ type: "message_start", message: { id: "msg_held", role: "assistant", content: [], usage: {} } });
+    feed(INTERRUPTED_RESULT);
+    const tail = stream({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_H", name: "Bash", input: { command: "ls" } }
+    });
+    assert.deepEqual(tail.filter((event) => event.itemId === "toolu_H"), []);
+    assert.deepEqual(
+      normalizer.beginTurn({ turnId: "turn-user" }).filter((event) => event.itemId === "toolu_H"),
+      []
+    );
+  });
+
+  it("a call a message streams after the adapter itself settled its turn rides that turn and runs on there", () => {
+    // `sendTurn` settles a stale synthetic turn itself, then awaits (model,
+    // mode, skills) before the user's turn opens — while the CLI's own message
+    // is still streaming. The CLI's run goes on, so a call that message
+    // starts in that window runs: it is its message's turn's, open until its
+    // result, and the user's turn does not take it.
+    const { normalizer, feed } = feedable();
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      feed({ type: "stream_event", uuid: "u-s", session_id: "s", parent_tool_use_id: null, event });
+    normalizer.beginTurn({ turnId: "turn-syn", synthetic: true });
+    stream({ type: "message_start", message: { id: "msg_bg", role: "assistant", content: [], usage: {} } });
+    normalizer.completeTurn("completed");
+    const started = stream({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_B", name: "Bash", input: { command: "ls" } }
+    });
+    assert.deepEqual(
+      started.filter((event) => event.itemId === "toolu_B").map((event) => [event.type, event.turnId]),
+      [["item.started", "turn-syn"]]
+    );
+    assert.deepEqual(
+      normalizer.beginTurn({ turnId: "turn-user" }).filter((event) => event.itemId === "toolu_B"),
+      [],
+      "the user's turn does not adopt it"
+    );
+    const done = feed({
+      type: "user",
+      uuid: "u-r",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_B", content: "a.txt\n" }] }
+    });
+    assert.deepEqual(
+      done
+        .filter((event) => event.itemId === "toolu_B")
+        .map((event) => [event.type, event.turnId, (event.payload as { status?: string }).status]),
+      [
+        ["item.updated", "turn-syn", "inProgress"],
+        ["content.delta", "turn-syn", undefined],
+        ["item.completed", "turn-syn", "completed"]
+      ]
+    );
+  });
+
+  it("a call that already rides a turn stays on it when the next turn opens", () => {
     const { normalizer, feed } = feedable();
     normalizer.beginTurn({ turnId: "turn-1" });
     feed({
