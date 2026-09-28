@@ -9,6 +9,6 @@ export interface RightRailPanelProps {
   projectPath: string;
   /** Docked beside the tab content (desktop), or inside the mobile bottom sheet. */
   variant: "docked" | "sheet";
-  /** An Insert or a Send landed — the mobile sheet closes on it. */
+  /** An Insert or a Send landed — a phone goes back to the chat on it. */
   onDelivered?: () => void;
 }

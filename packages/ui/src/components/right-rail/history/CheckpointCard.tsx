@@ -95,7 +95,7 @@ function FileList({ files }: { files: readonly CheckpointFile[] }): React.ReactE
 
 export interface CheckpointCardViewProps {
   entry: CheckpointEntry;
-  /** Docked beside the chat, or in the mobile sheet (finger-sized controls). */
+  /** Docked beside the chat, or on a phone (finger-sized controls). */
   variant: "docked" | "sheet";
   /** "Turn 12 · 14:05" ({@link checkpointMetaLabel}). */
   meta: string;
@@ -195,7 +195,7 @@ export interface CheckpointCardProps {
   onOpenDiff: (turnCount: number, title: string, trigger: HTMLElement | null) => void;
   rewind: (prompt: RewindPrompt) => Promise<RewindOutcome>;
   onRewound: (messageId: string) => void;
-  /** A rewind landed in the chat: the mobile sheet steps aside for it. */
+  /** A rewind landed in the chat: a phone goes back to the chat for it. */
   onLeave?: () => void;
 }
 

@@ -21,7 +21,6 @@ import {
   saveRightRailState,
   serializeRightRailState,
   setRightRailOpen,
-  setRightRailSheetPanel,
   setRightRailWidth,
   subscribeRightRail,
   toggleRightRailPanel,
@@ -63,33 +62,29 @@ test("nothing stored, or garbage stored, loads the defaults", () => {
   for (const raw of [null, undefined, "", "not json", "{", "null", "[]", "42", '"prompts"', "true"]) {
     assert.deepEqual(parseRightRailState(raw), RIGHT_RAIL_DEFAULT_STATE, `raw ${String(raw)}`);
   }
-  assert.deepEqual(RIGHT_RAIL_DEFAULT_STATE, { open: null, width: RIGHT_RAIL_WIDTH_DEFAULT, sheet: "prompts" });
+  assert.deepEqual(RIGHT_RAIL_DEFAULT_STATE, { open: null, width: RIGHT_RAIL_WIDTH_DEFAULT });
 });
 
 test("a well-formed payload round-trips", () => {
-  const state = { open: "history", width: 412, sheet: "history" } as const;
-  assert.equal(serializeRightRailState(state), '{"v":1,"open":"history","width":412,"sheet":"history"}');
+  const state = { open: "history", width: 412 } as const;
+  assert.equal(serializeRightRailState(state), '{"v":1,"open":"history","width":412}');
   assert.deepEqual(parseRightRailState(serializeRightRailState(state)), state);
   assert.deepEqual(parseRightRailState(serializeRightRailState(RIGHT_RAIL_DEFAULT_STATE)), RIGHT_RAIL_DEFAULT_STATE);
 });
 
 test("each field is validated on its own: one bad field never costs the others", () => {
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"files","width":400,"sheet":"history"}'), {
-    open: null,
-    width: 400,
-    sheet: "history"
-  });
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"prompts","width":"wide","sheet":7}'), {
+  assert.deepEqual(parseRightRailState('{"v":1,"open":"files","width":400}'), { open: null, width: 400 });
+  assert.deepEqual(parseRightRailState('{"v":1,"open":"prompts","width":"wide"}'), {
     open: "prompts",
-    width: RIGHT_RAIL_WIDTH_DEFAULT,
-    sheet: "prompts"
+    width: RIGHT_RAIL_WIDTH_DEFAULT
   });
   // Missing fields take their defaults; an explicit null `open` is a closed dock.
-  assert.deepEqual(parseRightRailState('{"width":300}'), { open: null, width: 300, sheet: "prompts" });
-  assert.deepEqual(parseRightRailState('{"open":null,"sheet":"history"}'), {
-    open: null,
-    width: RIGHT_RAIL_WIDTH_DEFAULT,
-    sheet: "history"
+  assert.deepEqual(parseRightRailState('{"width":300}'), { open: null, width: 300 });
+  assert.deepEqual(parseRightRailState('{"open":null}'), { open: null, width: RIGHT_RAIL_WIDTH_DEFAULT });
+  // An earlier bundle's `sheet` (the old mobile sheet's tab) is ignored.
+  assert.deepEqual(parseRightRailState('{"v":1,"open":"history","width":400,"sheet":"history"}'), {
+    open: "history",
+    width: 400
   });
   for (const open of ["true", "1", '"History"', '{"id":"prompts"}', '["prompts"]']) {
     assert.equal(parseRightRailState(`{"open":${open}}`).open, null, `open ${open}`);
@@ -111,8 +106,7 @@ test("a payload written by another version is still read field by field", () => 
   // A rollback after a newer bundle wrote `v: 2` keeps whatever still validates.
   assert.deepEqual(parseRightRailState('{"v":2,"open":"history","width":480,"extra":{"a":1}}'), {
     open: "history",
-    width: 480,
-    sheet: "prompts"
+    width: 480
   });
   assert.deepEqual(parseRightRailState('{"v":"one","open":"prompts"}').open, "prompts");
 });
@@ -162,8 +156,8 @@ test("load and save swallow storage errors and missing storage", () => {
   assert.deepEqual(loadRightRailState(null), RIGHT_RAIL_DEFAULT_STATE);
   assert.doesNotThrow(() => saveRightRailState(RIGHT_RAIL_DEFAULT_STATE, hostileStorage));
   assert.doesNotThrow(() => saveRightRailState(RIGHT_RAIL_DEFAULT_STATE, null));
-  const storage = memoryStorage('{"v":1,"open":"prompts","width":350,"sheet":"history"}');
-  assert.deepEqual(loadRightRailState(storage), { open: "prompts", width: 350, sheet: "history" });
+  const storage = memoryStorage('{"v":1,"open":"prompts","width":350}');
+  assert.deepEqual(loadRightRailState(storage), { open: "prompts", width: 350 });
 });
 
 // ---------------------------------------------------------------------------
@@ -171,9 +165,9 @@ test("load and save swallow storage errors and missing storage", () => {
 // ---------------------------------------------------------------------------
 
 test("the store loads once from storage, lazily", () => {
-  const storage = memoryStorage('{"v":1,"open":"history","width":300,"sheet":"history"}');
+  const storage = memoryStorage('{"v":1,"open":"history","width":300}');
   __resetRightRailStoreForTests({ storage });
-  assert.deepEqual(rightRailState(), { open: "history", width: 300, sheet: "history" });
+  assert.deepEqual(rightRailState(), { open: "history", width: 300 });
   storage.value = '{"v":1,"open":"prompts"}';
   assert.equal(rightRailState().open, "history", "an in-memory state is not re-read");
   assert.equal(storage.writes, 0, "reading never writes");
@@ -215,15 +209,6 @@ test("a live drag updates the state only; the release persists it", () => {
   resetRightRailWidth();
   assert.equal(rightRailState().width, RIGHT_RAIL_WIDTH_DEFAULT, "double-click resets");
   assert.equal(JSON.parse(storage.value!).width, RIGHT_RAIL_WIDTH_DEFAULT);
-});
-
-test("the mobile sheet remembers its last tab", () => {
-  const storage = memoryStorage();
-  __resetRightRailStoreForTests({ storage });
-  setRightRailSheetPanel("history");
-  assert.equal(rightRailState().sheet, "history");
-  assert.equal(JSON.parse(storage.value!).sheet, "history");
-  assert.equal(rightRailState().open, null, "without opening the desktop dock");
 });
 
 test("subscribers hear real changes only, and can unsubscribe", () => {

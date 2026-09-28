@@ -30,20 +30,16 @@ export type SavedPromptEditorRequest =
 
 type Listener = (request: SavedPromptEditorRequest) => void;
 
-/** Editor hosts: they alone decide whether a request opened an editor. */
+/** Editor hosts. */
 const listeners = new Set<Listener>();
-/** Told after a host took a request; never counted as an editor. */
-const openedListeners = new Set<Listener>();
 
 /**
- * Ask the mounted editor to open. `false` when no editor host is mounted —
- * whoever else listens (`subscribeSavedPromptEditorOpened`) — so the caller
- * can open its own editor instead.
+ * Ask the mounted editor to open. `false` when no editor host is mounted, so
+ * the caller can open its own editor instead.
  */
 export function openSavedPromptEditor(request: SavedPromptEditorRequest): boolean {
   if (listeners.size === 0) return false;
   for (const listener of [...listeners]) listener(request);
-  for (const listener of [...openedListeners]) listener(request);
   return true;
 }
 
@@ -52,18 +48,6 @@ export function subscribeSavedPromptEditor(listener: Listener): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
-  };
-}
-
-/**
- * Hear that a host opened the editor — AFTER it took the request. The mobile
- * sheet steps aside on it: the editor is a Modal (z-[100]) that would open
- * under the sheet (z-[110]). Returns the unsubscribe function.
- */
-export function subscribeSavedPromptEditorOpened(listener: Listener): () => void {
-  openedListeners.add(listener);
-  return () => {
-    openedListeners.delete(listener);
   };
 }
 

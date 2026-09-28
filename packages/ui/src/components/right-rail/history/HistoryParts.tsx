@@ -73,7 +73,7 @@ export function DeliveryButtons({
   disabledReason: string | null;
   onInsert: () => void;
   onSend: () => void;
-  /** Inside the mobile sheet: finger-sized. */
+  /** On a phone: finger-sized. */
   sheet?: boolean;
 }): React.ReactElement {
   const disabled = disabledReason !== null;
@@ -114,7 +114,7 @@ export interface CardActionProps {
   /** Its own request is in flight: a spinner, and not pressable again. */
   busy?: boolean;
   busyLabel?: string;
-  /** Inside the mobile sheet: finger-sized. */
+  /** On a phone: finger-sized. */
   sheet?: boolean;
 }
 

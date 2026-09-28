@@ -1,6 +1,6 @@
 /**
  * Surfaces outside a chat that own the keys typed into them: the right rail's
- * docked panel, its mobile sheet and the saved-prompt editor (each root
+ * docked panel, a phone's full-screen section and the saved-prompt editor (each root
  * carries {@link KEYBOARD_SURFACE_ATTRIBUTE}), and every modal dialog or sheet
  * (`aria-modal="true"`: `ui/modal.tsx`, `ui/sheet.tsx`).
  *

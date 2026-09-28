@@ -70,7 +70,7 @@ per-window quota bars and a per-device reset-time format (countdown / clock / bo
 project streamed as an interactive tab over a `/ws-browser` channel, with an element picker that
 delivers HTML/CSS/screenshot payloads into an agent's composer or PTY, and embedded Chrome DevTools (the browser's own version-matched frontend proxied by the daemon — right-dock split on desktop, full-screen on mobile); an installable **PWA** web client
 (service worker + Web Push notifications on agent-session bells); and a **right rail** beside the
-tab content (a bottom sheet on phones) with two panels — **Saved prompts** (global and
+tab content (on phones, a bottom bar of sections, each shown full screen) with two panels — **Saved prompts** (global and
 per-project, searchable, pinnable, with built-in `{variable}`s: project, workspace, branch,
 changed files, the uncommitted diff, date/time, agent, model) and **History & checkpoints** (every
 prompt of the open chat — the whole thread, from the host's index — and each turn's checkpoint:
@@ -2315,12 +2315,15 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
 - **The rail owns the keys typed into it.** The chat's chords (the composer's Ctrl/Cmd+E, +/,
   +Shift+M, +Shift+Enter, the timeline's Ctrl/Cmd+J) are capture-phase `window` listeners that no
   surface can stop, so they stand down for a key whose target is inside a root marked
-  `data-keyboard-surface` (the dock, the mobile sheet, the prompt editor) or any `aria-modal`
+  `data-keyboard-surface` (the dock, a phone's section, the prompt editor) or any `aria-modal`
   dialog or sheet (`insideKeyboardSurface`, `lib/keyboard-surfaces.ts`); the chat's own popovers
   are menus, not modal, so a chord still moves between them. The question card's digits stand
   down inside those AND inside any menu or listbox (`insideKeyboardOwner`), as well as under any
   open layer (the shortcut-listener gotcha), so a button focused in a modal, the sheet or a menu
-  never answers a question, which cannot be undone. The dock also holds an open layer
+  never answers a question, which cannot be undone. A phone's section (`MobileSections.tsx`: the
+  bottom section bar, each panel full screen over the tab content, never replacing `MainView` in
+  the tree) holds an open layer for as long as it shows, and its Escape goes back to the tab
+  content. The dock also holds an open layer
   (`lib/open-layers.ts`) while focus is inside it, so the chat's Escape (interrupt, Esc-Esc rewind)
   and Ctrl+Shift+A stand down; an Escape nothing inside handled goes back to the composer, and a
   held Escape is ONE press (the textarea answers a repeat with `"hold"` — `composerEscapeAction` —
@@ -2777,7 +2780,7 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Client store + transport + WS channel | `packages/ui/src/store/app.ts`, `packages/ui/src/lib/api-client.ts`, `packages/ui/src/lib/transporters/ws-session-channel.ts` |
 | Agent conversation history + resume | `apps/daemon/src/agent-conversations.ts`, `resumeLaunchArgs` in `apps/daemon/src/sessions.ts`, `resumeArgs`/`canResumeAgent` in `packages/registry/src/index.ts`, `packages/ui/src/components/main/ProjectOverview.tsx` |
 | Recent projects (daemon-owned) | `apps/daemon/src/recent-projects.ts`, `packages/ui/src/components/main/RecentProjects.tsx` |
-| Right rail: shell, saved prompts, history & checkpoints | `packages/ui/src/components/right-rail/` (`RightRailFrame`/`RightRailDock`/`RightRail`/`RightRailSheet`, `chat-target.ts`, `saved-prompts/`, `history/`), `packages/ui/src/lib/{saved-prompts,prompt-history}/`, `apps/daemon/src/saved-prompts.ts`, `packages/api/src/saved-prompts.ts`, `packages/api/src/agent-chat/prompts.ts`, the index's `prompts` query in `apps/daemon/src/agent-host/index/queries.ts` |
+| Right rail: shell, saved prompts, history & checkpoints | `packages/ui/src/components/right-rail/` (`RightRailFrame`/`RightRailDock`/`RightRail`/`MobileSections`, `chat-target.ts`, `saved-prompts/`, `history/`), `packages/ui/src/lib/{saved-prompts,prompt-history}/`, `apps/daemon/src/saved-prompts.ts`, `packages/api/src/saved-prompts.ts`, `packages/api/src/agent-chat/prompts.ts`, the index's `prompts` query in `apps/daemon/src/agent-host/index/queries.ts` |
 | System status (`/proc`, process tree, kill guard) | `apps/daemon/src/system-status.ts`, `panePids`/`serverPid` in `apps/daemon/src/tmux.ts` |
 | Git watcher, stashes, commit graph | `GitWatcher` + `passesGitEventFilter` in `apps/daemon/src/git.ts`, `packages/ui/src/components/git/git-watch.ts`, `packages/ui/src/components/git/graph.ts` |
 | Project templates + create dialog | `TEMPLATES` in `packages/registry/src/index.ts`, `packages/ui/src/components/sidebar/NewProjectModal.tsx` |

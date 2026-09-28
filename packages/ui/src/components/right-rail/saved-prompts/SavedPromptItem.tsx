@@ -1,7 +1,7 @@
 /**
  * One saved prompt in the list: a collapsed row — a click anywhere on it
  * opens the card — or the expanded card, with the pin,
- * the actions (a menu docked, inline buttons in the mobile sheet), the chips,
+ * the actions (a menu docked, inline buttons on a phone), the chips,
  * the "Context:" line, and Insert / Send.
  *
  * Presentational: everything it shows and does arrives as props, so a static
@@ -62,8 +62,8 @@ export interface SavedPromptItemProps {
   /** "Move to this project" needs an open project. */
   canMoveToProject: boolean;
   /**
-   * Delete asked, confirmed on the card itself — the mobile sheet's way: a
-   * modal confirm would open under the sheet. (Docked, the panel asks in a
+   * Delete asked, confirmed on the card itself — a phone's way, within thumb
+   * reach like its inline actions. (Docked, the panel asks in a
    * `ConfirmDialog` instead and this stays false.)
    */
   confirmingDelete?: boolean;
@@ -95,7 +95,7 @@ const FOCUS_RING = "focus:outline-none focus-visible:ring-1 focus-visible:ring-n
 /** Looks and acts disabled while a delivery resolves, yet keeps its focus (see `busy`). */
 const BUSY_DISABLED = "aria-disabled:pointer-events-none aria-disabled:opacity-50";
 
-/** The mobile sheet's inline actions: two to a row, 40px tall, a long label wrapping rather than cut. */
+/** A phone's inline actions: two to a row, 40px tall, a long label wrapping rather than cut. */
 const SHEET_ACTION = "h-auto min-h-10 w-full justify-start whitespace-normal px-2.5 py-1.5 text-left text-xs";
 
 const DANGER_ACTION = "text-danger hover:bg-danger-500/10 hover:text-danger";
@@ -411,8 +411,8 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
       )}
 
       {sheet && !confirming ? (
-        // The sheet shows its actions in place: a menu there would be a second
-        // bottom sheet stacked on the first.
+        // A phone shows its actions in place: finger-sized, one tap away,
+        // rather than behind a menu.
         <div role="group" aria-label={`Actions for ${prompt.title}`} className="grid grid-cols-2 gap-1.5">
           <Button type="button" variant="ghost" onClick={props.onEdit} className={SHEET_ACTION}>
             <Pencil size={14} aria-hidden className="shrink-0" />

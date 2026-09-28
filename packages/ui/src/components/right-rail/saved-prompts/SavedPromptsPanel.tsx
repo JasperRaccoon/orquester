@@ -55,7 +55,7 @@ const ERROR_FEEDBACK_MS = 8_000;
 
 /**
  * The scope switch and the open card outlive a remount — the rail closing and
- * opening, the mobile sheet — for this page's life. Memory only: nothing here
+ * opening, a phone's section — for this page's life. Memory only: nothing here
  * is persisted, so there is nothing stale to validate on load.
  */
 const remembered: { scope: SavedPromptScopeFilter; expandedId: string | null } = {
@@ -295,8 +295,8 @@ export const SavedPromptsPanel: React.FC<RightRailPanelProps> = ({
     [api, confirmDelete, deliver, expand, openEditor, projectPath]
   );
 
-  // Docked, Delete asks in a dialog. In the mobile sheet a dialog would open
-  // UNDER the sheet (z-[100] < z-[110]), so the card asks itself.
+  // Docked, Delete asks in a dialog. On a phone the card asks in place,
+  // within thumb reach, like the rest of its inline actions.
   const confirmOnCard = variant === "sheet";
 
   return (

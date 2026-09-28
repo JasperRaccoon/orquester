@@ -1,6 +1,6 @@
 /**
- * Render smoke checks for the right rail's shell: the icon rail, the dock, the
- * mobile sheet's body and the row that places them beside the tab content.
+ * Render smoke checks for the right rail's shell: the icon rail, the dock, a
+ * phone's section bar and section, and the row that places them beside the tab content.
  *
  * `right-rail-state.test.ts` owns persistence and `dock-keyboard.test.ts` the
  * keyboard rules; this exists because "each button is labelled and reports
@@ -26,8 +26,8 @@ import { RIGHT_RAIL_PANEL_REGISTRY, type RightRailPanelRegistry } from "./panels
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
 import { openProjectPathOf, RightRailRow } from "./RightRailFrame";
-import { RightRailSheetBody } from "./RightRailSheet";
-import { __resetRightRailStoreForTests, setRightRailSheetPanel } from "./right-rail-state";
+import { MOBILE_SECTION_BAR_MAX, MobileSectionBar, MobileSectionView, splitSectionItems } from "./MobileSections";
+import { __resetRightRailStoreForTests } from "./right-rail-state";
 import { SavedPromptsPanel } from "./saved-prompts/SavedPromptsPanel";
 import type { RightRailPanelId, RightRailPanelProps } from "./types";
 
@@ -169,34 +169,47 @@ setActiveChatTab(null);
 }
 
 // ---------------------------------------------------------------------------
-// The mobile sheet's body
+// A phone: the section bar and a section, full screen
 // ---------------------------------------------------------------------------
+
+{
+  const html = render(createElement(MobileSectionBar, { active: null, onSelect: NOOP, chatTab: true, panels: FAKES }));
+  assert.ok(html.startsWith('<nav aria-label="Sections"'), "a labelled nav");
+  const items = buttons(html);
+  assert.equal(items.length, 3, "Chat, Prompts, History");
+  assert.ok(items[0]?.includes('aria-current="page"'), "the tab content is the current one");
+  assert.ok(html.includes(">Chat</span>") && html.includes(">Prompts</span>") && html.includes(">History</span>"));
+  assert.ok(!html.includes(">More</span>"), "no More while everything fits");
+
+  const onTerminal = render(createElement(MobileSectionBar, { active: "history", onSelect: NOOP, chatTab: false, panels: FAKES }));
+  assert.ok(onTerminal.includes(">Tab</span>") && !onTerminal.includes(">Chat</span>"), "not a chat: Tab");
+  const [tab, , history] = buttons(onTerminal);
+  assert.ok(!tab?.includes("aria-current") && history?.includes('aria-current="page"'), "the section showing is current");
+}
+
+{
+  // Past the bar's room, the last slot is More.
+  const ids = ["a", "b", "c", "d", "e", "f"];
+  assert.deepEqual(splitSectionItems(ids), { shown: ["a", "b", "c", "d"], more: ["e", "f"] });
+  assert.deepEqual(splitSectionItems(ids.slice(0, MOBILE_SECTION_BAR_MAX)), { shown: ids.slice(0, 5), more: [] });
+  const many = ["prompts", "history", "prompts", "history", "prompts"] as unknown as RightRailPanelId[];
+  const html = render(createElement(MobileSectionBar, { active: null, onSelect: NOOP, chatTab: true, panels: FAKES, order: many }));
+  assert.equal(buttons(html).length, MOBILE_SECTION_BAR_MAX, "four items and More");
+  assert.ok(html.includes(">More</span>") && html.includes('aria-haspopup="dialog"'));
+}
 
 setActiveChatTab("chat-2");
 {
   const html = render(
-    createElement(RightRailSheetBody, { projectPath: "/w/orquester", onDelivered: NOOP, panels: FAKES })
+    createElement(MobileSectionView, { section: "prompts", projectPath: "/w/orquester", onLeave: NOOP, panels: FAKES })
   );
-  assert.ok(/role="group" aria-label="Prompts and history"/.test(html), "a labelled switch");
   assert.ok(html.startsWith("<div data-keyboard-surface="), "a keyboard surface: the chat's chords stand down in it");
-  const [prompts, history] = buttons(html);
-  assert.ok(prompts?.includes('aria-pressed="true"') && history?.includes('aria-pressed="false"'), "Prompts by default");
-  assert.ok(html.includes(">Prompts</button>") && html.includes(">History</button>"), "short labels");
+  assert.ok(html.includes('role="region" aria-label="Saved prompts"'), "named after its panel");
+  assert.ok(html.includes("absolute inset-0"), "over the tab content, filling it");
   const panel = html.match(/<div data-fake-panel="prompts"[^>]*>/)?.[0] ?? "";
-  assert.ok(panel.includes('data-variant="sheet"'), "the sheet variant");
-  assert.ok(panel.includes('data-delivered="function"'), "with onDelivered, which closes the sheet");
+  assert.ok(panel.includes('data-variant="sheet"'), "the touch-sized variant");
+  assert.ok(panel.includes('data-delivered="function"'), "with onDelivered, which goes back to the chat");
   assert.ok(panel.includes('data-session="chat-2"') && panel.includes('data-project="/w/orquester"'));
-  assert.ok(/style="height:calc\(75vh - 2rem - max\(0.5rem, env\(safe-area-inset-bottom\)\)\)"/.test(html), "a fixed-height body");
-}
-
-setRightRailSheetPanel("history");
-{
-  const html = render(
-    createElement(RightRailSheetBody, { projectPath: "/w/orquester", onDelivered: NOOP, panels: FAKES })
-  );
-  const [prompts, history] = buttons(html);
-  assert.ok(prompts?.includes('aria-pressed="false"') && history?.includes('aria-pressed="true"'), "the remembered tab");
-  assert.ok(html.includes('data-fake-panel="history"') && !html.includes('data-fake-panel="prompts"'));
 }
 setActiveChatTab(null);
 
@@ -207,7 +220,7 @@ setActiveChatTab(null);
 const TAB_CONTENT = createElement("main", { "data-tab-content": "" });
 const row = (projectPath: string | null, open: RightRailPanelId | null): string =>
   render(createElement(RightRailRow, { projectPath, open, width: 320, panels: FAKES, children: TAB_CONTENT }));
-const ALONE = '<div class="flex min-h-0 min-w-0 flex-1 overflow-hidden"><main data-tab-content=""></main></div>';
+const ALONE = '<div class="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"><main data-tab-content=""></main></div>';
 
 {
   const html = row("/w/orquester", "prompts");
@@ -215,7 +228,7 @@ const ALONE = '<div class="flex min-h-0 min-w-0 flex-1 overflow-hidden"><main da
   const dock = html.indexOf("<aside");
   const rail = html.indexOf('aria-label="Side panels"');
   assert.ok(content > 0 && content < dock && dock < rail, "the tab content first, then the dock, then the rail");
-  assert.ok(html.startsWith('<div class="flex min-h-0 min-w-0 flex-1 overflow-hidden"><main'), "in one flex row");
+  assert.ok(html.startsWith('<div class="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"><main'), "in one flex row");
   assert.ok(html.includes('data-project="/w/orquester"'), "the dock serves the open project");
 
   const closed = row("/w/orquester", null);

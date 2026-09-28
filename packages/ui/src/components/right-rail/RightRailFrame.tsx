@@ -4,6 +4,7 @@ import { useIsDesktop } from "../../hooks";
 import { useCurrentContext, type TabContext } from "../../store/app";
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
+import { MobileSectionOverlay } from "./MobileSections";
 import type { RightRailPanelRegistry } from "./panels";
 import { toggleRightRailPanel, useRightRailState } from "./right-rail-state";
 import { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
@@ -33,10 +34,16 @@ export interface RightRailRowProps {
   width: number;
   /** The panels by id (the real ones unless a check passes fakes). */
   panels?: RightRailPanelRegistry;
+  /**
+   * Drawn over the tab content (the row is its containing block): a phone's
+   * section, full screen (`MobileSections.tsx`).
+   */
+  overlay?: React.ReactNode;
 }
 
 /**
- * The row under the top bar: `[tab content | dock | rail]`.
+ * The row under the top bar: `[tab content | dock | rail]`, and on a phone a
+ * section drawn over the tab content.
  *
  * `children` always renders FIRST, in the same element, whatever else is
  * shown: moving the `MainView` in the tree would remount every tab — every
@@ -48,12 +55,14 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
   projectPath,
   open,
   width,
-  panels
+  panels,
+  overlay
 }) => {
   const rowRef = React.useRef<HTMLDivElement | null>(null);
   return (
-    <div ref={rowRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+    <div ref={rowRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
       {children}
+      {overlay}
       {projectPath !== null && open !== null ? (
         <RightRailDock
           panel={open}
@@ -73,14 +82,20 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
 /**
  * {@link RightRailRow} wired to the app: the rail — and the dock, while a
  * panel is open — appears only on desktop and only with a project open. Phones
- * reach the same panels through the top bar's sheet (`RightRailSheetButton`).
+ * reach the same panels through the bottom section bar, which shows them over
+ * the tab content (`MobileSections.tsx`).
  */
 export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isDesktop = useIsDesktop();
   const projectPath = useOpenProjectPath();
   const { open, width } = useRightRailState();
   return (
-    <RightRailRow projectPath={isDesktop ? projectPath : null} open={open} width={width}>
+    <RightRailRow
+      projectPath={isDesktop ? projectPath : null}
+      open={open}
+      width={width}
+      overlay={<MobileSectionOverlay projectPath={isDesktop ? null : projectPath} />}
+    >
       {children}
     </RightRailRow>
   );
@@ -88,8 +103,8 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
 
 /**
  * The saved-prompt editor, mounted once while a project is open — desktop or
- * mobile, whichever panel is showing — so both panels (the dock's and the
- * sheet's) open it through `saved-prompts/editor-bridge.ts`.
+ * mobile, whichever panel is showing — so both panels (docked, or a phone's
+ * section) open it through `saved-prompts/editor-bridge.ts`.
  */
 export const RightRailEditorHost: React.FC = () => {
   const projectPath = useOpenProjectPath();
