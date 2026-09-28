@@ -1810,6 +1810,9 @@ tests `xai-updates.test.ts`, frames shaped on these rows.
   capability mode) whose answer named no child yet; while two remain the child is HELD, writing
   nothing, until its prompt echo, a call's answer naming it, or the other candidates dropping out
   decides — the oldest candidate only when a row must be routed first (tests `xai-updates.test.ts`).
+  The echo decides by equality first (it comes as one chunk, so a call whose whole prompt it is wins
+  over an older call whose longer prompt it begins), then by prefix; an echo no candidate's prompt
+  begins or is begun by is no open call's child — the CLI's own agent, started under its own id.
   A launch a spawn already took learns no id from its answer, so no call ever becomes two
   children's.
 - **`retry_state` → one `session.state.changed {running}` per retry episode, mid-turn only.** Every

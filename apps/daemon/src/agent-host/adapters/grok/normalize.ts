@@ -563,11 +563,11 @@ export class GrokNormalizer {
         // The child's prompt, live (not a replay: fixture 15) — the spawn
         // call's `prompt` argument verbatim, which its `rawInput` already
         // holds. For a child whose launch is not decided yet it is the
-        // evidence that decides it; it writes nothing either way.
-        if (update.content.type === "text") {
-          childPromptChunk(this.state, String(params.sessionId), update.content.text);
-        }
-        return [];
+        // evidence that decides it — writing the start of an agent of its
+        // own when it is no open call's prompt.
+        return update.content.type === "text"
+          ? childPromptChunk(this.state, String(params.sessionId), update.content.text)
+          : [];
       case "available_commands_update":
       case "current_mode_update":
       case "config_option_update":

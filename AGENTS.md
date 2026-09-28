@@ -1517,12 +1517,16 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   that session's engine does with its own agents (fixtures README observation 58) — the child is HELD, writing nothing, until evidence decides
   (`HeldSpawn`, `subagents.ts`): its session's prompt echo (its first `user_message_chunk`, after its
   hooks, is the call's `prompt` argument verbatim — every capture, all 27 model launches of that
-  session; `childPromptChunk`), a call's answer naming its id, or every other candidate dropping out
-  (taken by another child, its answer naming another child, a declined spawn). Joined to "the oldest"
+  session; `childPromptChunk`: a call whose whole prompt IS the echo wins over an older call whose
+  longer prompt it only begins; an echo no candidate's prompt begins or is begun by makes the child
+  an agent of its own, as an unexplained spawn — a goal's skeptic spawned while model calls are
+  open), a call's answer naming its id, or every other candidate dropping out (taken by another
+  child, its answer naming another child, a declined spawn — for a spawn whose description matched
+  no candidate, only once its echo has begun, since it may be none of them). Joined to "the oldest"
   at once, as before, a child that belonged to the newer call was swapped with the other one between
   their calls' rows for good. Only when one of its rows must be routed first (never seen: nothing
   but hooks precedes the prompt), or a Stop, the session's stop or a report naming it comes, does the
-  oldest open candidate take it: in practice only for launches identical in every argument, whose
+  oldest open candidate its echo leaves take it: in practice only for launches identical in every argument, whose
   rows read the same on either agent. A launch a spawn already took learns no id from its answer, so
   no call ever becomes two children's. A spawn no launch explains is an agent of its own under its id, and a
   `resumed_from` with no call behind it — a goal engine resuming its skeptic — relaunches the

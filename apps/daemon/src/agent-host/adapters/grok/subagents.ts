@@ -167,8 +167,15 @@ export interface HeldSpawn {
   readonly raw: RuntimeEventRaw;
   /** The calls it may be, oldest first. */
   candidates: string[];
+  /**
+   * Its description matched the candidates' own. A spawn whose description
+   * matched no open launch may be none of them — the CLI's own agents (a
+   * goal's skeptic, a loop's fire) — so no candidate dropping out decides
+   * it by elimination before its echo says it may be the one left.
+   */
+  readonly described: boolean;
   /** What the child's session has echoed of its prompt so far. */
-  prompt: string;
+  echo: string;
 }
 
 /**
@@ -620,7 +627,7 @@ export function subagentSpawned(
     resumed = taskId !== undefined;
   }
   if (taskId === undefined) {
-    const candidates = spawnCandidates(state, record);
+    const { candidates, described } = spawnCandidates(state, record);
     if (candidates.length > 1) {
       state.heldSpawns.set(childSessionId.toLowerCase(), {
         subagentId,
@@ -628,7 +635,8 @@ export function subagentSpawned(
         record,
         raw,
         candidates,
-        prompt: ""
+        described,
+        echo: ""
       });
       evictOldest(state.heldSpawns, SUBAGENTS_REMEMBERED);
       return [];
@@ -677,7 +685,11 @@ function bindChild(
 /**
  * A launch a child may still be: no spawn has named it, its answer named no
  * child, and its agent is live — or a Stop cut it before a spawn could name
- * it ({@link SubagentLaunch.cutBeforeSpawn}).
+ * it ({@link SubagentLaunch.cutBeforeSpawn}). A cut launch stays one with no
+ * end: the spawn that trails a cut by the 7–20 ms of observation 37 is
+ * plausible and no capture bounds how late it may come (none shows a cut
+ * call's child spawning, or never spawning). A held child whose echo is not
+ * the cut call's prompt rules it out ({@link consistentCandidates}).
  */
 function isOpenLaunch(state: GrokNormalizerState, launch: SubagentLaunch | undefined): launch is SubagentLaunch {
   return (
@@ -695,7 +707,10 @@ function isOpenLaunch(state: GrokNormalizerState, launch: SubagentLaunch | undef
  * `capability_mode` agree with what the spawn repeats of them, when any do
  * (the 1.0.3 rows repeat both; a side that names none rules nothing out).
  */
-function spawnCandidates(state: GrokNormalizerState, record: Record<string, unknown>): string[] {
+function spawnCandidates(
+  state: GrokNormalizerState,
+  record: Record<string, unknown>
+): { candidates: string[]; described: boolean } {
   const open = [...state.subagentLaunches.entries()].filter(([, launch]) => isOpenLaunch(state, launch));
   const description = textArgument(record, "description");
   const described = description === undefined ? [] : open.filter(([, launch]) => launch.description === description);
@@ -713,7 +728,7 @@ function spawnCandidates(state: GrokNormalizerState, record: Record<string, unkn
   if (fitting.length > 0) {
     pool = fitting;
   }
-  return pool.map(([toolCallId]) => toolCallId);
+  return { candidates: pool.map(([toolCallId]) => toolCallId), described: described.length > 0 };
 }
 
 /** The held spawn a subagent or child-session id names, if its join still waits. */
@@ -732,21 +747,20 @@ export function heldSpawnNamed(state: GrokNormalizerState, id: string): HeldSpaw
 }
 
 /**
- * Decide a held child now: to `toolCallId` when evidence named it, else to
- * the oldest candidate still open — the rule before the wait, for a child
- * one of whose rows must be routed before anything told its calls apart. A
- * child no candidate is left for is an agent of its own, the only case with
- * a row to write (its start).
+ * Decide a held child now: to `toolCallId` when evidence named it; to no
+ * call at all when it is `null` (its echo ruled every candidate out); else
+ * to the oldest candidate still open that its echo so far does not rule out
+ * — the rule before the wait, for a child one of whose rows must be routed
+ * before anything told its calls apart. A child no call takes is an agent of
+ * its own, the only case with a row to write (its start).
  */
-export function joinHeldSpawn(state: GrokNormalizerState, id: string, toolCallId?: string): RuntimeEvent[] {
+export function joinHeldSpawn(state: GrokNormalizerState, id: string, toolCallId?: string | null): RuntimeEvent[] {
   const held = heldSpawnNamed(state, id);
   if (held === undefined) {
     return [];
   }
   state.heldSpawns.delete(held.childSessionId.toLowerCase());
-  const chosen =
-    toolCallId ??
-    held.candidates.find((candidate) => isOpenLaunch(state, state.subagentLaunches.get(candidate)));
+  const chosen = toolCallId === null ? undefined : (toolCallId ?? consistentCandidates(state, held)[0]);
   const taskId = chosen === undefined ? undefined : state.subagentLaunches.get(chosen)?.taskId;
   if (taskId !== undefined) {
     bindChild(state, taskId, held.subagentId, held.childSessionId, held.record);
@@ -769,45 +783,80 @@ export function joinHeldSpawns(state: GrokNormalizerState): RuntimeEvent[] {
 }
 
 /**
- * Every held child that exactly one open candidate is left for joins it: the
+ * The open candidates a held child's echo so far does not rule out: a call
+ * whose prompt begins with the echo, or begins it, or which had no prompt to
+ * compare. The echo is the prompt verbatim (fixtures 15–28, the 1.0.3
+ * session), so a call whose prompt neither begins nor extends it cannot be
+ * the child's; the second direction is kept as the conservative side. Oldest
+ * first.
+ */
+function consistentCandidates(state: GrokNormalizerState, held: HeldSpawn): string[] {
+  return held.candidates.filter((candidate) => {
+    const launch = state.subagentLaunches.get(candidate);
+    if (!isOpenLaunch(state, launch)) {
+      return false;
+    }
+    const prompt = launch.prompt;
+    return prompt === undefined || prompt.startsWith(held.echo) || held.echo.startsWith(prompt);
+  });
+}
+
+/**
+ * Every held child that exactly one candidate is left for joins it: the
  * others were taken by another child, named a child of their own in their
- * answer, or ended without one (a spawn the user declined). Writes nothing.
+ * answer, ended without one (a spawn the user declined), or were ruled out
+ * by its echo. A child whose description matched none of its candidates is
+ * decided so only once its echo has begun — it may be none of them. Writes
+ * nothing.
  */
 function decideHeldSpawns(state: GrokNormalizerState): void {
   for (const held of [...state.heldSpawns.values()]) {
-    const open = held.candidates.filter((candidate) => isOpenLaunch(state, state.subagentLaunches.get(candidate)));
-    if (open.length === 1 && state.heldSpawns.has(held.childSessionId.toLowerCase())) {
-      joinHeldSpawn(state, held.subagentId, open[0]);
+    if (!state.heldSpawns.has(held.childSessionId.toLowerCase()) || (!held.described && held.echo.length === 0)) {
+      continue;
+    }
+    const left = consistentCandidates(state, held);
+    if (left.length === 1) {
+      joinHeldSpawn(state, held.subagentId, left[0]);
     }
   }
 }
+
 
 /**
  * A held child's session echoing its prompt: the launch's `prompt` argument,
  * verbatim, as the session's first `user_message_chunk` after its hooks —
  * in every capture with a call (fixtures 15–28, one chunk each) and for all
- * 27 model launches of the 1.0.3 goal session. The launches whose prompt
- * begins with what has arrived so far stay candidates (a prompt streamed in
- * pieces narrows as it comes); a text that begins none of them rules nothing
- * out. One left: that is the child's call. Writes nothing.
+ * 27 model launches of the 1.0.3 goal session. Decided, in this order:
+ * - the one candidate whose prompt EQUALS the whole echo so far — since the
+ *   echo comes as one chunk, a call's whole prompt wins over an older call's
+ *   longer prompt it merely begins;
+ * - the one candidate the echo does not rule out ({@link consistentCandidates})
+ *   — a prompt streamed in pieces narrows as it comes;
+ * - none left: the child is no open call's — the CLI's own (a goal's
+ *   skeptic, a loop's fire) — and starts as an agent of its own, as an
+ *   unexplained spawn does; the only case with a row to write.
  */
-export function childPromptChunk(state: GrokNormalizerState, childSessionId: string, text: string): void {
+export function childPromptChunk(state: GrokNormalizerState, childSessionId: string, text: string): RuntimeEvent[] {
   const held = heldSpawnNamed(state, childSessionId);
   if (held === undefined || text.length === 0) {
-    return;
+    return [];
   }
-  const prompt = held.prompt + text;
-  const open = held.candidates.filter((candidate) => isOpenLaunch(state, state.subagentLaunches.get(candidate)));
-  const matching = open.filter((candidate) => state.subagentLaunches.get(candidate)?.prompt?.startsWith(prompt) === true);
-  if (matching.length === 0) {
-    return;
+  held.echo += text;
+  const exact = held.candidates.filter((candidate) => {
+    const launch = state.subagentLaunches.get(candidate);
+    return isOpenLaunch(state, launch) && launch.prompt === held.echo;
+  });
+  if (exact.length === 1) {
+    return joinHeldSpawn(state, held.subagentId, exact[0]);
   }
-  held.prompt = prompt;
-  held.candidates = matching;
-  if (matching.length === 1) {
-    joinHeldSpawn(state, held.subagentId, matching[0]);
+  const left = consistentCandidates(state, held);
+  if (left.length === 0) {
+    return joinHeldSpawn(state, held.subagentId, null);
   }
+  held.candidates = left;
+  return left.length === 1 ? joinHeldSpawn(state, held.subagentId, left[0]) : [];
 }
+
 
 /**
  * A resume the CLI ran by itself — `subagent_spawned {resumed_from}` with no

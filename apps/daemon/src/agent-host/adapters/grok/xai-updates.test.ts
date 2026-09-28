@@ -562,6 +562,51 @@ test("launches identical in every argument are told apart by nothing before an a
   assert.equal(ownerOf(r, SUB_X), "call-2");
 });
 
+test("an echo that is one call's whole prompt and only the start of another's is that call's child", () => {
+  // Every capture delivers the echo as ONE chunk, so an echo equal to a
+  // candidate's whole prompt is that candidate's — even when it is also how
+  // an older call's longer prompt begins. The prefix rule alone kept both,
+  // and the oldest took the child at its first row.
+  const SUB_A = "01a0d910-6f3a-7c33-b417-671c083d42ab";
+  const SUB_B = "01a0d910-6f3a-7c33-b417-671c083d42bb";
+  const r = rig();
+  spawnCall(r, "call-1", "Audit agenda IDOR", "Audit the handlers and the tests.");
+  spawnCall(r, "call-2", "Audit agenda IDOR", "Audit the handlers");
+  r.live(explore(SUB_B, "Audit agenda IDOR"));
+  r.live(explore(SUB_A, "Audit agenda IDOR"));
+  childPrompt(r, SUB_B, "Audit the handlers");
+  assert.equal(ownerOf(r, SUB_B), "call-2");
+  assert.equal(ownerOf(r, SUB_A), "call-1");
+});
+
+test("a spawn of the CLI's own whose echo is no open call's prompt is an agent of its own, and takes no call", () => {
+  // A goal's skeptic spawned while two model calls of other descriptions are
+  // open: nothing it says rules them out, so it is held — and neither the
+  // answer naming the first call's child (which leaves one call) nor the
+  // oldest-first rule may give it a call its prompt never was. Its echo
+  // begins no candidate's prompt and no candidate's prompt begins it: it is
+  // none of them, and starts under its own id as an unexplained spawn does.
+  const SUB_S = "01a0d910-6f3a-7c33-b417-671c083d42cc";
+  const SUB_A = "01a0d910-6f3a-7c33-b417-671c083d42ac";
+  const SUB_B = "01a0d910-6f3a-7c33-b417-671c083d42bc";
+  const r = rig();
+  spawnCall(r, "call-1", "Audit agenda IDOR", "Audit the agenda handlers.");
+  spawnCall(r, "call-2", "Audit billing IDOR", "Audit the billing handlers.");
+  assert.deepEqual(r.live(spawned(SUB_S, { description: "goal achievement skeptic" })), []);
+  spawnCallDone(r, "call-1", SUB_A, "Audit agenda IDOR");
+  const own = childPrompt(r, SUB_S, "You are a goal achievement skeptic. Check the goal.");
+  assert.deepEqual(
+    only(own, "task.started").map((event) => [event.payload.taskId, event.payload.toolUseId]),
+    [[SUB_S, SUB_S]]
+  );
+  r.live(explore(SUB_A, "Audit agenda IDOR"));
+  r.live(explore(SUB_B, "Audit billing IDOR"));
+  assert.deepEqual(
+    [ownerOf(r, SUB_S), ownerOf(r, SUB_A), ownerOf(r, SUB_B)],
+    [SUB_S, "call-1", "call-2"]
+  );
+});
+
 test("a launch the user declined is no candidate for a child of its description", () => {
   // Supervised, the CLI asks before it spawns (observation 49): of two calls
   // of one description, one approved and one declined, only the approved one
