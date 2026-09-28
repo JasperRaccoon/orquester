@@ -10,6 +10,7 @@ import { eventTakesMatcher, hookDraftFromForm, hookEvents, initialHookForm, vali
 import {
   copyableItems,
   copySourceAgents,
+  defaultCopySource,
   defaultPicks,
   gitUrlError,
   pickedCollisions,
@@ -167,6 +168,9 @@ test("import: git URLs, upload names, upload progress", () => {
 
 test("copy: every other agent; only the source agent's own items of the kind", () => {
   assert.deepEqual(copySourceAgents("grok"), ["claude", "codex", "opencode"]);
+  assert.equal(defaultCopySource("claude", () => null), "codex", "unknown yet: the first other");
+  assert.equal(defaultCopySource("claude", (other) => other !== "codex"), "grok", "a missing one is not the default");
+  assert.equal(defaultCopySource("claude", () => false), "codex", "none installed: still one to show");
   const snap = snapshot([
     item({ id: "skill:zeta", kind: "skill", name: "zeta" }),
     item({ id: "skill:alpha", kind: "skill", name: "alpha" }),

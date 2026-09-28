@@ -441,6 +441,83 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
 }
 
 // ---------------------------------------------------------------------------
+// What the adapters really put in `meta` and `warnings`
+// ---------------------------------------------------------------------------
+
+{
+  const offNote =
+    'Turning it off adds it to deniedMcpServers in settings.json, which also blocks a project MCP server named "context7".';
+  const claudeMcp = item({
+    id: "mcp:context7",
+    description: undefined,
+    meta: { transport: "http", target: "https://mcp.context7.com/mcp", offNote }
+  });
+  const claudeHook = item({
+    id: "hook:PreToolUse:1111111111111111",
+    kind: "hook",
+    name: "~/.claude/hooks/guard.sh",
+    description: "PreToolUse · Bash",
+    meta: { event: "PreToolUse", type: "command", matcher: "Bash" }
+  });
+  const unreadable = item({
+    id: "skill:broken",
+    kind: "skill",
+    editable: false,
+    path: "/var/lib/orquester/.claude/skills/broken",
+    warnings: [{ code: "unreadable", message: "SKILL.md frontmatter is not valid YAML", action: "open-file" }]
+  });
+  const noPath = item({
+    id: "hook:Stop:2222222222222222",
+    kind: "hook",
+    path: undefined,
+    warnings: [{ code: "config-toml-hook", message: "Defined in config.toml: change it in that file.", action: "open-file" }]
+  });
+  for (const variant of ["docked", "sheet"] as const) {
+    const html = view(viewProps({ variant, snap: snapshot("claude", { items: [claudeMcp, claudeHook, unreadable, noPath] }) }));
+
+    const mcp = rowOf(html, claudeMcp.id);
+    assert.ok(mcp.includes("http · https://mcp.context7.com/mcp"), `${variant}: the transport and the target as the second line`);
+    assert.ok(!/<p[^>]*>[^<]*deniedMcpServers/.test(mcp), `${variant}: the off-switch caveat is not a second-line fact`);
+    assert.ok(
+      /role="switch"[^>]*title="On — loaded by new sessions\. Turning it off adds it to deniedMcpServers[^"]*also blocks a project MCP server/.test(
+        mcp.replace(/&quot;/g, '"')
+      ),
+      `${variant}: it is the switch's tooltip, where it is about`
+    );
+
+    const hook = rowOf(html, claudeHook.id);
+    assert.ok(hook.includes(">PreToolUse · Bash</p>"), `${variant}: a hook's event and matcher said once, not "command · …" twice`);
+
+    const broken = rowOf(html, unreadable.id);
+    const copyPath = broken.match(/<button[^>]*title="Copy \/var\/lib\/orquester\/\.claude\/skills\/broken"[^>]*>[\s\S]*?<\/button>/)?.[0] ?? "";
+    assert.ok(copyPath.includes("Copy path"), `${variant}: an open-file warning offers the file's path`);
+    assert.ok(variant === "docked" ? /\bh-6\b/.test(copyPath) : /\bh-10\b/.test(copyPath), `${variant}: sized for the variant`);
+    assert.ok(!rowOf(html, noPath.id).includes("Copy path"), `${variant}: no path, no button`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Every control shows a focus ring, in every state (spec §7.5)
+// ---------------------------------------------------------------------------
+
+{
+  const states = [
+    viewProps({ loadError: "The daemon did not answer.", notice: { tone: "ok", text: "Saved." } }),
+    viewProps({ variant: "sheet", loadError: "The daemon did not answer." }),
+    viewProps({ snap: null, status: "error", error: "offline" }),
+    viewProps({ snap: snapshot("claude", { items: [] }), kind: "mcp" }),
+    viewProps({ variant: "sheet", confirming: { itemId: OFF.id, kind: "delete" } }),
+    viewProps({ width: 280 })
+  ];
+  for (const props of states) {
+    const html = view(props);
+    for (const button of html.match(/<button\b[^>]*>/g) ?? []) {
+      assert.match(button, /focus-visible:ring/, `a focus ring on ${button}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A row on its own: the menu's items
 // ---------------------------------------------------------------------------
 

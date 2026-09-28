@@ -27,6 +27,7 @@ import {
   markdownEditorModel,
   markdownFormFromDocument,
   markdownFormSignature,
+  markdownNameHint,
   SKILL_BODY_PLACEHOLDER,
   validateMarkdownForm,
   type MarkdownEditorModel,
@@ -137,7 +138,7 @@ const WriteSource: React.FC<{
       toolbar={toolbar}
       fill
       status={
-        <SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} />
+        <SubmitStatus state={submit} onResolveConflict={detail ? undefined : submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} nameShown />
       }
       primary={{ label: detail ? "Save" : kind === "skill" ? "Create skill" : "Create command", busy: submit.busy, onClick: save }}
     >
@@ -212,10 +213,7 @@ export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
       onChange={(value) => setValue(spec.key, value)}
     />
   );
-  const nameHint =
-    kind === "skill"
-      ? "Also the skill's folder name: lowercase words joined by hyphens."
-      : "Invoked as /name. One folder level is allowed (git/pr → /git:pr).";
+  const nameHint = markdownNameHint(kind, model);
   const bodyError = showErrors ? errors.body : undefined;
 
   return (

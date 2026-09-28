@@ -157,6 +157,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
               onClick={props.onRetry}
               className={cn(
                 "shrink-0 rounded px-1 text-neutral-300 underline-offset-2 hover:underline",
+                "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
                 sheet && "min-h-10"
               )}
             >

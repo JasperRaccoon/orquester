@@ -19,7 +19,7 @@ import type {
   ProfileImportScanResponse
 } from "@orquester/api";
 
-import { sanitizeAgentProfileSnapshot } from "../../../../lib/agent-profile/store";
+import { agentProfileStore, sanitizeAgentProfileSnapshot } from "../../../../lib/agent-profile/store";
 import { cn } from "../../../../lib/cn";
 import { useEditorEnv, useReportDirty, useTouch } from "./env";
 import { EditorShell } from "./EditorShell";
@@ -28,6 +28,7 @@ import { profileError, isAbort } from "./errors";
 import {
   copyableItems,
   copySourceAgents,
+  defaultCopySource,
   defaultPicks,
   gitUrlError,
   pickedCollisions,
@@ -497,7 +498,12 @@ export const CopySource: React.FC<{
   const { agent, api } = useEditorEnv();
   const ids = useId();
   const choices = copySourceAgents(agent);
-  const [from, setFrom] = useState<AgentProfileAgentId>(initial?.from ?? choices[0]!);
+  // What the panel's overview knows: an agent not installed is offered, but not first.
+  const [installedOf] = useState(() => {
+    const known = agentProfileStore.getState().overview.agents;
+    return (other: AgentProfileAgentId): boolean | null => known?.find((entry) => entry.agent === other)?.installed ?? null;
+  });
+  const [from, setFrom] = useState<AgentProfileAgentId>(() => initial?.from ?? defaultCopySource(agent, installedOf));
   const [load, setLoad] = useState<SnapshotLoad>(initial?.load ?? { status: "loading" });
   const [selected, setSelected] = useState<string | null>(initial?.selected ?? null);
   const [attempt, setAttempt] = useState(0);
@@ -550,7 +556,10 @@ export const CopySource: React.FC<{
           id={`${ids}-from`}
           value={from}
           describedBy={`${ids}-from-hint`}
-          options={choices.map((choice) => ({ value: choice, label: agentLabel(choice) }))}
+          options={choices.map((choice) => ({
+            value: choice,
+            label: installedOf(choice) === false ? `${agentLabel(choice)} (not installed)` : agentLabel(choice)
+          }))}
           onChange={(value) => {
             setFrom(value as AgentProfileAgentId);
             setSelected(null);

@@ -162,6 +162,7 @@ const snapshotSeq = new Map<AgentProfileAgentId, number>();
 let staleEpoch = 0;
 
 const OVERVIEW_KEY = "overview";
+const agentLoadKey = (agent: AgentProfileAgentId): string => `agent:${agent}`;
 
 function getState(): AgentProfileState {
   return agentProfileStore.getState();
@@ -262,7 +263,7 @@ export function loadAgentProfile(
   const force = options?.force === true;
   const again = () => loadAgentProfile(api, agent, { force: true });
   return singleFlight(
-    `agent:${agent}`,
+    agentLoadKey(agent),
     force,
     () => {
       const entry = agentProfileEntry(agent);
@@ -405,8 +406,15 @@ export function applyAgentProfileEvent(event: { type: string; payload: unknown }
   if (entry.snapshot !== null && entry.snapshot.revision === revision) return;
   const state = getState();
   if (state.overview.status === "ready" && !state.overview.stale) setOverview({ stale: true });
-  if (boundApi !== null && state.overview.status === "ready") void loadAgentProfileOverview(boundApi, { force: true });
-  if (entry.snapshot === null) return;
+  // A first load in flight may have been answered before this change: a
+  // forced load queues one more after it (`singleFlight`).
+  if (boundApi !== null && (state.overview.status === "ready" || inFlight.has(OVERVIEW_KEY))) {
+    void loadAgentProfileOverview(boundApi, { force: true });
+  }
+  if (entry.snapshot === null) {
+    if (boundApi !== null && inFlight.has(agentLoadKey(agent))) void loadAgentProfile(boundApi, agent, { force: true });
+    return;
+  }
   // Stale first, so a panel mounted without a bound client still refreshes it.
   if (!entry.stale) setEntry(agent, { ...entry, stale: true });
   if (boundApi !== null) void loadAgentProfile(boundApi, agent, { force: true });
@@ -446,6 +454,9 @@ export function applyAgentProfileSnapshot(snapshot: AgentProfileSnapshot): void 
     refreshing: current.refreshing
   });
 }
+
+/** A refusal that means the list on screen is wrong: refetch the agent. */
+const RELOAD_ON_CODES: readonly string[] = ["ITEM_NOT_FOUND", "CONFIG_UNREADABLE", "STASH_CONFLICT", "AGENT_NOT_INSTALLED"];
 
 interface MutationSpec {
   /** The agent the item belongs to. */
@@ -494,10 +505,9 @@ async function mutate(api: AgentProfileApi, spec: MutationSpec): Promise<AgentPr
         void loadAgentProfile(api, spec.agent, { force: true });
       } else if (!(code !== null && spec.quietCodes?.includes(code))) {
         setAgentProfileNotice({ tone: "error", text: `${spec.failure}: ${message}` });
-        // The item is gone or changed shape: show what is there now.
-        if (code === "ITEM_NOT_FOUND" || code === "CONFIG_UNREADABLE" || code === "STASH_CONFLICT") {
-          void loadAgentProfile(api, spec.agent, { force: true });
-        }
+        // The item is gone or changed shape, or the agent itself is: show what is there now.
+        if (RELOAD_ON_CODES.includes(code ?? "")) void loadAgentProfile(api, spec.agent, { force: true });
+        if (code === "AGENT_NOT_INSTALLED") void loadAgentProfileOverview(api, { force: true });
       }
     }
     return { ok: false, error: message, code, status };

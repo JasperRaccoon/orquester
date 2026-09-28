@@ -23,6 +23,9 @@ import { agentLabel } from "./layout.logic";
 import { publishSaved } from "./saved";
 import { SubmitStatus, useProfileSubmit } from "./use-submit";
 
+/** A move refused because the file changed on disk: it was re-read, and can be moved again. */
+export const MIGRATE_CONFLICT_MESSAGE = "The file changed on disk and was reloaded — move it again.";
+
 export type InstructionsLoad =
   | { status: "loading" }
   | { status: "error"; message: string }
@@ -93,7 +96,15 @@ export const InstructionsEditor: React.FC<{ initial?: { load: InstructionsLoad; 
       publishSaved(agent, response);
       setAttempt((n) => n + 1);
     } catch (error) {
-      setMigrateError(profileError(error).message);
+      const info = profileError(error);
+      if (info.code === "PROFILE_CONFLICT") {
+        // The move is offered only over no unsaved edits: take the disk's
+        // text (its fresh revision) and let the owner move it again.
+        setMigrateError(MIGRATE_CONFLICT_MESSAGE);
+        setAttempt((n) => n + 1);
+      } else {
+        setMigrateError(info.message);
+      }
     } finally {
       setMigrating(false);
     }

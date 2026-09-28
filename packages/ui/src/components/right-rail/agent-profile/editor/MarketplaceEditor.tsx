@@ -50,7 +50,7 @@ export const MarketplaceEditor: React.FC = () => {
   return (
     <EditorShell
       title={kindTitle("create", "marketplace")}
-      status={<SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} />}
+      status={<SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} nameShown keepBoth={false} />}
       primary={{ label: "Add marketplace", busyLabel: "Adding…", busy: submit.busy, onClick: save }}
     >
       <MarketplaceFormView form={form} onChange={change} validation={validation} showErrors={showErrors} nameError={submit.nameError} />

@@ -66,14 +66,107 @@ export function effectiveKindFilter(agent: AgentProfileAgentId, kind: ProfileKin
   return kind === "all" || AGENT_PROFILE_KINDS[agent].includes(kind) ? kind : "all";
 }
 
-/** Every whitespace-separated word of `query` appears in the item's name, description or source. */
+/** Every whitespace-separated word of `query` appears in the item's name, description, source or meta line. */
 export function matchesProfileQuery(item: ProfileItem, query: string): boolean {
   const words = query.trim().toLowerCase().split(/\s+/).filter((word) => word.length > 0);
   if (words.length === 0) return true;
-  const haystack = [item.name, item.description ?? "", item.source.label, ...Object.values(item.meta ?? {})]
+  const haystack = [item.name, item.description ?? "", item.source.label, ...profileItemMetaParts(item)]
     .join("\n")
     .toLowerCase();
   return words.every((word) => haystack.includes(word));
+}
+
+// ---------------------------------------------------------------------------
+// A row's meta line
+// ---------------------------------------------------------------------------
+
+/**
+ * `meta` keys that are not one-liners for the row: `offNote` is the Claude
+ * MCP off switch's caveat (it goes in the switch's tooltip, {@link switchTitle}).
+ */
+const META_NOT_SHOWN: ReadonlySet<string> = new Set(["offNote"]);
+
+/** The order the known keys read in; any other key follows, as sent. */
+const META_ORDER = [
+  "transport",
+  "target",
+  "command",
+  "url",
+  "event",
+  "matcher",
+  "type",
+  "timeout",
+  "file",
+  "in",
+  "version",
+  "marketplace",
+  "source",
+  "branch",
+  "installedPlugins",
+  "options",
+  "override",
+  "symlink"
+] as const;
+
+/**
+ * The kind-specific facts an adapter puts in `item.meta`, as the words the
+ * row's second line shows ("stdio · npx -y jira-mcp", "v5.0.7", "3 installed").
+ * Nothing the row already says twice (a hook's event and matcher are its
+ * description on some agents; a plugin id already names its marketplace), no
+ * bare flags ("true", "yes"), and never a key that is not a one-liner.
+ */
+export function profileItemMetaParts(item: Pick<ProfileItem, "kind" | "name" | "description" | "meta">): string[] {
+  const meta = item.meta ?? {};
+  const description = item.description ?? "";
+  const keys = [
+    ...META_ORDER.filter((key) => key in meta),
+    ...Object.keys(meta).filter((key) => !(META_ORDER as readonly string[]).includes(key))
+  ];
+  const parts: string[] = [];
+  for (const key of keys) {
+    if (META_NOT_SHOWN.has(key)) continue;
+    const value = meta[key]?.trim() ?? "";
+    if (value === "") continue;
+    const shown = metaPart(key, value, item.kind, item.name, description);
+    if (shown !== null && !parts.includes(shown)) parts.push(shown);
+  }
+  return parts;
+}
+
+function metaPart(key: string, value: string, kind: ProfileItemKind, name: string, description: string): string | null {
+  switch (key) {
+    case "event":
+    case "matcher":
+      // Claude and Grok already describe a hook as "Event · matcher".
+      return description.includes(value) ? null : value;
+    case "type":
+      // A hook's handler type: only an unusual one is worth a word.
+      return value === "command" ? null : `${value} hook`;
+    case "timeout":
+      return `timeout ${value}`;
+    case "version":
+      return /^\d/.test(value) ? `v${value}` : value;
+    case "marketplace":
+      // `superpowers@claude-plugins-official` names it already.
+      return name.includes(value) ? null : value;
+    case "installedPlugins":
+      return value === "0" ? null : `${value} installed`;
+    case "branch":
+      return `branch ${value}`;
+    case "in":
+      return value === "config" ? "in the config file" : `in ${value}`;
+    case "options":
+      return value === "yes" || value === "true" ? "with options" : null;
+    case "symlink":
+      return value === "true" ? "symlink" : null;
+    case "override":
+      return `skillOverrides: ${value}`;
+    case "source":
+      if (kind === "plugin") return value === "file" ? "local file" : value === "npm" ? "npm package" : null;
+      return value;
+    default:
+      return value;
+  }
 }
 
 export function filterProfileItems(
@@ -231,9 +324,14 @@ export function switchDisabledReason(item: ProfileItem): string | null {
   return "Can't be turned off here";
 }
 
-/** What the switch's tooltip says when it works. */
+/**
+ * What the switch's tooltip says when it works — with what turning it off
+ * does beyond this item when the adapter says (`meta.offNote`: Claude's
+ * `deniedMcpServers` also blocks a project server of that name).
+ */
 export function switchTitle(item: ProfileItem): string {
-  if (item.enabled) return "On — loaded by new sessions";
+  const offNote = item.meta?.offNote?.trim();
+  if (item.enabled) return offNote ? `On — loaded by new sessions. ${offNote}` : "On — loaded by new sessions";
   return item.stashed ? "Off — set aside by Orquester until turned back on" : "Off — not loaded";
 }
 

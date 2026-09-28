@@ -2,9 +2,11 @@
  * One item of an agent's profile: its name (truncated, the full name in a
  * tooltip), a one-line description, the source badge, the on/off switch and
  * the "…" menu (Edit · Manage in … · Copy to … · Copy file path · Delete).
- * Off rows are dimmed; locked rows carry a lock; warnings are amber chips —
- * with a Trust button where the agent offers one; an inherited row says where
- * it is managed.
+ * The second line is the adapter's `meta` as words (`profileItemMetaParts`)
+ * and the description. Off rows are dimmed; locked rows carry a lock;
+ * warnings are amber chips — with a Trust button where the agent offers one,
+ * and Copy path where the fix is in a file; an inherited row says where it is
+ * managed.
  *
  * The row never shifts: the switch and the menu keep fixed widths (the menu's
  * place is held when it has nothing to offer), the badge shrinks before the
@@ -33,7 +35,7 @@ import { menuFocusIndex } from "../saved-prompts/SavedPromptItem";
 import { RailSwitch, railCardClass } from "../primitives";
 import { agentIcon } from "./AgentPicker";
 import { WarningChip } from "./InstructionsCard";
-import { manageInAgent, switchDisabledReason, switchLabel, switchTitle } from "./list.logic";
+import { manageInAgent, profileItemMetaParts, switchDisabledReason, switchLabel, switchTitle } from "./list.logic";
 
 const FOCUS_RING = "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500";
 const DANGER_ACTION = "text-danger hover:bg-danger-500/10 hover:text-danger";
@@ -80,8 +82,7 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
   const owner = manageInAgent(item);
   const hasMenu =
     item.editable || owner !== null || props.copyTargets.length > 0 || item.path !== undefined || item.deletable;
-  const meta = Object.values(item.meta ?? {});
-  const secondLine = [...meta, ...(item.description ? [item.description] : [])].join(" · ");
+  const secondLine = [...profileItemMetaParts(item), ...(item.description ? [item.description] : [])].join(" · ");
   const menuButton = cn(
     "inline-flex shrink-0 items-center justify-center rounded-md text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100",
     sheet ? "h-10 w-10" : "h-7 w-7"
@@ -233,6 +234,19 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
                 >
                   <ShieldCheck size={12} aria-hidden />
                   Trust
+                </Button>
+              ) : warning.action === "open-file" && item.path !== undefined ? (
+                // The fix is in the file itself, on the daemon's host: hand over its path.
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  title={`Copy ${item.path}`}
+                  onClick={props.onCopyPath}
+                  className={cn("shrink-0 gap-1 px-2", sheet ? "h-10" : "h-6")}
+                >
+                  <FileText size={12} aria-hidden />
+                  Copy path
                 </Button>
               ) : null}
             </span>

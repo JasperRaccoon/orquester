@@ -439,6 +439,21 @@ describe("agentProfile.changed", () => {
     assert.equal(api.overviewGets, 2);
   });
 
+  it("a change during an agent's FIRST load asks once more after it (that answer may predate the change)", async () => {
+    api.held = deferred<void>();
+    const first = loadAgentProfile(api, "claude");
+    await settle();
+    applyAgentProfileEvent(changed("claude", "r2"));
+    api.server.set("claude", snapshot("claude", "r2", [JIRA]));
+    api.held.resolve();
+    api.held = null;
+    await first;
+    await settle();
+    await settle();
+    assert.deepEqual(api.gets, ["claude", "claude"]);
+    assert.equal(agentProfileEntry("claude").snapshot?.revision, "r2");
+  });
+
   it("ignores a malformed payload or another type without a throw", async () => {
     await loadAgentProfile(api, "claude");
     assert.doesNotThrow(() => {
@@ -509,6 +524,18 @@ describe("mutations", () => {
     });
     dismissAgentProfileNotice();
     assert.equal(agentProfileStore.getState().notice, null);
+  });
+
+  it("AGENT_NOT_INSTALLED refetches the agent and the overview (the picker learns it)", async () => {
+    await loadAgentProfile(api, "claude");
+    await loadAgentProfileOverview(api);
+    api.failMutation = refusal(404, "AGENT_NOT_INSTALLED", "Claude is not installed on this host.");
+    await setAgentProfileItemEnabled(api, "claude", JIRA, false);
+    await settle();
+    await settle();
+    assert.deepEqual(api.gets, ["claude", "claude"]);
+    assert.equal(api.overviewGets, 2);
+    assert.equal(agentProfileStore.getState().notice?.text, "Couldn't turn off jira: Claude is not installed on this host.");
   });
 
   it("a copy lands the TARGET's snapshot on the target", async () => {

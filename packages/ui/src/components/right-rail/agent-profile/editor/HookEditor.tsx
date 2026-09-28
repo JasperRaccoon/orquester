@@ -60,7 +60,7 @@ export const HookEditor: React.FC<{ detail?: HookDetail; onReload?: () => void }
   return (
     <EditorShell
       title={kindTitle(detail ? "edit" : "create", "hook")}
-      status={<SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} />}
+      status={<SubmitStatus state={submit} onResolveConflict={detail ? undefined : submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} keepBoth={false} />}
       primary={{ label: detail ? "Save" : "Add hook", busy: submit.busy, onClick: save }}
     >
       <HookFormView form={form} onChange={change} validation={validation} showErrors={showErrors} originalEvent={detail?.hook.event} />

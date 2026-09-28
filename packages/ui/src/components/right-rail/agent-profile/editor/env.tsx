@@ -24,6 +24,12 @@ export interface EditorEnv {
   finish(response: ProfileMutationResponse): void;
   /** The open editor reports whether it holds unsaved changes. */
   setDirty(dirty: boolean): void;
+  /**
+   * A save is in flight (`useProfileSubmit`). Closing then asks nothing: the
+   * changes are on their way, and the save reports to the panel's notice
+   * whether it lands or not.
+   */
+  setSaving(saving: boolean): void;
   /** Turn a create editor into another kind's ("Add a marketplace" from the plugin installer). */
   switchKind(kind: ProfileItemKind): void;
   /** The width assumed before the editor measures itself (checks pass one per variant). */
