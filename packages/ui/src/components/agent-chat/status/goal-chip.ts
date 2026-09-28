@@ -113,7 +113,7 @@ const WAITING_BACKGROUND_SHORT = "waiting";
 
 /**
  * A provider phase as words: Orquester's own names read as a sentence, any
- * other (Grok's `planning`/`executing`/`verifying`/`idle`) with its
+ * other (Grok's `planning`/`executing`/`idle`) with its
  * separators turned into spaces. `null` for none.
  */
 export function formatGoalPhase(phase: string | null | undefined): string | null {

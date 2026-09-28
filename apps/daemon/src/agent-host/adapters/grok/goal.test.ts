@@ -191,8 +191,8 @@ test("frames whose counters alone moved emit nothing", () => {
   const r = rig();
   r.live(frame());
   // Tokens, time and the `live_*` block move on nearly every real frame; none
-  // of them is goal STATE (`sameGoalState`).
-  assert.deepEqual(r.live(frame({ tokens_used: 67845, elapsed_ms: 222518, planning: true })), []);
+  // of them is goal STATE (`sameGoalState`). (`planning` is: see below.)
+  assert.deepEqual(r.live(frame({ tokens_used: 67845, elapsed_ms: 222518 })), []);
   assert.deepEqual(
     r.live(
       frame({
@@ -603,12 +603,62 @@ test("progress is throttled to one per 30 s per thread; a status change never is
 });
 
 // ---------------------------------------------------------------------------
+// The planner: `planning: true` is the `planning` phase
+// ---------------------------------------------------------------------------
+
+test("`planning: true` is the planning phase: one hidden progress as the planner starts, one as it ends, none per frame", () => {
+  // Both captures (1.0.3's goal sessions, observation 57; 1.0.34's fixture 30,
+  // observation 53): the planner runs under `phase: "executing"` with a
+  // `planning: true` flag, which is ABSENT, never `false`, once it is done.
+  const r = rig();
+  const changes = runLive(r, [
+    [0, frame()],
+    [1, frame({ planning: true })],
+    [19, frame({ planning: true, elapsed_ms: 19 })],
+    [4_000, frame({ planning: true, tokens_used: 5660, elapsed_ms: 4019, live_subagent_tokens: 5660, live_turn_count: 1 })],
+    // The planner is done 10 s after it started — inside the progress
+    // throttle's window, and 1.0.34 then sends no goal frame at all while the
+    // parent works the goal (fixture 30: lines 250 → 533). A throttled phase
+    // move would leave the chip reading "planning" for the whole run.
+    [6_000, frame({ tokens_used: 17771, elapsed_ms: 10019 })],
+    // Counters alone, still inside the window: nothing.
+    [1_000, frame({ tokens_used: 18000, elapsed_ms: 11019 })]
+  ]);
+  assert.deepEqual(
+    changes.map((payload) => [payload.change, payload.goal?.phase]),
+    [
+      ["set", "executing"],
+      ["progress", "planning"],
+      ["progress", "executing"]
+    ]
+  );
+});
+
+test("a frame that is not running the goal keeps its own phase, whatever `planning` says", () => {
+  // Not captured — every planning frame so far is `executing` — so the flag
+  // names the phase only where the goal runs: a stopped goal's `idle` stands.
+  const r = rig();
+  const changes = runLive(r, [
+    [0, frame({ planning: true })],
+    [MINUTE, at(5, { status: "budget_limited", phase: "idle", last_event: "budget_exceeded", planning: true })]
+  ]);
+  assert.deepEqual(
+    changes.map((payload) => [payload.change, payload.goal?.phase]),
+    [
+      ["set", "planning"],
+      ["limited", "idle"]
+    ]
+  );
+});
+
+// ---------------------------------------------------------------------------
 // A whole goal run, shaped on the real session
 // ---------------------------------------------------------------------------
 
 test("a whole goal run: set, round one, a failed verification, round two, achieved", () => {
   // The real run, frame for frame in kind: three identical-but-for-counters
-  // `goal_created` frames while planning, round one's `worker_completed` with
+  // `goal_created` frames while planning — the planner's start and end are the
+  // two hidden `progress` rows, its frames in between nothing — round one's `worker_completed` with
   // the verification running, the verdict landing on the same event, round
   // two carrying the STALE verdict while its own verification runs — which is
   // not a second check — and `goal_completed` three times, once verbatim.
@@ -677,10 +727,18 @@ test("a whole goal run: set, round one, a failed verification, round two, achiev
   ]);
 
   assert.deepEqual(
-    changes.map((payload) => payload.change),
-    ["set", "progress", "checked", "progress", "achieved"]
+    changes.map((payload) => [payload.change, payload.goal?.phase]),
+    [
+      ["set", "executing"],
+      ["progress", "planning"],
+      ["progress", "executing"],
+      ["progress", "executing"],
+      ["checked", "executing"],
+      ["progress", "executing"],
+      ["achieved", "idle"]
+    ]
   );
-  const [, first, checked, second, achieved] = changes;
+  const [, , , first, checked, second, achieved] = changes;
   assert.equal(first.goal?.rounds, 1);
   assert.equal(first.goal?.lastCheck, ROUND_ONE);
   assert.equal(checked.goal?.rounds, 1, "`Goal check 1: not met`");
@@ -1040,14 +1098,31 @@ test("after the comparison, live frames continue from the replayed state, not fr
 });
 
 test("a goal loaded while still planning is not set a second time by its next live frame", () => {
-  const created: AgentGoal = { objective: OBJECTIVE, status: "active", goalId: GOAL_ID, phase: "executing", rounds: 0 };
-  const r = rig({ knownGoal: created });
+  // The thread shows the planner running, as the previous host reported it.
+  const planning: AgentGoal = { objective: OBJECTIVE, status: "active", goalId: GOAL_ID, phase: "planning", rounds: 0 };
+  const r = rig({ knownGoal: planning });
   r.replay(frame());
   r.replay(frame({ planning: true, tokens_used: 67845 }));
   assert.deepEqual(r.normalizer.reconcileGoal("load"), []);
   // Its `last_event` is still the replayed `goal_created`: not a new event.
   assert.deepEqual(r.live(frame({ planning: true, tokens_used: 117745, elapsed_ms: 412588 })), [], "no second `Goal set`");
-  assert.deepEqual(r.live(frame({ tokens_used: 117745, elapsed_ms: 412609 })), []);
+  // The planner done: the phase moves, a hidden progress — never a set.
+  assert.deepEqual(
+    r.goals(r.live(frame({ tokens_used: 117745, elapsed_ms: 412609 }))).map((payload) => [payload.change, payload.goal?.phase]),
+    [["progress", "executing"]]
+  );
+});
+
+test("a goal a host from before the planning phase showed as executing learns it at the load, as progress", () => {
+  const executing: AgentGoal = { objective: OBJECTIVE, status: "active", goalId: GOAL_ID, phase: "executing", rounds: 0 };
+  const r = rig({ knownGoal: executing });
+  r.replay(frame());
+  r.replay(frame({ planning: true, tokens_used: 67845 }));
+  assert.deepEqual(
+    r.goals(r.normalizer.reconcileGoal("load")).map((payload) => [payload.change, payload.goal?.phase]),
+    [["progress", "planning"]]
+  );
+  assert.deepEqual(r.live(frame({ planning: true, tokens_used: 117745, elapsed_ms: 412588 })), [], "no second `Goal set`");
 });
 
 test("a live frame during the load leaves the comparison nothing to add", () => {

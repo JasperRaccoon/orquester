@@ -161,17 +161,27 @@ test("30 the goal is the thread's goal: set, stopped by its budget, cleared by /
   assert.deepEqual(warnings(run), [], "goal_updated is mapped, never a warning — eleven of them in one short run");
   const goals = only(run.events, "thread.goal.updated");
   assert.deepEqual(
-    goals.map((event) => [event.payload.change, event.turnId, event.payload.goal?.status ?? null]),
+    goals.map((event) => [
+      event.payload.change,
+      event.turnId,
+      event.payload.goal?.status ?? null,
+      event.payload.goal?.phase ?? null
+    ]),
     [
-      ["set", "turn-1", "active"],
-      ["limited", "turn-1", "budget-limited"],
+      ["set", "turn-1", "active", "executing"],
+      // The planner runs under `executing` with `planning: true`: the goal's
+      // `planning` phase, a hidden progress as it starts and as it ends 34 s
+      // later — its frames in between, their counters moving, are none.
+      ["progress", "turn-1", "active", "planning"],
+      ["progress", "turn-1", "active", "executing"],
+      ["limited", "turn-1", "budget-limited", "idle"],
       // 1.0.34's clear names no goal and no event: status `cleared`, every
       // id and text emptied (observation 53) — read as the level it is.
-      ["cleared", "turn-2", null]
+      ["cleared", "turn-2", null, null]
     ],
     "one row per change — a token tick alone is none"
   );
-  const [set, limited, cleared] = goals;
+  const [set, , , limited, cleared] = goals;
   assert.equal(set?.payload.goal?.objective, "Create a file named goal.txt containing exactly: ok");
   assert.equal(set?.payload.goal?.tokenBudget, 20_000);
   assert.equal(limited?.payload.goal?.tokensUsed, 48_386);

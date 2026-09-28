@@ -107,7 +107,10 @@ export function driveCapture(
         platform: "linux",
         env: { GROK_HOME: "~/daemon/agent-accounts/grok/<account-id>/home" }
       },
-      launchNonce: "capture"
+      launchNonce: "capture",
+      // The recorded time, as the stamps: the goal tracker's progress
+      // throttle then sees the capture's own pacing, never the test's.
+      now: () => CAPTURE_EPOCH_MS + now
     },
     "pending"
   );

@@ -9,8 +9,9 @@
  * its counters move, sometimes twice byte for byte (fixtures README
  * observation 57; 1.0.34's live frames, capture 30, observation 53). This
  * module turns that stream into `thread.goal.updated`
- * payloads: one per real change, `progress` throttled, replayed history held
- * back and compared once, after the load.
+ * payloads: one per real change, `progress` throttled (a phase move — the
+ * planner starting or ending — excepted), replayed history held back and
+ * compared once, after the load.
  *
  * Every read of a frame is field-wise with a fallback: a malformed field is
  * dropped, a malformed frame is a debug line — never a throw and never a
@@ -126,6 +127,8 @@ interface GoalFrame {
   /** Verbatim, for the debug line an unknown status earns. */
   readonly status: unknown;
   readonly phase?: string;
+  /** The goal's planner is running (`planning: true`; absent, never `false`, once it is done). */
+  readonly planning: boolean;
   readonly rounds?: number;
   readonly event?: string;
   readonly eventAt?: string;
@@ -164,6 +167,7 @@ function readGoalFrame(update: unknown): GoalFrame | null {
     objective: text(update["objective"]),
     status: update["status"],
     phase: text(update["phase"]),
+    planning: update["planning"] === true,
     rounds: count(update["total_worker_rounds"]),
     event: text(update["last_event"]),
     eventAt: text(update["last_event_timestamp"]),
@@ -177,6 +181,27 @@ function readGoalFrame(update: unknown): GoalFrame | null {
     tokenBudget: update["token_budget"] === null ? null : count(update["token_budget"]),
     elapsedMs: count(update["elapsed_ms"])
   };
+}
+
+/** The phase Grok's goal runs under while it works; the planner runs under it too. */
+const EXECUTING_PHASE = "executing";
+/** The phase a frame's `planning: true` names. */
+const GROK_GOAL_PLANNING_PHASE = "planning";
+
+/**
+ * The goal's phase as the thread shows it. Planning is not one of Grok's
+ * phases: its planner runs under `phase: "executing"` with a `planning: true`
+ * flag, which is absent — never `false` — once the plan is written (1.0.3's
+ * goal sessions, observation 57; 1.0.34's fixture 30, observation 53). The
+ * flag names the phase `planning` wherever the goal runs — `executing`, or no
+ * phase at all. Every captured planning frame is `executing`; on any other
+ * phase (a goal stopped, `idle`) the frame's own phase stands, since a goal
+ * that is not running plans nothing.
+ */
+function phaseOf(frame: GoalFrame): string | undefined {
+  return frame.planning && (frame.phase === undefined || frame.phase === EXECUTING_PHASE)
+    ? GROK_GOAL_PLANNING_PHASE
+    : frame.phase;
 }
 
 /** `last_event_timestamp` carries nanoseconds; an ISO string holds milliseconds. */
@@ -215,7 +240,7 @@ function goalOf(frame: GoalFrame, same: AgentGoal | null, lastCheck: string | un
     objective: frame.objective ?? same?.objective,
     status: grokGoalStatus(frame.status) ?? same?.status,
     goalId: frame.goalId,
-    phase: frame.phase,
+    phase: phaseOf(frame),
     rounds: frame.rounds,
     lastCheck,
     tokensUsed: frame.tokensUsed,
@@ -514,8 +539,20 @@ export class GrokGoalTracker {
       // shown, so the next frame that still differs delivers it once the
       // window has passed — or the next session's `reconcile` does. A status
       // or objective change is never `progress`.
+      //
+      // A PHASE move is not throttled: the planner starting and ending
+      // (`planning`, above) is two moves per plan, and the chip names the
+      // phase. Held back, the move could wait for good — 1.0.34 sends no goal
+      // frame while the parent works the goal after its plan (fixture 30:
+      // nothing between the planner's end and the budget stopping the goal,
+      // 90 s later), so the chip read "planning" for the whole run.
       const now = this.options.now();
-      if (this.lastProgressAt !== undefined && now - this.lastProgressAt < GROK_GOAL_PROGRESS_THROTTLE_MS) {
+      const phaseMoved = this.shown !== null && this.shown.phase !== step.goal?.phase;
+      if (
+        !phaseMoved &&
+        this.lastProgressAt !== undefined &&
+        now - this.lastProgressAt < GROK_GOAL_PROGRESS_THROTTLE_MS
+      ) {
         return null;
       }
       this.lastProgressAt = now;

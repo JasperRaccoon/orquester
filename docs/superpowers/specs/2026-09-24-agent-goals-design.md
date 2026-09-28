@@ -175,7 +175,7 @@ export interface AgentGoal {
   status: AgentGoalStatus;
   /** The provider's own id when it has one (Grok `goal_id`). */
   goalId?: string;
-  /** Free-text provider phase: Grok's planning/executing/verifying/idle; Claude "waiting-background". */
+  /** Free-text provider phase: Grok's executing/idle, planning while its planner runs; Claude "waiting-background". */
   phase?: string;
   /** Evaluation rounds so far: Claude's "not met" checks, Grok's worker rounds. */
   rounds?: number;
@@ -874,7 +874,11 @@ next session's §6.3.4 comparison).
    `session.state.changed {running}` heartbeat per retry episode, inside a turn only — never a row
    (Claude's `api_retry` precedent), the parent session's only; `compaction_checkpoint` ⇒ nothing
    (`auto_compact_completed` carries the boundary).
-2. Map: `objective`, `goal_id`→`goalId`, `phase`, `total_worker_rounds`→`rounds`,
+2. Map: `objective`, `goal_id`→`goalId`, `phase` — `planning` while the frame carries
+   `planning: true` (amended 2026-09-28: the planner runs under `phase: "executing"` with that
+   flag, absent once the plan is written, on 1.0.3 and 1.0.34 alike — Grok fixtures README
+   observations 53, 57; a frame on any phase but `executing` keeps its own) —
+   `total_worker_rounds`→`rounds`,
    `tokens_used`, `token_budget`, `elapsed_ms`, and `lastCheck` (amended 2026-09-24): while a new
    `not_achieved` verdict stands, its own text `Verification: not achieved (attempt <n> of <m>)`
    (`classifier_runs_attempted` of `classifier_max_runs`, the attempt dropped when either is
@@ -890,7 +894,9 @@ next session's §6.3.4 comparison).
    `previous` the goal shown); `budget_exceeded` ⇒ `limited`;
    `premature_stop_detected` or a new `not_achieved` verdict ⇒ `checked` (a new verdict is a row
    even when `sameGoalState` sees no change, amended 2026-09-24); everything else ⇒ `progress`
-   (throttled). A new objective under the same `goal_id` is `replaced`, whatever event it rides
+   (throttled — but a PHASE move is not, amended 2026-09-28: the planner's start and end are two
+   moves per plan, and 1.0.34 sends no goal frame while the parent works the goal after its plan,
+   fixture 30, so a throttled move could leave the chip reading `planning` for the whole run). A new objective under the same `goal_id` is `replaced`, whatever event it rides
    (amended 2026-09-24).
 4. **Replay:** replayed `goal_updated` rows (`isReplay`, `session/load`, history projection) emit
    nothing as they arrive. Once the session is up, the provider's last state is compared with

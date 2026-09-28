@@ -1948,7 +1948,13 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   episode, the parent's only — and `compaction_checkpoint`, nothing (fixtures README observations
   53, 57, 58). 1.0.34's `/goal clear` answers `goal_updated {status: "cleared"}` with every id and
   text emptied and no `last_event` (fixture 30), which the tracker reads as the level
-  `goal_cleared` is — before, the chip kept the goal the user had cleared. A Grok goal active at a
+  `goal_cleared` is — before, the chip kept the goal the user had cleared. The planner runs under
+  `phase: "executing"` with a `planning: true` flag, absent once the plan is written (1.0.3 and
+  1.0.34 alike), which the tracker shows as the phase `planning` (`phaseOf`; on a phase other than
+  `executing` the frame's own stands) — `Goal · planning` on the chip, `phase` in the MCP's
+  `chat.goal`. A phase move is a hidden `progress` the 30 s throttle never holds back: 1.0.34
+  sends no goal frame while the parent works the goal after its plan, so a held-back end of
+  planning read "planning" for the whole run. A Grok goal active at a
   host restart keeps reading active until the provider's next goal frame or the next load's
   reconcile: the adapter invents no provider state. A new
   `not_achieved` verdict is a `checked` row (`Goal check <rounds>: not met — …`) whose `lastCheck`

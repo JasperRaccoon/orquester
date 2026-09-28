@@ -1562,7 +1562,11 @@ Before 2026-09-26 every update was an "unmapped" warning — eleven in this shor
 mirrors the goal as the thread's goal (`goal.ts`, goals spec §6.3; observation 57 is the 1.0.3
 evidence it was first built on): `thread.goal.updated` rows the fold reads — `set` on
 `goal_created` (the frame's `token_budget` with it), no row for a token tick alone (a hidden
-`progress` only when its state moved, throttled), `limited` on `budget_exceeded`, and `cleared` on
+`progress` only when its state moved, throttled), the planner's run as the goal's `planning` phase
+(`planning: true` on an `executing` frame — a hidden `progress` as it starts, another as it ends, 34 s
+later here; never throttled, because no goal frame follows the planner's end until the budget stops
+the goal 90 s on, and a held-back move would have left the chip reading "planning" the whole time),
+`limited` on `budget_exceeded`, and `cleared` on
 `/goal clear`'s frame, which names no goal and no event: its `status: "cleared"` is read as the same
 level 1.0.3's `goal_cleared` was (`previous`, the goal as the thread showed it). Its planner is an
 agent row of its own. Not captured: a goal that completes, pauses, resumes or fails (observation 57
@@ -1713,7 +1717,10 @@ different: it has no goal by definition, so a thread still showing an unfinished
   goal while it planned and ran its first round). An event is new when the pair changes. Observed:
   `goal_created`, `worker_completed`, `goal_completed`.
 - **Statuses observed: `active`, `complete`; phases: `executing`, `idle`.** Planning is not a
-  phase — it is a `planning: true` flag on `executing` frames. `total_verify_rounds` stayed `0`
+  phase — it is a `planning: true` flag on `executing` frames, absent (never `false`) once the plan
+  is written: 9 of the 119 frames, one planning stretch per goal. The adapter shows it as the phase
+  `planning` (`phaseOf` in `goal.ts`; 1.0.34's fixture 30 carries the flag the same way), a phase
+  move being one hidden `progress` that the 30 s throttle never holds back. `total_verify_rounds` stayed `0`
   throughout, even across verifications.
 - **Verification is a flag and a verdict, and the verdict goes stale.** After round *n* the frame
   carries `classifier_runs_attempted: n` and `verifying_completion: true`; when the verifier

@@ -1091,10 +1091,30 @@ test("30 through the fold: the thread's goal is set, stopped by its budget, then
   // `thread.goal.updated` rows the fold reads — never a roster row. 1.0.34's
   // `/goal clear` frame names no goal and no event (status `cleared`).
   const s = captureSeam("30-goal.ndjson");
+  // The planner runs under `phase: "executing"` with `planning: true`
+  // (observation 53): the thread's goal reads `planning` while it runs, and
+  // `executing` again once it is done — 34 s later, with no goal frame after
+  // it until the budget stops the goal.
+  const goalPhases = (index: number): Array<string | undefined> =>
+    s.events
+      .slice(0, index + 1)
+      .filter((event) => event.type === "thread.goal.updated")
+      .map((event) => (event.payload as { goal: { phase?: string } | null }).goal?.phase);
+  const planning = s.events.findIndex(
+    (event) =>
+      event.type === "thread.goal.updated" &&
+      (event.payload as { goal: { phase?: string } | null }).goal?.phase === "planning"
+  );
+  assert.ok(planning > 0, "the planner's frames are the planning phase");
+  await s.feedThrough(planning);
+  assert.equal(s.state().goal?.phase, "planning");
   const limited = s.events.findIndex(
     (event) => event.type === "thread.goal.updated" && (event.payload as { change: string }).change === "limited"
   );
   assert.ok(limited > 0, "the budget_limited frame is a goal row");
+  await s.feedThrough(limited - 1);
+  assert.equal(s.state().goal?.phase, "executing", "the planner done");
+  assert.deepEqual(goalPhases(limited), ["executing", "planning", "executing", "idle"]);
   await s.feedThrough(limited);
   const atBudget = s.state().goal;
   assert.equal(atBudget?.objective, "Create a file named goal.txt containing exactly: ok");
@@ -1108,7 +1128,9 @@ test("30 through the fold: the thread's goal is set, stopped by its budget, then
     state.activities
       .filter((row) => row.activityKind === "goal.updated")
       .map((row) => (row.payload as { change: string }).change),
-    ["set", "limited", "cleared"]
+    // The planner's two phase moves are one hidden `progress` row, replaced
+    // in place under its stable id.
+    ["set", "progress", "limited", "cleared"]
   );
   assert.equal(state.roster.some((entry) => entry.id.startsWith("goal:")), false, "the goal is no roster row");
   assert.equal(s.liveness.liveness(THREAD), null);

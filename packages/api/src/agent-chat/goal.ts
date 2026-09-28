@@ -48,7 +48,11 @@ export interface AgentGoal {
   status: AgentGoalStatus;
   /** The provider's own id when it has one (Grok `goal_id`). */
   goalId?: string;
-  /** Free-text provider phase: Grok's planning/executing/verifying/idle; Claude "waiting-background". */
+  /**
+   * Free-text provider phase: Grok's `executing`/`idle`, and `planning` while
+   * its planner runs (a `planning: true` flag on `executing` frames); Claude's
+   * "waiting-background".
+   */
   phase?: string;
   /** Evaluation rounds so far: Claude's "not met" checks, Grok's worker rounds. */
   rounds?: number;
