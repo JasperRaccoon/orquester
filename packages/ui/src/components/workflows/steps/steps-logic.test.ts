@@ -214,6 +214,10 @@ describe("delete, duplicate, disable", () => {
     const copy = result.nodeId;
     assert.notEqual(nameOf(result.workflow, copy), "Review");
     assert.deepEqual(edgesOf(result.workflow), [`a:success>${copy}`, `${copy}:success>b`, "t:success>a"].sort());
+    // The copy takes the next column; what followed moves one column on, never under it.
+    const at = (id: string) => result.workflow.nodes.find((n) => n.id === id)!.position;
+    assert.equal(at(copy).x, 704);
+    assert.equal(at("b").x > at(copy).x, true, "the next block moved right, not stacked on the copy");
   });
 
   it("disable / enable", () => {

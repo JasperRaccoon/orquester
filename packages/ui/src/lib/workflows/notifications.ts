@@ -174,9 +174,15 @@ function remember(runId: string): boolean {
   return true;
 }
 
-/** The notify settings of a run's workflow, when this client has its definition (a loaded run), else the defaults. */
+/**
+ * The notify settings of a run's workflow: the rail row's `notify` (the
+ * workflow as it is now), else a loaded run's frozen definition, else the
+ * defaults.
+ */
 export function notifyPrefsForRun(run: Pick<WorkflowRunSummary, "id" | "workflowId">): WorkflowNotifyPrefs {
   const state = workflowsStore.getState();
+  const notify = state.summaries.get(run.workflowId)?.notify;
+  if (notify) return notifyPrefsOf({ notify });
   const own = state.runs[run.id]?.detail?.definition;
   if (own) return notifyPrefsOf(own.settings);
   for (const entry of Object.values(state.runs)) {
@@ -193,7 +199,7 @@ export function notifyWorkflowRunFinished(
 ): void {
   if (runOutcomeKind(run.status) === "quiet") return;
   if (!remember(run.id)) return;
-  const viewing = context.viewing === true || viewed.has(run.id);
+  const viewing = context.viewing === true || viewed.has(run.id) || isRunOnScreen(run.id);
   const prefs = context.prefs ?? notifyPrefsForRun(run);
   const toast = finishedRunNotice(run, { prefs, viewing });
   const entry = attentionEntryFor(run, { prefs, viewing });
@@ -209,8 +215,9 @@ export function notifyWorkflowRunFinished(
 
 /**
  * The app store's hook into the `workflows` event channel: a
- * `workflowRun.finished` notifies; anything else is ignored. `viewingRunId`
- * is the run the focused editor tab shows (no toast for what is on screen).
+ * `workflowRun.finished` notifies; anything else is ignored. What is on
+ * screen is read from the run views' own reports (`setRunOnScreen`): a tab
+ * in Editor mode, hidden, or a hidden document shows nothing.
  */
 export function observeWorkflowRunEvent(
   event: { type: string; payload: unknown },
@@ -235,18 +242,57 @@ export function dismissWorkflowAttention(runId: string): void {
   workflowNotificationsStore.setState({ attention: state.attention.filter((entry) => entry.runId !== runId) });
 }
 
-/** The run is on screen: its toast and its attention entry are read. Later events for it stay quiet. */
-export function markWorkflowRunViewed(runId: string): void {
-  viewed.add(runId);
-  if (viewed.size > MAX_REMEMBERED) {
-    const first = viewed.values().next().value;
-    if (first !== undefined) viewed.delete(first);
+/**
+ * The run was seen: its toast and its attention entry are read. Only a
+ * FINISHED run is remembered as seen (`finished: true`) — a live run is
+ * judged when it finishes, by whether it is on screen then
+ * (`setRunOnScreen`), so glancing at it while it ran never silences its
+ * failure.
+ */
+export function markWorkflowRunViewed(runId: string, options: { finished?: boolean } = {}): void {
+  if (options.finished === true) {
+    viewed.add(runId);
+    if (viewed.size > MAX_REMEMBERED) {
+      const first = viewed.values().next().value;
+      if (first !== undefined) viewed.delete(first);
+    }
   }
   const state = workflowNotificationsStore.getState();
   const toasts = state.toasts.filter((toast) => toast.runId !== runId);
   const attention = state.attention.filter((entry) => entry.runId !== runId);
   if (toasts.length === state.toasts.length && attention.length === state.attention.length) return;
   workflowNotificationsStore.setState({ toasts, attention });
+}
+
+// ---------------------------------------------------------------------------
+// On screen
+// ---------------------------------------------------------------------------
+
+/** What each mounted run view shows right now (null: nothing, or hidden). */
+const onScreen = new Map<object, string>();
+
+let documentVisible: () => boolean = () =>
+  typeof document === "undefined" || document.visibilityState !== "hidden";
+
+/**
+ * A run view reports the run it shows — only while its tab is in Runs mode
+ * AND shown; `null` when not. Several views may report (grid cells).
+ */
+export function setRunOnScreen(owner: object, runId: string | null): void {
+  if (runId === null) onScreen.delete(owner);
+  else onScreen.set(owner, runId);
+}
+
+/** The user can see `runId` right now: a view shows it and the document is visible. */
+export function isRunOnScreen(runId: string): boolean {
+  if (!documentVisible()) return false;
+  for (const shown of onScreen.values()) if (shown === runId) return true;
+  return false;
+}
+
+/** Test seam: the document's visibility. */
+export function setDocumentVisibilityProbe(probe: (() => boolean) | null): void {
+  documentVisible = probe ?? (() => typeof document === "undefined" || document.visibilityState !== "hidden");
 }
 
 /** A connection switch or a sign-out: nothing from the previous daemon stays. */

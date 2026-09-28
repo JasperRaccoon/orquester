@@ -72,6 +72,8 @@ export interface PhoneEditorProps {
   mode: EditorMode;
   onMode: (mode: EditorMode) => void;
   liveRuns: number;
+  /** Triggers whose last poll failed, by node id. */
+  triggerErrors?: ReadonlyMap<string, string>;
   enableRefusal: string | null;
   onToggleEnabled: (enabled: boolean) => void;
   /** Conflict and notice banners. */
@@ -324,6 +326,7 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
             onAddAfter={(from) => setAddTarget({ kind: "after", from })}
             onAddFirst={(kind) => setAddTarget({ kind: "first", triggers: kind === "trigger" })}
             onStepMenu={openMenu}
+            triggerErrors={props.triggerErrors}
           />
         </div>
       ) : (

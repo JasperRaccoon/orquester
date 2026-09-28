@@ -125,6 +125,8 @@ export interface WorkflowRunEntry {
   deadEdges: readonly string[];
   /** The last load of the whole run failed. */
   error: string | null;
+  /** The event stream was down since it was loaded (a reconnect): reload it when on screen. */
+  stale?: boolean;
 }
 
 export interface WorkflowSecretsList extends WorkflowsLoad {
@@ -577,6 +579,11 @@ export function loadWorkflowRuns(
       if (!isRecord(response) || !Array.isArray(response.runs)) {
         throw new Error("The daemon answered the run list in an unexpected shape.");
       }
+      // A run this client holds whole learns its status from the list too (an
+      // end missed while the event stream was down).
+      for (const run of sanitizeRunList(response.runs)) {
+        if (run.workflowId === workflowId && getState().runs[run.id] !== undefined) applyRunSummary(run);
+      }
       const state = getState();
       const current = state.recentRuns[workflowId];
       const fresh = sanitizeRunList(response.runs).filter((run) => run.workflowId === workflowId);
@@ -643,7 +650,8 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
             blocks: mergeBlocks(blocks, entry.blocks),
             takenEdges: union(takenEdges, entry.takenEdges),
             deadEdges: union(deadEdges, entry.deadEdges),
-            error: null
+            error: null,
+            stale: false
           }
         }
       });
@@ -739,6 +747,16 @@ export function markWorkflowsStale(): void {
     secrets[key] = list.status === "loaded" ? { ...list, stale: true } : list;
   }
   patch.secrets = secrets;
+  // A run held whole missed its deltas (and maybe its end): the view on screen reloads it.
+  let runsChanged = false;
+  const runs: Record<string, WorkflowRunEntry> = {};
+  for (const [id, entry] of Object.entries(state.runs)) {
+    if (entry.detail !== null && !entry.stale) {
+      runs[id] = { ...entry, stale: true };
+      runsChanged = true;
+    } else runs[id] = entry;
+  }
+  if (runsChanged) patch.runs = runs;
   workflowsStore.setState(patch);
 }
 

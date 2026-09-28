@@ -777,6 +777,39 @@ export class ApiClient {
     return this.transporter.openStream(`${workflowRoutes.nodeLog(runId, nodeId)}${query}`, handlers);
   }
 
+  /**
+   * One window of a code/shell block's log (`…/log?stream=&offset=&maxBytes=`,
+   * no follow): the redacted text plus the daemon's own position in the RAW
+   * file (`X-Log-Next-Offset`) — the only offset a resume may use, since
+   * redaction changes the text's length. A non-2xx answer throws.
+   */
+  async readWorkflowNodeLogWindow(
+    runId: string,
+    nodeId: string,
+    opts: { stream?: "stdout" | "stderr"; offset?: number; maxBytes?: number },
+    signal?: AbortSignal
+  ): Promise<WorkflowLogWindow> {
+    const path = workflowRoutes.nodeLog(runId, nodeId);
+    if (!this.transporter.requestBytes) throw new Error("Logs are not supported on this connection.");
+    const response = await this.transporter.requestBytes({
+      method: "GET",
+      path,
+      query: { stream: opts.stream, offset: opts.offset, maxBytes: opts.maxBytes },
+      signal
+    });
+    if (!response.ok) {
+      let body: unknown;
+      try {
+        const text = new TextDecoder().decode(response.data);
+        body = text ? JSON.parse(text) : undefined;
+      } catch {
+        body = undefined;
+      }
+      throw new WorkflowApiError(response.status, "GET", path, response.headers, body);
+    }
+    return parseWorkflowLogWindow(response.data, response.headers ?? {}, opts.offset ?? 0);
+  }
+
   /** "Who would run now?" for an agent block's chain. */
   previewWorkflowAccount(req: AccountPreviewRequest, signal?: AbortSignal): Promise<AccountPreviewResponse> {
     return this.workflowSend("POST", workflowRoutes.accountPreview, { body: req, signal });
@@ -1349,6 +1382,41 @@ export class ApiClient {
   killSystemProcess(pid: number): Promise<KillProcessResponse> {
     return this.send("POST", "/api/system/processes/kill", { body: { pid } });
   }
+}
+
+export interface WorkflowLogWindow {
+  text: string;
+  /** Where the next window starts, in the raw file's bytes (the daemon's word). */
+  nextOffset: number;
+  /** The window reached the file's end (as it is now). */
+  eof: boolean;
+  /** The file's size when read. */
+  size: number;
+  /** The daemon still writes this log (the block runs). */
+  live: boolean;
+}
+
+function headerOf(headers: Record<string, string>, name: string): string | undefined {
+  if (name in headers) return headers[name];
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) if (key.toLowerCase() === lower) return value;
+  return undefined;
+}
+
+/** A log window's body and `X-Log-*` headers. Headers missing (a proxy stripped them): the window is the whole rest. */
+export function parseWorkflowLogWindow(data: ArrayBuffer, headers: Record<string, string>, offset: number): WorkflowLogWindow {
+  const text = new TextDecoder().decode(data);
+  const next = Number(headerOf(headers, "x-log-next-offset"));
+  const size = Number(headerOf(headers, "x-log-size"));
+  const eofHeader = headerOf(headers, "x-log-eof");
+  const nextOffset = Number.isFinite(next) && next >= offset ? next : offset + data.byteLength;
+  return {
+    text,
+    nextOffset,
+    eof: eofHeader === undefined ? true : eofHeader === "1",
+    size: Number.isFinite(size) ? size : nextOffset,
+    live: headerOf(headers, "x-log-live") === "1"
+  };
 }
 
 export class ApiError extends Error {

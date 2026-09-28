@@ -38,6 +38,7 @@ import { providerForRefId } from "../../lib/agent-chat/providers";
 import { useSavedPrompts } from "../../lib/saved-prompts/hooks";
 import { canvasFitOptions } from "../../lib/workflows/canvas-fit";
 import { defaultAgentLabel, defaultModelLabel, type NodeSummaryContext } from "../../lib/workflows/catalog-ui";
+import { triggerErrorsOf } from "../../lib/workflows/format";
 import {
   duplicateWorkflowNodes,
   parseWorkflowClipboard,
@@ -221,6 +222,8 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   const workflows = useWorkflowsState();
   const summary = workflows.summaries.get(workflowId);
   const liveRuns = summary?.activeRuns.filter((run) => isRunActive(run.status)).length ?? 0;
+  const summaryTriggers = summary?.triggers;
+  const triggerErrors = useMemo(() => triggerErrorsOf(summaryTriggers ? { triggers: summaryTriggers } : null), [summaryTriggers]);
   const workflowProject = draft?.project.kind === "existing" ? draft.project.projectPath : projectPath;
   const secrets = useWorkflowSecrets(workflowId);
   const secretNames = useMemo(() => [...new Set(secrets.secrets.map((secret) => secret.name))].sort(), [secrets.secrets]);
@@ -646,7 +649,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   const runsContent = runsRenderer ? (
     runsRenderer(runsContext)
   ) : (
-    <RunsModeFallback workflowId={workflowId} runId={selectedRunId} onSelectRun={selectRun} summaryContext={summaryContext} />
+    <RunsModeFallback workflowId={workflowId} runId={selectedRunId} onSelectRun={selectRun} summaryContext={summaryContext} show={show} />
   );
 
   const overlays = (
@@ -709,6 +712,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
             mode={mode}
             onMode={setMode}
             liveRuns={liveRuns}
+            triggerErrors={triggerErrors}
             enableRefusal={enableRefusal}
             onToggleEnabled={(enabled) => void toggleEnabled(enabled)}
             banners={banners}
@@ -719,6 +723,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
                   ref={canvasRef}
                   workflow={draft}
                   problems={state.problems}
+                  triggerErrors={triggerErrors}
                   readOnly={readOnly}
                   selection={selection}
                   onSelectionChange={select}
@@ -808,6 +813,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
               ref={canvasRef}
               workflow={draft}
               problems={state.problems}
+              triggerErrors={triggerErrors}
               readOnly={readOnly}
               selection={selection}
               onSelectionChange={select}

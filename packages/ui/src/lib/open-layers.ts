@@ -49,3 +49,24 @@ export function isAnyLayerOpen(): boolean {
 export function openLayerEffect(open: boolean): (() => void) | undefined {
   return open ? openLayer() : undefined;
 }
+
+/**
+ * A layer that must know whether it is the NEWEST open one (a bottom sheet
+ * whose own Escape must not beat a dropdown opened inside it: both listen on
+ * `document`, and the sheet's listener, bound first, runs first). The set
+ * keeps insertion order, so the newest token is the last one.
+ */
+export function openTrackedLayer(): { release: () => void; isTopmost: () => boolean } {
+  const token = Symbol("open-layer");
+  openLayers.add(token);
+  return {
+    release: () => {
+      openLayers.delete(token);
+    },
+    isTopmost: () => {
+      let last: symbol | undefined;
+      for (const entry of openLayers) last = entry;
+      return last === token;
+    }
+  };
+}

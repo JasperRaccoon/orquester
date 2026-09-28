@@ -1,12 +1,14 @@
 /**
- * A code or shell block's log (spec §7.3): stdout / stderr, followed live
- * while the block runs (`GET …/nodes/:nodeId/log?stream=&offset=&follow=1`,
- * chunked, open only while on screen), ANSI stripped, the DOM capped at
- * `LOG_MAX_LINES` lines with the whole log one "Download full log" away.
+ * A code or shell block's log (spec §7.3): stdout / stderr, read window by
+ * window (`GET …/nodes/:nodeId/log?stream=&offset=`) to its end and polled
+ * while the block runs (only while on screen), ANSI stripped, the DOM capped
+ * at `LOG_MAX_LINES` lines (the dropped count is said above the log) with the
+ * whole log one "Download full log" away — which reads every window too.
  *
  * Auto-scroll sticks to the bottom until the user scrolls up; then a
- * "Jump to latest" pill brings them back. A stream that ends while the block
- * still runs (a dropped connection) resumes from the bytes already shown.
+ * "Jump to latest" pill brings them back. Every read resumes at the daemon's
+ * own raw-file offset (`X-Log-Next-Offset`), so a dropped connection never
+ * doubles or skips output; a non-2xx answer is an error, never log text.
  */
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -23,7 +25,11 @@ import {
   visibleLogLines,
   type LogBufferState
 } from "./log-buffer";
+import { readWholeLog, startLogFollower, type LogFollower } from "./log-follower";
 import { errorText, FOCUS_RING, type RunsVariant, type WorkflowRunsApi } from "./shared";
+
+/** Bytes per window when downloading the whole log (the daemon's maximum). */
+const LOG_DOWNLOAD_WINDOW_BYTES = 4 * 1024 * 1024;
 
 export type LogStream = "stdout" | "stderr";
 
@@ -215,8 +221,10 @@ export interface LogViewerProps {
   nodeId: string;
   /** The block's name (the downloaded file is named after it). */
   blockName: string;
-  /** Follow while the block runs; the stream ends by itself when it stops. */
+  /** Follow while the block runs; reading stops at the log's end once it does not. */
   live: boolean;
+  /** The block's attempt: a retry writes a new log, read from its start. */
+  attempt?: number;
   sizes?: { stdoutBytes: number; stderrBytes: number };
   /** Start on stderr (a failed block's first look), else stdout. */
   initialStream?: LogStream;
@@ -224,15 +232,14 @@ export interface LogViewerProps {
   className?: string;
 }
 
-const RESUME_DELAY_MS = 1_000;
-
-/** The viewer, streaming: `LogViewerView` fed by `openWorkflowNodeLog`. */
+/** The viewer, reading: `LogViewerView` fed window by window (`startLogFollower`). */
 export const LogViewer: React.FC<LogViewerProps> = ({
   api,
   runId,
   nodeId,
   blockName,
   live,
+  attempt = 0,
   sizes,
   initialStream = "stdout",
   variant,
@@ -246,98 +253,52 @@ export const LogViewer: React.FC<LogViewerProps> = ({
   const [downloading, setDownloading] = useState(false);
   const liveRef = useRef(live);
   liveRef.current = live;
-  const bytesRef = useRef(0);
+  const follower = useRef<LogFollower | null>(null);
 
+  // One follower per (run, block, attempt, stream): a retry's new attempt is a new file.
   useEffect(() => {
-    let closed = false;
-    let handle: { close(): void } | null = null;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    bytesRef.current = 0;
     setBuffer(EMPTY_LOG);
     setLoading(true);
     setError(null);
-
-    const open = (): void => {
-      const follow = liveRef.current;
-      setFollowing(follow);
-      handle = api.openWorkflowNodeLog(
-        runId,
-        nodeId,
-        { stream, offset: bytesRef.current, follow },
-        {
-          onData: (chunk) => {
-            if (closed) return;
-            setLoading(false);
-            setBuffer((current) => {
-              const next = appendLog(current, chunk);
-              bytesRef.current = next.bytes;
-              return next;
-            });
-          },
-          onEnd: () => {
-            if (closed) return;
-            setLoading(false);
-            handle = null;
-            // A stream that ends while the block still runs dropped: resume where it stopped.
-            if (follow && liveRef.current) {
-              timer = setTimeout(() => {
-                if (!closed) open();
-              }, RESUME_DELAY_MS);
-            } else {
-              setFollowing(false);
-            }
-          },
-          onError: (reason) => {
-            if (closed) return;
-            setLoading(false);
-            handle = null;
-            if (follow && liveRef.current) {
-              timer = setTimeout(() => {
-                if (!closed) open();
-              }, RESUME_DELAY_MS * 3);
-            } else {
-              setFollowing(false);
-              setError(errorText(reason, "The log could not be read."));
-            }
-          }
-        }
-      );
-    };
-    open();
+    setFollowing(liveRef.current);
+    const current = startLogFollower({
+      read: (offset, signal) => api.readWorkflowNodeLogWindow(runId, nodeId, { stream, offset }, signal),
+      live: () => liveRef.current,
+      onText: (text) => {
+        setLoading(false);
+        setBuffer((previous) => appendLog(previous, text));
+      },
+      onState: (state) => {
+        setLoading(state.loading);
+        setFollowing(state.following);
+        setError(state.error);
+      },
+      errorText: (reason) => errorText(reason, "The log could not be read.")
+    });
+    follower.current = current;
     return () => {
-      closed = true;
-      if (timer !== null) clearTimeout(timer);
-      handle?.close();
+      current.stop();
+      if (follower.current === current) follower.current = null;
     };
-  }, [api, runId, nodeId, stream]);
+  }, [api, runId, nodeId, stream, attempt]);
 
-  // The block stopped while its stream was open: the server ends the stream; nothing to do but reflect it.
+  // The block (re)started while its reader had finished: read on from where it stopped.
   useEffect(() => {
-    if (!live) setFollowing(false);
+    if (live) {
+      setFollowing(true);
+      follower.current?.wake();
+    }
   }, [live]);
 
   const download = useCallback(() => {
     if (downloading) return;
     setDownloading(true);
-    const parts: string[] = [];
-    const finish = (failure?: unknown) => {
-      setDownloading(false);
-      if (failure !== undefined) {
-        setError(errorText(failure, "The log could not be downloaded."));
-        return;
-      }
-      downloadBlob(logFileName(blockName, stream), new Blob(parts, { type: "text/plain;charset=utf-8" }));
-    };
-    api.openWorkflowNodeLog(
-      runId,
-      nodeId,
-      { stream, offset: 0, follow: false },
-      {
-        onData: (chunk) => parts.push(chunk),
-        onEnd: () => finish(),
-        onError: (reason) => finish(reason ?? new Error())
-      }
-    );
+    readWholeLog((offset) =>
+      api.readWorkflowNodeLogWindow(runId, nodeId, { stream, offset, maxBytes: LOG_DOWNLOAD_WINDOW_BYTES })
+    )
+      .then((parts) => downloadBlob(logFileName(blockName, stream), new Blob(parts, { type: "text/plain;charset=utf-8" })))
+      .catch((failure: unknown) => setError(errorText(failure, "The log could not be downloaded.")))
+      .finally(() => setDownloading(false));
   }, [api, blockName, downloading, nodeId, runId, stream]);
 
   return (

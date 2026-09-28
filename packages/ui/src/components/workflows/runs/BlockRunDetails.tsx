@@ -347,10 +347,12 @@ export const BlockRunDetails: React.FC<BlockRunDetailsProps> = ({
         {activeTab === "logs" && logs ? (
           block && block.attempt > 0 ? (
             <LogViewer
+              key={block.attempt}
               api={api}
               runId={runId}
               nodeId={nodeId}
               blockName={name}
+              attempt={block.attempt}
               live={block.status === "running"}
               sizes={block.logs}
               initialStream={block.status === "failed" && (block.logs?.stderrBytes ?? 0) > 0 ? "stderr" : "stdout"}

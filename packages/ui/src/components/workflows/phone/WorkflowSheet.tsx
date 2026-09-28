@@ -17,6 +17,7 @@ import { X } from "lucide-react";
 
 import { useOpenLayer } from "../../../hooks/use-open-layer";
 import { cn } from "../../../lib/cn";
+import { openTrackedLayer } from "../../../lib/open-layers";
 import { KEYBOARD_SURFACE_PROPS } from "../../../lib/keyboard-surfaces";
 import { pushBackClose } from "./back-close";
 import { PhoneLayoutContext } from "./phone-context";
@@ -71,6 +72,17 @@ const SheetFrame: React.FC<WorkflowSheetProps> = ({
 }) => {
   // Mounted only while open; holds its layer with that state.
   useOpenLayer(open);
+  // Its place among the open layers: a dropdown or menu opened inside it is newer, and owns Escape.
+  const tracked = useRef<{ release: () => void; isTopmost: () => boolean } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const layer = openTrackedLayer();
+    tracked.current = layer;
+    return () => {
+      layer.release();
+      if (tracked.current === layer) tracked.current = null;
+    };
+  }, [open]);
   const box = useVisualViewportBox(true);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const sheetRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +96,7 @@ const SheetFrame: React.FC<WorkflowSheetProps> = ({
       if (event.key !== "Escape" || event.defaultPrevented) return;
       const sheets = document.querySelectorAll("[data-wf-sheet]");
       if (sheets[sheets.length - 1] !== sheetRef.current) return; // only the topmost
+      if (tracked.current && !tracked.current.isTopmost()) return; // a layer above it (a dropdown) takes it
       event.preventDefault();
       closeRef.current();
     };

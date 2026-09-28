@@ -18,6 +18,7 @@ import { useWorkflowRun, useWorkflowRuns } from "../../lib/workflows/hooks";
 import { deriveRunOverlay } from "../../lib/workflows/overlay";
 import { RunStatusDot } from "../right-rail/workflows/WorkflowCard";
 import { StandaloneWorkflowCanvas } from "./canvas/WorkflowCanvas";
+import { useRunOnScreen } from "./runs/use-run-on-screen";
 
 const TONE_TEXT = { ok: "text-ok", danger: "text-danger", warn: "text-warn", info: "text-info", neutral: "text-neutral-400" } as const;
 
@@ -36,10 +37,12 @@ export const RunsModeFallback: React.FC<{
   runId: string | null;
   onSelectRun: (runId: string | null) => void;
   summaryContext: NodeSummaryContext;
-}> = ({ workflowId, runId, onSelectRun, summaryContext }) => {
+  show?: boolean;
+}> = ({ workflowId, runId, onSelectRun, summaryContext, show = true }) => {
   const list = useWorkflowRuns(workflowId);
   const selectedId = runId ?? list.runs[0]?.id ?? null;
   const entry = useWorkflowRun(selectedId);
+  useRunOnScreen(entry ? selectedId : null, show, entry !== null && !isRunActive(entry.summary.status));
   const anyLive = list.runs.some((run) => isRunActive(run.status));
   const now = useTicker(anyLive);
   const [selection, setSelection] = useState<{ nodeIds: string[]; edgeIds: string[] }>({ nodeIds: [], edgeIds: [] });

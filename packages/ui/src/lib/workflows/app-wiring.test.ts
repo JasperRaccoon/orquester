@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import { WORKFLOWS_CHANNEL, type WorkflowSummary } from "@orquester/api";
 
-import { useAppStore } from "../../store/app.ts";
+import { useAppStore, withoutWorkflowTabs } from "../../store/app.ts";
 import { resetWorkflows, workflowsStore } from "./store.ts";
 
 const P = "/w/acme/app";
@@ -158,8 +158,18 @@ describe("a sign-out and a connection switch reset the workflows", () => {
       const reset = body.indexOf("resetWorkflows();");
       assert.ok(reset >= 0, `${name} calls resetWorkflows()`);
       assert.ok(reset < body.indexOf("set({"), "before the new client is installed");
+      assert.ok(body.includes("...withoutWorkflowTabs(get())"), `${name} drops the previous daemon's workflow tabs`);
     });
   }
+
+  it("withoutWorkflowTabs empties the tabs and clears an active pointer at one", () => {
+    const result = withoutWorkflowTabs({
+      workflowTabsByProject: { [P]: [{ id: "wt-1", projectPath: P, workflowId: "a", title: "A" }] },
+      activeTabByProject: { [P]: "wt-1", [Q]: "session-9" }
+    });
+    assert.deepEqual(result.workflowTabsByProject, {});
+    assert.deepEqual(result.activeTabByProject, { [P]: null, [Q]: "session-9" });
+  });
 
   it("project and workspace cleanup drop the workflow tabs too", () => {
     const start = source.indexOf("function clearProjectLocalState(");

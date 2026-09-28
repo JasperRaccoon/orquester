@@ -14,6 +14,7 @@ import {
   runStatusLabel,
   runStatusTone,
   runTriggerText,
+  triggerErrorsOf,
   triggerLine,
   workflowInProject
 } from "./format.ts";
@@ -227,5 +228,19 @@ describe("the New workflow form", () => {
     assert.equal(isValidSecretName("JIRA_TOKEN"), true);
     assert.equal(isValidSecretName("2FA"), false);
     assert.equal(isValidSecretName("lower"), false);
+  });
+});
+
+describe("triggerErrorsOf", () => {
+  it("maps each trigger whose last poll failed to its error, and nothing else", () => {
+    const errors = triggerErrorsOf({
+      triggers: [
+        { nodeId: "git", lastError: "ls-remote: authentication failed" },
+        { nodeId: "cron", lastError: null },
+        { nodeId: "blank", lastError: "  " }
+      ]
+    });
+    assert.deepEqual([...errors], [["git", "ls-remote: authentication failed"]]);
+    assert.equal(triggerErrorsOf(null).size, 0);
   });
 });

@@ -377,8 +377,9 @@ export function duplicateStepAfter<W extends Graph>(workflow: W, nodeId: string,
   if (primary && acceptsInput(node)) {
     const onwards = next.edges.filter((edge) => edge.source === nodeId && edge.sourceHandle === primary);
     const copyOut = primary;
-    next = { ...next, edges: next.edges.filter((edge) => !onwards.includes(edge)) };
+    // Shift what follows BEFORE the edges go: with them gone nothing is downstream any more.
     next = shiftDownstream(next, nodeId, node.position.x + STEP_X);
+    next = { ...next, edges: next.edges.filter((edge) => !onwards.some((gone) => gone.id === edge.id)) };
     next = connectBlocks(next, { source: nodeId, sourceHandle: primary, target: copyId }, mintId);
     for (const edge of onwards) next = connectBlocks(next, { source: copyId, sourceHandle: copyOut, target: edge.target }, mintId);
   } else {

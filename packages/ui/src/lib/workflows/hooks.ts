@@ -13,6 +13,7 @@ import type { WorkflowSecretName, WorkflowSummary } from "@orquester/api";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { workflowInProject } from "./format";
+import { workflowTempProjects, type WorkflowTempProjects } from "./temp-projects";
 import {
   loadWorkflowRun,
   loadWorkflowRuns,
@@ -54,6 +55,41 @@ const getSnapshot = (): WorkflowsState => workflowsStore.getState();
 /** The whole workflows store, re-rendering on every change. */
 export function useWorkflowsState(): WorkflowsState {
   return useSyncExternalStore(workflowsStore.subscribe, getSnapshot, getSnapshot);
+}
+
+let tempCache: { state: WorkflowsState; value: WorkflowTempProjects } | null = null;
+
+const sameSet = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean => {
+  if (a.size !== b.size) return false;
+  for (const entry of a) if (!b.has(entry)) return false;
+  return true;
+};
+
+function tempProjectsSnapshot(): WorkflowTempProjects {
+  const state = workflowsStore.getState();
+  if (tempCache?.state === state) return tempCache.value;
+  const next = workflowTempProjects(state);
+  // The same answer keeps its identity: a run's progress re-renders nobody.
+  const value =
+    tempCache && sameSet(tempCache.value.paths, next.paths) && sameSet(tempCache.value.runIdPrefixes, next.runIdPrefixes)
+      ? tempCache.value
+      : next;
+  tempCache = { state, value };
+  return value;
+}
+
+/** The temporary projects of the runs this client knows (the sidebar's marker, §5.10). */
+export function useWorkflowTempProjects(): WorkflowTempProjects {
+  return useSyncExternalStore(workflowsStore.subscribe, tempProjectsSnapshot, tempProjectsSnapshot);
+}
+
+/** The workflows list's load status alone. */
+export function useWorkflowsLoadStatus(): WorkflowsState["load"]["status"] {
+  return useSyncExternalStore(
+    workflowsStore.subscribe,
+    () => workflowsStore.getState().load.status,
+    () => workflowsStore.getState().load.status
+  );
 }
 
 function useConnected(): boolean {
@@ -147,15 +183,18 @@ export function useWorkflowRun(runId: string | null): WorkflowRunEntry | null {
     () => null
   );
   const loaded = entry?.detail != null;
+  const stale = entry?.stale === true;
 
   useEffect(() => {
     watchConnection();
   }, []);
 
   useEffect(() => {
-    if (!connected || !runId || loaded) return;
-    void loadWorkflowRun(api, runId);
-  }, [api, connected, runId, loaded]);
+    if (!connected || !runId) return;
+    // Loaded and current: nothing to do. Stale (a reconnect): reload it whole.
+    if (loaded && !stale) return;
+    void loadWorkflowRun(api, runId, stale ? { force: true } : undefined);
+  }, [api, connected, runId, loaded, stale]);
 
   return entry;
 }

@@ -13,6 +13,9 @@ import {
   AUTOSAVE_DELAY_MS,
   VALIDATE_DELAY_MS,
   WorkflowEditor,
+  flushAllWorkflowEditors,
+  resetWorkflowEditors,
+  workflowEditorFor,
   type EditorTimers,
   type RemoteRevisions,
   type WorkflowEditorApi
@@ -380,5 +383,105 @@ describe("editor-store: history, patches, enabling, validation", () => {
     }));
     timers.advance(VALIDATE_DELAY_MS);
     assert.ok(editor.state.problems.some((problem) => problem.code === "unknown_reference" && problem.nodeId === "a"));
+  });
+});
+
+describe("editor-store: review fixes", () => {
+  it("a reconnect's new client keeps the same editor and its unsaved draft (keyed by connection id)", async () => {
+    const first = Object.assign(new FakeApi(workflow([node("t", "trigger.manual")])), { connection: { id: "c1" } });
+    const timers = new FakeTimers();
+    const editor = workflowEditorFor(first, "wf-1", { timers, remote: null });
+    await settle();
+    editor.change(rename("Typing"));
+    const second = Object.assign(new FakeApi(first.server), { connection: { id: "c1" } });
+    const again = workflowEditorFor(second, "wf-1", { timers, remote: null });
+    assert.equal(again, editor, "same editor");
+    assert.equal(again.state.draft?.name, "Typing");
+    timers.advance(AUTOSAVE_DELAY_MS);
+    await settle();
+    assert.equal(first.puts.length, 0, "the old client is not used any more");
+    assert.equal(second.puts.length, 1);
+    const other = Object.assign(new FakeApi(first.server), { connection: { id: "c2" } });
+    assert.notEqual(workflowEditorFor(other, "wf-1", { timers, remote: null }), editor, "another connection gets its own");
+    resetWorkflowEditors();
+  });
+
+  it("a load that lands after the user typed keeps the edit and raises the banner", async () => {
+    const { api, remote, editor } = await setup();
+    let release!: () => void;
+    const realGet = api.getWorkflow.bind(api);
+    api.getWorkflow = async () => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return realGet();
+    };
+    api.saveElsewhere(rename("Theirs"));
+    remote.announce(2); // clean → reload starts
+    await settle();
+    editor.change(rename("Mine")); // typed while the copy is on its way
+    release();
+    await settle();
+    assert.equal(editor.state.draft?.name, "Mine");
+    assert.deepEqual(editor.state.conflict, { kind: "remote" });
+  });
+
+  it("the editor's own Enable toggle does not trigger a reload", async () => {
+    const { api, remote, editor } = await setup();
+    const realPatch = api.patchWorkflow.bind(api);
+    api.patchWorkflow = async (id, req) => {
+      const answer = await realPatch(id, req);
+      remote.announce(api.server.revision); // the echo lands before the answer
+      return answer;
+    };
+    assert.equal(await editor.setEnabled(true), null);
+    await settle();
+    assert.equal(api.gets, 1, "no reload");
+    assert.equal(editor.state.revision, 2);
+    assert.equal(editor.state.conflict, null);
+  });
+
+  it("undo never flips enabled", async () => {
+    const { editor } = await setup();
+    editor.change(rename("A"));
+    await editor.setEnabled(true);
+    editor.undo();
+    assert.equal(editor.state.draft?.name, "Test");
+    assert.equal(editor.state.draft?.enabled, true);
+  });
+
+  it("reconnect: a failed save is retried; a newer daemon revision is a conflict", async () => {
+    const { api, timers, editor } = await setup();
+    const real = api.replaceWorkflow.bind(api);
+    let fail = true;
+    api.replaceWorkflow = async (id, req) => {
+      if (fail) throw Object.assign(new Error("Network down"), { status: 0 });
+      return real(id, req);
+    };
+    editor.change(rename("Kept"));
+    timers.advance(AUTOSAVE_DELAY_MS);
+    await settle();
+    assert.equal(editor.state.saveState, "error");
+    fail = false;
+    await editor.onReconnect();
+    await settle();
+    assert.equal(editor.state.saveState, "saved");
+    assert.equal(api.server.name, "Kept");
+
+    editor.change(rename("Again"));
+    api.saveElsewhere(rename("Theirs"));
+    await editor.onReconnect();
+    assert.deepEqual(editor.state.conflict, { kind: "remote" });
+    assert.equal(editor.state.draft?.name, "Again");
+  });
+
+  it("flushAllWorkflowEditors saves a pending edit at once (pagehide)", async () => {
+    const api = Object.assign(new FakeApi(workflow([node("t", "trigger.manual")])), { connection: { id: "c9" } });
+    const timers = new FakeTimers();
+    const editor = workflowEditorFor(api, "wf-9", { timers, remote: null });
+    await settle();
+    editor.change(rename("Leaving"));
+    flushAllWorkflowEditors();
+    await settle();
+    assert.equal(api.server.name, "Leaving");
+    resetWorkflowEditors();
   });
 });

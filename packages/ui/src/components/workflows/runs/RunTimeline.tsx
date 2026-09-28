@@ -6,12 +6,11 @@
  * "true", "case 1"), a join once after its branches. Tap a step to open it.
  */
 
-import React, { useEffect, useMemo } from "react";
+import React, { useMemo } from "react";
 import { CornerDownRight, FlaskConical, Pin, Repeat2 } from "lucide-react";
 
 import type { WorkflowRunEntry } from "../../../lib/workflows/store";
 import { cn } from "../../../lib/cn";
-import { markWorkflowRunViewed } from "../../../lib/workflows/notifications";
 import {
   blockErrorKindLabel,
   blockTypeLabel,
@@ -57,10 +56,6 @@ export const RunTimeline: React.FC<RunTimelineProps> = ({
         : [],
     [definition, entry.summary.status, entry.blocks, entry.takenEdges, entry.deadEdges, now]
   );
-
-  useEffect(() => {
-    markWorkflowRunViewed(entry.summary.id);
-  }, [entry.summary.id]);
 
   if (!definition) {
     return (

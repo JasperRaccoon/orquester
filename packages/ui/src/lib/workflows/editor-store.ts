@@ -181,10 +181,14 @@ export class WorkflowEditor {
   private unsubscribeRemote: (() => void) | null = null;
   private disposed = false;
   private loadSeq = 0;
+  /** Bumped on every user edit (change, undo, redo) — never by enabling or a load. */
+  private editSeq = 0;
+  /** An enable/disable patch in flight: its answer decides the revision, like a save's. */
+  private enabling: Promise<unknown> | null = null;
   private readonly remote: RemoteRevisions | null;
 
   constructor(
-    private readonly api: WorkflowEditorApi,
+    private api: WorkflowEditorApi,
     readonly workflowId: string,
     options: WorkflowEditorOptions = {}
   ) {
@@ -220,6 +224,15 @@ export class WorkflowEditor {
     return this.store.getState();
   }
 
+  /** The client of a reconnected connection: same daemon, a new transport. */
+  setApi(api: WorkflowEditorApi): void {
+    this.api = api;
+  }
+
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   private set(patch: Partial<WorkflowEditorState>): void {
     if (!this.disposed) this.store.setState(patch);
   }
@@ -235,12 +248,23 @@ export class WorkflowEditor {
   /** Read the workflow; replaces the draft, clears history and conflicts. */
   async load(): Promise<void> {
     const seq = ++this.loadSeq;
-    if (this.state.draft === null) this.set({ status: "loading", loadError: null });
+    const editAtStart = this.editSeq;
+    const hadDraft = this.state.draft !== null;
+    if (!hadDraft) this.set({ status: "loading", loadError: null });
     try {
       const answer = await this.api.getWorkflow(this.workflowId);
       if (seq !== this.loadSeq || this.disposed) return;
       const record = recordOf(answer);
       if (record === null) throw new Error("The daemon answered in an unexpected shape.");
+      if (hadDraft && this.editSeq !== editAtStart) {
+        // The user typed while the copy was on its way: never drop that edit.
+        if (record.revision > this.state.revision) {
+          this.cancelSave();
+          this.set({ conflict: { kind: "remote" }, saveState: "conflict" });
+        }
+        return;
+      }
+      if (hadDraft && record.revision < this.state.revision) return; // an answer older than our own save
       this.adoptServerCopy(record);
     } catch (error) {
       if (seq !== this.loadSeq || this.disposed) return;
@@ -302,8 +326,8 @@ export class WorkflowEditor {
   /** A revision announced by the daemon (`workflow.upserted`). */
   onRemoteRevision(revision: number): void {
     if (this.disposed || this.state.draft === null) return;
-    // Our own save's answer decides once it lands; checked again after it.
-    if (this.saving !== null) return;
+    // Our own save's (or enable's) answer decides once it lands; checked again after it.
+    if (this.saving !== null || this.enabling !== null) return;
     if (revision <= this.state.revision) return;
     if (!this.state.dirty) {
       void this.load();
@@ -327,6 +351,7 @@ export class WorkflowEditor {
       return false;
     }
     this.history.record(draft, options.coalesce ?? null, this.timers.now());
+    this.editSeq += 1;
     this.set({
       draft: next,
       dirty: true,
@@ -378,7 +403,11 @@ export class WorkflowEditor {
     this.swapDraft(next);
   }
 
-  private swapDraft(next: Workflow): void {
+  private swapDraft(snapshot: Workflow): void {
+    // `enabled` is not an edit: it moves only through setEnabled, never by undo.
+    const current = this.state.draft;
+    const next = current !== null && snapshot.enabled !== current.enabled ? { ...snapshot, enabled: current.enabled } : snapshot;
+    this.editSeq += 1;
     const ids = new Set(next.nodes.map((node) => node.id));
     const edgeIds = new Set(next.edges.map((edge) => edge.id));
     const selection = this.state.selection;
@@ -548,15 +577,18 @@ export class WorkflowEditor {
     if (this.state.draft === null) return "The workflow is not loaded.";
     await this.flush();
     if (this.state.conflict !== null) return "Resolve the conflict first.";
+    if (this.enabling !== null) await this.enabling.catch(() => undefined);
+    const patch = this.api.patchWorkflow(this.workflowId, {
+      revision: this.state.revision,
+      ops: [{ op: "set_enabled", enabled }]
+    });
+    this.enabling = patch;
     try {
-      const answer = await this.api.patchWorkflow(this.workflowId, {
-        revision: this.state.revision,
-        ops: [{ op: "set_enabled", enabled }]
-      });
+      const answer = await patch;
       const record = recordOf(answer);
       const draft = this.state.draft;
       if (draft !== null) this.set({ draft: { ...draft, enabled: record?.enabled ?? enabled } });
-      this.set({ revision: record?.revision ?? this.state.revision + 1 });
+      this.set({ revision: Math.max(this.state.revision, record?.revision ?? this.state.revision + 1) });
       return null;
     } catch (error) {
       if (isConflict(error)) {
@@ -564,7 +596,41 @@ export class WorkflowEditor {
         return "The workflow changed elsewhere.";
       }
       return errorText(error, enabled ? "Couldn't enable the workflow." : "Couldn't disable the workflow.");
+    } finally {
+      if (this.enabling === patch) this.enabling = null;
+      // Our own patch's echo is at or below the revision it answered; anything newer is someone else's.
+      const remote = this.remoteRevision();
+      if (remote !== undefined && !this.disposed) this.onRemoteRevision(remote);
     }
+  }
+
+  /**
+   * The connection came back: a clean draft reloads; a dirty one re-checks the
+   * daemon's revision (a newer one is a conflict) and otherwise saves again —
+   * a save that failed while the daemon was away included.
+   */
+  async onReconnect(): Promise<void> {
+    if (this.disposed || this.state.draft === null) {
+      if (!this.disposed) await this.load();
+      return;
+    }
+    if (!this.state.dirty) {
+      if (this.saving === null && this.enabling === null) await this.load();
+      return;
+    }
+    if (this.state.conflict !== null) return;
+    try {
+      const record = recordOf(await this.api.getWorkflow(this.workflowId));
+      if (this.disposed || record === null) return;
+      if (record.revision > this.state.revision && this.saving === null) {
+        this.cancelSave();
+        this.set({ conflict: { kind: "remote" }, saveState: "conflict" });
+        return;
+      }
+    } catch {
+      return; // still unreachable: the next reconnect tries again
+    }
+    if (this.state.dirty && this.state.conflict === null) await this.flush();
   }
 
   /** Stop timers and listeners; a pending edit is saved first. */
@@ -593,7 +659,8 @@ export const EDITOR_RELEASE_GRACE_MS = 1_000;
 
 interface EditorEntry {
   editor: WorkflowEditor;
-  api: WorkflowEditorApi;
+  /** The connection the draft belongs to (`api.connection.id`), else the client itself. */
+  connectionKey: unknown;
   refs: number;
   disposeTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -605,21 +672,50 @@ const editors = new Map<string, EditorEntry>();
  * while rendering; hold it with `retainWorkflowEditor` from an effect.
  */
 export function workflowEditorFor(api: WorkflowEditorApi, workflowId: string, options?: WorkflowEditorOptions): WorkflowEditor {
+  installLifecycleFlush();
+  const connectionKey = connectionKeyOf(api);
   let entry = editors.get(workflowId);
-  if (entry && entry.api !== api) {
+  if (entry && entry.connectionKey !== connectionKey) {
     // Another connection's client: its draft belongs to another daemon.
     if (entry.disposeTimer) clearTimeout(entry.disposeTimer);
     entry.editor.dispose();
     editors.delete(workflowId);
     entry = undefined;
   }
-  if (!entry) {
-    const editor = new WorkflowEditor(api, workflowId, options);
-    entry = { editor, api, refs: 0, disposeTimer: null };
-    editors.set(workflowId, entry);
-    void editor.load();
+  if (entry) {
+    // The same connection's new client (a reconnect rebuilds it): keep the draft.
+    entry.editor.setApi(api);
+    return entry.editor;
   }
+  const editor = new WorkflowEditor(api, workflowId, options);
+  entry = { editor, connectionKey, refs: 0, disposeTimer: null };
+  editors.set(workflowId, entry);
+  void editor.load();
   return entry.editor;
+}
+
+/** A client's connection id when it has one (the app's `ApiClient`), else the client itself. */
+export function connectionKeyOf(api: WorkflowEditorApi): unknown {
+  const connection = (api as { connection?: unknown }).connection;
+  if (isRecord(connection) && typeof connection.id === "string") return `connection:${connection.id}`;
+  return api;
+}
+
+/** Save every open editor's pending edit now (the page is going away or hidden). */
+export function flushAllWorkflowEditors(): void {
+  for (const entry of editors.values()) {
+    if (entry.editor.state.dirty && entry.editor.state.conflict === null) void entry.editor.flush();
+  }
+}
+
+let lifecycleInstalled = false;
+function installLifecycleFlush(): void {
+  if (lifecycleInstalled || typeof window === "undefined" || typeof document === "undefined") return;
+  lifecycleInstalled = true;
+  window.addEventListener("pagehide", flushAllWorkflowEditors);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushAllWorkflowEditors();
+  });
 }
 
 /** Hold `editor` open; the returned release lets it go (disposed once nothing holds it). */

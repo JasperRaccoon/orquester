@@ -409,6 +409,8 @@ export interface WorkflowSummary {
   errorCount: number;
   lastRun?: WorkflowRunSummary;
   activeRuns: WorkflowRunSummary[];
+  /** `settings.notify`, so open clients honour it for in-app notices. Optional: an older daemon omits it. */
+  notify?: { onFailure: boolean; onSuccess: boolean };
   createdAt: string;
   updatedAt: string;
 }

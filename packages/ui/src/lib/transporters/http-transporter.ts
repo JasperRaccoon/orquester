@@ -110,10 +110,26 @@ export class HttpTransporter implements Transporter {
     }
 
     const controller = new AbortController();
+    // Exactly one of onError/onEnd-after-error, and one onEnd, per stream.
+    let ended = false;
+    const end = (): void => {
+      if (ended) return;
+      ended = true;
+      handlers.onEnd();
+    };
     fetch(url, { headers, signal: controller.signal })
       .then((response) => {
+        if (!response.ok) {
+          // An error answer is not stream content: never hand its JSON body to onData.
+          void response.body?.cancel().catch(() => undefined);
+          if (!controller.signal.aborted) {
+            handlers.onError?.(Object.assign(new Error(`The stream failed with status ${response.status}.`), { status: response.status }));
+          }
+          end();
+          return;
+        }
         if (!response.body) {
-          handlers.onEnd();
+          end();
           return;
         }
         const reader = response.body.getReader();
@@ -121,7 +137,7 @@ export class HttpTransporter implements Transporter {
         const pump = (): Promise<void> =>
           reader.read().then(({ done, value }) => {
             if (done) {
-              handlers.onEnd();
+              end();
               return;
             }
             handlers.onData(decoder.decode(value, { stream: true }));
@@ -130,10 +146,10 @@ export class HttpTransporter implements Transporter {
         return pump();
       })
       .catch((error: unknown) => {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && !ended) {
           handlers.onError?.(error);
         }
-        handlers.onEnd();
+        end();
       });
 
     return { close: () => controller.abort() };

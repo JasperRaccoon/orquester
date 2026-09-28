@@ -29,6 +29,7 @@ import {
 import { createFromTemplate, type WorkflowTemplateId } from "../../../lib/workflows/templates";
 import { useAppStore } from "../../../store/app";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
+import { openWorkflowRunInEditor } from "../../workflows/runs/open-run";
 import type { RightRailPanelProps } from "../types";
 import { NewWorkflowDialog } from "./NewWorkflowDialog";
 import { WorkflowSecretsDialog } from "./WorkflowSecretsDialog";
@@ -127,7 +128,12 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
       setEnabled: (workflow, enabled) => void setWorkflowEnabled(api, workflow.id, enabled),
       run: (workflow) => void run(workflow),
       edit: (workflow) => openEditor(workflow.id, { title: workflow.name }),
-      openRun: (workflow, runId) => openEditor(workflow.id, { title: workflow.name, runId }),
+      // The one "open a run" path (a toast's, the Attention Center's): it also
+      // switches an editor tab that is already open to this run.
+      openRun: (workflow, runId) => {
+        if (!projectAvailable) return;
+        if (openWorkflowRunInEditor({ runId, workflowId: workflow.id, workflowName: workflow.name, ...(projectPath ? { projectPath } : {}) })) onDelivered?.();
+      },
       duplicate: (workflow) => {
         void duplicateWorkflow(api, workflow.id).then((result) => {
           if (result.ok) setExpanded(result.value.id);
@@ -136,7 +142,7 @@ export const WorkflowsPanel: React.FC<RightRailPanelProps> = ({ projectPath, var
       remove: (workflow) => setPendingDelete(workflow),
       retryRuns: (workflow) => void loadWorkflowRuns(api, workflow.id, { force: true })
     }),
-    [api, openEditor, run, setExpanded]
+    [api, openEditor, run, setExpanded, projectAvailable, projectPath, onDelivered]
   );
 
   const created = useCallback(

@@ -190,6 +190,12 @@ export function sanitizeWorkflowSummary(value: unknown): WorkflowSummary | null 
   if (description !== undefined) summary.description = description;
   const lastRun = sanitizeRunSummary(value.lastRun);
   if (lastRun !== null && lastRun.workflowId === id) summary.lastRun = lastRun;
+  if (isRecord(value.notify)) {
+    summary.notify = {
+      onFailure: value.notify.onFailure !== false,
+      onSuccess: value.notify.onSuccess === true
+    };
+  }
   return summary;
 }
 

@@ -12,7 +12,7 @@ import { isTriggerType, type WorkflowRunSummary } from "@orquester/api";
 import { useApi } from "../../../context/orquester-context";
 import { formatAgo, runStatusLabel } from "../../../lib/workflows/format";
 import { useWorkflowRun, useWorkflowRuns } from "../../../lib/workflows/hooks";
-import { blockInputOf, parsePinnedText } from "../../../lib/workflows/inspector-data";
+import { blockInputOf, parsePinnedText, pinnableOutputOf } from "../../../lib/workflows/inspector-data";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import { Section, Segmented, SmallButton } from "../ui/controls";
 import { usePhoneLayout } from "../phone/phone-context";
@@ -34,6 +34,7 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
   const [testing, setTesting] = useState(false);
   const [testNote, setTestNote] = useState<string | null>(null);
   const [confirmAgent, setConfirmAgent] = useState(false);
+  const [pinning, setPinning] = useState(false);
 
   const input = useMemo(
     () => (run ? blockInputOf(run.blocks, run.detail?.definition ?? workflow, node.id, run.takenEdges) : { kind: "none" as const }),
@@ -44,6 +45,21 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
     const refusal = editor.applyOps([{ op: "set_pinned", node: node.id, output: value }]);
     setPinError(refusal);
     if (refusal === null) setEditing(null);
+  };
+
+  /** "Pin this output": the whole output, read from the daemon when the run kept only a preview. */
+  const pinFromRun = async (): Promise<void> => {
+    if (!block || !run) return;
+    setPinning(true);
+    setPinError(null);
+    try {
+      const whole = await pinnableOutputOf(block, () => api.getWorkflowNodeOutput(run.summary.id, node.id));
+      pin(whole);
+    } catch (error) {
+      setPinError(error instanceof Error && error.message ? `Couldn't read the whole output: ${error.message}` : "Couldn't read the whole output.");
+    } finally {
+      setPinning(false);
+    }
   };
 
   const test = async (): Promise<void> => {
@@ -125,9 +141,17 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
                   <p className="text-[11px] text-neutral-500">Only a preview is shown; the run view loads the whole output.</p>
                 ) : null}
                 {!readOnly ? (
-                  <SmallButton icon={<Pin size={12} />} onClick={() => pin(block.output)}>
-                    Pin this output
-                  </SmallButton>
+                  <>
+                    <SmallButton
+                      icon={pinning ? <Loader2 size={12} className="motion-safe:animate-spin" /> : <Pin size={12} />}
+                      onClick={() => void pinFromRun()}
+                      disabled={pinning}
+                      title={block.outputTruncated ? "Pins the whole output, read from the run" : undefined}
+                    >
+                      Pin this output
+                    </SmallButton>
+                    {pinError && editing === null ? <p className="text-[11px] text-danger">{pinError}</p> : null}
+                  </>
                 ) : null}
               </>
             ) : block.error ? (
