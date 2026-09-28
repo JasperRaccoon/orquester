@@ -175,7 +175,8 @@ export function turnBaseline(s: SessionSummary): TurnBaseline {
 
 export type TurnOutcome = "completed" | "needs-input" | "plan-ready" | "interrupted" | "failed" | "timeout";
 
-function turnOutcome(s: SessionSummary, baseline: TurnBaseline): TurnOutcome | null {
+/** The outcome a turn wait ends on, or null while it goes on. Exported for chat-client (the workflow engine). */
+export function turnOutcome(s: SessionSummary, baseline: TurnBaseline): TurnOutcome | null {
   if (s.hasPendingApprovals || s.hasPendingUserInput) return "needs-input";
   const rung = resolveChatActivity(s).rung;
   // Goals §4.7: a goal the provider continues by itself (Codex) starts its next turn within milliseconds of the last
