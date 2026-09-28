@@ -267,12 +267,8 @@ export class UsageTokensScanner {
       userhome: string;
       cacheFile: string;
       now: () => number;
-      /** Extra credential homes to scan (managed accounts) beyond the host home.
-       *  A `launcherId` (e.g. the claudex/claudemix proxy homes) re-tags records
-       *  found under that home with the launcher id instead of the bare agent, so
-       *  GPT/Kimi transcripts routed through a Claude harness are attributed to the
-       *  launcher and excluded from the Claude-account aggregate. */
-      accountHomes?: () => { agent: "claude" | "codex"; home: string; launcherId?: string }[];
+      /** Extra credential homes to scan (managed accounts) beyond the host home. */
+      accountHomes?: () => { agent: "claude" | "codex"; home: string }[];
       /** Watcher-triggered recomputes run at most once per this window (default 30 s). */
       minRecomputeIntervalMs?: number;
     }
@@ -440,11 +436,9 @@ export class UsageTokensScanner {
       dir: join(process.env[envVar] || join(this.opts.userhome, agent === "claude" ? ".claude" : ".codex"), subdir),
       label: agent
     };
-    // A proxy home carries a `launcherId` (claudex/claudemix) which re-tags its
-    // records; managed account homes keep the bare agent label.
     const managed = (this.opts.accountHomes?.() ?? [])
       .filter((a) => a.agent === agent)
-      .map((a) => ({ dir: join(a.home, subdir), label: a.launcherId ?? agent }));
+      .map((a) => ({ dir: join(a.home, subdir), label: agent }));
     // Managed homes now symlink their history dir to the shared store — dedupe by
     // realpath so a shared transcript isn't counted once per account.
     const seen = new Set<string>();

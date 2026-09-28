@@ -16,18 +16,14 @@ import { REWIND_RECHECK_MS, REWIND_WAIT_MS, sessionTools } from "./sessions.ts";
 const tool = (name: string) => sessionTools.find((t) => t.name === name)!;
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
-  { id: "claudex", kind: "agent", name: "Claude Code × GPT", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
-  { id: "claudemix", kind: "agent", name: "Claude Code × Mixed", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
   { id: "grok", kind: "agent", name: "Grok Build", bin: ["grok"], enabled: false, installState: "idle", chat: { adapter: "grok" } }
 ] };
-const providers = { hostInstanceId: "h", providers: [{ id: "claude", refIds: ["claude", "claudex", "claudemix"], installed: true, version: "2", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [],
+const providers = { hostInstanceId: "h", providers: [{ id: "claude", refIds: ["claude"], installed: true, version: "2", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [],
   capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" } },
   models: [{ slug: "default", name: "Default", isDefault: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }] } }, { slug: "haiku", name: "Haiku", capabilities: null },
     // Not the default, and it takes options: an options-only change on it must keep it. (haiku takes none.)
     { slug: "opus", name: "Opus", capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }, { id: "thinking", label: "Thinking", type: "boolean" }] } }] }] };
 const accounts = { accounts: [{ id: "acc-1", agent: "claude", label: "jasperclaude", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }, { id: "acc-2", agent: "codex", label: "e@x.io", email: "e@x.io", plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }], defaults: { claude: "acc-1", codex: "acc-2", grok: null } };
-// acc-2 (codex) and acc-1 (claude) are seeded, so both proxy launchers have a seeded family default: claudex acc-2, claudemix acc-1.
-const cliproxy = { state: "healthy", reasons: [], detail: null, version: null, defaultModel: "gpt-5.6-sol", backgroundModel: "", modelOverrides: {}, providers: [], routerProviders: [], accounts: [{ id: "acc-2", provider: "codex", label: "e@x.io" }, { id: "acc-1", provider: "claude", label: "jasperclaude" }], activeSessionCount: 0, testedClaudeCliVersion: null, xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null } };
 
 async function harness(sessions = [chatSummary(), shellSummary()], snap = snapshot()) {
   const root = await mkdtemp(join(tmpdir(), "mcp-sess-"));
@@ -38,7 +34,7 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
   api.on("GET", "/api/sessions", { status: 200, body: sessions.map(fix) })
     .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, projectPath, cwd: projectPath } } } })
     .on("GET", "/api/registry", { status: 200, body: registry }).on("GET", "/api/agent/providers", { status: 200, body: providers })
-    .on("GET", "/api/agent-accounts", { status: 200, body: accounts }).on("GET", "/api/cliproxy", { status: 200, body: cliproxy }).on("GET", "/api/cliproxy/models", { status: 200, body: { models: [], asOf: null } });
+    .on("GET", "/api/agent-accounts", { status: 200, body: accounts });
   const ctx: ToolContext = { api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
   return { api, ctx, projectPath, root, close: () => rm(root, { recursive: true, force: true }) };
 }
@@ -102,7 +98,7 @@ test("get_session returns a detail for a chat and a view for a terminal; unknown
   await assert.rejects(tool("get_session").run({ sessionId: "zz" }, h.ctx), (e: { code: string }) => e.code === "SESSION_NOT_FOUND");
 });
 
-test("create_session validates everything up front and posts the GUI's body (claude, then claudex, then a resume)", async (t) => {
+test("create_session validates everything up front and posts the GUI's body (claude, then a resume)", async (t) => {
   const h = await harness(); t.after(h.close);
   h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }));
   const r = await tool("create_session").run({ project: "acme/api", agent: "claude", model: "default", options: { effort: "high" }, runtimeMode: "approval-required", accountId: "acc-1", title: "Fixer" }, h.ctx);
@@ -110,12 +106,6 @@ test("create_session validates everything up front and posts the GUI's body (cla
   const created = h.api.calls.find((c) => c.method === "POST" && c.path === "/api/sessions")!.body;
   assert.deepEqual(created, { kind: "agent-chat", refId: "claude", projectPath: h.projectPath, cwd: h.projectPath, title: "Fixer", accountId: "acc-1",
     chat: { accountId: "acc-1", modelSelection: { model: "default", options: [{ id: "effort", value: "high" }] }, runtimeMode: "approval-required" } });
-  h.api.calls.length = 0;
-  await tool("create_session").run({ project: h.projectPath, agent: "claudex", runtimeMode: "full-access" }, h.ctx);
-  const proxy = h.api.calls.find((c) => c.method === "POST" && c.path === "/api/sessions")!.body as Record<string, unknown>;
-  assert.equal(proxy.model, "gpt-5.6-sol"); assert.equal(proxy.title, "Claude Code × GPT");
-  assert.deepEqual(proxy.chat, { accountId: "acc-2", modelSelection: { model: "gpt-5.6-sol", options: [] }, runtimeMode: "full-access" });
-  assert.equal(proxy.accountId, "acc-2", "no accountId → the seeded family default, pinned as the '+' menu does");
   h.api.on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [{ id: "conv-1", agentRefId: "claude", title: "Earlier", updatedAt: stamp(1), home: "account", accountId: "acc-1" }] } });
   h.api.calls.length = 0;
   await tool("create_session").run({ project: "acme/api", resume: { conversationId: "conv-1" }, runtimeMode: "full-access" }, h.ctx);
@@ -124,40 +114,11 @@ test("create_session validates everything up front and posts the GUI's body (cla
   assert.deepEqual((resumed.chat as { resume: unknown }).resume, { home: "account", conversationId: "conv-1" });
 });
 
-test("create_session: a proxy launcher whose family default is not seeded launches under an explicit System", async (t) => {
-  const h = await harness(); t.after(h.close);
-  // acc-2 (the codex family default) is no longer seeded into the proxy, so list_agents reports claudex's default as "system".
-  h.api.on("GET", "/api/cliproxy", { status: 200, body: { ...cliproxy, accounts: [] } })
-    .on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }));
-  await tool("create_session").run({ project: "acme/api", agent: "claudex", runtimeMode: "full-access" }, h.ctx);
-  assert.equal(lastCreate(h.api).accountId, "system");
-  assert.equal(lastCreate(h.api).chat.accountId, "system");
-});
-
-test("create_session: claudemix is the Claude main loop through the proxy — a Claude-catalogue selection, no top-level model, the seeded Claude default", async (t) => {
-  const h = await harness(); t.after(h.close);
-  h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }));
-  await tool("create_session").run({ project: "acme/api", agent: "claudemix", options: { effort: "high" }, runtimeMode: "full-access" }, h.ctx);
-  // A top-level model becomes ANTHROPIC_MODEL (acc-prefixed once several accounts are seeded); for claudemix the daemon
-  // resolves its own Claude default there instead, exactly as the '+' menu leaves it.
-  assert.ok(!("model" in lastCreate(h.api)), "no top-level model");
-  assert.equal(lastCreate(h.api).accountId, "acc-1", "no accountId → the seeded Claude family default");
-  assert.deepEqual(lastCreate(h.api).chat, { accountId: "acc-1", modelSelection: { model: "default", options: [{ id: "effort", value: "high" }] }, runtimeMode: "full-access" });
-  await tool("create_session").run({ project: "acme/api", agent: "claudemix", model: "haiku", runtimeMode: "full-access" }, h.ctx);
-  assert.ok(!("model" in lastCreate(h.api)));
-  assert.deepEqual(lastCreate(h.api).chat.modelSelection, { model: "haiku", options: [] });
-  const posts = h.api.calls.filter((c) => c.method === "POST").length;
-  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudemix", model: "gpt-5.6-sol", runtimeMode: "full-access" }, h.ctx),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /default, haiku/.test(e.message));
-  assert.equal(h.api.calls.filter((c) => c.method === "POST").length, posts, "claudex's proxy models are not claudemix's: nothing was created");
-});
-
-test("create_session resume: a system-home row never forces System, a cliproxy row launches under its launcher, a mismatched agent is refused", async (t) => {
+test("create_session resume: a system-home row never forces System, a mismatched agent is refused", async (t) => {
   const h = await harness(); t.after(h.close);
   h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }))
     .on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [
       { id: "conv-sys", agentRefId: "claude", title: "", updatedAt: stamp(1), home: "system" },
-      { id: "conv-proxy", agentRefId: "claude", proxyRefId: "claudex", title: "Via the proxy", updatedAt: stamp(2), home: "cliproxy" },
       { id: "conv-acc", agentRefId: "claude", title: "Earlier", updatedAt: stamp(3), home: "account", accountId: "acc-1" }
     ] } });
   await tool("create_session").run({ project: "acme/api", resume: { conversationId: "conv-sys" }, runtimeMode: "full-access" }, h.ctx);
@@ -168,49 +129,10 @@ test("create_session resume: a system-home row never forces System, a cliproxy r
   assert.equal(lastCreate(h.api).title, "Claude Code", "an untitled conversation falls back to the agent's name");
   await tool("create_session").run({ project: "acme/api", resume: { conversationId: "conv-sys" }, accountId: "system", runtimeMode: "full-access" }, h.ctx);
   assert.equal(lastCreate(h.api).accountId, "system");
-  await tool("create_session").run({ project: "acme/api", resume: { conversationId: "conv-proxy" }, runtimeMode: "full-access" }, h.ctx);
-  assert.equal(lastCreate(h.api).refId, "claudex"); assert.equal(lastCreate(h.api).model, "gpt-5.6-sol");
-  assert.deepEqual(lastCreate(h.api).chat.resume, { home: "cliproxy", conversationId: "conv-proxy" });
-  assert.equal(lastCreate(h.api).accountId, "acc-2", "a proxy launcher resumes under the account its '+' row pins");
-  assert.equal(lastCreate(h.api).chat.accountId, "acc-2");
   const before = h.api.calls.length;
-  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudex", resume: { conversationId: "conv-acc" }, runtimeMode: "full-access" }, h.ctx),
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "grok", resume: { conversationId: "conv-acc" }, runtimeMode: "full-access" }, h.ctx),
     (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /belongs to claude/.test(e.message));
   assert.ok(!h.api.calls.slice(before).some((c) => c.method === "POST"), "nothing was created");
-});
-
-test("create_session refuses to resume a proxy-home conversation that names no launcher (list_conversations says resumable:false)", async (t) => {
-  const h = await harness(); t.after(h.close);
-  h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", refId: (body as { refId: string }).refId }) }))
-    .on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [{ id: "conv-orphan", agentRefId: "claude", title: "Proxy, launcher unknown", updatedAt: stamp(2), home: "cliproxy" }] } });
-  for (const agent of [undefined, "claude"]) {
-    await assert.rejects(tool("create_session").run({ project: "acme/api", ...(agent ? { agent } : {}), resume: { conversationId: "conv-orphan" }, runtimeMode: "full-access" }, h.ctx),
-      (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "Conversation \"conv-orphan\" is not resumable: it lives in a proxy home with no launcher. Pick a row with resumable: true from list_conversations.", String(agent));
-  }
-  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created — plain claude would have opened an empty session");
-});
-
-test("create_session: a disabled agent's refusal carries the registry's disabledReason when there is one", async (t) => {
-  const h = await harness(); t.after(h.close);
-  const down = { ...registry, agents: registry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) };
-  h.api.on("GET", "/api/registry", { status: 200, body: down });
-  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudex", runtimeMode: "full-access" }, h.ctx),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "claudex is not available on this host: proxy down.");
-  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created");
-});
-
-test("create_session: a registry read that fails while naming the reason leaves the plain refusal, never an INTERNAL", async (t) => {
-  const h = await harness(); t.after(h.close);
-  const down = { ...registry, agents: registry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) };
-  const plain = (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "claudex is not available on this host (not installed or disabled).";
-  // The catalogue's own read succeeds; the second one, for the reason, fails three ways.
-  for (const second of [() => { throw new Error("socket hang up"); }, () => ({ status: 500, body: null }), () => ({ status: 200, body: { agents: { claudex: {} } } })]) {
-    let reads = 0;
-    h.api.on("GET", "/api/registry", () => ((reads += 1) === 1 ? { status: 200, body: down } : second()));
-    await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claudex", runtimeMode: "full-access" }, h.ctx), plain);
-    assert.equal(reads, 2);
-  }
-  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was created");
 });
 
 test("create_session cwd: resolved against the project, and it must be an existing directory inside the sandbox", async (t) => {
@@ -338,19 +260,6 @@ test("update_session: an options-only change keeps the head's model and merges o
   const { commandId, ...mode } = modes[0].body as Record<string, unknown>;
   assert.equal(typeof commandId, "string");
   assert.deepEqual(mode, { modelSelection: { model: "opus", options: [{ id: "effort", value: "high" }, { id: "thinking", value: true }] } });
-});
-
-test("update_session on a claudemix thread: the Claude catalogue applies, and an options-only change keeps the head's Claude model", async (t) => {
-  const h = await harness([chatSummary({ refId: "claudemix", accountId: "acc-1" })], snapshot({ head: head({ refId: "claudemix", accountId: "acc-1", modelSelection: { model: "opus", options: [{ id: "thinking", value: true }] } }) })); t.after(h.close);
-  h.api.on("POST", "/api/sessions/c1/mode", { status: 200, body: { seq: 5 } });
-  await assert.rejects(tool("update_session").run({ sessionId: "c1", model: "gpt-5.6-sol", force: false }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /default, haiku/.test(e.message));
-  const r = await tool("update_session").run({ sessionId: "c1", options: { effort: "high" }, force: false }, h.ctx);
-  assert.deepEqual(r.applied, ["options"]);
-  const modes = h.api.calls.filter((c) => c.path === "/api/sessions/c1/mode");
-  assert.equal(modes.length, 1, "one /mode, and none for the refused proxy model");
-  const { commandId, ...mode } = modes[0].body as Record<string, unknown>;
-  assert.equal(typeof commandId, "string");
-  assert.deepEqual(mode, { modelSelection: { model: "opus", options: [{ id: "thinking", value: true }, { id: "effort", value: "high" }] } });
 });
 
 /** A goal as the summary names it, and as the thread snapshot holds it (the fold's goal, with the row's stamp). */
@@ -934,7 +843,7 @@ test("every session tool parameter is described, nested ones included; revert_se
   assert.match(tool("revert_session").input.keepTurns.description ?? "", /0 = rewind to before the first turn; N = keep turns 1\.\.N/);
   // The field a caller reads is chat.sessionStatus; OpenCode history is never listed; the file list is bounded too.
   assert.match(tool("stop_session").description, /whose chat\.sessionStatus is error/);
-  assert.match(tool("close_session").description, /stays resumable via list_conversations for Claude, Codex and Grok \(and claudex\/claudemix from their proxy homes\); OpenCode history is not listed\./);
+  assert.match(tool("close_session").description, /stays resumable via list_conversations for Claude, Codex and Grok; OpenCode history is not listed\./);
   assert.doesNotMatch(tool("get_turn_diff").description, /every changed file/);
   assert.match(tool("get_turn_diff").description, /filesTruncated/);
   for (const d of sessionTools) assert.ok(d.description.length <= 400, `${d.name}: ${d.description.length} characters`);

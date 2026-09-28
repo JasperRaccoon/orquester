@@ -538,22 +538,23 @@ test("kill() refuses a protectedPids entry, directly and inside a subtree", asyn
   if (!SYSTEM_STATUS_SUPPORTED) {
     return;
   }
-  // Stands in for the tmux-less model-proxy child: a real child of this
+  // Stands in for the tmux-less agent-host child: a real child of this
   // process, so it passes the "managed by this daemon" gate and would be
   // killable if the guard were missing.
-  const proxy = spawn("sleep", ["30"], { stdio: "ignore" });
+  const guarded = spawn("sleep", ["30"], { stdio: "ignore" });
   const parent = spawn("sh", ["-c", "sleep 30"], { stdio: "ignore" });
   try {
     await setTimeoutPromise(300);
-    assert.ok(proxy.pid && parent.pid);
-    const status = service({ protectedPids: () => [proxy.pid as number] });
+    assert.ok(guarded.pid && parent.pid);
+    const status = service({ protectedPids: () => [{ pid: guarded.pid as number, label: "the agent host" }] });
 
-    const refused = await status.kill(proxy.pid);
+    const refused = await status.kill(guarded.pid);
     assert.equal(refused.ok, false);
     assert.equal(refused.ok === false && refused.code, "PROCESS_PROTECTED");
+    assert.equal(refused.ok === false && refused.error, "Cannot stop the agent host.");
     const { stdout: alive } = await exec("sh", [
       "-c",
-      `kill -0 ${proxy.pid} 2>/dev/null && echo alive || echo gone`
+      `kill -0 ${guarded.pid} 2>/dev/null && echo alive || echo gone`
     ]);
     assert.equal(alive.trim(), "alive", "a refused kill must not have signalled anything");
 
@@ -561,7 +562,7 @@ test("kill() refuses a protectedPids entry, directly and inside a subtree", asyn
     const { stdout: kids } = await exec("pgrep", ["-P", String(parent.pid)]);
     const spared = Number(kids.trim().split("\n")[0]);
     assert.ok(Number.isInteger(spared) && spared > 1);
-    const sub = service({ protectedPids: () => [spared] });
+    const sub = service({ protectedPids: () => [{ pid: spared, label: "the agent host" }] });
     assert.equal((await sub.kill(parent.pid)).ok, true);
     await setTimeoutPromise(200);
     const { stdout: after } = await exec("sh", [
@@ -585,9 +586,9 @@ test("kill() refuses a protectedPids entry, directly and inside a subtree", asyn
         throw new Error("boom");
       }
     });
-    assert.equal((await throwing.kill(proxy.pid)).ok, true);
+    assert.equal((await throwing.kill(guarded.pid)).ok, true);
   } finally {
-    for (const child of [proxy, parent]) {
+    for (const child of [guarded, parent]) {
       child.kill("SIGKILL");
     }
   }

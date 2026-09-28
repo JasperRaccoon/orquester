@@ -305,10 +305,9 @@ test("an unterminated tail line is counted once, then not double-counted when co
   assert.equal((await scanner.snapshot(true)).rows.find((r) => r.agent === "claude")?.inputTokens, 15);
 });
 
-test("proxy-home transcripts are tagged with the launcher id, not folded into the claude aggregate", async () => {
+test("managed-account home transcripts are counted under the bare agent, alongside the system home", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
-  const home = await mkdtemp(join(tmpdir(), "orq-utok-proxy-"));
-  // A system-home transcript stays tagged `claude`.
+  const home = await mkdtemp(join(tmpdir(), "orq-utok-acct-"));
   const sysPdir = join(home, ".claude", "projects", "p");
   await mkdir(sysPdir, { recursive: true });
   await writeFile(
@@ -316,32 +315,24 @@ test("proxy-home transcripts are tagged with the launcher id, not folded into th
     JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "rs", message: { id: "ms", model: "claude-opus-4-8", usage: { input_tokens: 4, output_tokens: 1 } } }),
     "utf8"
   );
-  // A transcript under cliproxy/claude-home-claudex/projects/… must be tagged
-  // `claudex` (GPT/Kimi tokens must never inflate the Anthropic-quota signal).
-  const proxyHome = join(home, "cliproxy", "claude-home-claudex");
-  const proxyPdir = join(proxyHome, "projects", "p");
-  await mkdir(proxyPdir, { recursive: true });
+  const acctHome = join(home, "agent-accounts", "claude", "a1", "home");
+  const acctPdir = join(acctHome, "projects", "p");
+  await mkdir(acctPdir, { recursive: true });
   await writeFile(
-    join(proxyPdir, "t.jsonl"),
-    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "rp", message: { id: "mp", model: "gpt-5.4-codex", usage: { input_tokens: 9, output_tokens: 2 } } }),
+    join(acctPdir, "t.jsonl"),
+    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "ra", message: { id: "ma", model: "claude-opus-4-8", usage: { input_tokens: 9, output_tokens: 2 } } }),
     "utf8"
   );
   const scanner = new UsageTokensScanner({
     userhome: home,
     cacheFile: join(home, "c.json"),
     now: T0,
-    accountHomes: () => [{ agent: "claude", home: proxyHome, launcherId: "claudex" }]
+    accountHomes: () => [{ agent: "claude", home: acctHome }]
   });
   await scanner.init();
   const snap = await scanner.snapshot(true);
-  const claudeRows = snap.rows.filter((r) => r.agent === "claude");
-  const claudexRows = snap.rows.filter((r) => r.agent === "claudex");
-  // System-home transcript stays `claude`.
-  assert.equal(claudeRows.reduce((a, r) => a + r.inputTokens, 0), 4);
-  // Proxy-home transcript is tagged `claudex`, excluded from the claude aggregate.
-  assert.ok(claudexRows.length > 0);
-  assert.equal(claudexRows.reduce((a, r) => a + r.inputTokens, 0), 9);
-  assert.equal(claudeRows.some((r) => r.inputTokens === 9), false);
+  assert.deepEqual([...new Set(snap.rows.map((r) => r.agent))], ["claude"]);
+  assert.equal(snap.rows.reduce((a, r) => a + r.inputTokens, 0), 13);
 });
 
 test("requestRecompute coalesces bursts: leading run + one trailing run per cooldown window", async () => {

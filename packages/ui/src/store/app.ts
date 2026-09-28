@@ -103,13 +103,8 @@ import type {
   AgentAccountsResponse,
   AgentConversationSummary,
   BrowserSummary,
-  CliProxyMutationRefusal,
-  CliProxyProviderStatus,
-  CliProxyRouterProviderRequest,
-  CliProxySeedRequest,
-  CliProxyStatus,
-  CliProxyUnseedRequest,
   CreateAgentChatSessionFields,
+  GrokDeviceLinkStatus,
   ProviderUsageWindow,
   ProviderUsageLimitsUpdate,
   RecentProjectSummary,
@@ -519,15 +514,13 @@ export function tabSession(tab: ProjectTab): SessionSummary | null {
  *
  * `resumeConversationId` is the TERMINAL resume path — the daemon substitutes it
  * into the entry's `resumeArgs` — and applies only to `kind: "agent"`. A chat
- * launch resumes through `chat.resume` instead, which is why a cliproxy-home
- * conversation is resumable in chat and not in a terminal (§5.3).
+ * launch resumes through `chat.resume` instead (§5.3).
  */
 export interface OpenTabRequest {
   kind: SessionKind;
   refId: string;
   title?: string;
   accountId?: string;
-  model?: string;
   /** Legacy-terminal resume only. Refused with 400 `RESUME_UNAVAILABLE`. */
   resumeConversationId?: string;
   /**
@@ -689,10 +682,11 @@ export interface AppState {
   usage: UsageResponse | null;
   usageTokens: UsageTokensResponse | null;
   agentAccounts: AgentAccountsResponse | null;
-  /** Managed model-proxy status (claudex/claudemix backing), or null before first load. */
-  cliproxy: CliProxyStatus | null;
-  /** The proxy's live model catalog + its snapshot time, or null before first load. */
-  cliproxyModels: { models: string[]; asOf: string | null } | null;
+  /**
+   * Grok's device-code login as the daemon reports it, or null before first
+   * load; live via `grok-link.changed` on the agent-accounts channel.
+   */
+  grokDeviceLink: GrokDeviceLinkStatus | null;
   workspaces: WorkspaceSummary[];
   /** "Protect archived data" daemon flag (UI curtain; loaded on connect). */
   protectArchived: boolean;
@@ -724,13 +718,6 @@ export interface AppState {
   /** Client-derived working/idle + attention per session id (drives the status dot). */
   activityById: Record<string, SessionActivity>;
   /**
-   * Transient launch-time notice: models a just-launched claudex/claudemix
-   * session referenced but the live proxy catalog lacked
-   * (SessionSummary.missingModels — a create-response-only snapshot). Advisory,
-   * dismissible, never persisted; cleared on dismiss or the next launch.
-   */
-  modelWarning: { title: string; models: string[] } | null;
-  /**
    * Transient notice for a refused resume: the daemon answered
    * `RESUME_UNAVAILABLE` (the conversation id is unusable, or this agent has no
    * resume flag), so NO session was created. Carries what's needed to offer a
@@ -747,7 +734,6 @@ export interface AppState {
      * not silently open a session in project B.
      */
     accountId?: string;
-    model?: string;
     projectPath: string;
     /** Which kind the refused attempt was, so "Start fresh" opens the same one. */
     kind: SessionKind;
@@ -804,7 +790,7 @@ export interface AppState {
   viewModeByProject: Record<string, ViewMode>;
   /** Last account chosen per agent in the launcher (client-local, persisted). */
   preferredAccountByAgent: Record<string, string>;
-  /** Last backing model chosen per agent (claudex/claudemix) in the launcher (client-local, persisted). */
+  /** Last model chosen per agent in the launcher (client-local, persisted). */
   preferredModelByAgent: Record<string, string>;
   /** The last full model selection (model + options) per agent, from the composer's pickers too. */
   preferredModelSelectionByAgent: Record<string, ModelSelection>;
@@ -929,45 +915,8 @@ export interface AppState {
   loadUsage: (force?: boolean) => Promise<void>;
   loadUsageTokens: (force?: boolean) => Promise<void>;
   loadAgentAccounts: () => Promise<void>;
-  /** Fetch the managed model-proxy status + model catalog into the store. */
-  loadCliProxy: () => Promise<void>;
-  enableCliProxy: () => Promise<void>;
-  disableCliProxy: (force?: boolean) => Promise<{ ok: boolean; affectedSessions?: number }>;
-  seedCliProxyAccount: (req: CliProxySeedRequest) => Promise<CliProxyProviderStatus>;
-  unseedCliProxyAccount: (req: CliProxyUnseedRequest) => Promise<CliProxyProviderStatus>;
-  /** Create or update a router provider (id is its identity; key set separately). */
-  putCliProxyRouterProvider: (
-    id: string,
-    cfg: CliProxyRouterProviderRequest,
-    force?: boolean
-  ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
-  deleteCliProxyRouterProvider: (
-    id: string,
-    force?: boolean
-  ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
-  setCliProxyRouterKey: (
-    id: string,
-    key: string,
-    force?: boolean
-  ) => Promise<{ ok: boolean; affectedSessions?: number }>;
-  clearCliProxyRouterKey: (
-    id: string,
-    force?: boolean
-  ) => Promise<{ ok: boolean; affectedSessions?: number }>;
-  /** Read-only: the models a keyed router advertises upstream (models picker). */
-  getCliProxyRouterCatalog: (id: string) => Promise<{ models: string[] }>;
-  setCliProxyConfig: (
-    cfg: {
-      defaultModel?: string;
-      backgroundModel?: string;
-      claudeDefaultModel?: string;
-      modelOverrides?: Record<
-        string,
-        { contextWindow?: number; compactWindow?: number; compactPct?: number }
-      >;
-    },
-    force?: boolean
-  ) => Promise<CliProxyStatus | CliProxyMutationRefusal>;
+  /** Fetch Grok's device-code link state into the store. */
+  loadGrokDeviceLink: () => Promise<void>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
   /**
@@ -981,8 +930,6 @@ export interface AppState {
    * api, or a refused resume).
    */
   openTab: (request: OpenTabRequest) => Promise<SessionSummary | undefined>;
-  /** Dismiss the transient missing-models launch notice. */
-  dismissModelWarning: () => void;
   /** Dismiss the transient refused-resume notice. */
   dismissResumeError: () => void;
   /** Raise the chat provider auth-error toast (§7.7). Replaces any current one. */
@@ -1111,8 +1058,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   usage: null,
   usageTokens: null,
   agentAccounts: null,
-  cliproxy: null,
-  cliproxyModels: null,
+  grokDeviceLink: null,
   workspaces: [],
   protectArchived: false,
   protectArchivedLoaded: false,
@@ -1125,7 +1071,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessions: [],
   browsers: [],
   activityById: {},
-  modelWarning: null,
   resumeError: null,
   agentAuthError: null,
   dismissedAgentAuthErrors: [],
@@ -1325,7 +1270,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().loadRegistry(),
       get().loadUsage(),
       get().loadAgentAccounts(),
-      get().loadCliProxy(),
       // Daemon-side agent prefs (Claude stream timeout). Loaded per connect so the
       // panel shows the value of the daemon that will actually launch the session
       // — including after a connection switch or a daemon restart.
@@ -1669,7 +1613,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         // Transient per-daemon notices: they name a session/project of the
         // daemon we just left, and their actions would launch into it.
         resumeError: null,
-        modelWarning: null,
         agentAuthError: null,
         dismissedAgentAuthErrors: [],
         providerRateLimits: {},
@@ -1706,7 +1649,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Transient per-daemon notices (see signOut): they reference the previous
       // daemon's session/project, so they must not survive the switch.
       resumeError: null,
-      modelWarning: null,
       agentAuthError: null,
       dismissedAgentAuthErrors: [],
       providerRateLimits: {},
@@ -2312,134 +2254,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  loadCliProxy: async () => {
+  loadGrokDeviceLink: async () => {
     const api = get().api;
     if (!api) {
       return;
     }
-    // Status and the model catalog are fetched independently: a failed model
-    // fetch must NOT blank a good status (the panel still shows the persisted
-    // defaultModel), and vice versa.
     try {
-      set({ cliproxy: await api.getCliProxyStatus() });
+      set({ grokDeviceLink: await api.getGrokDeviceLink() });
     } catch {
       /* keep current */
     }
-    try {
-      set({ cliproxyModels: await api.getCliProxyModels() });
-    } catch {
-      /* keep current */
-    }
-  },
-
-  enableCliProxy: async () => {
-    const api = get().api;
-    if (!api) {
-      return;
-    }
-    // Optimistically adopt the returned status; the live "cliproxy.changed"
-    // stream keeps refining it through the download/build/start substages.
-    const status = await api.enableCliProxy();
-    set({ cliproxy: status });
-  },
-
-  disableCliProxy: async (force) => {
-    const api = get().api;
-    if (!api) {
-      return { ok: false };
-    }
-    const res = await api.disableCliProxy(force);
-    await get().loadCliProxy();
-    return res;
-  },
-
-  seedCliProxyAccount: async (req) => {
-    const api = get().api;
-    if (!api) {
-      throw new Error("not connected");
-    }
-    const provider = await api.seedCliProxyAccount(req);
-    await get().loadCliProxy();
-    return provider;
-  },
-
-  unseedCliProxyAccount: async (req) => {
-    const api = get().api;
-    if (!api) {
-      throw new Error("not connected");
-    }
-    const provider = await api.unseedCliProxyAccount(req);
-    await get().loadCliProxy();
-    return provider;
-  },
-
-  putCliProxyRouterProvider: async (id, cfg, force) => {
-    const api = get().api;
-    if (!api) {
-      return { ok: false, affectedSessions: 0 };
-    }
-    const res = await api.putCliProxyRouterProvider(id, cfg, force);
-    // A refusal ({ ok:false, affectedSessions }) passes straight through to the
-    // caller's force-confirm flow and must NOT be adopted as a status.
-    if ("ok" in res) return res;
-    // Adopt the returned status immediately, then reload: provider models change
-    // the proxy's model catalog too, and only loadCliProxy refreshes that.
-    set({ cliproxy: res });
-    await get().loadCliProxy();
-    return res;
-  },
-
-  deleteCliProxyRouterProvider: async (id, force) => {
-    const api = get().api;
-    if (!api) {
-      return { ok: false, affectedSessions: 0 };
-    }
-    const res = await api.deleteCliProxyRouterProvider(id, force);
-    if ("ok" in res) return res;
-    set({ cliproxy: res });
-    await get().loadCliProxy();
-    return res;
-  },
-
-  setCliProxyRouterKey: async (id, key, force) => {
-    const api = get().api;
-    if (!api) {
-      return { ok: false, affectedSessions: 0 };
-    }
-    // The key routes return { ok, affectedSessions } (they write projections but
-    // may not emit a status event), so refresh the status explicitly afterward.
-    const res = await api.setCliProxyRouterKey(id, key, force);
-    await get().loadCliProxy();
-    return res;
-  },
-
-  clearCliProxyRouterKey: async (id, force) => {
-    const api = get().api;
-    if (!api) {
-      return { ok: false, affectedSessions: 0 };
-    }
-    const res = await api.clearCliProxyRouterKey(id, force);
-    await get().loadCliProxy();
-    return res;
-  },
-
-  getCliProxyRouterCatalog: async (id) => {
-    const api = get().api;
-    if (!api) {
-      throw new Error("not connected");
-    }
-    return api.getCliProxyRouterCatalog(id);
-  },
-
-  setCliProxyConfig: async (cfg, force) => {
-    const api = get().api;
-    if (!api) {
-      return { ok: false, affectedSessions: 0 };
-    }
-    const res = await api.setCliProxyConfig(cfg, force);
-    if ("ok" in res) return res;
-    set({ cliproxy: res });
-    return res;
   },
 
   installAgent: async (id) => {
@@ -2452,8 +2276,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   openTab: async (request) => {
-    const { kind, refId, title, accountId, model, resumeConversationId, initialCommand, chat } =
-      request;
+    const { kind, refId, title, accountId, resumeConversationId, initialCommand, chat } = request;
     const api = get().api;
     if (!api) {
       return;
@@ -2468,7 +2291,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         projectPath: project?.path ?? "",
         cwd: project?.path,
         accountId,
-        model,
         resumeConversationId,
         initialCommand,
         chat
@@ -2493,7 +2315,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             // Replay material for "Start fresh": the identity, kind and project
             // this attempt targeted, not whatever is current when it is clicked.
             accountId,
-            model,
             projectPath: project?.path ?? "",
             kind,
             // Drop the cursor the daemon just refused; everything else about the
@@ -2516,13 +2337,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeTabByProject: project
         ? { ...state.activeTabByProject, [project.path]: session.id }
         : state.activeTabByProject,
-      // Surface the daemon's launch-time pre-flight: a claudex/claudemix session
-      // whose referenced models the live catalog lacked. Advisory only — the
-      // launch still happened — so it's a dismissible toast, not a blocker.
-      modelWarning:
-        session.missingModels && session.missingModels.length > 0
-          ? { title: session.title, models: session.missingModels }
-          : state.modelWarning,
       resumeError: null,
       // The agent this just launched is about to write a new conversation (or
       // extend the resumed one), so the cached list for its project is stale.
@@ -2533,8 +2347,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
     return session;
   },
-
-  dismissModelWarning: () => set({ modelWarning: null }),
 
   dismissResumeError: () => set({ resumeError: null }),
 
@@ -2572,7 +2384,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       refId: error.agentId,
       title: error.agentName,
       accountId: error.accountId,
-      model: error.model,
       chat: error.chat
     });
   },
@@ -3087,7 +2898,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     if (event.channel === "agent-accounts") {
-      set({ agentAccounts: event.payload as AgentAccountsResponse });
+      if (event.type === "grok-link.changed") {
+        set({ grokDeviceLink: event.payload as GrokDeviceLinkStatus });
+      } else {
+        set({ agentAccounts: event.payload as AgentAccountsResponse });
+      }
       return;
     }
     if (event.channel === "registry" && event.type === "registry.changed") {
@@ -3100,16 +2915,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       // client re-reads `GET /api/agent/providers`. The snapshot cache is
       // process-wide, so one re-read serves every open chat tab.
       notifyProvidersChanged(event.payload as { adapterId?: AgentAdapterId } | undefined);
-      return;
-    }
-    if (event.channel === "cliproxy") {
-      // "cliproxy.changed" carries the full status; other cliproxy events (e.g.
-      // "cliproxy.crashed") also imply the status shifted — refetch to be safe.
-      if (event.type === "cliproxy.changed") {
-        set({ cliproxy: event.payload as CliProxyStatus });
-      } else {
-        void get().loadCliProxy();
-      }
       return;
     }
     if (event.channel === "todos") {

@@ -191,7 +191,7 @@ test("the repair is a Claude thread's alone: exactly the claude adapter", () => 
     assert.equal(repairsReEmittedAssistantCopies(adapter), false, adapter);
   }
   assert.equal(repairsReEmittedAssistantCopies(undefined), false, "no head yet: nothing is second-guessed");
-  // An ADAPTER id, never a registry id: a claudex or claudemix thread's head names the claude adapter.
-  assert.equal(repairsReEmittedAssistantCopies("claudex"), false);
+  // An ADAPTER id, never a registry id.
+  assert.equal(repairsReEmittedAssistantCopies("claude-code"), false);
   assert.equal(repairsReEmittedAssistantCopies(""), false);
 });

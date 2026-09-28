@@ -18,14 +18,14 @@ describe("thread launch config (§3.1, §6.1)", () => {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok", BAD: 7, "": "x" },
         unsetEnv: ["ANTHROPIC_API_KEY", 42],
         homePath: "/home/acc",
+        // An older build's field: read without complaint, then dropped.
         proxyRefId: "claudex",
         extra: "ignored"
       }),
       {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok" },
         unsetEnv: ["ANTHROPIC_API_KEY"],
-        homePath: "/home/acc",
-        proxyRefId: "claudex"
+        homePath: "/home/acc"
       }
     );
     assert.deepEqual(parseThreadLaunchConfig({ launchEnv: {}, unsetEnv: [] }), {});
@@ -33,7 +33,7 @@ describe("thread launch config (§3.1, §6.1)", () => {
     assert.equal(parseThreadLaunchConfig(null), null);
   });
 
-  it("picks the four launch fields off a create request", () => {
+  it("picks the three launch fields off a create request", () => {
     assert.deepEqual(
       launchConfigFromRequest({
         launchEnv: { ANTHROPIC_BASE_URL: "http://127.0.0.1:1" },
@@ -53,11 +53,10 @@ describe("thread launch config (§3.1, §6.1)", () => {
       await store.save("t1", {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok" },
         unsetEnv: ["ANTHROPIC_API_KEY"],
-        homePath: "/home/proxy",
-        proxyRefId: "claudex"
+        homePath: "/home/proxy"
       });
       const path = join(dir, "threads", "t1", "launch.json");
-      // It carries the proxy token, so it is as sensitive as the appdir.
+      // A launcher env can carry a credential, so it is as sensitive as the appdir.
       assert.equal((await stat(path)).mode & 0o777, 0o600);
       assert.match(await readFile(path, "utf8"), /ANTHROPIC_AUTH_TOKEN/);
 
@@ -65,8 +64,7 @@ describe("thread launch config (§3.1, §6.1)", () => {
       assert.deepEqual(await reread.load("t1"), {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok" },
         unsetEnv: ["ANTHROPIC_API_KEY"],
-        homePath: "/home/proxy",
-        proxyRefId: "claudex"
+        homePath: "/home/proxy"
       });
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -86,7 +84,7 @@ describe("thread launch config (§3.1, §6.1)", () => {
   });
 });
 
-describe("the cliproxy launch environment (§3.1)", () => {
+describe("the launch environment (§3.1)", () => {
   const base = {
     adapter: "claude" as const,
     sessionPath: "/usr/bin",
@@ -96,26 +94,17 @@ describe("the cliproxy launch environment (§3.1)", () => {
     launchId: "launch-1"
   };
 
-  it("strips the proxy token WITHOUT the allowance — the bug this guards", () => {
-    const env = buildProviderEnv({
-      ...base,
-      extraEnv: { ANTHROPIC_BASE_URL: "http://127.0.0.1:9", ANTHROPIC_AUTH_TOKEN: "tok" }
-    });
-    assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:9");
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
-  });
-
-  it("keeps it when the launcher IS the identity, and nothing else", () => {
+  it("strips an ambient credential a launcher env carries, and keeps the rest", () => {
     const env = buildProviderEnv({
       ...base,
       extraEnv: {
         ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
         ANTHROPIC_AUTH_TOKEN: "tok",
         ANTHROPIC_API_KEY: "someone-elses-key"
-      },
-      allowCredentialVars: ["ANTHROPIC_AUTH_TOKEN"]
+      }
     });
-    assert.equal(env.ANTHROPIC_AUTH_TOKEN, "tok");
+    assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:9");
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
     assert.equal(
       env.ANTHROPIC_API_KEY,
       undefined,

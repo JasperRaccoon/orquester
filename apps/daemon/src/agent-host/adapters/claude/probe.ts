@@ -47,7 +47,7 @@ export const CLAUDE_USAGE_PROBE_TIMEOUT_MS = 20_000;
 export const CLAUDE_PROBE_CACHE_MS = 5 * 60_000;
 
 /** The registry ids this one adapter serves (§4.1 `refIds`). */
-export const CLAUDE_REF_IDS = ["claude", "claudex", "claudemix"] as const;
+export const CLAUDE_REF_IDS = ["claude"] as const;
 
 /** §4.1. Claude switches model in session and compacts with a slash command. */
 export const CLAUDE_CAPABILITIES: AdapterCapabilities = {

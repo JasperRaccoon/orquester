@@ -24,8 +24,7 @@ import {
   Sun,
   Trash2,
   Users,
-  X,
-  Zap
+  X
 } from "lucide-react";
 import type { AccountSummary, CreateAccountRequest, GitProviderId } from "@orquester/api";
 import { continueThreadsForProject } from "@orquester/config";
@@ -45,7 +44,6 @@ import { useIsDesktop, useRegistry } from "../../hooks";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { AgentAccountsSettings } from "./AgentAccountsSettings";
-import { ModelProxySettings } from "./ModelProxySettings";
 import { UsageOverview } from "./UsageOverview";
 import { SystemSettings } from "../system";
 
@@ -53,7 +51,6 @@ type Section =
   | "app"
   | "appearance"
   | "agents"
-  | "modelproxy"
   | "accounts"
   | "usage"
   | "git-hosting"
@@ -70,7 +67,6 @@ const SECTIONS: { id: Section; label: string; icon: React.ReactNode; desc: strin
   },
   { id: "usage", label: "Usage", icon: <Gauge size={16} />, desc: "Top-bar usage widget for Claude Code, Codex & Grok" },
   { id: "agents", label: "Agents", icon: <Boxes size={16} />, desc: "Install, update and view harness versions" },
-  { id: "modelproxy", label: "Model proxy", icon: <Zap size={16} />, desc: "Run GPT & Kimi in the Claude Code harness" },
   { id: "accounts", label: "Accounts", icon: <Users size={16} />, desc: "Managed Claude, Codex & Grok accounts for launching agents" },
   {
     id: "git-hosting",
@@ -94,8 +90,6 @@ const renderSection = (id: Section) =>
     <AppearanceSettings />
   ) : id === "agents" ? (
     <AgentsSettings />
-  ) : id === "modelproxy" ? (
-    <ModelProxySettings />
   ) : id === "accounts" ? (
     <AgentAccountsSettings />
   ) : id === "usage" ? (
@@ -411,7 +405,7 @@ const AgentsSettings: React.FC = () => {
       <div className="rounded-lg border border-neutral-800 px-3">
         <Field
           label="Claude stream timeout"
-          hint="Minutes an idle Claude stream may stall before the harness aborts it. Applies to every Claude harness launched here (claude, claudex, claudemix) and to their subagents. 30 is the maximum the harness honors. Takes effect for newly launched sessions."
+          hint="Minutes an idle Claude stream may stall before the harness aborts it. Applies to every Claude session launched here and to its subagents. 30 is the maximum the harness honors. Takes effect for newly launched sessions."
         >
           <Input
             className="w-20"
@@ -1013,8 +1007,8 @@ const UsageSettings: React.FC = () => {
   const setUsage = (patch: Partial<typeof prefs>) => void updateAppConfig({ usage: { ...prefs, ...patch } });
 
   const agentHint = (id: "claude" | "codex" | "grok") => {
-    // Grok's credential can come from the model proxy's xai link alone — the
-    // grok CLI need not be installed for usage to report.
+    // Grok's credential can come from a managed account alone — the grok CLI
+    // need not be installed for usage to report.
     if (id !== "grok") {
       const installed = registry.agents.some((a) => a.id === id && a.enabled);
       if (!installed) return "Not installed";

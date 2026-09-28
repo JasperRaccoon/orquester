@@ -15,7 +15,7 @@
 
 import type { ProviderUsageLimits } from "./runtime-events.ts";
 
-/** The four adapters of v1 (§3.2). claudex/claudemix are `claude` + proxy env. */
+/** The four adapters of v1 (§3.2). */
 export type AgentAdapterId = "claude" | "codex" | "opencode" | "grok";
 
 // ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ export interface ComposerContextRecord {
  * Which home dir a thread's provider child runs under. Mirrors
  * `AgentConversationHome` in the existing resume picker (§5.3).
  */
-export type AccountHomeKind = "system" | "account" | "cliproxy";
+export type AccountHomeKind = "system" | "account";
 
 /**
  * Resolved account home handed to `startSession` (§4.1).
@@ -209,8 +209,6 @@ export interface AccountHome {
   kind: AccountHomeKind;
   /** Managed agent-account id — set only when `kind` is `"account"`. */
   accountId?: string;
-  /** Launcher registry id owning the proxy home — only when `kind` is `"cliproxy"`. */
-  proxyRefId?: string;
   /** Absolute path of the home dir. Host-side only. */
   path: string;
 }
@@ -466,7 +464,7 @@ export interface ProviderVersionAdvisory {
 export interface ProviderSnapshot {
   /** Adapter id. */
   id: AgentAdapterId;
-  /** Registry ids served by this adapter (claude ← claude/claudex/claudemix). */
+  /** Registry ids served by this adapter. */
   refIds: string[];
   installed: boolean;
   version: string | null;

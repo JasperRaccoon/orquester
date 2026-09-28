@@ -44,7 +44,7 @@ sessions survive client disconnects, page reloads, and **daemon restarts**.
 concurrent persistent terminal sessions per project; **agent tabs are chat tabs** — an agent runs
 in the agent host over its own protocol and the client renders messages, reasoning, tool calls,
 diffs, approvals, questions and subagents as structured rows (see "Agent chat GUI" below); an
-installable agent registry (`claude`, `claudex`, `claudemix`, `codex`, `opencode`, `grok`
+installable agent registry (`claude`, `codex`, `opencode`, `grok`
 — npm or vendor installers; `deepseek` is detect-only, its npm package no longer exists) with live
 version detection; detection + "Open on…" for shells/IDEs/explorers/browsers; xterm.js terminals with
 WebSocket-multiplexed PTY streaming, scrollback replay and resize; a CodeMirror file editor;
@@ -211,12 +211,23 @@ agent host's thread index, is a derived cache of NDJSON logs — see "Agent chat
             saved-prompts.json (the right rail's prompt library, global + per project, ≤ 1000;
                                entry-wise tolerant parse; a corrupt file is moved aside)
             accounts.json  keys/ (0700 per-account SSH keys)  logs/
-            env/ (per-launcher env files: opencode.env, and the generated claudex.env/claudemix.env)
+            env/ (per-launcher env files, e.g. opencode.env)
             hooks/ (managed agent hook script)
-            cliproxy/ state.json (model proxy config + routerProviders)  secrets.json (0600)
-                      config.yaml (generated)  token  auth/  logs/  claude-home-<entryId>/
+            cliproxy/ (only on a host that ran the retired model proxy — see below)
   workspaces/   <workspace>/<project> dirs (the file-browser sandbox root, fsRoot)
 ```
+
+**The retired model proxy.** The `claudex`/`claudemix` launchers and the CLIProxyAPI "model proxy"
+behind them are gone. A host that ran them gets a one-time boot handover
+(`model-proxy-retirement.ts`, before the accounts refresher starts): it kills the leftover
+`orqsvc-cliproxy` service session (which a `KillMode=process` deploy leaves running, still
+refreshing the accounts seeded into it — and a single-use refresh token spent twice logs the
+account out), writes any fresher proxy-held token pair back into its managed account home, and
+removes the generated `env/claudex.env`/`claudemix.env` and their wrapper bins.
+`<appdir>/daemon/cliproxy/` itself (router keys, the proxy's credential copies, the binary) stays
+on disk — the user's data, deleted by hand — with a `retired` marker that makes every later boot
+skip the handover. The accounts' old `proxyOwned` flag is dropped by the schema on load, so
+Orquester refreshes every managed account again.
 
 **Sessions & PTYs — two backends** (`sessions.ts`, chosen at boot):
 
@@ -279,8 +290,8 @@ under every derived statement, and carries a `*Built: …*` line wherever the im
 deliberately departs from a sentence.
 
 **The agent host is a separate process.** `apps/daemon/src/agent-host/main.ts`, run with tsx like
-the daemon, spawned by the daemon into a **tmux service session `orqsvc-agent-host`** exactly as
-cliproxy is. That is the whole point: `deploy/orquester.service` uses `KillMode=process`, so a
+the daemon, spawned by the daemon into a **tmux service session `orqsvc-agent-host`**. That is
+the whole point: `deploy/orquester.service` uses `KillMode=process`, so a
 deploy signals only the node process and the host — with every provider child and every in-flight
 turn — survives it. It hosts the four adapters, owns every provider child, owns the per-thread
 event logs, and serves HTTP over a unix socket at `<appdir>/daemon/agent-host.sock`, authenticated
@@ -338,7 +349,7 @@ then the thread; a bad `resume` is a 400 `RESUME_UNAVAILABLE` there and nowhere 
 
 | Adapter | Process | Protocol |
 |---|---|---|
-| `claude` (also `claudex`/`claudemix`, Claude + cliproxy env) | one CLI per thread, owned by the SDK | `@anthropic-ai/claude-agent-sdk` streaming input, `pathToClaudeCodeExecutable` = the registry bin |
+| `claude` | one CLI per thread, owned by the SDK | `@anthropic-ai/claude-agent-sdk` streaming input, `pathToClaudeCodeExecutable` = the registry bin |
 | `codex` | one `codex app-server` per thread | hand-written NDJSON JSON-RPC over stdio (**no `jsonrpc` field**), bindings generated under `adapters/codex/_generated/` |
 | `opencode` | one `opencode serve` **per project**, shared by its threads | HTTP + SSE via `@opencode-ai/sdk` |
 | `grok` | one `grok agent stdio` per thread | hand-written ACP client + `x.ai/*` extensions (`adapters/grok/acp/`) |
@@ -1854,20 +1865,17 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   The composer's account chip re-points an existing chat thread at another managed account
   (`POST /api/sessions/:id/account` → the host's `POST /threads/:id/identity`), applied on the
   **next message**: §3.4's ensure-session step sees the changed `accountKey`, restarts with reason
-  `"account"` and carries the resume cursor, so the conversation survives. Four invariants.
+  `"account"` and carries the resume cursor, so the conversation survives. Three invariants.
   (1) **The launch config is rewritten before the head** — `main.ts`'s `buildEnv`/`resolveHome`
   prefer `launch.homePath`/`launch.launchEnv` over the head's account (they must: it is the
   daemon's resolved answer), so a head that moved first would claim the new identity while every
   relaunch kept the old home's credentials; a failed append rolls it back. (2) **It is refused
   unless nothing is in flight** — `identitySwitchRefusal` (`orchestration/session-policy.ts`) is
   the one expression, mirrored client-side by `canSwitchChatAccount`
-  (`packages/ui/src/lib/agent-chat/account-switch.ts`) to gate the chip. (3) **The home KIND never
-  crosses the cliproxy boundary** — it is a function of the registry entry, which never changes,
-  and a cliproxy home does not share `projects/` with the rest. (4) **OpenCode is excluded**: one
+  (`packages/ui/src/lib/agent-chat/account-switch.ts`) to gate the chip. (3) **OpenCode is excluded**: one
   server per project under the daemon's own identity, so there is no per-thread account to move.
   The route is daemon-owned rather than a §6.2 command precisely because the body is **not**
-  forwarded verbatim — only the daemon can apply the family gate, the seeded-account gate and the
-  launch-env recompose. `binding.json` gains no new writer.
+  forwarded verbatim — only the daemon can apply the family gate and the launch-env recompose. `binding.json` gains no new writer.
   A continuing Codex goal refuses the switch too (`Pause the goal before switching accounts.`; a
   goal a deploy holds, in words of its own), and a switch that applies carries the goal to the new
   home (`carryGoal`) — the Codex goal gotcha below.
@@ -2107,8 +2115,8 @@ unauthenticated unix socket never serves it) as a stateless Streamable-HTTP endp
 `McpServer` per request, a 16 MiB body limit and `405` for `GET`/`DELETE`. Every tool but the kept
 todo/file pair is an **in-process client of the daemon's own REST API**: `InjectDaemonApi`
 (`daemon-api.ts`) runs every call through `app.inject()` with the caller's own `Authorization`
-header, so each route's gates (the create route's claudex model gate, seeded-account gate,
-`chat.adapter` check and tab-then-thread order; the proxy routes'
+header, so each route's gates (the create route's `chat.adapter` check and tab-then-thread order;
+the proxy routes'
 `THREAD_NOT_FOUND`/`HOST_UNAVAILABLE` guards) and error codes are the GUI's by construction, not by
 review. Two invariants:
 
@@ -2288,22 +2296,20 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   `resume <id>` subcommand, which must follow the global options). Client side, the store surfaces
   it as a toast offering a fresh launch with the same agent/account/model.
 - **A conversation only exists inside the HOME that wrote it.** `agent-conversations.ts` scans the
-  union of the daemon's own HOME, every managed account home
-  (`agent-accounts/<family>/<id>/home`) and the proxy homes (`cliproxy/claude-home-<entryId>`),
-  deduping roots by dir and then collapsing symlink aliases per history dir by `realpath` — a
+  union of the daemon's own HOME and every managed account home
+  (`agent-accounts/<family>/<id>/home`), deduping roots by dir and then collapsing symlink aliases per history dir by `realpath` — a
   managed account home *symlinks* `projects`/`sessions` back at the daemon's own agent home, so
   without that the same transcripts get scanned once per account and burn the per-agent file cap
   on duplicates. First spelling wins and the system home is listed first, so a merely-symlinked
   transcript is correctly reported as resumable under the system home. Every remaining row is
-  stamped `home` + `accountId`/`proxyRefId`, and the
+  stamped `home` + `accountId`, and the
   UI's `resumeAccountId` maps it: `account` → that id, forced (only that home sees the transcript);
   `system` → the user's selected/preferred account, because every managed home symlinks its history
   dir back to the system one by construction so any identity can resume it — forcing the host
   identity here once broke resume with "session expired, run /login" whenever the system home's own
-  login was stale (the sentinel is used only when there is no fallback at all). `cliproxy` rows have no expressible identity — claudex/claudemix carry no `resumeArgs`,
-  and plain `claude` in the wrong HOME cannot find the transcript — so the UI filters them out of
-  both resume surfaces (`isResumableConversation` in `packages/ui/src/lib/resume-account.ts`); the
-  full fix (resumeArgs on the launchers + routing on `proxyRefId`) is a known follow-up.
+  login was stale (the sentinel is used only when there is no fallback at all). The retired model
+  proxy's launcher homes (`cliproxy/claude-home-<entryId>`) are not scanned: nothing can relaunch
+  under them.
   Every lister is independently try/caught to `[]` and file-capped: this reads other tools' private
   formats, so a failure may only shrink the list.
 - **Template availability is probed against the SESSION PATH, not the daemon's.** `/api/templates`
@@ -2312,9 +2318,9 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   `~/.cargo/bin`, `~/go/bin`, …) that sessions get — probing it would grey out templates the
   terminal runs fine. Probed per request (not cached) so a tool installed from a tab lights its
   card up on the next modal open.
-- **`/api/system/processes/kill` protects the daemon, the tmux server, and the managed cliproxy
-  process** (the route passes the proxy's live child pid via the service's `protectedPids` hook — on
-  a no-tmux host cliproxy is a daemon child and would otherwise be a legal target). Everything else
+- **`/api/system/processes/kill` protects the daemon, the tmux server, and the agent host** (the
+  route passes the host's pid via the service's labelled `protectedPids` hook — on a no-tmux host
+  the host is a daemon child and would otherwise be a legal target). Everything else
   must descend from a daemon-tree root (its own children plus every `orq-*` tmux pane pid, the agent
   host, and every orphan of the daemon's uid carrying an agent-host launch marker — what a provider
   CLI left behind, see "What a Grok CLI starts outlives it") or it's `PROCESS_NOT_MANAGED`. An
@@ -2434,85 +2440,34 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   (`StrictHostKeyChecking=accept-new`). A once-per-process best-effort refresh from
   `https://bitbucket.org/site/ssh` only ever *adds* lines for those two hosts. DC hosts are TOFU'd
   into the same file.
-- **Model proxy (cliproxy) & router providers.** The "Model proxy" is a daemon-supervised
-  CLIProxyAPI process (`apps/daemon/src/cliproxy*.ts`) that lets the `claudex`/`claudemix`
-  launchers drive GPT (Codex OAuth), Claude OAuth, **router** and **Grok** (xAI OAuth) models
-  through the Claude Code harness. Its state lives in `<appdir>/daemon/cliproxy/`: `state.json`
-  (enabled, port, model picks, `modelOverrides`, seeded accounts, **`routerProviders[]`**) and
-  `secrets.json` (0600 —
-  proxy api key, management secret, **`routerKeys` = providerId → API key**). Keys never cross the
-  wire; `CliProxyStatus.routerProviders[].keyState` is `"none" | "set" | "verified"` only.
-  - **Router providers are data, not code.** A provider is
-    `{id (slug /^[a-z0-9][a-z0-9-]{0,31}$/, reserved: codex/claude), label, baseUrl (http(s)),
-    preset: "openrouter"|"tokenrouter"|null, models: [{name, alias?, contextWindow?, compactWindow?,
-    compactPct?}], keyVerifiedAt, createdAt}` (zod in `packages/config`). `ROUTER_PRESETS` only
-    *prefills* the create form — behavior always comes from the stored fields. Routing is
-    `resolveRouterModel(providers, model)` (matches name **or** alias, tolerating an `acc<hex>/`
-    prefix), the single source of truth for: bare-vs-account-prefixed launch model, the
-    seeded-account launch gate, `compactEnvForModel`, the probe catalog union, and the UI's
-    "keyless — account ignored" dimming. Never reintroduce a model-name regex.
-  - **`config.yaml` projection.** `renderConfigYaml` emits one `openai-compatibility` entry per
-    provider that has **both** a stored key and ≥1 model (keyless/model-less are skipped). Every
-    emitted string goes through `JSON.stringify` (a label/baseUrl is user text — YAML-injection
-    guard), and free-text labels reaching `claudex.env` go through `envSafeLabel`. **`models` is a
-    provider-level key** (sibling of `api-key-entries`); nested under an api-key entry it parses
-    but registers zero models and every request 502s `unknown provider for model <alias>`.
-  - **Mutations are HTTP-only and restart-gated.** `PUT/DELETE /api/cliproxy/providers/:id`,
-    `POST/DELETE /api/cliproxy/providers/:id/key` are 403 over the unix socket (`refusedOnSocket`)
-    and answer 409 `{ok:false, affectedSessions}` while dependent sessions are live unless
-    `force`. `GET /api/cliproxy/providers/:id/catalog` is read-only (404 unknown / 409 no key /
-    502 upstream). Key verification: openrouter-preset uses its `GET /key`, everything else an
-    authed `GET {baseUrl}/models` — only 401/403 rejects; network/timeout stores *unverified*.
-  - **Legacy mirror rule.** A pre-router `secrets.openRouterKey` migrates once at load
-    (`migrateLegacyOpenRouter`) into an `openrouter` provider + `routerKeys.openrouter`, copying
-    `state.openRouterKeyVerifiedAt` into `keyVerifiedAt`. Both legacy fields stay **written at
-    rest** one release for rollback safety (precedent 914ec27) — new code writes the mirror and
-    never reads it. The `claudex.env` Fable slot is gated on `routerKimiAvailable()` (some keyed
-    provider serving name/alias `kimi-k3`), not on OpenRouter. *(The managed `kimi` agent row it
-    also gated is gone: `kimi`, `gemini`, `agy`, `cline` and `deepcode` were dropped from the
-    catalog when agent tabs became chat tabs — a row with no `chat` adapter cannot open one.
-    `deepseek` stays, detect-only and chat-less.)*
-  - **Grok is a third MANAGED ACCOUNT family (`agent: "grok"`) — same pipeline as
-    claude/codex.** Accounts live in the agent-accounts store (`agent-accounts/grok/<id>/home`,
-    credential = the grok CLI's native `auth.json`, the `"<issuer>::<client>"` keyed map);
-    acquired three ways, all in Settings → Accounts: **import** (upload `~/.grok/auth.json`,
-    auto-detected), **import the server's own login** (`fromSystem:"grok"` on the import route —
-    reads the FIXED `$GROK_HOME/auth.json` path server-side, so it is remote-transport-safe
-    unlike arbitrary `from` paths), or the **device-code link** — an RFC 8628 flow the daemon
-    drives DIRECTLY against `auth.x.ai` (`/oauth2/device/code` → poll `/oauth2/token`,
-    grok-CLI client id, scope incl. `api:access` — required by grok CLI ≥ 1.0, whose 403
-    names the missing scope — plus legacy `grok-cli:access`; `grok-device-auth.ts`), so it is
-    **proxy-independent** and on approval the tokens become a managed account
-    (`grokAuthJsonFromDeviceTokens`) — deliberately NOT auto-seeded. Separately,
-    `adoptOrphanXaiFiles` remains the boot migration for pre-managed deployments: an unbacked
-    proxy-written `auth/xai-<email>.json` is converted to native shape
-    (`grokAuthJsonFromStorage`), imported, renamed to the seeded filename `xai-acc<hex>.json`
-    and marked `proxyOwned`. Grok Build sessions get account chips → `GROK_HOME=<home>` (unset
-    `XAI_API_KEY`); idle managed accounts are refreshed by `refreshGrokToken` (standard OIDC
-    refresh against `auth.x.ai/oauth2/token`, client id shared with seed conversion). **Seeding
-    to the proxy is `provider:"grok"`** on the normal seed/unseed routes:
-    `grokStorageFromAuthJson` (NO `prefix` field — xai launch models are always bare; the proxy
-    routes internally) writes `xai-acc<hex>.json`, two-way credential sync + freshness use
-    `seededAuthFileName()` for the xai- naming exception. `CliProxyStatus.providers` includes
-    grok; `status.xai` (linked/expired = seeded files present, + linking progress) still gates
-    xai model chips, `resetDanglingModelPicks` and claudex coupling
-    (`codexOk || routerOk || xaiLinked`). `DELETE /api/agent-accounts/:id` un-seeds first for
-    every family. Accepted risks unchanged (brainstorm 2026-08-05): the proxy **impersonates the
-    first-party Grok CLI**; **no per-request quota readout exists** (best-effort
-    `lastQuotaError`); a `…-usage-exhausted` 429 **cools the account 24 h**; and the synthesized
-    native `auth.json` from adoption omits profile-only fields (team/names) the CLI treats as
-    optional.
-  - **Grok usage bar.** `createGrokSource` (`apps/daemon/src/usage-sources.ts`) reads the
-    subscription's weekly credit pool from the first-party
-    `cli-chat-proxy.grok.com/v1/billing?format=credits` (the endpoint behind the grok CLI's own
-    `/usage` command; spoofed client headers required or it 426s, pinned `GROK_CLIENT_VERSION`).
-    One `weekly` window only — SuperGrok has no 5h window; omitted `creditUsagePercent` on a
-    live period means **0%**, not unknown (proto3). Credential precedence: proxy-owned
-    `cliproxy/auth/xai-*.json` (this is the ONE sanctioned reader of xai token material outside
-    the proxy subsystem — the token never leaves the source closure) → managed grok account
-    homes (freshest `expires_at`) → the grok CLI's `~/.grok/auth.json`. Expired stamp ⇒
-    stale/no-fetch (the proxy/CLI/accounts-refresher refreshes, never this source).
-    `usage-parse.ts:parseGrokBilling`; chip enum + `USAGE_AGENT_IDS` include `grok`.
+- **Grok is a third MANAGED ACCOUNT family (`agent: "grok"`) — same pipeline as
+  claude/codex.** Accounts live in the agent-accounts store (`agent-accounts/grok/<id>/home`,
+  credential = the grok CLI's native `auth.json`, the `"<issuer>::<client>"` keyed map);
+  acquired three ways, all in Settings → Accounts: **import** (upload `~/.grok/auth.json`,
+  auto-detected), **import the server's own login** (`fromSystem:"grok"` on the import route —
+  reads the FIXED `$GROK_HOME/auth.json` path server-side, so it is remote-transport-safe
+  unlike arbitrary `from` paths), or the **device-code link** — an RFC 8628 flow the daemon
+  drives DIRECTLY against `auth.x.ai` (`/oauth2/device/code` → poll `/oauth2/token`,
+  grok-CLI client id, scope incl. `api:access` — required by grok CLI ≥ 1.0, whose 403
+  names the missing scope — plus legacy `grok-cli:access`; `grok-device-auth.ts`), served at
+  `GET/POST/DELETE /api/agent-accounts/grok/link` by `GrokDeviceLinkService`
+  (`grok-device-link.ts`, progress as `grok-link.changed` on the `agent-accounts` channel); on
+  approval the tokens become a managed account (`grokAuthJsonFromDeviceTokens`). Grok Build
+  sessions get account chips → `GROK_HOME=<home>` (unset `XAI_API_KEY`); idle managed accounts
+  are refreshed by `refreshGrokToken` (standard OIDC refresh against `auth.x.ai/oauth2/token`).
+- **Grok usage bar.** `createGrokSource` (`apps/daemon/src/usage-sources.ts`) reads the
+  subscription's weekly credit pool from the first-party
+  `cli-chat-proxy.grok.com/v1/billing?format=credits` (the endpoint behind the grok CLI's own
+  `/usage` command; spoofed client headers required or it 426s, pinned `GROK_CLIENT_VERSION`).
+  One `weekly` window only — SuperGrok has no 5h window; omitted `creditUsagePercent` on a
+  live period means **0%**, not unknown (proto3). Each managed account is polled on its own
+  (`authFile` = its home's `auth.json`); the System row's credential precedence is managed grok
+  account homes the caller lists (`managedGrokAuthFiles`, freshest `expires_at` — the daemon
+  lists none, since it polls them per account) → the grok CLI's `~/.grok/auth.json`. This is the
+  ONE sanctioned reader of xai token material outside the accounts subsystem — the token never
+  leaves the source closure. Expired stamp ⇒ stale/no-fetch (the CLI or the accounts refresher
+  refreshes, never this source). `usage-parse.ts:parseGrokBilling`; chip enum +
+  `USAGE_AGENT_IDS` include `grok`.
 - **Security boundary asymmetry.** `PUT /api/config/daemon` is **Unix-socket-only** (403 over
   remote HTTP) — **except the single-field `PUT /api/config/daemon/protect-archived`, which is
   allowed on both transports** (normal bearer auth) because it toggles a client-side UI curtain
@@ -2830,7 +2785,7 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Electron embedding | `apps/desktop/src/main.ts` |
 | Browser tabs (Design Mode) | `apps/daemon/src/browsers.ts`, `apps/daemon/src/browser-pick.ts`, `packages/ui/src/components/browser/` |
 | Git hosting accounts (GitHub/Bitbucket) | `apps/daemon/src/accounts.ts`, `apps/daemon/src/providers/`, `packages/ui/src/components/settings/SettingsModal.tsx` |
-| Model proxy + router providers + xAI (Grok) account | `apps/daemon/src/cliproxy.ts`, `apps/daemon/src/cliproxy-files.ts`, `apps/daemon/src/cliproxy-secrets.ts`, `apps/daemon/src/cliproxy-xai.ts`, router/xai schemas in `packages/config/src/index.ts`, `packages/ui/src/components/settings/ModelProxySettings.tsx` |
+| Grok managed accounts, device-code link, usage bar | `apps/daemon/src/agent-accounts.ts`, `apps/daemon/src/agent-account-refresh.ts`, `apps/daemon/src/grok-device-link.ts`, `apps/daemon/src/grok-device-auth.ts`, `createGrokSource` in `apps/daemon/src/usage-sources.ts` |
 | Agent chat: the host process, adapters, store, checkpoints | `apps/daemon/src/agent-host/README.md` (module map), `…/main.ts`, `…/adapters/<id>/`, `…/store/`, `…/checkpoints/` |
 | Agent chat: daemon side (supervision, route proxy, tab records) | `apps/daemon/src/agent-chat/{supervisor.ts,proxy-routes.ts,service.ts,session-router.ts,home-prep.ts}` |
 | Agent chat: wire contracts, runtime/domain events, fold | `packages/api/src/agent-chat/{wire.ts,runtime-events.ts,domain-events.ts,fold.ts,slim.ts,roster.ts}` |

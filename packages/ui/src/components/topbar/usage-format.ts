@@ -24,8 +24,8 @@ export function labelForAgent(id: string): string {
 
 /**
  * The actionable hint for an enabled-but-absent usage agent. Claude/Codex are
- * CLI logins; Grok's credential is the xai link (or a grok CLI login) — "run
- * grok login" alone would send the user to the wrong place on a proxy-only box.
+ * CLI logins; Grok's credential is a managed account (linked or imported in
+ * Settings → Accounts) or a grok CLI login.
  */
 export function usageLoginHint(id: string): string {
   return id === "grok" ? "link or import a Grok account in Settings → Accounts, or run grok login" : `run ${id} login`;

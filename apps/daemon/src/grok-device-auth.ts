@@ -4,8 +4,7 @@ import { decodeJwtPayload } from "./agent-account-identity.ts";
 /**
  * Direct RFC 8628 device-code login against xAI's OIDC issuer — the same
  * standard flow (endpoints, client id, grant) the grok CLI's own
- * `grok login --device-auth` performs, so linking a Grok account does NOT
- * depend on the model proxy being enabled. Verified live against
+ * `grok login --device-auth` performs. Verified live against
  * `auth.x.ai/.well-known/openid-configuration` (2026-08-06): device endpoint
  * `/oauth2/device/code`, token endpoint `/oauth2/token`, standard
  * `authorization_pending`/`slow_down` polling semantics.

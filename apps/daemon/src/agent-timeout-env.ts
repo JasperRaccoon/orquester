@@ -13,13 +13,10 @@ type TimeoutLaunchEnv = { env: Record<string, string> };
  * Claude Code aborts a streaming request after 180 s with no bytes received
  * (its `$Dh` default) and renders "[Request interrupted by user]" — which
  * killed 37 of 52 subagents in a single workflow run on the VPS. These three
- * variables are the documented per-process overrides. The managed CLIProxyAPI
- * is NOT involved: it has no timeout of any kind and merely observes the
- * client hang up.
+ * variables are the documented per-process overrides.
  *
- * Keys on the FAMILY, never the raw id: claudex/claudemix run the real `claude`
- * binary against the managed proxy, so they need the same env as plain `claude`
- * (same reasoning as agent-hooks.ts's config targeting).
+ * Keys on the FAMILY, never the raw id (same reasoning as agent-hooks.ts's
+ * config targeting).
  *
  * Returns null for non-claude launchers — these variables mean nothing to
  * codex/opencode/gemini and must not be set for them.

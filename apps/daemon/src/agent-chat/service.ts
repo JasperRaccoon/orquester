@@ -5,7 +5,7 @@
  * It owns the supervisor (§3.1), the host client, the chat tab records (§5.2),
  * the coarse summary subscription (§6.4) and the route dependencies of
  * §6.2/§6.3. `index.ts` keeps only the boot order and the `/api/sessions`
- * lifecycle glue, exactly as it does for cliproxy.
+ * lifecycle glue.
  */
 
 import { spawn } from "node:child_process";
@@ -123,13 +123,12 @@ export interface AgentChatServiceOptions {
   registryEntry(refId: string): RegistryEntry | undefined;
   /**
    * The SAME launch env a terminal launch of this entry would get today —
-   * account home, cliproxy env for claudex/claudemix, model pin, timeouts
-   * (§3.1 "Launch environment"). `index.ts` passes its own `resolveExtraEnv`
-   * body so the two can never drift.
+   * account home, timeouts (§3.1 "Launch environment"). `index.ts` passes its
+   * own `resolveExtraEnv` body so the two can never drift.
    */
   resolveLaunchEnv(
     entry: RegistryEntry,
-    ctx: { accountId?: string; model?: string }
+    ctx: { accountId?: string }
   ): Promise<ChatLaunchEnv | null>;
   /** The system Claude config file, when no `CLAUDE_CONFIG_DIR` is in play. */
   systemClaudeConfigFile(): string;
@@ -147,16 +146,6 @@ export interface AgentChatServiceOptions {
   sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
   /** Managed accounts + family defaults, for the §7.7 auth overlay (see `provider-auth-overlay.ts`). */
   listManagedAccounts?(): { accounts: AgentAccount[]; defaults?: Partial<Record<AgentAccount["agent"], string | null>> };
-  /**
-   * `index.ts`'s `seededAccountRefusal`, injected rather than imported so the
-   * service does not depend on the daemon entry point. A switch has to apply
-   * exactly the gate a create does, or a claudex tab could be re-pointed at an
-   * account the proxy has no auth file for and every later turn would 502.
-   */
-  seededAccountRefusal?(
-    input: { refId: string; accountId?: string },
-    model: string | undefined
-  ): { code: string; message: string } | null;
   logger?: {
     log?: (...a: unknown[]) => void;
     warn?: (...a: unknown[]) => void;
@@ -401,8 +390,7 @@ export class AgentChatService {
    *   a CLI updated outside the registry entirely.
    *
    * A first sighting is never a change: the host's own boot probe already owns
-   * boot. `claudex`/`claudemix` need no special case — their catalog rows carry
-   * `chat.adapter: "claude"`, so they nudge the same provider the launcher runs.
+   * boot.
    */
   onRegistryEntryChanged(entry: RegistryEntry): void {
     const adapter = entry.chat?.adapter;
@@ -553,8 +541,7 @@ export class AgentChatService {
       // The account rides the top level, shared with the terminal path;
       // `chat.accountId` is the host-side spelling and is only a fallback.
       launch = await this.opts.resolveLaunchEnv(entry, {
-        accountId: req.accountId ?? fields.accountId,
-        model: req.model
+        accountId: req.accountId ?? fields.accountId
       });
     } catch (error) {
       throw error instanceof ChatSessionError
@@ -563,7 +550,7 @@ export class AgentChatService {
     }
 
     const accountId = launch?.accountId ?? "";
-    const home = resolveHomeKind(entry.id, accountId);
+    const home = resolveHomeKind(accountId);
     const cwd = req.cwd || req.projectPath || homedir();
     const id = randomUUID();
     // EXACTLY the env a terminal launch composes today: the registry entry's
@@ -573,7 +560,7 @@ export class AgentChatService {
     // over `tmux -e`.
     const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
     // The adapter's home variable is the one authority on the home dir, so a
-    // managed account, a cliproxy launcher home and the system home all resolve
+    // managed account and the system home both resolve
     // through the same rule the child itself will read.
     const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
 
@@ -590,8 +577,7 @@ export class AgentChatService {
       cwd,
       order,
       accountId,
-      home,
-      model: req.model
+      home
     });
 
     const body: CreateHostThreadRequest = {
@@ -604,20 +590,18 @@ export class AgentChatService {
       home,
       // Passed through as the client sent it. An empty `modelSelection.model`
       // means "the provider's own default" — the launcher had no catalog to
-      // pick from — and is never a refusal here (the daemon's model gate above
-      // is the claudex/claudemix catalog check, which is a different thing).
+      // pick from — and is never a refusal here.
       modelSelection: fields.modelSelection,
       runtimeMode: fields.runtimeMode,
       // EXACTLY the env a terminal launch of this entry gets today (§3.1): the
       // registry entry's own env — which is where the per-launcher env file
-      // `<appdir>/daemon/env/<id>.env` (opencode.env, the generated
-      // claudex.env/claudemix.env) has already been merged by RegistryService —
+      // `<appdir>/daemon/env/<id>.env` (opencode.env) has already been merged
+      // by RegistryService —
       // under the `resolveExtraEnv` contributors, which win a collision exactly
       // as the terminal wrapper script's `export` wins over `tmux -e`.
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
       ...(homePath ? { homePath } : {}),
-      ...(home === "cliproxy" ? { proxyRefId: entry.id } : {}),
       ...(fields.resume ? { resume: fields.resume } : {})
     };
     try {
@@ -692,24 +676,16 @@ export class AgentChatService {
     // The family gate. `AgentAccountsService.resolveLaunchEnv` answers `null`
     // for an account of the wrong family — which would SILENTLY launch the
     // system identity — so a mismatched id is refused here rather than
-    // degraded there.
+    // degraded there. An entry draws its accounts from its own id's family.
     if (requestedAccountId !== SYSTEM_ACCOUNT_ID) {
-      const family = proxyAccountFamily(entry.id) ?? entry.id;
       const managed = this.opts.listManagedAccounts?.().accounts ?? [];
       const account = managed.find((candidate) => candidate.id === requestedAccountId);
-      if (!account || account.agent !== family) {
+      if (!account || account.agent !== entry.id) {
         throw new ChatSessionError(
           `That account cannot run "${entry.name}".`,
           "INVALID_COMMAND"
         );
       }
-    }
-    const seededRefusal = this.opts.seededAccountRefusal?.(
-      { refId: entry.id, accountId: requestedAccountId },
-      summary.model
-    );
-    if (seededRefusal) {
-      throw new ChatSessionError(seededRefusal.message, "INVALID_COMMAND");
     }
     if (!this.supervisor.isHealthy()) {
       throw new ChatSessionError("The agent host is not running.", "HOST_UNAVAILABLE");
@@ -721,8 +697,7 @@ export class AgentChatService {
       // the family default, so "switch to System" would silently pick whatever
       // account happens to be the default instead.
       launch = await this.opts.resolveLaunchEnv(entry, {
-        accountId: requestedAccountId,
-        model: summary.model
+        accountId: requestedAccountId
       });
     } catch (error) {
       throw error instanceof ChatSessionError
@@ -731,7 +706,7 @@ export class AgentChatService {
     }
 
     const accountId = launch?.accountId ?? "";
-    const home = resolveHomeKind(entry.id, accountId);
+    const home = resolveHomeKind(accountId);
     const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
     const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
     // The new home may never have been used for this project.
@@ -743,8 +718,7 @@ export class AgentChatService {
       home,
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
-      ...(homePath ? { homePath } : {}),
-      ...(home === "cliproxy" ? { proxyRefId: entry.id } : {})
+      ...(homePath ? { homePath } : {})
     };
     let receipt: { seq: number };
     try {
@@ -1084,26 +1058,11 @@ export class AgentChatService {
 
 /**
  * Which HOME the thread's provider child runs under — the §5.2 `home` field,
- * and the same three-way split the resume picker already uses.
+ * and the same split the resume picker already uses: a managed account's home,
+ * else the system one.
  */
-export function resolveHomeKind(entryId: string, accountId: string): AgentChatHome {
-  if (entryId === "claudex" || entryId === "claudemix") return "cliproxy";
+export function resolveHomeKind(accountId: string): AgentChatHome {
   return accountId ? "account" : "system";
-}
-
-/**
- * Which managed-account FAMILY a registry entry draws its accounts from.
- *
- * The proxy launchers route by model name, so `claudex` pins a seeded **Codex**
- * account and `claudemix` a seeded **Claude** one; their own ids never match an
- * `AgentAccount.agent`. Mirrors `PROXY_ACCOUNT_FAMILY` in the UI's `NewTabMenu`
- * — the two decide the same thing for the same reason, one at launch and one at
- * switch. Null for every other entry, which draws from its own id.
- */
-export function proxyAccountFamily(entryId: string): "claude" | "codex" | null {
-  if (entryId === "claudemix") return "claude";
-  if (entryId === "claudex") return "codex";
-  return null;
 }
 
 /**

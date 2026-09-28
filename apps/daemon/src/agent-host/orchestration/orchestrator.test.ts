@@ -2329,25 +2329,23 @@ describe("orchestrator — the §6.1 launch config (§3.1)", () => {
   it("persists the launcher env at create and hands it back for the child's env", async () => {
     const host = createTestHost();
     const threadId = await host.createThread({
-      refId: "claudex",
-      home: "cliproxy",
+      refId: "claude",
+      home: "account",
       launchEnv: {
         ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
-        ANTHROPIC_AUTH_TOKEN: "proxy-token"
+        CLAUDE_CODE_MAX_RETRIES: "3"
       },
       unsetEnv: ["ANTHROPIC_API_KEY"],
-      homePath: "/var/lib/orquester/daemon/cliproxy/claude-home-claudex",
-      proxyRefId: "claudex"
+      homePath: "/var/lib/orquester/daemon/agent-accounts/claude/acc1/home"
     });
 
     assert.deepEqual(host.orchestrator.launchConfig(threadId), {
       launchEnv: {
         ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
-        ANTHROPIC_AUTH_TOKEN: "proxy-token"
+        CLAUDE_CODE_MAX_RETRIES: "3"
       },
       unsetEnv: ["ANTHROPIC_API_KEY"],
-      homePath: "/var/lib/orquester/daemon/cliproxy/claude-home-claudex",
-      proxyRefId: "claudex"
+      homePath: "/var/lib/orquester/daemon/agent-accounts/claude/acc1/home"
     });
     // Written before the thread exists on the wire, so the very first turn
     // already sees it.
@@ -2377,10 +2375,10 @@ describe("orchestrator — the §6.1 launch config (§3.1)", () => {
   it("survives a host restart — the daemon sends it once, at create", async () => {
     const first = createTestHost();
     const threadId = await first.createThread({
-      refId: "claudex",
-      home: "cliproxy",
-      launchEnv: { ANTHROPIC_AUTH_TOKEN: "proxy-token" },
-      homePath: "/home/proxy"
+      refId: "claude",
+      home: "account",
+      launchEnv: { CLAUDE_CODE_MAX_RETRIES: "3" },
+      homePath: "/home/account"
     });
     await first.stop();
 
@@ -2390,13 +2388,11 @@ describe("orchestrator — the §6.1 launch config (§3.1)", () => {
     await next.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
     await next.settle();
     assert.deepEqual(next.orchestrator.launchConfig(threadId)?.launchEnv, {
-      ANTHROPIC_AUTH_TOKEN: "proxy-token"
+      CLAUDE_CODE_MAX_RETRIES: "3"
     });
     // …and the daemon's resolved home is what reaches `startSession`.
-    assert.equal(next.adapter.lastStart?.home.path, "/home/proxy");
-    assert.equal(next.adapter.lastStart?.home.kind, "cliproxy");
-    // No `proxyRefId` was sent, so the launcher's own refId is the owner.
-    assert.equal(next.adapter.lastStart?.home.proxyRefId, "claudex");
+    assert.equal(next.adapter.lastStart?.home.path, "/home/account");
+    assert.equal(next.adapter.lastStart?.home.kind, "account");
     await next.stop();
   });
 });

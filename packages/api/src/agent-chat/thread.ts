@@ -96,7 +96,7 @@ export interface ThreadHead {
   cwd: string;
   title: string;
   adapter: AgentAdapterId;
-  /** Registry id the tab launched from (claude, claudex, codex, …). */
+  /** Registry id the tab launched from (claude, codex, …). */
   refId: string;
   accountId: string;
   home: AccountHomeKind;
@@ -170,7 +170,7 @@ export interface ProviderSessionBinding {
   /** The adapter that owns the session this cursor belongs to. */
   adapter: AgentAdapterId;
   /**
-   * The registry entry the session launched from (`claude`, `claudex`, …).
+   * The registry entry the session launched from (`claude`, `codex`, …).
    * A cursor minted under one launcher can be unusable under another.
    */
   adapterKey: string | null;

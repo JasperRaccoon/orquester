@@ -10,7 +10,7 @@ const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const GROK_USER_URL = "https://cli-chat-proxy.grok.com/v1/user";
 // cli-chat-proxy enforces the first-party client headers (426 without them);
-// pinned like CLIProxyAPI pins its own copy — bump alongside grok releases.
+// pinned to a grok CLI release — bump alongside grok releases.
 const GROK_CLIENT_VERSION = "0.2.118";
 
 export async function readUsagePrefs(appConfigFile: string): Promise<UsagePrefs> {
@@ -139,59 +139,22 @@ async function fromGrokAuthJson(file: string): Promise<GrokCredential | null> {
 
 /**
  * The Grok OAuth bearer, read-only, from any credential store on this host:
- *  1. the proxy-owned `<cliproxy>/auth/xai-*.json` (CLIProxyAPI refreshes it
- *     with a 5-min lead — freshest file by `expired` wins), else
- *  2. managed grok account homes (`agent-accounts/grok/<id>/home/auth.json`,
+ *  1. managed grok account homes (`agent-accounts/grok/<id>/home/auth.json`,
  *     freshest by `expires_at` — kept alive by the accounts refresher), else
- *  3. the grok CLI's own `<grokHome>/auth.json` (refreshed whenever the CLI runs).
+ *  2. the grok CLI's own `<grokHome>/auth.json` (refreshed whenever the CLI runs).
  * When `authFile` is set, only that managed-home auth.json is read (per-account
  * poll). This is the ONE sanctioned reader of xai token material outside the
- * proxy subsystem: the token stays inside this closure and never reaches an
+ * accounts subsystem: the token stays inside this closure and never reaches an
  * AgentUsage payload.
  */
 async function readGrokCredential(
-  authDir: string,
   grokHome: string,
   managedAuthFiles: readonly string[] = [],
   authFile?: string
 ): Promise<GrokCredential | null> {
   if (authFile) return fromGrokAuthJson(authFile);
 
-  let best: { cred: GrokCredential; expired: number } | null = null;
-  try {
-    for (const name of await readdir(authDir)) {
-      if (!name.startsWith("xai-") || !name.endsWith(".json")) continue;
-      try {
-        const rec = JSON.parse(await readFile(join(authDir, name), "utf8"));
-        if (rec?.type !== "xai" || typeof rec.access_token !== "string" || !rec.access_token) continue;
-        const expired = typeof rec.expired === "string" ? Date.parse(rec.expired) : NaN;
-        // Prefer the file's email field; fall back to the xai-<email>.json stem.
-        const stem = name.slice("xai-".length, -".json".length);
-        const email =
-          typeof rec.email === "string" && rec.email
-            ? rec.email
-            : stem.includes("@")
-              ? stem
-              : null;
-        const cred: GrokCredential = {
-          token: rec.access_token,
-          userId: typeof rec.sub === "string" && rec.sub ? rec.sub : null,
-          email,
-          expiresAtMs: Number.isFinite(expired) ? expired : null
-        };
-        if (!best || (Number.isFinite(expired) && expired > best.expired)) {
-          best = { cred, expired: Number.isFinite(expired) ? expired : 0 };
-        }
-      } catch {
-        /* corrupt/foreign file → skip */
-      }
-    }
-  } catch {
-    /* no cliproxy auth dir → fall through to the CLI login */
-  }
-  if (best) return best.cred;
-
-  // Managed account homes: freshest credential wins (mirrors the proxy-dir rule).
+  // Managed account homes: freshest credential wins.
   // Used only for the System aggregate when managed files are still in the chain
   // (no per-account poll); multi-account wiring passes authFile instead.
   let bestManaged: GrokCredential | null = null;
@@ -229,12 +192,10 @@ function withGrokAccountLabel(agent: AgentUsage, email: string | null): AgentUsa
 /**
  * Grok Build subscription usage via the first-party billing endpoint (the one
  * behind the grok CLI's /usage command). Undocumented and reverse-engineered —
- * same accepted-risk posture as routing Grok through the proxy — so every
- * failure path degrades to signed-in/stale rather than breaking the widget.
+ * an accepted risk — so every failure path degrades to signed-in/stale rather
+ * than breaking the widget.
  */
 export function createGrokSource(opts: {
-  /** `<appdir>/daemon/cliproxy/auth` — the proxy-owned xai credential dir. */
-  authDir: string;
   /** The grok CLI home (`GROK_HOME` || `~/.grok`). */
   grokHome: string;
   /** When set, ONLY this managed-home `auth.json` is used (per-account poll). */
@@ -269,7 +230,6 @@ export function createGrokSource(opts: {
 
   return async () => {
     const cred = await readGrokCredential(
-      opts.authDir,
       opts.grokHome,
       opts.managedGrokAuthFiles?.() ?? [],
       opts.authFile
@@ -283,8 +243,8 @@ export function createGrokSource(opts: {
 
     const now = opts.now();
     if (now < backoffUntil) return signedIn();
-    // Expired token: the proxy (or the CLI) refreshes it, never us — skip the
-    // fetch, a 401 with a stale bearer would just churn.
+    // Expired token: the accounts refresher (or the CLI) refreshes it, never us —
+    // skip the fetch, a 401 with a stale bearer would just churn.
     if (cred.expiresAtMs !== null && cred.expiresAtMs <= now) return signedIn();
 
     try {
@@ -405,8 +365,6 @@ export async function shouldHideSystemUsage(
     claudeHome?: string;
     codexHome?: string;
     grokHome?: string;
-    /** Proxy-owned xai auth dir; only consulted for grok. */
-    authDir?: string;
     managedHomes?: string[];
   }
 ): Promise<boolean> {
@@ -422,9 +380,8 @@ export async function shouldHideSystemUsage(
   }
 
   if (agent === "grok") {
-    // System for Grok is cliproxy/CLI only (managed homes are polled separately).
+    // System for Grok is the CLI login only (managed homes are polled separately).
     const sys = await readGrokCredential(
-      opts.authDir || join(opts.userhome, ".orquester", "daemon", "cliproxy", "auth"),
       opts.grokHome || process.env.GROK_HOME || join(opts.userhome, ".grok"),
       []
     );

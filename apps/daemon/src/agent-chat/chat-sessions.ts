@@ -32,8 +32,6 @@ export interface ChatSessionCreateInput {
   order: number;
   accountId: string;
   home: AgentChatHome;
-  /** The resolved launch model, mirrored onto the summary like a terminal's. */
-  model?: string;
   createdAt?: string;
 }
 
@@ -104,7 +102,6 @@ export class ChatSessionManager {
       kind: "agent-chat",
       refId: input.refId,
       accountId: input.accountId || undefined,
-      model: input.model,
       title: input.title,
       projectPath: input.projectPath,
       cwd: input.cwd,
@@ -271,7 +268,6 @@ export class ChatSessionManager {
       cwd: s.summary.cwd,
       createdAt: s.summary.createdAt,
       accountId: s.summary.accountId,
-      model: s.summary.model,
       chat: { ...s.chat }
     }));
   }
@@ -292,7 +288,6 @@ export class ChatSessionManager {
         kind: "agent-chat",
         refId: record.refId,
         accountId: record.accountId,
-        model: record.model,
         title: record.title,
         projectPath: record.projectPath,
         cwd: record.cwd,

@@ -19,7 +19,7 @@ import { createThreadStore } from "./index.ts";
 const base = (overrides: Partial<ProviderSessionBinding> = {}): ProviderSessionBinding => ({
   threadId: "t1",
   adapter: "claude",
-  adapterKey: "claudex",
+  adapterKey: "claude",
   runtimeMode: "approval-required",
   providerInstanceId: "account:acc1",
   status: "running",
@@ -45,7 +45,7 @@ describe("mergeSessionBinding (§3.3)", () => {
   it("an omitted field is UNCHANGED — the rule the cursor exists for", () => {
     const next = merge(base(), { status: "ready" });
     assert.deepEqual(next.resumeCursor, { resume: "sess-1" });
-    assert.equal(next.adapterKey, "claudex");
+    assert.equal(next.adapterKey, "claude");
     assert.equal(next.runtimeMode, "approval-required");
     assert.equal(next.providerInstanceId, "account:acc1");
     assert.equal(next.providerThreadId, "prov-1");
@@ -55,7 +55,7 @@ describe("mergeSessionBinding (§3.3)", () => {
   it("an explicit `undefined` is also unchanged, never a clear", () => {
     const next = merge(base(), { resumeCursor: undefined, adapterKey: undefined });
     assert.deepEqual(next.resumeCursor, { resume: "sess-1" });
-    assert.equal(next.adapterKey, "claudex");
+    assert.equal(next.adapterKey, "claude");
   });
 
   it("`null` clears, and is distinguishable from an omission", () => {
@@ -117,14 +117,14 @@ describe("the store's binding file (§8 rollback boundary)", () => {
       await store.upsertSessionBinding({
         threadId: "t1",
         adapter: "claude",
-        patch: { adapterKey: "claudex", status: "running", resumeCursor: { resume: "sess-1" } }
+        patch: { adapterKey: "claude", status: "running", resumeCursor: { resume: "sess-1" } }
       });
       // A second store reads what the first wrote — no in-memory shortcut.
       const reader = createThreadStore({ rootDir, sweepIntervalMs: 0 });
       try {
         const loaded = await reader.loadBinding("t1");
         assert.deepEqual(loaded?.resumeCursor, { resume: "sess-1" });
-        assert.equal(loaded?.adapterKey, "claudex");
+        assert.equal(loaded?.adapterKey, "claude");
         // A status-only write must not take the cursor with it.
         await reader.upsertSessionBinding({
           threadId: "t1",

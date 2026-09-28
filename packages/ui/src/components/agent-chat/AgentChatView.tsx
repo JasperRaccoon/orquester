@@ -206,9 +206,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // composer offers for this thread's cwd — in the thread and in a drill-in.
   const skills = React.useMemo(() => timelineSkillNames(provider, session.cwd), [provider, session.cwd]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
-  // §3.4's account chip: a proxy launcher may only pin accounts SEEDED into
-  // the model proxy, the same rule the "+" menu's launch chips apply.
-  const cliproxy = useAppStore((s) => s.cliproxy);
   const setPreferredModelSelection = useAppStore((s) => s.setPreferredModelSelection);
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
@@ -648,7 +645,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     ? buildChatAccountOptions({
         refId: session.refId,
         accounts: agentAccounts?.accounts,
-        seededAccountIds: cliproxy?.accounts?.map((account) => account.id),
         shortLabel: shortAccountLabel
       })
     : undefined;
@@ -753,7 +749,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     turnStartedAt: paintOnly ? null : status.turnStartedAt,
     turnEndedAt: latestTurn?.completedAt ?? null,
     tokensUsed: slice.contextWindow?.usedTokens ?? null,
-    model: slice.head?.modelSelection.model ?? session.model ?? null
+    model: slice.head?.modelSelection.model ?? null
   };
   // --- the read-only viewer for a full tool output --------------------------
   // A §6.3 read with no store slice behind it: the timeline asks, the shell
@@ -987,7 +983,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 activePlan={paintOnly ? null : activePlan}
                 onCompact={paintOnly ? noop : () => dispatch(() => actions.compact())}
                 latestCheckpoint={latestCheckpoint}
-                modelLabel={slice.head?.modelSelection.model ?? session.model ?? null}
+                modelLabel={slice.head?.modelSelection.model ?? null}
                 goal={threadGoal}
                 goalHeldForUpdate={goalHeldForUpdate}
                 goalActions={goalActionList}

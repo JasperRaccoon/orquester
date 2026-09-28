@@ -2,7 +2,6 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { AgentAuthErrorToast } from "./AgentAuthErrorToast";
 import { ConnectionStatusToast } from "./ConnectionStatusToast";
-import { ModelWarningToast } from "./ModelWarningToast";
 import { NoticeToast } from "./NoticeToast";
 import { ResumeErrorToast } from "./ResumeErrorToast";
 
@@ -14,14 +13,13 @@ import { ResumeErrorToast } from "./ResumeErrorToast";
  * into this single column, which lays them out with a gap.
  *
  * Order is by urgency: transport trouble first (it explains why the others may
- * be failing), then launch-time warnings, then the agent-auth failure (every
- * turn on that thread will fail until it is fixed), then plain notices.
+ * be failing), then a refused resume, then the agent-auth failure (every turn
+ * on that thread will fail until it is fixed), then plain notices.
  */
 export const ToastStack: React.FC = () =>
   createPortal(
     <div className="pointer-events-none fixed inset-x-0 top-3 z-[95] flex flex-col items-center gap-2 px-3">
       <ConnectionStatusToast />
-      <ModelWarningToast />
       <ResumeErrorToast />
       <AgentAuthErrorToast />
       <NoticeToast />
