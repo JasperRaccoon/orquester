@@ -229,7 +229,10 @@ export function resetHistory(
  * A rewind that reaches into a loaded page, or removes the turn of a bridge
  * row, drops **all** of both: keeping the older ones would leave a gap
  * between them and the truncated window that "load older" (which only ever
- * pages further back) could never fill. The bounds stay: the cursor is
+ * pages further back) could never fill. So does one that may drop a turn-less
+ * message a page or the bridge shows (`mayDropTurnless`): the fold decides
+ * those by a count over the whole thread, not by turn, and a stale copy is
+ * worse than a page read again. The bounds stay: the cursor is
  * content-derived, so it still pages from just below where the window was —
  * and when the window has evicted since, the next load asks without one
  * (`nextHistoryCursor`).
@@ -244,39 +247,58 @@ export function historyAfterRevert(
   }
   const reaches =
     historyTurns(history.pages).some((turn) => turn.ordinal > turnCount) ||
-    bridgeReachedByRevert(history.bridge, turnCount, turns);
+    revertReaches(history, turnCount, turns);
   return reaches
     ? { ...history, pages: [], bridge: NO_ITEMS, windowCut: 0, error: null }
     : history;
 }
 
 /**
- * A bridge row belongs to a turn the rewind removes — mirroring the fold's own
- * cut (`reduceReverted`): a row keeps its place only with its turn among the
- * first `turnCount` STARTED turns, and a turn-less prompt goes with the turn
- * that names it as its `userMessageId`.
+ * A row of the bridge, or a turn-less message of a page, the rewind may drop
+ * — mirroring the fold's own cut (`reduceReverted`): a row keeps its place
+ * only with its turn among the first `turnCount` STARTED turns (a page's rows
+ * that name a turn are judged by the turns it lists), and a turn-less
+ * message is certain to stay only as the prompt one of those turns names as
+ * its `userMessageId` (`mayDropTurnless`).
  */
-function bridgeReachedByRevert(
-  bridge: readonly ThreadItem[],
+function revertReaches(
+  history: AgentChatHistoryState,
   turnCount: number,
   turns: readonly Turn[]
 ): boolean {
-  if (bridge.length === 0) {
-    return false;
-  }
   const kept = new Set<string>();
-  const removedPrompts = new Set<string>();
+  const keptPrompts = new Set<string>();
   startedTurns(turns).forEach((turn, index) => {
     if (index < Math.max(0, turnCount)) {
       kept.add(turn.turnId);
-    } else if (turn.userMessageId !== undefined) {
-      removedPrompts.add(turn.userMessageId);
+      if (turn.userMessageId !== undefined) keptPrompts.add(turn.userMessageId);
     }
   });
-  return bridge.some((item) =>
-    item.turnId !== null
-      ? !kept.has(item.turnId)
-      : item.kind === "message" && removedPrompts.has(item.id)
+  const bridgeReached = history.bridge.some((item) =>
+    item.turnId !== null ? !kept.has(item.turnId) : mayDropTurnless(item, keptPrompts)
+  );
+  return (
+    bridgeReached ||
+    history.pages.some((page) =>
+      page.items.some((item) => item.turnId === null && mayDropTurnless(item, keptPrompts))
+    )
+  );
+}
+
+/**
+ * Whether a rewind may drop a turn-less row of the parent timeline: a message
+ * no kept turn claims as its prompt. The fold keeps such a message only by its
+ * fallback pass — up to `turnCount` per role, counted over the whole thread
+ * (`retainMessagesAfterRevert`), which neither a page nor the bridge can
+ * count — and a host serves one on a page exactly while the fold keeps it
+ * (`historyBlockEvents`). A turn-less activity survives every rewind, and a
+ * subagent's rows never render in the parent timeline.
+ */
+function mayDropTurnless(item: ThreadItem, keptPrompts: ReadonlySet<string>): boolean {
+  return (
+    item.kind === "message" &&
+    (item.agentId === undefined || item.agentId.length === 0) &&
+    !keptPrompts.has(item.id)
   );
 }
 

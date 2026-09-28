@@ -678,6 +678,45 @@ describe("historyAfterRevert", () => {
     assert.deepEqual(historyAfterRevert(state, 5, FOLD).bridge, []);
     assert.equal(historyAfterRevert(state, 6, FOLD), state, "turn 6 survives a rewind to six turns");
   });
+
+  it("drops them for a turn-less prompt a page shows that no kept turn claims — the fold's fallback may drop it", () => {
+    const withNote = [
+      historyPage({
+        turns: [historyTurn("t1", 1)],
+        items: [message("user", "a note", { id: "note", createdAt: stamp(15) })]
+      }),
+      ...pages.slice(1)
+    ];
+    const state = history({ bounds: bounds(), pages: withNote });
+    assert.deepEqual(historyAfterRevert(state, 5, FOLD).pages, []);
+  });
+
+  it("drops them for such a prompt on the bridge too", () => {
+    const state = history({
+      bounds: bounds(),
+      pages,
+      bridge: [message("user", "a note", { id: "note", createdAt: stamp(45) })]
+    });
+    const after = historyAfterRevert(state, 5, FOLD);
+    assert.deepEqual(after.pages, []);
+    assert.deepEqual(after.bridge, []);
+  });
+
+  it("keeps them for a page's prompt a kept turn claims, and for a subagent's turn-less words", () => {
+    const state = history({
+      bounds: bounds(),
+      pages: [
+        historyPage({
+          turns: [historyTurn("t1", 1), historyTurn("t2", 2)],
+          items: [
+            message("user", "two", { id: "u2", createdAt: stamp(20) }),
+            message("assistant", "still exploring", { id: "agent-words", agentId: "agent-1", createdAt: stamp(21) })
+          ]
+        })
+      ]
+    });
+    assert.equal(historyAfterRevert(state, 5, FOLD), state);
+  });
 });
 
 // ---------------------------------------------------------------------------
