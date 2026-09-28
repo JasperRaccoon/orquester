@@ -23,6 +23,14 @@ export const ACP_ERROR_CODES = {
   invalidParams: -32602,
   internalError: -32603,
   /**
+   * ACP's own "authentication required" (`ErrorCode` -32000 in the ACP
+   * schema). Never produced by CLI 1.0.34 in any capture — a refused login
+   * could not be recorded without logging the account out (Grok fixtures
+   * README observation on error shapes) — kept so a not-logged-in failure the
+   * CLI reports in the protocol's own words is recognised as one.
+   */
+  authRequired: -32000,
+  /**
    * T3's typed rate-limit code, raised from a `prompt_complete` whose
    * `stopReason` is `rate_limit`. Never produced by CLI 1.0.34 in any capture
    * — kept because the adapter must still classify it if a later release
@@ -150,6 +158,25 @@ export function classifyAcpError(
     }
   }
   return "unknown";
+}
+
+/**
+ * The account failure an RPC error names (workflows §5.4), by its CODE alone
+ * — never by its message: T3's typed rate-limit code is a usage limit, ACP's
+ * authentication-required code a refused login. Anything else names none.
+ */
+export function acpFailureReason(error: unknown): "usage_limit" | "auth" | undefined {
+  if (!(error instanceof AcpRpcError)) {
+    return undefined;
+  }
+  switch (error.code) {
+    case ACP_ERROR_CODES.rateLimit:
+      return "usage_limit";
+    case ACP_ERROR_CODES.authRequired:
+      return "auth";
+    default:
+      return undefined;
+  }
 }
 
 function dataText(data: unknown): string {

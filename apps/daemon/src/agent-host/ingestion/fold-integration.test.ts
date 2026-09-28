@@ -137,6 +137,32 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     assert.equal(assistant[0]!.turnId, "turn-1");
   });
 
+  it("a Claude usage limit's reason and reset reach the folded activity (workflows §5.4)", async () => {
+    const { ingestion, sink } = harness();
+    const normalizer = new ClaudeNormalizer({ threadId: THREAD_ID, clock: fixedClock(), ids: countingIds() });
+    const events: RuntimeEvent[] = [...normalizer.beginTurn({ turnId: "turn-1" })];
+    events.push(
+      ...normalizer.handleMessage({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 1789969200, rateLimitType: "five_hour" },
+        uuid: "u",
+        session_id: "s"
+      } as unknown as SDKMessage)
+    );
+    for (const event of events) {
+      await ingestion.ingest(event);
+    }
+    await ingestion.drain();
+    const rows = activities(fold(sink.events())).filter(
+      (activity) => activity.activityKind === "runtime.warning"
+    );
+    assert.equal(rows.length, 1);
+    const payload = rows[0]!.payload as { reason?: string; resetsAt?: string; message: string };
+    assert.equal(payload.reason, "usage_limit");
+    assert.equal(payload.resetsAt, new Date(1789969200 * 1000).toISOString());
+    assert.match(payload.message, /^Claude usage limit reached\./);
+  });
+
   it("reasoning folds as a sibling message, never into the assistant one", async () => {
     const { ingestion, sink } = harness();
     const turn = { turnId: "turn-1", itemId: "item-1" };

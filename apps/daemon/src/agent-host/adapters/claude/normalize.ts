@@ -28,6 +28,7 @@ import type {
   ProviderUsageLimitsUpdate,
   RuntimeContentStreamKind,
   RuntimeErrorClass,
+  RuntimeFailureReason,
   RuntimeEvent,
   RuntimeEventRaw,
   RuntimeEventRawSource,
@@ -87,6 +88,7 @@ import {
   normalizeTaskUsage,
   normalizeTurnTokenUsage,
   rateLimitEventToUpdate,
+  rateLimitResetsAtIso,
   toThreadTokenUsage,
   totalProcessedFromModelUsage,
   type ClaudeScopedLimitNames,
@@ -207,6 +209,12 @@ export interface ClaudeTurnState {
   nextSyntheticAssistantBlockIndex: number;
   authenticationFailureMessage?: string;
   rejectedRateLimitTypes: Set<string>;
+  /**
+   * The reset time each rejected window named (ISO), keyed like
+   * `rejectedRateLimitTypes`: a failed result's usage-limit error carries the
+   * latest of the windows still rejected (workflows §5.4).
+   */
+  rejectedRateLimitResets: Map<string, string>;
   latestAssistantRateLimited: boolean;
   announcedUsageLimitKeys: Set<string>;
 }
@@ -612,19 +620,33 @@ export class ClaudeNormalizer {
     };
   }
 
-  warning(message: string, detail?: unknown): RuntimeEvent {
+  warning(message: string, detail?: unknown, failure?: ClaudeFailure): RuntimeEvent {
     return {
       ...this.base({ turnId: this.activeTurnId }),
       type: "runtime.warning",
-      payload: { message, ...(detail !== undefined ? { detail } : {}) }
+      payload: {
+        message,
+        ...(detail !== undefined ? { detail } : {}),
+        ...failureFields(failure)
+      }
     };
   }
 
-  error(message: string, errorClass: RuntimeErrorClass, detail?: unknown): RuntimeEvent {
+  error(
+    message: string,
+    errorClass: RuntimeErrorClass,
+    detail?: unknown,
+    failure?: ClaudeFailure
+  ): RuntimeEvent {
     return {
       ...this.base({ turnId: this.activeTurnId }),
       type: "runtime.error",
-      payload: { message, class: errorClass, ...(detail !== undefined ? { detail } : {}) }
+      payload: {
+        message,
+        class: errorClass,
+        ...(detail !== undefined ? { detail } : {}),
+        ...failureFields(failure)
+      }
     };
   }
 
@@ -822,6 +844,7 @@ export class ClaudeNormalizer {
       hasSubagents: false,
       nextSyntheticAssistantBlockIndex: -1,
       rejectedRateLimitTypes: new Set(),
+      rejectedRateLimitResets: new Map(),
       latestAssistantRateLimited: false,
       announcedUsageLimitKeys: new Set()
     };
@@ -2255,7 +2278,12 @@ export class ClaudeNormalizer {
     const events: RuntimeEvent[] = [];
     if (status === "failed") {
       events.push(
-        this.error(errorMessage ?? "Claude turn failed.", claudeErrorClass(message), message)
+        this.error(
+          errorMessage ?? "Claude turn failed.",
+          claudeErrorClass(message),
+          message,
+          resultFailure(message, turn)
+        )
       );
     }
     events.push(...this.completeTurn(status, errorMessage, message));
@@ -3468,11 +3496,18 @@ export class ClaudeNormalizer {
     const limitType = typeof record.rateLimitType === "string" ? record.rateLimitType : "unknown";
     const turn = this.turnState;
     const blocked = isRateLimitBlocking(info);
+    const resetsAt = rateLimitResetsAtIso(info);
     if (turn) {
       if (blocked) {
         turn.rejectedRateLimitTypes.add(limitType);
+        if (resetsAt !== undefined) {
+          turn.rejectedRateLimitResets.set(limitType, resetsAt);
+        } else {
+          turn.rejectedRateLimitResets.delete(limitType);
+        }
       } else if (isRateLimitClearing(info)) {
         turn.rejectedRateLimitTypes.delete(limitType);
+        turn.rejectedRateLimitResets.delete(limitType);
       }
     }
 
@@ -3490,7 +3525,11 @@ export class ClaudeNormalizer {
               nowMs: this.clock.now().getTime(),
               names: this.scopedLimitNames
             }),
-            info
+            info,
+            {
+              reason: "usage_limit",
+              ...(resetsAt !== undefined ? { resetsAt } : {})
+            }
           )
         );
       }
@@ -4427,6 +4466,61 @@ export function resultOutcome(
     status: resultErrorsText(result).includes("cancel") ? "cancelled" : "failed",
     errorMessage
   };
+}
+
+/** The structured failure a warning or error carries (workflows §5.4). */
+export interface ClaudeFailure {
+  reason: RuntimeFailureReason;
+  resetsAt?: string;
+}
+
+function failureFields(failure: ClaudeFailure | undefined): {
+  reason?: RuntimeFailureReason;
+  resetsAt?: string;
+} {
+  if (failure === undefined) {
+    return {};
+  }
+  return {
+    reason: failure.reason,
+    ...(failure.resetsAt !== undefined ? { resetsAt: failure.resetsAt } : {})
+  };
+}
+
+/**
+ * Why a FAILED result failed, when it is an account's doing (workflows §5.4),
+ * read off the same structured signals the failure hint is built from — never
+ * off the message text. An auth failure wins: a refused login says nothing
+ * about the account's limits. A usage limit is the turn's last assistant
+ * frame flagged `rate_limit`, or a window a `rate_limit_event` rejected and
+ * nothing cleared since; its reset is the LATEST such window names, since the
+ * account works again only once every one of them has reset.
+ */
+export function resultFailure(
+  result: SDKResultMessage,
+  turn: Pick<
+    ClaudeTurnState,
+    | "authenticationFailureMessage"
+    | "rejectedRateLimitTypes"
+    | "rejectedRateLimitResets"
+    | "latestAssistantRateLimited"
+  > | undefined
+): ClaudeFailure | undefined {
+  const status = nonNegativeInt((result as { api_error_status?: unknown }).api_error_status);
+  if (turn?.authenticationFailureMessage !== undefined || status === 401 || status === 403) {
+    return { reason: "auth" };
+  }
+  if (turn && (turn.rejectedRateLimitTypes.size > 0 || turn.latestAssistantRateLimited)) {
+    let resetsAt: string | undefined;
+    for (const type of turn.rejectedRateLimitTypes) {
+      const reset = turn.rejectedRateLimitResets.get(type);
+      if (reset !== undefined && (resetsAt === undefined || reset > resetsAt)) {
+        resetsAt = reset;
+      }
+    }
+    return { reason: "usage_limit", ...(resetsAt !== undefined ? { resetsAt } : {}) };
+  }
+  return undefined;
 }
 
 /** `class` decides retry vs surface vs re-auth (§4.2). */

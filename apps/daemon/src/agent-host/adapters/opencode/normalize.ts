@@ -32,6 +32,7 @@ import type {
   CanonicalItemType,
   RuntimeEvent,
   RuntimeEventBase,
+  RuntimeFailureReason,
   RuntimeItemStatus,
   RuntimeTaskCompletedStatus,
   RuntimeTaskStatus,
@@ -234,6 +235,71 @@ export function sessionErrorMessage(error: unknown): string {
 }
 
 /**
+ * The account failure a `session.error` names (workflows §5.4), read off the
+ * SDK's typed error — never its message: `ProviderAuthError`, or an
+ * `APIError` whose `statusCode` is 401/403, is a refused login; an `APIError`
+ * with 429 is a usage limit, and its reset is the provider's `Retry-After`
+ * (`retry-after-ms` first), relative to `nowIso`. OpenCode retries a
+ * retryable 429 itself (`session.status {type:"retry"}`, which names no
+ * status code), so only the error it finally gives up with reaches here.
+ */
+export function sessionErrorFailure(
+  error: unknown,
+  nowIso: string
+): { reason: RuntimeFailureReason; resetsAt?: string } | undefined {
+  if (!isRecord(error)) {
+    return undefined;
+  }
+  if (error.name === "ProviderAuthError") {
+    return { reason: "auth" };
+  }
+  if (error.name !== "APIError" || !isRecord(error.data)) {
+    return undefined;
+  }
+  const status = error.data.statusCode;
+  if (status === 401 || status === 403) {
+    return { reason: "auth" };
+  }
+  if (status !== 429) {
+    return undefined;
+  }
+  const resetsAt = retryAfterIso(error.data.responseHeaders, nowIso);
+  return { reason: "usage_limit", ...(resetsAt !== undefined ? { resetsAt } : {}) };
+}
+
+/** `Retry-After` (seconds or an HTTP date) or `retry-after-ms`, as an ISO time. */
+function retryAfterIso(headers: unknown, nowIso: string): string | undefined {
+  if (!isRecord(headers)) {
+    return undefined;
+  }
+  const header = (name: string): string | undefined => {
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === name && typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+    return undefined;
+  };
+  const now = Date.parse(nowIso);
+  if (!Number.isFinite(now)) {
+    return undefined;
+  }
+  const ms = header("retry-after-ms");
+  if (ms !== undefined && /^\d+(\.\d+)?$/.test(ms)) {
+    return new Date(now + Number(ms)).toISOString();
+  }
+  const after = header("retry-after");
+  if (after === undefined) {
+    return undefined;
+  }
+  if (/^\d+(\.\d+)?$/.test(after)) {
+    return new Date(now + Number(after) * 1000).toISOString();
+  }
+  const date = Date.parse(after);
+  return Number.isFinite(date) ? new Date(date).toISOString() : undefined;
+}
+
+/**
  * `Model not found: x` and `ProviderModelNotFoundError: Model not found: x`
  * are the same failure. The class prefix is what 1.18.5 adds on the re-emit,
  * so it is stripped for comparison only — never from what the user reads.
@@ -301,6 +367,11 @@ class Emitter {
     private readonly state: OpenCodeSessionState,
     private readonly ctx: NormalizeContext
   ) {}
+
+  /** The event clock, for a time an event states relative to now. */
+  nowIso(): string {
+    return this.ctx.nowIso();
+  }
 
   base(input: {
     turnId?: string | undefined;
@@ -946,10 +1017,16 @@ function demux(
       state.lastSessionErrorMessage = key;
 
       out.signal({ kind: "turn-failed", message });
+      const failure = sessionErrorFailure(error, out.nowIso());
       out.push({
         ...out.base({ raw }),
         type: "runtime.error",
-        payload: { message, class: "provider_error", detail: error }
+        payload: {
+          message,
+          class: "provider_error",
+          detail: error,
+          ...(failure !== undefined ? failure : {})
+        }
       });
       return;
     }
