@@ -38,7 +38,12 @@ import type { ClassifiedStderrLine } from "../../support/stderr.ts";
 import { appendAttachmentPathLines } from "../attachment-lines.ts";
 import { AcpConnection } from "./acp/connection.ts";
 import type { AcpFrameDirection } from "./acp/peer.ts";
-import { ACP_ERROR_CODES, AcpRpcError, classifyAcpError } from "./acp/errors.ts";
+import {
+  ACP_ERROR_CODES,
+  AcpRpcError,
+  acpFailureReason,
+  classifyAcpError
+} from "./acp/errors.ts";
 import type {
   InitializeResponse,
   LoadSessionResponse,
@@ -1130,10 +1135,12 @@ export class GrokSession {
             { stopReason: null },
             error instanceof Error ? error.message : String(error)
           );
+          const reason = acpFailureReason(error);
           this.emitEvent(
             this.normalizer.event("runtime.error", {
               message: error instanceof Error ? error.message : String(error),
-              class: classifyAcpError(error)
+              class: classifyAcpError(error),
+              ...(reason !== undefined ? { reason } : {})
             })
           );
         });
@@ -1328,7 +1335,10 @@ export class GrokSession {
       this.emitEvent(
         this.normalizer.event("runtime.error", {
           message: "Grok usage limit reached. Try again later.",
-          class: "provider_error"
+          class: "provider_error",
+          // The frame names no reset time (workflows §5.4: the engine then
+          // cools the account by its usage snapshot, else an hour).
+          reason: "usage_limit"
         })
       );
     }

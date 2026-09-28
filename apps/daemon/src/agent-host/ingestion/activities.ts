@@ -46,6 +46,7 @@ import {
   TASK_PROMPT_MAX_CHARS,
   type ProviderRequestKind,
   type RuntimeEvent,
+  type RuntimeFailureReason,
   type ThreadActivityItem,
   type ThreadActivityTone
 } from "@orquester/api/agent-chat";
@@ -186,6 +187,23 @@ interface ActivityInit {
   agentId?: string;
   parentToolUseId?: string;
   status?: ThreadActivityItem["status"];
+}
+
+/**
+ * The structured account failure a warning or error names (workflows §5.4),
+ * carried onto the activity verbatim so the workflow engine reads it off the
+ * thread instead of matching message text. Optional and additive: a payload
+ * without them is exactly the row it always was, and the fold copies an
+ * activity's payload whole, so no fold or index version moves.
+ */
+function failureFields(payload: { reason?: RuntimeFailureReason; resetsAt?: string }): {
+  reason?: RuntimeFailureReason;
+  resetsAt?: string;
+} {
+  return {
+    ...(payload.reason !== undefined ? { reason: payload.reason } : {}),
+    ...(payload.resetsAt !== undefined ? { resetsAt: payload.resetsAt } : {})
+  };
 }
 
 function makeActivity(event: RuntimeEvent, init: ActivityInit): ThreadActivityItem {
@@ -367,7 +385,8 @@ export function runtimeEventToActivities(
           payload: {
             message: truncateDetail(event.payload.message),
             class: event.payload.class,
-            ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {})
+            ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
+            ...failureFields(event.payload)
           },
           ...(event.agentId !== undefined ? { agentId: event.agentId } : {})
         })
@@ -385,7 +404,8 @@ export function runtimeEventToActivities(
           summary: truncateDetail(event.payload.message, 120),
           payload: {
             message: truncateDetail(event.payload.message),
-            ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {})
+            ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
+            ...failureFields(event.payload)
           },
           ...(event.agentId !== undefined ? { agentId: event.agentId } : {})
         })
