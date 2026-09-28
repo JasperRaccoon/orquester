@@ -390,7 +390,7 @@ test("history reads and rewind on a recycled idle thread bring its session back 
 
     assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
     await assert.rejects(
-      h.adapter.rollbackThread(HOST_THREAD_ID, 1, { turnId: "msg_unknown" }),
+      h.adapter.rollbackThread(HOST_THREAD_ID, 1, { firstRemovedTurnId: "msg_unknown", droppedTurnIds: ["msg_unknown"], retainedTurnIds: [] }),
       (error: Error) => !/no live session/.test(error.message),
       "a rewind reaches the session instead of failing for a missing one"
     );
