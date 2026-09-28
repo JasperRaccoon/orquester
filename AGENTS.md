@@ -12,6 +12,19 @@
 - Keep `CLAUDE.md` as a pointer to this file; put shared agent rules here once.
 - Commit on the current branch when asked to commit, including when it is `main`.
 
+## Terms used here
+
+- **Workspace:** a named directory directly under the configured workspaces root; it groups projects and can carry a git identity.
+- **Project:** a directory directly inside a workspace; it is the scope for its tabs, sessions, git state, and workflows.
+- **Session:** a daemon-owned shell or agent-chat tab identified by `sessionId`; an agent-chat thread uses the same ID.
+- **Agent chat GUI (the GUI):** the structured chat view showing messages, tools, approvals, and prompts instead of an agent TUI in a terminal pane.
+- **Terminal:** the PTY view for shell sessions and legacy terminal-agent sessions; input is sent as terminal keystrokes.
+- **Composer:** the prompt entry and controls in an agent-chat tab where the user writes and sends messages.
+- **Agent host:** the separate process that runs chat-provider adapters and owns chat threads and their event logs.
+- **MCP:** the daemon's authenticated Model Context Protocol endpoint for external agents to operate chats, workflows, and related data; it does not provide terminal I/O.
+- **Workflow:** a daemon-owned graph of triggers and blocks that automates tasks within a project; a run is one execution of that graph.
+- **Right rail:** the side panel for saved prompts, chat history and checkpoints, and automated workflows.
+
 ## Repository map
 
 - `apps/daemon` owns the HTTP and Unix-socket server, sessions, files, git, workflows, MCP, and the agent host supervisor.
