@@ -47,7 +47,6 @@ export interface ConfigState {
   targetText: string;
   /** The target's parsed value (`{}` for a new file); `null` when it does not parse. */
   targetValue: JsonObject | null;
-  targetExists: boolean;
   /** The config OpenCode ends up with; files that do not parse are left out. */
   merged: JsonObject;
   fileErrors: ProfileFileError[];
@@ -117,7 +116,6 @@ export async function readConfigState(dir: string): Promise<ConfigState> {
     targetName,
     targetText,
     targetValue: target === undefined ? {} : target.value,
-    targetExists: target !== undefined,
     merged: mergeConfigValues(files.flatMap((file) => (file.value === null ? [] : [file.value]))),
     fileErrors,
     broken: files.some((file) => file.value === null)
@@ -141,12 +139,6 @@ export function mergedWithTarget(state: ConfigState, targetText: string): JsonOb
 // ---------------------------------------------------------------------------
 // Permissions (OpenCode's `Permission.fromConfig` / `evaluate` / `Wildcard.match`)
 // ---------------------------------------------------------------------------
-
-export type PermissionAction = "allow" | "ask" | "deny";
-
-export function isPermissionAction(value: unknown): value is PermissionAction {
-  return value === "allow" || value === "ask" || value === "deny";
-}
 
 interface PermissionRule {
   permission: string;

@@ -18,8 +18,9 @@
  * recycle them, spec §4.8).
  */
 
-import { mkdir, mkdtemp, readFile, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type {
   McpServerDraft,
   MarkdownDocumentDraft,
@@ -333,21 +334,28 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       { root: join(this.ctx.homes.claudeDir, "skills"), origin: "claude", dot: true },
       { root: this.ctx.homes.agentsSkillsDir, origin: "agents", dot: true }
     ];
+    // One item per name, the own copy first; OpenCode loads one of the others at random.
+    const others = new Map<string, string[]>();
     for (const { root, origin, dot } of roots) {
       for (const skill of await findSkills(root, { dot })) {
         const id = itemId("skill", skill.name);
-        const existing = entries.get(id);
-        if (existing !== undefined) {
-          existing.item.warnings.push(
-            warning(
-              "opencode-skill-duplicate",
-              `Another skill named "${skill.name}" is at ${skill.dir}; OpenCode loads only one of them.`
-            )
-          );
+        if (entries.has(id)) {
+          others.set(id, [...(others.get(id) ?? []), skill.dir]);
           continue;
         }
         add(this.skillEntry(config, skill, origin, root));
       }
+    }
+    for (const [id, dirs] of others) {
+      const entry = entries.get(id)!;
+      entry.item.warnings.push(
+        warning(
+          "opencode-skill-duplicate",
+          dirs.length === 1
+            ? `Another skill named "${entry.item.name}" is at ${dirs[0]}; OpenCode loads only one of them.`
+            : `${dirs.length} other skills are named "${entry.item.name}" (${dirs.join(", ")}); OpenCode loads only one of them.`
+        )
+      );
     }
   }
 
@@ -1135,7 +1143,17 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     if (Object.hasOwn(skill, name)) {
       next = setJsonc(next, ["permission", "skill", name], undefined);
     }
-    return action === undefined ? next : setJsonc(next, ["permission", "skill", name], action);
+    if (action !== undefined) {
+      return setJsonc(next, ["permission", "skill", name], action);
+    }
+    // Nothing left: drop the emptied `skill` rules, then an emptied `permission`.
+    if (Object.keys(skill).every((key) => key === name)) {
+      next = setJsonc(next, ["permission", "skill"], undefined);
+      if (Object.keys(permission).every((key) => key === "skill")) {
+        next = setJsonc(next, ["permission"], undefined);
+      }
+    }
+    return next;
   }
 
   private async toggleSkill(model: Model, entry: Extract<Entry, { kind: "skill" }>, enabled: boolean): Promise<AdapterMutationResult> {
@@ -1332,8 +1350,8 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
         }
         const parent = agentProfileImportsDir(this.ctx.appdir);
         await mkdir(parent, { recursive: true, mode: 0o700 });
-        const tmp = await mkdtemp(join(parent, "export-opencode-"));
-        const dir = join(tmp, basename(entry.skill.dir) || entry.skill.name);
+        // The copy itself is the temp entry: the caller deletes `dir` and nothing is left behind.
+        const dir = join(parent, `export-opencode-${randomUUID()}`);
         await copyTree(entry.skill.dir, dir, { refuseSymlinks: false });
         return { kind: "skill", name: entry.skill.name, dir };
       }

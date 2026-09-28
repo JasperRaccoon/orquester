@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { AgentProfileErrorCode, ProfileItem } from "@orquester/api";
-import { agentProfileBackupsDir, agentProfileStashDir } from "@orquester/config";
+import { agentProfileBackupsDir, agentProfileImportsDir, agentProfileStashDir } from "@orquester/config";
 import { AgentProfileError } from "../../errors.ts";
 import { ProfileBackups, ProfileStash, pathKind } from "../../infra/index.ts";
 import type { AgentHomes } from "../types.ts";
@@ -546,7 +546,7 @@ test("skill switches write permission.skill (absent permission)", async (t) => {
   const off = await env.item("skill:handoff");
   assert.equal(off.enabled, false);
   await env.adapter.setEnabled(off.id, off.revision, true);
-  assert.deepEqual(jsonc(await env.read(env.config)).permission, { skill: {} });
+  assert.equal(await env.read(env.config), HOST_CONFIG, "the emptied rules go away again, byte for byte");
   assert.equal((await env.item("skill:handoff")).enabled, true);
 });
 
@@ -587,6 +587,44 @@ test("turning a skill on past a wildcard deny adds an allow rule; a later catch-
   assert.equal(await env.read(env.config), trap);
 });
 
+test("an own skill shadows an inherited one; other copies make one warning; skill/ and bad skills are listed", async (t) => {
+  const env = await setup(t);
+  await put(join(env.dir, "skill", "handoff", "SKILL.md"), "---\nname: handoff\ndescription: Mine\n---\n");
+  await put(join(env.home, ".claude", "skills", "synced", "def", "pdf", "SKILL.md"), "---\nname: pdf\ndescription: Again\n---\n");
+  await put(join(env.home, ".agents", "skills", "pdf", "SKILL.md"), "---\nname: pdf\ndescription: Third\n---\n");
+  await put(join(env.dir, "skills", "nameless", "SKILL.md"), "---\ndescription: No name\n---\n");
+  await put(join(env.dir, "skills", "quiet", "SKILL.md"), "---\nname: quiet\n---\n");
+  const items = await env.items();
+  const handoff = items.find((item) => item.id === "skill:handoff")!;
+  assert.equal(handoff.description, "Mine");
+  assert.equal(handoff.source.type, "user");
+  assert.equal(handoff.editable, true);
+  assert.equal(handoff.warnings.length, 1);
+  assert.match(handoff.warnings[0]!.message, /Another skill named "handoff" is at .*\.claude\/skills\/handoff/);
+  const pdf = items.find((item) => item.id === "skill:pdf")!;
+  assert.equal(pdf.warnings.filter((w) => w.code === "opencode-skill-duplicate").length, 1);
+  assert.match(pdf.warnings[0]!.message, /^2 other skills/);
+  const nameless = items.find((item) => item.id === "skill:nameless")!;
+  assert.equal(nameless.toggleable, false);
+  assert.equal(nameless.editable, true, "saving it writes the missing name");
+  assert.equal(nameless.deletable, true);
+  assert.ok(nameless.warnings.some((w) => w.code === "opencode-skill-no-name"));
+  assert.ok(items.find((item) => item.id === "skill:quiet")!.warnings.some((w) => w.code === "opencode-skill-no-description"));
+});
+
+test("a [spec, options] plugin entry is stashed and restored as it was", async (t) => {
+  const env = await setup(t, {
+    config: '{\n  "plugin": [\n    "first",\n    ["with-options@2", { "level": "debug" }],\n  ],\n}\n'
+  });
+  const item = await env.item("plugin:with-options@2");
+  assert.deepEqual(item.meta, { source: "npm", version: "2", options: "yes" });
+  await env.adapter.setEnabled(item.id, item.revision, false);
+  assert.equal(await env.read(env.config), '{\n  "plugin": [\n    "first",\n  ],\n}\n');
+  const off = await env.item(item.id);
+  await env.adapter.setEnabled(off.id, off.revision, true);
+  assert.deepEqual(jsonc(await env.read(env.config)).plugin, ["first", ["with-options@2", { level: "debug" }]]);
+});
+
 test("deleting an own skill drops its permission rule", async (t) => {
   const env = await setup(t);
   await env.adapter.create({ kind: "skill", document: { name: "temp", frontmatter: { description: "Temp" }, body: "" } }, { onConflict: "fail" });
@@ -594,7 +632,7 @@ test("deleting an own skill drops its permission rule", async (t) => {
   await env.adapter.setEnabled(temp.id, temp.revision, false);
   const off = await env.item("skill:temp");
   await env.adapter.remove(off.id, off.revision);
-  assert.deepEqual(jsonc(await env.read(env.config)).permission, { skill: {} });
+  assert.equal(await env.read(env.config), HOST_CONFIG);
 });
 
 // ---------------------------------------------------------------------------
@@ -873,7 +911,8 @@ test("export carries real MCP values and a skill copy; import honours the confli
     await env.read(join(env.dir, "skills", "handoff-2", "SKILL.md")),
     "---\nname: handoff-2\ndescription: Write a handoff\n---\nBody\n"
   );
-  await rm(join(skill.dir, ".."), { recursive: true, force: true });
+  await rm(skill.dir, { recursive: true, force: true });
+  assert.deepEqual(await readdir(agentProfileImportsDir(env.appdir)), [], "nothing left behind");
 
   await env.adapter.importItem({ kind: "command", name: "hi", frontmatter: { description: "Hi" }, body: "Hi\n" }, { onConflict: "fail" });
   assert.equal(await env.read(join(env.dir, "commands", "hi.md")), "---\ndescription: Hi\n---\nHi\n");

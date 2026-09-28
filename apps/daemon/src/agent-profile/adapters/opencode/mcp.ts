@@ -16,7 +16,6 @@
 import type {
   McpServerDraft,
   McpServerView,
-  McpTransport,
   SecretEntryDraft,
   SecretEntryView
 } from "@orquester/api";
@@ -30,10 +29,6 @@ export type McpEntryType = "local" | "remote";
 export function mcpEntryType(entry: unknown): McpEntryType | null {
   if (!isJsonObject(entry)) return null;
   return entry.type === "local" || entry.type === "remote" ? entry.type : null;
-}
-
-export function transportOf(type: McpEntryType): McpTransport {
-  return type === "local" ? "stdio" : "http";
 }
 
 function stringRecord(value: unknown): Record<string, string> {
