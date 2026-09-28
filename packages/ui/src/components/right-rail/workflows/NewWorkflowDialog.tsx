@@ -28,6 +28,7 @@ import { useAppStore } from "../../../store/app";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Modal } from "../../ui/modal";
+import { WorkspaceRepoPicker } from "../../workflows/RepoPicker";
 import { RailSegmented, type RailSegmentOption } from "../primitives";
 import { DialogHeader, Field, SelectField } from "./dialog-parts";
 
@@ -50,6 +51,8 @@ export const NewWorkflowDialog: React.FC<NewWorkflowDialogProps> = ({ projectPat
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
+  /** The picked repository's default branch, shown as the ref's placeholder. */
+  const [pickedBranch, setPickedBranch] = useState<string | null>(null);
 
   useEffect(() => {
     void ensureProjectIndex(api, workspaces).catch(() => undefined);
@@ -185,25 +188,28 @@ export const NewWorkflowDialog: React.FC<NewWorkflowDialogProps> = ({ projectPat
                     onChange={(source) => change({ source })}
                   />
                   {draft.source === "clone" ? (
-                    <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
-                      <Field id={`${ids}-url`} label="Repository" error={fieldError("cloneUrl")}>
-                        <Input
-                          id={`${ids}-url`}
-                          value={draft.cloneUrl}
-                          spellCheck={false}
-                          autoCapitalize="off"
-                          placeholder="git@github.com:org/repo.git"
-                          onChange={(event) => change({ cloneUrl: event.target.value })}
-                          className={cn(touch && "h-10")}
-                        />
-                      </Field>
-                      <Field id={`${ids}-ref`} label="Ref (optional)">
+                    <div className="space-y-3">
+                      <WorkspaceRepoPicker
+                        workspace={draft.workspace}
+                        value={draft.cloneUrl}
+                        touch={touch}
+                        onChange={(cloneUrl, repo) => {
+                          change({ cloneUrl });
+                          setPickedBranch(repo?.defaultBranch ?? null);
+                        }}
+                      />
+                      {fieldError("cloneUrl") ? (
+                        <p role="alert" className="text-[11px] text-danger">
+                          {fieldError("cloneUrl")}
+                        </p>
+                      ) : null}
+                      <Field id={`${ids}-ref`} label="Branch, tag or commit (optional)">
                         <Input
                           id={`${ids}-ref`}
                           value={draft.cloneRef}
                           spellCheck={false}
                           autoCapitalize="off"
-                          placeholder="main"
+                          placeholder={pickedBranch ?? "default branch"}
                           onChange={(event) => change({ cloneRef: event.target.value })}
                           className={cn(touch && "h-10")}
                         />

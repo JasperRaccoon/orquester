@@ -15,6 +15,7 @@ import { cn } from "../../lib/cn";
 import type { WorkflowEditor } from "../../lib/workflows/editor-store";
 import { browserTimeZone } from "../../lib/workflows/templates";
 import { useAppStore } from "../../store/app";
+import { WorkspaceRepoPicker } from "./RepoPicker";
 import { Modal, ModalCloseButton } from "../ui/modal";
 import { Field, NumberInput, Section, Segmented, SelectInput, SmallButton, TextInput, ToggleRow } from "./ui/controls";
 import { ProjectSelect } from "./ui/ProjectSelect";
@@ -198,19 +199,20 @@ export const WorkflowSettingsModal: React.FC<WorkflowSettingsModalProps> = ({
                 ]}
               />
               {project.source.kind === "clone" ? (
-                <div className="grid grid-cols-[1fr_7rem] gap-2">
-                  <Field label="Repository">
-                    <TextInput
-                      value={project.source.url}
-                      placeholder="git@github.com:org/repo.git"
-                      className="font-mono text-[12px]"
-                      onValue={(url) => setProject({ ...project, source: { ...(project.source as { kind: "clone"; url: string; ref?: string }), url } }, "url")}
-                    />
-                  </Field>
-                  <Field label="Ref">
+                <div className="space-y-3">
+                  <WorkspaceRepoPicker
+                    workspace={project.workspace}
+                    value={project.source.url}
+                    urlInputClassName="font-mono text-[12px]"
+                    onChange={(url) => {
+                      const source = project.source as { kind: "clone"; url: string; ref?: string };
+                      setProject({ ...project, source: { ...source, url } }, "url");
+                    }}
+                  />
+                  <Field label="Branch, tag or commit (optional)">
                     <TextInput
                       value={project.source.ref ?? ""}
-                      placeholder="main"
+                      placeholder="default branch"
                       className="font-mono text-[12px]"
                       onValue={(ref) => {
                         const source = project.source as { kind: "clone"; url: string };

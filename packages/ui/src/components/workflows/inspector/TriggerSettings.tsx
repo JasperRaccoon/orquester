@@ -28,6 +28,7 @@ import { formatAgo } from "../../../lib/workflows/format";
 import { useWorkflowsState } from "../../../lib/workflows/hooks";
 import { useAppStore } from "../../../store/app";
 import { Field, NumberInput, Section, Segmented, SelectInput, TextInput, ToggleRow } from "../ui/controls";
+import { RepoPicker } from "../RepoPicker";
 import { FieldAnchor, useConfigSetter, useFieldMessages, useInspector } from "./inspector-context";
 
 // ---------------------------------------------------------------------------
@@ -357,15 +358,7 @@ export const GitSettings: React.FC = () => {
         />
         {config.repo.kind === "url" ? (
           <FieldAnchor field="config.repo" className="space-y-3">
-            <Field label="Clone URL">
-              <TextInput
-                value={config.repo.url}
-                placeholder="git@github.com:owner/repo.git"
-                className="font-mono text-[12px]"
-                onValue={(url) => setConfig((current) => ({ ...current, repo: { ...(current.repo as { kind: "url"; url: string }), url } }), "repo-url")}
-              />
-            </Field>
-            <Field label="Read it as" hint="A private repository needs one of your git accounts.">
+            <Field label="Read it as" hint="A private repository needs one of your git accounts; picking one lists its repositories.">
               <SelectInput
                 value={config.repo.accountId ?? ""}
                 aria-label="Git account"
@@ -387,6 +380,13 @@ export const GitSettings: React.FC = () => {
                 ))}
               </SelectInput>
             </Field>
+            <RepoPicker
+              account={accounts.find((account) => account.id === (config.repo as { accountId?: string }).accountId) ?? null}
+              value={config.repo.url}
+              label="Repository"
+              urlInputClassName="font-mono text-[12px]"
+              onChange={(url) => setConfig((current) => ({ ...current, repo: { ...(current.repo as { kind: "url"; url: string }), url } }), "repo-url")}
+            />
           </FieldAnchor>
         ) : (
           <p className="text-[11px] leading-4 text-neutral-500">Its origin, read with the workspace's git account.</p>
