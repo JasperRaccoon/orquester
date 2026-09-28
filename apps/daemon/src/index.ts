@@ -104,7 +104,7 @@ import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
-import { RecentProjectsService } from "./recent-projects";
+import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptError, SavedPromptsService, publishSavedPromptEvents } from "./saved-prompts.ts";
 import { detectRepoId } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
@@ -115,6 +115,13 @@ import { accountPrefix } from "./cliproxy-seed.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { cloneRefProblem } from "./workflows/git-remote";
+import type { WorkflowEngine } from "./workflows/contracts.ts";
+import { WorkflowService, publishWorkflowEvents } from "./workflows/service.ts";
+import { WorkflowSecretsService } from "./workflows/secrets.ts";
+import { FileRunStore } from "./workflows/run-store.ts";
+import { WorkflowStateStore } from "./workflows/state-store.ts";
+import { registerWorkflowRoutes, summarizeWorkflow } from "./workflows/routes.ts";
+import { createInternalDaemonApi } from "./chat-client/index.ts";
 import { AgentAccountsService } from "./agent-accounts.ts";
 import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
@@ -191,6 +198,10 @@ import {
   resolveDaemonPaths,
   savedPromptsPath,
   sessionsIndexPath,
+  workflowRunsDir,
+  workflowSecretsPath,
+  workflowStatePath,
+  workflowsPath,
   tmuxSocketPath,
   todosIndexPath,
   usageTokensCacheFile,
@@ -248,6 +259,14 @@ interface ResolvedPaths {
   recentProjectsFile: string;
   /** <appdir>/daemon/saved-prompts.json — the shared saved-prompt library. */
   savedPromptsFile: string;
+  /** <appdir>/daemon/workflows.json — automated workflow definitions (workflows spec §3.1). */
+  workflowsFile: string;
+  /** <appdir>/daemon/workflow-state.json — schedule/git cursors, account cooldowns. */
+  workflowStateFile: string;
+  /** <appdir>/daemon/workflow-secrets.json — secret values (0600; names only leave the daemon). */
+  workflowSecretsFile: string;
+  /** <appdir>/daemon/workflow-runs — one directory per run (§5.8). */
+  workflowRunsDir: string;
   /** <appdir>/daemon/push.json — Web Push VAPID keypair + subscriptions (0600). */
   pushConfigFile: string;
   workspacesDir: string;
@@ -380,6 +399,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     todosIndexFile: todosIndexPath(paths.baseDir),
     recentProjectsFile: recentProjectsPath(paths.baseDir),
     savedPromptsFile: savedPromptsPath(paths.baseDir),
+    workflowsFile: workflowsPath(paths.baseDir),
+    workflowStateFile: workflowStatePath(paths.baseDir),
+    workflowSecretsFile: workflowSecretsPath(paths.baseDir),
+    workflowRunsDir: workflowRunsDir(paths.baseDir),
     pushConfigFile: pushConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
     keysDir: keysDir(paths.baseDir),
@@ -559,6 +582,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await savedPrompts.load();
+  // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
+  // state. Each store is tolerant at load — a file it cannot parse is moved aside, one it cannot
+  // read leaves that store read-only (503 WORKFLOWS_UNAVAILABLE) — so none of them blocks boot.
+  // The ENGINE is attached later (attachWorkflowEngine, after agentChat.init()); until then the
+  // routes serve definitions, secrets and run history from these stores alone.
+  const workflowSecrets = new WorkflowSecretsService({ file: resolved.workflowSecretsFile, logger: console });
+  await workflowSecrets.load();
+  const workflows = new WorkflowService({
+    file: resolved.workflowsFile,
+    logger: console,
+    secretNames: (workflowId) => workflowSecrets.names(workflowId),
+    savedPromptIds: () => savedPrompts.allIds()
+  });
+  await workflows.load();
+  const workflowRuns = new FileRunStore({ dir: resolved.workflowRunsDir, logger: console });
+  await workflowRuns.init();
+  const workflowState = new WorkflowStateStore({ path: resolved.workflowStateFile, logger: console });
+  await workflowState.load();
   // Push a project's git status to whoever is looking at it. The watcher polls
   // ONLY projects with a live `/events?project=…` subscriber and only emits on a
   // real change, so an unwatched (or idle) repo costs nothing.
@@ -827,6 +868,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // included, as `savedPrompt.upserted` (the whole prompt) / `savedPrompt.deleted`.
   publishSavedPromptEvents(savedPrompts, broadcaster);
 
+  // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
+  // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
+  // (no names, no values). Run events are published by the engine itself.
+  publishWorkflowEvents({
+    service: workflows,
+    secrets: workflowSecrets,
+    broadcaster,
+    // `services` is assigned below, before any transport serves — and every event follows a
+    // request — so it is always set when this runs.
+    summarize: (workflow) =>
+      summarizeWorkflow(
+        { service: workflows, runStore: workflowRuns, engine: () => services.workflowEngine },
+        workflow
+      )
+  });
+
   // Server-side browser tabs (Design Mode). Chromium resolves through the
   // registry's probed browser entries; no bundled download. Only CDP-speaking
   // (Chromium-family) browsers can drive puppeteer-core — see CHROMIUM_FAMILY_IDS.
@@ -938,7 +995,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // fresh, bounded live-catalog probe.
   const validateModel: ValidateModel = (entryId, model) => cliproxy.validateModel(entryId, model);
   const services: Services = {
-    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat
+    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null
   };
 
   // Boot the managed proxy AFTER reattach (adoption must see the final session
@@ -975,6 +1033,33 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     mode: "local"
   });
   await unixServer.listen({ path: paths.socketPath });
+
+  // The daemon's in-process client of its OWN REST API for the workflow engine's agent blocks
+  // (workflows spec §2 "Driving agents"). Bound to the UNIX app on purpose: it is always on and
+  // never rebuilt, and it needs no bearer — the HTTP app is hot-reloadable (a reference to it goes
+  // stale on the next config change) and would 401 an unauthenticated call. Every route gate the
+  // GUI meets applies to the engine through it by construction. `fsRoot`/`workspacesDir` are read
+  // once here, as the MCP's per-request client reads them.
+  services.internalApi = createInternalDaemonApi({
+    app: unixServer,
+    broadcaster,
+    agentChat,
+    fsRoot: resolved.fsRoot,
+    workspacesDir: resolved.workspacesDir
+  });
+
+  /**
+   * INTEGRATION POINT — attach the workflow engine (engine.ts) once it is built. Call it after
+   * `agentChat.init()` (above) and after `services.internalApi` exists (the engine's ChatClient
+   * rides it), then `await engine.resume()` and `engine.start()`. From then on the workflow routes
+   * run, test and cancel through it, and `workflow.upserted` carries its live trigger state; before
+   * it, those routes answer 503 ENGINE_UNAVAILABLE and history is read from the run store alone.
+   * `stop()` below stops an attached engine before flushing the workflow stores.
+   */
+  const attachWorkflowEngine = (engine: WorkflowEngine): void => {
+    services.workflowEngine = engine;
+  };
+  void attachWorkflowEngine;
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
@@ -1021,6 +1106,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const stop = async () => {
     usage.stop();
+    // Workflows first: the engine stops its timers, triggers and sweepers (never a sandbox child —
+    // those are detached and survive, §5.8), then every workflow store's write chain is flushed.
+    // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
+    await services.workflowEngine?.stop().catch((error) => console.error("Workflow engine stop failed", error));
+    await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
     clearInterval(cliproxyHealthTimer);
     agentAccounts.stopRefresher();
     gitWatcher.stop();
@@ -1777,6 +1867,24 @@ interface Services {
   recentProjects: RecentProjectsService;
   /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
   savedPrompts: SavedPromptsService;
+  /** Automated workflow definitions (workflows spec §3.1). */
+  workflows: WorkflowService;
+  /** Workflow secrets — names out, values only to the engine (§5.7). */
+  workflowSecrets: WorkflowSecretsService;
+  /** Workflow runs on disk (§5.8). */
+  workflowRuns: FileRunStore;
+  /** Schedule/git cursors and account cooldowns (§3.1); the engine and triggers own its contents. */
+  workflowState: WorkflowStateStore;
+  /**
+   * The workflow engine, once `attachWorkflowEngine` (in `startDaemon`) has run; null before.
+   * The routes read it per request.
+   */
+  workflowEngine: WorkflowEngine | null;
+  /**
+   * The daemon's in-process, unauthenticated client of its own REST API, bound to the unix app
+   * (see its construction in `startDaemon`); null until that app exists. The engine's ChatClient.
+   */
+  internalApi: InjectDaemonApi | null;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   push: PushService;
@@ -4319,6 +4427,24 @@ export function createServer(
       }
     }
   );
+
+  // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
+  // transports; the bearer hook above gates HTTP. Secret values are write-only.
+  registerWorkflowRoutes(app, {
+    service: services.workflows,
+    secrets: services.workflowSecrets,
+    runStore: services.workflowRuns,
+    engine: () => services.workflowEngine,
+    savedPromptIds: () => services.savedPrompts.allIds(),
+    // `?projectPath=` names `<workspacesDir>/<ws>/<project>`, read per request (PUT
+    // /api/config/daemon can move the workspaces dir).
+    projectPathFilter: (projectPath) => {
+      const described = describeProjectPath(resolved.workspacesDir, projectPath);
+      return described
+        ? { path: join(resolved.workspacesDir, described.workspace, described.name), workspace: described.workspace }
+        : null;
+    }
+  });
 
   // Web Push (PWA attention notifications). Allowed on both transports like
   // /api/sessions and /api/accounts — the response never carries the VAPID
