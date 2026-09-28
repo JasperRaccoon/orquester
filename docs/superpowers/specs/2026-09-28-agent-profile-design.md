@@ -1,4 +1,4 @@
-# Agent profile — manage the agents' skills, MCP servers, plugins, hooks, subagents, commands and instructions
+# Agent profile — manage the agents' skills, MCP servers, plugins, hooks, commands and instructions
 
 Status: design approved by the owner on 2026-09-28, section by section (approach A, native-first
 adapters; the coverage matrix with its two amendments; the daemon architecture; the panel with the
@@ -23,9 +23,9 @@ the owner lists, adds, edits, turns on/off and deletes each agent's items direct
 
 1. A fourth right-rail section named **Agent profile**, for Claude, Codex, Grok and OpenCode.
 2. Manage skills, MCP servers, plugins, hooks and the system-prompt append, plus instruction files,
-   subagents, slash commands and plugin marketplaces.
+   slash commands and plugin marketplaces. (Subagents were dropped by the owner during review.)
 3. Add, edit, turn on/off, delete — easily, per item.
-4. Add a skill/subagent/command by writing it in an editor, importing from a Git URL, uploading a
+4. Add a skill/command by writing it in an editor, importing from a Git URL, uploading a
    file/folder/zip, or copying from another agent.
 5. **Global only**: one profile per agent, applying to every account and every project. No project
    scope.
@@ -40,7 +40,9 @@ the owner lists, adds, edits, turns on/off and deletes each agent's items direct
 
 Project-scoped items (`.mcp.json`, `<repo>/.claude/…`, `.codex/config.toml`, …); claudex and
 claudemix; Claude output styles and `~/.claude/rules/`; per-session enabling of an item; a UI for
-the write backups; tools for the Orquester MCP.
+the write backups; tools for the Orquester MCP; **subagents** (custom agent definitions —
+`~/.claude/agents`, `~/.codex/agents`, `~/.grok/agents`, OpenCode `agents/`), removed from scope
+by the owner on review, including linking those directories into account homes.
 
 ## 2. Approach
 
@@ -57,9 +59,8 @@ hook trust, loses TOML comments); C, an Orquester-owned canonical profile projec
 
 ## 3. Coverage matrix
 
-Item kinds: `instructions`, `mcp`, `skill`, `plugin`, `marketplace`, `hook`, `subagent`,
-`command`. Paths are the daemon user's own homes (`HOME=/var/lib/orquester` in production), each
-resolved to its realpath before any write. "Stash" = `<appdir>/daemon/agent-profile/stash/…`
+Item kinds: `instructions`, `mcp`, `skill`, `plugin`, `marketplace`, `hook`, `command`. Paths are
+the daemon user's own homes (`HOME=/var/lib/orquester` in production), each resolved to its realpath before any write. "Stash" = `<appdir>/daemon/agent-profile/stash/…`
 (§4.4).
 
 | Kind | Claude | Codex | Grok | OpenCode |
@@ -70,14 +71,13 @@ resolved to its realpath before any write. "Stash" = `<appdir>/daemon/agent-prof
 | **plugin** | `claude plugin install/uninstall --scope user`; off = `enabledPlugins["<id>"] = false` | `plugin/install`, `plugin/uninstall`; off = `[plugins."<id>"] enabled = false` | `grok plugin install/uninstall`; off = `[plugins] disabled` (`grok plugin disable`) | `plugin[]` entries and `plugin/*.{js,ts}` files; off = stash |
 | **marketplace** | `claude plugin marketplace add/remove` | `marketplace/add`, `marketplace/remove` | `grok plugin marketplace add/remove` (`[[marketplace.sources]]`) | — (none) |
 | **hook** | `hooks` in `~/.claude/settings.json`; off = stash (Claude has no per-hook disable) | `~/.codex/hooks.json`; off = `[hooks.state."<key>"] enabled = false`; trust hash written on add (§4.6) | `~/.grok/hooks/*.json`; off = stash | — (OpenCode hooks are plugin code) |
-| **subagent** | `~/.claude/agents/*.md`; off = `permissions.deny: ["Agent(<name>)"]`, verified first on 2.1.280, else stash | `~/.codex/agents/*.toml` (`name`, `description`, `developer_instructions`); off = stash | `~/.grok/agents/*.md`; off = `[subagents.toggle] <name> = false` | `~/.config/opencode/agents/*.md`; off = frontmatter `disable: true` |
 | **command** | `~/.claude/commands/**/*.md`; off = stash | legacy `~/.codex/prompts/*.md`: listed read-only, deletable (deprecated, no longer loaded) | `~/.grok/commands/*.md`; off = `[skills] disabled` | `~/.config/opencode/commands/**/*.md`; off = stash |
 
 ### 3.1 Cross-cutting rules
 
 - **Inherited items** — items an agent loads from somewhere it does not own: Grok and OpenCode read
   `~/.claude/skills` (and Grok `~/.claude.json`'s MCP servers); Codex, Grok and OpenCode read
-  `~/.agents/skills`; every plugin's own skills, hooks, subagents, commands and MCP servers. They
+  `~/.agents/skills`; every plugin's own skills, hooks, commands and MCP servers. They
   are listed with a source badge (*From Claude*, *Shared · ~/.agents*, *Plugin · superpowers*).
   Edit and Delete belong to the owner ("Manage in Claude", "Manage in plugin"). The switch works
   only where the listing agent has its own native per-item disable for it, and then affects only
@@ -110,7 +110,7 @@ resolved to its realpath before any write. "Stash" = `<appdir>/daemon/agent-prof
 | `codex-config-client.ts` | A short-lived `codex app-server` (daemon user's `CODEX_HOME`) for `config/read`, `config/batchWrite` (`expectedVersion`, `reloadUserConfig: true`), `skills/list`, `skills/config/write`, `hooks/list`, `plugin/*`, `marketplace/*`. Spawned on demand, reused while calls are pending, closed after 30 s idle, every call under a deadline. Reuses the codex adapter's NDJSON JSON-RPC framing; the generated bindings are regenerated from the installed 0.155.1 first. |
 | `cli-runner.ts` | Runs `claude plugin …` and `grok mcp|plugin …`: argv only (no shell), explicit env built like `sessionEnvBase` with `HOME` = the daemon user's home and no `CLAUDE_CONFIG_DIR`/`GROK_HOME`, a deadline, `--json` where the CLI has it, stderr redacted before it is returned. Never `claude mcp list/get` (they spawn servers). |
 | `jsonc.ts` | `jsonc-parser` `modify` + `applyEdits` (2-space indent, comments kept) — OpenCode's own library. |
-| `toml-patch.ts` | Comment-preserving TOML edits for Grok (`@decimalturn/toml-patch`), used for `[skills] disabled`, `[subagents.toggle]`, `[plugins]` and table deletes the CLI does not do. |
+| `toml-patch.ts` | Comment-preserving TOML edits for Grok (`@decimalturn/toml-patch`), used for `[skills] disabled`, `[plugins]` and table deletes the CLI does not do. |
 | `frontmatter.ts` | YAML frontmatter parse/serialize (`yaml`) for SKILL.md, agents and commands. |
 | `stash.ts` | §4.4. |
 | `backups.ts` | Before every write the previous file (or the directory for a directory delete) is copied to `<appdir>/daemon/agent-profile/backups/<agent>/<stamp>-<name>`; a ring of the last 50 per agent. |
@@ -130,7 +130,7 @@ register the routes on both transports; `stop()` closes the watchers and any cod
 
 ```ts
 type AgentProfileAgentId = "claude" | "codex" | "grok" | "opencode";
-type ProfileItemKind = "mcp" | "skill" | "plugin" | "marketplace" | "hook" | "subagent" | "command";
+type ProfileItemKind = "mcp" | "skill" | "plugin" | "marketplace" | "hook" | "command";
 interface ProfileItem {
   id: string;                  // stable, see below
   kind: ProfileItemKind;
@@ -185,7 +185,7 @@ part of the snapshot, `enabled: false`. Delete of an off item deletes the stash 
   `WRITE_VERIFY_FAILED`.
 - Names are validated per CLI before anything is written: Grok MCP `[A-Za-z_][A-Za-z0-9_-]*` not
   ending in `_`; skill names `^[a-z0-9]+(-[a-z0-9]+)*$`, ≤ 64 (OpenCode, Codex, Grok; Claude
-  accepts the same); Claude subagent names without `:`; file names never contain `/`, `..` or NUL.
+  accepts the same); file names never contain `/`, `..` or NUL.
 - Frontmatter is validated before writing (OpenCode throws on a bad command frontmatter and loses
   its whole config).
 - A file the adapter cannot parse makes the snapshot partial (`fileErrors`), and every mutation
@@ -215,7 +215,7 @@ properly). A hook `hooks/list` reports `modified` or `untrusted` shows a warning
 action.
 
 **Grok.** MCP add/remove/enable/disable and plugin install/uninstall/enable/disable and
-marketplace add/remove go through `grok …`; `[skills] disabled`, `[subagents.toggle]` and
+marketplace add/remove go through `grok …`; `[skills] disabled` and
 anything else through `toml-patch.ts`. `[compat.claude] hooks = false` is never changed (Claude's
 hooks would double-report status). The per-thread `GROK_CONFIG_PATH` overlay is untouched.
 
@@ -245,9 +245,9 @@ ignored, and the notice then says "applies once OpenCode's server restarts".
 
 | Agent | New shared links | Already shared |
 |---|---|---|
-| Claude | `CLAUDE.md`, `agents/`, `commands/` | `skills/`, `plugins/`, `settings.json`, `projects/` |
-| Codex | `skills/`, `agents/` | `config.toml`, `hooks.json`, `sessions/` |
-| Grok | `AGENTS.md`, `agents/`, `commands/`, `rules/` | `config.toml`, `trusted_folders.toml`, `hooks/`, `plugins/`, `skills/`, `sessions/` |
+| Claude | `CLAUDE.md`, `commands/` | `skills/`, `plugins/`, `settings.json`, `projects/` |
+| Codex | `skills/` | `config.toml`, `hooks.json`, `sessions/` |
+| Grok | `AGENTS.md`, `commands/`, `rules/` | `config.toml`, `trusted_folders.toml`, `hooks/`, `plugins/`, `skills/`, `sessions/` |
 
 An account home that already has its own real copy is merged into the shared one first, as
 `projects/` is today; on a name collision both are kept, the account's copy suffixed
@@ -260,7 +260,7 @@ homes are untouched.
 - **Write** — the editor (§7.4).
 - **Git URL** — `git clone --depth 1` (argv, no shell) into `<appdir>/tmp/agent-profile-import-*`,
   60 s deadline, 50 MB cap; a `…/tree/<ref>/<path>` URL selects a subfolder. The clone is scanned
-  for `SKILL.md` directories (or `.md` agent/command files); the owner picks which to import;
+  for `SKILL.md` directories (or `.md` command files); the owner picks which to import;
   symlinks inside the repo are refused; files are copied (the item is not linked to the repo); the
   clone is deleted afterwards.
 - **Upload** — `.zip` or `.md` streamed to disk like the existing uploads (octet-stream body,
@@ -272,8 +272,6 @@ homes are untouched.
   - MCP servers converted between Claude JSON, Codex/Grok TOML and OpenCode JSONC (stdio ↔
     `command` array, `env` ↔ `environment`, http `url`/`headers`); secret values moved daemon-side;
     fields the target has no equivalent for listed in the result;
-  - subagents converted Claude/Grok/OpenCode `.md` ↔ Codex `.toml` (`developer_instructions` = the
-    body);
   - commands copied as `.md`; a command copied to Codex becomes a skill.
 - A name collision asks: **Replace**, **Keep both** (suffixed) or **Cancel**.
 
@@ -303,7 +301,7 @@ Top to bottom:
    disabled. Defaults to the visible chat tab's agent (`providerForRefId` on the tab's `refId`),
    else the last picked.
 2. **Search** and a single horizontally scrolling row of **kind chips with counts** (All · MCP ·
-   Skills · Plugins · Hooks · Subagents · Commands · Marketplaces — only the kinds that agent
+   Skills · Plugins · Hooks · Commands · Marketplaces — only the kinds that agent
    has).
 3. **Instructions card** — "CLAUDE.md · 42 lines · edited 2h ago", opening the instructions editor;
    its warning (override file, dead `GROK.md`) as a chip.
@@ -326,10 +324,9 @@ servers restart when idle"); a 409 refreshes the list and says so. Delete asks t
 Mounted once through a bridge host (`AgentProfileEditorHost`, like `SavedPromptEditorHost`); a
 `Modal` on desktop, a full-screen sheet on phones.
 
-- **Skill / subagent / command** — a source switcher (Write · Git URL · Upload · Copy from agent).
+- **Skill / command** — a source switcher (Write · Git URL · Upload · Copy from agent).
   Write: the known frontmatter fields for that agent and kind as inputs, the body in CodeMirror
-  markdown. A skill with other files: `SKILL.md` edited, the rest listed read-only. Codex
-  subagents: name, description, developer instructions.
+  markdown. A skill with other files: `SKILL.md` edited, the rest listed read-only.
 - **MCP server** — name; transport (stdio / http); command and arguments (a list); env and headers
   as key/value rows where an existing secret shows "••• set" with Replace and Remove; URL; timeout;
   an **Advanced** disclosure for per-agent fields (Codex `enabled_tools`/`disabled_tools`/
@@ -396,7 +393,7 @@ Events on `agent-profile`: `agentProfile.changed {agent, revision}`.
   the real CLI stored.
 - A fake `codex app-server` and fake `claude` / `grok` binaries on PATH, so no test touches a real
   agent or a real home.
-- Converter tests for every MCP / subagent / command pair; import tests (zip traversal and symlink
+- Converter tests for every MCP / command pair; import tests (zip traversal and symlink
   refusal, git subfolder selection with a local bare repo).
 - Account-home linking tests (merge, collision suffixing, Codex `.system`).
 - Route tests through `inject` on a temp appdir; store tests; `*.check.ts` render checks for every
@@ -408,13 +405,11 @@ Events on `agent-profile`: `agentProfile.changed {agent, revision}`.
 
 ## 10. Verification items the plan resolves first
 
-1. Claude 2.1.280: does `permissions.deny: ["Agent(<name>)"]` in user settings hide a user
-   subagent? If not, Claude subagents use the stash.
-2. Exact `claude plugin` / `claude plugin marketplace` flags (`--scope user`, `--json`, non-
+1. Exact `claude plugin` / `claude plugin marketplace` flags (`--scope user`, `--json`, non-
    interactive confirmation) and the `grok mcp|plugin` equivalents, from `--help`.
-3. Regenerate the Codex app-server bindings from 0.155.1 and confirm `config/batchWrite` against a
+2. Regenerate the Codex app-server bindings from 0.155.1 and confirm `config/batchWrite` against a
    symlinked `config.toml` writes the target file.
-4. `@decimalturn/toml-patch` against a copy of the real `~/.grok/config.toml`: comments, the
+3. `@decimalturn/toml-patch` against a copy of the real `~/.grok/config.toml`: comments, the
    `[plugins]` array, `[[marketplace.sources]]` and a table delete.
 
 ## 11. Build order
