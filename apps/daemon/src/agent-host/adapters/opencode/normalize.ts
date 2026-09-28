@@ -36,6 +36,7 @@ import type {
   RuntimeItemStatus,
   RuntimeTaskCompletedStatus,
   RuntimeTaskStatus,
+  RuntimeTaskUsage,
   TaskAgentLinkage,
   ToolLifecycleItemType,
   UserInputQuestion
@@ -62,6 +63,7 @@ import {
 } from "./ruleset.ts";
 import {
   accumulateStepUsage,
+  childAgentUsage,
   addRelatedSession,
   advanceOutputMark,
   claimPrompt,
@@ -1052,13 +1054,22 @@ function demux(
  * not trust it from the provider. `taskType: "subagent"` is what makes
  * `classifyTaskAgentKind` resolve it to `"agent"`.
  */
+/**
+ * A child session's title as the roster's name: OpenCode titles it
+ * `"<description> (@<agent> subagent)"`, and the agent rides as the role.
+ */
+function childAgentTitle(title: string): string {
+  const bare = title.replace(/\s*\(@[^()]+ subagent\)\s*$/u, "");
+  return bare.length > 0 ? bare : title;
+}
+
 function childLinkage(agent: OpenCodeChildAgent): TaskAgentLinkage {
   // The run's launch: the provider's call, or the adapter's own relaunch id.
   const toolUseId = agent.launchId ?? agent.toolUseId;
   return {
     taskType: "subagent",
     agentId: agent.sessionId,
-    ...(agent.title !== undefined ? { title: agent.title } : {}),
+    ...(agent.title !== undefined ? { title: childAgentTitle(agent.title) } : {}),
     ...(agent.role !== undefined ? { role: agent.role } : {}),
     ...(agent.model !== undefined ? { model: agent.model } : {}),
     ...(toolUseId !== undefined ? { toolUseId } : {}),
@@ -1176,6 +1187,29 @@ function emitTaskProgress(
       ...(extra.lastToolName !== undefined ? { lastToolName: extra.lastToolName } : {}),
       ...(extra.status !== undefined ? { status: extra.status } : {})
     }
+  });
+}
+
+/**
+ * The child's usage alone. No description: a tick with one also rewrites the
+ * agent's one progress row (`activities.ts`), blanking its last tool and its
+ * summary; the linkage carries the title.
+ */
+function emitTaskUsage(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  usage: RuntimeTaskUsage,
+  raw: unknown,
+  out: Emitter
+): void {
+  if (agent.completed) {
+    return;
+  }
+  emitTaskStarted(state, agent, raw, out);
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.progress",
+    payload: { ...childLinkage(agent), taskId: agent.sessionId, description: "", usage }
   });
 }
 
@@ -1976,9 +2010,24 @@ function demuxChild(
         }
       }
 
+      if (part.type === "step-finish" && role !== "user") {
+        // The child's own spend, step by step: its roster usage. A part is
+        // restated as it settles, so it is kept by id, never added twice.
+        const step = part as Extract<OpenCodePart, { type: "step-finish" }>;
+        const agent = ensureChildAgent(state, childSessionId);
+        (agent.stepTokens ??= new Map()).set(step.id, step.tokens);
+        const usage = childAgentUsage(agent);
+        if (usage !== undefined) {
+          emitTaskUsage(state, agent, usage, raw, out);
+        }
+      }
+
       if (part.type === "tool") {
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
         const agent = ensureChildAgent(state, childSessionId);
+        if (tool.state.status === "completed" || tool.state.status === "error") {
+          (agent.finishedCalls ??= new Set()).add(tool.callID);
+        }
         if (tool.state.status === "running" || tool.state.status === "pending") {
           // A call under way — an aborted one's closing frame is an `error`.
           reportChildRun(agent, "activity", out);

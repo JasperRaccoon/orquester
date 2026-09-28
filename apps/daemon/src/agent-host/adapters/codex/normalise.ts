@@ -164,7 +164,32 @@ export class CodexNormaliser {
    * child missing here was launched before this session — a resume after a
    * host restart.
    */
-  private readonly launchedChildren = new Map<string, { agentPath: string; title: string }>();
+  private readonly launchedChildren = new Map<
+    string,
+    { agentPath: string; title: string; parentAgentId?: string }
+  >();
+  /** Child thread id → the calls it has finished, the roster's `toolUses`. */
+  private readonly childToolUses = new Map<string, number>();
+  /**
+   * Child thread id → its current run's last finished message: the run's
+   * answer, which its end record carries as the agent's result. Taken by that
+   * end, and dropped when the child's next turn starts.
+   */
+  private readonly childAnswers = new Map<string, string>();
+  /**
+   * Children whose current run's end record (`subAgentActivity`
+   * `completed`/`interrupted`) was written. Codex sends the record just before
+   * the child's own `turn/completed`, which then says nothing more: its
+   * `idle` would demote the ended row until the record's second copy
+   * restored it. Cleared when the child's next turn starts.
+   */
+  private readonly endRecorded = new Set<string>();
+  /**
+   * Launch and end records already written, by record id. Codex sends every
+   * `subAgentActivity` twice, as `item/started` and `item/completed` of the
+   * same record, 1–3 ms apart (fixtures README observation 24). Bounded.
+   */
+  private readonly seenAgentRecords = new Set<string>();
   /**
    * Children with a settled run behind them — their own `turn/completed` or
    * `thread/closed`, a `subAgentActivity` `completed`/`interrupted`, or a Stop
@@ -1327,11 +1352,13 @@ export class CodexNormaliser {
     params: unknown,
     raw: RuntimeEventRaw
   ): RuntimeEventDraft[] {
-    const linkage = {
-      taskType: "subagent",
-      agentKind: "agent" as const,
-      agentId: childThreadId
-    };
+    const linkage = this.childLinkage(childThreadId);
+    // A tick's `description` is the agent's NAME — ingestion titles the row
+    // with it and the roster takes that title (`activities.ts`), exactly as
+    // Claude's `task_progress` rows carry the task's description. What the
+    // agent is doing now rides `summary`. Unnamed (a launch this session
+    // never saw), a tick names nothing and the start's name stands.
+    const name = linkage.title ?? "";
     const base = { agentId: childThreadId, raw } as const;
 
     switch (method) {
@@ -1356,6 +1383,8 @@ export class CodexNormaliser {
         // step 3) — the child turn id exists nowhere else.
         this.childTurns.set(childThreadId, p.turn.id);
         this.settledChildren.delete(childThreadId);
+        this.childAnswers.delete(childThreadId);
+        this.endRecorded.delete(childThreadId);
         const events: RuntimeEventDraft[] = [];
         if (relaunch) {
           this.relaunchedTurns.add(childThreadId);
@@ -1378,12 +1407,7 @@ export class CodexNormaliser {
         }
         events.push({
           type: "task.progress",
-          payload: {
-            taskId: childThreadId,
-            description: `agent ${childThreadId}`,
-            status: "running",
-            ...linkage
-          },
+          payload: { taskId: childThreadId, description: name, status: "running", ...linkage },
           ...base
         });
         return events;
@@ -1395,6 +1419,9 @@ export class CodexNormaliser {
         const p = params as CodexProtocol.v2.TurnCompletedNotification;
         const state = turnState(p.turn.status);
         const interrupted = state === "interrupted" || state === "cancelled";
+        // The run's end record came first and said how it ended: nothing
+        // more to say about the run but the calls it left open.
+        const ended = this.endRecorded.has(childThreadId);
         return [
           // A turn the provider abandoned leaves its in-progress items with no
           // `item/completed` of their own (R3 finding 1) — a child's as the
@@ -1404,15 +1431,19 @@ export class CodexNormaliser {
             (open) => open.childThreadId === childThreadId && open.childTurnId === p.turn.id,
             raw
           ),
-          {
-            type: "task.updated",
-            payload: {
-              taskId: childThreadId,
-              status: state === "completed" ? "idle" : "interrupted",
-              ...linkage
-            },
-            ...base
-          }
+          ...(ended
+            ? []
+            : [
+                {
+                  type: "task.updated" as const,
+                  payload: {
+                    taskId: childThreadId,
+                    status: state === "completed" ? ("idle" as const) : ("interrupted" as const),
+                    ...linkage
+                  },
+                  ...base
+                }
+              ])
         ];
       }
       case "thread/closed": {
@@ -1436,7 +1467,7 @@ export class CodexNormaliser {
             type: "task.progress",
             payload: {
               taskId: childThreadId,
-              description: `agent ${childThreadId}`,
+              description: name,
               error: presentableError(p.error.message),
               ...linkage
             },
@@ -1457,26 +1488,42 @@ export class CodexNormaliser {
           // item is, so the child's turn's end can abandon it by that key.
           this.noteCollabPrompt(item, childItemId(childThreadId, item.id));
         }
+        const phase = method === "item/started" ? "started" : "completed";
+        const isCall = isToolLifecycleItemType(classified.itemType);
+        if (phase === "completed" && item.type === "agentMessage" && item.text.trim().length > 0) {
+          this.childAnswers.set(childThreadId, item.text.trim());
+        }
+        if (isCall && phase === "completed") {
+          this.childToolUses.set(childThreadId, (this.childToolUses.get(childThreadId) ?? 0) + 1);
+        }
         return [
-          ...this.childItemEvents(
-            method === "item/started" ? "started" : "completed",
-            childThreadId,
-            p.turnId,
-            item.id,
-            classified,
-            raw
-          ),
-          // The roster's tick: what the agent is doing, and its last tool.
-          {
-            type: "task.progress",
-            payload: {
-              taskId: childThreadId,
-              description: classified.title ?? classified.itemType,
-              lastToolName: classified.itemType,
-              ...linkage
-            },
-            ...base
-          }
+          // A child's own launch record for an agent of ITS own: the
+          // grandchild's start, owned by this child.
+          ...(item.type === "subAgentActivity" && item.agentThreadId !== childThreadId
+            ? this.subAgentActivity(item, this.activeTurnId, raw, childThreadId)
+            : []),
+          ...this.childItemEvents(phase, childThreadId, p.turnId, item.id, classified, raw),
+          // The roster's tick: the call the agent is running, and its tool.
+          // Its messages, reasoning and bookkeeping items name no activity,
+          // and a tick is the agent's ONE progress row (replaced in place), so
+          // a bare one would blank the last tool: they get none.
+          ...(isCall
+            ? [
+                {
+                  type: "task.progress" as const,
+                  payload: {
+                    taskId: childThreadId,
+                    description: name,
+                    ...(phase === "started" && classified.title !== undefined
+                      ? { summary: classified.title }
+                      : {}),
+                    lastToolName: childToolName(classified),
+                    ...linkage
+                  },
+                  ...base
+                }
+              ]
+            : [])
         ];
       }
       case "item/fileChange/patchUpdated": {
@@ -1529,13 +1576,64 @@ export class CodexNormaliser {
           }
         ];
       }
+      case "thread/tokenUsage/updated": {
+        // The child's own spend — the roster's usage, never the parent's
+        // meter. `total` is the child thread's running total, which the
+        // roster keeps the largest of (`mergeUsageMax`).
+        const p = params as CodexProtocol.v2.ThreadTokenUsageUpdatedNotification;
+        const total = p.tokenUsage.total;
+        const toolUses = this.childToolUses.get(childThreadId);
+        return [
+          {
+            type: "task.progress",
+            payload: {
+              // No name here: a tick with one writes a progress row too, which
+              // would replace the last tool. The linkage carries the title.
+              taskId: childThreadId,
+              description: "",
+              usage: {
+                totalTokens: total.totalTokens,
+                inputTokens: total.inputTokens,
+                cachedInputTokens: total.cachedInputTokens,
+                outputTokens: total.outputTokens,
+                reasoningOutputTokens: total.reasoningOutputTokens,
+                ...(toolUses !== undefined ? { toolUses } : {})
+              },
+              ...linkage
+            },
+            ...base
+          }
+        ];
+      }
       default:
-        // `thread/status/changed`, `thread/tokenUsage/updated`,
-        // `thread/settings/updated`, `model/rerouted`: the child is live, but
-        // none of it belongs on the parent's timeline and none of it carries a
-        // roster field we publish.
+        // `thread/status/changed`, `thread/settings/updated`, `model/rerouted`:
+        // the child is live, but none of it belongs on the parent's timeline
+        // and none of it carries a roster field we publish.
         return [];
     }
+  }
+
+  /**
+   * The roster linkage every row about a collab child repeats: its launch's
+   * name and path when this session saw the launch record, so no row of it
+   * reads nameless.
+   */
+  private childLinkage(childThreadId: string): {
+    taskType: string;
+    agentKind: "agent";
+    agentId: string;
+    agentPath?: string;
+    title?: string;
+    parentAgentId?: string;
+  } {
+    const launch = this.launchedChildren.get(childThreadId);
+    return {
+      taskType: "subagent",
+      agentKind: "agent",
+      agentId: childThreadId,
+      ...(launch !== undefined ? { agentPath: launch.agentPath, title: launch.title } : {}),
+      ...(launch?.parentAgentId !== undefined ? { parentAgentId: launch.parentAgentId } : {})
+    };
   }
 
   /**
@@ -1629,24 +1727,39 @@ export class CodexNormaliser {
    */
   private subAgentActivity(
     item: Extract<CodexThreadItem, { type: "subAgentActivity" }>,
-    turnId: string,
-    raw: RuntimeEventRaw
+    turnId: string | null,
+    raw: RuntimeEventRaw,
+    parentAgentId?: string
   ): RuntimeEventDraft[] {
     if (isRootAgentPath(item.agentPath)) {
       return [];
+    }
+    const recordKey = `${parentAgentId ?? ""}:${item.id}:${item.kind}`;
+    if (this.seenAgentRecords.has(recordKey)) {
+      return [];
+    }
+    this.seenAgentRecords.add(recordKey);
+    while (this.seenAgentRecords.size > COLLAB_PROMPT_MEMORY) {
+      const oldest = this.seenAgentRecords.values().next();
+      if (oldest.done === true) break;
+      this.seenAgentRecords.delete(oldest.value);
     }
     const linkage = {
       taskType: "subagent",
       agentKind: "agent" as const,
       agentId: item.agentThreadId,
       agentPath: item.agentPath,
-      title: agentNameFromPath(item.agentPath)
+      title: agentNameFromPath(item.agentPath),
+      ...(parentAgentId !== undefined ? { parentAgentId } : {})
     };
+    // A child's record names the child's own item, which may collide with
+    // the parent's ids: namespaced as its calls are.
+    const itemId = parentAgentId !== undefined ? childItemId(parentAgentId, item.id) : item.id;
     const base = {
-      turnId,
-      itemId: item.id,
+      ...(turnId !== null ? { turnId } : {}),
+      itemId,
       agentId: item.agentThreadId,
-      providerRefs: { providerTurnId: turnId, providerItemId: item.id }
+      providerRefs: { ...(turnId !== null ? { providerTurnId: turnId } : {}), providerItemId: item.id }
     } as const;
 
     switch (item.kind) {
@@ -1654,7 +1767,8 @@ export class CodexNormaliser {
         this.knownAgentPaths.add(item.agentPath);
         this.launchedChildren.set(item.agentThreadId, {
           agentPath: item.agentPath,
-          title: linkage.title
+          title: linkage.title,
+          ...(parentAgentId !== undefined ? { parentAgentId } : {})
         });
         // The spawn's prompt, when its call was read first: by the child it
         // named, or by this record's own id, which is the spawn call's.
@@ -1693,6 +1807,8 @@ export class CodexNormaliser {
         if (this.relaunchedTurns.has(item.agentThreadId)) {
           return []; // about the run before (`relaunchedTurns`)
         }
+        this.endRecorded.add(item.agentThreadId);
+        this.childAnswers.delete(item.agentThreadId);
         return [
           {
             type: "task.completed",
@@ -1707,10 +1823,19 @@ export class CodexNormaliser {
         if (this.relaunchedTurns.has(item.agentThreadId)) {
           return []; // about the run before (`relaunchedTurns`)
         }
+        this.endRecorded.add(item.agentThreadId);
+        // The child's last message is its answer: the agent's result.
+        const answer = this.childAnswers.get(item.agentThreadId);
+        this.childAnswers.delete(item.agentThreadId);
         return [
           {
             type: "task.completed",
-            payload: { taskId: item.agentThreadId, status: "completed", ...linkage },
+            payload: {
+              taskId: item.agentThreadId,
+              status: "completed",
+              ...(answer !== undefined ? { summary: answer } : {}),
+              ...linkage
+            },
             ...base,
             raw
           }
@@ -2039,6 +2164,27 @@ function errorClassOf(info: CodexProtocol.v2.CodexErrorInfo | null): RuntimeErro
 function isRootAgentPath(path: string): boolean {
   const trimmed = path.trim();
   return trimmed === "" || trimmed === "/" || trimmed === "/root";
+}
+
+/** The tool a child's call ran, as the roster's "last tool" line names it. */
+function childToolName(classified: ClassifiedItem): string {
+  switch (classified.itemType) {
+    case "command_execution":
+      return "Shell";
+    case "file_change":
+      return "Edit";
+    case "web_search":
+      return "Web search";
+    case "image_view":
+      return "View image";
+    case "collab_agent_tool_call":
+      return classified.title ?? "Agent";
+    case "mcp_tool_call":
+    case "dynamic_tool_call":
+      return classified.title ?? classified.itemType;
+    default:
+      return classified.itemType;
+  }
 }
 
 function agentNameFromPath(path: string): string {

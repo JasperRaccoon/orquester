@@ -927,7 +927,8 @@ test("12: the parent's `task` tool part supplies the role, the model and the too
   assert.equal(enriched.payload.role, "explore");
   assert.equal(enriched.payload.model, "openrouter/google/gemini-3.1-flash-lite");
   assert.equal(enriched.payload.toolUseId, "call_107260");
-  assert.match(String(enriched.payload.title), /@explore subagent/);
+  // The session's title, less the "(@explore subagent)" the role already says.
+  assert.equal(enriched.payload.title, "list files");
 });
 
 test("12: the child's own tool work reaches the roster as progress", () => {
@@ -942,6 +943,23 @@ test("12: the child's own tool work reaches the roster as progress", () => {
   // Its status transitions land as non-terminal patches.
   const statuses = eventsOfType(events, "task.updated").map((event) => event.payload.status);
   assert.ok(statuses.includes("running"), `saw ${JSON.stringify(statuses)}`);
+});
+
+test("12: the child's own steps are its roster usage, and never the parent's meter", () => {
+  const { events } = replayChildParent();
+  const usages = eventsOfType(events, "task.progress")
+    .map((event) => event.payload.usage)
+    .filter((usage) => usage !== undefined);
+  // The child's two `step-finish` parts (lines 161 and 174), summed once each
+  // however often a part is restated.
+  assert.deepEqual(usages.at(-1), {
+    totalTokens: 3538 + 3585,
+    inputTokens: 3454 + 3544,
+    cachedInputTokens: 0,
+    outputTokens: 16 + 68 + 18 + 23,
+    reasoningOutputTokens: 68 + 23,
+    toolUses: 1
+  });
 });
 
 test("12: a child's items and text are stamped with agentId; the parent's are not", () => {
@@ -1220,7 +1238,7 @@ test("a child's title change is a progress row; a re-stated title is not (observ
   const changed = eventsOfType(feed(run, retitled).flat(), "task.progress");
   assert.equal(changed.length, 1);
   assert.equal(changed[0]?.payload.summary, "list hidden files (@explore subagent)");
-  assert.equal(changed[0]?.payload.title, "list hidden files (@explore subagent)");
+  assert.equal(changed[0]?.payload.title, "list hidden files");
   assert.deepEqual(taskRows(feed(run, retitled).flat()), [], "re-stated, it is not a change");
 });
 
