@@ -52,11 +52,19 @@ export function browserTimeZone(): string {
   }
 }
 
-/** A blank workflow: its name, its project, and one manual trigger the daemon names and places. */
-export function blankWorkflowRequest(name: string, project: WorkflowProject): CreateWorkflowRequest {
+/**
+ * A blank workflow: its name, its project, one manual trigger the daemon names
+ * and places, and this browser's time zone (a schedule added later reads in it).
+ */
+export function blankWorkflowRequest(
+  name: string,
+  project: WorkflowProject,
+  timezone: string = browserTimeZone()
+): CreateWorkflowRequest {
   return {
     name: name.trim() || "Untitled workflow",
     project,
+    settings: { timezone },
     nodes: [{ type: "trigger.manual", config: {} }],
     autoLayout: true
   };

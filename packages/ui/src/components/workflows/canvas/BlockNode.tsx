@@ -89,6 +89,14 @@ const OutputHandle: React.FC<{
         className="wf-handle"
         style={{ ["--wf-handle-color" as string]: tone.dot }}
         aria-label={`${label ?? handle} output`}
+        onClick={
+          actions.touch && actions.startTapConnect
+            ? (event) => {
+                event.stopPropagation();
+                actions.startTapConnect?.({ nodeId, handle });
+              }
+            : undefined
+        }
       />
       {label !== null && connected ? (
         <span
@@ -157,7 +165,7 @@ function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactEle
 }
 
 function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.ReactElement {
-  const { node, summary, problems, overlay, runView, connected, pinned, hint } = data;
+  const { node, summary, problems, overlay, runView, connected, pinned, hint, connectRole = null } = data;
   const Icon = BLOCK_ICONS[node.type];
   const trigger = isTriggerType(node.type);
   const handles = outputHandles(node);
@@ -180,7 +188,10 @@ function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.
         selected ? "is-selected border-neutral-400" : "border-neutral-800 hover:border-neutral-700",
         node.disabled && "wf-block-disabled opacity-60",
         status?.ring,
-        (unreached || overlay?.status === "skipped") && "opacity-50 saturate-50"
+        (unreached || overlay?.status === "skipped") && "opacity-50 saturate-50",
+        connectRole === "source" && "ring-2 ring-ok/80",
+        connectRole === "valid" && "wf-connect-target ring-2 ring-info/80 ring-offset-2 ring-offset-neutral-950",
+        connectRole === "invalid" && "opacity-35"
       )}
       style={trigger ? { minHeight, borderTopLeftRadius: 30, borderBottomLeftRadius: 30 } : { minHeight }}
     >

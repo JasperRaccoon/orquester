@@ -9,7 +9,6 @@
  */
 
 import {
-  buildStepOutline,
   isRunActive,
   isTriggerType,
   topologicalOrder,
@@ -34,6 +33,7 @@ import {
 } from "@orquester/api";
 
 import { formatDuration, runElapsedMs, runStatusLabel, type RunTone } from "./format";
+import { displayOutline } from "./outline-display";
 
 // ---------------------------------------------------------------------------
 // Time
@@ -559,17 +559,19 @@ export function runTimeline(
   const stepOf = new Map((order ?? []).map((id, index) => [id, index + 1]));
   const total = nodes.length;
   const runOver = run.status !== undefined && !isRunActive(run.status);
-  const outline = buildStepOutline({ nodes, edges });
+  const outline = displayOutline({ nodes, edges });
 
   const items: TimelineItem[] = [];
   for (const entry of outline) {
     const node = byId.get(entry.nodeId);
     if (!node) continue;
     const parent = entry.parentId ? byId.get(entry.parentId) : undefined;
-    const parentOuts = entry.parentId ? edges.filter((edge) => edge.source === entry.parentId) : [];
-    const branches = parentOuts.length > 1 || (parentOuts.length === 1 && parentOuts[0]!.sourceHandle !== "success");
     const branchLabel =
-      parent && entry.viaHandle !== undefined && branches ? workflowHandleLabel(parent, entry.viaHandle) : undefined;
+      parent && entry.viaHandle !== undefined && entry.labelled
+        ? workflowHandleLabel(parent, entry.viaHandle)
+        : entry.failureJoin
+          ? "failure"
+          : undefined;
     const block = run.blocks[node.id];
     const notReached = block === undefined && runOver;
     const status: WorkflowBlockStatus = block?.status ?? (notReached ? "skipped" : "pending");
@@ -579,7 +581,7 @@ export function runTimeline(
       type: node.type,
       category: WORKFLOW_NODE_CATEGORY[node.type] ?? "flow",
       isTrigger: isTriggerType(node.type),
-      depth: entry.depth,
+      depth: entry.displayDepth,
       ...(branchLabel !== undefined ? { branchLabel } : {}),
       step: order ? (stepOf.get(node.id) ?? null) : null,
       total

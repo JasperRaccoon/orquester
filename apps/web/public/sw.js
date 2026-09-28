@@ -13,7 +13,7 @@
  * "Failed to convert value to 'Response'").
  */
 
-var VERSION = "v5";
+var VERSION = "v6";
 var SHELL_CACHE = "orq-shell-" + VERSION;
 var ASSET_CACHE = "orq-assets-" + VERSION;
 var CURRENT_CACHES = [SHELL_CACHE, ASSET_CACHE];
@@ -217,13 +217,33 @@ self.addEventListener("push", function (event) {
     tag: payload.tag,
     icon: "/icon-192.png",
     badge: "/icon-192.png",
-    data: { sessionId: payload.sessionId }
+    data: {
+      sessionId: payload.sessionId,
+      // A workflow run's notification names its run (daemon push.ts, notifyWorkflowRun).
+      workflowId: typeof payload.workflowId === "string" ? payload.workflowId : undefined,
+      runId: typeof payload.runId === "string" ? payload.runId : undefined
+    }
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
+// A workflow id / run id as the app's deep link accepts it (lib/workflows/deep-link.ts).
+function isLinkId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+}
+
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
+  var data = event.notification.data || {};
+  var workflowId = isLinkId(data.workflowId) ? data.workflowId : null;
+  var runId = isLinkId(data.runId) ? data.runId : null;
+  // A workflow run's notification opens that run: an open window is focused
+  // and told (it opens the workflow's tab on the run); else a new window
+  // starts on /?workflow=<id>&run=<runId>, which the app reads on boot.
+  var target = "/";
+  if (workflowId) {
+    target = "/?workflow=" + encodeURIComponent(workflowId) + (runId ? "&run=" + encodeURIComponent(runId) : "");
+  }
   event.waitUntil(
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })
@@ -231,11 +251,14 @@ self.addEventListener("notificationclick", function (event) {
         for (var i = 0; i < clientList.length; i++) {
           var client = clientList[i];
           if ("focus" in client) {
+            if (workflowId) {
+              client.postMessage({ type: "orquester:open-workflow-run", workflowId: workflowId, runId: runId });
+            }
             return client.focus();
           }
         }
         if (self.clients.openWindow) {
-          return self.clients.openWindow("/");
+          return self.clients.openWindow(target);
         }
         return undefined;
       })

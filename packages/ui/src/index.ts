@@ -126,6 +126,17 @@ export {
   pasteWorkflowClipboard,
   duplicateWorkflowNodes
 } from "./lib/workflows/clipboard";
+// Automated workflows — a notification's run (the web host hands its link / message here)
+export {
+  parseWorkflowDeepLink,
+  parseWorkflowRunMessage,
+  requestWorkflowDeepLink,
+  stripWorkflowDeepLink,
+  WORKFLOW_RUN_MESSAGE,
+  type WorkflowDeepLink
+} from "./lib/workflows/deep-link";
+export { pickRunId, pickBlockId, type PhoneRunPane } from "./lib/workflows/runs-mode";
+export { canvasFitOptions, type CanvasFitOptions } from "./lib/workflows/canvas-fit";
 export * from "./hooks";
 export * from "./services";
 

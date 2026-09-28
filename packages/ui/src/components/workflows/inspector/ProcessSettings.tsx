@@ -20,6 +20,8 @@ import { HTTP_METHODS } from "@orquester/config";
 import { Editor } from "../../files/Editor";
 import { Dropdown, DropdownEmpty, DropdownItem, DropdownLabel, DropdownSeparator } from "../../ui/dropdown";
 import { Modal, ModalCloseButton } from "../../ui/modal";
+import { FullScreenEditor } from "../phone/FullScreenEditor";
+import { usePhoneLayout } from "../phone/phone-context";
 import {
   Field,
   KeyValueTable,
@@ -75,17 +77,27 @@ const CodeModal: React.FC<{
   filename: string;
   value: string;
   onChange: (value: string) => void;
-}> = ({ open, onClose, title, filename, value, onChange }) => (
-  <Modal open={open} onClose={onClose} className="h-[86vh] max-w-5xl flex-col">
-    <div className="flex h-12 shrink-0 items-center justify-between border-b border-neutral-800 px-4">
-      <div className="text-sm font-medium text-neutral-100">{title}</div>
-      <ModalCloseButton onClose={onClose} />
-    </div>
-    <div className="min-h-0 flex-1" data-keyboard-surface="" onKeyDown={(event) => event.stopPropagation()}>
-      <Editor filename={filename} value={value} onChange={onChange} />
-    </div>
-  </Modal>
-);
+}> = ({ open, onClose, title, filename, value, onChange }) => {
+  const phone = usePhoneLayout();
+  if (phone) {
+    return (
+      <FullScreenEditor open={open} onClose={onClose} title={title} subtitle={filename.endsWith(".sh") ? "bash" : "JavaScript module"} templates={false}>
+        {() => <Editor filename={filename} value={value} onChange={onChange} />}
+      </FullScreenEditor>
+    );
+  }
+  return (
+    <Modal open={open} onClose={onClose} className="h-[86vh] max-w-5xl flex-col">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-neutral-800 px-4">
+        <div className="text-sm font-medium text-neutral-100">{title}</div>
+        <ModalCloseButton onClose={onClose} />
+      </div>
+      <div className="min-h-0 flex-1" data-keyboard-surface="" onKeyDown={(event) => event.stopPropagation()}>
+        <Editor filename={filename} value={value} onChange={onChange} />
+      </div>
+    </Modal>
+  );
+};
 
 /** A bordered, fixed-height code editor with an Expand button. */
 const CodeBox: React.FC<{
@@ -97,6 +109,35 @@ const CodeBox: React.FC<{
   invalid?: boolean;
 }> = ({ filename, value, onChange, title, height = 260, invalid }) => {
   const [expanded, setExpanded] = useState(false);
+  const phone = usePhoneLayout();
+  if (phone) {
+    // A phone edits code full screen, with the key bar; here, what it holds.
+    const lines = value.split("\n");
+    return (
+      <div className="space-y-1.5">
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          aria-label={`Edit ${title}`}
+          className={
+            "group relative block w-full overflow-hidden rounded-xl border bg-neutral-950/60 text-left " +
+            (invalid ? "border-danger/60" : "border-neutral-800 active:border-neutral-600")
+          }
+        >
+          <pre className="max-h-[168px] overflow-hidden px-3 py-2.5 font-mono text-[12px] leading-5 text-neutral-300">
+            {value.trim() ? lines.slice(0, 8).join("\n") : <span className="text-neutral-600">Empty</span>}
+          </pre>
+          <span className="absolute inset-x-0 bottom-0 flex items-end justify-between bg-gradient-to-t from-neutral-950 via-neutral-950/90 to-transparent px-3 pb-2 pt-6">
+            <span className="text-[11.5px] text-neutral-500">{lines.length} {lines.length === 1 ? "line" : "lines"}</span>
+            <span className="inline-flex h-9 items-center gap-1.5 rounded-full bg-neutral-100 px-3.5 text-[13px] font-semibold text-neutral-900">
+              <Maximize2 size={13} aria-hidden /> Edit
+            </span>
+          </span>
+        </button>
+        <CodeModal open={expanded} onClose={() => setExpanded(false)} title={title} filename={filename} value={value} onChange={onChange} />
+      </div>
+    );
+  }
   return (
     <div className="space-y-1.5">
       <div
