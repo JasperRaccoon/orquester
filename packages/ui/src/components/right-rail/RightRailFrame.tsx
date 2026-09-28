@@ -1,6 +1,7 @@
 import React from "react";
 
 import { useIsDesktop } from "../../hooks";
+import { cn } from "../../lib/cn";
 import { useCurrentContext, type TabContext } from "../../store/app";
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
@@ -39,6 +40,14 @@ export interface RightRailRowProps {
    * section, full screen (`MobileSections.tsx`).
    */
   overlay?: React.ReactNode;
+  /**
+   * Make the tab content its own stacking context (a phone). Without it the
+   * chat's own layers — the composer's overlay is `z-20` — painted OVER a
+   * section drawn on top of it, and hid the section's last rows. Never on a
+   * desktop viewport: there a layer inside the tab content may reach over
+   * the dock.
+   */
+  isolateContent?: boolean;
 }
 
 /**
@@ -56,11 +65,18 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
   open,
   width,
   panels,
-  overlay
+  overlay,
+  isolateContent = false
 }) => {
   const rowRef = React.useRef<HTMLDivElement | null>(null);
   return (
-    <div ref={rowRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+    <div
+      ref={rowRef}
+      className={cn(
+        "relative flex min-h-0 min-w-0 flex-1 overflow-hidden",
+        isolateContent && "[&>:first-child]:isolate"
+      )}
+    >
       {children}
       {overlay}
       {projectPath !== null && open !== null ? (
@@ -95,6 +111,7 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
       open={open}
       width={width}
       overlay={<MobileSectionOverlay projectPath={isDesktop ? null : projectPath} />}
+      isolateContent={!isDesktop}
     >
       {children}
     </RightRailRow>

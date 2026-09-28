@@ -238,6 +238,13 @@ const ALONE = '<div class="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
   // No project on a desktop viewport, or any phone (`RightRailFrame` passes null).
   assert.equal(row(null, "prompts"), ALONE, "without a project the row holds the tab content alone");
 }
+{
+  const phone = render(
+    createElement(RightRailRow, { projectPath: null, open: null, width: 320, panels: FAKES, isolateContent: true, children: TAB_CONTENT })
+  );
+  assert.ok(phone.includes("[&amp;&gt;:first-child]:isolate"), "a phone isolates the tab content, so its layers stay under a section");
+  assert.ok(!ALONE.includes("isolate"), "a desktop row does not");
+}
 
 const project = (path: string): TabContext => ({
   kind: "project",
