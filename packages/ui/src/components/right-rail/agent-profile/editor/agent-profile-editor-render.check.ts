@@ -350,6 +350,23 @@ for (const variant of VARIANTS) {
   );
   assert.ok(general.includes('role="alert"') && general.includes("grok mcp add exited 1"), "anything else: the banner");
 
+  // A plugin, a marketplace, a hook: one copy only — the adapters refuse a second.
+  const oneCopy = render(
+    inShell(
+      "body",
+      createElement(SubmitStatus, {
+        state: { error: { code: "ITEM_EXISTS", status: 409, message: '"superpowers@official" already exists.' }, placement: "exists" },
+        onResolveConflict: noop,
+        onDismiss: noop,
+        keepBoth: false
+      })
+    ),
+    "claude",
+    variant
+  );
+  assert.ok(buttonWith(oneCopy, "Replace") && !oneCopy.includes(">Keep both<"), "no Keep both where a second copy cannot exist");
+  assert.ok(oneCopy.includes("Replace it?"), "and it asks only that");
+
   // An edit's ITEM_EXISTS (a rename onto a taken name): `PUT` takes no
   // onConflict, so Replace / Keep both would only resend the same request.
   const renamedOntoTaken = render(
@@ -753,6 +770,12 @@ for (const variant of VARIANTS) {
   for (const file of ["ImportSources.tsx", "PluginEditor.tsx", "HookEditor.tsx", "InstructionsEditor.tsx"]) {
     assert.doesNotMatch(source(file), /nameShown/, `${file}: no name field, so the banner says it`);
   }
+
+  // Keep both only for the named kinds.
+  for (const file of ["HookEditor.tsx", "MarketplaceEditor.tsx"]) {
+    assert.match(source(file), /<SubmitStatus[^>]*keepBoth=\{false\}/, `${file}: one copy only`);
+  }
+  assert.equal((source("PluginEditor.tsx").match(/<SubmitStatus[^>]*keepBoth=\{false\}/g) ?? []).length, 2, "both plugin installers: one copy only");
 
   // Edits offer no Replace / Keep both; creates do.
   for (const file of ["McpEditor.tsx", "HookEditor.tsx", "MarkdownEditor.tsx"]) {

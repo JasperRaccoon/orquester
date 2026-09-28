@@ -108,7 +108,9 @@ export function closedSaveFailure(info: ProfileErrorInfo): string {
  * `onResolveConflict` is for a CREATE only: an edit's `ITEM_EXISTS` (a rename
  * onto a name that is taken) is a plain refusal, since `PUT …/items/:id` takes
  * no `onConflict` — offering Replace / Keep both there would only send the
- * same request again.
+ * same request again. `keepBoth` is for the named kinds only (MCP servers,
+ * skills, commands): a second copy of one plugin, marketplace or hook is
+ * refused or refused again by the adapters, so those offer Replace alone.
  */
 export const SubmitStatus: React.FC<{
   state: Pick<SubmitState, "error" | "placement">;
@@ -117,7 +119,9 @@ export const SubmitStatus: React.FC<{
   onReload?: () => void;
   /** The editor shows `INVALID_NAME` beside its own name field. */
   nameShown?: boolean;
-}> = ({ state, onResolveConflict, onDismiss, onReload, nameShown = false }) => {
+  /** Offer Keep both (a suffixed second copy) beside Replace. */
+  keepBoth?: boolean;
+}> = ({ state, onResolveConflict, onDismiss, onReload, nameShown = false, keepBoth = true }) => {
   const { error, placement } = state;
   if (error === null || (placement === "name" && nameShown)) return null;
   if (placement === "exists" && onResolveConflict) {
@@ -128,12 +132,12 @@ export const SubmitStatus: React.FC<{
         actions={
           <>
             <SmallButton onClick={() => onResolveConflict("replace")}>Replace</SmallButton>
-            <SmallButton onClick={() => onResolveConflict("keep-both")}>Keep both</SmallButton>
+            {keepBoth ? <SmallButton onClick={() => onResolveConflict("keep-both")}>Keep both</SmallButton> : null}
             {onDismiss ? <SmallButton onClick={onDismiss}>Cancel</SmallButton> : null}
           </>
         }
       >
-        {error.message} Replace it, or keep both (the new one gets a suffix)?
+        {error.message} {keepBoth ? "Replace it, or keep both (the new one gets a suffix)?" : "Replace it?"}
       </Banner>
     );
   }

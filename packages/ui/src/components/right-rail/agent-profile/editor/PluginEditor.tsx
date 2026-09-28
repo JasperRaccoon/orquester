@@ -64,7 +64,7 @@ export const SpecInstall: React.FC<{ initialSpec?: string; showErrors?: boolean 
   return (
     <EditorShell
       title={kindTitle("create", "plugin")}
-      status={<SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} />}
+      status={<SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} keepBoth={false} />}
       primary={{ label: "Install", busyLabel: "Installing…", busy: submit.busy, onClick: install }}
     >
       <Field
@@ -243,7 +243,7 @@ export const MarketplaceInstall: React.FC<{ initial?: MarketplaceInstallInitial 
   return (
     <EditorShell
       title={kindTitle("create", "plugin")}
-      status={<SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} />}
+      status={<SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} keepBoth={false} />}
       secondary={names.length > 0 ? <SmallButton onClick={() => env.switchKind("marketplace")}>Add a marketplace</SmallButton> : undefined}
       primary={
         snapshot.status === "loaded" && names.length === 0
