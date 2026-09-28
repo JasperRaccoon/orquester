@@ -18,7 +18,6 @@ import {
   AgentProfileService,
   publishAgentProfileEvents,
   snapshotRevision,
-  stableStringify,
   type AgentProfileServiceOptions,
   type ProfileWatchFn
 } from "./service.ts";
@@ -154,7 +153,8 @@ test("snapshotRevision ignores item and file-error order and key order, and move
     ]
   });
   assert.notEqual(toggled, base);
-  assert.equal(stableStringify({ b: 1, a: [undefined, { d: undefined, c: 2 }] }), '{"a":[null,{"c":2}],"b":1}');
+  const plain = { instructions: info, items: [a, b], fileErrors: [] };
+  assert.notEqual(snapshotRevision(false, "1", plain), snapshotRevision(true, "1", plain), "installing moves it");
 });
 
 test("overview: counts per kind per agent; one failing adapter reads as counts {} and is logged", async () => {

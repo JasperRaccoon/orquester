@@ -34,7 +34,6 @@
  *   directory a copy exports or converts is removed once the copy finishes.
  */
 
-import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { watch as fsWatch } from "node:fs";
 import { realpath as fsRealpath, rm } from "node:fs/promises";
@@ -49,10 +48,6 @@ import {
   PROFILE_COPYABLE_KINDS,
   PROFILE_ITEM_KIND_LABELS,
   isAgentProfileAgentId,
-  isProfileItemKind,
-  isValidCommandName,
-  isValidMcpServerName,
-  isValidSkillName,
   type AgentProfileAgentId,
   type AgentProfileAgentSummary,
   type AgentProfileChangedPayload,
@@ -76,6 +71,7 @@ import type {
   ProfileAdapter
 } from "./adapters/types.ts";
 import { AgentProfileError, profileErrors } from "./errors.ts";
+import { assertCommandName, assertMcpServerName, assertSkillName, contentHash, parseItemId } from "./infra/index.ts";
 import {
   identityConverter,
   importsUnavailable,
@@ -387,7 +383,8 @@ export class AgentProfileService {
     if (!adapter.trust) {
       throw new AgentProfileError(400, "KIND_NOT_SUPPORTED", `${AGENT_PROFILE_AGENT_LABELS[agent]} has no hook trust to grant.`);
     }
-    return this.mutate(agent, (a) => a.trust!(id, revision));
+    const trust = adapter.trust.bind(adapter);
+    return this.mutate(agent, () => trust(id, revision));
   }
 
   async writeInstructions(agent: AgentProfileAgentId, text: string, revision: string): Promise<ProfileMutationResponse> {
@@ -404,7 +401,8 @@ export class AgentProfileService {
         `${AGENT_PROFILE_AGENT_LABELS[agent]} has no legacy instruction file to migrate.`
       );
     }
-    return this.mutate(agent, (a) => a.migrateLegacyInstructions!(revision));
+    const migrate = adapter.migrateLegacyInstructions.bind(adapter);
+    return this.mutate(agent, () => migrate(revision));
   }
 
   /**
@@ -761,29 +759,7 @@ export function instructionsPathFor(agent: AgentProfileAgentId, homes: AgentHome
 export function snapshotRevision(installed: boolean, version: string | undefined, raw: AdapterSnapshot): string {
   const items = [...raw.items].sort((a, b) => compare(a.id, b.id));
   const fileErrors = [...raw.fileErrors].sort((a, b) => compare(a.path, b.path) || compare(a.message, b.message));
-  const canonical = stableStringify({
-    installed,
-    version: version ?? null,
-    instructions: raw.instructions,
-    items,
-    fileErrors
-  });
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-}
-
-/** JSON with object keys sorted at every level (arrays keep their order); `undefined` members dropped. */
-export function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value) ?? "null";
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => (entry === undefined ? "null" : stableStringify(entry))).join(",")}]`;
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record)
-    .filter((key) => record[key] !== undefined)
-    .sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+  return contentHash({ installed, version: version ?? null, instructions: raw.instructions, items, fileErrors });
 }
 
 function compare(a: string, b: string): number {
@@ -798,8 +774,7 @@ function assertAgent(agent: string): asserts agent is AgentProfileAgentId {
 
 /** The kind an id names (`<kind>:…`), when its prefix is one. */
 function kindOfId(id: string): ProfileItemKind | undefined {
-  const prefix = id.slice(0, Math.max(0, id.indexOf(":")));
-  return isProfileItemKind(prefix) ? prefix : undefined;
+  return parseItemId(id)?.kind;
 }
 
 function assertCanCreate(agent: AgentProfileAgentId, kind: ProfileItemKind): void {
@@ -828,7 +803,7 @@ function notCopyable(kind: ProfileItemKind): AgentProfileError {
 function assertDraftValid(agent: AgentProfileAgentId, draft: ProfileItemDraft): void {
   switch (draft.kind) {
     case "mcp":
-      assertMcpName(draft.mcp.name);
+      assertMcpServerName(draft.mcp.name);
       assertTransport(agent, draft.mcp.transport);
       return;
     case "skill":
@@ -847,7 +822,7 @@ function assertPortableReceivable(agent: AgentProfileAgentId, item: PortableItem
   assertCanCreate(agent, item.kind);
   switch (item.kind) {
     case "mcp":
-      assertMcpName(item.server.name);
+      assertMcpServerName(item.server.name);
       assertTransport(agent, item.server.transport);
       return;
     case "skill":
@@ -856,30 +831,6 @@ function assertPortableReceivable(agent: AgentProfileAgentId, item: PortableItem
     case "command":
       assertCommandName(item.name);
       return;
-  }
-}
-
-function assertMcpName(name: string): void {
-  if (!isValidMcpServerName(name)) {
-    throw profileErrors.invalidName(
-      `"${excerpt(name)}" is not a valid MCP server name: start with a letter or _, then letters, digits, _ or -, not ending in _ (at most 64).`
-    );
-  }
-}
-
-function assertSkillName(name: string): void {
-  if (!isValidSkillName(name)) {
-    throw profileErrors.invalidName(
-      `"${excerpt(name)}" is not a valid skill name: lowercase letters and digits in words joined by single hyphens (at most 64).`
-    );
-  }
-}
-
-function assertCommandName(name: string): void {
-  if (!isValidCommandName(name)) {
-    throw profileErrors.invalidName(
-      `"${excerpt(name)}" is not a valid command name: lowercase words joined by hyphens, with at most one folder level (git/pr).`
-    );
   }
 }
 
@@ -904,7 +855,7 @@ function closeAll(handles: ProfileWatchHandle[]): void {
 }
 
 /** A user-supplied string quoted in a message, bounded. */
-export function excerpt(value: string, max = 80): string {
+function excerpt(value: string, max = 80): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
