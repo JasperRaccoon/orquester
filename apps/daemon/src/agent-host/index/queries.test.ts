@@ -573,6 +573,27 @@ describe("thread index: activity paging", () => {
     assert.equal(index.turnByPrompt(id, "u1")?.turnId, "t1");
   });
 
+  it("keepsUserMessage: a user message until a revert drops it by the fold's rule", async () => {
+    const log = new TestLog();
+    await indexed(log, [
+      created(),
+      ...liveTurn({ n: 1, prompt: "one" }),
+      userMessage("note", "an idle note no turn claims"),
+      ...liveTurn({ n: 2, prompt: "two" })
+    ]);
+    const id = log.threadId;
+    assert.equal(index.keepsUserMessage(id, "u1"), true);
+    assert.equal(index.keepsUserMessage(id, "note"), true, "not judged yet");
+    assert.equal(index.keepsUserMessage(id, "a1"), false, "an answer is no user message");
+    assert.equal(index.keepsUserMessage(id, "missing"), false);
+    assert.equal(index.keepsUserMessage("another-thread", "u1"), false);
+    // t1 keeps its own prompt, so the fold's fallback restores nothing: the note goes with u2.
+    await indexed(log, [reverted(1)]);
+    assert.equal(index.keepsUserMessage(id, "u1"), true);
+    assert.equal(index.keepsUserMessage(id, "u2"), false, "a removed turn's prompt");
+    assert.equal(index.keepsUserMessage(id, "note"), false, "a prompt no kept turn claims, past the fallback");
+  });
+
   it("walks one fleet turn of 1 000 activities back in contiguous 400-activity blocks", async () => {
     const log = new TestLog();
     const fleet: Draft[] = [];

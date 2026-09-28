@@ -479,6 +479,10 @@ export function createFakeThreadIndex(options: { available?: boolean } = {}): Fa
       return turn === undefined ? null : { ...turn };
     },
 
+    keepsUserMessage(threadId: string, messageId: string): boolean {
+      return threads.get(threadId)?.messages.get(messageId)?.role === "user";
+    },
+
     rewindable(threadId: string, turn: IndexedTurn): boolean {
       const markers = threads.get(threadId)?.markers ?? [];
       return !markers.some((marker) => marker.compacted && marker.seq > turn.firstSeq);

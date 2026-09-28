@@ -3127,4 +3127,106 @@ describe("Load older after a rewind keeps a turn a late row stretched", () => {
     assert.ok(everAsked > 0, "a page planned the chunks");
     await host.stop();
   });
+
+  // -------------------------------------------------------------------------
+  // A turn-less prompt is on a page exactly when the fold keeps it
+  // -------------------------------------------------------------------------
+
+  /** A turn the provider started by itself — no prompt, no request — with `count` parent rows. */
+  const providerTurn = async (host: TestHost, threadId: string, turnId: string, count: number): Promise<void> => {
+    await sinkEach(host, threadId, [
+      sunk(threadId, "thread.session-set", { session: { status: "running", activeTurnId: turnId } })
+    ]);
+    await parentRows(host, threadId, turnId, count);
+    await settleTurn(host, threadId);
+  };
+
+  /** A user message no turn claims: an idle host `/goal`, a refused send. */
+  const idlePrompt = (host: TestHost, threadId: string, messageId: string): Promise<void> =>
+    host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId,
+        role: "user",
+        text: `a note: ${messageId}`,
+        streaming: false,
+        turnId: null
+      })
+    ]);
+
+  /** Whether the fold of the whole log keeps message `id`. */
+  const foldKeeps = (host: TestHost, threadId: string, id: string): boolean =>
+    foldThread(host.store.logs.get(threadId)!).items.some((item) => item.id === id);
+
+  it("a turn-less prompt the fold's fallback restores out of a rewind's cut is on a page", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    // r-1 has no prompt of its own, so a rewind to it restores one turn-less prompt no turn claims.
+    await providerTurn(host, threadId, "r-1", 560);
+    await plainTurn(host, threadId, "r-2", 30);
+    // In the cut: after r-2's first line, before the rewind.
+    await idlePrompt(host, threadId, "user:note");
+    await rewind(host, threadId, 1);
+    assert.equal(foldKeeps(host, threadId, "user:note"), true, "the fold's fallback pass restores the note");
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    assert.equal(pagesHolding(pages, "user:note").length, 1, "one page serves the prompt the fold kept");
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"]);
+    // Search and the right rail's History list it as the index keeps it — with no turn, so neither offers a
+    // reveal (`planReveal` pages by turn): "Load older" is what brings it on screen once the window evicts it.
+    const hit = index.search({ q: "note", limit: 10 }).find((row) => row.id === "user:note");
+    assert.equal(hit?.turnId, null, "search finds it, turnless");
+    const listed = index.prompts(threadId, { limit: 10 })?.prompts.find((row) => row.messageId === "user:note");
+    assert.equal(listed?.turnId, null, "History lists it, turnless");
+    await host.stop();
+  });
+
+  it("a turn-less prompt a rewind drops is on no page, even inside a kept turn's range", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await plainTurn(host, threadId, "r-1", 560);
+    // In r-1's range, before the cut: r-1 has its own prompt, so the fold's fallback restores nothing.
+    await idlePrompt(host, threadId, "user:note");
+    await plainTurn(host, threadId, "r-2", 30);
+    await rewind(host, threadId, 1);
+    assert.equal(foldKeeps(host, threadId, "user:note"), false, "the rewind drops the note");
+    const { window, pages } = await walkAsTheClient(host, index, threadId);
+    assert.deepEqual(pagesHolding(pages, "user:note"), [], "no page serves the prompt the fold dropped");
+    assertRewoundHistory(host.store, threadId, window, pages, ["r-2"], new Set(["user:note"]));
+    await host.stop();
+  });
+
+  it("a turn-less prompt one rewind restores and a later one drops: on a page between them, then on none", async (t) => {
+    const index = await realIndex(t);
+    const host = createTestHost({ index });
+    const threadId = await host.createThread();
+    await providerTurn(host, threadId, "r-1", 560);
+    await plainTurn(host, threadId, "r-2", 30);
+    await idlePrompt(host, threadId, "user:note");
+    await rewind(host, threadId, 1);
+    const first = await walkAsTheClient(host, index, threadId);
+    assert.equal(pagesHolding(first.pages, "user:note").length, 1, "restored by the first rewind: on a page");
+
+    // r-3 answers its prompt and a steer: two user messages of its own, so a rewind to two turns
+    // restores no turn-less one.
+    await startTurn(host, threadId, "r-3");
+    await host.orchestrator.ingestionSink(threadId, [
+      sunk(threadId, "thread.message-sent", {
+        messageId: "user:steer",
+        role: "user",
+        text: "and the tests too",
+        streaming: false,
+        turnId: "r-3"
+      })
+    ]);
+    await parentRows(host, threadId, "r-3", 20);
+    await settleTurn(host, threadId);
+    await plainTurn(host, threadId, "r-4", 20);
+    await rewind(host, threadId, 2);
+    assert.equal(foldKeeps(host, threadId, "user:note"), false, "the second rewind drops the note");
+    const second = await walkAsTheClient(host, index, threadId);
+    assert.deepEqual(pagesHolding(second.pages, "user:note"), [], "then no page serves it");
+    assertRewoundHistory(host.store, threadId, second.window, second.pages, ["r-2", "r-4"], new Set(["user:note"]));
+    await host.stop();
+  });
 });

@@ -4070,7 +4070,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       const rules: GapRules = {
         latestRevertSeq: index.latestRevertSeq(threadId),
         turnOf: askedOnce((turnId) => index.turnById(threadId, turnId)),
-        turnOfPrompt: askedOnce((messageId) => index.turnByPrompt(threadId, messageId))
+        turnOfPrompt: askedOnce((messageId) => index.turnByPrompt(threadId, messageId)),
+        keepsUserMessage: askedOnce((messageId) => index.keepsUserMessage(threadId, messageId))
       };
       const whole = historyBlockEvents(range.events, plan.turns, plan.firstTurnSeq, rules);
       let served = plan;
@@ -4101,10 +4102,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
       let state = await applyEventsChunked(fold.createEmpty(), block.events, { apply: fold.apply });
       let gapTurns = block.gapTurns;
-      if (block.gapActivities.size > 0 && state.evicted?.activities === true) {
+      if (
+        (block.gapActivities.size > 0 && state.evicted?.activities === true) ||
+        (block.gapMessages.size > 0 && state.evicted?.messages === true)
+      ) {
         logger.warn("agent-host: a history page cannot fold its gap rows whole; serving it without them", {
           threadId,
-          gapRows: block.gapActivities.size
+          gapRows: block.gapActivities.size + block.gapMessages.size
         });
         served = plan;
         gapTurns = [];
@@ -7065,6 +7069,13 @@ interface HistoryBlockEvents {
    * line — what the page counts against its activities (`indexedActivityBudget`).
    */
   gapActivities: Map<string, number>;
+  /**
+   * Every message a gap line writes, by id. A page counts activities, never
+   * messages — an in-range prompt does not count against its 400 either — so
+   * these only arm the lossless check: a page whose fold evicts a message
+   * beside them is served without its gap rows (`readHistory`).
+   */
+  gapMessages: Set<string>;
   /** The kept turns the gap rows belong to. */
   gapTurns: IndexedTurn[];
 }
@@ -7077,6 +7088,11 @@ interface GapRules {
   turnOf(turnId: string): IndexedTurn | null;
   /** The index's turn that names a message as its opening prompt. */
   turnOfPrompt(messageId: string): IndexedTurn | null;
+  /**
+   * Whether the thread still holds a user message: the revert rule the index
+   * applied to it, the fold's own (`ThreadIndex.keepsUserMessage`).
+   */
+  keepsUserMessage(messageId: string): boolean | null;
 }
 
 /**
@@ -7095,6 +7111,16 @@ interface GapRules {
  * folding the cut would bring the removed turns back and apply a `turnCount`
  * counted from the thread's first turn, not the block's.
  *
+ * A turn-less user message written before the latest revert is judged by
+ * that revert's own rule wherever it lies — out of a gap and inside a range
+ * alike (`droppedByRevert`): the fold keeps it with the turn that claims it,
+ * or by its fallback pass (`retainMessagesAfterRevert`: up to `turnCount`
+ * prompts no turn claims, counted over the whole thread, which no block can
+ * replay), and the index applied exactly that rule when the revert landed
+ * (`dropRevertedUserMessages`), so a block asks it rather than counting
+ * again. A prompt can lie inside a kept turn's range and still be dropped —
+ * an idle `/goal` no turn claims — and in a cut and still be kept.
+ *
  * A line lies in exactly one block, so each gap row is on one page; the
  * window may still hold it (retention keeps an agent's rows in windows of
  * their own), and the reader renders one row per id, as it does for any row a
@@ -7107,7 +7133,15 @@ function historyBlockEvents(
   rules: GapRules
 ): HistoryBlockEvents {
   if (firstTurnSeq === null) {
-    return { events: [...events], inRange: [...events], gapActivities: new Map(), gapTurns: [] };
+    // No started turn at all: a legacy log, numbered by checkpoints. The block
+    // folds its reverts itself, and the index judged no user message of it.
+    return {
+      events: [...events],
+      inRange: [...events],
+      gapActivities: new Map(),
+      gapMessages: new Set(),
+      gapTurns: []
+    };
   }
   // A turnless capture is judged by the reverts after it, which the block
   // holds whole when it holds the latest.
@@ -7123,9 +7157,13 @@ function historyBlockEvents(
   const folded: DomainEvent[] = [];
   const inRange: DomainEvent[] = [];
   const gapActivities = new Map<string, number>();
+  const gapMessages = new Set<string>();
   const gapTurns = new Map<string, IndexedTurn>();
   let turn = 0;
   for (const event of events) {
+    if (droppedByRevert(event, rules)) {
+      continue;
+    }
     if (event.seq < firstTurnSeq) {
       folded.push(event);
       inRange.push(event);
@@ -7149,9 +7187,33 @@ function historyBlockEvents(
     }
     if (event.type === "thread.activity-appended") {
       gapActivities.set(event.payload.activity.id, event.seq);
+    } else if (event.type === "thread.message-sent") {
+      gapMessages.add(event.payload.messageId);
     }
   }
-  return { events: folded, inRange, gapActivities, gapTurns: [...gapTurns.values()] };
+  return {
+    events: folded,
+    inRange,
+    gapActivities,
+    gapMessages,
+    gapTurns: [...gapTurns.values()]
+  };
+}
+
+/**
+ * A turn-less user message a revert dropped (`historyBlockEvents`): written
+ * before the latest revert, and no longer held by the index, which judged it
+ * by the fold's own rule. Never a line written after the latest revert, which
+ * no revert has judged, nor a message naming a turn, which follows its turn.
+ */
+function droppedByRevert(event: DomainEvent, rules: GapRules): boolean {
+  return (
+    event.type === "thread.message-sent" &&
+    event.payload.role === "user" &&
+    event.seq < rules.latestRevertSeq &&
+    referencedTurnId(event) === null &&
+    rules.keepsUserMessage(event.payload.messageId) !== true
+  );
 }
 
 /** A `thread.reverted` a block holds: its seq and the started turns it kept. */
@@ -7170,9 +7232,12 @@ interface RevertLine {
  *   the index has that began after the line is an id minted again, and the
  *   row was another turn's;
  * - a turnless activity: every revert keeps it;
- * - a turnless message: only a kept turn's opening prompt, the first pass of
- *   `retainMessagesAfterRevert` — its fallback pass restores a few more,
- *   counted over the whole thread, which no block can replay;
+ * - a turnless user message: kept by every revert since it was written, both
+ *   passes of `retainMessagesAfterRevert` — a kept turn's opening prompt, or
+ *   one the fallback restored — which the index judged already
+ *   (`droppedByRevert` has let through only those); any other turnless
+ *   message is none of the parent's prompts, and the fold keeps it only by a
+ *   fallback count over the whole thread no block can replay;
  * - a turnless checkpoint: while its count is within every later revert's
  *   (`planRevert`), known only when the block holds them (`revertsAfter`);
  * - anything else — a session change, a turn request, the revert — is no row.
@@ -7206,7 +7271,7 @@ function keptOutOfGap(
     case "thread.activity-appended":
       return { turn: null };
     case "thread.message-sent":
-      return prompt === null ? null : { turn: prompt };
+      return event.payload.role === "user" ? { turn: prompt } : null;
     case "thread.turn-diff-completed": {
       const count = event.payload.turnCount;
       const later = revertsAfter?.(event.seq) ?? null;

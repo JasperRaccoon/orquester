@@ -45,6 +45,7 @@ export interface ThreadIndexQueries {
   latestRevertSeq(threadId: string): number;
   turnById(threadId: string, turnId: string): IndexedTurn | null;
   turnByPrompt(threadId: string, messageId: string): IndexedTurn | null;
+  keepsUserMessage(threadId: string, messageId: string): boolean;
   totalTurns(threadId: string): number;
   turnsBefore(
     threadId: string,
@@ -70,6 +71,11 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
        ORDER BY ordinal LIMIT 1`
     ),
     revertSeq: db.prepare("SELECT revert_seq FROM threads WHERE thread_id = ?"),
+    // A user message's row outlives every revert that keeps it, and no other
+    // (`dropRevertedUserMessages` in `indexer.ts`).
+    keepsUserMessage: db.prepare(
+      "SELECT 1 AS hit FROM message_docs WHERE thread_id = ? AND message_id = ? AND role = 'user' LIMIT 1"
+    ),
     totalTurns: db.prepare("SELECT COUNT(*) AS total FROM turns WHERE thread_id = ?"),
     newestTurns: db.prepare(
       `SELECT ${TURN_COLUMNS} FROM turns WHERE thread_id = ? ORDER BY ordinal DESC LIMIT ?`
@@ -392,6 +398,18 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
         return null;
       }
       return toIndexedTurn(sql.turnByPrompt.get(threadId, messageId));
+    },
+
+    /**
+     * Whether the thread still holds `messageId` as a user message: the index
+     * wrote its row at its first line, and only a revert that drops it by the
+     * fold's own rule deletes it (`dropRevertedUserMessages` in `indexer.ts`).
+     */
+    keepsUserMessage(threadId, messageId) {
+      if (typeof messageId !== "string" || messageId.length === 0) {
+        return false;
+      }
+      return sql.keepsUserMessage.get(threadId, messageId) !== undefined;
     },
 
     totalTurns(threadId) {

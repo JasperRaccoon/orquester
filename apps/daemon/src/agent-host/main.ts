@@ -848,6 +848,7 @@ function deferredThreadIndex(): ThreadIndex & { open(index: ThreadIndex): void }
     firstBoundaryAfter: (threadId, seq) => target.firstBoundaryAfter(threadId, seq),
     latestRevertSeq: (threadId) => target.latestRevertSeq(threadId),
     turnByPrompt: (threadId, messageId) => target.turnByPrompt(threadId, messageId),
+    keepsUserMessage: (threadId, messageId) => target.keepsUserMessage(threadId, messageId),
     search: (input) => target.search(input),
     // Before the file opens, every thread is catching up: it opens on the
     // loop's next turn, and its catch-up starts right after.

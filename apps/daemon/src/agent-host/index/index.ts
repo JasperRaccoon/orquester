@@ -281,6 +281,15 @@ export interface ThreadIndex {
   latestRevertSeq(threadId: string): number;
   /** The turn that names `messageId` as its opening prompt (`userMessageId`), or null. */
   turnByPrompt(threadId: string, messageId: string): IndexedTurn | null;
+  /**
+   * Whether the thread still holds `messageId` as a user message — every one
+   * the index has taken, less those a revert dropped by the fold's own rule
+   * (`indexer.ts` `dropRevertedUserMessages`: with the turn that names or
+   * claims it, else by the fallback pass). What a history page folds of a
+   * turn-less prompt written before the latest revert (`historyBlockEvents`
+   * in `orchestrator.ts`). False when the index cannot read.
+   */
+  keepsUserMessage(threadId: string, messageId: string): boolean;
   search(input: { q: string; limit: number; projectPath?: string }): ThreadSearchHit[];
   /**
    * Whether the index holds every line of the thread's log up to `logSeq` —
@@ -773,6 +782,10 @@ function createOpenThreadIndex(input: {
       return serving() ? read(() => queries.turnByPrompt(threadId, messageId), null) : null;
     },
 
+    keepsUserMessage(threadId, messageId) {
+      return serving() ? read(() => queries.keepsUserMessage(threadId, messageId), false) : false;
+    },
+
     search(request) {
       return serving() ? read(() => queries.search(request), []) : [];
     },
@@ -862,6 +875,7 @@ export function createUnavailableThreadIndex(): ThreadIndex {
     firstBoundaryAfter: () => null,
     latestRevertSeq: () => 0,
     turnByPrompt: () => null,
+    keepsUserMessage: () => false,
     search: () => [],
     coverage: async () => "unavailable",
     beginCatchUpSweep: () => ({ end: () => undefined }),
