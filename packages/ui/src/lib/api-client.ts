@@ -94,7 +94,25 @@ import {
 } from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
 import { buildQueryString } from "./transporter";
-import { workflowRoutes } from "@orquester/api";
+import { agentProfileRoutes, workflowRoutes } from "@orquester/api";
+import type {
+  AgentProfileAgentId,
+  AgentProfileOverviewResponse,
+  AgentProfileSnapshot,
+  CopyProfileItemRequest,
+  CreateProfileItemRequest,
+  MarketplacePluginsResponse,
+  MigrateLegacyInstructionsRequest,
+  ProfileImportGitRequest,
+  ProfileImportScanResponse,
+  ProfileInstructionsResponse,
+  ProfileItemDetail,
+  ProfileMutationResponse,
+  SetProfileItemEnabledRequest,
+  TrustProfileItemRequest,
+  UpdateProfileItemRequest,
+  WriteProfileInstructionsRequest
+} from "@orquester/api";
 import type {
   AccountPreviewRequest,
   AccountPreviewResponse,
@@ -629,6 +647,105 @@ export class ApiClient {
   /** An Insert or a Send used the prompt: bumps `lastUsedAt` / `useCount`. */
   markSavedPromptUsed(id: string): Promise<SavedPrompt> {
     return this.send("POST", `/api/saved-prompts/${encodeURIComponent(id)}/used`);
+  }
+
+  // --- Agent profile (agent profile spec §8) --------------------------------
+  // A refusal is an ApiError whose body is `{error: {code, message}}`.
+
+  getAgentProfileOverview(signal?: AbortSignal): Promise<AgentProfileOverviewResponse> {
+    return this.send("GET", agentProfileRoutes.overview, { signal });
+  }
+
+  getAgentProfile(agent: AgentProfileAgentId, signal?: AbortSignal): Promise<AgentProfileSnapshot> {
+    return this.send("GET", agentProfileRoutes.snapshot(agent), { signal });
+  }
+
+  getAgentProfileItem(agent: AgentProfileAgentId, id: string, signal?: AbortSignal): Promise<ProfileItemDetail> {
+    return this.send("GET", agentProfileRoutes.item(agent, id), { signal });
+  }
+
+  createAgentProfileItem(agent: AgentProfileAgentId, req: CreateProfileItemRequest): Promise<ProfileMutationResponse> {
+    return this.send("POST", agentProfileRoutes.items(agent), { body: req });
+  }
+
+  updateAgentProfileItem(
+    agent: AgentProfileAgentId,
+    id: string,
+    req: UpdateProfileItemRequest
+  ): Promise<ProfileMutationResponse> {
+    return this.send("PUT", agentProfileRoutes.item(agent, id), { body: req });
+  }
+
+  setAgentProfileItemEnabled(
+    agent: AgentProfileAgentId,
+    id: string,
+    req: SetProfileItemEnabledRequest
+  ): Promise<ProfileMutationResponse> {
+    return this.send("POST", agentProfileRoutes.itemEnabled(agent, id), { body: req });
+  }
+
+  trustAgentProfileItem(
+    agent: AgentProfileAgentId,
+    id: string,
+    req: TrustProfileItemRequest
+  ): Promise<ProfileMutationResponse> {
+    return this.send("POST", agentProfileRoutes.itemTrust(agent, id), { body: req });
+  }
+
+  deleteAgentProfileItem(agent: AgentProfileAgentId, id: string, revision: string): Promise<ProfileMutationResponse> {
+    return this.send("DELETE", agentProfileRoutes.item(agent, id), { query: { revision } });
+  }
+
+  copyAgentProfileItem(
+    agent: AgentProfileAgentId,
+    id: string,
+    req: CopyProfileItemRequest
+  ): Promise<ProfileMutationResponse> {
+    return this.send("POST", agentProfileRoutes.itemCopy(agent, id), { body: req });
+  }
+
+  getAgentProfileInstructions(agent: AgentProfileAgentId, signal?: AbortSignal): Promise<ProfileInstructionsResponse> {
+    return this.send("GET", agentProfileRoutes.instructions(agent), { signal });
+  }
+
+  writeAgentProfileInstructions(
+    agent: AgentProfileAgentId,
+    req: WriteProfileInstructionsRequest
+  ): Promise<ProfileMutationResponse> {
+    return this.send("PUT", agentProfileRoutes.instructions(agent), { body: req });
+  }
+
+  migrateAgentProfileLegacyInstructions(
+    agent: AgentProfileAgentId,
+    req: MigrateLegacyInstructionsRequest
+  ): Promise<ProfileMutationResponse> {
+    return this.send("POST", agentProfileRoutes.instructionsMigrateLegacy(agent), { body: req });
+  }
+
+  scanAgentProfileGitImport(agent: AgentProfileAgentId, req: ProfileImportGitRequest): Promise<ProfileImportScanResponse> {
+    return this.send("POST", agentProfileRoutes.importGit(agent), { body: req });
+  }
+
+  /** Streams a `.zip` or `.md` file (never base64): the daemon extracts and scans it. */
+  scanAgentProfileUpload(
+    agent: AgentProfileAgentId,
+    name: string,
+    data: BinaryBody,
+    onProgress?: (sent: number, total: number) => void
+  ): Promise<ProfileImportScanResponse> {
+    return this.send("POST", agentProfileRoutes.importUpload(agent), {
+      query: { name },
+      binaryBody: data,
+      onUploadProgress: onProgress
+    });
+  }
+
+  listAgentProfileMarketplacePlugins(
+    agent: AgentProfileAgentId,
+    marketplace: string,
+    signal?: AbortSignal
+  ): Promise<MarketplacePluginsResponse> {
+    return this.send("GET", agentProfileRoutes.marketplacePlugins(agent, marketplace), { signal });
   }
 
   // --- Automated workflows (workflows spec §8.1) ---------------------------

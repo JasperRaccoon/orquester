@@ -166,6 +166,26 @@ export function workflowRunsDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workflow-runs");
 }
 
+/** Agent profile state (docs/superpowers/specs/2026-09-28-agent-profile-design.md §4): stash + backups. */
+export function agentProfileDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-profile");
+}
+
+/** Items turned off where the agent has no native "off" (§4.4): `<agent>/<kind>/<id>/`. */
+export function agentProfileStashDir(baseDir: string): string {
+  return joinPath(agentProfileDir(baseDir), "stash");
+}
+
+/** The previous version of every file the agent profile rewrote (§4.1): `<agent>/…`, a ring per agent. */
+export function agentProfileBackupsDir(baseDir: string): string {
+  return joinPath(agentProfileDir(baseDir), "backups");
+}
+
+/** Import scans in flight (§6): a git clone or an extracted upload per `<importId>/`. */
+export function agentProfileImportsDir(baseDir: string): string {
+  return joinPath(baseDir, "tmp", "agent-profile-imports");
+}
+
 /** Web Push state (VAPID keypair + browser subscriptions); 0600 — holds the private key. */
 export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");

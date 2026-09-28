@@ -155,10 +155,13 @@ interface AgentProfileSnapshot {
 
 Ids are derived from content, never positions: `<kind>:<name>` for named items
 (`mcp:jira-cloud`, `plugin:superpowers@claude-plugins-official`); hooks
-`hook:<event>:<sha256 of the normalized {matcher, handler}>` truncated to 16 hex. The revision is
-a hash over the size, mtime and inode of every file and directory entry the adapter reads; every
-mutation carries the revision the client saw and a mismatch answers 409 `PROFILE_CONFLICT` with the
-fresh snapshot.
+`hook:<event>:<sha256 of the normalized {matcher, handler}>` truncated to 16 hex. Revisions are
+**per item**: `ProfileItem.revision` is a hash of the item's own content and on/off state, and every
+mutation of an item carries it back (a stale one answers 409 `PROFILE_CONFLICT`); the instruction
+file carries its own content hash. A per-agent revision would conflict constantly — Claude sessions
+rewrite `~/.claude.json` all the time — so the snapshot's own `revision` only dedupes events.
+Creates carry no revision: a name collision is decided by `onConflict`. The wire contract is
+`packages/api/src/agent-profile.ts`.
 
 ### 4.4 Stash
 

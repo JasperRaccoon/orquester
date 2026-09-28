@@ -23,6 +23,7 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
  */
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
+export * from "./agent-profile.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 
