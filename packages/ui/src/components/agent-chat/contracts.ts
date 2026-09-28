@@ -343,7 +343,10 @@ export interface ChatBannerDockProps {
   respondingRequestIds: readonly string[];
   /** Non-null with no turn working ⇒ the liveness banner with its single Stop (§7.6). */
   backgroundLiveness: BackgroundLiveness | null;
+  /** Live subagents — never a background shell (`rosterKindCounts`). */
   liveAgentCount: number;
+  /** Background shells still running, named apart from the agents. */
+  liveShellCount?: number;
   stopping: boolean;
   actionableProposedPlan: boolean;
   onApprove: (input: { requestId: string; decision: ApprovalDecision }) => void;

@@ -106,6 +106,15 @@ test("the liveness title counts agents and degrades to a generic label", () => {
   assert.equal(backgroundLivenessTitle("monitoring", 4), "Monitoring");
 });
 
+test("the liveness title names running shells beside the agents, never counts them as agents", () => {
+  assert.equal(backgroundLivenessTitle("working", 8, 1), "8 agents and 1 shell running");
+  assert.equal(backgroundLivenessTitle("working", 1, 2), "1 agent and 2 shells running");
+  assert.equal(backgroundLivenessTitle("working", 3, 0), "3 agents working");
+  assert.equal(backgroundLivenessTitle("working", 0, 1), "1 shell running");
+  assert.equal(backgroundLivenessTitle("working", 0, 3), "3 shells running");
+  assert.equal(backgroundLivenessTitle("monitoring", 0, 1), "Monitoring");
+});
+
 test("the liveness banner is hidden while a turn is working", () => {
   assert.equal(
     showBackgroundLivenessBanner({ backgroundLiveness: "working", isTurnWorking: true }),

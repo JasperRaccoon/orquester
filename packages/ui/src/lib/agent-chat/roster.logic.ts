@@ -417,6 +417,24 @@ export interface LivenessBannerView {
 }
 
 /**
+ * The `working` banner's title, kind-aware like the roster's count line: a
+ * background shell is not an agent, so "9 agents working" for eight subagents
+ * and one shell was a lie about what the user had running (owner report,
+ * 2026-09-28). "N agents working" alone, "N agents and M shells running"
+ * together, "M shells running" alone, "Background work" when nothing is named.
+ */
+export function workingLivenessTitle(liveAgentCount: number, liveShellCount = 0): string {
+  const agents = Math.max(0, liveAgentCount);
+  const shells = Math.max(0, liveShellCount);
+  const agentLabel = `${agents} ${agents === 1 ? "agent" : "agents"}`;
+  const shellLabel = `${shells} ${shells === 1 ? "shell" : "shells"}`;
+  if (agents > 0 && shells > 0) return `${agentLabel} and ${shellLabel} running`;
+  if (agents > 0) return `${agentLabel} working`;
+  if (shells > 0) return `${shellLabel} running`;
+  return "Background work";
+}
+
+/**
  * While `backgroundLiveness` is non-null and **no turn is working**, a banner
  * sits in the notice stack at activity priority with one **Stop** button.
  * "N agents working" — or "Background work" when the live agent count is zero —
@@ -428,6 +446,8 @@ export function deriveLivenessBanner(input: {
   backgroundLiveness: "working" | "monitoring" | null;
   isTurnWorking: boolean;
   liveAgentCount: number;
+  /** Background shells still running — named apart from the agents. */
+  liveShellCount?: number;
   stopping: boolean;
 }): LivenessBannerView {
   if (input.backgroundLiveness === null || input.isTurnWorking) {
@@ -436,8 +456,6 @@ export function deriveLivenessBanner(input: {
   const title =
     input.backgroundLiveness === "monitoring"
       ? "Monitoring"
-      : input.liveAgentCount > 0
-        ? `${input.liveAgentCount} agent${input.liveAgentCount === 1 ? "" : "s"} working`
-        : "Background work";
+      : workingLivenessTitle(input.liveAgentCount, input.liveShellCount);
   return { visible: true, title, stopLabel: input.stopping ? "Stopping…" : "Stop" };
 }

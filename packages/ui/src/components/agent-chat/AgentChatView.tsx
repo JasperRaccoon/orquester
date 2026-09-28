@@ -86,6 +86,7 @@ import {
   type DrillInMemoryEntry
 } from "./roster/drill-in-memory";
 import { AgentRoster } from "./roster/AgentRoster";
+import { rosterKindCounts } from "./roster/roster-summary";
 import { EmptyThreadPanel } from "./EmptyThreadPanel";
 
 /** Per-device: the roster folded to its summary line. */
@@ -196,6 +197,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     useAgentChatThread(sessionId);
   const pending = useAgentChatPending(sessionId);
   const roster = useAgentChatRoster(sessionId);
+  // The banner counts by kind, as the roster's footer does: the panel's
+  // `liveCount` also counts running shells as agents.
+  const rosterCounts = React.useMemo(() => rosterKindCounts(roster.agents), [roster.agents]);
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
   // The skills a sent `$mention` re-chips against (§4.6.7): the ones the
@@ -1004,7 +1008,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 userInputs={paintOnly ? NO_APPROVALS : pending.userInputs}
                 respondingRequestIds={paintOnly ? NO_REQUEST_IDS : pending.respondingRequestIds}
                 backgroundLiveness={paintOnly ? null : roster.backgroundLiveness}
-                liveAgentCount={paintOnly ? 0 : roster.panel.liveCount}
+                liveAgentCount={paintOnly ? 0 : rosterCounts.liveAgents}
+                liveShellCount={paintOnly ? 0 : rosterCounts.liveShells}
                 stopping={!paintOnly && roster.stopping}
                 // The dock shows the banner on exactly the decision the
                 // composer acts on — not on the summary flag alone, which

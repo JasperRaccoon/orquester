@@ -298,6 +298,19 @@ describe("the liveness banner", () => {
     );
   });
 
+  it("names running shells apart from agents", () => {
+    assert.equal(
+      deriveLivenessBanner({
+        backgroundLiveness: "working",
+        isTurnWorking: false,
+        liveAgentCount: 8,
+        liveShellCount: 1,
+        stopping: false
+      }).title,
+      "8 agents and 1 shell running"
+    );
+  });
+
   it("reads 'Stopping…' while an interrupt is in flight", () => {
     assert.equal(
       deriveLivenessBanner({

@@ -10,6 +10,8 @@ export interface BackgroundLivenessBannerProps {
   liveness: BackgroundLiveness;
   /** From the roster's panel model; 0 means "something is running, unnamed". */
   liveAgentCount: number;
+  /** Background shells still running, named apart from the agents. */
+  liveShellCount?: number;
   /** True from the click until liveness clears — not until the command returns. */
   stopping: boolean;
   onStop: () => void;
@@ -38,6 +40,7 @@ export interface BackgroundLivenessBannerProps {
 export function BackgroundLivenessBanner({
   liveness,
   liveAgentCount,
+  liveShellCount = 0,
   stopping,
   onStop
 }: BackgroundLivenessBannerProps): React.ReactElement {
@@ -47,7 +50,7 @@ export function BackgroundLivenessBanner({
       variant="default"
       density="compact"
       icon={<StatusDot tone={working ? "info" : "muted"} size="xs" pulse={working} />}
-      title={backgroundLivenessTitle(liveness, liveAgentCount)}
+      title={backgroundLivenessTitle(liveness, liveAgentCount, liveShellCount)}
       actions={
         <button
           type="button"
