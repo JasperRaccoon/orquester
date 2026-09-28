@@ -3,8 +3,8 @@
  * phone or desktop, provides the editor env, guards unsaved changes on
  * Cancel / Escape / the backdrop / Back, and picks the editor the request
  * names — a create by kind, an edit by the loaded item's kind, or the
- * instruction file. A save that lands tells the panel
- * (`notifyAgentProfileEditorSaved`) and closes.
+ * instruction file. A save that lands puts the fresh snapshot in the store,
+ * tells the panel (`publishSaved`) and closes.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -14,7 +14,7 @@ import type { ProfileItemDetail, ProfileItemKind, ProfileMutationResponse } from
 import { useApi } from "../../../../context/orquester-context";
 import { useMediaQuery } from "../../../../hooks/use-media-query";
 import { useAppStore } from "../../../../store/app";
-import { notifyAgentProfileEditorSaved, type AgentProfileEditorRequest } from "../editor-bridge";
+import type { AgentProfileEditorRequest } from "../editor-bridge";
 import { EditorEnvContext, useEditorEnv, type EditorEnv } from "./env";
 import { EditorFrame } from "./EditorFrame";
 import { EditorShell } from "./EditorShell";
@@ -28,6 +28,7 @@ import { MarkdownCreateEditor, MarkdownEditEditor } from "./MarkdownEditor";
 import { MarketplaceEditor } from "./MarketplaceEditor";
 import { McpEditor } from "./McpEditor";
 import { PluginEditor } from "./PluginEditor";
+import { publishSaved } from "./saved";
 
 export const AgentProfileEditor: React.FC<{ request: AgentProfileEditorRequest; onClose: () => void }> = ({
   request,
@@ -51,7 +52,7 @@ export const AgentProfileEditor: React.FC<{ request: AgentProfileEditorRequest; 
   }, []);
   const finish = useCallback(
     (response: ProfileMutationResponse) => {
-      notifyAgentProfileEditorSaved({ agent: request.agent, itemIds: response.itemIds, notes: response.notes });
+      publishSaved(request.agent, response);
       dirty.current = false;
       closeRef.current();
     },

@@ -13,6 +13,7 @@ import { Search } from "lucide-react";
 
 import type { AgentProfileSnapshot, MarketplacePluginEntry } from "@orquester/api";
 
+import { sanitizeAgentProfileSnapshot } from "../../../../lib/agent-profile/store";
 import { cn } from "../../../../lib/cn";
 import { useEditorEnv, useReportDirty, useTouch } from "./env";
 import { EditorShell } from "./EditorShell";
@@ -148,7 +149,12 @@ export const MarketplaceInstall: React.FC<{ initial?: MarketplaceInstallInitial 
     const controller = new AbortController();
     setSnapshot({ status: "loading" });
     api.getAgentProfile(agent, controller.signal).then(
-      (value) => {
+      (raw) => {
+        const value = sanitizeAgentProfileSnapshot(raw);
+        if (value === null) {
+          setSnapshot({ status: "error", message: "The daemon's answer could not be read." });
+          return;
+        }
         setSnapshot({ status: "loaded", value });
         setMarketplace((current) => current ?? marketplaceNames(value)[0] ?? null);
       },

@@ -11,7 +11,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ProfileInstructionsInfo, ProfileInstructionsResponse } from "@orquester/api";
 
-import { notifyAgentProfileEditorSaved } from "../editor-bridge";
+import { sanitizeInstructions } from "../../../../lib/agent-profile/sanitize";
 import { CodeArea } from "./CodeArea";
 import { useEditorEnv, useReportDirty } from "./env";
 import { EditorShell } from "./EditorShell";
@@ -20,6 +20,7 @@ import { Banner, SmallButton } from "./fields";
 import { Progress } from "./ImportSources";
 import { instructionsFileName, instructionsSummary, legacyFileName, overwriteInstructions } from "./instructions.logic";
 import { agentLabel } from "./layout.logic";
+import { publishSaved } from "./saved";
 import { SubmitStatus, useProfileSubmit } from "./use-submit";
 
 export type InstructionsLoad =
@@ -49,7 +50,8 @@ export const InstructionsEditor: React.FC<{ initial?: { load: InstructionsLoad; 
     const controller = new AbortController();
     setLoad({ status: "loading" });
     api.getAgentProfileInstructions(agent, controller.signal).then(
-      (response) => {
+      (raw) => {
+        const response = readInstructions(raw);
         setLoad({ status: "loaded", response });
         setText(response.text);
       },
@@ -74,7 +76,7 @@ export const InstructionsEditor: React.FC<{ initial?: { load: InstructionsLoad; 
     void submit.run(() =>
       overwriteInstructions(
         {
-          read: (target) => api.getAgentProfileInstructions(target),
+          read: async (target) => readInstructions(await api.getAgentProfileInstructions(target)),
           write: (target, request) => api.writeAgentProfileInstructions(target, request)
         },
         agent,
@@ -88,7 +90,7 @@ export const InstructionsEditor: React.FC<{ initial?: { load: InstructionsLoad; 
     setMigrateError(null);
     try {
       const response = await api.migrateAgentProfileLegacyInstructions(agent, { revision: loaded.info.revision });
-      notifyAgentProfileEditorSaved({ agent, itemIds: response.itemIds, notes: response.notes });
+      publishSaved(agent, response);
       setAttempt((n) => n + 1);
     } catch (error) {
       setMigrateError(profileError(error).message);
@@ -148,6 +150,12 @@ export const InstructionsEditor: React.FC<{ initial?: { load: InstructionsLoad; 
   );
 };
 
+/** The daemon's answer, field by field: a text, and the info the panel's store reads the same way. */
+function readInstructions(raw: unknown): ProfileInstructionsResponse {
+  const record = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  return { text: typeof record.text === "string" ? record.text : "", info: sanitizeInstructions(record.info) };
+}
+
 export const InstructionsConflict: React.FC<{ message: string; onReload: () => void; onOverwrite: () => void }> = ({
   message,
   onReload,
@@ -186,7 +194,8 @@ export const InstructionsBody: React.FC<{
       {info.warnings.length > 0 || legacy ? (
         <div className="shrink-0 space-y-2">
           {info.warnings
-            .filter((warning) => !legacy || warning.code !== "legacy-instructions")
+            // The legacy file's own warning is the banner below, which can act on it.
+            .filter((warning) => !legacy || !warning.message.includes(legacy))
             .map((warning) => (
               <Banner key={`${warning.code}:${warning.message}`} tone="warn">
                 {warning.message}

@@ -19,6 +19,7 @@ import type {
   ProfileImportScanResponse
 } from "@orquester/api";
 
+import { sanitizeAgentProfileSnapshot } from "../../../../lib/agent-profile/store";
 import { cn } from "../../../../lib/cn";
 import { useEditorEnv, useReportDirty, useTouch } from "./env";
 import { EditorShell } from "./EditorShell";
@@ -512,7 +513,10 @@ export const CopySource: React.FC<{
     const controller = new AbortController();
     setLoad({ status: "loading" });
     api.getAgentProfile(from, controller.signal).then(
-      (snapshot) => setLoad({ status: "loaded", snapshot }),
+      (raw) => {
+        const snapshot = sanitizeAgentProfileSnapshot(raw);
+        setLoad(snapshot ? { status: "loaded", snapshot } : { status: "error", message: "The daemon's answer could not be read." });
+      },
       (error) => {
         if (!controller.signal.aborted && !isAbort(error)) setLoad({ status: "error", message: profileError(error).message });
       }
