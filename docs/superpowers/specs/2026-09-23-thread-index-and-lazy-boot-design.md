@@ -222,10 +222,9 @@ position (`dropRevertedUserMessages`: kept with a retained turn or claimed by on
 then the fold's restoring pass; the truncation spares `role = 'user'`). The merged indexer derives
 both halves, so neither build's version-4 file is its own — the prompts build's fits every
 statement but may hold ranges reaching past a cut; the clipping build's has none of the new columns
-— and `INDEX_SCHEMA_VERSION` went to 5: one more rebuild at the deploy, in the background. One gap
-between the two halves: the fold's restoring pass can keep a turn-less prompt that lies inside a
-revert's cut, and history planning never replays that pass (below), so such a prompt is in search
-and the prompt list but on no "Load older" page.
+— and `INDEX_SCHEMA_VERSION` went to 5: one more rebuild at the deploy, in the background. The
+merge left one gap between the two halves — the fold's restoring pass could keep a turn-less
+prompt inside a revert's cut that history planning never served — closed on 2026-09-28 (below).
 
 *Built (follow-ups 2026-09-24):* a kept turn's late rows past a revert's cut stay in "Load older",
 at query time, with no index change. The gaps between the clipped ranges are a revert's cut and
@@ -237,7 +236,8 @@ has judged; a row naming a turn (`referencedTurnId`, the rule the indexer grows 
 activity's, a message's or a checkpoint's `turnId`) which the index still has and which began
 before the line — a kept turn's late row; a turnless activity, which every revert keeps; a turnless
 message only as a kept turn's opening prompt (`turnByPrompt`) — the fallback pass of
-`retainMessagesAfterRevert`, counted over the whole thread, is not replayed; and a turnless
+`retainMessagesAfterRevert`, counted over the whole thread, is not replayed (*superseded
+2026-09-28, below*); and a turnless
 checkpoint only from a block that holds the latest revert, and there only when every later
 revert's `turnCount` holds its count — a block that does not hold it serves none, which is
 conservative, and harmless while the window's 500 checkpoints hold them. Never a removed turn's
@@ -268,6 +268,27 @@ page that shows no row the timeline did not already show, up to five pages
 (`HISTORY_PAGES_PER_LOAD`, the MCP's `read_transcript` bound), `history.loading` set throughout; and
 the window's rows the history takes that no page holds keep the window's order there
 (`withWindowContent`), ahead of the rows both hold that follow them — never re-sorted by stamp.
+
+*Built (merge follow-ups 2026-09-28):* a turn-less user message written before the latest revert
+is on a page exactly while the fold keeps it — out of a gap, and inside a kept turn's range alike
+(`droppedByRevert` in `orchestrator.ts`). The fold keeps it with the turn that claims it, or by
+the fallback pass of `retainMessagesAfterRevert` (up to `turnCount` prompts no turn claims,
+counted over the whole thread), and the indexer applied that same rule to the message's
+`message_docs` row when the revert landed (`dropRevertedUserMessages`), so a block asks the index
+(`ThreadIndex.keepsUserMessage`: the row is still there, `role = 'user'`) rather than counting a
+third time; query time only, no schema change. Before, such a prompt restored out of a cut was in
+search and the prompt list but on no page, and one a rewind dropped inside a kept turn's range (an
+idle `/goal` no turn claims, when the kept turns have prompts of their own) was on a page the
+timeline did not have. A gap's messages count against no budget (a page counts activities, and an
+in-range prompt counts against nothing either); a page whose fold evicts a message beside them is
+served without its gap rows, as for activities. Such a prompt names no turn, so neither search
+nor the prompt list offers a reveal of it (`planReveal` pages by turn) — "Load older" reaches it.
+A later rewind can drop a turn-less message no kept turn claims by the fallback's count, which no
+turn a page lists tells the client, so `historyAfterRevert` drops the loaded pages and the bridge
+whenever one of them shows such a message of the parent's (`mayDropTurnless`); they are read
+again. Parity is with a fold of the whole log, as for the prompt list: the live fold counts the
+fallback over its retained window, and a turn-less ASSISTANT message the fallback restores out of a
+cut is still on no page (the index keeps no rule for it; parent turn-less answers are rare).
 
 Maintenance. The orchestrator's `commit` hands every appended event, with the byte position the
 store returns for it, to `index.observe(...)`. The indexer keeps, per thread, a tiny **turn fold**

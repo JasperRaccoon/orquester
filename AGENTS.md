@@ -718,19 +718,32 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   `orchestrator.ts`, the arms of `reduceReverted`): a row written after the latest revert, which no
   revert has judged; a row naming a turn the index still has that began before it (by
   `referencedTurnId`, the index's own rule — a kept turn's late row); a turnless activity; a
-  turnless message only as a kept turn's prompt (the message fallback pass, counted over the whole
-  thread, is not replayed); a turnless checkpoint only from a block that holds the latest revert,
-  and there only within every later revert's count — a block that does not hold it serves none,
-  which is conservative, and harmless while the window's 500 checkpoints hold them — and never a
-  removed turn's row, a session change or the revert. The page lists the newest kept turn its gap
-  rows name when it lists no later one: a rewind that removes it removes every later turn, so the
-  client still drops the page (`historyAfterRevert`), and a search reveal judges a page by the rows
-  it shows, never by its turns (`planReveal`).
+  turnless user message the index still holds; a turnless checkpoint only from a block that holds
+  the latest revert, and there only within every later revert's count — a block that does not hold
+  it serves none, which is conservative, and harmless while the window's 500 checkpoints hold them
+  — and never a removed turn's row, a session change or the revert. **A turnless prompt written
+  before the latest revert is on a page exactly while the fold keeps it**, out of a gap and inside
+  a kept turn's range alike (`droppedByRevert`): the fold keeps one a kept turn claims, and up to
+  `turnCount` no turn claims by its fallback pass — counted over the whole thread, which no block
+  can count — and the index applied that very rule when the revert landed
+  (`dropRevertedUserMessages`), so a block asks it (`ThreadIndex.keepsUserMessage`) rather than
+  counting a third time. Before, such a prompt restored out of a cut was in search and History but
+  on no page, and one a rewind dropped inside a kept turn's range (an idle `/goal` no turn claims)
+  was on a page though the timeline had dropped it. Such a prompt names no turn, so neither search
+  nor History offers a reveal of it (`planReveal` pages by turn); "Load older" reaches it. The page
+  lists the newest kept turn its gap rows name when it lists no later one: a rewind that removes it
+  removes every later turn, so the client still drops the page (`historyAfterRevert`), and a search
+  reveal judges a page by the rows it shows, never by its turns (`planReveal`). A later rewind can
+  also drop a turnless message no kept turn claims by the fallback's count, which no turn a page
+  lists says, so the client drops its pages and bridge for a rewind whenever one of them shows such
+  a message of the parent's (`mayDropTurnless`), and reads them again.
   The index counts none of the rows of a cut, so the page does: its gap rows count
   against its 400 (`indexedActivityBudget` plans the block again from the same end with that many
   fewer indexed activities; a row written after the revert is indexed, counted already), and a cut
   holding more of them than a page folds beside one activity is served without them, with a warning,
-  whenever folding them would evict. Query time only: nothing the index derives changed. A deploy of
+  whenever folding them would evict. A gap's messages count against no budget — a page counts
+  activities, and an in-range prompt counts against nothing either — but a page whose fold evicts a
+  message beside them is served without its gap rows the same way. Query time only: nothing the index derives changed. A deploy of
   a bump deletes an older `index.sqlite` (version 3, or either build's 4) and rebuilds it once, in
   the background, by the boot
   catch-up (one thread at a time, never on the readiness path): until a thread's catch-up reaches
@@ -806,10 +819,10 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   (`searchWantsOlder`, capped at 5 000 prompts; both through `useAutoLoadsOlder`). `turnOrdinal`
   and `rewindable` come from the same turn rows and compaction rule the history page uses, and a
   revert drops user rows by the FOLD's own rule (a port of `retainMessagesAfterRevert`), not by
-  log position, so History never lists a prompt the timeline dropped. One known gap, not a bug of
-  either rule: the fold's restoring pass (up to `turnCount` turn-less prompts no removed turn
-  claimed) can keep a prompt that lies inside a revert's cut, and "Load older" never replays that
-  pass (the history-pages gotcha), so such a prompt is in search and in History but on no page.
+  log position, so History never lists a prompt the timeline dropped. "Load older" asks the index
+  the same question for every turnless prompt written before the latest revert
+  (`keepsUserMessage`, the history-pages gotcha), so a prompt the fold's restoring pass keeps out of
+  a revert's cut is on a page too.
   The cursor is `base64url({t, s})` on the log seq — it survives a rebuild and a revert; a malformed one is a
   first page. Before answering, the host checks the index COVERS the thread (`coverage`: it waits
   for queued live appends, never for a catch-up): a thread still catching up (a rebuild, the boot
