@@ -101,7 +101,12 @@ export function editToml(text: string, edits: readonly TomlEdit[]): string {
       }
     }
     if (next === null) {
-      const patched = patch(current, expected);
+      let patched = patch(current, expected);
+      // Deleting the first root key (one this module put above the first
+      // table) leaves the blank line that separated them at the very top.
+      if (/^\r?\n/.test(patched) && !/^\r?\n/.test(current)) {
+        patched = patched.replace(/^(?:\r?\n)+/, "");
+      }
       if (!matches(patched, want)) {
         throw new Error(`Editing ${edit.path.join(".")} did not produce the expected document.`);
       }
