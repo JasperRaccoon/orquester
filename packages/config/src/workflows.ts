@@ -20,10 +20,28 @@ import { z } from "zod";
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-export const workflowKeyValueSchema = z.object({ name: z.string(), value: z.string() });
+/**
+ * Every object of a definition keeps the keys it does not know (`.passthrough()`): a save rewrites
+ * every workflow, so an older build that stripped a newer build's fields would erase them for good
+ * on a rollback. Changing an existing field's TYPE still bumps the file version.
+ */
+function looseObject<T extends z.ZodRawShape>(shape: T): z.ZodObject<T> {
+  // Typed as the plain object: the kept keys are opaque to this build (it never reads them), and an
+  // index signature on every config type would reach every consumer. At runtime they pass through.
+  return z.object(shape).passthrough() as unknown as z.ZodObject<T>;
+}
+
+/**
+ * Block and connection ids: keys of the run's per-block state and of pinned outputs, so never an
+ * `Object.prototype` name. Letters, digits, `_`, `-`, `.` and `:`, at most 128.
+ */
+export const WORKFLOW_GRAPH_ID_PATTERN = /^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9_.:-]{1,128}$/;
+const graphIdSchema = z.string().regex(WORKFLOW_GRAPH_ID_PATTERN, "must be 1-128 letters, digits, _ - . or : (and not a reserved name)");
+
+export const workflowKeyValueSchema = looseObject({ name: z.string(), value: z.string() });
 export type WorkflowKeyValue = z.infer<typeof workflowKeyValueSchema>;
 
-export const workflowPositionSchema = z.object({ x: z.number().finite(), y: z.number().finite() });
+export const workflowPositionSchema = looseObject({ x: z.number().finite(), y: z.number().finite() });
 
 export const WORKFLOW_NODE_TYPES = [
   "trigger.manual",
@@ -48,30 +66,30 @@ export type WorkflowNodeType = (typeof WORKFLOW_NODE_TYPES)[number];
 // ---------------------------------------------------------------------------
 
 export const schedulePresetSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("minutes"), every: z.number().int().min(1).max(59) }),
-  z.object({
+  looseObject({ kind: z.literal("minutes"), every: z.number().int().min(1).max(59) }),
+  looseObject({
     kind: z.literal("hours"),
     every: z.number().int().min(1).max(23),
     atMinute: z.number().int().min(0).max(59).default(0)
   }),
-  z.object({ kind: z.literal("daily"), time: z.string().regex(HHMM) }),
-  z.object({
+  looseObject({ kind: z.literal("daily"), time: z.string().regex(HHMM) }),
+  looseObject({
     kind: z.literal("weekly"),
     /** 0 = Sunday … 6 = Saturday (cron's numbering). */
     days: z.array(z.number().int().min(0).max(6)).min(1),
     time: z.string().regex(HHMM)
   }),
-  z.object({ kind: z.literal("monthly"), day: z.number().int().min(1).max(31), time: z.string().regex(HHMM) }),
-  z.object({ kind: z.literal("cron") })
+  looseObject({ kind: z.literal("monthly"), day: z.number().int().min(1).max(31), time: z.string().regex(HHMM) }),
+  looseObject({ kind: z.literal("cron") })
 ]);
 export type SchedulePreset = z.infer<typeof schedulePresetSchema>;
 
-export const triggerManualConfigSchema = z.object({
+export const triggerManualConfigSchema = looseObject({
   /** A JSON example shown in "Run now" (free text; not validated as JSON on read). */
   inputExample: z.string().optional()
 });
 
-export const triggerScheduleConfigSchema = z.object({
+export const triggerScheduleConfigSchema = looseObject({
   preset: schedulePresetSchema,
   /** The authority (5 fields; 6 with seconds only for preset kind "cron"). */
   cron: z.string().min(1)
@@ -79,9 +97,9 @@ export const triggerScheduleConfigSchema = z.object({
 
 export const gitRepoRefSchema = z.discriminatedUnion("kind", [
   /** The workflow project's `origin` (a temp workflow's clone URL) and its workspace's git account. */
-  z.object({ kind: z.literal("project") }),
+  looseObject({ kind: z.literal("project") }),
   /** Any URL; no account = a public repository. */
-  z.object({ kind: z.literal("url"), url: z.string().min(1), accountId: z.string().min(1).optional() })
+  looseObject({ kind: z.literal("url"), url: z.string().min(1), accountId: z.string().min(1).optional() })
 ]);
 export type GitRepoRef = z.infer<typeof gitRepoRefSchema>;
 
@@ -90,11 +108,11 @@ export type GitPullRequestAction = (typeof GIT_PR_ACTIONS)[number];
 
 export const gitTriggerEventSchema = z.discriminatedUnion("kind", [
   /** Globs over branch names; [] = the repository's default branch. */
-  z.object({ kind: z.literal("push"), branches: z.array(z.string()).default([]) }),
-  z.object({ kind: z.literal("tag"), pattern: z.string().optional() }),
+  looseObject({ kind: z.literal("push"), branches: z.array(z.string()).default([]) }),
+  looseObject({ kind: z.literal("tag"), pattern: z.string().optional() }),
   /** GitHub only (Bitbucket has no releases — the editor offers "tag"). */
-  z.object({ kind: z.literal("release"), includePrereleases: z.boolean().default(false) }),
-  z.object({
+  looseObject({ kind: z.literal("release"), includePrereleases: z.boolean().default(false) }),
+  looseObject({
     kind: z.literal("pull_request"),
     actions: z.array(z.enum(GIT_PR_ACTIONS)).min(1),
     baseBranches: z.array(z.string()).optional()
@@ -102,18 +120,18 @@ export const gitTriggerEventSchema = z.discriminatedUnion("kind", [
 ]);
 export type GitTriggerEvent = z.infer<typeof gitTriggerEventSchema>;
 
-export const triggerGitConfigSchema = z.object({ repo: gitRepoRefSchema, event: gitTriggerEventSchema });
+export const triggerGitConfigSchema = looseObject({ repo: gitRepoRefSchema, event: gitTriggerEventSchema });
 
 // ---------------------------------------------------------------------------
 // Agent block (§5.1, §5.2)
 // ---------------------------------------------------------------------------
 
-export const agentModelOptionSchema = z.object({
+export const agentModelOptionSchema = looseObject({
   id: z.string().min(1),
   value: z.union([z.string(), z.boolean()])
 });
 
-export const accountPolicySchema = z.object({
+export const accountPolicySchema = looseObject({
   strategy: z.enum(["least-used", "soonest-reset", "fixed"]).default("least-used"),
   /** fixed: try in this order; other strategies: an allow-list. Omitted = every account of the family. */
   accounts: z.array(z.string().min(1)).optional(),
@@ -125,7 +143,7 @@ export const accountPolicySchema = z.object({
   /** Provider-labelled windows, e.g. Claude's "Fable" weekly cap. */
   scoped: z
     .array(
-      z.object({
+      looseObject({
         label: z.string().min(1),
         maxPct: z.number().min(0).max(100),
         onlyForModels: z.array(z.string()).optional()
@@ -138,7 +156,7 @@ export const accountPolicySchema = z.object({
 });
 export type AccountPolicy = z.infer<typeof accountPolicySchema>;
 
-export const agentChainEntrySchema = z.object({
+export const agentChainEntrySchema = looseObject({
   /** Registry refId: claude | claudex | claudemix | codex | grok | opencode. */
   agent: z.string().min(1),
   model: z.string().min(1),
@@ -149,18 +167,18 @@ export const agentChainEntrySchema = z.object({
 export type AgentChainEntry = z.infer<typeof agentChainEntrySchema>;
 
 export const agentPromptSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("text"), text: z.string() }),
-  z.object({ kind: z.literal("saved"), promptId: z.string().min(1), append: z.string().optional() })
+  looseObject({ kind: z.literal("text"), text: z.string() }),
+  looseObject({ kind: z.literal("saved"), promptId: z.string().min(1), append: z.string().optional() })
 ]);
 export type AgentPrompt = z.infer<typeof agentPromptSchema>;
 
 export const agentSessionModeSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("new"), title: z.string().optional() }),
+  looseObject({ kind: z.literal("new"), title: z.string().optional() }),
   /** A follow-up turn into the session an upstream agent block (by NAME) created in this run. */
-  z.object({ kind: z.literal("continue"), fromNode: z.string().min(1) })
+  looseObject({ kind: z.literal("continue"), fromNode: z.string().min(1) })
 ]);
 
-export const agentConfigSchema = z.object({
+export const agentConfigSchema = looseObject({
   prompt: agentPromptSchema,
   session: agentSessionModeSchema.default({ kind: "new" }),
   chain: z.array(agentChainEntrySchema).min(1),
@@ -168,8 +186,8 @@ export const agentConfigSchema = z.object({
   whenOnlyWatchLoopsRemain: z.enum(["finish", "wait"]).default("finish"),
   whenAllBurnt: z
     .discriminatedUnion("kind", [
-      z.object({ kind: z.literal("fail") }),
-      z.object({ kind: z.literal("wait-for-reset"), maxWaitHours: z.number().positive().max(168) })
+      looseObject({ kind: z.literal("fail") }),
+      looseObject({ kind: z.literal("wait-for-reset"), maxWaitHours: z.number().positive().max(168) })
     ])
     .default({ kind: "fail" }),
   maxMinutes: z.number().int().positive().default(240)
@@ -180,14 +198,14 @@ export type AgentBlockConfig = z.infer<typeof agentConfigSchema>;
 // Code / shell / http (§4, §5.6)
 // ---------------------------------------------------------------------------
 
-export const codeConfigSchema = z.object({
+export const codeConfigSchema = looseObject({
   source: z.string(),
   timeoutMinutes: z.number().positive().optional(),
   memoryMb: z.number().int().positive().optional()
 });
 export type CodeBlockConfig = z.infer<typeof codeConfigSchema>;
 
-export const shellConfigSchema = z.object({
+export const shellConfigSchema = looseObject({
   /** `{{…}}` is refused here by validation: values reach the script only through `env`. */
   script: z.string(),
   shell: z.enum(["bash", "sh"]).default("bash"),
@@ -199,12 +217,12 @@ export type ShellBlockConfig = z.infer<typeof shellConfigSchema>;
 export const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const;
 
 export const httpBodySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("json"), value: z.string() }),
-  z.object({ kind: z.literal("text"), value: z.string(), contentType: z.string().optional() }),
-  z.object({ kind: z.literal("form"), fields: z.array(workflowKeyValueSchema) })
+  looseObject({ kind: z.literal("json"), value: z.string() }),
+  looseObject({ kind: z.literal("text"), value: z.string(), contentType: z.string().optional() }),
+  looseObject({ kind: z.literal("form"), fields: z.array(workflowKeyValueSchema) })
 ]);
 
-export const httpConfigSchema = z.object({
+export const httpConfigSchema = looseObject({
   method: z.enum(HTTP_METHODS).default("GET"),
   url: z.string(),
   headers: z.array(workflowKeyValueSchema).default([]),
@@ -241,7 +259,7 @@ export const RULE_OPERATORS = [
 ] as const;
 export type RuleOperator = (typeof RULE_OPERATORS)[number];
 
-export const workflowRuleSchema = z.object({
+export const workflowRuleSchema = looseObject({
   /** A template: usually one `{{ path }}`. */
   left: z.string(),
   op: z.enum(RULE_OPERATORS),
@@ -249,15 +267,15 @@ export const workflowRuleSchema = z.object({
 });
 export type WorkflowRule = z.infer<typeof workflowRuleSchema>;
 
-export const ifConfigSchema = z.object({
+export const ifConfigSchema = looseObject({
   combine: z.enum(["all", "any"]).default("all"),
   rules: z.array(workflowRuleSchema).min(1)
 });
 
-export const switchConfigSchema = z.object({
+export const switchConfigSchema = looseObject({
   cases: z
     .array(
-      z.object({
+      looseObject({
         label: z.string(),
         combine: z.enum(["all", "any"]).default("all"),
         rules: z.array(workflowRuleSchema).min(1)
@@ -268,9 +286,9 @@ export const switchConfigSchema = z.object({
   fallback: z.boolean().default(true)
 });
 
-export const mergeConfigSchema = z.object({ mode: z.enum(["all", "first"]).default("all") });
+export const mergeConfigSchema = looseObject({ mode: z.enum(["all", "first"]).default("all") });
 
-export const stopConfigSchema = z.object({
+export const stopConfigSchema = looseObject({
   as: z.enum(["success", "failure"]).default("success"),
   message: z.string().optional(),
   /** A template; its rendered value becomes the run's final output. */
@@ -278,38 +296,36 @@ export const stopConfigSchema = z.object({
 });
 
 export const waitConfigSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("duration"), minutes: z.number().positive() }),
-  z.object({ kind: z.literal("until"), time: z.string().regex(HHMM), timezone: z.string().optional() })
+  looseObject({ kind: z.literal("duration"), minutes: z.number().positive() }),
+  looseObject({ kind: z.literal("until"), time: z.string().regex(HHMM), timezone: z.string().optional() })
 ]);
 
-export const subWorkflowConfigSchema = z.object({
+export const subWorkflowConfigSchema = looseObject({
   workflowId: z.string().min(1),
   /** A template whose rendered value is the child's `trigger.input`. */
   input: z.string().optional()
 });
 
 export const NOTE_COLORS = ["yellow", "blue", "green", "pink", "purple", "neutral"] as const;
-export const noteConfigSchema = z.object({ text: z.string().default(""), color: z.enum(NOTE_COLORS).default("yellow") });
+export const noteConfigSchema = looseObject({ text: z.string().default(""), color: z.enum(NOTE_COLORS).default("yellow") });
 
 // ---------------------------------------------------------------------------
 // Nodes, edges, workflow (§3.1)
 // ---------------------------------------------------------------------------
 
 const nodeBase = {
-  id: z.string().min(1),
+  id: graphIdSchema,
   name: z.string().min(1),
   position: workflowPositionSchema,
   disabled: z.boolean().optional(),
   notes: z.string().optional(),
-  retry: z
-    .object({ maxTries: z.number().int().min(1).max(10), delaySeconds: z.number().min(0).max(3600) })
-    .optional(),
+  retry: looseObject({ maxTries: z.number().int().min(1).max(10), delaySeconds: z.number().min(0).max(3600) }).optional(),
   timeoutMinutes: z.number().positive().optional(),
   projectOverride: z.string().min(1).optional()
 };
 
 function nodeOf<T extends WorkflowNodeType, C extends z.ZodTypeAny>(type: T, config: C) {
-  return z.object({ ...nodeBase, type: z.literal(type), config }).passthrough();
+  return looseObject({ ...nodeBase, type: z.literal(type), config }).passthrough();
 }
 
 export const workflowNodeSchema = z.discriminatedUnion("type", [
@@ -337,24 +353,24 @@ export const WORKFLOW_HANDLE_PATTERN = /^(success|error|true|false|default|case:
 
 export const workflowEdgeSchema = z
   .object({
-    id: z.string().min(1),
-    source: z.string().min(1),
+    id: graphIdSchema,
+    source: graphIdSchema,
     sourceHandle: z.string().regex(WORKFLOW_HANDLE_PATTERN),
-    target: z.string().min(1)
+    target: graphIdSchema
   })
   .passthrough();
 export type WorkflowEdge = z.infer<typeof workflowEdgeSchema>;
 
 export const workflowProjectSchema = z.discriminatedUnion("kind", [
   /** `<workspacesDir>/<ws>/<project>` */
-  z.object({ kind: z.literal("existing"), projectPath: z.string().min(1) }),
-  z.object({
+  looseObject({ kind: z.literal("existing"), projectPath: z.string().min(1) }),
+  looseObject({
     kind: z.literal("temp"),
     /** The workspace NAME; its git account clones. */
     workspace: z.string().min(1),
     source: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("empty") }),
-      z.object({ kind: z.literal("clone"), url: z.string().min(1), ref: z.string().min(1).optional() })
+      looseObject({ kind: z.literal("empty") }),
+      looseObject({ kind: z.literal("clone"), url: z.string().min(1), ref: z.string().min(1).optional() })
     ])
   })
 ]);
@@ -366,9 +382,7 @@ export const workflowSettingsSchema = z
     maxConcurrent: z.number().int().min(1).max(8).default(2),
     timezone: z.string().min(1).default("UTC"),
     runTimeoutMinutes: z.number().positive().optional(),
-    notify: z
-      .object({ onFailure: z.boolean().default(true), onSuccess: z.boolean().default(false) })
-      .default({}),
+    notify: looseObject({ onFailure: z.boolean().default(true), onSuccess: z.boolean().default(false) }).default({}),
     keepFailedTempDays: z.number().int().min(0).max(30).default(3)
   })
   .passthrough();
@@ -531,21 +545,45 @@ export function parseWorkflowStateFile(raw: unknown): WorkflowStateFile {
 export const WORKFLOW_SECRET_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 export const WORKFLOW_SECRET_MAX_VALUE_BYTES = 64 * 1024;
 
-export const workflowSecretEntrySchema = z.object({
-  value: z.string(),
-  updatedAt: z.string().datetime({ offset: true })
-});
+export const workflowSecretEntrySchema = z
+  .object({
+    value: z.string(),
+    updatedAt: z.string().datetime({ offset: true })
+  })
+  .passthrough();
 export type WorkflowSecretEntry = z.infer<typeof workflowSecretEntrySchema>;
+
+/** A map keyed by user text: no prototype, so no key can reach `Object.prototype`. */
+export function nullProtoRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
 
 export interface WorkflowSecretsFile {
   version: 1;
   global: Record<string, WorkflowSecretEntry>;
   /** workflowId -> name -> entry; a workflow's own secret shadows a global one. */
   workflows: Record<string, Record<string, WorkflowSecretEntry>>;
+  /**
+   * What this build could not read, written back VERBATIM on every save (a rollback never loses a
+   * newer build's secrets): unknown top-level keys, and per scope the entries whose name or shape
+   * it does not accept (`workflows` keyed by workflow id; a scope that is not an object whole).
+   */
+  extra?: Record<string, unknown>;
+  rejected?: { global: Record<string, unknown>; workflows: Record<string, unknown> };
 }
 
 export function createDefaultWorkflowSecretsFile(): WorkflowSecretsFile {
-  return { version: 1, global: {}, workflows: {} };
+  return {
+    version: 1,
+    global: nullProtoRecord(),
+    workflows: nullProtoRecord(),
+    extra: nullProtoRecord(),
+    rejected: { global: nullProtoRecord(), workflows: nullProtoRecord() }
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** Throws on a foreign version (the daemon moves the file aside); tolerant per entry otherwise. */
@@ -553,20 +591,52 @@ export function parseWorkflowSecretsFile(raw: unknown): WorkflowSecretsFile {
   const outer = z
     .object({
       version: z.literal(1).default(1),
-      global: z.record(z.string(), z.unknown()).default({}),
-      workflows: z.record(z.string(), z.unknown()).default({})
+      global: z.unknown().optional(),
+      workflows: z.unknown().optional()
     })
     .safeParse(raw);
-  if (!outer.success) {
+  if (!outer.success || !isPlainRecord(raw)) {
     throw new Error("Not a version-1 workflow secrets file");
   }
-  const named = (value: unknown): Record<string, WorkflowSecretEntry> => {
-    const entries = tolerantRecord(value, workflowSecretEntrySchema);
-    return Object.fromEntries(Object.entries(entries).filter(([name]) => WORKFLOW_SECRET_NAME_PATTERN.test(name)));
+  if (raw.global !== undefined && !isPlainRecord(raw.global)) throw new Error("Not a version-1 workflow secrets file");
+  if (raw.workflows !== undefined && !isPlainRecord(raw.workflows)) throw new Error("Not a version-1 workflow secrets file");
+  const file = createDefaultWorkflowSecretsFile();
+  const rejected = file.rejected!;
+  /** Accepted entries into `into`; the rest into `aside` (verbatim). */
+  const named = (value: Record<string, unknown>, into: Record<string, WorkflowSecretEntry>, aside: Record<string, unknown>): void => {
+    for (const [name, entry] of Object.entries(value)) {
+      const parsed = workflowSecretEntrySchema.safeParse(entry);
+      if (parsed.success && WORKFLOW_SECRET_NAME_PATTERN.test(name)) into[name] = parsed.data;
+      else aside[name] = entry;
+    }
   };
-  const workflows: WorkflowSecretsFile["workflows"] = {};
-  for (const [id, value] of Object.entries(outer.data.workflows)) {
-    workflows[id] = named(value);
+  named((raw.global as Record<string, unknown> | undefined) ?? {}, file.global, rejected.global);
+  for (const [id, value] of Object.entries((raw.workflows as Record<string, unknown> | undefined) ?? {})) {
+    if (!isPlainRecord(value) || id.length === 0) {
+      rejected.workflows[id] = value;
+      continue;
+    }
+    const scope = nullProtoRecord<WorkflowSecretEntry>();
+    const aside = nullProtoRecord<unknown>();
+    named(value, scope, aside);
+    if (Object.keys(scope).length > 0) file.workflows[id] = scope;
+    if (Object.keys(aside).length > 0) rejected.workflows[id] = aside;
   }
-  return { version: 1, global: named(outer.data.global), workflows };
+  for (const [key, value] of Object.entries(raw)) {
+    if (key !== "version" && key !== "global" && key !== "workflows") file.extra![key] = value;
+  }
+  return file;
+}
+
+/** The file as written: the accepted entries over what this build could not read, verbatim. */
+export function serializeWorkflowSecretsFile(file: WorkflowSecretsFile): Record<string, unknown> {
+  const rejected = file.rejected ?? { global: {}, workflows: {} };
+  const global: Record<string, unknown> = Object.assign(nullProtoRecord<unknown>(), rejected.global, file.global);
+  const workflows: Record<string, unknown> = nullProtoRecord<unknown>();
+  for (const [id, value] of Object.entries(rejected.workflows)) workflows[id] = value;
+  for (const [id, scope] of Object.entries(file.workflows)) {
+    const aside = rejected.workflows[id];
+    workflows[id] = Object.assign(nullProtoRecord<unknown>(), isPlainRecord(aside) ? aside : {}, scope);
+  }
+  return Object.assign(nullProtoRecord<unknown>(), file.extra ?? {}, { version: 1, global, workflows });
 }

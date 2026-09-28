@@ -42,6 +42,7 @@ import {
   type WorkflowNode,
   type WorkflowNodeType,
   type WorkflowRun,
+  type WorkflowRunErrorKind,
   type WorkflowRunStatus,
   type WorkflowRunSummary,
   type WorkflowSummary,
@@ -50,6 +51,8 @@ import {
   type WorkflowsEventType
 } from "@orquester/api";
 import { join } from "node:path";
+
+import { WORKFLOW_GRAPH_ID_PATTERN } from "@orquester/config";
 
 import type {
   Clock,
@@ -83,6 +86,7 @@ import {
   retryDelayMs,
   sleepUntil,
   toRunSummary,
+  EngineStoppedError,
   WorkflowEngineError,
   type EngineLimits
 } from "./run-context.ts";
@@ -128,6 +132,8 @@ export interface WorkflowRuntimeEngine extends WorkflowEngine, TriggerHost {
 interface Ending {
   status: Extract<WorkflowRunStatus, "failed" | "cancelled" | "stopped" | "interrupted">;
   error?: string;
+  /** A structured reason for the run's error (additive; blocks carry their own). */
+  errorKind?: WorkflowRunErrorKind;
   finalOutputNodeId?: string;
 }
 
@@ -139,7 +145,10 @@ interface ActiveRun {
   order: string[];
   /** Whole (redacted) outputs by node id; `run.blocks[id].output` may be only a preview. */
   outputs: Map<string, unknown>;
+  /** The secrets this run's expressions read (its own workflow's). */
   secrets: Record<string, string>;
+  /** What it redacts: its own secrets plus every ancestor run's (a parent may hand one down). */
+  redactSecrets: Record<string, string>;
   redactor: SecretRedactor;
   /** Aborted when the run ends early (failure, cancel, stop, timeout): every block's signal follows. */
   abort: AbortController;
@@ -266,6 +275,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   const agentSlots: SlotPool = createSlotPool(limits.maxConcurrentAgentBlocks);
   const processSlots: SlotPool = createSlotPool(limits.maxConcurrentProcesses);
   const active = new Map<string, ActiveRun>();
+  /** Runs past the overlap decision whose record is being created: counted, never started. */
+  const reserving = new Map<string, ActiveRun>();
   let stopped = false;
   let stopping = false;
   let summarizing = false;
@@ -625,7 +636,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       expressionContext: () => baseContext(a, node.id, attempt, branch),
       secrets: a.secrets,
       setWaitingOn: async (waitingOn) => {
-        if (!alive(a)) return;
+        // Stopped (or finalized): nothing more reaches disk, so the executor must not go on to a
+        // side effect nobody recorded — the next engine resumes from what run.json last held.
+        if (!alive(a) || stopping) throw new EngineStoppedError();
         if (waitingOn === undefined) delete block.waitingOn;
         else block.waitingOn = structuredClone(waitingOn);
         if (waitingOn !== undefined && isWaitState(waitingOn)) {
@@ -651,6 +664,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         }
         markDirty(a, node.id);
         await save(a);
+        // The engine stopped while this state was being written: it may not have landed.
+        if (!alive(a)) throw new EngineStoppedError();
       },
       update(patch) {
         if (!alive(a) || isFinishedBlockStatus(block.status)) return;
@@ -857,6 +872,14 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         break;
       }
       case "cancelled":
+        if (a.ending === null) {
+          // Nothing cancelled the run: a block that reports "cancelled" by itself did not do its
+          // work, and must not let the run end succeeded with its downstream skipped.
+          block.status = "failed";
+          block.handle = "error";
+          block.error = { kind: "interrupted", message: "The block stopped without finishing, though the run was not cancelled." };
+          break;
+        }
         block.status = "cancelled";
         delete block.handle;
         break;
@@ -1025,8 +1048,27 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const payload = a.run.triggerPayload;
     if (payload?.kind !== "git") return undefined;
     const node = a.run.trigger.nodeId !== undefined ? a.nodes.get(a.run.trigger.nodeId) : undefined;
-    if (node?.type === "trigger.git" && node.config.repo.kind === "project" && payload.sha) return payload.sha;
+    if (node?.type !== "trigger.git" || node.config.repo.kind !== "project") return undefined;
+    // A pull request: its head commit (the full `headSha` when the provider gave one).
+    if (payload.event === "pull_request") {
+      const head = payload.pr?.headSha || payload.sha;
+      if (head) return head;
+      return payload.pr?.head || undefined;
+    }
+    // A release or tag event may carry no sha (a release names its tag): clone at the tag then.
+    if (payload.sha) return payload.sha;
+    const tag = payload.tag ?? payload.release?.tag;
+    if ((payload.event === "release" || payload.event === "tag") && tag) return tag;
     return undefined;
+  };
+
+  /** A PR-triggered clone at a sha that failed: the PR's source branch to retry at, once. */
+  const prBranchFallback = (a: ActiveRun, source: { kind: "empty" } | { kind: "clone"; url: string; ref?: string }): string | undefined => {
+    const payload = a.run.triggerPayload;
+    if (source.kind !== "clone" || payload?.kind !== "git" || payload.event !== "pull_request") return undefined;
+    const head = payload.pr?.head;
+    if (typeof head !== "string" || head.length === 0 || source.ref === head) return undefined;
+    return source.ref === gitRefFor(a) ? head : undefined;
   };
 
   const prepareProject = async (a: ActiveRun): Promise<void> => {
@@ -1034,7 +1076,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (a.run.projectPath !== undefined) {
       const resolved = await projects.resolveExisting(a.run.projectPath).catch(() => null);
       if (!resolved) {
-        failRun(a, { status: "failed", error: `The project ${a.run.projectPath} no longer exists.` });
+        failRun(a, { status: "failed", error: `The project ${a.run.projectPath} no longer exists.`, errorKind: "project_missing" });
         return;
       }
       a.project = { ...resolved, temp: a.run.tempProject !== undefined };
@@ -1044,7 +1086,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (target.kind === "existing") {
       const resolved = await projects.resolveExisting(target.projectPath).catch(() => null);
       if (!resolved) {
-        failRun(a, { status: "failed", error: `The project ${target.projectPath} does not exist (project_missing).` });
+        failRun(a, { status: "failed", error: `The project ${target.projectPath} does not exist.`, errorKind: "project_missing" });
         return;
       }
       a.project = resolved;
@@ -1058,16 +1100,57 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       const ref = gitRefFor(a) ?? target.source.ref;
       source = ref !== undefined ? { kind: "clone", url: target.source.url, ref } : { kind: "clone", url: target.source.url };
     }
+    // A creation a restart cut short left its directory (maybe half cloned): remove it first.
+    const leftover = a.run.tempProject;
+    if (leftover?.pending && !leftover.deleted) {
+      try {
+        await projects.deleteProject(leftover.path);
+      } catch (error) {
+        logger.warn("workflow temp project leftover could not be removed", { runId: a.run.id, path: leftover.path, error: errorMessage(error) });
+      }
+      if (!alive(a)) return;
+    }
+    // On disk BEFORE the creation: a restart in between finds the directory and cleans it up.
+    const path = projects.tempPathFor(target.workspace, name);
+    a.run.tempProject = { path, deleted: false, pending: true };
+    markDirty(a);
+    await save(a);
+    if (!alive(a)) return;
+    const discard = async (createdPath: string): Promise<void> => {
+      try {
+        await projects.deleteProject(createdPath);
+        a.run.tempProject = { path: createdPath, deleted: true };
+      } catch (error) {
+        logger.warn("workflow temp project delete failed", { runId: a.run.id, path: createdPath, error: errorMessage(error) });
+        a.run.tempProject = { path: createdPath, deleted: false, deleteAfter: nowIso() };
+      }
+      markDirty(a);
+    };
     let created: ProjectContext;
     try {
-      created = await projects.createTemp({ workspace: target.workspace, name, source });
+      try {
+        created = await projects.createTemp({ workspace: target.workspace, name, source });
+      } catch (error) {
+        // A pull request's head may be a commit the clone cannot resolve by its id (Bitbucket Cloud
+        // reports 12-character heads): try once more at the PR's source branch.
+        const branch = prBranchFallback(a, source);
+        if (branch === undefined || !alive(a) || a.ending !== null) throw error;
+        logger.info("workflow temp clone at the PR head failed; retrying at its branch", { runId: a.run.id, error: errorMessage(error) });
+        await projects.deleteProject(path).catch(() => undefined);
+        if (!alive(a)) throw error;
+        created = await projects.createTemp({ workspace: target.workspace, name, source: { ...(source as { kind: "clone"; url: string }), ref: branch } });
+      }
     } catch (error) {
+      if (!alive(a)) return;
+      // A failed clone can leave a partial directory behind.
+      await discard(path);
       failRun(a, { status: "failed", error: `Could not create the temporary project: ${a.redactor.text(errorMessage(error))}` });
       return;
     }
+    if (stopped) return; // the pending marker on disk: the next engine removes the directory.
     if (!alive(a) || a.ending !== null) {
       // The run ended while the project was being made: nothing will use it.
-      if (!stopped) await projects.deleteProject(created.path).catch(() => undefined);
+      await discard(created.path);
       return;
     }
     a.project = { ...created, temp: true };
@@ -1209,6 +1292,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     a.run.durationMs = Math.max(0, Date.parse(now) - Date.parse(a.run.startedAt ?? a.run.queuedAt));
     if (a.ending?.error !== undefined) a.run.error = a.redactor.text(a.ending.error);
     else if (status === "cancelled") a.run.error = "Cancelled.";
+    if (a.ending?.errorKind !== undefined) a.run.errorKind = a.ending.errorKind;
     delete a.run.current;
     delete a.run.queuedFor;
     a.summaryDirty = true;
@@ -1219,14 +1303,17 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const temp = a.run.tempProject;
     if (temp && !temp.deleted) {
       const keepDays = a.def.settings.keepFailedTempDays ?? 3;
+      delete temp.pending;
       if (status === "succeeded" || status === "stopped" || keepDays <= 0 || a.noPersist) {
+        // Due now BEFORE the await: an engine stopped meanwhile persists this state, and the
+        // sweeper then deletes what this delete did not get to.
+        temp.deleteAfter = nowIso();
         try {
           await opts.services.projects.deleteProject(temp.path);
           temp.deleted = true;
           delete temp.deleteAfter;
         } catch (error) {
           logger.warn("workflow temp project delete failed", { runId: a.run.id, path: temp.path, error: errorMessage(error) });
-          temp.deleteAfter = nowIso();
         }
       } else {
         temp.deleteAfter = new Date(Date.parse(now) + keepDays * DAY_MS).toISOString();
@@ -1304,7 +1391,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
   };
 
-  const newActive = (run: PersistedRun, secrets: Record<string, string>): ActiveRun => {
+  const newActive = (run: PersistedRun, secrets: Record<string, string>, redactSecrets: Record<string, string> = secrets): ActiveRun => {
     const def = run.definition;
     const order = topologicalOrder(def) ?? executableNodes(def).map((node) => node.id);
     return {
@@ -1314,7 +1401,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       order,
       outputs: new Map(),
       secrets,
-      redactor: createRedactor(secrets),
+      redactSecrets,
+      redactor: createRedactor(redactSecrets),
       abort: new AbortController(),
       lifetime: new AbortController(),
       slots: new Map(),
@@ -1339,6 +1427,30 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     };
   };
 
+  /**
+   * The secrets a run redacts: its own, plus every run's above it — a parent can render
+   * `{{secrets.X}}` into a child's input, and the child must redact that value too. A name two
+   * workflows share with different values keeps both (the ancestor's under a suffixed name).
+   */
+  const chainSecrets = (own: Record<string, string>, parentRunId: string | undefined): Record<string, string> => {
+    const union: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, own);
+    const seen = new Set<string>();
+    let cursor = parentRunId !== undefined ? active.get(parentRunId) : undefined;
+    while (cursor && !seen.has(cursor.run.id)) {
+      seen.add(cursor.run.id);
+      for (const [name, value] of Object.entries(cursor.redactSecrets)) {
+        if (!Object.hasOwn(union, name)) union[name] = value;
+        else if (union[name] !== value) {
+          let key = `${name} (parent)`;
+          for (let n = 2; Object.hasOwn(union, key) && union[key] !== value; n += 1) key = `${name} (parent ${n})`;
+          union[key] = value;
+        }
+      }
+      cursor = cursor.run.parentRunId !== undefined ? active.get(cursor.run.parentRunId) : undefined;
+    }
+    return union;
+  };
+
   const baseRun = (workflow: Workflow, runId: string, spec: RunSpec, now: string, redactor: SecretRedactor): PersistedRun => {
     const run: PersistedRun = {
       version: 1,
@@ -1351,7 +1463,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       queuedAt: now,
       definition: structuredClone(workflow),
       triggerPayload: redactor.value(structuredClone(spec.payload)),
-      blocks: {},
+      // Keyed by block id: no prototype, so no id can reach Object.prototype.
+      blocks: Object.create(null) as PersistedRun["blocks"],
       takenEdges: [],
       deadEdges: [],
       depth: spec.depth
@@ -1490,7 +1603,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   };
 
   const overlapDecision = (workflow: Workflow): "start" | "queue" | "skip" => {
-    const mine = [...active.values()].filter((a) => !a.finished && a.run.workflowId === workflow.id);
+    const mine = [...active.values(), ...reserving.values()].filter((a) => !a.finished && a.run.workflowId === workflow.id);
     if (mine.length === 0) return "start";
     switch (workflow.settings.overlap) {
       case "queue":
@@ -1506,7 +1619,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (stopped || stopping) throw new WorkflowEngineError(503, "ENGINE_UNAVAILABLE", "The workflow engine is stopping.");
     const runId = opts.mintId();
     const secrets = opts.secrets.resolve(workflow.id);
-    const redactor = createRedactor(secrets);
+    const redactSecrets = chainSecrets(secrets, spec.parentRunId);
+    const redactor = createRedactor(redactSecrets);
     const seeds =
       (spec.retryOf !== undefined || spec.fromNodeId !== undefined) && !spec.freshRetry
         ? await buildSeeds(workflow, spec, runId, redactor)
@@ -1525,7 +1639,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const now = nowIso();
     const run = baseRun(workflow, runId, spec, now, redactor);
     if (queuedFor !== undefined) run.queuedFor = queuedFor;
-    const a = newActive(run, secrets);
+    const a = newActive(run, secrets, redactSecrets);
     let executed: Set<string> | null = null;
     if (spec.fromNodeId !== undefined) {
       executed = new Set([spec.fromNodeId]);
@@ -1548,13 +1662,17 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       }
       run.blocks[node.id] = block;
     }
-    active.set(runId, a);
+    // Reserved (the overlap decision counts it) but not active until its record exists: nothing
+    // may start, save or list a run whose run.json was never created.
+    reserving.set(runId, a);
     try {
       await runStore.create(structuredClone(run));
     } catch (error) {
-      active.delete(runId);
       throw new WorkflowEngineError(503, "WORKFLOWS_UNAVAILABLE", `Could not record the run: ${errorMessage(error)}`);
+    } finally {
+      reserving.delete(runId);
     }
+    active.set(runId, a);
     emit("workflowRun.started", { run: toRunSummary(run) });
     emitUpserted(workflow.id);
     pump();
@@ -1685,13 +1803,25 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       if (active.has(run.id)) continue;
       let a: ActiveRun;
       try {
-        if (!run.definition || !Array.isArray(run.definition.nodes) || typeof run.blocks !== "object") throw new Error("malformed run");
+        if (!run.definition || !Array.isArray(run.definition.nodes) || run.blocks === null || typeof run.blocks !== "object") {
+          throw new Error("malformed run");
+        }
+        // Block ids key the run's state: an id this build refuses (`__proto__` from an older one)
+        // is never used as a key.
+        const ids = [...run.definition.nodes.map((node) => node?.id), ...Object.keys(run.blocks)];
+        if (ids.some((id) => typeof id !== "string" || !WORKFLOW_GRAPH_ID_PATTERN.test(id))) throw new Error("malformed block id");
+        run.blocks = Object.assign(Object.create(null) as PersistedRun["blocks"], run.blocks);
         a = newActive(run, opts.secrets.resolve(run.workflowId));
       } catch (error) {
         logger.warn("workflow run cannot be resumed", { runId: run.id, error: errorMessage(error) });
         run.status = "interrupted";
         run.endedAt = nowIso();
         run.error = "The run's saved state could not be read.";
+        // Its temporary project is nobody's any more: due for the sweeper now (it skips a
+        // project with no `deleteAfter`).
+        if (run.tempProject && typeof run.tempProject === "object" && !run.tempProject.deleted) {
+          run.tempProject = { path: run.tempProject.path, deleted: false, deleteAfter: nowIso() };
+        }
         await runStore.save(run).catch(() => undefined);
         continue;
       }
@@ -1708,9 +1838,14 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       active.set(run.id, a);
       if (run.status === "running") toWalk.push(a);
     }
-    // Parents know their children (a child names its parent).
-    for (const a of active.values()) {
-      if (a.run.parentRunId !== undefined) active.get(a.run.parentRunId)?.children.add(a.run.id);
+    // Parents know their children (a child names its parent), and a child redacts its ancestors'
+    // secrets too — parents first, so a grandchild reads its parent's union.
+    const depthOf = (a: ActiveRun): number => (typeof a.run.depth === "number" ? a.run.depth : 0);
+    for (const a of [...active.values()].sort((x, y) => depthOf(x) - depthOf(y))) {
+      if (a.run.parentRunId === undefined) continue;
+      active.get(a.run.parentRunId)?.children.add(a.run.id);
+      a.redactSecrets = chainSecrets(a.secrets, a.run.parentRunId);
+      a.redactor = createRedactor(a.redactSecrets);
     }
     for (const a of toWalk) begin(a, true);
     pump();

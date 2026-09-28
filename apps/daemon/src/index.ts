@@ -115,7 +115,7 @@ import { accountPrefix } from "./cliproxy-seed.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { cloneRefProblem } from "./workflows/git-remote";
-import type { WorkflowEngine } from "./workflows/contracts.ts";
+import type { ProjectOps, WorkflowEngine } from "./workflows/contracts.ts";
 import { WorkflowService, publishWorkflowEvents } from "./workflows/service.ts";
 import { WorkflowSecretsService } from "./workflows/secrets.ts";
 import { FileRunStore } from "./workflows/run-store.ts";
@@ -1035,7 +1035,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const validateModel: ValidateModel = (entryId, model) => cliproxy.validateModel(entryId, model);
   const services: Services = {
     registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
-    workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null
+    workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
+    workflowProjects: workflowDaemon.runtime.projects
   };
 
   // Boot the managed proxy AFTER reattach (adoption must see the final session
@@ -1921,6 +1922,8 @@ interface Services {
    * The routes read it per request.
    */
   workflowEngine: WorkflowEngine | null;
+  /** Temporary-project deletes for the workflow delete cascade when the engine cannot do them. */
+  workflowProjects?: Pick<ProjectOps, "deleteProject">;
   /**
    * The daemon's in-process, unauthenticated client of its own REST API, bound to the unix app
    * (see its construction in `startDaemon`); null until that app exists. The engine's ChatClient.
@@ -4481,6 +4484,7 @@ export function createServer(
     secrets: services.workflowSecrets,
     runStore: services.workflowRuns,
     engine: () => services.workflowEngine,
+    ...(services.workflowProjects ? { projects: services.workflowProjects } : {}),
     savedPromptIds: () => services.savedPrompts.allIds(),
     // `?projectPath=` names `<workspacesDir>/<ws>/<project>`, read per request (PUT
     // /api/config/daemon can move the workspaces dir).

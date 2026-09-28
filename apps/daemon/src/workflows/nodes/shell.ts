@@ -104,8 +104,11 @@ export function createShellExecutor(options: ShellExecutorOptions = {}): NodeExe
         return { status: "failed", error: { kind: "interrupted", message: "The shell block's process ended without recording its exit." }, output };
       }
       const exit = outcome.exit;
-      if (exit.cancelled) return { status: "cancelled" };
       const { output, warnings } = await collect(ctx, attemptDir, exit.code);
+      // The run did not cancel it (checked above): a runner stopped from outside is a failure.
+      if (exit.cancelled) {
+        return { status: "failed", error: { kind: "interrupted", message: "The script was stopped from outside the workflow." }, output };
+      }
       if (exit.timedOut) {
         return { status: "failed", error: { kind: "timeout", message: `The shell block ran past its ${describeDuration(ctx.timeoutMs)} timeout.` }, output };
       }

@@ -357,6 +357,9 @@ export interface WorkflowRunProgress {
   total: number;
 }
 
+/** The structured reasons a run (not one of its blocks) failed. */
+export type WorkflowRunErrorKind = "project_missing";
+
 export interface WorkflowRunSummary {
   id: string;
   workflowId: string;
@@ -371,8 +374,14 @@ export interface WorkflowRunSummary {
   durationMs?: number;
   current?: WorkflowRunProgress;
   error?: string;
+  /** What kind of failure `error` is, when the engine knows (additive; e.g. `project_missing`). */
+  errorKind?: WorkflowRunErrorKind;
   projectPath?: string;
-  tempProject?: { path: string; deleted: boolean; deleteAfter?: string };
+  /**
+   * `pending`: recorded BEFORE the creation (a restart finds and removes the directory);
+   * `deleteAfter`: when the sweeper may delete a project the run kept.
+   */
+  tempProject?: { path: string; deleted: boolean; deleteAfter?: string; pending?: boolean };
   parentRunId?: string;
   retryOf?: string;
 }

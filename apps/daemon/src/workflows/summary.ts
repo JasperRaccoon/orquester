@@ -35,6 +35,36 @@ export interface WorkflowSummaryDeps {
   now?: Date;
 }
 
+/**
+ * `errorCount` validates the whole workflow; the rail lists every workflow on each `GET` and on
+ * every event, so the count is cached per definition object (a write replaces it) and per
+ * validation context (a new secret or saved prompt can change it without an edit).
+ */
+const errorCounts = new WeakMap<Workflow, { key: string; count: number }>();
+
+function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): string {
+  const list = (values: readonly string[] | undefined): string => (values === undefined ? "-" : [...values].sort().join("\u0000"));
+  return [
+    workflow.id,
+    String(workflow.revision),
+    workflow.updatedAt,
+    list(options.secretNames),
+    list(options.savedPromptIds),
+    list(options.knownWorkflowIds),
+    options.strictScheduleIntervals === true ? "strict" : "-"
+  ].join("\u0001");
+}
+
+export function errorCountOf(workflow: Workflow, options: ValidateWorkflowOptions): number {
+  const key = validationKey(workflow, options);
+  const cached = errorCounts.get(workflow);
+  if (cached && cached.key === key) return cached.count;
+  const problems = validateWorkflow(workflow, options).problems;
+  const count = hasWorkflowErrors(problems) ? problems.filter((problem) => problem.severity === "error").length : 0;
+  errorCounts.set(workflow, { key, count });
+  return count;
+}
+
 /** The project a workflow's triggers name: an existing project's directory name, a temp clone's repo. */
 export function workflowProjectName(workflow: Workflow): string | undefined {
   const project = workflow.project;
@@ -64,7 +94,6 @@ export function buildWorkflowSummary(workflow: Workflow, deps: WorkflowSummaryDe
     if (state?.lastError !== undefined) trigger.lastError = state.lastError;
     triggers.push(trigger);
   }
-  const problems = validateWorkflow(workflow, deps.validation ?? {}).problems;
   const summary: WorkflowSummary = {
     id: workflow.id,
     name: workflow.name,
@@ -73,7 +102,7 @@ export function buildWorkflowSummary(workflow: Workflow, deps: WorkflowSummaryDe
     project: workflow.project,
     triggers,
     nodeCount: workflow.nodes.length,
-    errorCount: hasWorkflowErrors(problems) ? problems.filter((problem) => problem.severity === "error").length : 0,
+    errorCount: errorCountOf(workflow, deps.validation ?? {}),
     activeRuns: deps.runStore.activeForWorkflow(workflow.id),
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt

@@ -185,6 +185,17 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
       message: `The definition is ${Math.ceil(bytes / 1024)} KiB; the limit is ${WORKFLOW_LIMITS.maxDefinitionBytes / 1024} KiB`
     });
   }
+  // Past a hard limit nothing else is checked: the per-block and graph checks are superlinear, and
+  // a request that is refused anyway must not hold the event loop (5 000 blocks took ~20 s).
+  const nodeCount = Array.isArray(input.nodes) ? input.nodes.length : 0;
+  const edgeCount = Array.isArray(input.edges) ? input.edges.length : 0;
+  if (nodeCount > WORKFLOW_LIMITS.maxNodes) {
+    push({ severity: "error", code: "too_many_nodes", message: `At most ${WORKFLOW_LIMITS.maxNodes} blocks per workflow` });
+  }
+  if (edgeCount > WORKFLOW_LIMITS.maxEdges) {
+    push({ severity: "error", code: "too_many_edges", message: `At most ${WORKFLOW_LIMITS.maxEdges} connections per workflow` });
+  }
+  if (problems.length > 0) return { workflow: null, problems };
 
   // -- The record, without its nodes and edges ---------------------------------------------------
   const top = workflowRecordSchema.safeParse({ ...input, nodes: [], edges: [] });
@@ -212,9 +223,6 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
   const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
   if (input.nodes !== undefined && !Array.isArray(input.nodes)) {
     push({ severity: "error", code: "schema", message: "nodes must be a list", field: "nodes" });
-  }
-  if (rawNodes.length > WORKFLOW_LIMITS.maxNodes) {
-    push({ severity: "error", code: "too_many_nodes", message: `At most ${WORKFLOW_LIMITS.maxNodes} blocks per workflow` });
   }
   const nodes: WorkflowNode[] = [];
   const allIds = new Set<string>();
@@ -270,9 +278,6 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
   const rawEdges = Array.isArray(input.edges) ? input.edges : [];
   if (input.edges !== undefined && !Array.isArray(input.edges)) {
     push({ severity: "error", code: "schema", message: "edges must be a list", field: "edges" });
-  }
-  if (rawEdges.length > WORKFLOW_LIMITS.maxEdges) {
-    push({ severity: "error", code: "too_many_edges", message: `At most ${WORKFLOW_LIMITS.maxEdges} connections per workflow` });
   }
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const label = (id: string): string => byId.get(id)?.name ?? id;

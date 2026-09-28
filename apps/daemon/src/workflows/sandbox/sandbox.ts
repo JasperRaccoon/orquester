@@ -283,6 +283,13 @@ export function createSandboxRunner(options: SandboxRunnerOptions = {}): Detaile
 
   const readExit = (attemptDir: string): Promise<SandboxExitDetail | null> => readSandboxExit(attemptDir);
 
+  const readHandle = async (attemptDir: string): Promise<SandboxHandle | null> => {
+    const record = (await readJson(join(attemptDir, "handle.json"))) as Partial<SandboxHandle> | null | undefined;
+    if (!record || typeof record !== "object") return null;
+    if (typeof record.pid !== "number" || !(record.pid > 0) || typeof record.starttime !== "number") return null;
+    return { pid: record.pid, starttime: record.starttime, attemptDir };
+  };
+
   const spawn = async (request: SandboxSpawnRequest): Promise<SandboxHandle> => {
     if (request.kind !== "code" && request.kind !== "shell") {
       throw new Error(`Unknown sandbox kind: ${String(request.kind)}`);
@@ -481,6 +488,7 @@ export function createSandboxRunner(options: SandboxRunnerOptions = {}): Detaile
     wait,
     isAlive,
     readExit,
+    readHandle,
     kill
   };
 }

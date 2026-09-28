@@ -57,6 +57,7 @@ export function runSummaryOf(run: PersistedRun | WorkflowRun): WorkflowRunSummar
     "durationMs",
     "current",
     "error",
+    "errorKind",
     "projectPath",
     "tempProject",
     "parentRunId",
@@ -315,12 +316,17 @@ export class FileRunStore implements RunStore {
     return JSON.parse(await readFile(target, "utf8")) as unknown;
   }
 
-  async deleteForWorkflow(workflowId: string): Promise<void> {
+  async deleteForWorkflow(workflowId: string, options: { keep?: ReadonlySet<string> } = {}): Promise<void> {
     // A copy: deleteRun splices the live list.
-    const list = [...(this.byWorkflow.get(workflowId) ?? [])];
+    const list = [...(this.byWorkflow.get(workflowId) ?? [])].filter((summary) => !options.keep?.has(summary.id));
     await Promise.all(list.map((summary) => this.deleteRun(summary.id)));
-    this.byWorkflow.delete(workflowId);
+    if ((this.byWorkflow.get(workflowId)?.length ?? 0) === 0) this.byWorkflow.delete(workflowId);
     void this.persistIndex();
+  }
+
+  /** Every workflow id with a run on record (a deleted workflow's kept runs included). */
+  workflowIds(): string[] {
+    return [...this.byWorkflow.keys()];
   }
 
   async sweep(): Promise<void> {
@@ -417,6 +423,11 @@ export class FileRunStore implements RunStore {
         if (at !== -1) oldList.splice(at, 1);
       }
       previous.summary = summary;
+      // The file's stamp belongs to the OLD summary: until the write lands and re-stamps it, the
+      // cached index must not pair the new file with a stale summary (a crash in between would
+      // leave an unfinished run listed as finished, never resumed).
+      previous.size = -1;
+      previous.mtimeMs = -1;
     } else {
       this.entries.set(summary.id, { summary, size: -1, mtimeMs: -1 });
     }

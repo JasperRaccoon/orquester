@@ -31,6 +31,18 @@ export class WorkflowEngineError extends Error {
   }
 }
 
+/**
+ * Thrown by `setWaitingOn` once the engine has stopped (or the run was finalized): the state can no
+ * longer reach disk, so the executor must NOT go on to its side effect — the next engine resumes the
+ * block from what `run.json` last held.
+ */
+export class EngineStoppedError extends Error {
+  constructor() {
+    super("The workflow engine stopped; this block resumes after the restart.");
+    this.name = "EngineStoppedError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Limits
 // ---------------------------------------------------------------------------
@@ -203,6 +215,7 @@ export function toRunSummary(run: PersistedRun): WorkflowRunSummary {
   if (run.durationMs !== undefined) summary.durationMs = run.durationMs;
   if (run.current !== undefined) summary.current = { ...run.current };
   if (run.error !== undefined) summary.error = run.error;
+  if (run.errorKind !== undefined) summary.errorKind = run.errorKind;
   if (run.projectPath !== undefined) summary.projectPath = run.projectPath;
   if (run.tempProject !== undefined) summary.tempProject = { ...run.tempProject };
   if (run.parentRunId !== undefined) summary.parentRunId = run.parentRunId;

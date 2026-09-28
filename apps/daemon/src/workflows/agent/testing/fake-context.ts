@@ -179,6 +179,7 @@ export function createFakeContext(opts: FakeContextOptions): FakeContext {
       async resolveExisting() { return project; },
       async createTemp() { throw new Error("not simulated"); },
       async deleteProject() {},
+      tempPathFor(workspace, name) { return `/w/${workspace}/${name}`; },
       async gitStatusShort(path) {
         if (typeof opts.gitStatus === "function") return opts.gitStatus(path);
         return opts.gitStatus ?? " M src/app.ts\n";

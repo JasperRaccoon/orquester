@@ -21,16 +21,37 @@ export async function runSandboxAttempt<T extends "code" | "shell">(ctx: NodeExe
   let handle: SandboxHandle;
   let deadlineAt: Date;
   if (resume) {
-    handle = { pid: resume.pid, starttime: resume.starttime, attemptDir: resume.attemptDir };
     deadlineAt = new Date(resume.deadlineAt);
+    if (resume.spawning) {
+      // The restart came between the pre-spawn marker and the handle: adopt the runner the spawn
+      // recorded in handle.json, else read its exit; never spawn a second one.
+      const recorded = await sandbox.readHandle(resume.attemptDir);
+      if (recorded === null) {
+        const exit = await sandbox.readExit(resume.attemptDir);
+        await ctx.setWaitingOn(undefined);
+        return exit ? { kind: "exit", exit } : { kind: "lost" };
+      }
+      handle = recorded;
+      await ctx.setWaitingOn({
+        kind: "process",
+        pid: handle.pid,
+        starttime: handle.starttime,
+        attemptDir: handle.attemptDir,
+        deadlineAt: deadlineAt.toISOString()
+      });
+    } else {
+      handle = { pid: resume.pid, starttime: resume.starttime, attemptDir: resume.attemptDir };
+    }
     if (!sandbox.isAlive(handle)) {
-      const exit = await sandbox.readExit(resume.attemptDir);
+      const exit = await sandbox.readExit(handle.attemptDir);
       await ctx.setWaitingOn(undefined);
       return exit ? { kind: "exit", exit } : { kind: "lost" };
     }
   } else {
     const attemptDir = await ctx.attemptDir();
     deadlineAt = new Date(ctx.services.clock.now().getTime() + ctx.timeoutMs);
+    // On disk BEFORE the spawn: a restart in between finds the runner through handle.json.
+    await ctx.setWaitingOn({ kind: "process", pid: 0, starttime: 0, attemptDir, deadlineAt: deadlineAt.toISOString(), spawning: true });
     try {
       handle = await sandbox.spawn({
         ...spawn,

@@ -1,9 +1,13 @@
 // Automated workflows — the flow blocks: IF, Switch, Merge, Stop, and the triggers (spec §3.2, §4).
-// Pure: they read the run context and choose a handle.
+// They read the run context and choose a handle; a `matches` rule runs in a worker (regex-worker.ts).
 
-import { evaluateRules, evaluateSwitch, type ExpressionContext, type WorkflowNodeType } from "@orquester/api";
+import { evaluateRulesAsync, evaluateSwitchAsync, type ExpressionContext, type RuleMatcher, type WorkflowNodeType } from "@orquester/api";
 
 import type { NodeExecutionContext, NodeExecutor, NodeResult } from "../contracts.ts";
+import { sharedRegexMatcher } from "./regex-worker.ts";
+
+/** Where `matches` runs: a worker thread with a hard timeout (regex-worker.ts), never this loop. */
+const defaultMatcher: RuleMatcher = (job) => sharedRegexMatcher().match(job);
 
 function ruleContext<T extends WorkflowNodeType>(ctx: NodeExecutionContext<T>): ExpressionContext {
   return { ...ctx.expressionContext(), secrets: ctx.secrets, workflow: { id: ctx.workflow.id, name: ctx.workflow.name } };
@@ -18,23 +22,23 @@ export function createTriggerExecutors(): [NodeExecutor<"trigger.manual">, NodeE
   return [make("trigger.manual"), make("trigger.schedule"), make("trigger.git")];
 }
 
-export function createIfExecutor(): NodeExecutor<"if"> {
+export function createIfExecutor(matcher: RuleMatcher = defaultMatcher): NodeExecutor<"if"> {
   return {
     type: "if",
     async execute(ctx): Promise<NodeResult> {
       const context = ruleContext(ctx);
-      const evaluated = evaluateRules(ctx.node.config.combine, ctx.node.config.rules, context);
+      const evaluated = await evaluateRulesAsync(ctx.node.config.combine, ctx.node.config.rules, context, matcher);
       return { status: "succeeded", output: context.input, handle: evaluated.result ? "true" : "false", warnings: evaluated.warnings };
     }
   };
 }
 
-export function createSwitchExecutor(): NodeExecutor<"switch"> {
+export function createSwitchExecutor(matcher: RuleMatcher = defaultMatcher): NodeExecutor<"switch"> {
   return {
     type: "switch",
     async execute(ctx): Promise<NodeResult> {
       const context = ruleContext(ctx);
-      const evaluated = evaluateSwitch(ctx.node.config, context);
+      const evaluated = await evaluateSwitchAsync(ctx.node.config, context, matcher);
       // No case and no fallback output: every outgoing edge is dead.
       return { status: "succeeded", output: context.input, handle: evaluated.handle ?? "none", warnings: evaluated.warnings };
     }
