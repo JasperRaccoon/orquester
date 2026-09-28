@@ -648,11 +648,9 @@ export const PROFILE_HOOK_EVENTS: Partial<Record<AgentProfileAgentId, readonly s
   ]
 };
 
-/** Events whose matcher the agent ignores: the editor hides the matcher field for them. */
-export const PROFILE_HOOK_EVENTS_WITHOUT_MATCHER: readonly string[] = [
-  "UserPromptSubmit",
-  "Stop",
-  "Interrupt",
-  "SessionEnd",
-  "Notification"
-];
+/**
+ * Events whose matcher every agent ignores: the editor hides the matcher field
+ * for them. SessionEnd and Notification keep theirs (Codex hashes a SessionEnd
+ * matcher into its hook trust; Claude matches Notification by type).
+ */
+export const PROFILE_HOOK_EVENTS_WITHOUT_MATCHER: readonly string[] = ["UserPromptSubmit", "Stop", "Interrupt"];

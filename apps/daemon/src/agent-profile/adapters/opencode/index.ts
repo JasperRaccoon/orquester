@@ -18,6 +18,7 @@
  * recycle them, spec §4.8).
  */
 
+import { SecretDigester } from "../../infra/secret-digest.ts";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -190,6 +191,8 @@ function keepBothName(base: string, taken: (name: string) => boolean, valid: (na
 }
 
 export class OpenCodeProfileAdapter implements ProfileAdapter {
+  /** Keyed digests of MCP secret values for revisions (never the values themselves). */
+  private readonly secrets = new SecretDigester();
   readonly agent = AGENT;
   private readonly ctx: ProfileAdapterContext;
   private readonly backups: ProfileBackups;
@@ -328,7 +331,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
           locked: false,
           source: USER,
           path: (definedIn.at(-1) ?? files.at(-1))?.path ?? config.targetPath,
-          revision: contentHash({ effective, enabled, files: files.map((file) => file.name) }),
+          revision: contentHash({ effective: this.secrets.deepMasked(effective), enabled, files: files.map((file) => file.name) }),
           warnings,
           meta: mcpMeta(effective)
         }

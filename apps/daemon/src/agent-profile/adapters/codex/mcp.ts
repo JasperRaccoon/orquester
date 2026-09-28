@@ -249,7 +249,13 @@ export function portableFromEntry(name: string, entry: CodexMcpEntry): PortableM
   if (view.transport === "stdio" && Object.keys(env).length > 0) server.env = env;
   const headers = stringTable(entry.http_headers);
   if (view.transport === "http" && Object.keys(headers).length > 0) server.headers = headers;
-  if (view.advanced !== undefined) server.advanced = view.advanced;
+  // Codex-only settings travel as advanced keys, so the converter names them
+  // in its "Dropped MCP settings …" note instead of losing them silently.
+  const advanced: Record<string, unknown> = { ...(view.advanced ?? {}) };
+  for (const key of ["env_vars", "env_http_headers"] as const) {
+    if (entry[key] !== undefined) advanced[key] = entry[key];
+  }
+  if (Object.keys(advanced).length > 0) server.advanced = advanced;
   return server;
 }
 

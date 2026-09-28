@@ -12,7 +12,6 @@
  * reaches a client.
  */
 
-import { createHmac, randomBytes } from "node:crypto";
 import {
   MCP_TRANSPORTS,
   type McpServerDraft,
@@ -84,31 +83,7 @@ export function mcpTarget(def: Record<string, unknown>): string | undefined {
   return typeof def.url === "string" ? def.url : undefined;
 }
 
-/**
- * Keyed digests stand in for secret values in revisions: an edit of a value
- * still moves the revision, but a revision (sent to clients) cannot be
- * brute-forced back into a short secret. The key lives for the process, so
- * revisions of servers with secrets move once across a daemon restart.
- */
-export class SecretDigester {
-  private readonly key = randomBytes(32);
-
-  digest(value: string): string {
-    return createHmac("sha256", this.key).update(value).digest("hex").slice(0, 16);
-  }
-
-  /** The definition with `env`/`headers` values replaced by digests. */
-  masked(def: Record<string, unknown>): Record<string, unknown> {
-    const out: Record<string, unknown> = { ...def };
-    for (const field of ["env", "headers"] as const) {
-      const map = def[field];
-      if (isRecord(map)) {
-        out[field] = Object.fromEntries(Object.entries(map).map(([k, v]) => [k, this.digest(String(v))]));
-      }
-    }
-    return out;
-  }
-}
+export { SecretDigester } from "../../infra/secret-digest.ts";
 
 /**
  * Resolves draft entries against the values on disk: `{key, value}` sets,

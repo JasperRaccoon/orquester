@@ -150,3 +150,4 @@ export {
   encodeStashId
 } from "./stash.ts";
 export { type CopyResult, type PathKind, copyTree, pathKind } from "./tree.ts";
+export { SecretDigester } from "./secret-digest.ts";

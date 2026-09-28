@@ -42,6 +42,7 @@
  *   with a warning, and can only be deleted (or copied to another agent).
  */
 
+import { SecretDigester } from "../../infra/secret-digest.ts";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { join, sep } from "node:path";
@@ -241,6 +242,8 @@ function splitPluginId(id: string): { name: string; marketplace: string } {
 }
 
 export class CodexProfileAdapter implements ProfileAdapter {
+  /** Keyed digests of MCP secret values for revisions (never the values themselves). */
+  private readonly secrets = new SecretDigester();
   readonly agent = AGENT;
   private client: CodexConfigClient | null = null;
   /** The `codex` binary {@link client} was made for. */
@@ -510,7 +513,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
           locked: false,
           source: { ...USER_SOURCE },
           path: this.configPath,
-          revision: contentHash({ entry: value, enabled }),
+          revision: contentHash({ entry: this.secrets.deepMasked(value), enabled }),
           warnings: [],
           meta: { transport }
         },
@@ -531,7 +534,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
       deletable: false,
       locked: false,
       source: { type: "plugin", label: `Plugin · ${plugin}`, pluginId },
-      revision: contentHash({ pluginId, server }),
+      revision: contentHash({ pluginId, server: this.secrets.deepMasked(server) }),
       warnings: []
     };
   }
