@@ -314,7 +314,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
       const { problems } = validateWorkflow(candidate, {
         secretNames: secrets.names(id),
         savedPromptIds: deps.savedPromptIds(),
-        knownWorkflowIds: service.list().map((workflow) => workflow.id)
+        knownWorkflowIds: service.list().map((workflow) => workflow.id),
+        strictScheduleIntervals: true
       });
       return { problems };
     })

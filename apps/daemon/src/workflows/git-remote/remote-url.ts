@@ -137,13 +137,28 @@ export function repoDisplayName(url: string): string {
 }
 
 /**
- * The URL with any password/token removed from its userinfo (`https://user:tok@h/…` →
- * `https://user@h/…`), so a remote read off a checkout never carries a credential into a
- * persisted payload or a broadcast. Non-URL (scp-like) forms are returned unchanged.
+ * The URL with its credentials removed, so a remote read off a checkout (or typed into a trigger)
+ * never carries a token into a persisted payload, a broadcast or a prompt. For `http(s)://` and
+ * `git://` the WHOLE userinfo goes (`https://ghp_xxx@github.com/…` → `https://github.com/…`):
+ * GitHub accepts a token as the username alone, so keeping "the user" can keep the secret, and the
+ * account's own transport authenticates reads of the URL. For `ssh://` the user is the login
+ * (`git`) and stays; only a password goes. Non-URL (scp-like) forms are returned unchanged.
  */
 export function stripUrlCredentials(url: string): string {
   return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)([^@/?#]*)@/i, (_match, scheme: string, userinfo: string) => {
+    if (!/^ssh(\+git)?:\/\/$|^git\+ssh:\/\/$/i.test(scheme)) return scheme;
     const user = userinfo.split(":")[0];
     return user ? `${scheme}${user}@` : scheme;
+  });
+}
+
+/**
+ * Redacts URL userinfo inside free text (git's stderr, an error message): any `//user:secret@`,
+ * and for `http(s)://` / `git://` any `//anything@` (a bare token as the user) → `//***@`.
+ */
+export function redactUrlUserinfo(text: string): string {
+  return text.replace(/(\b[a-z][a-z0-9+.-]*:)?\/\/([^/@\s]*)@/gi, (match, scheme: string | undefined, info: string) => {
+    const tokenScheme = scheme !== undefined && /^(https?|git):$/i.test(scheme);
+    return info.includes(":") || tokenScheme ? `${scheme ?? ""}//***@` : match;
   });
 }

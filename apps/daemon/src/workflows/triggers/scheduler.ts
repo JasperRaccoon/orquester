@@ -100,11 +100,24 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     return nextScheduleRun(cron, timezone, from);
   }
 
-  async function writeCursors(mutate: (draft: Record<string, ScheduleCursor>) => void): Promise<void> {
-    await state.update((draft) => {
-      mutate(draft.schedules);
-      cursors = draft.schedules;
-    });
+  /**
+   * Applies `mutate` to the live state (memory — and `cursors` — move at once) and waits for the
+   * write. Resolves false when the write failed: the change stays in memory and rides the next
+   * write, and the caller must neither stop the timer nor fire on an unpersisted cursor.
+   */
+  async function writeCursors(mutate: (draft: Record<string, ScheduleCursor>) => void): Promise<boolean> {
+    try {
+      await state.update((draft) => {
+        mutate(draft.schedules);
+        cursors = draft.schedules;
+      });
+      return true;
+    } catch (error) {
+      logger.error("workflow scheduler: could not persist schedule cursors", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
   }
 
   /** New / changed triggers get a cursor computed from now; gone ones are pruned. */
@@ -153,13 +166,16 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const from = new Date(Math.max(now.getTime(), scheduledFor.getTime()));
       const nextRunAt = computeNext(trigger.key, cursor.cron, cursor.timezone, from);
       const firedAt = now.toISOString();
-      await writeCursors((draft) => {
+      const persisted = await writeCursors((draft) => {
         const live = draft[trigger.key];
         // An edit that landed meanwhile owns the cursor.
         if (!live || live.nextRunAt !== cursor.nextRunAt || live.cron !== cursor.cron) return;
         draft[trigger.key] = { ...live, nextRunAt, lastFiredAt: fire ? firedAt : live.lastFiredAt };
       });
       if (stopped) return;
+      // The advanced cursor is in memory but not on disk: skip this one run (a crash now must not
+      // repeat it — "lose, never repeat"); the next time is still armed.
+      if (!persisted) continue;
       const request: FireRequest = {
         workflowId: trigger.workflow.id,
         triggerNodeId: trigger.node.id,
@@ -197,8 +213,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     timer = clock.setTimeout(() => {
       timer = null;
       void enqueue(async () => {
-        await tick();
-        arm();
+        try {
+          await tick();
+        } finally {
+          // Always re-arm: the timer was just consumed, and a tick that threw must not stop every
+          // schedule until the next edit or restart.
+          arm();
+        }
       });
     }, delay);
   }
@@ -206,9 +227,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   function rearm(): Promise<void> {
     return enqueue(async () => {
       if (stopped) return;
-      await reconcile();
-      await tick();
-      arm();
+      try {
+        await reconcile();
+        await tick();
+      } finally {
+        arm();
+      }
     });
   }
 

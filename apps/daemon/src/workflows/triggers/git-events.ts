@@ -6,7 +6,15 @@
 //   push     `refs/heads/<b>` → sha; `@default` → the default branch it was recorded for (branches: [])
 //   tag      `refs/tags/<t>`  → the tag's own object sha (a moved tag is ignored, not re-fired)
 //   release  `release:<id>`   → tag
-//   PR       `pr:<n>`         → `<state>:<headSha>`; `@high` → the highest PR number ever seen
+//   PR       `pr:<n>`         → `<state>:<headSha>[:<cycle>]` (cycle = times reopened, absent = 0);
+//                              `@high` → the highest PR number ever seen
+//
+// Dedup keys name the TRANSITION, not just the destination, so a legitimate return to an earlier
+// state (a force-push rollback `B..A` after `A..B`, a PR closed again after a reopen) is a new key:
+//   push `push:<ref>:<previousSha>..<sha>` (`..<sha>` for a new branch)
+//   PR   `pr:<n>:opened:<headSha>`, else `pr:<n>:<action>:<prevHeadSha>..<headSha>[#<cycle>]`
+// Keys written by older builds (`push:<ref>:<sha>`, `pr:<n>:<action>:<headSha>`) stay in the ring
+// and simply never match again; the committed `seen` map is what prevents a re-fire after a crash.
 
 import type { GitTriggerPayload } from "@orquester/api";
 import type { GitPullRequestAction, GitTriggerEvent } from "@orquester/config";
@@ -22,7 +30,7 @@ export const FIRED_RING_SIZE = 1000;
 export const MAX_SEEN_PULL_REQUESTS = 2000;
 
 export interface DetectedEvent {
-  /** The dedup key (`push:<ref>:<sha>`, `tag:<name>:<sha>`, `release:<id>`, `pr:<n>:<action>:<headSha>`). */
+  /** The dedup key (`push:<ref>:<prev>..<sha>`, `tag:<name>:<sha>`, `release:<id>`, `pr:<n>:<action>:<prev>..<headSha>`). */
   key: string;
   payload: GitTriggerPayload;
   text: string;
@@ -109,7 +117,7 @@ export function detectPush(
     seen[ref] = sha;
     if (!baselined || previous === sha) continue;
     events.push({
-      key: `push:${ref}:${sha}`,
+      key: `push:${ref}:${previous ?? ""}..${sha}`,
       payload: {
         kind: "git",
         event: "push",
@@ -213,8 +221,11 @@ export function detectPullRequests(
   repo: RepoInfo
 ): Detection {
   const seen: Record<string, string> = { ...cursor.seen };
-  let high = Number(seen[HIGH_KEY] ?? "0");
-  if (!Number.isFinite(high)) high = 0;
+  let baseHigh = Number(seen[HIGH_KEY] ?? "0");
+  if (!Number.isFinite(baseHigh)) baseHigh = 0;
+  // "Opened" is judged against the mark as it stood BEFORE this page: raising it while walking would
+  // hide a lower-numbered new PR walked after a higher-numbered one.
+  let high = baseHigh;
   const wanted = new Set<GitPullRequestAction>(event.actions);
   const bases = (event.baseBranches ?? []).map((base) => base.trim()).filter((base) => base.length > 0);
   const events: DetectedEvent[] = [];
@@ -223,31 +234,35 @@ export function detectPullRequests(
     const key = `pr:${pr.number}`;
     const previous = Object.hasOwn(seen, key) ? seen[key] : undefined;
     const actions: GitPullRequestAction[] = [];
-    if (cursor.baselined) {
-      if (previous === undefined) {
-        if (pr.number > high) {
-          actions.push("opened");
-          if (pr.state === "merged") actions.push("merged");
-          if (pr.state === "closed") actions.push("closed");
-        }
-      } else {
-        const colon = previous.indexOf(":");
-        const prevState = colon < 0 ? previous : previous.slice(0, colon);
-        const prevSha = colon < 0 ? "" : previous.slice(colon + 1);
+    let prevSha = "";
+    let cycle = 0;
+    if (previous !== undefined) {
+      const [prevState = "", sha = "", rawCycle = "0"] = previous.split(":");
+      prevSha = sha;
+      cycle = Number.parseInt(rawCycle, 10) || 0;
+      if (prevState !== "open" && pr.state === "open") cycle += 1;
+      if (cursor.baselined) {
         if (prevState === "open" && pr.state === "open" && !sameSha(prevSha, pr.headSha)) actions.push("updated");
         if (prevState === "open" && pr.state === "merged") actions.push("merged");
         if (prevState === "open" && pr.state === "closed") actions.push("closed");
       }
+    } else if (cursor.baselined && pr.number > baseHigh) {
+      actions.push("opened");
+      if (pr.state === "merged") actions.push("merged");
+      if (pr.state === "closed") actions.push("closed");
     }
     // Re-insert so the map's order is least-recently-changed first (eviction below).
     delete seen[key];
-    seen[key] = `${pr.state}:${pr.headSha}`;
+    seen[key] = cycle > 0 ? `${pr.state}:${pr.headSha}:${cycle}` : `${pr.state}:${pr.headSha}`;
     if (pr.number > high) high = pr.number;
     if (bases.length > 0 && !matchesAnyGlob(bases, pr.base)) continue;
     for (const action of actions) {
       if (!wanted.has(action)) continue;
       events.push({
-        key: `pr:${pr.number}:${action}:${pr.headSha}`,
+        key:
+          action === "opened"
+            ? `pr:${pr.number}:opened:${pr.headSha}`
+            : `pr:${pr.number}:${action}:${prevSha}..${pr.headSha}${cycle > 0 ? `#${cycle}` : ""}`,
         payload: {
           kind: "git",
           event: "pull_request",

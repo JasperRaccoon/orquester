@@ -18,7 +18,7 @@ import { UNSET_SUBWORKFLOW_ID } from "./block-types.ts";
 import { parseTemplate, templateReferences, hasTemplate, type TemplateReference } from "./expressions.ts";
 import { nodeTemplateFields } from "./fields.ts";
 import { acceptsInput, findCycles, outputHandles, reachableFromTriggers, upstreamOf } from "./graph.ts";
-import { presetToCron, validateCron, isValidTimeZone } from "./schedule.ts";
+import { presetToCron, scheduleIntervalProblem, validateCron, isValidTimeZone } from "./schedule.ts";
 import {
   isTriggerType,
   WORKFLOW_LIMITS,
@@ -68,6 +68,7 @@ export const WORKFLOW_PROBLEM_CODES = [
   "invalid_timezone",
   "invalid_cron",
   "schedule_preset_mismatch",
+  "schedule_uneven_interval",
   "release_github_only",
   "subworkflow_unset",
   "subworkflow_self",
@@ -86,6 +87,12 @@ export interface ValidateWorkflowOptions {
   savedPromptIds?: readonly string[];
   /** Workflow ids; an unknown sub-workflow warns only when given. */
   knownWorkflowIds?: readonly string[];
+  /**
+   * A save (or the editor's check of one): an "every N" schedule preset whose N does not divide the
+   * hour (day) is an ERROR. Without it — a stored definition being run or summarised — only a
+   * warning, so a workflow saved before the rule keeps running.
+   */
+  strictScheduleIntervals?: boolean;
 }
 
 export interface ValidateWorkflowResult {
@@ -506,6 +513,16 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         const reason = validateCron(node.config.cron, timezone);
         if (reason !== null) {
           push({ severity: "error", code: "invalid_cron", message: `${node.name}: ${reason}`, nodeId: node.id, field: "config.cron" });
+        }
+        const uneven = scheduleIntervalProblem(node.config.preset);
+        if (uneven !== null) {
+          push({
+            severity: opts.strictScheduleIntervals === true ? "error" : "warning",
+            code: "schedule_uneven_interval",
+            message: `${node.name}: ${uneven}`,
+            nodeId: node.id,
+            field: "config.preset"
+          });
         }
         const derived = presetToCron(node.config.preset);
         if (derived !== null && derived !== node.config.cron.trim().split(/\s+/).join(" ")) {

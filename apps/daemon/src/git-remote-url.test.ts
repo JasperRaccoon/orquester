@@ -25,7 +25,7 @@ async function withRepo(fn: (dir: string, git: (...args: string[]) => Promise<un
   }
 }
 
-test("remoteUrl reads origin (or a named remote) and strips a password", async () => {
+test("remoteUrl reads origin (or a named remote) and strips its credentials", async () => {
   await withRepo(async (dir, git) => {
     const service = new GitService();
     assert.equal(await service.remoteUrl(dir), null);
@@ -34,8 +34,10 @@ test("remoteUrl reads origin (or a named remote) and strips a password", async (
     assert.equal(await service.remoteUrl(dir), "git@github.com:octo-org/hello-world.git");
     assert.equal(
       await service.remoteUrl(dir, "upstream"),
-      "https://x-access-token@github.com/up/hello-world.git"
+      "https://github.com/up/hello-world.git"
     );
+    await git("remote", "add", "tokenuser", "https://ghp_secret@github.com/up/hello-world.git");
+    assert.equal(await service.remoteUrl(dir, "tokenuser"), "https://github.com/up/hello-world.git");
     assert.equal(await service.remoteUrl(dir, "missing"), null);
     assert.equal(await service.remoteUrl(dir, "--help"), null);
   });

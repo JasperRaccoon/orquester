@@ -308,7 +308,9 @@ export class WorkflowService implements WorkflowStore {
       );
     }
     const id = typeof record.id === "string" ? record.id : undefined;
-    const result = validateWorkflow(candidate, this.validationOptions(id));
+    // A save is strict: an "every N" preset that cannot run evenly is an error here, a warning on
+    // a stored definition (which keeps running).
+    const result = validateWorkflow(candidate, { ...this.validationOptions(id), strictScheduleIntervals: true });
     if (result.workflow === null) {
       const errors = result.problems.filter((problem) => problem.severity === "error");
       throw new WorkflowError(

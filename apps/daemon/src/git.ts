@@ -571,9 +571,10 @@ export class GitService {
 
   /**
    * The fetch URL of `remote` (default `origin`), or null when the dir is no repo, the remote
-   * does not exist or its name is not a plain remote name. Any password/token in the URL's
-   * userinfo is removed (`https://user:tok@h/…` → `https://user@h/…`): the URL feeds trigger
-   * payloads and cards, and the account's own transport authenticates reads of it.
+   * does not exist or its name is not a plain remote name. Credentials are removed
+   * (`stripUrlCredentials`: an http(s) URL loses its whole userinfo — a token can be the user —
+   * `https://tok@h/…` → `https://h/…`): the URL feeds trigger payloads and cards, and the
+   * account's own transport authenticates reads of it.
    */
   async remoteUrl(cwd: string, remote = "origin"): Promise<string | null> {
     if (!/^[A-Za-z0-9._][A-Za-z0-9._/-]*$/.test(remote)) {

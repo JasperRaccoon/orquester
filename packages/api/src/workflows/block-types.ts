@@ -58,7 +58,7 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
     type: "trigger.schedule",
     title: "Schedule",
     description:
-      "Starts the workflow on a schedule — every N minutes or hours, daily, on chosen weekdays, monthly, or a cron — in the workflow's time zone.",
+      "Starts the workflow on a schedule — every N minutes (1, 2, 3, 4, 5, 6, 10, 12, 15, 20 or 30) or hours (1, 2, 3, 4, 6, 8 or 12), daily, on chosen weekdays, monthly, or a cron — in the workflow's time zone.",
     category: WORKFLOW_NODE_CATEGORY["trigger.schedule"],
     output: "{ kind: \"schedule\", firedAt, scheduledFor } (ISO times).",
     example: { preset: { kind: "weekly", days: [1, 5], time: "16:00" }, cron: "0 16 * * 1,5" }

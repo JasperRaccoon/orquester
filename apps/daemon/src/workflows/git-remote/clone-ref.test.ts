@@ -74,3 +74,13 @@ test("isMissingRemoteRef recognises git's messages", () => {
   assert.equal(isMissingRemoteRef("fatal: couldn't find remote ref deadbeef"), true);
   assert.equal(isMissingRemoteRef("fatal: Authentication failed"), false);
 });
+
+test("resolveAbbreviatedSha: one commit by prefix, null when none or ambiguous", async () => {
+  const { resolveAbbreviatedSha } = await import("./clone-ref");
+  const a = `abcdef012345${"0".repeat(28)}`;
+  const b = `abcdef012345${"1".repeat(28)}`;
+  const listing = `${a}\trefs/heads/main\n${a}\tHEAD\n${"9".repeat(40)}\trefs/tags/v1\n`;
+  assert.equal(resolveAbbreviatedSha(listing, "ABCDEF012345"), a);
+  assert.equal(resolveAbbreviatedSha(listing, "123456789abc"), null);
+  assert.equal(resolveAbbreviatedSha(`${listing}${b}\trefs/pull/1/head\n`, "abcdef012345"), null);
+});

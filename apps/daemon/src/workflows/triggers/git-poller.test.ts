@@ -4,7 +4,7 @@ import type { GitTriggerPayload } from "@orquester/api";
 import type { LsRemoteResult } from "../git-remote/index.ts";
 import { GitRemoteError, type ConditionalListOptions, type PullRequestInfo, type ReleaseInfo } from "../../providers/types.ts";
 import { ManualClock } from "./clock.ts";
-import { createGitPoller, MAX_BACKOFF_MS, type GitRemoteReader } from "./git-poller.ts";
+import { createGitPoller, describePollError, MAX_BACKOFF_MS, type GitRemoteReader } from "./git-poller.ts";
 import type { ResolveRepo } from "./repo-resolve.ts";
 import { advance, fakeHost, memoryState, node, recordingLogger, workflow } from "./test-support.ts";
 
@@ -21,6 +21,7 @@ class FakeRemote implements GitRemoteReader {
   lsCalls: { accountId: string | null; url: string; defaultBranch: boolean | undefined }[] = [];
   prCalls: { accountId: string | null; url: string; etag?: string }[] = [];
   releaseCalls: { etag?: string }[] = [];
+  knownOpenCalls: (number[] | undefined)[] = [];
   lsError: Error | null = null;
   prError: Error | null = null;
   /** When set, a request carrying this ETag answers 304. */
@@ -39,6 +40,7 @@ class FakeRemote implements GitRemoteReader {
 
   async listPullRequests(accountId: string | null, url: string, opts?: ConditionalListOptions) {
     this.prCalls.push({ accountId, url, ...(opts?.etag ? { etag: opts.etag } : {}) });
+    this.knownOpenCalls.push(opts?.knownOpen ? [...opts.knownOpen] : undefined);
     if (this.prError) throw this.prError;
     if (this.prEtag !== null && opts?.etag === this.prEtag) return { notModified: true as const };
     return { items: structuredClone(this.prs), ...(this.prEtag ? { etag: this.prEtag } : {}) };
@@ -99,7 +101,7 @@ test("push: the first poll only baselines; a later push fires once with previous
       text: "Push to main (bbbbbbb)"
     }
   ]);
-  assert.deepEqual(state.get().git["wf:g"]!.fired, [`push:refs/heads/main:${sha("b")}`]);
+  assert.deepEqual(state.get().git["wf:g"]!.fired, [`push:refs/heads/main:${sha("a")}..${sha("b")}`]);
 
   await run(60 * S);
   assert.equal(host.fired.length, 1, "an unchanged head fires nothing");
@@ -540,4 +542,80 @@ test("stop() mid-poll commits and fires nothing", async () => {
   assert.equal(host.fired.length, 0);
   assert.equal(state.get().git["wf:g"]!.seen["refs/heads/main"], sha("a"));
   assert.deepEqual(clock.pending(), []);
+});
+
+test("a token typed as the URL's user never reaches the poll, the payload or the error text", async () => {
+  const tokenUrl = "https://ghp_secret123@github.com/acme/app.git";
+  const { host, remote, run, poller } = setup([
+    workflow("wf", [gitTrigger("g", { kind: "push", branches: ["main"] }, { kind: "url", url: tokenUrl })])
+  ]);
+  await poller.start();
+  await run(5 * S);
+  remote.heads.main = sha("b");
+  await run(60 * S);
+  assert.equal(host.fired.length, 1);
+  assert.equal(payloads(host)[0]!.repo.url, "https://github.com/acme/app.git");
+  assert.ok(remote.lsCalls.every((call) => !call.url.includes("ghp_secret123")));
+  assert.ok(!JSON.stringify(host.fired).includes("ghp_secret123"));
+  assert.equal(
+    describePollError(new Error(`fatal: unable to access '${tokenUrl}/': The requested URL returned error: 500`)),
+    "fatal: unable to access 'https://***@github.com/acme/app.git/': The requested URL returned error: 500"
+  );
+  poller.stop();
+});
+
+test("ETags: a new ETag is written in the same state update as the cursors that judged its page", async () => {
+  const remote = new FakeRemote();
+  remote.prEtag = 'W/"1"';
+  remote.prs = [pull(1, "open", sha("a"))];
+  const state = memoryState();
+  const snapshots: { etag: string | undefined; seen: string | undefined }[] = [];
+  const original = state.update.bind(state);
+  state.update = (mutator) =>
+    original((draft) => {
+      mutator(draft);
+      snapshots.push({ etag: Object.values(draft.etags)[0]?.etag, seen: draft.git["wf:g"]?.seen["pr:2"] });
+    });
+  const { host, poller, run } = setup([workflow("wf", [gitTrigger("g", { kind: "pull_request", actions: ["opened"] })])], { remote, state });
+  await poller.start();
+  await run(5 * S);
+  remote.prEtag = 'W/"2"';
+  remote.prs = [pull(2, "open", sha("b")), pull(1, "open", sha("a"))];
+  await run(120 * S);
+  assert.equal(host.fired.length, 1);
+  // No committed state ever pairs the new ETag with a cursor that has not seen PR #2.
+  assert.ok(snapshots.every((snap) => snap.etag !== 'W/"2"' || snap.seen !== undefined), JSON.stringify(snapshots));
+  poller.stop();
+});
+
+test("the pulls poll names the PRs its triggers last saw open (so a DC listing can look them up)", async () => {
+  const remote = new FakeRemote();
+  remote.prs = [pull(4, "open", sha("a")), pull(2, "merged", sha("b")), pull(9, "open", sha("c"))];
+  const { poller, run } = setup([workflow("wf", [gitTrigger("g", { kind: "pull_request", actions: ["merged"] })])], { remote });
+  await poller.start();
+  await run(5 * S);
+  await run(120 * S);
+  assert.deepEqual(remote.knownOpenCalls, [undefined, [9, 4]]);
+  poller.stop();
+});
+
+test("pull_request: an abbreviated head (Bitbucket Cloud) is completed from the branch heads before it fires", async () => {
+  const remote = new FakeRemote();
+  const bbUrl = "git@bitbucket.org:acme/app.git";
+  const full = `fedcba987654${"0".repeat(28)}`;
+  remote.prs = [pull(7, "open", "0123456789ab")];
+  const { host, poller, run } = setup(
+    [workflow("wf", [gitTrigger("g", { kind: "pull_request", actions: ["updated"] }, { kind: "url", url: bbUrl, accountId: "acc1" })])],
+    { remote }
+  );
+  await poller.start();
+  await run(5 * S);
+  assert.equal(remote.lsCalls.length, 0, "nothing to complete, nothing read");
+  remote.prs = [pull(7, "open", "fedcba987654"), pull(8, "open", "0123456789ab", { head: "fork-branch" })];
+  remote.heads = { main: sha("a"), "feature/7": full };
+  await run(180 * S);
+  const fired = payloads(host);
+  assert.deepEqual(fired.map((p) => [p.pr!.number, p.sha, p.pr!.headSha]), [[7, full, full]]);
+  assert.deepEqual(remote.lsCalls, [{ accountId: "acc1", url: bbUrl, defaultBranch: false }]);
+  poller.stop();
 });

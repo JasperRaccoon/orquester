@@ -22,6 +22,11 @@ import type {
 } from "./types";
 import { GitRemoteError, POLL_PAGE_SIZE } from "./types";
 
+/** The git trigger's DC listing reads at most this many OPEN pull requests per poll. */
+export const DC_OPEN_PULLS_CAP = 200;
+/** …and looks up at most this many PRs it last saw open that the listings no longer hold. */
+export const DC_KNOWN_OPEN_LOOKUPS = 25;
+
 /**
  * Bitbucket Server / Data Center ("Bitbucket Enterprise").
  *
@@ -646,8 +651,12 @@ export const bitbucketServerProvider: GitProvider = {
   supportsReleases: false,
 
   /**
-   * `GET …/pull-requests?state=ALL&order=NEWEST` — one page. DC's NEWEST is by
-   * creation, so the page is re-sorted by `updatedDate` (most recent first).
+   * DC can only order a listing by CREATION (`order=NEWEST`), so one `state=ALL` page dropped every
+   * long-lived PR once 50 newer ones existed. Instead: every OPEN PR (paged, up to
+   * `DC_OPEN_PULLS_CAP`), the newest page of MERGED and of DECLINED, and — for each PR the caller
+   * last saw open (`opts.knownOpen`) that none of those hold — the PR itself (up to
+   * `DC_KNOWN_OPEN_LOOKUPS`), so its merge or decline is never missed. Merged by id, most recently
+   * updated first. No ETag: one ETag cannot stand for several requests.
    * Needs an account: the instance's base URL (and its token) come from it.
    */
   async listPullRequests(
@@ -662,24 +671,45 @@ export const bitbucketServerProvider: GitProvider = {
         "unsupported"
       );
     }
-    const res = await dcRequest(
-      creds,
-      "GET",
-      `/rest/api/1.0/projects/${encodeURIComponent(repo.owner)}/repos/${encodeURIComponent(repo.repo)}` +
-        `/pull-requests?state=ALL&order=NEWEST&limit=${POLL_PAGE_SIZE}`,
-      undefined,
-      { etag: opts?.etag }
-    );
-    if (res.status === 304) {
-      return { notModified: true };
+    const prefix = `/rest/api/1.0/projects/${encodeURIComponent(repo.owner)}/repos/${encodeURIComponent(repo.repo)}/pull-requests`;
+    const byId = new Map<number, Record<string, unknown>>();
+    const add = (values: unknown) => {
+      if (!Array.isArray(values)) return;
+      for (const value of values) {
+        if (value && typeof value === "object" && typeof (value as { id?: unknown }).id === "number") {
+          byId.set((value as { id: number }).id, value as Record<string, unknown>);
+        }
+      }
+    };
+    let start = 0;
+    for (let fetched = 0; fetched < DC_OPEN_PULLS_CAP; ) {
+      const res = await dcRequest(creds, "GET", `${prefix}?state=OPEN&order=NEWEST&limit=${POLL_PAGE_SIZE}&start=${start}`);
+      const values: unknown[] = Array.isArray(res.data?.values) ? res.data.values : [];
+      add(values);
+      fetched += values.length;
+      const next = res.data?.nextPageStart;
+      if (res.data?.isLastPage !== false || typeof next !== "number" || next <= start || values.length === 0) break;
+      start = next;
     }
-    const values: unknown[] = Array.isArray(res.data?.values) ? res.data.values : [];
-    const items = values
-      .filter((value): value is Record<string, unknown> => !!value && typeof value === "object")
+    for (const state of ["MERGED", "DECLINED"]) {
+      const res = await dcRequest(creds, "GET", `${prefix}?state=${state}&order=NEWEST&limit=${POLL_PAGE_SIZE}`);
+      add(res.data?.values);
+    }
+    const missing = (opts?.knownOpen ?? []).filter((id) => Number.isInteger(id) && id > 0 && !byId.has(id)).slice(0, DC_KNOWN_OPEN_LOOKUPS);
+    for (const id of missing) {
+      try {
+        const res = await dcRequest(creds, "GET", `${prefix}/${id}`);
+        add([res.data]);
+      } catch (error) {
+        // A PR that is gone (deleted, moved) is simply not reported; anything else is a failed poll.
+        if (error instanceof DcHttpError && error.httpStatus === 404) continue;
+        throw error;
+      }
+    }
+    const items = [...byId.values()]
       .map(toServerPullRequest)
       .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
-    const etag = res.headers.get("etag") ?? undefined;
-    return { items, ...(etag ? { etag } : {}) };
+    return { items };
   },
 
   /** Bitbucket has no releases (the editor offers "tag" there). */

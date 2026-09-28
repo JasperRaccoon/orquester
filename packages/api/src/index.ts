@@ -260,9 +260,10 @@ export type CreateProjectRequest =
   /**
    * `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. `ref` (optional)
    * checks out a branch, tag or commit sha after the clone (≤ 250 chars, no leading `-`, no
-   * whitespace/control characters; 400 `INVALID_REF` otherwise).
+   * whitespace/control characters; 400 `INVALID_REF` otherwise). `unattended` (an automated
+   * caller — a workflow's temporary project): the clone is bounded at 10 min and never prompts.
    */
-  | { source: "clone"; url: string; name?: string; ref?: string }
+  | { source: "clone"; url: string; name?: string; ref?: string; unattended?: boolean }
   | {
       source: "create";
       owner: string;

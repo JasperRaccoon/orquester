@@ -183,9 +183,16 @@ test("lsRemote anonymously resets every credential helper", async () => {
   const { exec, calls } = fakeExec(() => "");
   await service(exec).lsRemote(null, "https://github.com/octo-org/hello-world");
   assert.deepEqual(configOf(calls[0].args), ["credential.helper="]);
-  const ssh = fakeExec(() => "");
-  await service(ssh.exec).lsRemote(null, "git@github.com:octo-org/hello-world.git");
-  assert.equal(ssh.calls[0].env?.GIT_SSH_COMMAND, "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes");
+});
+
+test("lsRemote refuses an anonymous SSH read (it would offer this host's own keys) and points at https", async () => {
+  const { exec, calls } = fakeExec(() => "");
+  for (const url of ["git@github.com:octo-org/hello-world.git", "ssh://git@github.com/octo-org/hello-world.git"]) {
+    await assert.rejects(service(exec).lsRemote(null, url), (error: unknown) => {
+      return error instanceof GitRemoteError && error.kind === "unsupported" && /https:\/\//.test(error.message);
+    });
+  }
+  assert.equal(calls.length, 0);
 });
 
 test("lsRemote refuses unsafe URLs before running anything", async () => {
@@ -239,14 +246,21 @@ test("lsRemote classifies failures: auth, not found, timeout — and redacts use
 
 // --- cloneRepo at a ref --------------------------------------------------------
 
-test("cloneRepo without a ref keeps today's clone, plus a prompt-free env and a 10 min ceiling", async () => {
+test("cloneRepo without options is the New Project dialog's clone: no ceiling, git's prompting untouched", async () => {
   const { exec, calls } = fakeExec();
   await service(exec).cloneRepo("gh", "git@github.com:o/r.git", "r", workspace);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args, ["clone", "--", "git@github.com:o/r.git", "r"]);
   assert.equal(calls[0].cwd, workspace);
-  assert.equal(calls[0].env?.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(calls[0].env?.GIT_TERMINAL_PROMPT, process.env.GIT_TERMINAL_PROMPT);
   assert.equal(calls[0].env?.GIT_SSH_COMMAND, 'ssh -i "/k/gh" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new');
+  assert.equal(calls[0].timeout, undefined);
+});
+
+test("an unattended clone (a workflow's) gets a prompt-free env and a 10 min ceiling", async () => {
+  const { exec, calls } = fakeExec();
+  await service(exec).cloneRepo("gh", "https://github.com/o/r.git", "r2", workspace, { unattended: true });
+  assert.equal(calls[0].env?.GIT_TERMINAL_PROMPT, "0");
   assert.ok((calls[0].timeout ?? 0) > 9 * 60_000 && (calls[0].timeout ?? 0) <= 10 * 60_000);
 });
 
@@ -439,4 +453,45 @@ test("listReleases: GitHub lists, Bitbucket answers unsupported without a reques
     unsupported: true
   });
   assert.equal(urls.length, 1);
+});
+
+test("cloneRepo resolves an abbreviated commit (Bitbucket Cloud's 12 hex) against the remote's refs before fetching it", async () => {
+  const short = SHA.slice(0, 12);
+  const other = "f".repeat(40);
+  const { exec, calls } = fakeExec((args) => {
+    const cmd = command(args);
+    if (cmd.includes("--branch")) return gitFailure(`fatal: Remote branch ${short} not found in upstream origin`);
+    if (cmd[0] === "checkout" && cmd[2] === short) return gitFailure(`error: pathspec '${short}' did not match any file(s) known to git`);
+    if (cmd[0] === "ls-remote") return `${other}\trefs/heads/main\n${SHA}\trefs/pull-requests/7/from\n`;
+    return "";
+  });
+  await service(exec).cloneRepo("cloud", "git@ssh.bitbucket.org:acme/web-app.git", "wf-f", workspace, { ref: short, unattended: true });
+  assert.deepEqual(
+    calls.map((call) => command(call.args)).slice(2),
+    [
+      ["checkout", "--detach", short],
+      ["ls-remote", "origin"],
+      ["fetch", "origin", SHA],
+      ["checkout", "--detach", "FETCH_HEAD"]
+    ]
+  );
+});
+
+test("an abbreviated commit no ref resolves fails clearly and removes the clone (never fetches a prefix)", async () => {
+  const short = SHA.slice(0, 12);
+  const dest = join(workspace, "wf-g");
+  const { exec, calls } = fakeExec((args) => {
+    const cmd = command(args);
+    if (cmd.includes("--branch")) return gitFailure(`fatal: Remote branch ${short} not found in upstream origin`);
+    if (cmd[0] === "checkout") return gitFailure("error: pathspec did not match");
+    if (cmd[0] === "ls-remote") return `${"f".repeat(40)}\trefs/heads/main\n`;
+    return "";
+  });
+  await mkdir(dest, { recursive: true });
+  await assert.rejects(
+    service(exec).cloneRepo("cloud", "git@ssh.bitbucket.org:acme/web-app.git", "wf-g", workspace, { ref: short }),
+    (error: unknown) => error instanceof AccountError && error.status === 400 && /abbreviated commit id/.test(error.message)
+  );
+  assert.ok(!calls.some((call) => command(call.args)[0] === "fetch"));
+  assert.equal(existsSync(dest), false);
 });

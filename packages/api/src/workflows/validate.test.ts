@@ -391,6 +391,18 @@ describe("blocks", () => {
     assert.equal(zone[0]!.field, "settings.timezone");
   });
 
+  it("schedule: an 'every N' preset must divide the hour/day — an error on a save, a warning on a stored definition", () => {
+    const uneven = testNode("s", "trigger.schedule", { preset: { kind: "minutes", every: 45 }, cron: "*/45 * * * *" }, { name: "S" });
+    const stored = problemsOf(testWorkflow([uneven]));
+    assert.deepEqual(stored.map((p) => [p.code, p.severity]), [["schedule_uneven_interval", "warning"]]);
+    const saved = problemsOf(testWorkflow([uneven]), { strictScheduleIntervals: true });
+    assert.deepEqual(saved.map((p) => [p.code, p.severity, p.field]), [["schedule_uneven_interval", "error", "config.preset"]]);
+    const hours = testNode("s", "trigger.schedule", { preset: { kind: "hours", every: 5, atMinute: 0 }, cron: "0 */5 * * *" }, { name: "S" });
+    assert.deepEqual(codes(problemsOf(testWorkflow([hours]), { strictScheduleIntervals: true })), ["schedule_uneven_interval"]);
+    const even = testNode("s", "trigger.schedule", { preset: { kind: "hours", every: 6, atMinute: 0 }, cron: "0 */6 * * *" }, { name: "S" });
+    assert.deepEqual(problemsOf(testWorkflow([even]), { strictScheduleIntervals: true }), []);
+  });
+
   it("git: releases are GitHub only", () => {
     const release = (url: string) =>
       testNode("g", "trigger.git", { repo: { kind: "url", url }, event: { kind: "release", includePrereleases: false } }, { name: "G" });

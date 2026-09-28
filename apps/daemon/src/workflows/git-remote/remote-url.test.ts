@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { remoteUrlProblem, repoDisplayName, repoKeyOf, stripUrlCredentials } from "./remote-url";
+import { redactUrlUserinfo, remoteUrlProblem, repoDisplayName, repoKeyOf, stripUrlCredentials } from "./remote-url";
 
 test("repoKeyOf: every GitHub form of one repo has one key", () => {
   const forms = [
@@ -99,12 +99,23 @@ test("remoteUrlProblem accepts the four transports and refuses the rest", () => 
   }
 });
 
-test("stripUrlCredentials drops a password but keeps the user", () => {
-  assert.equal(
-    stripUrlCredentials("https://x-access-token:ghp_secret@github.com/o/r.git"),
-    "https://x-access-token@github.com/o/r.git"
-  );
+test("stripUrlCredentials drops the whole http(s) userinfo (a token may be the user) and an ssh password", () => {
+  assert.equal(stripUrlCredentials("https://x-access-token:ghp_secret@github.com/o/r.git"), "https://github.com/o/r.git");
+  assert.equal(stripUrlCredentials("https://ghp_secret@github.com/o/r.git"), "https://github.com/o/r.git");
   assert.equal(stripUrlCredentials("https://:tok@github.com/o/r.git"), "https://github.com/o/r.git");
-  assert.equal(stripUrlCredentials("https://jdoe@bitbucket.org/a/b.git"), "https://jdoe@bitbucket.org/a/b.git");
+  assert.equal(stripUrlCredentials("https://jdoe@bitbucket.org/a/b.git"), "https://bitbucket.org/a/b.git");
+  assert.equal(stripUrlCredentials("git://tok@example.com/a/b.git"), "git://example.com/a/b.git");
+  assert.equal(stripUrlCredentials("ssh://git@github.com/o/r.git"), "ssh://git@github.com/o/r.git");
+  assert.equal(stripUrlCredentials("ssh://git:pw@github.com/o/r.git"), "ssh://git@github.com/o/r.git");
   assert.equal(stripUrlCredentials("git@github.com:o/r.git"), "git@github.com:o/r.git");
+});
+
+test("redactUrlUserinfo hides a token user in http(s) text and a password anywhere, keeps ssh logins", () => {
+  assert.equal(
+    redactUrlUserinfo("fatal: unable to access 'https://ghp_secret@github.com/o/r.git/': 403"),
+    "fatal: unable to access 'https://***@github.com/o/r.git/': 403"
+  );
+  assert.equal(redactUrlUserinfo("see https://u:p@h/x"), "see https://***@h/x");
+  assert.equal(redactUrlUserinfo("ssh://git@github.com/o/r"), "ssh://git@github.com/o/r");
+  assert.equal(redactUrlUserinfo("no url here"), "no url here");
 });

@@ -101,7 +101,7 @@ describe("projects", () => {
     await assert.rejects(ops.deleteProject("/w/ws/locked"), /BUSY: in use/);
     await assert.rejects(ops.deleteProject("/elsewhere/p"), /not a project/);
     assert.deepEqual(calls.slice(0, 3), [
-      { method: "POST", path: "/api/workspaces/ws/projects", body: { source: "clone", name: "wf-x-1", url: "git@h:o/r.git", ref: "v1" } },
+      { method: "POST", path: "/api/workspaces/ws/projects", body: { source: "clone", name: "wf-x-1", url: "git@h:o/r.git", ref: "v1", unattended: true } },
       { method: "POST", path: "/api/workspaces/ws/projects", body: { source: "empty", name: "wf-x-2" } },
       { method: "DELETE", path: "/api/workspaces/ws/projects/wf-x-1" }
     ]);

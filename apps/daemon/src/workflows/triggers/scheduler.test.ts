@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ManualClock } from "./clock.ts";
 import { createScheduler, SCHEDULER_MAX_TIMER_MS } from "./scheduler.ts";
+import { WorkflowStateStore } from "../state-store.ts";
 import { advance, fakeHost, memoryState, node, recordingLogger, workflow } from "./test-support.ts";
 
 const MIN = 60_000;
@@ -198,5 +199,53 @@ test("an unrelated edit keeps the cursor; a disabled node is not scheduled; an i
   assert.equal(logger.lines.filter((line) => line.startsWith("warn:")).length, 1, "warned once");
   await run(HOUR);
   assert.deepEqual(new Set(host.fired.map((r) => r.triggerNodeId)), new Set(["s1"]));
+  scheduler.stop();
+});
+
+test("a failed cursor write skips that one run but never stops the timer", async () => {
+  const clock = new ManualClock("2026-09-28T10:14:00.000Z");
+  const host = fakeHost([workflow("wf", [schedule("s1", "*/15 * * * *", { kind: "minutes", every: 15 })])]);
+  let failWrites = false;
+  const state = new WorkflowStateStore({
+    path: "/nonexistent/workflow-state.json",
+    logger: { warn() {}, error() {} },
+    write: async () => {
+      if (failWrites) throw new Error("ENOSPC");
+    }
+  });
+  const logger = recordingLogger();
+  const scheduler = createScheduler({ host, state, clock, logger });
+  const run = (ms: number) => advance(clock, () => scheduler.idle(), ms);
+  await scheduler.start();
+  failWrites = true;
+  await run(MIN); // 10:15 — the write fails: no run, but the next time is armed
+  assert.equal(host.fired.length, 0);
+  assert.equal(scheduler.triggerState("wf", "s1")!.nextRunAt, "2026-09-28T10:30:00.000Z");
+  assert.ok(clock.pending().length > 0, "the timer is still armed");
+  assert.ok(logger.lines.some((line) => line.includes("could not persist")));
+  failWrites = false;
+  await run(15 * MIN); // 10:30 — writes work again
+  assert.equal(host.fired.length, 1);
+  assert.equal((host.fired[0]!.payload as { scheduledFor: string }).scheduledFor, "2026-09-28T10:30:00.000Z");
+  scheduler.stop();
+});
+
+test("a failed write while reconciling still arms the timer", async () => {
+  const clock = new ManualClock("2026-09-28T10:14:00.000Z");
+  const host = fakeHost([workflow("wf", [schedule("s1", "*/15 * * * *", { kind: "minutes", every: 15 })])]);
+  let failWrites = true;
+  const state = new WorkflowStateStore({
+    path: "/nonexistent/workflow-state.json",
+    logger: { warn() {}, error() {} },
+    write: async () => {
+      if (failWrites) throw new Error("EROFS");
+    }
+  });
+  const scheduler = createScheduler({ host, state, clock, logger: recordingLogger() });
+  await scheduler.start();
+  assert.ok(clock.pending().length > 0);
+  failWrites = false;
+  await advance(clock, () => scheduler.idle(), MIN);
+  assert.equal(host.fired.length, 1);
   scheduler.stop();
 });

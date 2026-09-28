@@ -13,6 +13,8 @@ import {
   describeSchedule,
   nextRuns,
   presetToCron,
+  SCHEDULE_HOUR_STEPS,
+  SCHEDULE_MINUTE_STEPS,
   validateCron,
   type GitPullRequestAction,
   type GitTriggerEvent,
@@ -43,6 +45,23 @@ const DAYS: { value: number; label: string }[] = [
   { value: 6, label: "Sat" },
   { value: 0, label: "Sun" }
 ];
+
+/**
+ * The "every N" choice: only the intervals a cron step keeps evenly (divisors of 60 / 24). A stored
+ * value outside them (saved before the rule) is still shown, marked, until another is picked.
+ */
+function StepSelect({ value, steps, onValue, label }: { value: number; steps: readonly number[]; onValue: (value: number) => void; label: string }) {
+  return (
+    <SelectInput value={String(value)} onValue={(next) => onValue(Number(next))} aria-label={label} className="w-20">
+      {steps.includes(value) ? null : <option value={String(value)}>{value} (uneven)</option>}
+      {steps.map((step) => (
+        <option key={step} value={String(step)}>
+          {step}
+        </option>
+      ))}
+    </SelectInput>
+  );
+}
 
 function presetOf(kind: PresetKind, previous: SchedulePreset): SchedulePreset {
   const time = "time" in previous ? previous.time : "09:00";
@@ -159,14 +178,14 @@ export const ScheduleSettings: React.FC = () => {
         {preset.kind === "minutes" ? (
           <div className="flex items-center gap-2 text-[13px] text-neutral-300">
             Every
-            <NumberInput value={preset.every} onValue={(every) => apply({ kind: "minutes", every: Math.round(every ?? 15) })} min={1} max={59} className="w-20" allowEmpty={false} aria-label="Minutes" />
+            <StepSelect value={preset.every} steps={SCHEDULE_MINUTE_STEPS} onValue={(every) => apply({ kind: "minutes", every })} label="Minutes" />
             minutes
           </div>
         ) : null}
         {preset.kind === "hours" ? (
           <div className="flex flex-wrap items-center gap-2 text-[13px] text-neutral-300">
             Every
-            <NumberInput value={preset.every} onValue={(every) => apply({ ...preset, every: Math.round(every ?? 1) })} min={1} max={23} className="w-16" allowEmpty={false} aria-label="Hours" />
+            <StepSelect value={preset.every} steps={SCHEDULE_HOUR_STEPS} onValue={(every) => apply({ ...preset, every })} label="Hours" />
             hours, at minute
             <NumberInput value={preset.atMinute} onValue={(atMinute) => apply({ ...preset, atMinute: Math.round(atMinute ?? 0) })} min={0} max={59} className="w-16" allowEmpty={false} aria-label="At minute" />
           </div>

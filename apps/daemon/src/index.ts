@@ -2503,7 +2503,12 @@ export function createServer(
             body.url,
             preferredName,
             workspaceDir,
-            body.ref === undefined ? {} : { ref: body.ref }
+            {
+              ...(body.ref === undefined ? {} : { ref: body.ref }),
+              // Only an automated caller (a workflow's temporary project) gets the 10-minute
+              // ceiling and the prompt-free env; the New Project dialog's clone is unbounded.
+              ...(body.unattended === true ? { unattended: true } : {})
+            }
           );
           // A stale archived name (dir removed outside orquester) would hide
           // the fresh clone — prune it, same as the empty branch above.

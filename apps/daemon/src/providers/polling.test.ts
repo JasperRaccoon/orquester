@@ -267,14 +267,23 @@ test("bitbucket cloud and server have no releases", async () => {
 // --- Bitbucket Server / DC ---------------------------------------------------
 
 test("bitbucket server: pull-requests map states and sort by updatedDate", async () => {
-  const seen = stubFetch(() => json(fixture("bitbucket-server-pull-requests.json")));
+  const all = JSON.parse(fixture("bitbucket-server-pull-requests.json")) as { values: { state: string }[] };
+  const seen = stubFetch((url) => {
+    const state = /state=([A-Z]+)/.exec(url)?.[1];
+    return json(JSON.stringify({ isLastPage: true, values: all.values.filter((pr) => pr.state === state) }));
+  });
   const page = await bitbucketServerProvider.listPullRequests(
     { token: "dc-token", baseUrl: "https://bb.corp.example/bitbucket/" },
     { owner: "PRJ", repo: "api" }
   );
-  assert.equal(
-    seen[0].url,
-    "https://bb.corp.example/bitbucket/rest/api/1.0/projects/PRJ/repos/api/pull-requests?state=ALL&order=NEWEST&limit=50"
+  const prefix = "https://bb.corp.example/bitbucket/rest/api/1.0/projects/PRJ/repos/api/pull-requests";
+  assert.deepEqual(
+    seen.map((s) => s.url),
+    [
+      `${prefix}?state=OPEN&order=NEWEST&limit=50&start=0`,
+      `${prefix}?state=MERGED&order=NEWEST&limit=50`,
+      `${prefix}?state=DECLINED&order=NEWEST&limit=50`
+    ]
   );
   assert.equal(seen[0].headers.authorization, "Bearer dc-token");
   assert.ok(!page.notModified);
@@ -301,6 +310,46 @@ test("bitbucket server: pull-requests map states and sort by updatedDate", async
       updatedAt: new Date(1758960000000).toISOString()
     }
   );
+});
+
+test("bitbucket server: every OPEN page is read (a long-lived PR never drops off) and a PR last seen open is looked up", async () => {
+  const pr = (id: number, state: string, updated: number) => ({
+    id,
+    title: `PR ${id}`,
+    state,
+    updatedDate: updated,
+    fromRef: { displayId: `f/${id}`, latestCommit: String(id).padStart(40, "0") },
+    toRef: { displayId: "master" }
+  });
+  const seen = stubFetch((url) => {
+    if (url.includes("state=OPEN") && url.endsWith("start=0")) {
+      return json(JSON.stringify({ isLastPage: false, nextPageStart: 50, values: [pr(300, "OPEN", 30)] }));
+    }
+    if (url.includes("state=OPEN") && url.endsWith("start=50")) {
+      // The oldest open PR, created long ago: on a creation-ordered `state=ALL` page it had dropped off.
+      return json(JSON.stringify({ isLastPage: true, values: [pr(3, "OPEN", 5)] }));
+    }
+    if (url.includes("state=")) return json(JSON.stringify({ isLastPage: true, values: [] }));
+    if (url.endsWith("/pull-requests/7")) return json(JSON.stringify(pr(7, "MERGED", 40)));
+    if (url.endsWith("/pull-requests/8")) return json('{"errors":[{"message":"gone"}]}', 404);
+    return json("{}", 500);
+  });
+  const page = await bitbucketServerProvider.listPullRequests(
+    { token: "t", baseUrl: "https://h" },
+    { owner: "PRJ", repo: "api" },
+    { knownOpen: [3, 7, 8] }
+  );
+  assert.ok(!page.notModified);
+  assert.deepEqual(
+    page.items.map((p) => [p.number, p.state]),
+    [
+      [7, "merged"],
+      [300, "open"],
+      [3, "open"]
+    ]
+  );
+  assert.equal(page.etag, undefined);
+  assert.ok(!seen.some((s) => s.url.endsWith("/pull-requests/3")), "a PR the listing holds is not looked up");
 });
 
 test("bitbucket server: needs an account; personal projects keep the ~; a 403 is auth", async () => {

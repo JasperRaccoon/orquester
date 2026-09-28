@@ -135,6 +135,12 @@ export interface ReleaseInfo {
 export interface ConditionalListOptions {
   /** The `etag` of the previous page: an unchanged listing answers `{notModified: true}`. */
   etag?: string;
+  /**
+   * Pull requests the caller last saw OPEN. A provider whose listing can miss one (Bitbucket
+   * Server/DC lists by creation date, so a long-lived PR merged today is not on its recent
+   * MERGED page) looks each missing one up, so its merge or decline is still seen. Others ignore it.
+   */
+  knownOpen?: readonly number[];
 }
 
 /**

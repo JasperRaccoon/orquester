@@ -617,13 +617,18 @@ interface GitTriggerConfig {
   and `listReleases(creds, repo)` — GitHub (`/pulls?state=all&sort=updated&direction=desc`,
   `/releases`, with `If-None-Match` ETags: a 304 is free), Bitbucket Cloud
   (`/pullrequests?state=OPEN&state=MERGED&state=DECLINED&sort=-updated_on`; the UI warns when the
-  token lacks `read:pullrequest`), Bitbucket Server/DC (`/pull-requests?state=ALL&order=NEWEST`).
+  token lacks `read:pullrequest`), Bitbucket Server/DC (*Built:* every `state=OPEN` page up to 200, the newest `MERGED` and
+  `DECLINED` pages, and a lookup of each PR last seen open that none of them hold — DC orders only
+  by creation, so a `state=ALL` page dropped long-lived PRs; no ETag there).
   Every 120 s (Bitbucket Cloud 180 s). Releases are GitHub-only (the editor offers "tag" elsewhere).
   A PR's `updated` = its head sha changed; `merged` = GitHub `merged_at` set / Bitbucket `MERGED`.
 - **Baseline:** a trigger's first successful poll only records the current state — creating or
   re-enabling a trigger never fires on existing refs.
-- **Dedup:** fired keys (`push:<ref>:<sha>`, `tag:<name>:<sha>`, `release:<id>`,
-  `pr:<n>:<action>:<headSha>`) persist per trigger (a ring of 1 000) — a restart never re-fires.
+- **Dedup:** fired keys (`push:<ref>:<prev>..<sha>`, `tag:<name>:<sha>`, `release:<id>`,
+  `pr:<n>:opened:<headSha>` / `pr:<n>:<action>:<prevHead>..<headSha>[#<reopens>]`) persist per
+  trigger (a ring of 1 000) — a restart never re-fires, and naming the transition lets a force-push
+  rollback or a PR closed again after a reopen fire. *Built: transition keys; a pre-change ring's
+  destination-only keys are kept and never match again.*
 - **Coalescing:** several pushes to one branch between polls → one event with `previousSha..sha`;
   new tags → one run per tag, at most 10 per poll (the rest recorded as skipped).
 - **Payload:** `{kind:"git", event, repo:{url, name}, ref, sha, previousSha?, branch?, tag?,

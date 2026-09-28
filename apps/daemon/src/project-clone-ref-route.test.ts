@@ -102,3 +102,21 @@ test("a bad ref is a 400 INVALID_REF and nothing is cloned", async (t) => {
   }
   assert.equal(h.clones.length, 0);
 });
+
+test("only an unattended clone (a workflow's) is marked for the ceiling and the prompt-free env", async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  const dialog = await h.inject({
+    method: "POST",
+    url: "/api/workspaces/acme/projects",
+    payload: { source: "clone", url: "git@github.com:o/r.git", name: "dialog" }
+  });
+  assert.equal(dialog.statusCode, 200, dialog.body);
+  const workflow = await h.inject({
+    method: "POST",
+    url: "/api/workspaces/acme/projects",
+    payload: { source: "clone", url: "git@github.com:o/r.git", name: "wf-y", ref: "main", unattended: true }
+  });
+  assert.equal(workflow.statusCode, 200, workflow.body);
+  assert.deepEqual(h.clones.map((args) => args[4]), [{}, { ref: "main", unattended: true }]);
+});

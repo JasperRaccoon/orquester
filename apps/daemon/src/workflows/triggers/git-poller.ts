@@ -21,7 +21,7 @@
 import type { GitTriggerCursor, GitTriggerEvent, WorkflowStateFile } from "@orquester/config";
 import type { Clock, FireRequest, TriggerHost, WorkflowLogger } from "../contracts.ts";
 import type { WorkflowStateStore } from "../state-store.ts";
-import { parseRemoteUrl, repoDisplayName, repoKeyOf, stripUrlCredentials, type LsRemoteResult } from "../git-remote/index.ts";
+import { isFullSha, parseRemoteUrl, redactUrlUserinfo, repoDisplayName, repoKeyOf, stripUrlCredentials, type LsRemoteResult } from "../git-remote/index.ts";
 import type { ConditionalListOptions, ConditionalPage, PullRequestInfo, ReleaseInfo } from "../../providers/types.ts";
 import {
   type DetectedEvent,
@@ -33,7 +33,8 @@ import {
   eventKeyOf,
   MAX_FIRES_PER_POLL,
   pushFired,
-  type RepoInfo
+  type RepoInfo,
+  sameSha
 } from "./git-events.ts";
 import type { ResolveRepo, ResolvedRepo } from "./repo-resolve.ts";
 
@@ -165,7 +166,7 @@ export function describePollError(error: unknown): string {
     case "timeout":
       return "timed out";
     default: {
-      const flat = message.replace(/\/\/[^/@\s:]*:[^/@\s]*@/g, "//***@").replace(/\s+/g, " ").trim();
+      const flat = redactUrlUserinfo(message).replace(/\s+/g, " ").trim();
       return flat.length > 300 ? `${flat.slice(0, 299)}…` : flat || "poll failed";
     }
   }
@@ -435,6 +436,17 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
     // A trigger that still needs its baseline needs the page itself, not a 304.
     const baselining = users.some((entry) => view.git[entry.key]?.baselined !== true);
     const opts: ConditionalListOptions = cached && !baselining ? { etag: cached.etag } : {};
+    if (channel === "pulls") {
+      // The PRs any trigger here last saw open: a provider whose listing can miss one (DC) looks it up.
+      const knownOpen = new Set<number>();
+      for (const entry of users) {
+        for (const [seenKey, value] of Object.entries(view.git[entry.key]?.seen ?? {})) {
+          const number = /^pr:(\d+)$/.exec(seenKey)?.[1];
+          if (number !== undefined && value.startsWith("open:")) knownOpen.add(Number(number));
+        }
+      }
+      if (knownOpen.size > 0) opts.knownOpen = [...knownOpen].sort((a, b) => b - a);
+    }
     const page =
       channel === "pulls"
         ? await remote.listPullRequests(poller.accountId, poller.url, opts)
@@ -450,15 +462,22 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
       return;
     }
     const items = page.items;
-    await update((draft) => {
-      if (page.etag) draft.etags[key] = { etag: page.etag, body: null };
-      else delete draft.etags[key];
-    }).catch(() => undefined);
-    await commit(poller, users, (entry, cursor) => {
-      if (entry.event.kind === "pull_request") return detectPullRequests(entry.event, cursor, items as PullRequestInfo[], poller.repo);
-      if (entry.event.kind === "release") return detectReleases(entry.event, cursor, items as ReleaseInfo[], poller.repo);
-      return null;
-    });
+    // The ETag rides the SAME update as the cursors that judged this page: written apart, a stop
+    // between the two persisted the new ETag beside the old cursors, and every later 304 hid the
+    // changes that page held until the listing changed again.
+    await commit(
+      poller,
+      users,
+      (entry, cursor) => {
+        if (entry.event.kind === "pull_request") return detectPullRequests(entry.event, cursor, items as PullRequestInfo[], poller.repo);
+        if (entry.event.kind === "release") return detectReleases(entry.event, cursor, items as ReleaseInfo[], poller.repo);
+        return null;
+      },
+      (draft) => {
+        if (page.etag) draft.etags[key] = { etag: page.etag, body: null };
+        else delete draft.etags[key];
+      }
+    );
   }
 
   /**
@@ -469,7 +488,8 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
   async function commit(
     poller: RepoPoller,
     users: TriggerEntry[],
-    detect: (entry: TriggerEntry, cursor: GitTriggerCursor) => Detection | null | "unchanged"
+    detect: (entry: TriggerEntry, cursor: GitTriggerCursor) => Detection | null | "unchanged",
+    alsoWrite?: (draft: WorkflowStateFile) => void
   ): Promise<void> {
     if (stopped || poller.removed) return;
     const now = clock.now().toISOString();
@@ -496,6 +516,7 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
         });
         draft.git[entry.key] = { ...base, baselined: true, seen: detection.seen, fired: pushFired(cursor.fired, newKeys) };
       }
+      alsoWrite?.(draft);
     });
     try {
       await written;
@@ -505,6 +526,7 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
         error: error instanceof Error ? error.message : String(error)
       });
     }
+    await completeAbbreviatedHeads(poller, toFire.map(({ event }) => event));
     for (const { entry, event } of toFire) {
       if (stopped) return;
       const request = fireRequest(entry, event, event.text);
@@ -527,6 +549,34 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
           error: error instanceof Error ? error.message : String(error)
         });
       }
+    }
+  }
+
+  /**
+   * Bitbucket Cloud lists a PR's head as 12 hex, which a clone cannot fetch by id. Before a PR event
+   * fires, its head is completed from the repo's branch heads (one `ls-remote`, only when needed):
+   * a same-repo PR's branch still at that commit names it in full. Best effort — a fork's PR, a
+   * branch that moved on or a failed read keeps the abbreviation (the clone resolves or refuses
+   * it). The dedup key is left as detected.
+   */
+  async function completeAbbreviatedHeads(poller: RepoPoller, events: DetectedEvent[]): Promise<void> {
+    const short = events.filter((event) => event.payload.pr !== undefined && event.payload.sha !== "" && !isFullSha(event.payload.sha));
+    if (short.length === 0 || stopped || poller.removed) return;
+    let heads: Record<string, string>;
+    try {
+      heads = (await remote.lsRemote(poller.accountId, poller.url, { defaultBranch: false })).heads;
+    } catch (error) {
+      logger.debug("workflow git trigger: could not complete an abbreviated PR head", {
+        repo: poller.repo.name,
+        error: describePollError(error)
+      });
+      return;
+    }
+    for (const event of short) {
+      const pr = event.payload.pr!;
+      const full = heads[pr.head];
+      if (full === undefined || !isFullSha(full) || !sameSha(full, event.payload.sha)) continue;
+      event.payload = { ...event.payload, sha: full, pr: { ...pr, headSha: full } };
     }
   }
 

@@ -52,10 +52,13 @@ import {
   fetchCommitArgs,
   isFullSha,
   isMissingRemoteRef,
+  lsRemoteAllArgs,
+  resolveAbbreviatedSha,
   type LsRemoteResult,
   mayBeAbbreviatedSha,
   parseLsRemote,
   parseRemoteUrl,
+  redactUrlUserinfo,
   remoteUrlProblem
 } from "./workflows/git-remote";
 
@@ -85,7 +88,13 @@ export interface CloneOptions {
    * detached HEAD); an abbreviated hex that names no branch/tag is retried as a commit.
    */
   ref?: string;
-  /** Ceiling on the whole clone, every step included (default 10 min). */
+  /**
+   * An automated caller (a workflow's temporary project): the clone is bounded (`timeoutMs`,
+   * default 10 min) and never waits on a prompt (`GIT_TERMINAL_PROMPT=0`). Without it the clone
+   * runs as the New Project dialog's always has — no ceiling, git's own prompting untouched.
+   */
+  unattended?: boolean;
+  /** Ceiling on the whole clone, every step included (default: 10 min when `unattended`, else none). */
   timeoutMs?: number;
 }
 
@@ -105,9 +114,9 @@ export interface LsRemoteOptions {
 /** Default ceiling on one `git ls-remote`. */
 export const LS_REMOTE_TIMEOUT_MS = 30_000;
 
-/** Replace any `//user:secret@` userinfo in git's output before it reaches an error message. */
+/** Replace any `//user:secret@` (and an http(s) `//token@`) userinfo in git's output before it reaches an error message. */
 function redactUserinfo(text: string): string {
-  return text.replace(/\/\/[^/@\s:]*:[^/@\s]*@/g, "//***@");
+  return redactUrlUserinfo(text);
 }
 
 /** True when a rejected exec was killed by its `timeout`. */
@@ -830,16 +839,18 @@ export class AccountsService {
    * pin the account's key through `GIT_SSH_COMMAND` (no token in the URL/argv) rather than relying
    * on `includeIf` timing; HTTPS URLs point git at the account's 0600 credential store (plus its
    * CA bundle on DC). With no account (`null`, a public repo) every configured credential helper
-   * is reset, so nothing ambient answers for it. `GIT_TERMINAL_PROMPT=0` always: a daemon-side
-   * git must fail, never wait on a prompt.
+   * is reset, so nothing ambient answers for it; an anonymous SSH read is refused by its callers
+   * (it would offer this host's own keys and agent). `noPrompt` sets `GIT_TERMINAL_PROMPT=0`: an
+   * unattended git must fail, never wait on a prompt.
    */
   private async remoteTransport(
     account: Account | null,
     url: string,
-    opts: { batchSsh?: boolean } = {}
+    opts: { batchSsh?: boolean; noPrompt?: boolean } = {}
   ): Promise<{ configArgs: string[]; env: NodeJS.ProcessEnv }> {
     const configArgs: string[] = [];
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: this.home, GIT_TERMINAL_PROMPT: "0" };
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: this.home };
+    if (opts.noPrompt) env.GIT_TERMINAL_PROMPT = "0";
     const batch = opts.batchSsh ? " -o BatchMode=yes" : "";
     if (/^https?:\/\//i.test(url)) {
       if (account) {
@@ -852,8 +863,6 @@ export class AccountsService {
       }
     } else if (account) {
       env.GIT_SSH_COMMAND = `${sshCommandFor(account, await this.knownHosts(account))}${batch}`;
-    } else if (opts.batchSsh) {
-      env.GIT_SSH_COMMAND = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes";
     }
     return { configArgs, env };
   }
@@ -861,7 +870,8 @@ export class AccountsService {
   /**
    * Clone a repo into a project dir, optionally at a ref (see `CloneOptions`), over the account's
    * transport (`remoteTransport`). `cwd` is the workspace dir, `destName` the new project subdir.
-   * The whole clone is bounded by `timeoutMs` (default 10 min). A clone whose checkout fails is
+   * An `unattended` clone is bounded by `timeoutMs` (default 10 min) and prompt-free; the New
+   * Project dialog's is neither (a `timeoutMs` alone still bounds it). A clone whose checkout fails is
    * removed again, so a failed ref never leaves a half-made project behind. Errors surface stderr
    * so the route can map them to 4xx.
    */
@@ -880,19 +890,23 @@ export class AccountsService {
         throw new AccountError(400, problem);
       }
     }
-    const timeoutMs = opts.timeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS;
-    const deadline = Date.now() + timeoutMs;
-    const remaining = () => Math.max(1_000, deadline - Date.now());
-    const { configArgs, env } = await this.remoteTransport(account, url);
+    const timeoutMs = opts.timeoutMs ?? (opts.unattended === true ? DEFAULT_CLONE_TIMEOUT_MS : undefined);
+    const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+    const remaining = () => (deadline === undefined ? undefined : Math.max(1_000, deadline - Date.now()));
+    const { configArgs, env } = await this.remoteTransport(account, url, { noPrompt: opts.unattended === true });
     const dest = join(cwd, destName);
     const git = (args: string[], at: string) =>
-      this.exec("git", [...configArgs, ...args], { cwd: at, env, timeout: remaining() });
+      this.exec("git", [...configArgs, ...args], {
+        cwd: at,
+        env,
+        ...(deadline === undefined ? {} : { timeout: remaining() })
+      });
 
     const cloneFailure = (error: unknown): AccountError => {
       if (timedOut(error)) {
         return new GitRemoteError(
           504,
-          `Could not clone the repository: timed out after ${Math.round(timeoutMs / 1000)} s.`,
+          `Could not clone the repository: timed out after ${Math.round((timeoutMs ?? 0) / 1000)} s.`,
           "timeout"
         );
       }
@@ -931,8 +945,21 @@ export class AccountsService {
       } catch (error) {
         if (timedOut(error)) throw error;
         // Not among the cloned refs (a fork's PR head, a sha no branch holds any more): fetch it
-        // by id — GitHub and Bitbucket serve reachable commits — then check that out.
-        await git(fetchCommitArgs(commit), dest);
+        // by id — GitHub and Bitbucket serve reachable commits — then check that out. A fetch
+        // needs the FULL id: an abbreviation (Bitbucket Cloud lists 12 hex) is first resolved
+        // against every ref the remote advertises (GitHub's refs/pull/*, DC's refs/pull-requests/*).
+        let full = commit;
+        if (!isFullSha(commit)) {
+          const { stdout } = await git(lsRemoteAllArgs(), dest);
+          const resolved = resolveAbbreviatedSha(stdout, commit);
+          if (resolved === null) {
+            throw new Error(
+              `${commit} is an abbreviated commit id that no branch or advertised ref of the remote resolves (a PR from a fork?) — use a branch or the full sha`
+            );
+          }
+          full = resolved;
+        }
+        await git(fetchCommitArgs(full), dest);
         await git(checkoutArgs("FETCH_HEAD"), dest);
       }
     } catch (error) {
@@ -966,7 +993,15 @@ export class AccountsService {
       throw new GitRemoteError(400, problem, "unsupported");
     }
     const account = accountId === null ? null : await this.requireAccount(accountId);
-    const { configArgs, env } = await this.remoteTransport(account, trimmed, { batchSsh: true });
+    if (account === null && !/^(https?|git):\/\//i.test(trimmed)) {
+      // Anonymous SSH would offer this host's own keys and agent, and trust its known_hosts.
+      throw new GitRemoteError(
+        400,
+        "Reading a repository over SSH needs a git account. For a public repository use its https:// URL.",
+        "unsupported"
+      );
+    }
+    const { configArgs, env } = await this.remoteTransport(account, trimmed, { batchSsh: true, noPrompt: true });
     const timeoutMs = opts.timeoutMs ?? LS_REMOTE_TIMEOUT_MS;
     const args =
       opts.defaultBranch === false

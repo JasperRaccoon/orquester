@@ -58,3 +58,22 @@ export function fetchCommitArgs(commit: string): string[] {
 export function isMissingRemoteRef(stderr: string): boolean {
   return /Remote branch .* not found|couldn't find remote ref|not found in upstream/i.test(stderr);
 }
+
+/** `git ls-remote origin` in the clone: every ref the remote advertises (PR refs included). */
+export function lsRemoteAllArgs(): string[] {
+  return ["ls-remote", "origin"];
+}
+
+/**
+ * The one full sha an `ls-remote` listing holds that starts with `prefix` (case-insensitive), or
+ * null — none, or two different commits sharing the abbreviation.
+ */
+export function resolveAbbreviatedSha(lsRemoteOutput: string, prefix: string): string | null {
+  const wanted = prefix.toLowerCase();
+  const found = new Set<string>();
+  for (const line of lsRemoteOutput.split("\n")) {
+    const sha = line.split("\t")[0]?.trim().toLowerCase() ?? "";
+    if (isFullSha(sha) && sha.startsWith(wanted)) found.add(sha);
+  }
+  return found.size === 1 ? [...found][0]! : null;
+}

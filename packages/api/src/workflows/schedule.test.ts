@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { SchedulePreset } from "./types.ts";
-import { describeSchedule, isValidTimeZone, nextScheduleRun, nextRuns, presetToCron, validateCron } from "./schedule.ts";
+import { describeSchedule, isValidTimeZone, nextScheduleRun, nextRuns, presetToCron, SCHEDULE_HOUR_STEPS, SCHEDULE_MINUTE_STEPS, scheduleIntervalProblem, validateCron } from "./schedule.ts";
 
 describe("presetToCron", () => {
   it("derives 5-field crons", () => {
@@ -140,5 +140,81 @@ describe("nextRuns", () => {
     assert.deepEqual(nextRuns("* * * * *", "Nowhere/Land", 3), []);
     assert.deepEqual(nextRuns("* * * * *", "UTC", 0), []);
     assert.equal(nextScheduleRun("0 0 30 2 *", "UTC"), null);
+  });
+});
+
+describe("DST", () => {
+  it("America/New_York fall-back: a sub-daily cron fires in the repeated hour too", () => {
+    // 2026-11-01: 01:00–02:00 EDT (05:00–06:00Z), then 01:00–02:00 EST again (06:00–07:00Z).
+    assert.deepEqual(nextRuns("*/30 * * * *", "America/New_York", 6, "2026-11-01T04:50:00Z"), [
+      "2026-11-01T05:00:00.000Z",
+      "2026-11-01T05:30:00.000Z",
+      "2026-11-01T06:00:00.000Z",
+      "2026-11-01T06:30:00.000Z",
+      "2026-11-01T07:00:00.000Z",
+      "2026-11-01T07:30:00.000Z"
+    ]);
+    assert.deepEqual(nextRuns("0 * * * *", "America/New_York", 3, "2026-11-01T04:50:00Z"), [
+      "2026-11-01T05:00:00.000Z",
+      "2026-11-01T06:00:00.000Z",
+      "2026-11-01T07:00:00.000Z"
+    ]);
+    // One step at a time, as the scheduler chains it, reaches the repeated hour too.
+    const chained: string[] = [];
+    let at = "2026-11-01T05:15:00.000Z";
+    for (let i = 0; i < 4; i += 1) {
+      at = nextScheduleRun("*/30 * * * *", "America/New_York", at)!;
+      chained.push(at);
+    }
+    assert.deepEqual(chained, ["2026-11-01T05:30:00.000Z", "2026-11-01T06:00:00.000Z", "2026-11-01T06:30:00.000Z", "2026-11-01T07:00:00.000Z"]);
+  });
+
+  it("a daily cron in the repeated hour still fires once", () => {
+    assert.deepEqual(nextRuns("30 1 * * *", "America/New_York", 2, "2026-10-31T12:00:00Z"), [
+      "2026-11-01T05:30:00.000Z",
+      "2026-11-02T06:30:00.000Z"
+    ]);
+  });
+
+  it("Europe/Berlin fall-back: the repeated 02:00–03:00 fires twice for an hourly cron", () => {
+    // 2026-10-25: 02:00–03:00 CEST (00:00–01:00Z), then 02:00–03:00 CET (01:00–02:00Z).
+    assert.deepEqual(nextRuns("15 * * * *", "Europe/Berlin", 4, "2026-10-24T23:30:00Z"), [
+      "2026-10-25T00:15:00.000Z",
+      "2026-10-25T01:15:00.000Z",
+      "2026-10-25T02:15:00.000Z",
+      "2026-10-25T03:15:00.000Z"
+    ]);
+  });
+
+  it("spring-forward never repeats or reorders instants", () => {
+    for (const [zone, from] of [
+      ["America/New_York", "2026-03-08T06:10:00Z"],
+      ["Europe/Berlin", "2026-03-29T00:10:00Z"]
+    ] as const) {
+      const runs = nextRuns("*/30 * * * *", zone, 8, from);
+      assert.equal(runs.length, 8);
+      for (let i = 1; i < runs.length; i += 1) assert.ok(runs[i]! > runs[i - 1]!, `${zone}: ${runs.join(", ")}`);
+      assert.equal(new Set(runs).size, runs.length);
+    }
+    assert.deepEqual(nextRuns("*/30 * * * *", "America/New_York", 4, "2026-03-08T06:10:00Z"), [
+      "2026-03-08T06:30:00.000Z",
+      "2026-03-08T07:00:00.000Z",
+      "2026-03-08T07:30:00.000Z",
+      "2026-03-08T08:00:00.000Z"
+    ]);
+  });
+});
+
+describe("scheduleIntervalProblem", () => {
+  it("accepts exactly the divisors of 60 (minutes) and 24 (hours)", () => {
+    for (let every = 1; every <= 59; every += 1) {
+      assert.equal(scheduleIntervalProblem({ kind: "minutes", every }) === null, 60 % every === 0 && every < 60, `minutes ${every}`);
+    }
+    for (let every = 1; every <= 23; every += 1) {
+      assert.equal(scheduleIntervalProblem({ kind: "hours", every, atMinute: 0 }) === null, 24 % every === 0, `hours ${every}`);
+    }
+    assert.deepEqual([...SCHEDULE_MINUTE_STEPS], [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30]);
+    assert.deepEqual([...SCHEDULE_HOUR_STEPS], [1, 2, 3, 4, 6, 8, 12]);
+    assert.equal(scheduleIntervalProblem({ kind: "daily", time: "09:00" }), null);
   });
 });

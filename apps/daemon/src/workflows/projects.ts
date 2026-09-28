@@ -74,7 +74,14 @@ export function createProjectOps(deps: ProjectOpsDeps): ProjectOps {
     async createTemp(input): Promise<ProjectContext> {
       const body: Record<string, unknown> =
         input.source.kind === "clone"
-          ? { source: "clone", name: input.name, url: input.source.url, ...(input.source.ref !== undefined ? { ref: input.source.ref } : {}) }
+          ? {
+              source: "clone",
+              name: input.name,
+              url: input.source.url,
+              ...(input.source.ref !== undefined ? { ref: input.source.ref } : {}),
+              // A workflow waits on nobody: bounded, prompt-free (the dialog's clone is neither).
+              unattended: true
+            }
           : { source: "empty", name: input.name };
       const response = await api().request("POST", `/api/workspaces/${encodeURIComponent(input.workspace)}/projects`, { body });
       if (response.status >= 400) {
