@@ -1,13 +1,19 @@
 /**
- * The remote HTTP transport's bearer hook gates every `/api`, `/events` and
- * `/mcp` route whatever spelling of the path reaches the router: the router
- * percent-decodes a path before matching it, so the hook must not decide on the
- * raw request line alone (`/%61pi/...` is routed to `/api/...`).
+ * The daemon's own router (`createServer`), driven through `inject` only:
+ *
+ * - the remote HTTP transport's bearer hook gates every `/api`, `/events` and
+ *   `/mcp` route whatever spelling of the path reaches the router: the router
+ *   percent-decodes a path before matching it, so the hook must not decide on
+ *   the raw request line alone (`/%61pi/...` is routed to `/api/...`);
+ * - a route parameter as long as the agent profile's item ids (a command
+ *   `command:<64>/<64>`, a plugin `plugin:<name>@<marketplace>`, percent-encoded)
+ *   still matches its route.
  */
 
 import assert from "node:assert/strict";
 import { createWriteStream } from "node:fs";
 import { test } from "node:test";
+import { agentProfileRoutes } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "./index.ts";
 
@@ -61,6 +67,30 @@ test("the bearer hook refuses percent-encoded spellings of a gated path", async 
     assert.equal(reads, 1);
     // The public auth-info endpoint stays public.
     assert.equal((await app.inject({ method: "GET", url: "/api/auth/info" })).statusCode, 200);
+  } finally {
+    await app.close();
+  }
+});
+
+test("agent profile item routes match ids longer than the router's default 100-character parameter", async () => {
+  const seen: string[] = [];
+  const app = remoteApp({
+    agentProfile: {
+      readItem: async (_agent: string, id: string) => {
+        seen.push(id);
+        return { kind: "command", item: { id }, document: { frontmatter: {}, body: "" } };
+      }
+    }
+  });
+  try {
+    const id = `command:${"a".repeat(64)}/${"b".repeat(64)}`;
+    const res = await app.inject({
+      method: "GET",
+      url: agentProfileRoutes.item("claude", id),
+      headers: { authorization: BEARER }
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.deepEqual(seen, [id]);
   } finally {
     await app.close();
   }

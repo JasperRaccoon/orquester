@@ -1270,6 +1270,10 @@ export function createServer(
     // makes the per-IP login throttle key on the actual client (see clientIp).
     // The unix-socket transport has no proxy, so leave it off there.
     trustProxy: options.mode === "remote" ? "127.0.0.1" : false,
+    // find-my-way's default (100) is shorter than an agent profile item id in its URL
+    // (`command%3A<64>%2F<64>`, `plugin%3A<name>%40<marketplace>`): such a route would 404.
+    // Every handler bounds and validates its own parameters.
+    maxParamLength: 2048,
     logger: {
       level: "info",
       stream: logStream,
