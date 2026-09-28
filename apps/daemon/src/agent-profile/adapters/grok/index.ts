@@ -25,6 +25,9 @@
  * - Plugin install/uninstall and marketplace add/remove do run `grok plugin …`
  *   (they clone, fetch and keep `installed-plugins/registry.json`); the file is
  *   backed up first and a note says so when Grok's rewrite dropped comments.
+ *   Uninstall never passes `--confirm`: Grok removes a whole install, so with
+ *   it deleting one of several plugins installed from one source silently
+ *   uninstalls the others too. Such plugins are listed not deletable.
  * - `[[hooks.<Event>]]` tables in `config.toml` are listed read-only: they
  *   run, but Grok's own inspect flags `hooks` as an unknown config key, so
  *   the profile does not write them.
@@ -124,6 +127,7 @@ import {
   replaceHandler,
   serializeHookFile
 } from "./hooks.ts";
+import { SecretDigester } from "../claude/mcp.ts";
 import { type GrokInspect, parseGrokInspect } from "./inspect.ts";
 import { type TomlEdit, type TomlTable, editToml, getTomlPath, isTable, parseToml } from "./toml-patch.ts";
 
@@ -416,8 +420,11 @@ export class GrokProfileAdapter implements ProfileAdapter {
   private readonly backups: ProfileBackups;
   private readonly stash: ProfileStash;
   private readonly runCli: typeof runAgentCliOrThrow;
+  private readonly secrets = new SecretDigester();
   private inspectCache: { at: number; result: InspectResult } | null = null;
   private inspectInFlight: Promise<InspectResult> | null = null;
+  /** Bumped by every write: an inspect started before it never answers or caches for after it. */
+  private inspectGeneration = 0;
 
   constructor(
     private readonly ctx: ProfileAdapterContext,
@@ -656,14 +663,22 @@ export class GrokProfileAdapter implements ProfileAdapter {
     if (this.inspectInFlight !== null) {
       return this.inspectInFlight;
     }
-    const run = this.runInspect().then((result) => {
-      this.inspectCache = { at: now, result };
-      return result;
-    });
-    this.inspectInFlight = run.finally(() => {
-      this.inspectInFlight = null;
-    });
-    return this.inspectInFlight;
+    const generation = this.inspectGeneration;
+    const inFlight: Promise<InspectResult> = this.runInspect()
+      .then((result) => {
+        // A write landed while this ran: its answer may predate the write, so it is not kept.
+        if (generation === this.inspectGeneration) {
+          this.inspectCache = { at: now, result };
+        }
+        return result;
+      })
+      .finally(() => {
+        if (this.inspectInFlight === inFlight) {
+          this.inspectInFlight = null;
+        }
+      });
+    this.inspectInFlight = inFlight;
+    return inFlight;
   }
 
   private async runInspect(): Promise<InspectResult> {
@@ -680,9 +695,11 @@ export class GrokProfileAdapter implements ProfileAdapter {
     }
   }
 
-  /** Drops the cached inspect answer (after every write). */
+  /** Drops the cached inspect answer, and any run already under way, after every write. */
   private invalidate(): void {
     this.inspectCache = null;
+    this.inspectInFlight = null;
+    this.inspectGeneration += 1;
   }
 
   private inspectWarning(inspect: InspectResult): ProfileItemWarning[] {
@@ -724,7 +741,8 @@ export class GrokProfileAdapter implements ProfileAdapter {
             warnings,
             meta: { transport: transportOf(table) }
           },
-          table
+          // Keyed digests of env/header values: the revision reaches clients and must not be brute-forceable into a secret.
+          this.secrets.masked(table)
         ),
         ref: { type: "mcp-own", name, table }
       });
@@ -1069,9 +1087,13 @@ export class GrokProfileAdapter implements ProfileAdapter {
     return "other";
   }
 
-  /** `installed-plugins/registry.json`: plugin name → its install. Tolerant: an unreadable registry is empty. */
-  private async readRegistry(): Promise<Map<string, { path?: string; version?: string; marketplace?: string }>> {
-    const out = new Map<string, { path?: string; version?: string; marketplace?: string }>();
+  /**
+   * `installed-plugins/registry.json`: plugin name → its install, and the
+   * other plugins installed from the same source (`siblings`: Grok uninstalls
+   * those only together). Tolerant: an unreadable registry is empty.
+   */
+  private async readRegistry(): Promise<Map<string, { path?: string; version?: string; marketplace?: string; siblings: string[] }>> {
+    const out = new Map<string, { path?: string; version?: string; marketplace?: string; siblings: string[] }>();
     let parsed: unknown;
     try {
       parsed = JSON.parse(await readFile(join(this.grokHome, "installed-plugins", "registry.json"), "utf8"));
@@ -1082,12 +1104,14 @@ export class GrokProfileAdapter implements ProfileAdapter {
     for (const repo of Object.values(repos)) {
       if (!isJsonObject(repo) || !isJsonObject(repo.plugins)) continue;
       const marketplace = isJsonObject(repo.marketplace) && typeof repo.marketplace.source_display_name === "string" ? repo.marketplace.source_display_name : undefined;
+      const names = Object.keys(repo.plugins);
       for (const [name, info] of Object.entries(repo.plugins)) {
         const version = isJsonObject(info) && typeof info.version === "string" ? info.version : undefined;
         out.set(name, {
           ...(typeof repo.path === "string" ? { path: repo.path } : {}),
           ...(version !== undefined ? { version } : {}),
-          ...(marketplace !== undefined ? { marketplace } : {})
+          ...(marketplace !== undefined ? { marketplace } : {}),
+          siblings: names.filter((other) => other !== name)
         });
       }
     }
@@ -1145,6 +1169,19 @@ export class GrokProfileAdapter implements ProfileAdapter {
       const version = installed?.version ?? manifest.version;
       const marketplace = installed?.marketplace;
       const enabled = this.pluginOn(doc, plugin.name);
+      // `grok plugin uninstall` removes a whole install: one of several
+      // plugins installed from one source cannot be deleted alone.
+      const siblings = where === "installed" ? (installed?.siblings ?? []) : [];
+      const itemWarnings: ProfileItemWarning[] =
+        siblings.length === 0
+          ? warnings
+          : [
+              ...warnings,
+              {
+                code: "shared-install",
+                message: `Installed together with ${siblings.join(", ")}: Grok uninstalls them only together (grok plugin uninstall ${plugin.name} --confirm). Turn it off instead.`
+              }
+            ];
       const ref: Extract<Ref, { type: "plugin" }> = {
         type: "plugin",
         name: plugin.name,
@@ -1165,14 +1202,14 @@ export class GrokProfileAdapter implements ProfileAdapter {
             enabled,
             toggleable: true,
             editable: false,
-            deletable: where === "installed" || where === "plugins-dir",
+            deletable: (where === "installed" && siblings.length === 0) || where === "plugins-dir",
             locked: false,
             source: where === "claude" ? FROM_CLAUDE : where === "other" ? { type: "user", label: "Custom path" } : USER,
             ...(plugin.path !== undefined ? { path: plugin.path } : {}),
-            warnings,
+            warnings: itemWarnings,
             meta: { ...(version !== undefined ? { version } : {}), ...(marketplace !== undefined ? { marketplace } : {}) }
           },
-          { path: plugin.path, where, version }
+          { path: plugin.path, where, version, siblings }
         ),
         ref
       });
@@ -1643,7 +1680,13 @@ export class GrokProfileAdapter implements ProfileAdapter {
         replace = true;
       }
     }
-    await writeSkill(this.skillsDir, { ...document, name }, { backups: this.backups, agent: AGENT, mergeExisting: !replace });
+    if (replace) {
+      // The old skill goes (backed up) before the new one is written: its other
+      // files must not linger, and a symlinked skill loses only its link — never
+      // is the shared skill it points at (Claude's, ~/.agents') overwritten.
+      await removeProfilePath(join(this.skillsDir, name), { backups: this.backups, agent: AGENT });
+    }
+    await writeSkill(this.skillsDir, { ...document, name }, { backups: this.backups, agent: AGENT, mergeExisting: false });
     this.invalidate();
     return { itemIds: [itemId("skill", name)], notes };
   }
@@ -1672,7 +1715,11 @@ export class GrokProfileAdapter implements ProfileAdapter {
         replace = true;
       }
     }
-    await writeCommand(this.commandsDir, { ...document, name }, { backups: this.backups, agent: AGENT, mergeExisting: !replace });
+    if (replace) {
+      // As for skills: a symlinked command loses only its link, never its target's text.
+      await removeProfilePath(join(this.commandsDir, `${name}.md`), { backups: this.backups, agent: AGENT });
+    }
+    await writeCommand(this.commandsDir, { ...document, name }, { backups: this.backups, agent: AGENT, mergeExisting: false });
     this.invalidate();
     return { itemIds: [itemId("command", name)], notes };
   }
@@ -1954,6 +2001,14 @@ export class GrokProfileAdapter implements ProfileAdapter {
         const data = model.hookFiles.get(ref.location.file)?.data;
         const next = data ? removeHandler(data, ref.location) : null;
         if (next === null) throw profileErrors.conflict();
+        // A stashed copy whose fragment hashes to this id is this very hook,
+        // re-added by hand meanwhile (the snapshot hides it behind the live
+        // one): dropping it loses nothing; keeping it would refuse this "off".
+        const stashed = await this.stash.get(AGENT, "hook", id);
+        const twin = stashed?.original.type === "fragment" ? this.fragmentLocation(stashed.original.data) : null;
+        if (twin !== null && hookId(twin) === id) {
+          await this.stash.remove(AGENT, "hook", id);
+        }
         await this.stash.stashFragment(AGENT, "hook", id, item.name, ref.location);
         try {
           await this.writeHookFile(model, ref.location.file, next);
@@ -2018,7 +2073,9 @@ export class GrokProfileAdapter implements ProfileAdapter {
         break;
       case "plugin":
         if (ref.where === "installed") {
-          const { output, notes: cliNotes } = await this.grokRewritingConfig(model, ["plugin", "uninstall", ref.name, "--confirm"], TIMEOUTS.uninstall);
+          // Never `--confirm`: it makes Grok also uninstall every plugin
+          // installed from the same source. Without it Grok refuses that case.
+          const { output, notes: cliNotes } = await this.grokRewritingConfig(model, ["plugin", "uninstall", ref.name], TIMEOUTS.uninstall);
           notes.push(...cliNotes);
           void output;
         } else if (ref.where === "plugins-dir" && ref.path !== undefined) {

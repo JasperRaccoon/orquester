@@ -9,7 +9,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { MarketplaceSource } from "@orquester/api";
 import { pathKind, readTextIfExists } from "../../infra/index.ts";
-import { isRecord } from "./settings.ts";
+import { isRecord, parseJsonText } from "./settings.ts";
 
 /** One user-scope record of `installed_plugins.json`. */
 export interface InstalledPlugin {
@@ -29,7 +29,7 @@ export interface InstalledPlugin {
  * does not parse or is not the v2 shape.
  */
 export function parseInstalledPlugins(text: string): InstalledPlugin[] {
-  const doc: unknown = JSON.parse(text);
+  const doc = parseJsonText(text);
   if (!isRecord(doc) || !isRecord(doc.plugins)) {
     throw new Error('expected {"version": 2, "plugins": {…}}');
   }
@@ -61,7 +61,7 @@ export interface KnownMarketplace {
 
 /** Throws an `Error` when the text does not parse or is not an object. */
 export function parseKnownMarketplaces(text: string): KnownMarketplace[] {
-  const doc: unknown = JSON.parse(text);
+  const doc = parseJsonText(text);
   if (!isRecord(doc)) {
     throw new Error("the top level is not a JSON object");
   }

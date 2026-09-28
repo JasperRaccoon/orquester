@@ -24,7 +24,7 @@ interface Fixture {
   argvLog: string;
   adapter: ClaudeProfileAdapter;
   managedHookScript: string;
-  makeAdapter: (options?: { bin?: string | null }) => ClaudeProfileAdapter;
+  makeAdapter: (options?: { bin?: string | null; claudeDir?: string }) => ClaudeProfileAdapter;
 }
 
 async function writeJson(path: string, value: unknown, mode?: number): Promise<void> {
@@ -234,11 +234,11 @@ async function fixture(t: test.TestContext): Promise<Fixture> {
   await writeText(bin, fakeClaudeScript());
   await chmod(bin, 0o755);
 
-  const makeAdapter = (options: { bin?: string | null } = {}): ClaudeProfileAdapter => {
+  const makeAdapter = (options: { bin?: string | null; claudeDir?: string } = {}): ClaudeProfileAdapter => {
     const ctx: ProfileAdapterContext = {
       homes: {
         home,
-        claudeDir,
+        claudeDir: options.claudeDir ?? claudeDir,
         claudeJson,
         codexHome: join(home, ".codex"),
         grokHome: join(home, ".grok"),
@@ -1052,4 +1052,155 @@ test("export and import round trip: MCP with real secrets, a skill directory, a 
   );
 
   await assert.rejects(source.adapter.exportItem("plugin:hookify@claude-plugins-official"), assertCode("INVALID_REQUEST"));
+});
+
+test("a hand-broken settings.json or ~/.claude.json never has its text (a secret) quoted in fileErrors or errors", async (t) => {
+  const f = await fixture(t);
+  const centur = await item(f.adapter, "mcp:centur");
+  // V8's SyntaxError quotes the text around a bad token — here an unquoted token value.
+  await writeFile(f.settingsPath, '{"env": {"ANTHROPIC_API_KEY": sk-LEAKED-PLACEHOLDER}}');
+  let snapshot = await f.adapter.snapshot();
+  const settingsError = snapshot.fileErrors.find((e) => e.path === f.settingsPath);
+  assert.ok(settingsError);
+  assert.match(settingsError.message, /not valid JSON/);
+  assert.ok(!JSON.stringify(snapshot).includes("sk-LEAK"), "no quoted text in the snapshot");
+  await assert.rejects(f.adapter.setEnabled(centur.id, centur.revision, false), (error: unknown) => {
+    assertCode("CONFIG_UNREADABLE")(error);
+    assert.ok(!(error as Error).message.includes("sk-LEAK"), (error as Error).message);
+    return true;
+  });
+
+  await writeFile(f.claudeJson, '{"mcpServers": {"jira": {"env": {"JIRA_API_TOKEN": sk-LEAKED-PLACEHOLDER}}}}');
+  snapshot = await f.adapter.snapshot();
+  assert.ok(snapshot.fileErrors.some((e) => e.path === f.claudeJson));
+  assert.ok(!JSON.stringify(snapshot).includes("sk-LEAK"), "no quoted text in the snapshot");
+  await assert.rejects(
+    f.adapter.create({ kind: "mcp", mcp: { name: "x", transport: "sse", url: "https://sse.example/sse" } }, { onConflict: "fail" }),
+    (error: unknown) => {
+      assertCode("CONFIG_UNREADABLE")(error);
+      assert.ok(!(error as Error).message.includes("sk-LEAK"), (error as Error).message);
+      return true;
+    }
+  );
+});
+
+test("a hook naming agent-hook.sh is refused: it would turn its user group into Orquester's managed one", async (t) => {
+  const f = await fixture(t);
+  const before = await readFile(f.settingsPath, "utf8");
+  // Joining the user UserPromptSubmit group would make isManagedGroup() claim it — and the
+  // daemon's next hook install replaces every managed group, dropping the user's reinject hook.
+  await assert.rejects(
+    f.adapter.create(
+      { kind: "hook", hook: { event: "UserPromptSubmit", command: `'${f.managedHookScript}' claude SessionStart` } },
+      { onConflict: "fail" }
+    ),
+    assertCode("INVALID_ITEM")
+  );
+  const reinject = (await f.adapter.snapshot()).items.find((i) => i.kind === "hook" && i.name.includes("reinject-claude-md.py"));
+  assert.ok(reinject);
+  await assert.rejects(
+    f.adapter.update(reinject.id, reinject.revision, { kind: "hook", hook: { event: "UserPromptSubmit", command: "sh agent-hook.sh" } }),
+    assertCode("INVALID_ITEM")
+  );
+  assert.equal(await readFile(f.settingsPath, "utf8"), before);
+});
+
+test("off then on keeps a plugin's version pin and a skill's partial override", async (t) => {
+  const f = await fixture(t);
+  const settings = await readJson(f.settingsPath);
+  settings.enabledPlugins["superpowers@claude-plugins-official"] = ["^6.0.0"];
+  settings.skillOverrides = { handoff: "user-invocable-only" };
+  await writeJson(f.settingsPath, settings, 0o600);
+  const pluginId = "plugin:superpowers@claude-plugins-official";
+
+  let plugin = await item(f.adapter, pluginId);
+  assert.equal(plugin.enabled, true, "a pin list is on");
+  await f.adapter.setEnabled(plugin.id, plugin.revision, false);
+  assert.equal((await readJson(f.settingsPath)).enabledPlugins["superpowers@claude-plugins-official"], false);
+  plugin = await item(f.adapter, pluginId);
+  await f.adapter.setEnabled(plugin.id, plugin.revision, true);
+  assert.deepEqual((await readJson(f.settingsPath)).enabledPlugins["superpowers@claude-plugins-official"], ["^6.0.0"]);
+
+  let skill = await item(f.adapter, "skill:handoff");
+  assert.equal(skill.enabled, true, "user-invocable-only is not off");
+  await f.adapter.setEnabled(skill.id, skill.revision, false);
+  assert.equal((await readJson(f.settingsPath)).skillOverrides.handoff, "off");
+  skill = await item(f.adapter, "skill:handoff");
+  await f.adapter.setEnabled(skill.id, skill.revision, true);
+  assert.deepEqual((await readJson(f.settingsPath)).skillOverrides, { handoff: "user-invocable-only" });
+  // Renamed while off, it still comes back with its own override.
+  skill = await item(f.adapter, "skill:handoff");
+  await f.adapter.setEnabled(skill.id, skill.revision, false);
+  skill = await item(f.adapter, "skill:handoff");
+  await f.adapter.update(skill.id, skill.revision, { kind: "skill", document: { name: "handover", frontmatter: {}, body: "Write it.\n" } });
+  skill = await item(f.adapter, "skill:handover");
+  assert.equal(skill.enabled, false);
+  await f.adapter.setEnabled(skill.id, skill.revision, true);
+  assert.deepEqual((await readJson(f.settingsPath)).skillOverrides, { handover: "user-invocable-only" });
+
+  // A value set by hand in between wins over an older memory: off (pin kept), on by hand, off, on.
+  plugin = await item(f.adapter, pluginId);
+  await f.adapter.setEnabled(plugin.id, plugin.revision, false);
+  const byHand = await readJson(f.settingsPath);
+  byHand.enabledPlugins["superpowers@claude-plugins-official"] = true;
+  await writeJson(f.settingsPath, byHand, 0o600);
+  plugin = await item(f.adapter, pluginId);
+  await f.adapter.setEnabled(plugin.id, plugin.revision, false);
+  plugin = await item(f.adapter, pluginId);
+  await f.adapter.setEnabled(plugin.id, plugin.revision, true);
+  assert.equal((await readJson(f.settingsPath)).enabledPlugins["superpowers@claude-plugins-official"], true);
+  assert.ok(!(await f.adapter.snapshot()).items.some((i) => i.stashed), "remembered values are not listed");
+});
+
+test("turning off a hook whose identical copy is already stashed replaces that copy instead of refusing", async (t) => {
+  const f = await fixture(t);
+  const { itemIds } = await f.adapter.create({ kind: "hook", hook: { event: "SessionStart", command: "~/bin/hello.sh" } }, { onConflict: "fail" });
+  let hook = await item(f.adapter, itemIds[0]!);
+  await f.adapter.setEnabled(hook.id, hook.revision, false);
+  // The same hook is put back by hand: the live one hides the stashed copy.
+  const settings = await readJson(f.settingsPath);
+  settings.hooks.SessionStart = [{ hooks: [{ type: "command", command: "~/bin/hello.sh" }] }];
+  await writeJson(f.settingsPath, settings, 0o600);
+  hook = await item(f.adapter, itemIds[0]!);
+  assert.equal(hook.enabled, true);
+  await f.adapter.setEnabled(hook.id, hook.revision, false);
+  assert.equal((await readJson(f.settingsPath)).hooks.SessionStart, undefined);
+  hook = await item(f.adapter, itemIds[0]!);
+  assert.deepEqual([hook.enabled, hook.stashed, hook.warnings], [false, true, []]);
+  await f.adapter.setEnabled(hook.id, hook.revision, true);
+  assert.deepEqual((await readJson(f.settingsPath)).hooks.SessionStart, [{ hooks: [{ type: "command", command: "~/bin/hello.sh" }] }]);
+});
+
+test("the claude CLI gets CLAUDE_CONFIG_DIR only when the daemon's own moved the config dir", async (t) => {
+  const f = await fixture(t);
+  const moved = join(f.root, "moved-claude");
+  await writeJson(join(moved, "plugins", "installed_plugins.json"), { version: 2, plugins: {} });
+  const adapter = f.makeAdapter({ claudeDir: moved });
+  await adapter.create({ kind: "plugin", plugin: { plugin: "hookify", marketplace: "claude-plugins-official" } }, { onConflict: "fail" });
+  const calls = await readArgv(f.argvLog);
+  assert.deepEqual([calls.at(-1)?.home, calls.at(-1)?.claudeConfigDir], [f.home, moved]);
+});
+
+test("a server whose name Claude accepts but the profile's naming rule does not can still be edited in place", async (t) => {
+  const f = await fixture(t);
+  const live = await readJson(f.claudeJson);
+  live.mcpServers["1password"] = { type: "stdio", command: "op-mcp", args: [], env: { OP_TOKEN: "op-PLACEHOLDER" } };
+  await writeJson(f.claudeJson, live, 0o600);
+  const server = await item(f.adapter, "mcp:1password");
+  await f.adapter.update(server.id, server.revision, {
+    kind: "mcp",
+    mcp: { name: "1password", transport: "stdio", command: "op-mcp", args: ["--read-only"], env: [{ key: "OP_TOKEN", keep: true }] }
+  });
+  assert.deepEqual((await readJson(f.claudeJson)).mcpServers["1password"], {
+    type: "stdio",
+    command: "op-mcp",
+    args: ["--read-only"],
+    env: { OP_TOKEN: "op-PLACEHOLDER" }
+  });
+  // A rename still has to pass the rule.
+  const edited = await item(f.adapter, "mcp:1password");
+  await assert.rejects(
+    f.adapter.update(edited.id, edited.revision, { kind: "mcp", mcp: { name: "2password", transport: "stdio", command: "op-mcp" } }),
+    assertCode("INVALID_NAME")
+  );
 });

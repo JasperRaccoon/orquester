@@ -20,12 +20,15 @@
  * the manifest's `defaultEnabled`, which defaults to ON; `deniedMcpServers`
  * merges from every settings source, the user file included; `skillOverrides`
  * ignores plugin skills. The CLI runs with HOME = the daemon user's home and
- * no `CLAUDE_CONFIG_DIR`; installs never pass `-y`, so a marketplace-declared
- * install command is refused by the CLI instead of being run unseen.
+ * no `CLAUDE_CONFIG_DIR` (unless the daemon's own moved `claudeDir`); installs
+ * never pass `-y`, so a marketplace-declared install command is refused by
+ * the CLI instead of being run unseen. Turning a plugin or skill off keeps a
+ * value "off" replaces (a version-constraint list, a `name-only` /
+ * `user-invocable-only` override) as a stash fragment for the next "on".
  */
 
 import { mkdir, mkdtemp, rename, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   AGENT_PROFILE_AGENT_LABELS,
   type HookDraft,
@@ -131,6 +134,8 @@ const AGENT = "claude";
 const LABEL = AGENT_PROFILE_AGENT_LABELS.claude;
 /** The CLI-owned directory under `skills/` (and `plugins/`): never listed, never written. */
 const SYNCED_DIR = "synced";
+/** What `isManagedGroup` looks for in a handler's command. */
+const MANAGED_HOOK_SCRIPT = "agent-hook.sh";
 const INSTALL_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 120_000;
 /** Plugin and marketplace names as argv tokens: never an option, never a path. */
@@ -976,7 +981,13 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
       throw profileErrors.notInstalled(LABEL);
     }
     const home = this.ctx.homes.home;
-    await this.runCli({ bin: this.ctx.bin, args, timeoutMs, cwd: home, env: { HOME: home }, label, redact: { homeDirs: [home] } });
+    // The CLI must change the files this adapter reads: `<home>/.claude` by
+    // default (no CLAUDE_CONFIG_DIR, so no account home leaks in), or the
+    // directory the daemon's own CLAUDE_CONFIG_DIR moved it to.
+    const claudeDir = this.ctx.homes.claudeDir;
+    const env: Record<string, string> = { HOME: home };
+    if (resolve(claudeDir) !== resolve(home, ".claude")) env.CLAUDE_CONFIG_DIR = claudeDir;
+    await this.runCli({ bin: this.ctx.bin, args, timeoutMs, cwd: home, env, label, redact: { homeDirs: [home] } });
   }
 
   private async installPlugin(draft: PluginInstallDraft, onConflict: ProfileConflictPolicy): Promise<AdapterMutationResult> {
@@ -1047,7 +1058,9 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     if (!isRecord(draft)) throw profileErrors.invalid("The MCP server draft is missing.");
     this.requireClaudeJson(state);
     const nextName = draft.name;
-    assertMcpServerName(typeof nextName === "string" ? nextName : "");
+    // Claude itself accepts names this rule refuses (`1password`): an edit that
+    // keeps the name must not be blocked by it; a rename is validated.
+    if (nextName !== name) assertMcpServerName(typeof nextName === "string" ? nextName : "");
     const enabled = !isMcpDenied(state.settings, name);
     await updateClaudeJsonMcpServers(
       this.ctx.homes.claudeJson,
@@ -1103,6 +1116,11 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
           doc.skillOverrides = overrides;
         });
       }
+      // The override an "off" replaced follows the skill to its new name.
+      const oldId = itemId("skill", skill.name);
+      const remembered = await this.recallValue("skill", oldId);
+      await this.stash.remove(AGENT, "skill", oldId);
+      await this.rememberValue("skill", itemId("skill", name), name, remembered);
     }
     await writeSkill(this.skillsRoot, { ...document, name }, this.writeOptions);
     return { itemIds: [itemId("skill", name)], notes: [] };
@@ -1154,15 +1172,37 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
           done.notes.push(`deniedMcpServers now lists "${entry.name}"; that also blocks a project MCP server with this name.`);
         }
         return done;
-      case "skill":
+      case "skill": {
         this.requireSettings(state);
-        await this.patchSettings((doc) => setSkillOverride(doc, entry.skill.name, enabled));
+        const name = entry.skill.name;
+        if (!enabled) {
+          // `name-only` / `user-invocable-only` are on-ish values "off" replaces: keep one for the next on.
+          const current = skillOverride(state.settings, name);
+          await this.rememberValue("skill", id, name, current !== undefined && current !== "on" ? current : undefined);
+          await this.patchSettings((doc) => setSkillOverride(doc, name, false));
+          return done;
+        }
+        const restore = await this.recallValue("skill", id);
+        await this.patchSettings((doc) => setSkillOverride(doc, name, true, typeof restore === "string" ? restore : undefined));
+        await this.stash.remove(AGENT, "skill", id);
         return done;
-      case "plugin":
+      }
+      case "plugin": {
         this.requireSettings(state);
-        await this.patchSettings((doc) => setPluginEnabled(doc, entry.plugin.id, enabled));
+        const pluginId = entry.plugin.id;
+        if (!enabled) {
+          // A version-constraint list is Claude's "on, pinned": "off" replaces it, so keep it for the next on.
+          const current = isRecord(state.settings?.enabledPlugins) ? state.settings.enabledPlugins[pluginId] : undefined;
+          await this.rememberValue("plugin", id, pluginId, Array.isArray(current) ? current : undefined);
+          await this.patchSettings((doc) => setPluginEnabled(doc, pluginId, false));
+        } else {
+          const restore = await this.recallValue("plugin", id);
+          await this.patchSettings((doc) => setPluginEnabled(doc, pluginId, Array.isArray(restore) ? restore : true));
+          await this.stash.remove(AGENT, "plugin", id);
+        }
         done.notes.push("Applies to new Claude sessions.");
         return done;
+      }
       case "hook":
         this.requireSettings(state);
         if (entry.origin === "settings") {
@@ -1185,9 +1225,35 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     }
   }
 
+  /**
+   * Keeps (as a stash fragment) the settings value an "off" is about to
+   * replace, for the next "on"; `undefined` just forgets any older one, so a
+   * value set by hand in between is never overridden by a stale memory.
+   */
+  private async rememberValue(kind: "skill" | "plugin", id: string, name: string, value: unknown): Promise<void> {
+    await this.stash.remove(AGENT, kind, id);
+    if (value !== undefined) {
+      await this.stash.stashFragment(AGENT, kind, id, name, { value });
+    }
+  }
+
+  private async recallValue(kind: "skill" | "plugin", id: string): Promise<unknown> {
+    const entry = await this.stash.get(AGENT, kind, id);
+    const data = entry?.original.type === "fragment" ? entry.original.data : undefined;
+    return isRecord(data) ? data.value : undefined;
+  }
+
   private async stashHook(hook: SettingsHook): Promise<void> {
     const fragment: HookFragment = { event: hook.event, matcher: hook.matcher, handler: hook.handler };
     const name = typeof hook.handler.command === "string" ? hook.handler.command : hook.event;
+    // A stashed copy whose fragment hashes to this id is this very hook,
+    // re-added meanwhile: dropping it loses nothing, and keeping it would
+    // refuse this "off" over a copy the list does not show.
+    const stashed = await this.stash.get(AGENT, "hook", hook.id);
+    const twin = stashed?.original.type === "fragment" ? parseHookFragment(stashed.original.data) : null;
+    if (twin !== null && claudeHookId(twin.event, twin.matcher, twin.handler) === hook.id) {
+      await this.stash.remove(AGENT, "hook", hook.id);
+    }
     await this.stash.stashFragment(AGENT, "hook", hook.id, name, fragment);
     try {
       const removed = await this.patchSettings((doc) => removeSettingsHook(doc, hook.id));
@@ -1239,6 +1305,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
       }
       case "skill":
         await removeProfilePath(entry.skill.dir, this.writeOptions);
+        await this.stash.remove(AGENT, "skill", id);
         if (skillOverride(state.settings, entry.skill.name) !== undefined && state.settingsError === undefined) {
           await this.patchSettings((doc) => setSkillOverride(doc, entry.skill.name, true));
         }
@@ -1263,6 +1330,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
         assertCliName(entry.plugin.name, "plugin");
         assertCliName(entry.plugin.marketplace, "marketplace");
         await this.cli(["plugin", "uninstall", entry.plugin.id, "--scope", "user"], "claude plugin uninstall");
+        await this.stash.remove(AGENT, "plugin", id);
         done.notes.push("Applies to new Claude sessions.");
         return done;
       case "marketplace": {
@@ -1485,6 +1553,12 @@ function hookFragmentFromDraft(draft: HookDraft, base: Record<string, unknown>, 
   }
   if (typeof draft.command !== "string" || draft.command.trim().length === 0) {
     throw profileErrors.invalidItem("A hook needs a command.");
+  }
+  // `isManagedGroup` marks a whole group Orquester's once one handler names
+  // agent-hook.sh: the user group it joined would turn locked, and the
+  // daemon's next hook install replaces every managed group — dropping it.
+  if (draft.command.includes(MANAGED_HOOK_SCRIPT)) {
+    throw profileErrors.invalidItem(`${MANAGED_HOOK_SCRIPT} is Orquester's own status hook; it is installed by the daemon, not here.`);
   }
   if (draft.matcher !== undefined && draft.matcher !== null && typeof draft.matcher !== "string") {
     throw profileErrors.invalidItem("The matcher must be text.");
