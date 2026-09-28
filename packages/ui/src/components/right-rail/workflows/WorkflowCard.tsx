@@ -45,7 +45,7 @@ import type { WorkflowRunsList } from "../../../lib/workflows/store";
 import { AdaptiveMenu } from "../../ui/adaptive-menu";
 import { Button } from "../../ui/button";
 import { DropdownItem, DropdownSeparator } from "../../ui/dropdown";
-import { RailChip, railCardClass } from "../primitives";
+import { RailChip, RailSwitch, railCardClass } from "../primitives";
 
 export interface WorkflowCardProps {
   workflow: WorkflowSummary;
@@ -92,43 +92,6 @@ function TriggerIcon({ trigger }: { trigger: WorkflowTriggerSummary }): React.Re
   const Icon = trigger.type === "trigger.schedule" ? Clock : trigger.type === "trigger.git" ? GitBranch : Hand;
   return <Icon size={12} aria-hidden className="mt-[3px] shrink-0 text-neutral-500" />;
 }
-
-/** The enabled switch, sized for its variant: a 40 px target on a phone around the same track. */
-const EnabledSwitch: React.FC<{
-  checked: boolean;
-  label: string;
-  sheet: boolean;
-  onChange: (checked: boolean) => void;
-}> = ({ checked, label, sheet, onChange }) => (
-  <button
-    type="button"
-    role="switch"
-    aria-checked={checked}
-    aria-label={label}
-    title={checked ? "Enabled — its triggers fire" : "Disabled — only Run now starts it"}
-    onClick={() => onChange(!checked)}
-    className={cn(
-      "group -my-1 inline-flex shrink-0 items-center justify-center rounded-md",
-      FOCUS_RING,
-      sheet ? "-mr-1.5 h-10 w-12" : "-mr-1 h-7 w-10"
-    )}
-  >
-    <span
-      aria-hidden
-      className={cn(
-        "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
-        checked ? "bg-neutral-200" : "bg-neutral-700 group-hover:bg-neutral-600"
-      )}
-    >
-      <span
-        className={cn(
-          "inline-block h-3.5 w-3.5 rounded-full bg-neutral-950 transition-transform motion-reduce:transition-none",
-          checked ? "translate-x-[18px]" : "translate-x-[3px]"
-        )}
-      />
-    </span>
-  </button>
-);
 
 /** A run's status: the dot, then its words. */
 export const RunStatusDot: React.FC<{ run: Pick<WorkflowRunSummary, "status">; className?: string }> = ({
@@ -232,11 +195,13 @@ export const WorkflowCard: React.FC<WorkflowCardProps> = (props) => {
               <span className="mt-0.5 block truncate text-xs text-neutral-500">{workflow.description}</span>
             ) : null}
           </button>
-          <EnabledSwitch
+          <RailSwitch
             checked={workflow.enabled}
             sheet={sheet}
             label={`Enable ${workflow.name}`}
+            title={workflow.enabled ? "Enabled — its triggers fire" : "Disabled — only Run now starts it"}
             onChange={props.onToggleEnabled}
+            className={cn("-my-1", sheet ? "-mr-1.5" : "-mr-1")}
           />
         </div>
 
