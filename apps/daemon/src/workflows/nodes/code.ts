@@ -27,7 +27,12 @@ export function createCodeExecutor(): NodeExecutor<"code"> {
         return { status: "failed", error: { kind: "interrupted", message: "The code block's process ended without recording a result." } };
       }
       const exit = outcome.exit;
-      if (ctx.signal.aborted || exit.cancelled) return { status: "cancelled" };
+      // Cancelled only when the RUN asked for it; a runner stopped from outside (a SIGTERM nobody in
+      // the engine sent) is a failure, or the run would read succeeded with this block skipped.
+      if (ctx.signal.aborted) return { status: "cancelled" };
+      if (exit.cancelled) {
+        return { status: "failed", error: { kind: "interrupted", message: "The code block's process was stopped from outside the workflow." } };
+      }
       const result = exit.result;
       if (result && "stop" in result) {
         return result.reason !== undefined

@@ -5,6 +5,8 @@
 // meets applies — the workspace's git account for a clone, the non-empty-directory refusal, the
 // tab cascade on delete.
 
+import { join } from "node:path";
+
 import type { GitFileChange, GitStatusResponse, ProjectSummary } from "@orquester/api";
 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
@@ -105,6 +107,10 @@ export function createProjectOps(deps: ProjectOpsDeps): ProjectOps {
         const error = daemonError(response);
         throw new Error(`${error.code}: ${error.message}`);
       }
+    },
+
+    tempPathFor(workspace: string, name: string): string {
+      return join(read(deps.workspacesDir), workspace, name);
     },
 
     async gitStatusShort(path: string, maxBytes: number): Promise<string> {

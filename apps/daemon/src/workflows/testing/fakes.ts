@@ -334,8 +334,12 @@ export class InMemoryRunStore implements RunStore {
     return structuredClone(this.files.get(path));
   }
 
-  async deleteForWorkflow(workflowId: string): Promise<void> {
-    for (const [id, run] of this.runs) if (run.workflowId === workflowId) this.runs.delete(id);
+  async deleteForWorkflow(workflowId: string, options: { keep?: ReadonlySet<string> } = {}): Promise<void> {
+    for (const [id, run] of this.runs) if (run.workflowId === workflowId && !options.keep?.has(id)) this.runs.delete(id);
+  }
+
+  workflowIds(): string[] {
+    return [...new Set([...this.runs.values()].map((run) => run.workflowId))];
   }
 
   async sweep(): Promise<void> {
@@ -371,6 +375,10 @@ export class FakeProjects implements ProjectOps {
   async deleteProject(path: string): Promise<void> {
     this.deleted.push(path);
     this.existing.delete(path);
+  }
+
+  tempPathFor(workspace: string, name: string): string {
+    return `/w/${workspace}/${name}`;
   }
 
   async gitStatusShort(): Promise<string> {
@@ -455,6 +463,11 @@ export class FakeSandbox implements SandboxRunner {
 
   async readExit(attemptDir: string): Promise<SandboxExit | null> {
     return this.processes.find((process) => process.handle.attemptDir === attemptDir)?.exit ?? null;
+  }
+
+  async readHandle(attemptDir: string): Promise<SandboxHandle | null> {
+    const found = this.processes.find((process) => process.handle.attemptDir === attemptDir);
+    return found ? { ...found.handle } : null;
   }
 
   async kill(handle: SandboxHandle): Promise<void> {

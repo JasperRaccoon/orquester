@@ -162,8 +162,34 @@ export function compileRulePattern(source: string): { regex: RegExp } | { error:
 // Rules
 // ---------------------------------------------------------------------------
 
-/** Evaluate one rule. Never throws. */
-export function evaluateRule(rule: WorkflowRule, ctx: ExpressionContext): RuleEvaluation {
+/**
+ * A secret value inside a text that is about to be CLIPPED into a warning: replaced by its
+ * placeholder first, so a clip can never leave a secret's prefix behind that the engine's redactor
+ * (which matches whole values) would no longer recognise.
+ */
+function redactForClip(text: string, secrets: Readonly<Record<string, string>> | undefined): string {
+  if (!secrets) return text;
+  const entries = Object.keys(secrets)
+    .sort()
+    .map((name) => [name, secrets[name]] as const)
+    .filter((entry): entry is readonly [string, string] => typeof entry[1] === "string" && entry[1].length >= 4)
+    .sort((a, b) => b[1].length - a[1].length);
+  let out = text;
+  for (const [name, value] of entries) if (out.includes(value)) out = out.split(value).join(`«secret:${name}»`);
+  return out;
+}
+
+function clipped(text: string, ctx: ExpressionContext, max = 60): string {
+  return redactForClip(text, ctx.secrets).slice(0, max);
+}
+
+interface RuleOperands {
+  left: unknown;
+  right: string;
+  warnings: string[];
+}
+
+function ruleOperands(rule: WorkflowRule, ctx: ExpressionContext): RuleOperands {
   const warnings: string[] = [];
   let left: unknown;
   const single = singleExpression(rule.left);
@@ -182,88 +208,116 @@ export function evaluateRule(rule: WorkflowRule, ctx: ExpressionContext): RuleEv
     right = rendered.text;
     warnings.push(...rendered.warnings);
   }
+  return { left, right, warnings };
+}
 
+/** What a `matches` rule searches: the compiled pattern and the (capped) text; null when refused. */
+export interface RuleMatchJob {
+  source: string;
+  flags: string;
+  text: string;
+}
+
+function prepareMatch(operands: RuleOperands): { job: RuleMatchJob; regex: RegExp } | null {
+  const compiled = compileRulePattern(operands.right);
+  if ("error" in compiled) {
+    operands.warnings.push(`Rule "matches": the pattern is refused — ${compiled.error}`);
+    return null;
+  }
+  let text = ruleText(operands.left);
+  if (text.length > RULE_MATCH_MAX_INPUT) {
+    operands.warnings.push(`Rule "matches": only the first ${RULE_MATCH_MAX_INPUT / 1024} KB of the value were searched`);
+    text = text.slice(0, RULE_MATCH_MAX_INPUT);
+  }
+  return { job: { source: compiled.regex.source, flags: compiled.regex.flags, text }, regex: compiled.regex };
+}
+
+/** Every operator but `matches` (decided by the caller, sync or async). */
+function decideRule(rule: WorkflowRule, operands: RuleOperands, ctx: ExpressionContext): boolean {
+  const { left, right, warnings } = operands;
   const numeric = (compare: (a: number, b: number) => boolean): boolean => {
     const a = ruleNumber(left);
     const b = ruleNumber(right);
     if (a === null || b === null) {
-      warnings.push(
-        `Rule "${rule.op}": ${a === null ? `"${ruleText(left).slice(0, 60)}"` : `"${right.slice(0, 60)}"`} is not a number`
-      );
+      warnings.push(`Rule "${rule.op}": "${a === null ? clipped(ruleText(left), ctx) : clipped(right, ctx)}" is not a number`);
       return false;
     }
     return compare(a, b);
   };
 
-  let result: boolean;
   switch (rule.op) {
     case "equals":
-      result = looseEquals(left, right);
-      break;
+      return looseEquals(left, right);
     case "notEquals":
-      result = !looseEquals(left, right);
-      break;
+      return !looseEquals(left, right);
     case "contains":
-      result = Array.isArray(left) ? left.some((item) => looseEquals(item, right)) : ruleText(left).includes(right);
-      break;
+      return Array.isArray(left) ? left.some((item) => looseEquals(item, right)) : ruleText(left).includes(right);
     case "notContains":
-      result = !(Array.isArray(left) ? left.some((item) => looseEquals(item, right)) : ruleText(left).includes(right));
-      break;
+      return !(Array.isArray(left) ? left.some((item) => looseEquals(item, right)) : ruleText(left).includes(right));
     case "startsWith":
-      result = ruleText(left).startsWith(right);
-      break;
+      return ruleText(left).startsWith(right);
     case "endsWith":
-      result = ruleText(left).endsWith(right);
-      break;
-    case "matches": {
-      const compiled = compileRulePattern(right);
-      if ("error" in compiled) {
-        warnings.push(`Rule "matches": the pattern is refused — ${compiled.error}`);
-        result = false;
-        break;
-      }
-      let text = ruleText(left);
-      if (text.length > RULE_MATCH_MAX_INPUT) {
-        warnings.push(`Rule "matches": only the first ${RULE_MATCH_MAX_INPUT / 1024} KB of the value were searched`);
-        text = text.slice(0, RULE_MATCH_MAX_INPUT);
-      }
-      result = compiled.regex.test(text);
-      break;
-    }
+      return ruleText(left).endsWith(right);
+    case "matches":
+      // Decided by the caller (evaluateRule / evaluateRuleAsync).
+      return false;
     case "gt":
-      result = numeric((a, b) => a > b);
-      break;
+      return numeric((a, b) => a > b);
     case "gte":
-      result = numeric((a, b) => a >= b);
-      break;
+      return numeric((a, b) => a >= b);
     case "lt":
-      result = numeric((a, b) => a < b);
-      break;
+      return numeric((a, b) => a < b);
     case "lte":
-      result = numeric((a, b) => a <= b);
-      break;
+      return numeric((a, b) => a <= b);
     case "isEmpty":
-      result = isEmptyValue(left);
-      break;
+      return isEmptyValue(left);
     case "isNotEmpty":
-      result = !isEmptyValue(left);
-      break;
+      return !isEmptyValue(left);
     case "exists":
-      result = left !== undefined;
-      break;
+      return left !== undefined;
     case "isTrue":
-      result = left === true || (typeof left === "string" && left.trim().toLowerCase() === "true");
-      break;
+      return left === true || (typeof left === "string" && left.trim().toLowerCase() === "true");
     case "isFalse":
-      result = left === false || (typeof left === "string" && left.trim().toLowerCase() === "false");
-      break;
+      return left === false || (typeof left === "string" && left.trim().toLowerCase() === "false");
     default: {
       const unhandled: never = rule.op;
       warnings.push(`Unknown rule operator "${String(unhandled)}"`);
-      result = false;
+      return false;
     }
   }
-  return { result, warnings };
+}
+
+/**
+ * Evaluate one rule. Never throws. `matches` runs IN THIS THREAD behind the pattern guard — fine for
+ * a preview; the daemon evaluates rules with {@link evaluateRuleAsync} and a matcher that runs the
+ * regular expression in a worker with a hard timeout, because no guard catches every slow pattern.
+ */
+export function evaluateRule(rule: WorkflowRule, ctx: ExpressionContext): RuleEvaluation {
+  const operands = ruleOperands(rule, ctx);
+  if (rule.op === "matches") {
+    const prepared = prepareMatch(operands);
+    return { result: prepared !== null && prepared.regex.test(prepared.job.text), warnings: operands.warnings };
+  }
+  return { result: decideRule(rule, operands, ctx), warnings: operands.warnings };
+}
+
+/** Runs a `matches` search somewhere safe: its answer, or a warning (a timeout) that reads as false. */
+export type RuleMatcher = (job: RuleMatchJob) => Promise<{ result: boolean; warning?: string }>;
+
+/** {@link evaluateRule} with `matches` handed to `matcher`. Never rejects. */
+export async function evaluateRuleAsync(rule: WorkflowRule, ctx: ExpressionContext, matcher: RuleMatcher): Promise<RuleEvaluation> {
+  const operands = ruleOperands(rule, ctx);
+  if (rule.op !== "matches") return { result: decideRule(rule, operands, ctx), warnings: operands.warnings };
+  const prepared = prepareMatch(operands);
+  if (prepared === null) return { result: false, warnings: operands.warnings };
+  try {
+    const answer = await matcher(prepared.job);
+    if (answer.warning !== undefined) operands.warnings.push(answer.warning);
+    return { result: answer.result, warnings: operands.warnings };
+  } catch (error) {
+    operands.warnings.push(`Rule "matches": the pattern could not be evaluated — ${error instanceof Error ? error.message : String(error)}`);
+    return { result: false, warnings: operands.warnings };
+  }
 }
 
 /** `all`: every rule holds (an empty list holds); `any`: at least one does. Every rule is evaluated. */
@@ -301,6 +355,41 @@ export function evaluateSwitch(
   for (let index = 0; index < config.cases.length; index += 1) {
     const current = config.cases[index]!;
     const evaluated = evaluateRules(current.combine, current.rules, ctx);
+    warnings.push(...evaluated.warnings);
+    if (evaluated.result) return { handle: `case:${index}`, warnings };
+  }
+  return { handle: config.fallback ? "default" : null, warnings };
+}
+
+/** {@link evaluateRules} with `matches` handed to `matcher`. */
+export async function evaluateRulesAsync(
+  combine: "all" | "any",
+  rules: readonly WorkflowRule[],
+  ctx: ExpressionContext,
+  matcher: RuleMatcher
+): Promise<RuleEvaluation> {
+  const warnings: string[] = [];
+  let all = true;
+  let any = false;
+  for (const rule of rules) {
+    const evaluated = await evaluateRuleAsync(rule, ctx, matcher);
+    warnings.push(...evaluated.warnings);
+    all &&= evaluated.result;
+    any ||= evaluated.result;
+  }
+  return { result: combine === "all" ? all : any, warnings };
+}
+
+/** {@link evaluateSwitch} with `matches` handed to `matcher`. */
+export async function evaluateSwitchAsync(
+  config: SwitchConfigLike,
+  ctx: ExpressionContext,
+  matcher: RuleMatcher
+): Promise<{ handle: string | null; warnings: string[] }> {
+  const warnings: string[] = [];
+  for (let index = 0; index < config.cases.length; index += 1) {
+    const current = config.cases[index]!;
+    const evaluated = await evaluateRulesAsync(current.combine, current.rules, ctx, matcher);
     warnings.push(...evaluated.warnings);
     if (evaluated.result) return { handle: `case:${index}`, warnings };
   }

@@ -17,6 +17,7 @@
 import { basename, dirname, join, resolve } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  isRunActive,
   outputHandles,
   validateCron,
   nextRuns,
@@ -60,12 +61,15 @@ import {
   triggerGitConfigSchema,
   triggerManualConfigSchema,
   triggerScheduleConfigSchema,
+  agentChainEntrySchema,
   waitConfigSchema,
-  WORKFLOW_NODE_TYPES
+  WORKFLOW_NODE_TYPES,
+  WORKFLOW_SECRET_NAME_PATTERN
 } from "@orquester/config";
 import type { ZodTypeAny } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import type { WorkflowEngine } from "./contracts.ts";
+import type { ProjectOps, WorkflowEngine } from "./contracts.ts";
+import { WorkflowEngineError } from "./run-context.ts";
 import {
   engineUnavailable,
   invalidRequest,
@@ -99,7 +103,15 @@ export interface WorkflowRouteDeps {
   projectPathFilter?: (projectPath: string) => { path: string; workspace: string } | null;
   /** How often a followed log is re-read at its end (tests shorten it). */
   logPollMs?: number;
+  /**
+   * Deletes a kept temporary project when the engine cannot (not attached yet, or its delete
+   * failed) — the delete cascade must not drop the only record naming a directory it left behind.
+   */
+  projects?: Pick<ProjectOps, "deleteProject">;
 }
+
+/** Definitions may be 2 MiB (`maxDefinitionBytes`); a JSON body carrying one needs room around it. */
+export const WORKFLOW_WRITE_BODY_LIMIT = 3 * 1024 * 1024;
 
 /** Default and maximum page sizes for the run history. */
 const RUNS_PAGE_DEFAULT = 20;
@@ -168,14 +180,14 @@ export function summarizeWorkflow(
  * it — the record goes next), then its runs and its secrets. An existing project is never touched.
  */
 export async function deleteWorkflowCascade(
-  deps: Pick<WorkflowRouteDeps, "service" | "secrets" | "runStore" | "engine">,
+  deps: Pick<WorkflowRouteDeps, "service" | "secrets" | "runStore" | "engine" | "projects">,
   id: string,
   revision?: number
 ): Promise<void> {
   await deps.service.delete(id, revision);
   const engine = deps.engine();
+  const cancelled: string[] = [];
   if (engine !== null) {
-    const cancelled: string[] = [];
     for (const run of deps.runStore.activeForWorkflow(id)) {
       cancelled.push(run.id);
       await engine.cancel(run.id).catch((error) => console.error(`Failed to cancel workflow run ${run.id}`, error));
@@ -193,26 +205,67 @@ export async function deleteWorkflowCascade(
       ]);
       clearTimeout(timer);
     }
-    let before: string | undefined;
-    for (let page = 0; page < 50; page += 1) {
-      const listing = await deps.runStore.listForWorkflow(id, before !== undefined ? { before, limit: 100 } : { limit: 100 });
-      for (const run of listing.runs) {
-        if (!run.tempProject || run.tempProject.deleted) continue;
-        await engine
-          .deleteTempProject(run.id)
-          .catch((error) => console.error(`Failed to delete the temporary project of workflow run ${run.id}`, error));
+  }
+  // The temporary projects the finished runs kept. A run whose project could not be deleted keeps
+  // its record (due for the sweeper now): it is the only thing that names the directory.
+  const keep = new Set<string>();
+  let before: string | undefined;
+  for (let page = 0; page < 50; page += 1) {
+    const listing = await deps.runStore.listForWorkflow(id, before !== undefined ? { before, limit: 100 } : { limit: 100 });
+    for (const run of listing.runs) {
+      if (!run.tempProject || run.tempProject.deleted) continue;
+      // A run the engine held (cancelled above) deletes its own project as it ends, and its record
+      // is no longer written: it is the engine's, not this loop's.
+      if (cancelled.includes(run.id) || (engine !== null && isRunActive(run.status))) continue;
+      let gone = false;
+      if (engine !== null) {
+        gone = await engine.deleteTempProject(run.id).catch((error) => {
+          console.error(`Failed to delete the temporary project of workflow run ${run.id}`, error);
+          return false;
+        });
       }
-      if (listing.before === null) break;
-      before = listing.before;
+      if (!gone && deps.projects && !isRunActive(run.status)) {
+        gone = await deps.projects
+          .deleteProject(run.tempProject.path)
+          .then(() => true)
+          .catch((error) => {
+            console.error(`Failed to delete the temporary project of workflow run ${run.id}`, error);
+            return false;
+          });
+      }
+      if (!gone) keep.add(run.id);
+    }
+    if (listing.before === null) break;
+    before = listing.before;
+  }
+  for (const runId of keep) {
+    const run = await deps.runStore.load(runId).catch(() => null);
+    if (run?.tempProject && !run.tempProject.deleted) {
+      run.tempProject = { path: run.tempProject.path, deleted: false, deleteAfter: new Date().toISOString() };
+      await deps.runStore.save(run).catch(() => undefined);
     }
   }
-  await deps.runStore.deleteForWorkflow(id);
+  await deps.runStore.deleteForWorkflow(id, { keep });
   await deps.secrets.deleteForWorkflow(id);
 }
 
 function sendError(reply: FastifyReply, error: unknown): FastifyReply {
   if (isWorkflowError(error)) {
     return reply.code(error.status).send(error.body());
+  }
+  // The engine's refusals carry their status, code and (INVALID_WORKFLOW) problems.
+  if (error instanceof WorkflowEngineError) {
+    const status = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 500;
+    return reply.code(status).send({
+      error: { code: error.code, message: error.message, ...(error.problems !== undefined ? { problems: error.problems } : {}) }
+    });
+  }
+  // A body over the route's limit (Fastify refuses it before the handler runs).
+  const fastifyCode = (error as { code?: unknown } | null)?.code;
+  if (fastifyCode === "FST_ERR_CTP_BODY_TOO_LARGE" || (error as { statusCode?: unknown } | null)?.statusCode === 413) {
+    return reply.code(413).send({
+      error: { code: "LIMIT_EXCEEDED", message: `The request body is larger than ${WORKFLOW_WRITE_BODY_LIMIT / 1024 / 1024} MiB.` }
+    });
   }
   reply.log.error({ err: error }, "workflow route failed");
   return reply.code(500).send({ error: { code: "INTERNAL", message: "The workflow request failed; see the daemon log." } });
@@ -257,6 +310,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
       }
     };
 
+  /** Write routes: room for a 2 MiB definition, and a too-big body answered in the workflow shape. */
+  const writeRoute = {
+    bodyLimit: WORKFLOW_WRITE_BODY_LIMIT,
+    errorHandler: (error: unknown, _request: FastifyRequest, reply: FastifyReply) => sendError(reply, error)
+  };
+
   const requireEngine = (): WorkflowEngine => {
     const engine = deps.engine();
     if (engine === null) throw engineUnavailable();
@@ -299,6 +358,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
 
   app.post(
     workflowRoutes.create,
+    writeRoute,
     guarded(async (request, reply) => {
       const response: WorkflowWriteResponse = await service.create(request.body as CreateWorkflowRequest);
       return reply.code(201).send(response);
@@ -307,6 +367,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
 
   app.post(
     workflowRoutes.validate,
+    writeRoute,
     guarded(async (request): Promise<ValidateWorkflowResponse> => {
       if (!isRecord(request.body) || !("workflow" in request.body)) throw invalidRequest("The body must be {workflow}.");
       const candidate = request.body.workflow;
@@ -343,8 +404,18 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
     guarded(async (request): Promise<AccountPreviewResponse> => {
       const engine = requireEngine();
       if (!isRecord(request.body) || !Array.isArray(request.body.chain)) throw invalidRequest("The body must be {chain, projectPath?}.");
+      const chain: AgentChainEntry[] = [];
+      for (const [index, entry] of request.body.chain.entries()) {
+        const parsed = agentChainEntrySchema.safeParse(entry);
+        if (!parsed.success) {
+          const issue = parsed.error.issues[0];
+          const where = issue && issue.path.length > 0 ? `.${issue.path.join(".")}` : "";
+          throw invalidRequest(`chain[${index}]${where}: ${issue?.message ?? "is not an agent chain entry"}`);
+        }
+        chain.push(parsed.data);
+      }
       const projectPath = optionalString(request.body.projectPath);
-      return { decision: await engine.accountPreview(request.body.chain as AgentChainEntry[], projectPath) };
+      return { decision: await engine.accountPreview(chain, projectPath) };
     })
   );
 
@@ -358,6 +429,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
 
   app.put(
     "/api/workflows/:id",
+    writeRoute,
     guarded(
       async (request): Promise<WorkflowWriteResponse> => service.replace(request.params.id, request.body as ReplaceWorkflowRequest)
     )
@@ -377,6 +449,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
 
   app.post(
     "/api/workflows/:id/patch",
+    writeRoute,
     guarded(
       async (request): Promise<WorkflowWriteResponse> => service.patch(request.params.id, request.body as PatchWorkflowRequest)
     )
@@ -391,6 +464,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
 
   app.post(
     "/api/workflows/:id/run",
+    writeRoute,
     guarded(async (request): Promise<RunWorkflowResponse> => {
       const engine = requireEngine();
       service.require(request.params.id);
@@ -602,7 +676,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
   app.delete(
     "/api/workflow-secrets/:name",
     guarded(async (request, reply) => {
-      await secrets.delete(request.params.name, optionalString(request.query.workflowId));
+      // The same checks as PUT: a name a secret can have, a workflow that exists.
+      const workflowId = secretScope(optionalString(request.query.workflowId));
+      if (!WORKFLOW_SECRET_NAME_PATTERN.test(request.params.name)) {
+        throw new WorkflowError(400, "SECRET_INVALID", "Not a valid secret name: an uppercase letter, then uppercase letters, digits or _ (at most 64).");
+      }
+      await secrets.delete(request.params.name, workflowId);
       return reply.code(204).send();
     })
   );

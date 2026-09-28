@@ -259,7 +259,31 @@ export function definitionView(workflow: Workflow, extra: Record<string, unknown
     view.truncatedFields = cut.slice(0, 50).map((p) => clipText(p, 120));
     view.truncationNote = TRUNCATION_NOTE;
   }
-  return view;
+  // The fitting planned to `budget`; what matters now is ok()'s hard cap (its last-resort cut).
+  const hardRoom = Math.max(budget, MAX_RESULT_BYTES - 1_000);
+  if (resultBytes(view) <= hardRoom) return view;
+  // Even with every long text cut the blocks do not fit (a big workflow): list them as an outline
+  // and point at the per-block read, rather than leave the result to ok()'s last-resort byte cut.
+  const outline: Record<string, unknown> = {
+    ...shown,
+    nodes: workflow.nodes.map((n) => ({ id: n.id, name: n.name, type: n.type, ...(n.disabled ? { disabled: true } : {}) }))
+  };
+  const outlined: Record<string, unknown> = {
+    ...head,
+    workflow: outline,
+    ...flags,
+    blocksOutlined: true,
+    outlineNote: "The definition is too big for one result: blocks are listed as {id, name, type}. get_workflow {workflowId, node} reads one block's config."
+  };
+  if (resultBytes(outlined) <= hardRoom) return outlined;
+  // Still too big: the edges go too (`connections` keeps them by name while it fits).
+  delete outline.edges;
+  outlined.edgesOmitted = true;
+  if (resultBytes(outlined) > hardRoom) {
+    delete outlined.connections;
+    outlined.connectionsOmitted = true;
+  }
+  return outlined;
 }
 
 // ---------------------------------------------------------------------------

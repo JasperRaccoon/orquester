@@ -16,7 +16,9 @@ import { chmod, readFile, rename } from "node:fs/promises";
 import type { WorkflowSecretName, WorkflowSecretsChangedPayload } from "@orquester/api";
 import {
   createDefaultWorkflowSecretsFile,
+  nullProtoRecord,
   parseWorkflowSecretsFile,
+  serializeWorkflowSecretsFile,
   WORKFLOW_SECRET_MAX_VALUE_BYTES,
   WORKFLOW_SECRET_NAME_PATTERN,
   type WorkflowSecretsFile
@@ -31,6 +33,21 @@ export interface WorkflowSecretsServiceOptions {
   file: string;
   logger?: Pick<Console, "warn" | "error">;
   now?: () => Date;
+}
+
+/** A copy whose every map has no prototype (structuredClone would give them `Object.prototype`). */
+function cloneSecretsFile(file: WorkflowSecretsFile): WorkflowSecretsFile {
+  const copy = createDefaultWorkflowSecretsFile();
+  Object.assign(copy.global, file.global);
+  for (const [id, scope] of Object.entries(file.workflows)) copy.workflows[id] = Object.assign(nullProtoRecord(), scope);
+  Object.assign(copy.extra!, file.extra ?? {});
+  Object.assign(copy.rejected!.global, file.rejected?.global ?? {});
+  Object.assign(copy.rejected!.workflows, file.rejected?.workflows ?? {});
+  return copy;
+}
+
+function validName(name: unknown): name is string {
+  return typeof name === "string" && WORKFLOW_SECRET_NAME_PATTERN.test(name);
 }
 
 export class WorkflowSecretsService implements SecretStore {
@@ -92,7 +109,7 @@ export class WorkflowSecretsService implements SecretStore {
       short: entry.value.length < MIN_REDACTED_SECRET_LENGTH
     }));
     if (workflowId !== undefined) {
-      for (const [name, entry] of Object.entries(this.data.workflows[workflowId] ?? {})) {
+      for (const [name, entry] of Object.entries(Object.hasOwn(this.data.workflows, workflowId) ? this.data.workflows[workflowId]! : {})) {
         names.push({ name, scope: "workflow", workflowId, updatedAt: entry.updatedAt, short: entry.value.length < MIN_REDACTED_SECRET_LENGTH });
       }
     }
@@ -107,13 +124,15 @@ export class WorkflowSecretsService implements SecretStore {
   resolve(workflowId: string): Record<string, string> {
     const out: Record<string, string> = {};
     for (const [name, entry] of Object.entries(this.data.global)) out[name] = entry.value;
-    for (const [name, entry] of Object.entries(this.data.workflows[workflowId] ?? {})) out[name] = entry.value;
+    if (Object.hasOwn(this.data.workflows, workflowId)) {
+      for (const [name, entry] of Object.entries(this.data.workflows[workflowId]!)) out[name] = entry.value;
+    }
     return out;
   }
 
   async set(name: string, value: string, workflowId?: string): Promise<void> {
     this.requireWritable();
-    if (typeof name !== "string" || !WORKFLOW_SECRET_NAME_PATTERN.test(name)) {
+    if (!validName(name)) {
       throw new WorkflowError(
         400,
         "SECRET_INVALID",
@@ -130,9 +149,13 @@ export class WorkflowSecretsService implements SecretStore {
       throw new WorkflowError(400, "SECRET_INVALID", "workflowId must be a non-empty string.");
     }
     const entry = { value, updatedAt: this.now().toISOString() };
-    const next = structuredClone(this.data);
+    const next = cloneSecretsFile(this.data);
     if (workflowId === undefined) next.global[name] = entry;
-    else next.workflows[workflowId] = { ...(next.workflows[workflowId] ?? {}), [name]: entry };
+    else {
+      const scope = Object.hasOwn(next.workflows, workflowId) ? next.workflows[workflowId]! : nullProtoRecord<typeof entry>();
+      scope[name] = entry;
+      next.workflows[workflowId] = scope;
+    }
     this.data = next;
     await this.persist();
     this.emitChanged(workflowId ?? null);
@@ -140,9 +163,13 @@ export class WorkflowSecretsService implements SecretStore {
 
   async delete(name: string, workflowId?: string): Promise<boolean> {
     this.requireWritable();
-    const scope = workflowId === undefined ? this.data.global : this.data.workflows[workflowId];
-    if (scope === undefined || !Object.prototype.hasOwnProperty.call(scope, name)) return false;
-    const next = structuredClone(this.data);
+    // Only a name a secret can have, in a scope the store holds: nothing user-typed ever indexes
+    // past the store's own (prototype-less) maps.
+    if (!validName(name)) return false;
+    if (workflowId !== undefined && (typeof workflowId !== "string" || !Object.hasOwn(this.data.workflows, workflowId))) return false;
+    const scope = workflowId === undefined ? this.data.global : this.data.workflows[workflowId]!;
+    if (!Object.hasOwn(scope, name)) return false;
+    const next = cloneSecretsFile(this.data);
     if (workflowId === undefined) delete next.global[name];
     else {
       delete next.workflows[workflowId]![name];
@@ -156,8 +183,8 @@ export class WorkflowSecretsService implements SecretStore {
 
   /** Cascade of a workflow delete. A read-only store holds nothing to delete and must not fail the delete it follows. */
   async deleteForWorkflow(workflowId: string): Promise<void> {
-    if (this.blockedReason !== null || this.data.workflows[workflowId] === undefined) return;
-    const next = structuredClone(this.data);
+    if (this.blockedReason !== null || typeof workflowId !== "string" || !Object.hasOwn(this.data.workflows, workflowId)) return;
+    const next = cloneSecretsFile(this.data);
     delete next.workflows[workflowId];
     this.data = next;
     await this.persist();
@@ -193,7 +220,7 @@ export class WorkflowSecretsService implements SecretStore {
     const write = async (): Promise<void> => {
       if (this.blockedReason !== null) return;
       try {
-        await writeFileAtomic(this.file, `${JSON.stringify(this.data, null, 2)}\n`, 0o600, false);
+        await writeFileAtomic(this.file, `${JSON.stringify(serializeWorkflowSecretsFile(this.data), null, 2)}\n`, 0o600, false);
         await chmod(this.file, 0o600);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException)?.code;

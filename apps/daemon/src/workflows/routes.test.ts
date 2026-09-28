@@ -16,7 +16,8 @@ import {
 } from "@orquester/api";
 import type { PersistedRun, WorkflowEngine } from "./contracts.ts";
 import { FileRunStore } from "./run-store.ts";
-import { registerWorkflowRoutes, type WorkflowRouteDeps } from "./routes.ts";
+import { deleteWorkflowCascade, registerWorkflowRoutes, type WorkflowRouteDeps } from "./routes.ts";
+import { WorkflowEngineError } from "./run-context.ts";
 import { WorkflowSecretsService } from "./secrets.ts";
 import { WorkflowService } from "./service.ts";
 import { buildWorkflowSummary } from "./summary.ts";
@@ -462,4 +463,100 @@ test("log follow streams as the file grows and redacts a secret split across wri
   assert.equal(body, "first line\ntoken=«secret:KEY» end\n");
   assert.ok(chunks.length >= 2, "streamed in more than one chunk");
   assert.ok(!chunks.some((chunk) => chunk.includes("hun") && !chunk.includes("«secret")), "no half of the secret leaked");
+});
+
+// ---- Review fixes -------------------------------------------------------------------------------
+
+test("an engine refusal keeps its status, code and problems (never a generic 500)", async () => {
+  const h = await harness();
+  const workflow = await createWorkflow(h);
+  const engine = fakeEngine(() => h);
+  engine.run = async () => {
+    throw new WorkflowEngineError(400, "INVALID_WORKFLOW", "The workflow has errors: x", [{ severity: "error", code: "schema", message: "x" }]);
+  };
+  engine.testNode = async () => {
+    throw new WorkflowEngineError(503, "ENGINE_UNAVAILABLE", "stopping");
+  };
+  h.setEngine(engine);
+  const run = await h.app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/run`, payload: {} });
+  assert.equal(run.statusCode, 400);
+  assert.deepEqual(run.json(), { error: { code: "INVALID_WORKFLOW", message: "The workflow has errors: x", problems: [{ severity: "error", code: "schema", message: "x" }] } });
+  const tested = await h.app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/nodes/c/test` });
+  assert.equal(tested.statusCode, 503);
+  assert.equal(tested.json().error.code, "ENGINE_UNAVAILABLE");
+});
+
+test("DELETE of a secret refuses prototype names and unknown workflows; Object.prototype is untouched", async () => {
+  const h = await harness();
+  const polluted = await h.app.inject({ method: "DELETE", url: "/api/workflow-secrets/hasOwnProperty?workflowId=__proto__" });
+  assert.equal(polluted.statusCode, 404);
+  assert.equal(polluted.json().error.code, "WORKFLOW_NOT_FOUND");
+  const badName = await h.app.inject({ method: "DELETE", url: "/api/workflow-secrets/hasOwnProperty" });
+  assert.equal(badName.statusCode, 400);
+  assert.equal(typeof Object.prototype.hasOwnProperty, "function");
+  assert.equal(await h.secrets.delete("hasOwnProperty", "__proto__"), false);
+  assert.equal(typeof Object.prototype.hasOwnProperty, "function");
+});
+
+test("validate returns at once past the hard limits (5 000 blocks)", async () => {
+  const h = await harness();
+  const nodes = Array.from({ length: 5000 }, (_, i) => ({ id: `n${i}`, type: "code", name: `N${i}`, position: { x: 0, y: 0 }, config: { source: "" } }));
+  const edges = nodes.slice(1).map((n, i) => ({ id: `e${i}`, source: `n${i}`, sourceHandle: "success", target: n.id }));
+  const started = Date.now();
+  const res = await h.app.inject({ method: "POST", url: workflowRoutes.validate, payload: { workflow: { id: "w", name: "Big", project: { kind: "existing", projectPath: "/w/ws/app" }, nodes, edges } } });
+  assert.equal(res.statusCode, 200);
+  assert.ok(Date.now() - started < 3_000, `answered in ${Date.now() - started} ms`);
+  const codes = (res.json().problems as { code: string }[]).map((p) => p.code);
+  assert.ok(codes.includes("too_many_nodes") && codes.includes("too_many_edges"), codes.join(","));
+});
+
+test("write routes take a body past 1 MiB, and one past their limit answers LIMIT_EXCEEDED", async () => {
+  const h = await harness();
+  const big = "x".repeat(1_500_000);
+  const accepted = await h.app.inject({ method: "POST", url: workflowRoutes.validate, payload: { workflow: { name: "W", description: big } } });
+  assert.equal(accepted.statusCode, 200, "1.5 MiB reaches the handler");
+  const huge = "x".repeat(3_200_000);
+  const refused = await h.app.inject({ method: "POST", url: workflowRoutes.create, payload: { name: "W", description: huge } });
+  assert.equal(refused.statusCode, 413);
+  assert.equal(refused.json().error.code, "LIMIT_EXCEEDED");
+});
+
+test("account-preview refuses a chain entry it cannot read (400, never 500)", async () => {
+  const h = await harness();
+  h.setEngine(fakeEngine(() => h));
+  const res = await h.app.inject({ method: "POST", url: workflowRoutes.accountPreview, payload: { chain: [null] } });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error.code, "INVALID_REQUEST");
+  assert.match(res.json().error.message, /^chain\[0\]/);
+});
+
+test("the delete cascade keeps a run record whose temp project it could not delete; deletes it directly when it can", async () => {
+  for (const withProjects of [false, true]) {
+    const h = await harness();
+    const workflow = await createWorkflow(h);
+    await h.runStore.create(persistedRun(workflow, "kept", { status: "failed", tempProject: { path: "/w/ws/wf-kept", deleted: false, deleteAfter: "2026-10-01T00:00:00.000Z" } }));
+    await h.runStore.create(persistedRun(workflow, "plain", { status: "succeeded" }));
+    const deleted: string[] = [];
+    await deleteWorkflowCascade(
+      {
+        service: h.service,
+        secrets: h.secrets,
+        runStore: h.runStore,
+        engine: () => null,
+        ...(withProjects ? { projects: { deleteProject: async (path: string) => void deleted.push(path) } } : {})
+      },
+      workflow.id
+    );
+    assert.equal(await h.runStore.load("plain"), null);
+    if (withProjects) {
+      assert.deepEqual(deleted, ["/w/ws/wf-kept"]);
+      assert.equal(await h.runStore.load("kept"), null);
+    } else {
+      const kept = await h.runStore.load("kept");
+      assert.ok(kept, "the only record naming the directory stays");
+      assert.equal(kept.tempProject?.deleted, false);
+      assert.ok(Date.parse(kept.tempProject!.deleteAfter!) <= Date.now(), "due for the sweeper now");
+      assert.ok(h.runStore.workflowIds().includes(workflow.id), "the sweeper still finds it");
+    }
+  }
 });

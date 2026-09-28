@@ -112,7 +112,11 @@ export type WaitingOn =
       /** Everything else the agent block needs to resume (chain position, tried accounts, …). */
       state: Record<string, unknown>;
     }
-  | { kind: "process"; pid: number; starttime: number; attemptDir: string; deadlineAt: string }
+  /**
+   * A sandbox attempt. `spawning` is the marker persisted BEFORE the spawn (pid/starttime 0): a
+   * restart that finds it adopts the runner from the attempt's `handle.json`, or reads its exit.
+   */
+  | { kind: "process"; pid: number; starttime: number; attemptDir: string; deadlineAt: string; spawning?: true }
   | { kind: "timer"; until: string; purpose: "wait" | "retry-delay" | "wait-for-reset" }
   | { kind: "child-run"; runId: string }
   | { kind: "http"; method: string; startedAt: string };
@@ -163,7 +167,10 @@ export interface RunStore {
   /** Writes a big output beside the attempt and returns its path. */
   writeOutputFile(runId: string, nodeId: string, attempt: number, output: unknown): Promise<string>;
   readOutputFile(path: string): Promise<unknown>;
-  deleteForWorkflow(workflowId: string): Promise<void>;
+  /** `keep`: runs to leave on record (a temporary project they name could not be deleted). */
+  deleteForWorkflow(workflowId: string, options?: { keep?: ReadonlySet<string> }): Promise<void>;
+  /** Every workflow id with a run on record — a deleted workflow's kept runs included (sweepers). */
+  workflowIds?(): string[];
   /** Retention: keep runsPerWorkflow newest and nothing older than runRetentionDays; never an active run. */
   sweep(): Promise<void>;
 }
@@ -362,6 +369,8 @@ export interface SandboxRunner {
   wait(handle: SandboxHandle, opts: { deadlineAt: Date; signal: AbortSignal; onLogs?: (bytes: { stdout: number; stderr: number }) => void }): Promise<SandboxExit>;
   /** After a restart: is this (pid, starttime) still our process? */
   isAlive(handle: SandboxHandle): boolean;
+  /** The runner's handle as `spawn` recorded it (`<attemptDir>/handle.json`), or null. */
+  readHandle(attemptDir: string): Promise<SandboxHandle | null>;
   /** Read a finished attempt's exit.json/result.json when the process is gone. */
   readExit(attemptDir: string): Promise<SandboxExit | null>;
   /** SIGTERM the group, SIGKILL after the grace. */
@@ -378,6 +387,8 @@ export interface ProjectOps {
     source: { kind: "empty" } | { kind: "clone"; url: string; ref?: string };
   }): Promise<ProjectContext>;
   deleteProject(path: string): Promise<void>;
+  /** Where `createTemp` would put `<workspace>/<name>` (persisted BEFORE the creation). */
+  tempPathFor(workspace: string, name: string): string;
   gitStatusShort(path: string, maxBytes: number): Promise<string>;
   currentBranch(path: string): Promise<string | undefined>;
 }

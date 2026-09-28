@@ -476,3 +476,22 @@ test("round trip: create → update (add_node + connect + rename) → validate �
   assert.deepEqual((run.blocks as { name: string; status: string }[]).map((b) => `${b.name}:${b.status}`), ["Start:succeeded", "ListFiles:succeeded", "HasFiles:succeeded"]);
   assert.equal((run.run as { status: string }).status, "succeeded");
 });
+
+test("get_workflow / create_workflow: 200 blocks too big even cut are outlined, never byte-cut by ok()", async (t) => {
+  const api = await sandbox(t);
+  const nodes = Array.from({ length: 200 }, (_, i) => ({
+    type: "code",
+    name: `Block${i}`,
+    config: { source: `export default async function () {\n  // ${"padding ".repeat(60)}\n  return ${i};\n}\n` }
+  }));
+  const created = await call(api, "create_workflow", { name: "Wide", project: { kind: "existing", project: "acme/api" }, nodes });
+  assert.equal(created.blocksOutlined, true);
+  const r = await call(api, "get_workflow", { workflowId: created.workflowId as string });
+  assert.equal(r.blocksOutlined, true);
+  assert.match(r.outlineNote as string, /get_workflow \{workflowId, node\}/);
+  const listed = (r.workflow as { nodes: Record<string, unknown>[] }).nodes;
+  assert.equal(listed.length, 200);
+  assert.deepEqual(Object.keys(listed[0]!).sort(), ["id", "name", "type"]);
+  const one = await call(api, "get_workflow", { workflowId: created.workflowId as string, node: "Block7" });
+  assert.match(((one.node as { config: { source: string } }).config.source), /return 7;/);
+});

@@ -66,10 +66,13 @@ export function createWorkflowSweepers(deps: WorkflowSweepersDeps): WorkflowSwee
   const sweepTempProjects = async (report: SweepReport): Promise<void> => {
     const now = deps.clock.now().getTime();
     const active = new Set(deps.activeRunIds());
-    for (const workflow of deps.store.list()) {
+    // A deleted workflow's runs whose temporary project its delete could not remove are kept on
+    // record, due now: sweep those too.
+    const workflowIds = new Set<string>([...deps.store.list().map((workflow) => workflow.id), ...(deps.runStore.workflowIds?.() ?? [])]);
+    for (const workflowId of workflowIds) {
       let before: string | undefined;
       for (let page = 0; page < 20; page += 1) {
-        const listing = await deps.runStore.listForWorkflow(workflow.id, before !== undefined ? { before, limit: 100 } : { limit: 100 });
+        const listing = await deps.runStore.listForWorkflow(workflowId, before !== undefined ? { before, limit: 100 } : { limit: 100 });
         for (const summary of listing.runs) {
           const temp = summary.tempProject;
           if (!temp || temp.deleted || temp.deleteAfter === undefined) continue;

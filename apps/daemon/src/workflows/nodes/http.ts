@@ -7,6 +7,7 @@
 import { singleExpression, WORKFLOW_LIMITS } from "@orquester/api";
 
 import type { NodeExecutionContext, NodeExecutor, NodeResult } from "../contracts.ts";
+import { createRedactor } from "../sandbox/redact.ts";
 import { describeDuration } from "./process.ts";
 
 export interface HttpExecutorOptions {
@@ -74,7 +75,8 @@ function buildRequest(ctx: NodeExecutionContext<"http">): BuiltRequest {
   try {
     url = new URL(rawUrl);
   } catch {
-    return fail("validation", `"${rawUrl.slice(0, 200)}" is not a valid URL.`);
+    // Redacted BEFORE the cut: a cut secret no longer matches the engine's whole-value redactor.
+    return fail("validation", `"${createRedactor(ctx.secrets).text(rawUrl).slice(0, 200)}" is not a valid URL.`);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return fail("validation", "Only http:// and https:// URLs are supported.");
   for (const entry of config.query) {
