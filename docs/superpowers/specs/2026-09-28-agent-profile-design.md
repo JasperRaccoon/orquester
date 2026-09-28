@@ -32,14 +32,12 @@ the owner lists, adds, edits, turns on/off and deletes each agent's items direct
 6. "System prompt append" **is** the global instruction file (`CLAUDE.md` / `AGENTS.md`), which
    applies to chats and terminal tabs alike. No separate Orquester-injected text.
 7. Fix the account-home gaps so a global edit reaches every managed account.
-8. **Do not touch claudex / claudemix** (being removed in another line of work): their proxy homes
-   are never read or written and they never appear in the panel.
-9. It must look good, work on mobile and be responsive.
+8. It must look good, work on mobile and be responsive.
 
 ### 1.2 Out of scope
 
-Project-scoped items (`.mcp.json`, `<repo>/.claude/…`, `.codex/config.toml`, …); claudex and
-claudemix; Claude output styles and `~/.claude/rules/`; per-session enabling of an item; a UI for
+Project-scoped items (`.mcp.json`, `<repo>/.claude/…`, `.codex/config.toml`, …); Claude output
+styles and `~/.claude/rules/`; per-session enabling of an item; a UI for
 the write backups; tools for the Orquester MCP; **subagents** (custom agent definitions —
 `~/.claude/agents`, `~/.codex/agents`, `~/.grok/agents`, OpenCode `agents/`), removed from scope
 by the owner on review, including linking those directories into account homes.
@@ -92,8 +90,6 @@ the daemon user's own homes (`HOME=/var/lib/orquester` in production), each reso
 - **Reach** — changes apply to new sessions and turns; running chats are not restarted. OpenCode is
   the exception that needs help: `opencode serve` caches its global config forever, so after an
   OpenCode write the daemon asks the agent host to recycle idle OpenCode servers (§4.8).
-- **claudex / claudemix** proxy homes (`<appdir>/daemon/cliproxy/claude-home-*`) are never read or
-  written.
 
 ## 4. Daemon
 
@@ -252,8 +248,7 @@ ignored, and the notice then says "applies once OpenCode's server restarts".
 An account home that already has its own real copy is merged into the shared one first, as
 `projects/` is today; on a name collision both are kept, the account's copy suffixed
 `-<accountId prefix>`. Codex's bundled `.system` skills stay per home: the shared `skills/` link is
-made only once the account's `skills/.system` has been merged (Codex re-creates it at start). Proxy
-homes are untouched.
+made only once the account's `skills/.system` has been merged (Codex re-creates it at start).
 
 ## 6. Import and copy
 
@@ -424,5 +419,6 @@ Events on `agent-profile`: `agentProfile.changed {agent, revision}`.
 7. Client store and `ApiClient`.
 8. The panel (registration, list, rows, states).
 9. The editors.
-10. Responsive pass and the screenshot review; AGENTS.md updated (a feature line, the module, the
-    gotchas: native-first writes, the Codex `hooks.state` re-keying, the stash, the locked items).
+10. Responsive pass and the screenshot review; README's feature tour gains the Agent profile, and
+    AGENTS.md's **Right rail** term names the new section (AGENTS.md takes no feature tours or
+    design notes).
