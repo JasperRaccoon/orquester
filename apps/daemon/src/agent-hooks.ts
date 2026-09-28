@@ -69,7 +69,7 @@ function groupCommands(group: unknown): string[] {
  * shell quoting and JSON escaping would break a raw-path substring match for
  * exotic appdir paths, and a moved appdir should still sweep stale entries.
  */
-function isManagedGroup(group: unknown): boolean {
+export function isManagedGroup(group: unknown): boolean {
   return groupCommands(group).some((c) => c.includes("agent-hook.sh"));
 }
 
@@ -515,7 +515,7 @@ function canonicalize(value: unknown): unknown {
  * user_prompt_submit/stop before hashing (codex-rs matcher_pattern_for_event),
  * so including one there would yield a hash Codex never writes.
  */
-function codexTrustHash(eventLabel: string, command: string, matcher?: string): string {
+export function codexTrustHash(eventLabel: string, command: string, matcher?: string): string {
   const handler = { type: "command", command, timeout: 10, async: false };
   const identity: Record<string, unknown> = { event_name: eventLabel, hooks: [handler] };
   const effectiveMatcher =
