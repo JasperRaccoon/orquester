@@ -1,9 +1,10 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentUsage } from "@orquester/api";
+import type { AgentUsage, UsageWindow } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
 import { claudePlanLabel, currentScopedWindows, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
 import { decodeJwtPayload, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity";
+import { CLAUDE_SESSION_WINDOW_ID, CLAUDE_WEEKLY_WINDOW_ID } from "./agent-host/adapters/claude/usage.ts";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -28,20 +29,102 @@ function retryAfterMs(res: Response, floorMs: number): number {
   return Number.isFinite(secs) && secs > 0 ? Math.max(secs * 1000, floorMs) : floorMs;
 }
 
+/** Anthropic's usage endpoint answers ~1 request per 5 minutes per account (429, `retry-after: 300`). */
+export const CLAUDE_USAGE_MIN_INTERVAL_MS = 5 * 60_000;
+/** A live reading (off a model response) this recent makes a poll pointless. */
+export const CLAUDE_LIVE_FRESH_MS = 5 * 60_000;
+/** A reading older than this is served greyed. */
+export const CLAUDE_USAGE_STALE_AFTER_MS = 15 * 60_000;
+/** A `Retry-After` longer than this is not believed. */
+const CLAUDE_MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
+
+/**
+ * What one Claude usage source remembers, persisted (`ClaudeUsageStateStore`) so a daemon restart
+ * neither starts blank nor re-asks an endpoint the previous process asked a minute ago — which was
+ * a 429 and five minutes of "usage updating…" after every deploy.
+ */
+export interface ClaudeUsageRecord {
+  /** The last good reading (`asOf` stamped). */
+  lastGood: AgentUsage | null;
+  /** When the endpoint was last asked (ms epoch), whatever it answered. */
+  lastFetchAt: number;
+  /** Not before this (ms epoch): a 429's `Retry-After`, or a short pause after a failure. */
+  retryAt: number;
+  /** When the last live reading arrived (ms epoch). */
+  liveAt: number;
+  /** The last attempt failed with nothing newer since: the reading is served greyed. */
+  failed: boolean;
+}
+
+export interface ClaudeUsageStateStore {
+  get(key: string): ClaudeUsageRecord | undefined;
+  set(key: string, record: ClaudeUsageRecord): void;
+}
+
+/** A live reading of an account's windows, off its own model responses. */
+export interface ClaudeLiveUsage {
+  session?: UsageWindow | null;
+  weekly?: UsageWindow | null;
+  /** When the reading was taken (ms epoch). */
+  observedAt: number;
+}
+
+/**
+ * A chat thread's live windows (the host's `ProviderUsageWindow`s, Claude's ids) as a
+ * {@link ClaudeLiveUsage}: only the two account windows, a window the reading does not carry is
+ * left as it was. Null when the reading carries neither or its time does not parse.
+ */
+export function claudeLiveUsageFromWindows(
+  windows: ReadonlyArray<{ id: string; usedPercent: number; resetsAt?: string }>,
+  observedAt: string
+): ClaudeLiveUsage | null {
+  const observedAtMs = Date.parse(observedAt);
+  if (!Number.isFinite(observedAtMs)) return null;
+  const window = (id: string): UsageWindow | undefined => {
+    const found = windows.find((w) => w.id === id);
+    if (!found || !Number.isFinite(found.usedPercent)) return undefined;
+    const percent = Math.max(0, Math.min(100, found.usedPercent));
+    return { percent, ...(found.resetsAt ? { resetsAt: found.resetsAt } : {}) };
+  };
+  const session = window(CLAUDE_SESSION_WINDOW_ID);
+  const weekly = window(CLAUDE_WEEKLY_WINDOW_ID);
+  if (!session && !weekly) return null;
+  return { ...(session ? { session } : {}), ...(weekly ? { weekly } : {}), observedAt: observedAtMs };
+}
+
+export type ClaudeUsageSource = (() => Promise<AgentUsage | null>) & {
+  /** Take a live reading (a chat thread's `rate_limit_event`). Older than what is held: ignored. */
+  ingestLive(reading: ClaudeLiveUsage): boolean;
+};
+
 export function createClaudeSource(opts: {
   userhome: string;
   now: () => number;
   claudeHome?: string;
   fetchImpl?: typeof fetch;
   logger?: Pick<Console, "warn">;
-}): () => Promise<AgentUsage | null> {
+  /** Persisted state, under `key` (default: in memory only). */
+  state?: { store: ClaudeUsageStateStore; key: string };
+  /** Minimum time between two endpoint requests (default {@link CLAUDE_USAGE_MIN_INTERVAL_MS}). */
+  minIntervalMs?: number;
+}): ClaudeUsageSource {
   const doFetch = opts.fetchImpl ?? fetch;
   const claudeHome = opts.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
   const credsFile = join(claudeHome, ".credentials.json");
-  let lastGood: AgentUsage | null = null;
-  let backoffUntil = 0;
+  const minIntervalMs = opts.minIntervalMs ?? CLAUDE_USAGE_MIN_INTERVAL_MS;
+  let record: ClaudeUsageRecord = opts.state?.store.get(opts.state.key) ?? {
+    lastGood: null,
+    lastFetchAt: 0,
+    retryAt: 0,
+    liveAt: 0,
+    failed: false
+  };
+  const save = (next: ClaudeUsageRecord): void => {
+    record = next;
+    opts.state?.store.set(opts.state.key, next);
+  };
 
-  return async () => {
+  const source = async (): Promise<AgentUsage | null> => {
     let oauth: { accessToken?: string; expiresAt?: number; subscriptionType?: string; rateLimitTier?: string } | undefined;
     try {
       oauth = JSON.parse(await readFile(credsFile, "utf8"))?.claudeAiOauth;
@@ -51,27 +134,41 @@ export function createClaudeSource(opts: {
     if (!oauth?.accessToken) return null; // genuinely not logged in
 
     // From here the user IS logged in — never return null (that renders as "not
-    // logged in"). Report last-known greyed, or a signed-in "updating" placeholder.
+    // logged in"). Report last-known, or a signed-in "updating" placeholder.
     const creds = { subscriptionType: oauth.subscriptionType, rateLimitTier: oauth.rateLimitTier };
+    const now = opts.now();
+    const expired = typeof oauth.expiresAt === "number" && oauth.expiresAt <= now;
     // Serving last-known numbers: drop any window whose reset has since passed —
     // a frozen pre-reset reading (e.g. weekly 100%) must not outlive its window.
-    const signedIn = (): AgentUsage =>
-      lastGood
-        ? {
-            ...lastGood,
-            stale: true,
-            session: currentWindow(lastGood.session, opts.now()),
-            weekly: currentWindow(lastGood.weekly, opts.now()),
-            scopedWindows: currentScopedWindows(lastGood.scopedWindows, opts.now())
-          }
-        : { id: "claude", available: true, stale: true, plan: claudePlanLabel(creds), session: null, weekly: null };
+    const serve = (): AgentUsage => {
+      const good = record.lastGood;
+      if (!good) {
+        return { id: "claude", available: true, stale: true, plan: claudePlanLabel(creds), session: null, weekly: null };
+      }
+      const asOfMs = good.asOf ? Date.parse(good.asOf) : Number.NaN;
+      const old = !Number.isFinite(asOfMs) || now - asOfMs > CLAUDE_USAGE_STALE_AFTER_MS;
+      return {
+        ...good,
+        plan: good.plan ?? claudePlanLabel(creds),
+        stale: record.failed || expired || old,
+        session: currentWindow(good.session, now),
+        weekly: currentWindow(good.weekly, now),
+        scopedWindows: currentScopedWindows(good.scopedWindows, now)
+      };
+    };
 
-    const now = opts.now();
-    // Backing off from a rate limit, or the token is expired until Claude Code
-    // refreshes it: don't hit the endpoint, just report signed-in/stale.
-    if (now < backoffUntil) return signedIn();
-    if (typeof oauth.expiresAt === "number" && oauth.expiresAt <= now) return signedIn();
+    // Asked recently, backing off, fed live a moment ago, or the token is
+    // expired until Claude Code refreshes it: serve what is held.
+    // The interval holds with nothing to show too: asking again inside it is only a 429.
+    // A stamp in the future (the clock moved back) is not believed.
+    const sinceFetch = now - record.lastFetchAt;
+    const sinceLive = now - record.liveAt;
+    if (sinceFetch >= 0 && sinceFetch < minIntervalMs) return serve();
+    if (record.lastGood && sinceLive >= 0 && sinceLive < CLAUDE_LIVE_FRESH_MS) return serve();
+    if (now < record.retryAt && record.retryAt - now <= CLAUDE_MAX_RETRY_AFTER_MS) return serve();
+    if (expired) return serve();
 
+    record = { ...record, lastFetchAt: now };
     try {
       const res = await doFetch(CLAUDE_USAGE_URL, {
         headers: {
@@ -79,30 +176,62 @@ export function createClaudeSource(opts: {
           "anthropic-beta": "oauth-2025-04-20",
           "User-Agent": "claude-code/2.1.0",
           Accept: "application/json"
-        }
+        },
+        // A hung request must not hold up every other account's reading.
+        signal: AbortSignal.timeout(15_000)
       });
       if (res.status === 429) {
-        // Floor at 5 min so N daemons sharing one account stop hammering the endpoint.
-        backoffUntil = now + retryAfterMs(res, 5 * 60_000);
+        // Floor at the endpoint's own window, persisted: a restart must not re-ask.
+        const wait = Math.min(retryAfterMs(res, minIntervalMs), CLAUDE_MAX_RETRY_AFTER_MS);
+        save({ ...record, retryAt: now + wait, failed: true });
         opts.logger?.warn?.("usage: claude usage endpoint rate-limited (429); backing off");
-        return signedIn();
+        return serve();
       }
       if (!res.ok) {
-        backoffUntil = now + 60_000; // brief backoff on 5xx/other
-        return signedIn();
+        save({ ...record, retryAt: now + 60_000, failed: true }); // brief backoff on 5xx/other
+        return serve();
       }
       const agent = parseClaudeUsage(await res.json(), creds, now);
       if (agent.available) {
-        lastGood = { ...agent, asOf: new Date(now).toISOString() };
-        return lastGood;
+        save({ ...record, lastGood: { ...agent, asOf: new Date(now).toISOString() }, retryAt: 0, failed: false });
+        return serve();
       }
-      return signedIn(); // 200 but unparseable → still signed in, no number yet
+      save(record);
+      return serve(); // 200 but unparseable → still signed in, no number yet
     } catch (err) {
       opts.logger?.warn?.(`usage: claude fetch failed: ${String(err)}`);
-      backoffUntil = now + 60_000;
-      return signedIn();
+      save({ ...record, retryAt: now + 60_000, failed: true });
+      return serve();
     }
   };
+
+  const ingestLive = (reading: ClaudeLiveUsage): boolean => {
+    const good = record.lastGood;
+    const asOfMs = good?.asOf ? Date.parse(good.asOf) : Number.NaN;
+    if (Number.isFinite(asOfMs) && reading.observedAt <= asOfMs) return false;
+    if (reading.session === undefined && reading.weekly === undefined) return false;
+    const session = reading.session !== undefined ? reading.session : (good?.session ?? null);
+    const weekly = reading.weekly !== undefined ? reading.weekly : (good?.weekly ?? null);
+    save({
+      ...record,
+      lastGood: {
+        id: "claude",
+        ...(good ?? {}),
+        available: true,
+        stale: false,
+        session,
+        weekly,
+        // Model-scoped weeklies ride only the endpoint: kept from its last reading.
+        ...(good?.scopedWindows ? { scopedWindows: good.scopedWindows } : {}),
+        asOf: new Date(reading.observedAt).toISOString()
+      },
+      liveAt: reading.observedAt,
+      failed: false
+    });
+    return true;
+  };
+
+  return Object.assign(source, { ingestLive });
 }
 
 interface GrokCredential {

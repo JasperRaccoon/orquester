@@ -2308,6 +2308,50 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     await host.stop();
   });
 
+  it("keeps each thread's live usage for its summary, and moves the snapshot only for the system login", async () => {
+    const host = createTestHost();
+    const applied: string[] = [];
+    host.snapshots.applyUsageLimits = (_adapterId, event) => {
+      applied.push(event.threadId);
+    };
+    const onAccount = await host.createThread({ threadId: "t-account", home: "account", accountId: "acc-7" });
+    const onSystem = await host.createThread({ threadId: "t-system", home: "system", accountId: "" });
+    await host.orchestrator.readThread(onAccount);
+    await host.orchestrator.readThread(onSystem);
+    const event = (threadId: string, windows: unknown[]) =>
+      ({
+        eventId: `acct-${threadId}`,
+        threadId,
+        createdAt: host.clock.nowIso(),
+        type: "account.rate-limits.updated",
+        payload: { limits: { windows } }
+      }) as unknown as RuntimeEvent;
+    host.orchestrator.onAccountEvent(
+      event(onAccount, [{ id: "session", kind: "session", label: "Session", usedPercent: 4 }])
+    );
+    host.orchestrator.onAccountEvent(
+      event(onAccount, [{ id: "weekly_all", kind: "weekly", label: "Weekly", usedPercent: 16 }])
+    );
+    host.orchestrator.onAccountEvent(
+      event(onSystem, [{ id: "session", kind: "session", label: "Session", usedPercent: 50 }])
+    );
+    const usage = host.orchestrator.summary(onAccount)?.usageLimits;
+    assert.equal(usage?.home, "account");
+    assert.equal(usage?.accountId, "acc-7");
+    assert.equal(usage?.observedAt, host.clock.nowIso());
+    assert.deepEqual(
+      usage?.windows.map((window) => [window.id, window.usedPercent]),
+      [
+        ["session", 4],
+        ["weekly_all", 16]
+      ]
+    );
+    // A managed account's numbers are not the system login's: only that thread moved the snapshot.
+    assert.deepEqual(applied, [onSystem]);
+    assert.equal(host.orchestrator.summary(onSystem)?.usageLimits?.home, "system");
+    await host.stop();
+  });
+
   it("startSession receives no launch args", async () => {
     // Registry `args` are the TERMINAL launcher's flags
     // (`--dangerously-skip-permissions`, `--effort …`, `--yolo`); a chat

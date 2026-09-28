@@ -657,6 +657,21 @@ two different encodings of the same reset. The frame has **no percentage**: it c
 > present. The adapter maps the frame when it carries `utilization` and otherwise marks the cached
 > snapshot stale for the next probe (`rateLimitEventToUpdate` in
 > `apps/daemon/src/agent-host/adapters/claude/usage.ts`).
+>
+> **CLI 2.1.280 (live threads, 2026-09-28): every frame carries both account windows.** The
+> frame now arrives on every model response, and `rate_limit_info.unifiedWindows` holds the
+> 5-hour and weekly windows, each a 0–1 `utilization` with an epoch-seconds `resetsAt`:
+>
+> ```json
+> {"status":"allowed","resetsAt":1790623200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.04,"resetsAt":1790623200},"seven_day":{"utilization":0.16,"resetsAt":1791158400}}}
+> ```
+>
+> `rateLimitEventToUpdate` reads `unifiedWindows` first (the session and weekly rows the probe
+> draws; any other key is ignored) and falls back to the rules above. The host keeps each
+> thread's latest reading for its summary (`usageLimits`), and the daemon's usage service takes
+> it for the thread's account — the live usage the account row shows, at no cost to the
+> rate-limited `/api/oauth/usage` endpoint (AGENTS.md, "Claude usage is read off the model's own
+> responses"). No capture in this directory has the field yet.
 
 ### 17. Miscellaneous, smaller
 

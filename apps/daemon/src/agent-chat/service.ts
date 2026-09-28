@@ -42,7 +42,7 @@ import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
-import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush } from "./summary.ts";
+import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush, type ThreadUsageReading } from "./summary.ts";
 import {
   AgentHostSupervisor,
   buildAgentHostEnv,
@@ -301,8 +301,16 @@ export class AgentChatService {
       // handover happens the moment the host goes quiet — and so does a
       // subagent fleet or watch loop finishing, which the drain also waits on.
       onTurnSettled: () => this.supervisor.handleTurnSettled(),
-      onBackgroundWorkEnded: () => this.supervisor.handleTurnSettled()
+      onBackgroundWorkEnded: () => this.supervisor.handleTurnSettled(),
+      onUsageLimits: (reading) => this.usageLimitsListener(reading)
     });
+  }
+
+  private usageLimitsListener: (reading: ThreadUsageReading) => void = () => undefined;
+
+  /** Where each thread's live account-usage reading goes (`index.ts`: the usage service). */
+  setUsageLimitsListener(listener: (reading: ThreadUsageReading) => void): void {
+    this.usageLimitsListener = listener;
   }
 
   /** Persisting is the PTY manager's job; `index.ts` injects the callback. */

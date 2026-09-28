@@ -208,6 +208,8 @@ agent host's thread index, is a derived cache of NDJSON logs — see "Agent chat
             tmux.sock (dedicated tmux server)         sessions.json (reattach index)
             workspaces.json (side-table: gitAccountId, createdAt, isArchived, archivedProjects)
             recent-projects.json (shared recents, capped at 30; entry-wise tolerant parse)
+            usage-state.json (0600: each Claude account's last usage reading and when its
+                              rate-limited usage endpoint was last asked — a cache)
             saved-prompts.json (the right rail's prompt library, global + per project, ≤ 1000;
                                entry-wise tolerant parse; a corrupt file is moved aside)
             accounts.json  keys/ (0700 per-account SSH keys)  logs/
@@ -2554,6 +2556,29 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   Deleting a project or workspace deletes its prompts once the directory is gone (a failed `rm`
   deletes nothing); archiving does not, and neither does a generic `DELETE /api/fs` (as for
   to-dos).
+- **Claude usage is read off the model's own responses; the usage endpoint is a scarce
+  fallback.** `GET api.anthropic.com/api/oauth/usage` answers about ONE request per 5 minutes per
+  account (`429`, `retry-after: 300`). The daemon kept the last reading and the backoff only in
+  memory, so every restart asked again inside the previous process's window, got a 429 for every
+  account, and showed "Signed in — usage updating…" (and a workflow's account selection saw every
+  Claude account's usage as unknown, its thresholds ignored) for five minutes. Three rules now:
+  (1) `createClaudeSource` asks the endpoint at most once per `CLAUDE_USAGE_MIN_INTERVAL_MS`
+  (5 min), with or without a reading to show, honours `Retry-After` (floored at that window,
+  capped at 24 h), and persists all of it with the last reading in `usage-state.json`
+  (`UsageStateFile`, `usage-state.ts`) — a restart shows the last numbers at once and asks
+  nothing it may not; (2) CLI 2.1.280's `rate_limit_event` carries both windows on every model
+  response (`rate_limit_info.unifiedWindows`, claude fixtures README observation 16): the adapter
+  maps them, the host keeps each thread's latest reading with the account it ran as
+  (`usageLimits` on `GET …/summary`, the orchestrator's `liveUsageLimits`), and the daemon's
+  summary poll hands a new one to that account's source (`ingestLive`, wired in `index.ts`) — the
+  account row moves with every response, and while a live reading is under
+  `CLAUDE_LIVE_FRESH_MS` (5 min) old the endpoint is not asked at all (only idle accounts, and
+  the model-scoped weeklies the live frame does not carry, still come from it); (3) the workflow
+  engine starts only after the first usage reading is held (`UsageService.whenFirstReading`,
+  bounded 15 s). A managed account's live windows never move the provider snapshot (the system
+  login's, which the probe reads). Getting more requests out of the endpoint — rotating IPs,
+  several paths to one account — is circumvention and pointless besides: the limit is per
+  account.
 - **Adapter/localStorage loads must go through a schema (or field-wise validation) with
   fallback — old bundles' payloads outlive deploys.** Raw `JSON.parse` output must never reach
   typed code: a `usage` blob persisted by a pre-migration bundle once crashed the whole web

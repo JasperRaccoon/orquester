@@ -176,6 +176,14 @@ export function usageTokensCacheFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-tokens.json");
 }
 
+/**
+ * The Claude usage sources' persisted state — each account's last reading and
+ * when its rate-limited usage endpoint was last asked; 0600.
+ */
+export function usageStateFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "usage-state.json");
+}
+
 // --- agent chat: the host-owned thread store (spec §5.1) -------------------
 //
 //   <appdir>/daemon/agent/

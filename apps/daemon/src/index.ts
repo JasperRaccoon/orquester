@@ -130,7 +130,16 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
-import { createClaudeSource, createCodexSource, createGrokSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
+import {
+  createClaudeSource,
+  createCodexSource,
+  createGrokSource,
+  readUsagePrefs,
+  claudeLiveUsageFromWindows,
+  shouldHideSystemUsage,
+  type ClaudeUsageSource
+} from "./usage-sources";
+import { UsageStateFile } from "./usage-state";
 import { currentScopedWindows, currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
@@ -207,6 +216,7 @@ import {
   tmuxSocketPath,
   todosIndexPath,
   usageTokensCacheFile,
+  usageStateFile,
   workspacesMetaPath,
   isValidName
 } from "@orquester/config";
@@ -623,8 +633,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agentChat.onRegistryEntryChanged(entry);
   });
   agentAccounts.events.on("changed", (payload) => broadcaster.publish("agent-accounts", "agent-accounts.changed", payload));
+  // Each Claude source's last reading and endpoint timing, persisted: a restart shows the last
+  // numbers at once and never re-asks the rate-limited usage endpoint inside its window.
+  const usageState = new UsageStateFile(usageStateFile(paths.baseDir));
+  await usageState.load();
   const claudeAccountSource = (home?: string) =>
-    createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), claudeHome: home, logger: console });
+    createClaudeSource({
+      userhome: resolved.vars.userhome,
+      now: () => Date.now(),
+      claudeHome: home,
+      logger: console,
+      state: { store: usageState, key: `claude:${home ?? ""}` }
+    });
   const codexAccountSource = (home?: string) =>
     createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now(), codexHome: home, logger: console });
   const grokAuthDir = join(cliproxyDir(resolved.daemonDir), "auth");
@@ -716,6 +736,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     now: () => Date.now()
   });
   usage.events.on("changed", (u) => broadcaster.publish("usage", "usage.changed", u));
+  // Live usage: every Claude chat thread reports its account's windows off its own model
+  // responses (`rate_limit_event.unifiedWindows`); the host hands the latest on in the thread's
+  // summary. It goes to that account's source — numbers that move with every response, at no
+  // cost to the usage endpoint's budget, which is then asked only for idle accounts.
+  let liveRecompute: ReturnType<typeof setTimeout> | undefined;
+  agentChat.setUsageLimitsListener(({ refId, limits }) => {
+    if (registry.get(refId)?.chat?.adapter !== "claude" || limits.home === "cliproxy") return;
+    let home: string | undefined;
+    if (limits.home === "account") {
+      const managed = agentAccounts.list().accounts.some((a) => a.agent === "claude" && a.id === limits.accountId);
+      if (!managed) return;
+      home = agentAccounts.homePath("claude", limits.accountId);
+    }
+    const live = claudeLiveUsageFromWindows(limits.windows, limits.observedAt);
+    if (!live) return;
+    const source = usageSource("claude", claudeAccountSource, home) as ClaudeUsageSource;
+    if (!source.ingestLive(live) || liveRecompute) return;
+    liveRecompute = setTimeout(() => {
+      liveRecompute = undefined;
+      void usage.recompute();
+    }, 1_000);
+    liveRecompute.unref?.();
+  });
   // NOT started here: the first recompute needs the managed-accounts index
   // (loaded by agentAccounts.init() below). Started before it, the boot reading
   // saw zero managed accounts, fell back to the System login — expired on a host
@@ -1108,6 +1151,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     services.workflowEngine = engine;
   };
   attachWorkflowEngine(workflowDaemon.runtime.engine);
+  // Runs resume and missed schedules fire as the engine starts, and their account selection reads
+  // usage at once: let the first reading land first (the persisted one, usually no request at all).
+  await usage.whenFirstReading(15_000);
   await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
@@ -1155,6 +1201,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const stop = async () => {
     usage.stop();
+    clearTimeout(liveRecompute);
+    await usageState.flush();
     // Workflows first: the engine stops its timers, triggers and sweepers (never a sandbox child —
     // those are detached and survive, §5.8), then every workflow store's write chain is flushed.
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.

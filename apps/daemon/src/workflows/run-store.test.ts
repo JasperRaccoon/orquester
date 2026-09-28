@@ -10,7 +10,8 @@ import { FileRunStore, pathSegment, persistedRunToWire, previewOutput, runSummar
 
 const roots: string[] = [];
 after(async () => {
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+  // A store's debounced index write can still land while the tree is removed (ENOTEMPTY): retry.
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 });
 
 async function scratch(): Promise<string> {

@@ -37,7 +37,11 @@ import type {
   TurnState
 } from "@orquester/api/agent-chat";
 import { AGENT_GOAL_STATUSES, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
-import { agentHostExtraRoutes, type AgentHostPendingRequest } from "../agent-host/server/index.ts";
+import {
+  agentHostExtraRoutes,
+  type AgentHostPendingRequest,
+  type AgentHostThreadUsageLimits
+} from "../agent-host/server/index.ts";
 import {
   pushTypeForFields,
   resolveChatActivity,
@@ -86,9 +90,23 @@ export interface AgentChatSummaryOptions {
    * and watch loops, which have no turn to settle.
    */
   onBackgroundWorkEnded?: () => void;
+  /**
+   * A thread reported a NEW live account-usage reading (its `usageLimits`
+   * moved since the last poll). The daemon's usage service takes it for the
+   * account named, so usage follows every model response.
+   */
+  onUsageLimits?: (reading: ThreadUsageReading) => void;
   /** Test seam: replaces the interval so a test never waits on a clock. */
   setInterval?: (fn: () => void, ms: number) => { unref?: () => void };
   clearInterval?: (handle: unknown) => void;
+}
+
+/** A thread's live account-usage reading, with the tab's registry entry. */
+export interface ThreadUsageReading {
+  threadId: string;
+  /** The tab's registry entry (`claude`, `claudex`, …). */
+  refId: string;
+  limits: AgentHostThreadUsageLimits;
 }
 
 /** What the service remembers per thread, beyond the summary itself. */
@@ -110,6 +128,8 @@ interface ThreadState {
 
 export class AgentChatSummaryService {
   private readonly threads = new Map<string, ThreadState>();
+  /** The `observedAt` of each thread's last usage reading handed on. */
+  private readonly usageObservedAt = new Map<string, string>();
   private timer: unknown = null;
   private polling = false;
   /** True once one poll round has completed — before that the view is unknown. */
@@ -153,6 +173,7 @@ export class AgentChatSummaryService {
    */
   forget(threadId: string): void {
     this.threads.delete(threadId);
+    this.usageObservedAt.delete(threadId);
   }
 
   /** The current activity for a chat tab, for `SessionSummary.activity`. */
@@ -242,6 +263,23 @@ export class AgentChatSummaryService {
       return;
     }
     this.applyFields(threadId, sanitizeFields(raw), sanitizePendingRequests(raw));
+    this.applyUsageLimits(threadId, sanitizeUsageLimits(raw));
+  }
+
+  /** Hand a thread's usage reading on once per new `observedAt`. Never throws. */
+  applyUsageLimits(threadId: string, limits: AgentHostThreadUsageLimits | null): void {
+    const tab = this.opts.chat.get(threadId);
+    if (!limits || !tab) {
+      if (!tab) this.usageObservedAt.delete(threadId);
+      return;
+    }
+    if (this.usageObservedAt.get(threadId) === limits.observedAt) return;
+    this.usageObservedAt.set(threadId, limits.observedAt);
+    try {
+      this.opts.onUsageLimits?.({ threadId, refId: tab.refId ?? "", limits });
+    } catch (error) {
+      this.opts.logger?.warn?.("agent-chat: usage reading listener failed", error);
+    }
   }
 
   /**
@@ -492,6 +530,27 @@ export function sanitizePendingRequests(value: unknown): AgentHostPendingRequest
 /** `working` or `monitoring`; an absent field reads as none. */
 function hasBackgroundLiveness(fields: AgentChatSessionSummaryFields): boolean {
   return fields.backgroundLiveness === "working" || fields.backgroundLiveness === "monitoring";
+}
+
+/** The summary's `usageLimits`, or null when absent or malformed. */
+export function sanitizeUsageLimits(value: unknown): AgentHostThreadUsageLimits | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = (value as { usageLimits?: unknown }).usageLimits;
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row.observedAt !== "string" || !Number.isFinite(Date.parse(row.observedAt))) return null;
+  if (row.home !== "system" && row.home !== "account" && row.home !== "cliproxy") return null;
+  if (typeof row.accountId !== "string" || !Array.isArray(row.windows)) return null;
+  const windows = row.windows.filter(
+    (window): window is AgentHostThreadUsageLimits["windows"][number] =>
+      !!window &&
+      typeof window === "object" &&
+      typeof (window as { id?: unknown }).id === "string" &&
+      typeof (window as { kind?: unknown }).kind === "string" &&
+      typeof (window as { usedPercent?: unknown }).usedPercent === "number" &&
+      Number.isFinite((window as { usedPercent: number }).usedPercent)
+  );
+  return { observedAt: row.observedAt, home: row.home, accountId: row.accountId, windows };
 }
 
 export function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
