@@ -18,7 +18,8 @@ export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
       let timedOut = false;
       let timer: { cancel(): void } | null = null;
       if (Number.isFinite(ctx.timeoutMs)) {
-        const left = Date.parse(ctx.startedAt) + ctx.timeoutMs - clock.now().getTime();
+        const startedAt = ctx.startedAt !== undefined ? Date.parse(ctx.startedAt) : clock.now().getTime();
+        const left = startedAt + ctx.timeoutMs - clock.now().getTime();
         timer = clock.setTimeout(() => {
           timedOut = true;
           controller.abort();

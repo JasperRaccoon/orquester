@@ -273,10 +273,16 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
   timeoutMs: number;
   /** Sub-workflow depth of this run. */
   depth: number;
-  /** When this attempt started (wall clock): deadlines derive from it, so a restart never extends them. */
-  startedAt: string;
-  /** The live inputs this block runs on (sources that finished on the handle an edge takes), by edge order. */
-  liveInputs(): { nodeId: string; name: string; output: unknown }[];
+  /**
+   * When this attempt started (wall clock): deadlines derive from it, so a restart never extends
+   * them. Always set by the engine (optional only so hand-built test contexts need not).
+   */
+  startedAt?: string;
+  /**
+   * The live inputs this block runs on (sources that finished on the handle an edge takes), in edge
+   * order. Always set by the engine (optional only so hand-built test contexts need not).
+   */
+  liveInputs?(): { nodeId: string; name: string; output: unknown }[];
   services: EngineServices;
   log: WorkflowLogger;
 }

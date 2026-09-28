@@ -47,7 +47,7 @@ export function createMergeExecutor(): NodeExecutor<"merge"> {
     type: "merge",
     async execute(ctx): Promise<NodeResult> {
       const output: Record<string, unknown> = {};
-      for (const input of ctx.liveInputs()) output[input.name] = input.output ?? null;
+      for (const input of ctx.liveInputs?.() ?? []) output[input.name] = input.output ?? null;
       return { status: "succeeded", output };
     }
   };
