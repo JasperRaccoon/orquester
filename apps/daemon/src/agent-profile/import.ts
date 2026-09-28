@@ -40,7 +40,14 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs
 import { basename, extname, join } from "node:path";
 import type { AgentProfileAgentId, ProfileImportCandidate, ProfileImportScanResponse } from "@orquester/api";
 import type { PortableItem } from "./adapters/types.ts";
-import { CODEX_COMMAND_NOTE, commandNameFor, commandSkillName, commandToSkillDocument, droppedKeysNote, mapFrontmatter } from "./convert.ts";
+import {
+  CODEX_COMMAND_NOTE,
+  commandNameFor,
+  commandSkillName,
+  commandToSkillDocument,
+  droppedKeysNote,
+  mapFrontmatter
+} from "./convert.ts";
 import { isAgentProfileError, profileErrors } from "./errors.ts";
 import { type GitCloneFn, gitClone } from "./import/git-clone.ts";
 import { parseGitImportUrl } from "./import/git-url.ts";

@@ -35,7 +35,19 @@
  * symlink inside it (a symlink refuses the copy, `IMPORT_FAILED`).
  */
 
-import { constants, chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  constants,
+  copyFileSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -243,7 +255,11 @@ function readSkillDocument(dir: string, name: string): { frontmatter: Record<str
 // Kinds
 // ---------------------------------------------------------------------------
 
-function convertSkill(item: Extract<PortableItem, { kind: "skill" }>, to: AgentProfileAgentId, tempRoot: string): ProfileConversion {
+function convertSkill(
+  item: Extract<PortableItem, { kind: "skill" }>,
+  to: AgentProfileAgentId,
+  tempRoot: string
+): ProfileConversion {
   assertSkillName(item.name);
   const document = readSkillDocument(item.dir, item.name);
   const mapped = mapFrontmatter(document.frontmatter, "skill", to);
