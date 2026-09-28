@@ -8,15 +8,27 @@ import { MobileKeyBar } from "../terminal";
 import { ToastStack } from "../status";
 import { CommandPalette } from "../command-palette";
 import { GlobalShortcutListener } from "../attention";
-import { RightRailEditorHost, RightRailFrame } from "../right-rail";
+import { MobileSectionNav, RightRailEditorHost, RightRailFrame, useMobileSection } from "../right-rail";
 import { CloseSessionConfirm } from "./CloseSessionConfirm";
 
 /**
  * Primary layout: full-height sidebar on the left, and a main column whose top
  * bar occupies the titlebar region above the content area. Below the top bar,
  * the tab content shares a row with the right rail (desktop, a project open):
- * `[MainView | docked panel | icon rail]`.
+ * `[MainView | docked panel | icon rail]`. A phone has a bar of sections at
+ * the bottom instead, under the terminal key bar, which a section hides (it
+ * covers the terminal).
  */
+const MobileBottomBars: React.FC = () => {
+  const section = useMobileSection();
+  return (
+    <>
+      {section === null && <MobileKeyBar />}
+      <MobileSectionNav />
+    </>
+  );
+};
+
 export const AppShell: React.FC = () => (
   <div className="flex min-h-0 flex-1">
     <Sidebar />
@@ -25,7 +37,7 @@ export const AppShell: React.FC = () => (
       <RightRailFrame>
         <MainView />
       </RightRailFrame>
-      <MobileKeyBar />
+      <MobileBottomBars />
     </div>
     <SettingsModal />
     <AuthModal />

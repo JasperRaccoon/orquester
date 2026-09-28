@@ -56,7 +56,7 @@ export const EDITOR_UNAVAILABLE = "The prompt editor isn't available right now."
 
 export interface PromptCardViewProps {
   prompt: HistoryPrompt;
-  /** Docked beside the chat, or in the mobile sheet (finger-sized controls). */
+  /** Docked beside the chat, or on a phone (finger-sized controls). */
   variant: "docked" | "sheet";
   /** "Turn 12 · 14:05" ({@link promptMetaLabel}). */
   meta: string;
@@ -248,9 +248,9 @@ export interface PromptCardProps {
   rewind: (prompt: RewindPrompt) => Promise<RewindOutcome>;
   /** The prompt was rewound to: it has left the thread, and the card closes. */
   onRewound: (messageId: string) => void;
-  /** An Insert or a Send landed (the mobile sheet closes on it). */
+  /** An Insert or a Send landed (a phone goes back to the chat on it). */
   onDelivered?: () => void;
-  /** A jump or a rewind landed in the chat: the mobile sheet steps aside for it. */
+  /** A jump or a rewind landed in the chat: a phone goes back to the chat for it. */
   onLeave?: () => void;
 }
 

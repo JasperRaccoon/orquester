@@ -3,7 +3,6 @@ export { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
 export {
   openSavedPromptEditor,
   subscribeSavedPromptEditor,
-  subscribeSavedPromptEditorOpened,
   type SavedPromptEditorRequest
 } from "./saved-prompts/editor-bridge";
 export { PromptHistoryPanel } from "./history/PromptHistoryPanel";
@@ -26,12 +25,16 @@ export {
   type RightRailRowProps
 } from "./RightRailFrame";
 export {
-  RightRailSheet,
-  RightRailSheetBody,
-  RightRailSheetButton,
-  type RightRailSheetBodyProps,
-  type RightRailSheetProps
-} from "./RightRailSheet";
+  MOBILE_SECTION_BAR_MAX,
+  MobileSectionBar,
+  MobileSectionNav,
+  MobileSectionOverlay,
+  MobileSectionView,
+  splitSectionItems,
+  type MobileSectionBarProps,
+  type MobileSectionViewProps
+} from "./MobileSections";
+export { mobileSection, setMobileSection, subscribeMobileSection, useMobileSection } from "./mobile-section";
 export {
   RIGHT_RAIL_DOCK_ID,
   RIGHT_RAIL_PANEL_ORDER,
@@ -46,7 +49,6 @@ export {
   resetRightRailWidth,
   rightRailState,
   setRightRailOpen,
-  setRightRailSheetPanel,
   setRightRailWidth,
   subscribeRightRail,
   toggleRightRailPanel,

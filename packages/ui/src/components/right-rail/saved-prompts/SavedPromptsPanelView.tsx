@@ -204,14 +204,13 @@ export const SavedPromptsPanelView: React.FC<SavedPromptsPanelViewProps> = (prop
       <div className="shrink-0 space-y-2 border-t border-neutral-800 px-3 py-3">
         <Button
           type="button"
-          variant="outline"
           onClick={props.onNewPrompt}
           className={cn("w-full", sheet && "h-10")}
         >
           <Plus size={14} aria-hidden />
           New prompt
         </Button>
-        <p className="text-center text-[11px] text-neutral-500">Click to insert · Send to run</p>
+        <p className="text-center text-[11px] text-neutral-500">Open a prompt to insert or send it</p>
       </div>
 
       {/* The Insert / Send outcome, read out: always mounted, so a new text is

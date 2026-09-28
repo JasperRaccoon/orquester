@@ -3,7 +3,7 @@
  * (`/api/saved-prompts`).
  *
  * One module-level store, like the provider catalogue: every panel instance
- * (docked, the mobile sheet) and the editor read the same map, so a change in
+ * (docked, a phone's section) and the editor read the same map, so a change in
  * one shows in the others without a refetch. The daemon owns the list, and
  * this copy converges on it three ways:
  *

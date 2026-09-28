@@ -10,7 +10,7 @@ import {
 } from "../../agent-chat/timeline/TurnDiffModal";
 
 /**
- * A turn's diff INSIDE the panel — the mobile sheet's way to show it. The
+ * A turn's diff INSIDE the panel — a phone's way to show it. The
  * app's modal layer (z-100) sits below the bottom sheet (z-110), so a modal
  * opened from inside the sheet would open behind it; the sheet shows the diff
  * in place instead. It is laid OVER the list, which stays mounted and

@@ -1,6 +1,6 @@
 /**
  * The right rail's panels, by id: what the rail button, the dock's header and
- * the mobile sheet's switch call each one, its icon, and the component that
+ * a phone's section bar call each one, its icon, and the component that
  * renders it (`RightRailPanelProps`). One table, so the three surfaces never
  * disagree on a name.
  */
@@ -16,7 +16,7 @@ export interface RightRailPanelSpec {
   id: RightRailPanelId;
   /** The rail button's label and tooltip, and the dock's title. */
   title: string;
-  /** The mobile sheet's segment label. */
+  /** A phone's section bar label. */
   shortTitle: string;
   Icon: LucideIcon;
   Component: React.ComponentType<RightRailPanelProps>;
@@ -51,7 +51,7 @@ export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
   }
 };
 
-/** Rail order, top to bottom (and the sheet's switch, left to right). */
+/** Rail order, top to bottom (and a phone's section bar, left to right). */
 export const RIGHT_RAIL_PANEL_ORDER: readonly RightRailPanelId[] = ["prompts", "history"];
 
 /** The dock's element id — what the active rail button `aria-controls`. */

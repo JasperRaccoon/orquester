@@ -1,7 +1,7 @@
 /**
  * The right rail's per-device state: which panel is docked beside the tab
- * content (desktop), how wide the dock is, and which tab the mobile sheet
- * showed last.
+ * content (desktop) and how wide the dock is. (A phone's section is not a
+ * preference: `mobile-section.ts`, in memory.)
  *
  * A viewing preference, so it is persisted per device in localStorage and
  * never synced through the daemon — the same mold as `lib/panel-sizes.ts` and
@@ -12,7 +12,9 @@
  * itself and nothing here can throw on what it reads.
  *
  * Stored under `orquester:right-rail` as
- * `{ "v": 1, "open": "prompts" | "history" | null, "width": <px>, "sheet": "prompts" | "history" }`.
+ * `{ "v": 1, "open": "prompts" | "history" | null, "width": <px> }`. (Earlier
+ * bundles also wrote a `sheet` field, the mobile sheet's last tab: ignored now,
+ * and gone at the next write.)
  * `v` is written for a future migration; this version reads any payload field
  * by field whatever its `v`, so a rollback after a newer bundle wrote v2 keeps
  * whatever still validates.
@@ -46,14 +48,11 @@ export interface RightRailState {
   readonly open: RightRailPanelId | null;
   /** The dock's width in px, within `[RIGHT_RAIL_WIDTH_MIN, RIGHT_RAIL_WIDTH_MAX]`. */
   readonly width: number;
-  /** The mobile sheet's last tab. */
-  readonly sheet: RightRailPanelId;
 }
 
 export const RIGHT_RAIL_DEFAULT_STATE: RightRailState = Object.freeze({
   open: null,
-  width: RIGHT_RAIL_WIDTH_DEFAULT,
-  sheet: "prompts"
+  width: RIGHT_RAIL_WIDTH_DEFAULT
 });
 
 export function isRightRailPanelId(value: unknown): value is RightRailPanelId {
@@ -124,8 +123,7 @@ export function sanitizeRightRailState(value: unknown): RightRailState {
     typeof rawWidth === "number" && Number.isFinite(rawWidth) && rawWidth > 0
       ? clampRightRailWidth(rawWidth)
       : RIGHT_RAIL_DEFAULT_STATE.width;
-  const sheet = isRightRailPanelId(record.sheet) ? record.sheet : RIGHT_RAIL_DEFAULT_STATE.sheet;
-  return { open, width, sheet };
+  return { open, width };
 }
 
 /** The stored string → a valid state. Nothing stored, or anything unparsable, is the defaults. */
@@ -146,8 +144,7 @@ export function serializeRightRailState(state: RightRailState): string {
   return JSON.stringify({
     v: RIGHT_RAIL_STATE_VERSION,
     open: state.open,
-    width: state.width,
-    sheet: state.sheet
+    width: state.width
   });
 }
 
@@ -232,8 +229,7 @@ export function useRightRailState(): RightRailState {
 function update(patch: Partial<RightRailState>, persist: boolean): void {
   const previous = rightRailState();
   const next: RightRailState = { ...previous, ...patch };
-  const changed =
-    next.open !== previous.open || next.width !== previous.width || next.sheet !== previous.sheet;
+  const changed = next.open !== previous.open || next.width !== previous.width;
   if (changed) {
     current = next;
   }
@@ -275,11 +271,6 @@ export function setRightRailWidth(
 /** Double-click on the resize handle: back to the default width. */
 export function resetRightRailWidth(): void {
   update({ width: RIGHT_RAIL_WIDTH_DEFAULT }, true);
-}
-
-/** The mobile sheet's tab (remembered for the next time it opens). */
-export function setRightRailSheetPanel(id: RightRailPanelId): void {
-  update({ sheet: id }, true);
 }
 
 /**

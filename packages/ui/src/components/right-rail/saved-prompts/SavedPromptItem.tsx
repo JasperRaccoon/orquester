@@ -1,7 +1,7 @@
 /**
- * One saved prompt in the list: a collapsed row — its body inserts the prompt
- * into the chat, its chevron opens it — or the expanded card, with the pin,
- * the actions (a menu docked, inline buttons in the mobile sheet), the chips,
+ * One saved prompt in the list: a collapsed row — a click anywhere on it
+ * opens the card — or the expanded card, with the pin,
+ * the actions (a menu docked, inline buttons on a phone), the chips,
  * the "Context:" line, and Insert / Send.
  *
  * Presentational: everything it shows and does arrives as props, so a static
@@ -50,7 +50,7 @@ export interface SavedPromptItemProps {
   prompt: SavedPrompt;
   expanded: boolean;
   variant: "docked" | "sheet";
-  /** A chat is the target. Without one, Insert, Send and the row's click-to-insert are disabled. */
+  /** A chat is the target. Without one, Insert and Send are disabled. */
   canDeliver: boolean;
   /**
    * This prompt's delivery is resolving its variables: a spinner on that
@@ -62,8 +62,8 @@ export interface SavedPromptItemProps {
   /** "Move to this project" needs an open project. */
   canMoveToProject: boolean;
   /**
-   * Delete asked, confirmed on the card itself — the mobile sheet's way: a
-   * modal confirm would open under the sheet. (Docked, the panel asks in a
+   * Delete asked, confirmed on the card itself — a phone's way, within thumb
+   * reach like its inline actions. (Docked, the panel asks in a
    * `ConfirmDialog` instead and this stays false.)
    */
   confirmingDelete?: boolean;
@@ -95,7 +95,7 @@ const FOCUS_RING = "focus:outline-none focus-visible:ring-1 focus-visible:ring-n
 /** Looks and acts disabled while a delivery resolves, yet keeps its focus (see `busy`). */
 const BUSY_DISABLED = "aria-disabled:pointer-events-none aria-disabled:opacity-50";
 
-/** The mobile sheet's inline actions: two to a row, 40px tall, a long label wrapping rather than cut. */
+/** A phone's inline actions: two to a row, 40px tall, a long label wrapping rather than cut. */
 const SHEET_ACTION = "h-auto min-h-10 w-full justify-start whitespace-normal px-2.5 py-1.5 text-left text-xs";
 
 const DANGER_ACTION = "text-danger hover:bg-danger-500/10 hover:text-danger";
@@ -185,24 +185,25 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
     const feedback = props.feedback;
     return (
       <div ref={rootRef} data-saved-prompt={prompt.id} className={railCardClass(false)}>
-        <div className="flex items-stretch">
-          <button
-            type="button"
-            data-card-focus=""
-            disabled={!props.canDeliver}
-            aria-disabled={busy ? true : undefined}
-            onClick={() => {
-              if (!busy) props.onDeliver("insert");
-            }}
-            title={props.canDeliver ? "Click to insert into the chat" : NO_CHAT_TARGET_REASON}
-            className={cn(
-              "min-w-0 flex-1 pl-3 pr-1 text-left disabled:cursor-default aria-disabled:cursor-default",
-              "focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500",
-              feedback ? "rounded-tl-xl" : "rounded-l-xl",
-              sheet ? "py-3" : "py-2.5"
-            )}
-          >
-            <span className="sr-only">Insert: </span>
+        {/* The whole row opens the card; Insert and Send live in the open card only. */}
+        <button
+          ref={chevronRef}
+          type="button"
+          data-card-focus=""
+          aria-expanded={false}
+          aria-busy={busy ? true : undefined}
+          title="Show details"
+          onClick={() => {
+            pendingFocus.current = "header";
+            props.onExpand();
+          }}
+          className={cn(
+            "group flex w-full min-w-0 items-center text-left",
+            "focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500",
+            feedback ? "rounded-t-xl" : "rounded-xl"
+          )}
+        >
+          <span className={cn("min-w-0 flex-1 pl-3 pr-1", sheet ? "py-3" : "py-2.5")}>
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="truncate text-[13px] font-medium text-neutral-100">{prompt.title}</span>
               {prompt.pinned ? (
@@ -218,28 +219,19 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
             {prompt.description ? (
               <span className="mt-0.5 block truncate text-xs text-neutral-400">{prompt.description}</span>
             ) : null}
-          </button>
-          <button
-            ref={chevronRef}
-            type="button"
-            aria-expanded={false}
-            title="Show details"
-            onClick={() => {
-              pendingFocus.current = "header";
-              props.onExpand();
-            }}
+          </span>
+          <span
+            aria-hidden
             className={cn(
-              "flex shrink-0 items-center justify-center text-neutral-500 transition-colors hover:text-neutral-200",
-              "focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500",
-              feedback ? "rounded-tr-xl" : "rounded-r-xl",
+              "flex shrink-0 items-center justify-center self-stretch text-neutral-500 transition-colors group-hover:text-neutral-200",
               sheet ? "w-11" : "w-9"
             )}
           >
-            <ChevronRight size={15} aria-hidden />
-            <span className="sr-only">Show details for {prompt.title}</span>
-          </button>
-        </div>
-        {/* Beside the buttons, not inside one: it is not part of the row's name. */}
+            <ChevronRight size={15} />
+          </span>
+          <span className="sr-only">, show details</span>
+        </button>
+        {/* Beside the button, not inside it: it is not part of the row's name. */}
         {feedback ? <FeedbackLine feedback={feedback} className="-mt-1 px-3 pb-2.5" /> : null}
       </div>
     );
@@ -419,8 +411,8 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
       )}
 
       {sheet && !confirming ? (
-        // The sheet shows its actions in place: a menu there would be a second
-        // bottom sheet stacked on the first.
+        // A phone shows its actions in place: finger-sized, one tap away,
+        // rather than behind a menu.
         <div role="group" aria-label={`Actions for ${prompt.title}`} className="grid grid-cols-2 gap-1.5">
           <Button type="button" variant="ghost" onClick={props.onEdit} className={SHEET_ACTION}>
             <Pencil size={14} aria-hidden className="shrink-0" />
