@@ -80,6 +80,27 @@ export {
   useWorkflowsState
 } from "./lib/workflows/hooks";
 export * from "./components/workflows";
+// Automated workflows — seeing runs: the run view's components, its pure helpers, the notifications
+export * from "./components/workflows/runs";
+export * from "./lib/workflows/run-view";
+export * from "./lib/workflows/json-tree";
+export {
+  attentionEntryFor,
+  dismissWorkflowAttention,
+  dismissWorkflowToasts,
+  finishedRunNotice,
+  markWorkflowRunViewed,
+  notifyPrefsOf,
+  notifyWorkflowRunFinished,
+  observeWorkflowRunEvent,
+  resetWorkflowNotifications,
+  runOutcomeKind,
+  workflowNotificationsStore,
+  type WorkflowAttentionEntry,
+  type WorkflowNotificationsState,
+  type WorkflowNotifyPrefs,
+  type WorkflowRunNotice
+} from "./lib/workflows/notifications";
 export * from "./hooks";
 export * from "./services";
 

@@ -8,6 +8,7 @@ import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
+import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -1683,6 +1684,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       invalidateProjectIndex();
       resetSavedPrompts();
       resetWorkflows();
+      resetWorkflowNotifications();
       set({
         api: apiWithCredential(api, ""),
         connectionStatus: "error",
@@ -1727,6 +1729,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     invalidateProjectIndex();
     resetSavedPrompts();
     resetWorkflows();
+    resetWorkflowNotifications();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
       api: new ApiClient(connection, buildTransporter(connection)),
@@ -3220,6 +3223,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // sanitised); this store mirrors only what its editor tabs show — a
       // renamed workflow's title, a deleted workflow's tab closing.
       const effect = applyWorkflowsEvent(event);
+      // A finished run raises its toast / Attention Center entry — unless the
+      // focused editor tab is showing that very run.
+      observeWorkflowRunEvent(event, { viewingRunId: viewedWorkflowRunId(get()) });
       if (effect?.kind === "upserted") {
         set((state) => renameWorkflowTabs(state, effect.workflow.id, effect.workflow.name));
       } else if (effect?.kind === "deleted") {
@@ -3437,6 +3443,15 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
       workflowTabsByProject
     )
   };
+}
+
+/** The run the focused editor tab shows, if the visible tab is a workflow tab on a run. */
+function viewedWorkflowRunId(state: AppState): string | null {
+  const path = state.currentProject?.path;
+  if (!path) return null;
+  const active = state.activeTabByProject[path];
+  const tab = active ? state.workflowTabsByProject[path]?.find((t) => t.id === active) : undefined;
+  return tab?.runId ?? null;
 }
 
 /** Retitle every open editor tab of workflow `workflowId` (a `workflow.upserted` — a rename anywhere). */
