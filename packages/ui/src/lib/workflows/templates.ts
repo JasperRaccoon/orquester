@@ -2,13 +2,13 @@
  * Automated workflows — what "New workflow" and the empty state's starters
  * send to `POST /api/workflows`.
  *
- * The starter templates (spec §7.1) are named here; what each one builds is a
- * STUB for now — a blank workflow named after the template, with one manual
- * trigger — until `buildTemplate` lands in `@orquester/api` and
- * `createFromTemplate` builds the real graph from it.
+ * The starter templates (spec §7.1) are the owner's own examples, built by
+ * `buildTemplate` in `@orquester/api` (the MCP's too), created DISABLED so
+ * nothing runs before the user has read them, in the creating browser's time
+ * zone. The ids here are the rail's; `API_TEMPLATE_ID` maps them.
  */
 
-import type { CreateWorkflowRequest, WorkflowProject } from "@orquester/api";
+import { buildTemplate, type CreateWorkflowRequest, type WorkflowProject, type WorkflowTemplateId as ApiTemplateId } from "@orquester/api";
 
 export type WorkflowTemplateId = "nightly-agent-task" | "jira-ticket-fixer" | "release-tag-reviewer";
 
@@ -37,6 +37,21 @@ export const WORKFLOW_TEMPLATES: readonly WorkflowTemplateInfo[] = [
   }
 ];
 
+const API_TEMPLATE_ID: Record<WorkflowTemplateId, ApiTemplateId> = {
+  "nightly-agent-task": "nightly-agent",
+  "jira-ticket-fixer": "jira-fixer",
+  "release-tag-reviewer": "release-reviewer"
+};
+
+/** The zone this browser is in (a new workflow's schedules default to it). */
+export function browserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
 /** A blank workflow: its name, its project, and one manual trigger the daemon names and places. */
 export function blankWorkflowRequest(name: string, project: WorkflowProject): CreateWorkflowRequest {
   return {
@@ -48,10 +63,15 @@ export function blankWorkflowRequest(name: string, project: WorkflowProject): Cr
 }
 
 /**
- * What a starter template creates. STUB: a blank workflow named after the
- * template; the real graphs come with `buildTemplate` (another builder's).
+ * What a starter template creates: the template's whole graph for an existing
+ * project. A temporary project gets the same graph, re-pointed at it.
  */
-export function createFromTemplate(id: WorkflowTemplateId, project: WorkflowProject): CreateWorkflowRequest {
-  const template = WORKFLOW_TEMPLATES.find((entry) => entry.id === id);
-  return blankWorkflowRequest(template?.title ?? "Untitled workflow", project);
+export function createFromTemplate(
+  id: WorkflowTemplateId,
+  project: WorkflowProject,
+  timezone: string = browserTimeZone()
+): CreateWorkflowRequest {
+  const projectPath = project.kind === "existing" ? project.projectPath : "";
+  const request = buildTemplate(API_TEMPLATE_ID[id], { projectPath, timezone });
+  return project.kind === "existing" ? request : { ...request, project };
 }

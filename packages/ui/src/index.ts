@@ -80,6 +80,31 @@ export {
   useWorkflowsState
 } from "./lib/workflows/hooks";
 export * from "./components/workflows";
+// The workflow editor's state and pure helpers (the run view and the phone Steps view reuse them)
+export {
+  WorkflowEditor,
+  workflowEditorFor,
+  retainWorkflowEditor,
+  type WorkflowEditorState,
+  type EditorSelection,
+  type ChangeOptions
+} from "./lib/workflows/editor-store";
+export { deriveRunOverlay, type RunOverlay, type OverlayNodeState, type OverlayEdgeState } from "./lib/workflows/overlay";
+export {
+  nodeSummary,
+  BLOCK_ICONS,
+  accentClass,
+  blockAccent,
+  filterPalette,
+  PALETTE_GROUPS,
+  type NodeSummaryContext
+} from "./lib/workflows/catalog-ui";
+export {
+  serializeWorkflowSelection,
+  parseWorkflowClipboard,
+  pasteWorkflowClipboard,
+  duplicateWorkflowNodes
+} from "./lib/workflows/clipboard";
 export * from "./hooks";
 export * from "./services";
 
