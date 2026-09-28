@@ -157,7 +157,10 @@ export const accountPolicySchema = looseObject({
 export type AccountPolicy = z.infer<typeof accountPolicySchema>;
 
 export const agentChainEntrySchema = looseObject({
-  /** Registry refId: claude | claudex | claudemix | codex | grok | opencode. */
+  /**
+   * Registry refId: claude | codex | grok | opencode. Any string parses (a definition may name an
+   * agent this host does not offer — validation reports it, a run passes it over).
+   */
   agent: z.string().min(1),
   model: z.string().min(1),
   options: z.array(agentModelOptionSchema).optional(),

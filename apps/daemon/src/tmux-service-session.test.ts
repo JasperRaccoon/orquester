@@ -28,7 +28,7 @@ async function makeTestTmux(t: any): Promise<Tmux | null> {
 
 test("SERVICE_SESSION_PREFIX is outside the reaped orq- namespace", () => {
   assert.equal(SERVICE_SESSION_PREFIX, "orqsvc-");
-  assert.equal("orqsvc-cliproxy".startsWith("orq-"), false);
+  assert.equal("orqsvc-agent-host".startsWith("orq-"), false);
 });
 
 test("service session lives outside orq- namespace and survives listSessions/reattach scans", async (t) => {

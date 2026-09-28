@@ -9,18 +9,16 @@ function view(id: string, over: Partial<AgentView> = {}): AgentView {
   return { id, enabled: true, status: "ready", models: [{ slug: "m1", name: "M1", isDefault: true, options: [] }], ...over } as AgentView;
 }
 
-test("a provider's models count only once it has been probed; claudex's proxy list whenever it lists any", () => {
+test("a provider's models count only once it has been probed", () => {
   const catalog = toValidationCatalog([
     view("claude"),
     view("codex", { status: "unknown" }),
-    view("claudex", { status: "unknown" }),
     view("opencode", { models: [] }),
     view("grok", { enabled: false })
   ]);
   assert.deepEqual(catalog.agents, [
     { id: "claude", enabled: true, models: ["m1"] },
     { id: "codex", enabled: true, models: null },
-    { id: "claudex", enabled: true, models: ["m1"] },
     { id: "opencode", enabled: true, models: null },
     { id: "grok", enabled: false, models: ["m1"] }
   ]);

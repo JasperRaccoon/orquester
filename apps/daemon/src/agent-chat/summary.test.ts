@@ -9,7 +9,13 @@ import { busEvent, FakeDaemonApi } from "../mcp/testing.ts";
 import { waitForAttention } from "../mcp/wait.ts";
 import { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
-import { AgentChatSummaryService, sanitizeFields, sanitizePendingRequests } from "./summary.ts";
+import {
+  AgentChatSummaryService,
+  sanitizeFields,
+  sanitizePendingRequests,
+  sanitizeUsageLimits,
+  type ThreadUsageReading
+} from "./summary.ts";
 
 // §6.4: the six derived fields, the coarse bus events, and the pushes the
 // protocol now produces instead of bells and hooks.
@@ -906,4 +912,43 @@ test("a non-object body yields no fields rather than throwing", () => {
   assert.deepEqual(sanitizeFields("nope"), {});
   assert.deepEqual(sanitizeFields([1, 2]), {});
   assert.deepEqual(sanitizeFields({ backgroundLiveness: null }), { backgroundLiveness: null });
+});
+
+test("a thread's live usage reading is handed on once per new reading, with the tab's entry", () => {
+  const chat = new ChatSessionManager({ requestPersist: () => undefined });
+  const readings: ThreadUsageReading[] = [];
+  const service = new AgentChatSummaryService({
+    client: new AgentHostClient({ socketPath: "/dev/null", token: () => null }),
+    chat,
+    broadcaster: { publish: () => undefined },
+    push: { notifyStructural: async () => undefined },
+    onUsageLimits: (reading) => readings.push(reading)
+  });
+  seedTab(chat, "t1");
+  const limits = sanitizeUsageLimits({
+    pendingRequests: [],
+    usageLimits: {
+      observedAt: "2026-09-28T14:00:00.000Z",
+      home: "account",
+      accountId: "acc-1",
+      windows: [
+        { id: "session", kind: "session", label: "Session", usedPercent: 4 },
+        { id: "junk", kind: "weekly", label: "x", usedPercent: "12" }
+      ]
+    }
+  });
+  assert.deepEqual(limits?.windows.map((w) => w.id), ["session"]);
+  service.applyUsageLimits("t1", limits);
+  service.applyUsageLimits("t1", limits); // the next poll, same reading
+  assert.equal(readings.length, 1);
+  assert.equal(readings[0]?.refId, "claude");
+  assert.equal(readings[0]?.limits.accountId, "acc-1");
+  service.applyUsageLimits("t1", limits && { ...limits, observedAt: "2026-09-28T14:00:05.000Z" });
+  assert.equal(readings.length, 2);
+  // No tab, no reading; a host older than the field sends none.
+  service.applyUsageLimits("ghost", limits);
+  assert.equal(readings.length, 2);
+  assert.equal(sanitizeUsageLimits({ pendingRequests: [] }), null);
+  assert.equal(sanitizeUsageLimits({ usageLimits: { observedAt: "nope", home: "account", accountId: "a", windows: [] } }), null);
+  assert.equal(sanitizeUsageLimits({ usageLimits: { observedAt: "2026-09-28T14:00:00Z", home: "elsewhere", accountId: "a", windows: [] } }), null);
 });

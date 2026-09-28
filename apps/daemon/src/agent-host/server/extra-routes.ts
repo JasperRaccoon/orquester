@@ -8,7 +8,11 @@
  * builders from here rather than hand-writing the strings.
  */
 
-import type { AgentChatSessionSummaryFields } from "@orquester/api/agent-chat";
+import type {
+  AccountHomeKind,
+  AgentChatSessionSummaryFields,
+  ProviderUsageWindow
+} from "@orquester/api/agent-chat";
 
 const thread = (threadId: string): string => `/threads/${encodeURIComponent(threadId)}`;
 
@@ -54,6 +58,26 @@ export interface AgentHostPendingRequest {
  */
 export interface AgentHostThreadSummary extends AgentChatSessionSummaryFields {
   pendingRequests: AgentHostPendingRequest[];
+  /**
+   * The account usage this thread's provider reported last, live, off its own
+   * API responses (Claude's `rate_limit_event.unifiedWindows`), under the
+   * account the thread ran as when it was reported. The daemon feeds it to its
+   * usage service for that account, so usage moves with every model response
+   * instead of waiting on the rate-limited usage endpoint. Absent from a host
+   * older than the field, and until the thread's provider reports one.
+   */
+  usageLimits?: AgentHostThreadUsageLimits | null;
+}
+
+/** One thread's latest live account usage (see {@link AgentHostThreadSummary.usageLimits}). */
+export interface AgentHostThreadUsageLimits {
+  /** When the host received the reading (ISO). */
+  observedAt: string;
+  /** The home and account the thread ran under when the reading arrived. */
+  home: AccountHomeKind;
+  accountId: string;
+  /** Merged by window id across the thread's readings. */
+  windows: ProviderUsageWindow[];
 }
 
 /** Response of `GET …/attachments/:id`. */

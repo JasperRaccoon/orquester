@@ -74,10 +74,7 @@ export const COMPACT_SLASH_COMMAND: SlashCommand = {
  * *T3: `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640` — a pending
  * provider carries its bundled catalog, not an empty list.*
  *
- * Deliberately not derived from `@orquester/config`'s `XAI_OAUTH_MODELS`:
- * those are the ids the **cliproxy** serves over the Claude harness
- * (`grok-build-0.1`, `grok-4.5`), which is a different surface from the ids
- * the `grok` CLI itself accepts. The live probe replaces this list wholesale.
+ * The live probe replaces this list wholesale.
  */
 export const FALLBACK_GROK_MODELS: readonly ProviderModel[] = [
   { slug: "grok-4.7", name: "Grok 4.7", isDefault: true, capabilities: null },

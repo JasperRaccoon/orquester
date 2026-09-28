@@ -376,7 +376,7 @@ export async function refreshProvider(
   publishAmbientFacts([refreshed]);
 }
 
-/** Resolve the adapter serving a registry id (claude ← claude/claudex/claudemix). */
+/** Resolve the adapter serving a registry id. */
 export function providerForRefId(
   providers: readonly ProviderSnapshot[],
   refId: string

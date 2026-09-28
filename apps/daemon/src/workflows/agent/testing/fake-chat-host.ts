@@ -3,7 +3,7 @@
 //
 // What it simulates (the parts a workflow drives):
 //   - the catalogue reads `loadAgents` makes: /api/registry, /api/agent/providers,
-//     /api/agent-accounts, /api/cliproxy, /api/cliproxy/models;
+//     /api/agent-accounts;
 //   - POST /api/sessions (a chat tab + thread, `owner` recorded), GET /api/sessions, DELETE;
 //   - the commands: /turn (a new turn, or a steer into the running one), /interrupt (settles the
 //     running turn `interrupted`, cancels pending requests, stops background work), /answer,
@@ -75,7 +75,6 @@ const EFFORT: FakeModelOption = {
 
 export const DEFAULT_FAKE_AGENTS: FakeAgent[] = [
   { id: "claude", name: "Claude Code", adapter: "claude", models: [{ slug: "opus", name: "Opus", isDefault: true, options: [EFFORT] }, { slug: "sonnet", name: "Sonnet", options: [EFFORT] }] },
-  { id: "claudemix", name: "Claude Mix", adapter: "claude", models: [{ slug: "opus", name: "Opus", isDefault: true, options: [EFFORT] }] },
   { id: "codex", name: "Codex", adapter: "codex", models: [{ slug: "gpt-5", name: "GPT-5", isDefault: true, options: [EFFORT] }] },
   { id: "grok", name: "Grok", adapter: "grok", models: [{ slug: "grok-4", name: "Grok 4", isDefault: true }] },
   { id: "opencode", name: "OpenCode", adapter: "opencode", models: [{ slug: "oc/model", name: "OC Model", isDefault: true }] }
@@ -177,14 +176,12 @@ export interface FakeChatHostOptions {
   agents?: FakeAgent[];
   accounts?: AgentAccount[];
   defaults?: AgentAccountsResponse["defaults"];
-  /** claudex/claudemix: the ids seeded into the model proxy. */
-  seeded?: string[];
   behaviour?: FakeBehaviour;
   fsRoot?: string;
   workspacesDir?: string;
 }
 
-const FAMILY: Record<string, string> = { claude: "claude", claudemix: "claude", codex: "codex", claudex: "codex", grok: "grok" };
+const FAMILY: Record<string, string> = { claude: "claude", codex: "codex", grok: "grok" };
 
 export class FakeChatHost implements DaemonApi {
   readonly fsRoot: string;
@@ -193,7 +190,6 @@ export class FakeChatHost implements DaemonApi {
   agents: FakeAgent[];
   accounts: AgentAccount[];
   defaults: AgentAccountsResponse["defaults"];
-  seeded: Set<string>;
   behaviour: FakeBehaviour;
   readonly sessions = new Map<string, FakeSessionState>();
   /** Every turn the provider ran, in order. */
@@ -216,7 +212,6 @@ export class FakeChatHost implements DaemonApi {
     this.agents = opts.agents ?? DEFAULT_FAKE_AGENTS;
     this.accounts = opts.accounts ?? [];
     this.defaults = opts.defaults ?? { claude: null, codex: null, grok: null };
-    this.seeded = new Set(opts.seeded ?? []);
     this.behaviour = opts.behaviour ?? (() => [{ kind: "say", text: "Done." }]);
     this.fsRoot = opts.fsRoot ?? "/w";
     this.workspacesDir = opts.workspacesDir ?? "/w";
@@ -244,8 +239,6 @@ export class FakeChatHost implements DaemonApi {
     if (method === "GET" && path === "/api/registry") return ok(this.registry());
     if (method === "GET" && path === "/api/agent/providers") return ok(this.providers());
     if (method === "GET" && path === "/api/agent-accounts") return ok({ accounts: this.accounts, defaults: this.defaults });
-    if (method === "GET" && path === "/api/cliproxy") return ok({ accounts: [...this.seeded].map((id) => ({ id })), routerProviders: [], defaultModel: null });
-    if (method === "GET" && path === "/api/cliproxy/models") return ok({ models: [] });
     if (method === "GET" && path === "/api/sessions") {
       const projectPath = opts?.query?.projectPath;
       return ok([...this.sessions.values()].filter((s) => !s.closed && (!projectPath || s.projectPath === projectPath)).map((s) => this.summary(s)));
@@ -806,7 +799,7 @@ function fail(status: number, code: string, message: string): DaemonResponse {
 }
 
 function limitMessage(refId: string, step: { resetsAt?: string }): string {
-  const who = refId.startsWith("grok") ? "Grok" : refId.startsWith("codex") || refId === "claudex" ? "Codex" : refId === "opencode" ? "OpenCode" : "Claude";
+  const who = refId.startsWith("grok") ? "Grok" : refId.startsWith("codex") ? "Codex" : refId === "opencode" ? "OpenCode" : "Claude";
   return `${who} usage limit reached.${step.resetsAt ? ` Resets at ${step.resetsAt}.` : ""}`;
 }
 

@@ -76,14 +76,6 @@ import { createThreadStore } from "./store/index.ts";
 import { buildProviderEnv } from "./support/env.ts";
 
 /**
- * The ONE ambient credential a cliproxy launcher may keep: for `claudex` and
- * `claudemix` the proxy's bearer token IS the selected identity, so the §3.1
- * denylist must not strip it. Everything else in
- * `AMBIENT_CREDENTIAL_ENV_VARS` stays denied.
- */
-const CLIPROXY_CREDENTIAL_ENV_VAR = "ANTHROPIC_AUTH_TOKEN";
-
-/**
  * How long a host teardown lets the consumers read what the adapters'
  * teardown queued, once every `stopAll()` resolved (`stop()` below). Reading
  * a closed stream to its end takes a few milliseconds per row; the bound only
@@ -314,8 +306,8 @@ export async function startAgentHost(
   /**
    * Exact secrets this host injects into children, masked wherever they could
    * surface (a CLI echoing its resolved config on stderr, an error message).
-   * The cliproxy `ANTHROPIC_AUTH_TOKEN` is a bare hex string that matches no
-   * credential shape, so nothing but the literal catches it.
+   * A launcher-env token can be a bare hex string that matches no credential
+   * shape, so nothing but the literal catches it.
    */
   const hostInjectedSecrets: string[] = [];
   const noteInjectedSecret = (value: string | undefined): void => {
@@ -382,13 +374,7 @@ export async function startAgentHost(
         // hosts could share. Every adapter's provider and what it starts carry
         // it, so Settings → System can reach what outlives the provider; only
         // the Grok adapter sweeps by it (it stamps its own value over this one).
-        launchId: randomUUID(),
-        // For a cliproxy launcher the proxy token IS the selected identity, so
-        // it is the one ambient credential that may survive the denylist —
-        // without this, `claudex`/`claudemix` launch with no credential at all.
-        ...(home.kind === "cliproxy"
-          ? { allowCredentialVars: [CLIPROXY_CREDENTIAL_ENV_VAR] }
-          : {})
+        launchId: randomUUID()
       });
       // The `unset` half of §3.1: the daemon names the ambient vars this launch
       // must not carry, and they are removed after everything else is layered.
@@ -396,7 +382,6 @@ export async function startAgentHost(
         delete env[name];
       }
       // Remember what we handed out so the redactor can mask it by value.
-      noteInjectedSecret(env.ANTHROPIC_AUTH_TOKEN);
       for (const [key, value] of Object.entries(env)) {
         if (/(_API_KEY|_TOKEN)$/.test(key)) {
           noteInjectedSecret(value);
@@ -508,22 +493,12 @@ export async function startAgentHost(
     logger,
     hostInstanceId,
     adapterForRefId: (refId) => refIds.get(refId)?.adapter ?? null,
-    resolveHome: async ({ adapter, refId, accountId, home, threadId }): Promise<AccountHome> => {
+    resolveHome: async ({ adapter, accountId, home, threadId }): Promise<AccountHome> => {
       // The daemon resolved the absolute home when it created the thread and
       // it is the authority: it read the same `ACCOUNT_HOME_ENV_VAR` the child
       // itself will read. The conventions below are the fallback for a thread
       // created before the daemon sent one.
       const launch = orchestrator?.launchConfig(threadId) ?? null;
-      if (home === "cliproxy") {
-        const proxyRefId = launch?.proxyRefId ?? refId;
-        return {
-          kind: "cliproxy",
-          proxyRefId,
-          path:
-            launch?.homePath ??
-            join(daemonConfigDir(appdir), "cliproxy", `claude-home-${proxyRefId}`)
-        };
-      }
       const family = accountFamilyFor(adapter);
       if (home === "account" && (launch?.homePath || (family && accountId.length > 0))) {
         return {

@@ -13,7 +13,7 @@ export interface UsageServiceDeps {
   now: () => number;
   /**
    * Poll cadence (default 5m fresh / 5m stale). The Anthropic /api/oauth/usage
-   * endpoint rate-limits per account (~Retry-After 256s), so polling faster than
+   * endpoint rate-limits per account (Retry-After 300s), so polling faster than
    * ~5m just 429s; the 5h/weekly windows move slowly, so 5m is plenty.
    */
   activeMs?: number;
@@ -32,8 +32,29 @@ export class UsageService {
   private hash = "";
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
+  private firstReadingDone!: () => void;
+  private readonly firstReading = new Promise<void>((resolve) => {
+    this.firstReadingDone = resolve;
+  });
 
   constructor(private readonly deps: UsageServiceDeps) {}
+
+  /**
+   * Resolves once the first reading after `start()` is held (or `timeoutMs` passed): what reads
+   * usage synchronously at boot — a workflow's account selection — waits for it rather than
+   * reading an empty snapshot as "usage unknown" for every account.
+   */
+  async whenFirstReading(timeoutMs: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.firstReading,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      })
+    ]);
+    clearTimeout(timer);
+  }
 
   async recompute(): Promise<void> {
     const prefs = await this.deps.getPrefs().catch(() => DEFAULT_PREFS);
@@ -71,6 +92,7 @@ export class UsageService {
   private async tick(): Promise<void> {
     if (this.stopped) return;
     await this.recompute().catch(() => undefined);
+    this.firstReadingDone();
     if (this.stopped) return;
     const claude = this.cache.agents.find((a) => a.id === "claude");
     const delay = claude?.stale ? this.deps.idleMs ?? 300_000 : this.deps.activeMs ?? 300_000;

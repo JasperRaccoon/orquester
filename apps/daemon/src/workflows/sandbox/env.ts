@@ -1,7 +1,7 @@
 // Automated workflows — the environment of a sandbox attempt (spec §5.6).
 //
 // Built explicitly, NEVER a spread of the daemon's `process.env` (the `sessionEnvBase` rule: the
-// daemon's own environment holds `ORQUESTER_HTTP_PASSWORD`, cliproxy and push secrets, none of which
+// daemon's own environment holds `ORQUESTER_HTTP_PASSWORD` and push secrets, none of which
 // a workflow script has any business seeing). What a script gets:
 //
 //   PATH      sessionPath() — the terminal sessions' PATH, wider than the daemon's under systemd

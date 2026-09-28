@@ -100,31 +100,28 @@ test("every conversation is attributed to the home it was read from", async () =
     "acct-1",
     "from a managed account"
   );
+  // The retired model proxy's launcher homes stay on disk until removed by
+  // hand; nothing can relaunch under them, so they are not scanned.
   await writeClaudeTranscript(
     join(daemonDir, "cliproxy", "claude-home-claudemix"),
     projectPath,
     "proxy-1",
-    "from a proxy launcher"
+    "from a retired proxy launcher"
   );
 
   const rows = await listAgentConversations(projectPath, { daemonDir });
   const byId = new Map(rows.map((row) => [row.id, row]));
-  assert.deepEqual(new Set(byId.keys()), new Set(["sys-1", "acct-1", "proxy-1"]));
+  assert.deepEqual(new Set(byId.keys()), new Set(["sys-1", "acct-1"]));
 
-  // The daemon's own HOME: nothing to relaunch under, so no account/proxy id.
+  // The daemon's own HOME: nothing to relaunch under, so no account id.
   assert.deepEqual(
-    { home: byId.get("sys-1")?.home, accountId: byId.get("sys-1")?.accountId, proxyRefId: byId.get("sys-1")?.proxyRefId },
-    { home: "system", accountId: undefined, proxyRefId: undefined }
+    { home: byId.get("sys-1")?.home, accountId: byId.get("sys-1")?.accountId },
+    { home: "system", accountId: undefined }
   );
   // A managed agent-account home carries the account id a relaunch needs.
   assert.deepEqual(
     { home: byId.get("acct-1")?.home, accountId: byId.get("acct-1")?.accountId },
     { home: "account", accountId: "acc1f2e3" }
-  );
-  // A cliproxy home carries the launcher entry id (`claude-home-<entryId>`).
-  assert.deepEqual(
-    { home: byId.get("proxy-1")?.home, accountId: byId.get("proxy-1")?.accountId, proxyRefId: byId.get("proxy-1")?.proxyRefId },
-    { home: "cliproxy", accountId: undefined, proxyRefId: "claudemix" }
   );
 
   await rm(root, { recursive: true, force: true });

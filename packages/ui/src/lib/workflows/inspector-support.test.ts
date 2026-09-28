@@ -64,11 +64,12 @@ describe("account usage rows", () => {
     assert.equal(rows[2]!.unknown, true, "a stale reading is unknown");
   });
 
-  it("families: proxy launchers borrow another's; OpenCode has none", () => {
-    assert.equal(accountFamily("claudemix"), "claude");
-    assert.equal(accountFamily("claudex"), "codex");
+  it("families: an agent's own; OpenCode and agents this build does not offer have none", () => {
+    assert.equal(accountFamily("claude"), "claude");
+    assert.equal(accountFamily("codex"), "codex");
     assert.equal(accountFamily("grok"), "grok");
     assert.equal(accountFamily("opencode"), null);
+    assert.equal(accountFamily("claudex"), null, "a removed launcher a stored chain may still name");
     assert.deepEqual(scopedWindowLabels(usage, "claude"), ["Fable"]);
   });
 

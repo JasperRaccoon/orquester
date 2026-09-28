@@ -24,5 +24,6 @@ export {
   agentHostExtraRoutes,
   type AgentHostPendingRequest,
   type AgentHostThreadSummary,
+  type AgentHostThreadUsageLimits,
   type AttachmentPathResponse
 } from "./extra-routes.ts";

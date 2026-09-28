@@ -38,7 +38,6 @@ test("chat-client re-exports the very functions the MCP uses, never copies", () 
     ["findModel", chatClient.findModel, mcpAgents.findModel],
     ["resolveModelSelection", chatClient.resolveModelSelection, mcpAgents.resolveModelSelection],
     ["validateAccountId", chatClient.validateAccountId, mcpAgents.validateAccountId],
-    ["launchesProxyModel", chatClient.launchesProxyModel, mcpAgents.launchesProxyModel],
     ["EFFORT_OPTION_IDS", chatClient.EFFORT_OPTION_IDS, mcpAgents.EFFORT_OPTION_IDS],
     ["resolveChatActivity", chatClient.resolveChatActivity, ladder.resolveChatActivity]
   ];

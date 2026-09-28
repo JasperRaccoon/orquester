@@ -25,8 +25,6 @@ interface RegistryDef {
   env?: Record<string, string>;
   envFile?: string;
   enabled?: boolean;
-  /** When false, disabled at rest even if the bin resolves (a runtime service enables it). */
-  enabledAtRest?: boolean;
   versionFlag?: string;
   installCmd?: string;
   updateCmd?: string;
@@ -143,7 +141,6 @@ function materialize(list: readonly RegistryEntryDef[]): RegistryDef[] {
     if (s.args && s.args.length > 0) d.args = [...s.args];
     if (s.launchViaShell) d.launchViaShell = true;
     if (s.env && Object.keys(s.env).length > 0) d.env = { ...s.env };
-    if (s.enabledAtRest === false) d.enabledAtRest = false;
     if (s.versionFlag) d.versionFlag = s.versionFlag;
     const installCmd = process.platform === "win32" && s.installCmdWin32 ? s.installCmdWin32 : s.installCmd;
     if (installCmd) d.installCmd = installCmd;
@@ -173,13 +170,8 @@ function osOpenerForKind(kind: RegistryKind): string[] {
  */
 export class RegistryService {
   private entries = new Map<string, RegistryEntry>();
-  /** Runtime defs, keyed by id — retained so reresolve/setRuntimeState can recompute. */
+  /** Runtime defs, keyed by id — retained so an install can re-resolve its bin. */
   private defs = new Map<string, RegistryDef>();
-  /**
-   * Per-entry runtime enable/disable overlaid on top of the static/bin-resolution
-   * state (set by daemon services such as the CliProxyManager). Survives reresolve.
-   */
-  private runtimeState = new Map<string, { enabled: boolean; disabledReason?: string }>();
   /** Emits "changed" with the updated RegistryEntry (broadcast to clients). */
   readonly events = new EventEmitter();
 
@@ -224,40 +216,6 @@ export class RegistryService {
 
   get(id: string): RegistryEntry | undefined {
     return this.entries.get(id);
-  }
-
-  /**
-   * Overlay runtime enable/disable state on an entry (used by daemon services to
-   * gate launchers behind backing infrastructure). Recomputes effective `enabled`
-   * through the single pure function and broadcasts the sanitized entry.
-   */
-  setRuntimeState(id: string, s: { enabled: boolean; disabledReason?: string }): void {
-    const def = this.defs.get(id);
-    const entry = this.entries.get(id);
-    if (!def || !entry) {
-      return;
-    }
-    this.runtimeState.set(id, { enabled: s.enabled, disabledReason: s.disabledReason });
-    const { enabled, disabledReason } = this.computeEnabled(def, entry.resolvedBin);
-    this.patch(id, { enabled, disabledReason });
-  }
-
-  /**
-   * Re-run bin resolution + env-file load for one entry, preserving install and
-   * runtime state, then broadcast the sanitized entry. Lets a service pick up a
-   * freshly written env file without resurrecting a runtime-disabled launcher.
-   */
-  async reresolve(id: string): Promise<void> {
-    const def = this.defs.get(id);
-    const entry = this.entries.get(id);
-    if (!def || !entry) {
-      return;
-    }
-    const resolvedBin = resolveBin(this.candidatesFor(def));
-    const envFromFile = await this.loadEnvFile(def.id, def.envFile);
-    const env = mergeEnv(def.env, envFromFile);
-    const { enabled, disabledReason } = this.computeEnabled(def, resolvedBin);
-    this.patch(id, { env, resolvedBin, enabled, disabledReason });
   }
 
   /** Launch an ide/file-explorer/browser on a path (fire-and-forget). */
@@ -313,13 +271,10 @@ export class RegistryService {
       if (result.ok) {
         const def = this.defs.get(id);
         const resolvedBin = def ? resolveBin(this.candidatesFor(def)) : undefined;
-        const { enabled, disabledReason } = def
-          ? this.computeEnabled(def, resolvedBin)
-          : { enabled: Boolean(resolvedBin), disabledReason: undefined };
+        const enabled = def ? this.computeEnabled(def, resolvedBin) : Boolean(resolvedBin);
         this.patch(id, {
           resolvedBin,
           enabled,
-          disabledReason,
           installState: "idle",
           installError: undefined,
           version: undefined
@@ -368,29 +323,19 @@ export class RegistryService {
   }
 
   /**
-   * The single source of truth for effective `enabled` (and its runtime reason),
-   * used by init, install success, reresolve and setRuntimeState alike. An entry
-   * is enabled only when its bin resolved, it is not statically disabled, it is not
-   * disabled at rest, and no runtime override turned it off. The disabledReason is
-   * surfaced only when a runtime override provides one and the entry is off.
+   * The single source of truth for effective `enabled`, used by init and install
+   * success alike: an entry is enabled only when its bin resolved and it is not
+   * statically disabled.
    */
-  private computeEnabled(def: RegistryDef, resolvedBin: string | undefined): { enabled: boolean; disabledReason?: string } {
-    const runtime = this.runtimeState.get(def.id);
-    // A runtime override (from a backing service) wins outright; without one,
-    // `enabledAtRest` sets the default. So `enabledAtRest:false` disables a
-    // launcher at rest yet still lets the service turn it on when its
-    // infrastructure is healthy — it must not veto the runtime decision.
-    const runtimeDecision = runtime ? runtime.enabled : def.enabledAtRest !== false;
-    const enabled = Boolean(resolvedBin) && def.enabled !== false && runtimeDecision;
-    const disabledReason = !enabled && runtime?.disabledReason ? runtime.disabledReason : undefined;
-    return { enabled, disabledReason };
+  private computeEnabled(def: RegistryDef, resolvedBin: string | undefined): boolean {
+    return Boolean(resolvedBin) && def.enabled !== false;
   }
 
   private async resolveDef(def: RegistryDef): Promise<RegistryEntry> {
     const resolvedBin = resolveBin(this.candidatesFor(def));
     const envFromFile = await this.loadEnvFile(def.id, def.envFile);
     const env = mergeEnv(def.env, envFromFile);
-    const { enabled, disabledReason } = this.computeEnabled(def, resolvedBin);
+    const enabled = this.computeEnabled(def, resolvedBin);
     return {
       id: def.id,
       name: def.name,
@@ -401,7 +346,6 @@ export class RegistryService {
       env,
       resolvedBin,
       enabled,
-      disabledReason,
       versionFlag: def.versionFlag,
       installCmd: def.installCmd,
       updateCmd: def.updateCmd,
@@ -487,7 +431,6 @@ function normalizeDef(item: unknown, defaultKind: RegistryKind): RegistryDef | n
     env: env && Object.keys(env).length > 0 ? env : undefined,
     envFile,
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : undefined,
-    enabledAtRest: obj.enabledAtRest === false ? false : undefined,
     versionFlag: typeof obj.versionFlag === "string" ? obj.versionFlag : undefined,
     installCmd: typeof obj.installCmd === "string" ? obj.installCmd : undefined,
     updateCmd: typeof obj.updateCmd === "string" ? obj.updateCmd : undefined

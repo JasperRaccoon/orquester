@@ -48,11 +48,13 @@ async function claudeTests() {
   assert.ok(a2 && a2.available);
   assert.equal(calls, 1, "must back off after 429 (no repeated fetch)");
 
-  // 200 then 429 → stale last-known carrying the real numbers.
+  // 200 then 429 → stale last-known carrying the real numbers. (No minimum interval here, so the
+  // second call asks the endpoint again at the same instant.)
   let mode: "ok" | "429" = "ok";
   const src = createClaudeSource({
     userhome: home,
     now,
+    minIntervalMs: 0,
     fetchImpl: async () =>
       mode === "ok"
         ? jsonRes(200, { five_hour: { utilization: 45, resets_at: "2026-07-07T10:00:00Z" }, seven_day: { utilization: 69 } })
@@ -143,26 +145,35 @@ async function codexTests() {
 
 async function grokTests() {
   const base = await mkdtemp(join(tmpdir(), "usage-grok-"));
-  const authDir = join(base, "auth");
   const grokHome = join(base, ".grok");
+  const acctA = join(base, "acct-a", "auth.json");
+  const acctB = join(base, "acct-b", "auth.json");
+  const managed = [acctA, acctB];
+  const managedAuthJson = (key: string, email: string, userId: string, expiresAt: string) =>
+    JSON.stringify({
+      "https://auth.x.ai::client-1": { key, auth_mode: "oidc", email, user_id: userId, expires_at: expiresAt }
+    });
   const billing = (pct: number) =>
     jsonRes(200, {
       config: { creditUsagePercent: pct, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-07-12T00:00:00Z" } }
     });
 
   // No credential anywhere → null (renders "not linked").
-  assert.equal(await createGrokSource({ authDir, grokHome, now, fetchImpl: async () => billing(1) })(), null);
-
-  // cliproxy xai auth file → weekly window; token/sub must never leak into the payload.
-  await mkdir(authDir, { recursive: true });
-  await writeFile(
-    join(authDir, "xai-user@example.com.json"),
-    JSON.stringify({ type: "xai", auth_kind: "oauth", access_token: "SECRET-TOK", sub: "uid-1", email: "user@example.com", expired: "2026-07-07T09:00:00Z" })
+  assert.equal(
+    await createGrokSource({ grokHome, managedGrokAuthFiles: () => managed, now, fetchImpl: async () => billing(1) })(),
+    null
   );
+
+  // Managed account homes → weekly window; the freshest `expires_at` wins; the
+  // token/user id must never leak into the payload.
+  await mkdir(join(base, "acct-a"), { recursive: true });
+  await mkdir(join(base, "acct-b"), { recursive: true });
+  await writeFile(acctA, managedAuthJson("OLD-TOK", "old@example.com", "uid-0", "2026-07-07T08:30:00Z"));
+  await writeFile(acctB, managedAuthJson("SECRET-TOK", "user@example.com", "uid-1", "2026-07-07T09:00:00Z"));
   const seen: { url: string; headers: Record<string, string> }[] = [];
   const src = createGrokSource({
-    authDir,
     grokHome,
+    managedGrokAuthFiles: () => managed,
     now,
     fetchImpl: async (url, init) => {
       seen.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
@@ -174,24 +185,42 @@ async function grokTests() {
   assert.equal(g1.id, "grok");
   assert.equal(g1.weekly?.percent, 22.4);
   assert.equal(g1.session, null);
-  // Email from the proxy file becomes a labeled account row (matches Claude/Codex panel).
+  // Email from the managed home becomes a labeled account row (matches Claude/Codex panel).
   assert.equal(g1.accounts?.length, 1);
-  assert.equal(g1.accounts?.[0].label, "user@example.com");
+  assert.equal(g1.accounts?.[0].label, "user@example.com", "the freshest managed credential wins");
   assert.equal(g1.accounts?.[0].weekly?.percent, 22.4);
   assert.ok(seen[0].url.includes("/billing"), "goes straight to billing when the file carries a user id");
   assert.equal(seen[0].headers["x-userid"], "uid-1");
+  assert.equal(seen[0].headers.Authorization, "Bearer SECRET-TOK");
   assert.equal(seen[0].headers["x-grok-client-identifier"], "grok-shell");
   assert.ok(!JSON.stringify(g1).includes("SECRET-TOK"), "token must never reach the usage payload");
 
-  // Expired stamp → signed-in/stale, NO fetch (the proxy refreshes, never us).
+  // A managed home outranks the grok CLI's own login.
+  await mkdir(grokHome, { recursive: true });
   await writeFile(
-    join(authDir, "xai-user@example.com.json"),
-    JSON.stringify({ type: "xai", access_token: "SECRET-TOK", sub: "uid-1", expired: "2026-07-07T07:00:00Z" })
+    join(grokHome, "auth.json"),
+    JSON.stringify({ "https://auth.x.ai::client-1": { key: "CLI-TOK", auth_mode: "oidc", user_id: "uid-c", expires_at: "2026-07-07T10:00:00Z" } })
   );
+  const ranked: string[] = [];
+  await createGrokSource({
+    grokHome,
+    managedGrokAuthFiles: () => managed,
+    now,
+    fetchImpl: async (_url, init) => {
+      ranked.push(((init?.headers ?? {}) as Record<string, string>).Authorization);
+      return billing(5);
+    }
+  })();
+  assert.equal(ranked[0], "Bearer SECRET-TOK", "managed homes come before the CLI login");
+
+  // Expired stamp → signed-in/stale, NO fetch (the accounts refresher refreshes, never us).
+  const expiredDir = await mkdtemp(join(tmpdir(), "usage-grok-expired-"));
+  const expiredAuth = join(expiredDir, "auth.json");
+  await writeFile(expiredAuth, managedAuthJson("SECRET-TOK", "user@example.com", "uid-1", "2026-07-07T07:00:00Z"));
   let fetches = 0;
   const expired = await createGrokSource({
-    authDir,
-    grokHome,
+    grokHome: join(expiredDir, "no-cli"),
+    managedGrokAuthFiles: () => [expiredAuth],
     now,
     fetchImpl: async () => {
       fetches++;
@@ -203,14 +232,10 @@ async function grokTests() {
   assert.equal(fetches, 0, "expired token must not be sent upstream");
 
   // 429 → backoff with last-good served stale; no second fetch.
-  await writeFile(
-    join(authDir, "xai-user@example.com.json"),
-    JSON.stringify({ type: "xai", access_token: "SECRET-TOK", sub: "uid-1", expired: "2026-07-07T09:00:00Z" })
-  );
   let calls = 0;
   const src429 = createGrokSource({
-    authDir,
     grokHome,
+    managedGrokAuthFiles: () => managed,
     now,
     fetchImpl: async () => {
       calls++;
@@ -226,7 +251,7 @@ async function grokTests() {
   assert.equal(calls, 2, "backed off after the 429");
   assert.ok(stale2?.stale);
 
-  // grok CLI auth.json fallback (no cliproxy file): userId resolved via /user once.
+  // grok CLI auth.json fallback (no managed home): userId resolved via /user once.
   const cliOnly = await mkdtemp(join(tmpdir(), "usage-grok-cli-"));
   const cliHome = join(cliOnly, ".grok");
   await mkdir(cliHome, { recursive: true });
@@ -236,8 +261,8 @@ async function grokTests() {
   );
   const cliSeen: string[] = [];
   const cliSrc = createGrokSource({
-    authDir: join(cliOnly, "auth"),
     grokHome: cliHome,
+    managedGrokAuthFiles: () => [join(cliOnly, "no-managed", "auth.json")],
     now,
     fetchImpl: async (url) => {
       cliSeen.push(String(url));
@@ -266,7 +291,6 @@ async function grokTests() {
     })
   );
   const mSrc = createGrokSource({
-    authDir: join(managedHome, "no-proxy"),
     grokHome: join(managedHome, "no-cli"),
     authFile: managedAuth,
     now,

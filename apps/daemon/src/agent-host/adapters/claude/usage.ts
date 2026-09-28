@@ -612,10 +612,52 @@ export function usageResponseToLimits(input: {
 }
 
 /**
- * The streamed `rate_limit_event`. On CLI 2.1.210 it carries **no**
- * utilization, so this returns `undefined` for every real frame today and the
- * caller marks the cached snapshot stale instead. Older/newer CLIs that do
- * send a 0–1 fraction still produce a sparse merge-by-id update.
+ * The session and weekly windows of a `rate_limit_info.unifiedWindows` block.
+ * CLI 2.1.280 sends it on every `rate_limit_event` — every model response —
+ * with both windows as a 0–1 `utilization` and an epoch-seconds `resetsAt`
+ * (fixtures README observation 16): the account's live usage, read off the API
+ * response itself, never from the rate-limited `/api/oauth/usage` endpoint.
+ * Only the two account-wide windows are read; a key this does not know opens
+ * no row the probe could not reconcile.
+ */
+function unifiedWindowsToUpdate(info: Record<string, unknown>): ProviderUsageWindow[] {
+  const unified = info.unifiedWindows;
+  if (unified === null || typeof unified !== "object" || Array.isArray(unified)) {
+    return [];
+  }
+  const windows: ProviderUsageWindow[] = [];
+  const known: Array<[string, ProviderUsageWindow["kind"], string, string, number]> = [
+    ["five_hour", "session", CLAUDE_SESSION_WINDOW_ID, "Session", SESSION_MINS],
+    ["seven_day", "weekly", CLAUDE_WEEKLY_WINDOW_ID, "Weekly", WEEK_MINS]
+  ];
+  for (const [key, kind, id, label, durationMins] of known) {
+    const entry = (unified as Record<string, unknown>)[key];
+    if (entry === null || typeof entry !== "object") {
+      continue;
+    }
+    const utilization = (entry as { utilization?: unknown }).utilization;
+    if (typeof utilization !== "number" || !Number.isFinite(utilization)) {
+      continue;
+    }
+    const resetsAt = isoFromEpochSeconds((entry as { resetsAt?: unknown }).resetsAt);
+    windows.push({
+      id,
+      kind,
+      label,
+      windowDurationMins: durationMins,
+      usedPercent: clampPercent(utilization * 100),
+      ...(resetsAt ? { resetsAt } : {})
+    });
+  }
+  return windows;
+}
+
+/**
+ * The streamed `rate_limit_event`. CLI 2.1.280 carries both account windows in
+ * `unifiedWindows`, which win; CLI 2.1.210 carried **no** utilization at all,
+ * so for such a frame this returns `undefined` and the caller marks the cached
+ * snapshot stale instead. CLIs that send a top-level 0–1 fraction still
+ * produce a sparse merge-by-id update.
  */
 export function rateLimitEventToUpdate(
   info: unknown,
@@ -625,6 +667,10 @@ export function rateLimitEventToUpdate(
     return undefined;
   }
   const record = info as Record<string, unknown>;
+  const unified = unifiedWindowsToUpdate(record);
+  if (unified.length > 0) {
+    return { windows: unified };
+  }
   const type = typeof record.rateLimitType === "string" ? record.rateLimitType : undefined;
   const utilization = record.utilization;
   if (type === undefined || typeof utilization !== "number") {

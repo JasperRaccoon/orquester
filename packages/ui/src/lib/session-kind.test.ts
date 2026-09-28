@@ -7,7 +7,6 @@ import { DEFAULT_THREAD_TITLE } from "./agent-chat/title.logic.ts";
 import {
   canOpenChat,
   chatAdapterFor,
-  chatLaunchRefId,
   isAgentLikeSession,
   isChatResumableConversation,
   isChatSession,
@@ -47,10 +46,6 @@ test("every catalog agent with an adapter can open a chat tab; deepseek cannot",
     assert.equal(chatAdapterFor(id), id, `${id} maps to its own adapter`);
     assert.equal(launchKindForAgent(id), "agent-chat");
   }
-  // The proxy launchers are Claude with launcher env on top (§5.3).
-  assert.equal(chatAdapterFor("claudex"), "claude");
-  assert.equal(chatAdapterFor("claudemix"), "claude");
-
   assert.equal(chatAdapterFor("deepseek"), null);
   assert.equal(canOpenChat("deepseek"), false);
   assert.equal(launchKindForAgent("deepseek"), null);
@@ -71,56 +66,36 @@ const conversation = (over: Partial<AgentConversationSummary>): AgentConversatio
   ...over
 });
 
-test("a cliproxy conversation launches under its proxy launcher, not plain claude", () => {
-  const row = conversation({ home: "cliproxy", proxyRefId: "claudex" });
-  assert.equal(chatLaunchRefId(row), "claudex");
-  // Resumable in chat for the first time (§5.3): the adapter resumes under the
-  // same HOME rather than through the launcher's resumeArgs.
-  assert.equal(isChatResumableConversation(row), true);
-});
-
-test("a cliproxy row with no proxyRefId is not resumable: no launcher owns its home", () => {
-  const row = conversation({ home: "cliproxy" });
-  // The launch id still falls back to the agent the row names...
-  assert.equal(chatLaunchRefId(row), "claude");
-  // ...but plain `claude` looks in the daemon's own HOME, where this
-  // transcript is not, so the row is never offered (the MCP refuses it too).
-  assert.equal(isChatResumableConversation(row), false);
-});
-
 // The two GUI launch paths ask the same predicate, each through its own
 // exported filter, which is what the components call. Both run here over one
-// project's rows: a proxied row, the same row with its launcher unknown, and a
-// plain system-home row.
-const PROXIED = conversation({ id: "c-proxied", home: "cliproxy", proxyRefId: "claudex" });
-const ORPHANED = conversation({ id: "c-orphaned", home: "cliproxy" });
-const SYSTEM = conversation({ id: "c-system", home: "system" });
-const ROWS = [PROXIED, ORPHANED, SYSTEM];
+// project's rows.
+const CLAUDE = conversation({ id: "c-claude", home: "system" });
+const CODEX = conversation({ id: "c-codex", agentRefId: "codex", home: "account", accountId: "a1" });
+const ROWS = [CLAUDE, CODEX];
 
-test("ProjectOverview offers a proxied row under its launcher, never an orphaned one", () => {
-  // `ProjectOverview.tsx` (both of its lists): the launcher entry is installed
+test("ProjectOverview offers a row only while its agent is installed", () => {
+  // `ProjectOverview.tsx` (both of its lists): the agent's entry is installed
   // AND the predicate holds.
   const offered = (agentsById: ReadonlyMap<string, { enabled: boolean }>) =>
     ROWS.filter((c) => isResumableByInstalledAgent(c, agentsById)).map((c) => c.id);
   assert.deepEqual(
-    offered(new Map([["claude", { enabled: true }], ["claudex", { enabled: true }]])),
-    ["c-proxied", "c-system"]
+    offered(new Map([["claude", { enabled: true }], ["codex", { enabled: true }]])),
+    ["c-claude", "c-codex"]
   );
-  // A launcher that is not installed, or not in the registry at all, offers
+  // An agent that is not installed, or not in the registry at all, offers
   // none of its rows.
   assert.deepEqual(
-    offered(new Map([["claude", { enabled: true }], ["claudex", { enabled: false }]])),
-    ["c-system"]
+    offered(new Map([["claude", { enabled: true }], ["codex", { enabled: false }]])),
+    ["c-claude"]
   );
-  assert.deepEqual(offered(new Map([["claudex", { enabled: true }]])), ["c-proxied"]);
+  assert.deepEqual(offered(new Map([["codex", { enabled: true }]])), ["c-codex"]);
 });
 
-test("NewTabMenu lists a proxied row under its launcher, and no agent lists an orphaned one", () => {
-  // `NewTabMenu.tsx`: an agent's submenu lists the rows it launches AND the
-  // predicate holds. Without the predicate the orphan landed under "claude".
+test("NewTabMenu lists a row under the agent that wrote it", () => {
   const listed = (agentId: string) => ROWS.filter((c) => isResumableByAgent(c, agentId)).map((c) => c.id);
-  assert.deepEqual(listed("claudex"), ["c-proxied"]);
-  assert.deepEqual(listed("claude"), ["c-system"]);
+  assert.deepEqual(listed("claude"), ["c-claude"]);
+  assert.deepEqual(listed("codex"), ["c-codex"]);
+  assert.deepEqual(listed("grok"), []);
 });
 
 test("a conversation whose agent has no adapter is not offered", () => {

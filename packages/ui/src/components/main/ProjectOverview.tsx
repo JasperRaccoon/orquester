@@ -7,7 +7,7 @@ import { useAppStore } from "../../store/app";
 import { launchWithNotice } from "../../lib/launch-notice";
 import { relativeTime } from "../../lib/relative-time";
 import { resumeAccountId } from "../../lib/resume-account";
-import { canOpenChat, chatLaunchRefId, isResumableByInstalledAgent } from "../../lib/session-kind";
+import { canOpenChat, isResumableByInstalledAgent } from "../../lib/session-kind";
 import { runtimeModeForAgent } from "../../lib/chat-prefs";
 import { resolveLaunchModel } from "../../lib/launch-models";
 import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
@@ -96,7 +96,7 @@ const ResumeRow: React.FC<{
   const setNotice = useAppStore((s) => s.setNotice);
   const chatPrefs = useAppStore((s) => s.chatPrefs);
   const preferredAccountByAgent = useAppStore((s) => s.preferredAccountByAgent);
-  const refId = chatLaunchRefId(conversation);
+  const refId = conversation.agentRefId;
   const model = useLaunchModel(refId);
   const launchSelectionFor = useAppStore((s) => s.launchSelectionFor);
 
@@ -204,7 +204,7 @@ export const RecentConversationsList: React.FC<{
     const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
     return (cached ?? []).filter((c) => {
       if (!isResumableByInstalledAgent(c, byId)) return false;
-      return adapter === undefined || byId.get(chatLaunchRefId(c))?.chat?.adapter === adapter;
+      return adapter === undefined || byId.get(c.agentRefId)?.chat?.adapter === adapter;
     });
   }, [cached, agents, adapter]);
   const visible = resumable.slice(0, shown);
@@ -219,7 +219,7 @@ export const RecentConversationsList: React.FC<{
         <ResumeRow
           key={`${conversation.agentRefId}:${conversation.id}`}
           conversation={conversation}
-          agentName={agentName(chatLaunchRefId(conversation))}
+          agentName={agentName(conversation.agentRefId)}
           onPicked={onPicked}
         />
       ))}
@@ -252,10 +252,7 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
 
   /**
    * A conversation is offerable when the entry that would run it is installed
-   * and has an adapter. Unlike the terminal path this no longer drops the
-   * `cliproxy`-home rows: chat resumes under the conversation's own HOME, so a
-   * claudex/claudemix transcript is resumable for the first time (§5.3) — under
-   * the launcher that owns that home, which is what `chatLaunchRefId` returns.
+   * and has an adapter: chat resumes under the conversation's own HOME (§5.3).
    */
   const resumable = React.useMemo(() => {
     const byId = new Map<string, RegistryEntry>(agents.map((a) => [a.id, a]));
@@ -292,7 +289,7 @@ export const ProjectOverview: React.FC<{ projectPath: string }> = ({ projectPath
           <ResumeRow
             key={`${conversation.agentRefId}:${conversation.id}`}
             conversation={conversation}
-            agentName={agentName(chatLaunchRefId(conversation))}
+            agentName={agentName(conversation.agentRefId)}
           />
         ))}
       </div>

@@ -12,13 +12,6 @@ import type {
   CreateBrowserRequest,
   CreateProjectRequest,
   CreateSessionRequest,
-  CliProxyMutationRefusal,
-  CliProxyProviderStatus,
-  CliProxyRouterProviderRequest,
-  CliProxySeedRequest,
-  CliProxyStatus,
-  CliProxyUnseedRequest,
-  CliProxyXaiLink,
   CreateSavedPromptRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
@@ -44,6 +37,8 @@ import type {
   GitStashEntry,
   GitStatusResponse,
   GitWorkingDiffResponse,
+  GrokDeviceLink,
+  GrokDeviceLinkStatus,
   HealthResponse,
   ImportAgentAccountRequest,
   KillProcessResponse,
@@ -145,7 +140,7 @@ export interface ApiRequestOptions {
 
 function serverMessageFromBody(body: unknown): string | null {
   // Daemon error bodies carry either `{ message }` (git/registry) or `{ error }`
-  // (cliproxy refusals, fs) — accept both so refusal reasons reach the UI.
+  // (fs, the Grok device link) — accept both so refusal reasons reach the UI.
   // The workflow routes nest it: `{ error: { code, message } }`.
   if (body && typeof body === "object") {
     for (const key of ["message", "error"] as const) {
@@ -231,30 +226,6 @@ export class ApiClient {
     }
 
     return response.data;
-  }
-
-  /**
-   * POST/PUT/DELETE for the restart-gated cliproxy mutations: the daemon answers
-   * a live dependent-session conflict with 409 { ok:false, affectedSessions }. Turn
-   * that into a first-class refusal value (not an ApiError throw) so the caller can
-   * offer a force-confirm flow; every other non-2xx still throws via {@link send}.
-   * DELETE routes carry no body, so `force` rides the query string instead.
-   */
-  private async mutateAllowingRefusal<T>(
-    method: TransportMethod,
-    path: string,
-    body?: unknown,
-    query?: ApiRequestOptions["query"]
-  ): Promise<T | CliProxyMutationRefusal> {
-    try {
-      return await this.send<T>(method, path, { body, query });
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        const parsed = e.body as { affectedSessions?: number } | null | undefined;
-        return { ok: false, affectedSessions: parsed?.affectedSessions ?? 0 };
-      }
-      throw e;
-    }
   }
 
   /**
@@ -1025,135 +996,22 @@ export class ApiClient {
     return this.send("PUT", "/api/agent-accounts/defaults", { body: req });
   }
 
-  // CliProxy — the managed CLIProxyAPI backing the claudex/claudemix launchers.
-  // Status/models read over either transport; mutations are HTTP-only.
+  // Grok's device-code login: the daemon drives the RFC 8628 flow against
+  // auth.x.ai and broadcasts `grok-link.changed` on the agent-accounts channel
+  // as it advances; a granted link becomes a managed grok account.
 
-  getCliProxyStatus(signal?: AbortSignal): Promise<CliProxyStatus> {
-    return this.send("GET", "/api/cliproxy", { signal });
+  getGrokDeviceLink(signal?: AbortSignal): Promise<GrokDeviceLinkStatus> {
+    return this.send("GET", "/api/agent-accounts/grok/link", { signal });
   }
 
-  getCliProxyModels(signal?: AbortSignal): Promise<{ models: string[]; asOf: string | null }> {
-    return this.send("GET", "/api/cliproxy/models", { signal });
+  /** Start a link. 409 while one is already pending, 502 when auth.x.ai fails. */
+  startGrokDeviceLink(): Promise<GrokDeviceLink> {
+    return this.send("POST", "/api/agent-accounts/grok/link");
   }
 
-  enableCliProxy(): Promise<CliProxyStatus> {
-    return this.send("POST", "/api/cliproxy/enable");
-  }
-
-  disableCliProxy(force?: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.mutateAllowingRefusal<{ ok: boolean; affectedSessions?: number }>(
-      "POST",
-      "/api/cliproxy/disable",
-      { force: Boolean(force) }
-    );
-  }
-
-  setCliProxyConfig(
-    cfg: {
-      defaultModel?: string;
-      backgroundModel?: string;
-      modelOverrides?: Record<string, { contextWindow?: number; compactWindow?: number; compactPct?: number }>;
-    },
-    force?: boolean
-  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    return this.mutateAllowingRefusal<CliProxyStatus>("PUT", "/api/cliproxy/config", {
-      ...cfg,
-      force: Boolean(force)
-    });
-  }
-
-  seedCliProxyAccount(req: CliProxySeedRequest): Promise<CliProxyProviderStatus> {
-    return this.send("POST", "/api/cliproxy/accounts/seed", { body: req });
-  }
-
-  unseedCliProxyAccount(req: CliProxyUnseedRequest): Promise<CliProxyProviderStatus> {
-    return this.send("POST", "/api/cliproxy/accounts/unseed", { body: req });
-  }
-
-  // Router providers (OpenRouter/TokenRouter presets or any custom
-  // OpenAI-compatible gateway). Every mutation is restart-gated exactly like
-  // setCliProxyConfig: a 409 comes back as { ok:false, affectedSessions } so the
-  // caller can re-attempt with `force`. Keys only ever travel INTO the daemon —
-  // no route here ever returns key material.
-
-  putCliProxyRouterProvider(
-    id: string,
-    cfg: CliProxyRouterProviderRequest,
-    force?: boolean
-  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    return this.mutateAllowingRefusal<CliProxyStatus>(
-      "PUT",
-      `/api/cliproxy/providers/${encodeURIComponent(id)}`,
-      { ...cfg, force: Boolean(force) }
-    );
-  }
-
-  deleteCliProxyRouterProvider(
-    id: string,
-    force?: boolean
-  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    return this.mutateAllowingRefusal<CliProxyStatus>(
-      "DELETE",
-      `/api/cliproxy/providers/${encodeURIComponent(id)}`,
-      undefined,
-      { force: force ? "true" : undefined }
-    );
-  }
-
-  setCliProxyRouterKey(
-    id: string,
-    key: string,
-    force?: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.mutateAllowingRefusal<{ ok: boolean; affectedSessions?: number }>(
-      "POST",
-      `/api/cliproxy/providers/${encodeURIComponent(id)}/key`,
-      { key, force: Boolean(force) }
-    );
-  }
-
-  clearCliProxyRouterKey(
-    id: string,
-    force?: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.mutateAllowingRefusal<{ ok: boolean; affectedSessions?: number }>(
-      "DELETE",
-      `/api/cliproxy/providers/${encodeURIComponent(id)}/key`,
-      undefined,
-      { force: force ? "true" : undefined }
-    );
-  }
-
-  /** Browse the models a keyed router provider advertises upstream (read-only). */
-  getCliProxyRouterCatalog(id: string, signal?: AbortSignal): Promise<{ models: string[] }> {
-    return this.send("GET", `/api/cliproxy/providers/${encodeURIComponent(id)}/catalog`, { signal });
-  }
-
-  // xAI OAuth (Grok) account. No key and no seeded credential: the proxy owns
-  // the tokens, so linking is just an RFC 8628 device-code prompt the daemon
-  // starts and then polls, broadcasting `cliproxy.changed` as it advances.
-
-  /**
-   * Start the device-code flow. The returned prompt is also carried on
-   * `CliProxyStatus.xai.link` (so a reload mid-flow still shows it) — callers
-   * may render either. Requires a running proxy (409 otherwise).
-   */
-  linkCliProxyXai(): Promise<CliProxyXaiLink> {
-    return this.send("POST", "/api/cliproxy/xai/link");
-  }
-
-  /**
-   * Cancel an in-flight link, or unlink the account. Unlink is session-gated
-   * like the router mutations (409 → { ok:false, affectedSessions }), though
-   * nothing restarts: the proxy hot-discovers the auth-dir change.
-   */
-  unlinkCliProxyXai(force?: boolean): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    return this.mutateAllowingRefusal<CliProxyStatus>(
-      "DELETE",
-      "/api/cliproxy/xai/link",
-      undefined,
-      { force: force ? "true" : undefined }
-    );
+  /** Cancel a pending link; idempotent. */
+  cancelGrokDeviceLink(): Promise<GrokDeviceLinkStatus> {
+    return this.send("DELETE", "/api/agent-accounts/grok/link");
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {

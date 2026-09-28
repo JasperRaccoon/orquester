@@ -57,10 +57,9 @@ export function staticUsage(usage: UsageResponse = { agents: [] }): UsageReader 
   return reader;
 }
 
-export function staticAccounts(host: Pick<FakeChatHost, "accounts" | "seeded" | "defaults">): AccountsReader {
+export function staticAccounts(host: Pick<FakeChatHost, "accounts" | "defaults">): AccountsReader {
   return {
-    list: (): AgentAccountsResponse => ({ accounts: host.accounts, defaults: host.defaults }),
-    seededAccountIds: () => new Set(host.seeded)
+    list: (): AgentAccountsResponse => ({ accounts: host.accounts, defaults: host.defaults })
   };
 }
 

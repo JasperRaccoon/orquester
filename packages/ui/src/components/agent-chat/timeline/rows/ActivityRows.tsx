@@ -226,7 +226,7 @@ function QuestionAnswerHistory({
  * DELIBERATE DIFFERENCE FROM T3: T3 has **no** rerouted-model UI at all —
  * `model.rerouted` exists in its contracts (`providerRuntime.ts:757-762,
  * 1127-1132`) and is never rendered. Here it is a banded inline notice, because
- * a proxy silently answering with a different model than the chip says is the
+ * a provider silently answering with a different model than the chip says is the
  * kind of thing a user must be able to see without reading a log.
  *
  * It is an inline row rather than a banner on purpose: it is a fact about *this

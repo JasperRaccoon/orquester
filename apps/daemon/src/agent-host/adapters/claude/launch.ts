@@ -110,8 +110,6 @@ export interface BuildClaudeQueryOptionsInput {
   /** A transcript uuid to resume at, set only by a rollback. */
   resumeSessionAt?: string;
   sessionId?: string;
-  /** cliproxy's `autoCompactWindow`, when the launcher env carries one. */
-  autoCompactWindow?: number;
 }
 
 export interface BuiltClaudeQueryOptions {
@@ -156,10 +154,7 @@ export function buildClaudeQueryOptions(
     ...(fastMode === true ? { fastMode: true } : {}),
     // Ultracode is xhigh effort PLUS the setting, exactly as T3's manifest
     // paired them; the SDK requires an xhigh-capable model for it.
-    ...(ultracode === true ? { ultracode: true } : {}),
-    ...(input.autoCompactWindow !== undefined
-      ? { autoCompactWindow: input.autoCompactWindow }
-      : {})
+    ...(ultracode === true ? { ultracode: true } : {})
   };
   const effectiveEffort = ultracode === true ? ("xhigh" as const) : effort;
 

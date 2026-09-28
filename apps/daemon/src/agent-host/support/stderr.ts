@@ -81,10 +81,9 @@ export interface RedactOptions {
    * Exact secrets the HOST itself injected, masked verbatim.
    *
    * The shape patterns below only catch credentials that look like
-   * credentials. The cliproxy `ANTHROPIC_AUTH_TOKEN` handed to every
-   * `claudex`/`claudemix` child is `randomBytes(24).toString("hex")` — a bare
-   * 48-char hex string that matches none of them — so a CLI that echoes its
-   * resolved config or an env dump on stderr would land it unmasked in
+   * credentials. A token a launcher env hands a child can be a bare hex
+   * string that matches none of them — so a CLI that echoes its resolved
+   * config or an env dump on stderr would land it unmasked in
    * `events.ndjson` and in the timeline. The host knows exactly what it
    * injected, so it says so. Masked longest-first, like `homeDirs`.
    */

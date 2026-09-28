@@ -32,7 +32,7 @@ import {
 import type { AccountCooldown } from "@orquester/config";
 import type { AccountsReader, Clock, CooldownStore, UsageReader } from "../contracts.ts";
 import { buildCooldown } from "./cooldowns.ts";
-import { accountFamilyOf, cooldownKey, cooldownSubject, defaultUsesAccount, isProxyLauncher, type UsesAccount } from "./families.ts";
+import { accountFamilyOf, cooldownKey, cooldownSubject } from "./families.ts";
 import { burntWindowResetAt, formatDuration, selectAccount, type SelectAccountInput } from "./select.ts";
 
 /** The agent/model/account a block runs (or is about to run) on. */
@@ -46,9 +46,8 @@ export interface AgentCandidate {
   /** `cooldownSubject(agent, model, accountId).family` — the key family of its cooldowns and exclusions. */
   family: string;
   /**
-   * `cooldownSubject(...).account` — the key's account part: the account id, "proxy" for a proxy
-   * launcher's own pick, the provider for an accountless launch. Absent on a state persisted before
-   * it existed (the account id then).
+   * `cooldownSubject(...).account` — the key's account part: the account id, or the provider for an
+   * accountless launch. Absent on a state persisted before it existed (the account id then).
    */
   cooldownAccount?: string;
 }
@@ -57,7 +56,6 @@ export interface FailoverDeps {
   usage: UsageReader;
   accounts: AccountsReader;
   cooldowns: CooldownStore;
-  usesAccount?: UsesAccount;
   clock: Pick<Clock, "now">;
 }
 
@@ -65,7 +63,7 @@ export interface FailoverDeps {
 export interface FailoverMemory {
   /** `<family>:<accountId>` → until when it was cooled down by THIS block. */
   tried: Record<string, string>;
-  /** Keys unusable for the rest of the run (auth failures, a refused family / seed gate). */
+  /** Keys unusable for the rest of the run (auth failures, an account the daemon refused). */
   unusable: string[];
   /** Chain indices the catalogue refused (unknown model, agent not installed). */
   badChains: number[];
@@ -94,8 +92,8 @@ export function excludedKeys(memory: FailoverMemory, now: Date): Set<string> {
   return out;
 }
 
-export function candidateFromChoice(choice: NonNullable<AccountSelectionDecision["chosen"]>, usesAccount: UsesAccount = defaultUsesAccount): AgentCandidate {
-  const subject = cooldownSubject(choice.agent, choice.model, choice.accountId, usesAccount);
+export function candidateFromChoice(choice: NonNullable<AccountSelectionDecision["chosen"]>): AgentCandidate {
+  const subject = cooldownSubject(choice.agent, choice.model, choice.accountId);
   return {
     chainIndex: choice.chainIndex,
     agent: choice.agent,
@@ -113,8 +111,8 @@ export function candidateKey(candidate: Pick<AgentCandidate, "family" | "account
 }
 
 /** Does this candidate run under a managed account (so an in-session switch means anything)? */
-export function isAccountful(candidate: Pick<AgentCandidate, "agent" | "model">, usesAccount: UsesAccount = defaultUsesAccount): boolean {
-  return accountFamilyOf(candidate.agent) !== null && usesAccount(candidate.agent, candidate.model);
+export function isAccountful(candidate: Pick<AgentCandidate, "agent">): boolean {
+  return accountFamilyOf(candidate.agent) !== null;
 }
 
 /** §5.4 step 1: cool the account down in the shared store and remember it in the block. */
@@ -126,15 +124,10 @@ export async function coolDown(
 ): Promise<AccountCooldown> {
   const now = deps.clock.now();
   // The usage snapshot describes managed accounts and a family's system login only: an accountless
-  // launch (OpenCode, a claudex router / xAI model) and a proxy launcher's own pick have no row of
-  // their own — reading the family's system row there would cool them by another quota's reset.
+  // launch (OpenCode) has no row of its own.
   const accountFamily = accountFamilyOf(candidate.agent);
-  const hasUsageRow =
-    accountFamily !== null &&
-    isAccountful(candidate, deps.usesAccount) &&
-    !(isProxyLauncher(candidate.agent) && candidate.accountId === SYSTEM_ACCOUNT_ID);
   const usageResetAt =
-    failure.reason === "usage_limit" && hasUsageRow
+    failure.reason === "usage_limit" && accountFamily !== null
       ? burntWindowResetAt({ usage: deps.usage.snapshot(), family: accountFamily, accountId: candidate.accountId, now })
       : undefined;
   const key = candidateKey(candidate);
@@ -161,11 +154,9 @@ export function selectionInput(deps: FailoverDeps, chain: AgentChainEntry[], mem
     chain,
     usage: deps.usage.snapshot(),
     accounts: deps.accounts.list(),
-    seededAccountIds: deps.accounts.seededAccountIds(),
     cooldowns: deps.cooldowns.list(),
     now,
-    exclude: excludedKeys(memory, now),
-    ...(deps.usesAccount ? { usesAccount: deps.usesAccount } : {})
+    exclude: excludedKeys(memory, now)
   };
 }
 
@@ -208,7 +199,7 @@ export async function pickCandidate(
         fallenFrom.push(chain[index]!.agent);
         break;
       }
-      const candidate = candidateFromChoice(decision.chosen, deps.usesAccount);
+      const candidate = candidateFromChoice(decision.chosen);
       const checked = await check(candidate);
       if (!checked.ok) {
         memory.extraSkips.push(checked.skip);

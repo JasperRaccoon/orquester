@@ -285,7 +285,12 @@ export interface AgentHop {
   via: "initial" | "switched" | "handoff" | "resumed";
 }
 
-export type AccountSkipReason = "needsReauth" | "notSeeded" | "threshold" | "cooldown" | "unknownUsage" | "catalog" | "unavailable";
+/**
+ * Why selection passed an account over. Run records are stored verbatim and read back without a
+ * schema on this field, so a record written by an older build may carry a reason this union no
+ * longer names (a removed build's `notSeeded`): readers render such a value as `unavailable`.
+ */
+export type AccountSkipReason = "needsReauth" | "threshold" | "cooldown" | "unknownUsage" | "catalog" | "unavailable";
 
 export interface AccountSkip {
   agent: string;

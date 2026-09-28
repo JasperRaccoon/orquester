@@ -352,7 +352,7 @@ describe("factory", () => {
       publish: (type) => events.push(type),
       summarize: (wf: Workflow) => ({ id: wf.id, name: wf.name, enabled: wf.enabled, revision: wf.revision, project: wf.project, triggers: [], nodeCount: 0, errorCount: 0, activeRuns: [], createdAt: wf.createdAt, updatedAt: wf.updatedAt }),
       usage: { snapshot: () => ({}) as never },
-      accounts: { list: () => ({}) as never, seededAccountIds: () => new Set() },
+      accounts: { list: () => ({}) as never },
       cooldowns: { get: () => null, set: async () => undefined, list: () => ({}) },
       git: { status: async () => cleanStatus(), workingDiff: async () => ({}) as never, currentBranch: async () => "main" },
       savedPrompts: { get: () => undefined },

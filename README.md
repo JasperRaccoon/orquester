@@ -29,7 +29,6 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - 📱 **Your phone is a first-class client** — installable PWA with a terminal key bar, file attach, drag-scroll through agent TUIs, and a web push when an agent needs you.
 - 🔔 **End-to-end attention signalling** — agent hooks report *working / waiting / finished* → pulsing tab status dots → push notification on your phone.
 - 🖱️ **Design Mode** — a real server-side Chromium streamed into a tab. Click any element of your running app and send its selector, React component chain, computed styles and a screenshot straight into an agent's prompt.
-- 🔀 **Mix models inside one harness** — a managed CLI proxy runs GPT and any OpenAI-compatible router model inside the Claude Code harness, with per-tab model and account chips.
 
 ---
 
@@ -44,11 +43,9 @@ Coding agents are long-running, chatty processes that want your attention at unp
 
 ### 🤖 Agent registry & accounts
 - One-click install/update for supported agents, with live version detection and enable-on-detect for everything else on your PATH.
-- Multiple managed Claude/Codex accounts — run different tabs under different subscriptions, with a default per agent.
+- Multiple managed Claude/Codex/Grok accounts — run different tabs under different subscriptions, with a default per agent.
 - Usage widget: rolling 5-hour and weekly quota gauges, reset countdowns, token counts and cost per day/model for Claude Code & Codex.
-- **Model proxy**: run GPT and any OpenAI-compatible router model through the Claude Code harness via a daemon-supervised [CLIProxyAPI], with health states and a curated model catalog.
-- **Router providers**: add OpenRouter, TokenRouter (one-click presets) or any custom OpenAI-compatible gateway — paste the key, pick models from the fetched catalog (or type them), set per-model aliases and context/compact windows. Keys are verified before storing, stay on the host, and never cross the wire.
-- **Grok**: install xAI's **Grok Build** agent in one click, and link your Grok account with a device-code flow to run **Grok models** inside the Claude Code harness through the same model proxy — no API key, tokens stay with the proxy on disk.
+- **Grok**: install xAI's **Grok Build** agent in one click, and link your Grok account with a device-code flow as a managed account — no API key, tokens stay on the host — with its weekly credit pool in the usage widget.
 
 ### 🌐 Browser tabs (Design Mode)
 - Per-project headless Chromium, screencast into a tab with full keyboard/mouse/touch forwarding and desktop ⇄ mobile viewport toggle.
@@ -82,7 +79,7 @@ The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`, on the authe
 
 | Category | Entries |
 |---|---|
-| **Agents** | Claude Code · Codex · Gemini CLI · DeepSeek · OpenCode · Grok Build · Claude Code × GPT/Kimi/Grok (via managed proxy) |
+| **Agents** | Claude Code · Codex · Gemini CLI · DeepSeek · OpenCode · Grok Build |
 | **Shells** | Bash · Zsh · Fish · Nushell · PowerShell · cmd · sh |
 | **File explorers** | Nautilus · Dolphin · Thunar · Nemo · PCManFM · Caja · Explorer · system fallback |
 | **Browsers** | Chrome · Chromium · Brave · Edge · Vivaldi · Firefox · system fallback |
@@ -213,5 +210,3 @@ Single-user by design, and honest about it:
 <div align="center">
 <sub>Made by JasperDev - Forked from Sammwy's orquester</sub>
 </div>
-
-[CLIProxyAPI]: https://github.com/router-for-me/CLIProxyAPI

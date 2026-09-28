@@ -27,19 +27,12 @@ export interface RegistryEntryDef {
   updateCmd?: string;
   /**
    * The chat adapter that drives this entry in an agent-chat tab (agent chat
-   * design spec §5.3). Present on every agent row that has an adapter;
-   * claudex/claudemix map to `claude` and carry their launcher env on top.
+   * design spec §5.3). Present on every agent row that has an adapter.
    * Absent means the entry can only be launched as a legacy terminal — the
    * catalog is deliberately allowed to list a detect-only agent (`deepseek`)
    * that no adapter serves.
    */
   chat?: { adapter: "claude" | "codex" | "opencode" | "grok" };
-  /**
-   * When false, the entry is disabled at rest even if its bin resolves — a
-   * daemon service (the CliProxyManager) enables it at runtime once its backing
-   * infrastructure is healthy. Absent/true means "enabled as soon as bin found".
-   */
-  enabledAtRest?: boolean;
 }
 
 /**
@@ -138,37 +131,6 @@ export const REGISTRY = {
       updateCmd: "npm update -g @xai-official/grok",
       resumeArgs: ["--resume", "{id}"] as const,
       chat: { adapter: "grok" as const }
-    },
-    {
-      // Claude Code driven through the managed CLIProxyAPI against a GPT/Kimi
-      // catalog. Reuses the `claude` binary; the CliProxyManager enables it at
-      // runtime once the proxy is healthy (disabled at rest).
-      id: "claudex",
-      name: "Claude Code × GPT/Kimi/Grok",
-      kind: "agent",
-      bin: ["claude"] as const,
-      // "high", not the plain-claude "max": Sol is already the slow deep tier,
-      // and max-effort turns there run into many minutes each. /effort in-tab
-      // overrides per session.
-      args: ["--dangerously-skip-permissions", "--effort", "high", "--verbose"] as const,
-      env: { CLAUDE_CODE_NO_FLICKER: "1" },
-      versionFlag: "--version",
-      enabledAtRest: false,
-      chat: { adapter: "claude" as const }
-    },
-    {
-      // Claude Code with a mixed model set (Claude OAuth main loop + GPT/Kimi
-      // side channels) through the managed proxy. Also runtime-enabled.
-      id: "claudemix",
-      name: "Claude Code × Mixed",
-      kind: "agent",
-      bin: ["claude"] as const,
-      // "high" like claudex — GPT/Kimi side channels get painfully slow at max.
-      args: ["--dangerously-skip-permissions", "--effort", "high", "--verbose"] as const,
-      env: { CLAUDE_CODE_NO_FLICKER: "1" },
-      versionFlag: "--version",
-      enabledAtRest: false,
-      chat: { adapter: "claude" as const }
     }
   ] as const,
 

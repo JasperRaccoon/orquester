@@ -37,7 +37,6 @@ import type { DaemonApi } from "../mcp/daemon-api.ts";
 import type { AccountsReader, Clock, MintId, SandboxRunner, UsageReader, WorkflowLogger } from "./contracts.ts";
 import { createCooldownStore } from "./agent/cooldowns.ts";
 import { createAgentExecutor, type AgentTimings } from "./agent/executor.ts";
-import { createUsesAccount, routerProvidersFromDisk, type UsesAccount } from "./agent/families.ts";
 import { createAccountPreview } from "./agent/preview.ts";
 import { createValidationCatalog, type ValidationCatalog } from "./agent/validation-catalog.ts";
 import { createWorkflowRuntime, realClock, type WorkflowRuntime, type WorkflowRuntimeDeps } from "./factory.ts";
@@ -80,7 +79,7 @@ export interface WorkflowDaemonDeps {
   broadcaster: Pick<Broadcaster, "publish">;
   /** Synchronous: the usage service's latest cached reading (no I/O). */
   usage: UsageReader;
-  /** Managed agent accounts + the ids seeded into the model proxy (the create route's gate reads the same file). */
+  /** Managed agent accounts (the agent-accounts store). */
   accounts: AccountsReader;
   /** The daemon's GitService. */
   git: WorkflowRuntimeDeps["git"] & { remoteUrl(cwd: string): Promise<string | null> };
@@ -92,8 +91,6 @@ export interface WorkflowDaemonDeps {
   /** Getters: `PUT /api/config/daemon` moves both in place. */
   workspacesDir: () => string;
   fsRoot: () => string;
-  /** `<appdir>/daemon` — where the proxy's router providers live (`usesAccount`). */
-  daemonDir: string;
   /** `<appdir>/tmp` — the sandbox attempts' TMPDIR. */
   appdirTmp?: string;
   push: WorkflowPushSender | null;
@@ -107,7 +104,6 @@ export interface WorkflowDaemonDeps {
   sandbox?: SandboxRunner;
   limits?: Partial<EngineLimits>;
   agentTimings?: Partial<AgentTimings>;
-  usesAccount?: UsesAccount;
   workflowTabRetentionDays?: number;
   /** [0, 1) for the poller's jitter and spread. */
   random?: () => number;
@@ -145,7 +141,6 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
   const { service, runStore, state, logger } = deps;
   const clock = deps.clock ?? realClock;
   const triggerClock = deps.triggerClock ?? systemTriggerClock;
-  const usesAccount = deps.usesAccount ?? createUsesAccount(() => routerProvidersFromDisk(deps.daemonDir));
   const cooldowns = createCooldownStore(state, clock);
 
   let scheduler: Scheduler | null = null;
@@ -238,7 +233,6 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     createAgentExecutor: (agentDeps) =>
       createAgentExecutor({ ...agentDeps, ...(deps.agentTimings ? { timings: deps.agentTimings } : {}) }),
     createAccountPreview: (previewDeps) => createAccountPreview(previewDeps),
-    usesAccount,
     logger,
     clock,
     ...(deps.mintId ? { mintId: deps.mintId } : {}),

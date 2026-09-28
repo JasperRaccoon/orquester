@@ -247,8 +247,6 @@ const REASONING_IDS = ["effort", "reasoningEffort", "variant"];
 
 const KNOWN_AGENT_LABELS: Record<string, string> = {
   claude: "Claude",
-  claudex: "Claudex",
-  claudemix: "Claudemix",
   codex: "Codex",
   grok: "Grok",
   opencode: "OpenCode"

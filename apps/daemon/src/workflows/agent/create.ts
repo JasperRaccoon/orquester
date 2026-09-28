@@ -2,9 +2,8 @@
 //
 // The create is the MCP's `create_session`, spelled for an unattended run: `kind: "agent-chat"`,
 // the registry refId, the project as `projectPath` and `cwd`, a title, `accountId` ALWAYS explicit
-// ("system" included — an omitted one would silently become the family default), a top-level
-// `model` for claudex only (a proxy model is the launch's ANTHROPIC_MODEL; claudemix never names
-// one), `chat: {accountId, modelSelection, runtimeMode: "full-access"}` and the `owner` that ties the
+// ("system" included — an omitted one would silently become the family default),
+// `chat: {accountId, modelSelection, runtimeMode: "full-access"}` and the `owner` that ties the
 // tab to the run. The model is validated against the provider catalogue first (the host only
 // shape-checks), and the account's family is re-checked here: the daemon's create silently degrades a
 // wrong-family id to the system login.
@@ -18,7 +17,6 @@ import type { CreateAgentChatSessionFields } from "@orquester/api/agent-chat";
 import {
   expectOk,
   findAgent,
-  launchesProxyModel,
   listSessions,
   loadAgents,
   resolveModelSelection,
@@ -61,7 +59,7 @@ export class AgentCatalog {
   /**
    * The catalogue's verdict on a candidate: the agent is installed and enabled, the model and its
    * options are ones the provider lists (normalised as the composer would), and the account is one
-   * of the agent's family (seeded, for a proxy launcher). A refused agent or model passes over the
+   * of the agent's family. A refused agent or model passes over the
    * whole chain entry; a refused account only that account.
    */
   async check(candidate: AgentCandidate): Promise<CandidateCheck> {
@@ -74,7 +72,7 @@ export class AgentCatalog {
       return { ok: false, scope: "chain", skip: { ...skipBase, why: "catalog", detail: `${candidate.agent} is not a chat agent on this host` } };
     }
     if (!view.enabled) {
-      return { ok: false, scope: "chain", skip: { ...skipBase, why: "catalog", detail: `${candidate.agent} is not available on this host${view.disabledReason ? ` (${view.disabledReason})` : ""}` } };
+      return { ok: false, scope: "chain", skip: { ...skipBase, why: "catalog", detail: `${candidate.agent} is not available on this host` } };
     }
     let selection;
     try {
@@ -118,7 +116,6 @@ export function buildCreateBody(input: {
     cwd: input.projectPath,
     title: input.title,
     accountId: candidate.accountId,
-    ...(launchesProxyModel(candidate.agent) ? { model: candidate.model } : {}),
     chat,
     owner: input.owner
   };

@@ -7,12 +7,6 @@ import type {
   BrowserClientMessage,
   BrowserSuggestionsResponse,
   BrowserSummary,
-  CliProxyProviderStatus,
-  CliProxyRouterProviderRequest,
-  CliProxySeedRequest,
-  CliProxyStatus,
-  CliProxyUnseedRequest,
-  CliProxyXaiLink,
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
@@ -43,6 +37,8 @@ import type {
   GitStatusChangedPayload,
   GitStatusResponse,
   GitWorkingDiffResponse,
+  GrokDeviceLink,
+  GrokDeviceLinkStatus,
   HealthResponse,
   ImportAgentAccountRequest,
   KillProcessErrorResponse,
@@ -109,9 +105,8 @@ import { SavedPromptError, SavedPromptsService, publishSavedPromptEvents } from 
 import { detectRepoId } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
-import { CliProxyManager } from "./cliproxy";
-import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary, listPatches, rollbackBinary } from "./cliproxy-install.ts";
-import { accountPrefix } from "./cliproxy-seed.ts";
+import { GrokDeviceLinkService } from "./grok-device-link.ts";
+import { retireModelProxy } from "./model-proxy-retirement.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
 import { cloneRefProblem } from "./workflows/git-remote";
@@ -130,7 +125,16 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
-import { createClaudeSource, createCodexSource, createGrokSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
+import {
+  createClaudeSource,
+  createCodexSource,
+  createGrokSource,
+  readUsagePrefs,
+  claudeLiveUsageFromWindows,
+  shouldHideSystemUsage,
+  type ClaudeUsageSource
+} from "./usage-sources";
+import { UsageStateFile } from "./usage-state";
 import { currentScopedWindows, currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
@@ -153,15 +157,11 @@ import {
 import {
   type AppConfig,
   type ClientConfig,
-  type CliProxyModelOverrides,
-  type CliProxyState,
   type ConfigVars,
   type DaemonConfig,
   type DaemonPaths,
   type RemoteConnectionConfig,
   type RemotesConfig,
-  type RouterModel,
-  type RouterProvider,
   type WorkspaceMeta,
   type WorkspacesConfig,
   accountsConfigPath,
@@ -171,18 +171,6 @@ import {
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
-  cliproxyDir,
-  cliproxyHomeDir,
-  cliproxyStateFile,
-  cliproxyTokenFile,
-  cliProxyModelOverridesSchema,
-  compactEnvForModel,
-  parseCliProxyState,
-  MODEL_NAME_RE,
-  ROUTER_PROVIDER_ID_RE,
-  resolveRouterModel,
-  resolveXaiModel,
-  routerKeyCheckUrl,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
@@ -207,6 +195,7 @@ import {
   tmuxSocketPath,
   todosIndexPath,
   usageTokensCacheFile,
+  usageStateFile,
   workspacesMetaPath,
   isValidName
 } from "@orquester/config";
@@ -217,7 +206,7 @@ import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { spawn } from "node:child_process";
-import { createReadStream, createWriteStream, existsSync, readFileSync, type WriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -437,16 +426,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   /**
-   * The full launch env for one agent — account home, cliproxy env for
-   * claudex/claudemix, the model pin, the Claude timeout. Lifted out of the
+   * The full launch env for one agent — account home and the Claude timeout.
+   * Lifted out of the
    * session manager's `resolveExtraEnv` seam because a chat thread must get
    * EXACTLY the env a terminal launch gets today (chat spec §3.1 "Launch
    * environment"); two copies would drift on the first change.
    */
-  const resolveAgentLaunchEnv = async (
-    entry: RegistryEntry,
-    ctx: { accountId?: string; model?: string }
-  ) => {
+  const resolveAgentLaunchEnv = async (entry: RegistryEntry, ctx: { accountId?: string }) => {
     // Claude harness stream/API timeout (spec
     // 2026-07-29-claude-agent-timeout-setting-design.md §3). Read fresh per
     // launch so a settings change applies to the next session with no daemon
@@ -455,10 +441,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const { claudeTimeoutMinutes } = (await readAppConfigFile(resolved.appConfigFile)).agents;
     return buildAgentLaunchEnv(
       entry.id,
-      ctx,
       claudeTimeoutMinutes,
-      await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId),
-      resolved.daemonDir
+      await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId)
     );
   };
 
@@ -470,7 +454,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const broadcaster = new Broadcaster();
 
   // The supervised agent host (chat spec §3.1). `init()` runs after
-  // `sessions.reattach()`, exactly where cliproxy's adoption does.
+  // `sessions.reattach()`, so the chat tab records are already loaded.
   const agentChatTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
   const agentChat = new AgentChatService({
     baseDir: paths.baseDir,
@@ -488,11 +472,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // host probes under the daemon user's own login, which may well be stale
     // while every managed account is fine.
     listManagedAccounts: () => agentAccounts.list(),
-    // §3.4's account switch applies the same seeded-account gate a create does
-    // — injected rather than imported, so the service stays independent of this
-    // entry point.
-    seededAccountRefusal: (input, model) =>
-      seededAccountRefusal(input, model, resolved.daemonDir),
     systemClaudeConfigFile: () =>
       env.CLAUDE_CONFIG_DIR
         ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
@@ -623,17 +602,25 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agentChat.onRegistryEntryChanged(entry);
   });
   agentAccounts.events.on("changed", (payload) => broadcaster.publish("agent-accounts", "agent-accounts.changed", payload));
+  // Each Claude source's last reading and endpoint timing, persisted: a restart shows the last
+  // numbers at once and never re-asks the rate-limited usage endpoint inside its window.
+  const usageState = new UsageStateFile(usageStateFile(paths.baseDir));
+  await usageState.load();
   const claudeAccountSource = (home?: string) =>
-    createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), claudeHome: home, logger: console });
+    createClaudeSource({
+      userhome: resolved.vars.userhome,
+      now: () => Date.now(),
+      claudeHome: home,
+      logger: console,
+      state: { store: usageState, key: `claude:${home ?? ""}` }
+    });
   const codexAccountSource = (home?: string) =>
     createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now(), codexHome: home, logger: console });
-  const grokAuthDir = join(cliproxyDir(resolved.daemonDir), "auth");
   const grokCliHome = process.env.GROK_HOME || join(resolved.vars.userhome, ".grok");
-  // Grok System = proxy-owned xai auth + CLI login only. Managed homes are polled
-  // per-account below (authFile), so they are NOT on the System chain.
+  // Grok System = the CLI login only. Managed homes are polled per-account below
+  // (authFile), so they are NOT on the System chain.
   const grokAccountSource = (home?: string) =>
     createGrokSource({
-      authDir: grokAuthDir,
       grokHome: grokCliHome,
       authFile: home ? join(home, "auth.json") : undefined,
       managedGrokAuthFiles: () => [],
@@ -675,7 +662,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       (await shouldHideSystemUsage(agent, {
         userhome: resolved.vars.userhome,
         now: Date.now(),
-        authDir: agent === "grok" ? grokAuthDir : undefined,
         grokHome: agent === "grok" ? grokCliHome : undefined,
         managedHomes: managed.map((a) => agentAccounts.homePath(agent, a.id))
       }).catch(() => false));
@@ -716,6 +702,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     now: () => Date.now()
   });
   usage.events.on("changed", (u) => broadcaster.publish("usage", "usage.changed", u));
+  // Live usage: every Claude chat thread reports its account's windows off its own model
+  // responses (`rate_limit_event.unifiedWindows`); the host hands the latest on in the thread's
+  // summary. It goes to that account's source — numbers that move with every response, at no
+  // cost to the usage endpoint's budget, which is then asked only for idle accounts.
+  let liveRecompute: ReturnType<typeof setTimeout> | undefined;
+  agentChat.setUsageLimitsListener(({ refId, limits }) => {
+    if (registry.get(refId)?.chat?.adapter !== "claude") return;
+    let home: string | undefined;
+    if (limits.home === "account") {
+      const managed = agentAccounts.list().accounts.some((a) => a.agent === "claude" && a.id === limits.accountId);
+      if (!managed) return;
+      home = agentAccounts.homePath("claude", limits.accountId);
+    }
+    const live = claudeLiveUsageFromWindows(limits.windows, limits.observedAt);
+    if (!live) return;
+    const source = usageSource("claude", claudeAccountSource, home) as ClaudeUsageSource;
+    if (!source.ingestLive(live) || liveRecompute) return;
+    liveRecompute = setTimeout(() => {
+      liveRecompute = undefined;
+      void usage.recompute();
+    }, 1_000);
+    liveRecompute.unref?.();
+  });
   // NOT started here: the first recompute needs the managed-accounts index
   // (loaded by agentAccounts.init() below). Started before it, the boot reading
   // saw zero managed accounts, fell back to the System login — expired on a host
@@ -731,12 +740,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       ...agentAccounts
         .list()
         .accounts.filter((a): a is typeof a & { agent: "claude" | "codex" } => a.agent !== "grok")
-        .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) })),
-      // The proxy homes are Claude-format config dirs, but their GPT/Kimi
-      // transcripts must be attributed to the launcher id, NOT the Claude
-      // aggregate (else they inflate the "Anthropic quota left" signal).
-      { agent: "claude" as const, home: cliproxyHomeDir(resolved.daemonDir, "claudex"), launcherId: "claudex" },
-      { agent: "claude" as const, home: cliproxyHomeDir(resolved.daemonDir, "claudemix"), launcherId: "claudemix" }
+        .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
     ]
   });
   await usageTokens.init();
@@ -764,16 +768,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // otherwise go unwatched until a restart. The nudge is rate-limited, so
     // the noisier fallback watch is still cheap.
     const claudeProjects = join(claudeConfig, "projects");
-    // Also watch the proxy homes' transcript roots so live claudex/claudemix
-    // sessions update usage (the scanner already covers them; without the watch
-    // they only refresh on the periodic poll / a restart).
-    const proxyProjects = ["claudex", "claudemix"]
-      .map((id) => join(cliproxyHomeDir(resolved.daemonDir, id), "projects"))
-      .filter((dir) => existsSync(dir));
     for (const dir of [
       join(process.env.CODEX_HOME || join(resolved.vars.userhome, ".codex"), "sessions"),
-      existsSync(claudeProjects) ? claudeProjects : claudeConfig,
-      ...proxyProjects
+      existsSync(claudeProjects) ? claudeProjects : claudeConfig
     ]) {
       try {
         const watcher = watch(dir, { recursive: true }, nudge);
@@ -791,6 +788,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
   await sessions.reattach().catch((error) => console.error("Session reattach failed", error));
+  // The removed model proxy's one-time handover: stop it and hand the accounts
+  // it refreshed back to the refresher started below, fresher tokens first.
+  await retireModelProxy({
+    daemonDir: resolved.daemonDir,
+    killServiceSession: tmuxAvailable() && tmuxVersionOk() ? (name) => tmux.killServiceSession(name) : undefined,
+    managedCredentialPath: (agent, id) => join(agentAccounts.homePath(agent, id), MANAGED_CRED_FILENAME[agent])
+  }).catch((error) => console.error("Model proxy retirement failed", error));
   await agentAccounts.init();
   agentAccounts.startRefresher(() => sessions.liveAccountIds());
   // First usage reading only now: managed accounts are loaded and reattached
@@ -901,9 +905,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     broadcaster,
     usage: { snapshot: () => workflowUsage },
     accounts: {
-      list: () => agentAccounts.list(),
-      // The same file the create route's seeded-account gate reads (`seededAccountRefusal`).
-      seededAccountIds: () => new Set(readCliProxyState(resolved.daemonDir)?.seededAccounts.map((a) => a.accountId) ?? [])
+      list: () => agentAccounts.list()
     },
     git,
     gitRemote: accounts,
@@ -913,7 +915,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Getters: PUT /api/config/daemon reassigns both in place.
     workspacesDir: () => resolved.workspacesDir,
     fsRoot: () => resolved.fsRoot,
-    daemonDir: resolved.daemonDir,
     appdirTmp: workflowTmp,
     push,
     logger: consoleWorkflowLogger
@@ -950,122 +951,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (summary?.projectPath) urlWatcher.ingest(summary.projectPath, data);
   });
 
-  // The managed CLIProxyAPI process backing the claudex/claudemix launchers.
-  // All process control + I/O is injected: on a tmux host the proxy runs in a
-  // dedicated (reaper-immune) service session; on a no-tmux host the direct
-  // child fallback runs it (non-persistent, dies with the daemon). Install pulls
-  // the pinned stock release, SHA-256-verified.
-  const cliproxyTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
-  const cliproxyRunDir = cliproxyDir(resolved.daemonDir);
-  const cliproxy = new CliProxyManager({
-    daemonDir: resolved.daemonDir,
-    appdir: paths.baseDir,
-    registry,
-    broadcaster,
-    adapters: {
-      probe: probeCliProxy,
-      verifyRouterKey,
-      fetchRouterModels,
-      tmux: cliproxyTmux,
-      // No-tmux fallback: a direct, non-detached child that reads config.yaml from
-      // the cliproxy run dir. Output is discarded (the daemon owns its own logs);
-      // it dies with the daemon (tmux is the durable path).
-      spawnDirect: (bin, args) => {
-        const child = spawn(bin, args, { cwd: cliproxyRunDir, detached: false, stdio: "ignore" });
-        child.on("error", (error) => console.error("cliproxy spawnDirect failed", error));
-        // `pid` so the system-status kill guard can protect it: without tmux
-        // this IS a child of the daemon and would otherwise be killable.
-        return { kill: () => child.kill(), pid: child.pid };
-      },
-      liveDependentSessionCount: () =>
-        sessions
-          .list()
-          .filter((s) => (s.refId === "claudex" || s.refId === "claudemix") && s.status === "running").length,
-      // The unlink gate: only sessions actually running on a Grok model lose their
-      // credential when the xAI account is unlinked. `SessionSummary.model` carries
-      // the resolved launch model, so this is the same string the launcher pinned.
-      liveXaiSessionCount: () =>
-        sessions
-          .list()
-          .filter(
-            (s) =>
-              (s.refId === "claudex" || s.refId === "claudemix") &&
-              s.status === "running" &&
-              s.model !== undefined &&
-              resolveXaiModel(s.model) !== null
-          ).length,
-      now: () => Date.now(),
-      // Pull + verify + atomically install the pinned binary. When committed
-      // patches exist (deploy/cliproxy-patches/*.patch), builds from the pinned
-      // source with them applied instead — self-shipped fixes, no upstream wait.
-      install: async () => {
-        const { version } = await installBinary(
-          resolved.daemonDir,
-          { fetchTarball: defaultFetchTarball },
-          undefined,
-          { patches: await listPatches() }
-        );
-        return { version: version || CLIPROXY_RELEASE.version };
-      },
-      // Last-resort recovery: restore the prior binary from bin.prev/ when a fresh
-      // install never probes healthy (see CliProxyManager.enable).
-      rollback: () => rollbackBinary(resolved.daemonDir),
-      // Shared, non-credential Claude config `seedHome` copies into each dedicated
-      // launcher home: the host's CLAUDE_CONFIG_DIR, else ~/.claude.
-      systemClaudeDir: () => env.CLAUDE_CONFIG_DIR || join(resolved.vars.userhome, ".claude"),
-      // The system .claude.json is a HOME-level sibling of ~/.claude unless
-      // CLAUDE_CONFIG_DIR relocates it (same rule as agent-accounts).
-      systemClaudeConfigFile: () =>
-        env.CLAUDE_CONFIG_DIR
-          ? join(env.CLAUDE_CONFIG_DIR, ".claude.json")
-          : join(resolved.vars.userhome, ".claude.json"),
-      // Write-back target for two-way credential sync (proxy auth/ ↔ managed
-      // home): refresh-token rotation means the two copies MUST converge or
-      // whichever side refreshes second gets logged out.
-      managedCredentialPath: (provider, accountId) =>
-        join(agentAccounts.homePath(provider, accountId), MANAGED_CRED_FILENAME[provider]),
-      // Device-link adoption: a proxy-completed xAI login is imported as a
-      // managed grok account (mirrors an explicit auth.json upload) and marked
-      // proxy-owned, since the manager registers the credential as seeded.
-      importGrokAccount: async (content) => {
-        const account = await agentAccounts.importAccount({ content });
-        return { id: account.id, label: account.label };
-      },
-      markAccountProxyOwned: (id, owned) => agentAccounts.markProxyOwned(id, owned)
-    }
+  // The Grok account's device-code link (Settings → Accounts): a granted link
+  // becomes a managed grok account.
+  const grokDeviceLink = new GrokDeviceLinkService({
+    importAccount: (content) => agentAccounts.importAccount({ content })
   });
-
-  // Per-launch model resolution/validation for claudex/claudemix rides the
-  // CliProxyManager: request pick wins over the default, verified against a
-  // fresh, bounded live-catalog probe.
-  const validateModel: ValidateModel = (entryId, model) => cliproxy.validateModel(entryId, model);
+  grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
   const services: Services = {
-    registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
 
-  // Boot the managed proxy AFTER reattach (adoption must see the final session
-  // set) and BEFORE any transport serves. init() loads persisted state/secrets
-  // and runs ownership-verified adoption; a disabled proxy (the default) just
-  // marks the launchers disabled. Best-effort — a proxy failure must not block
-  // the daemon.
-  await cliproxy.init().catch((error) => console.error("CliProxy init failed", error));
   // The agent host (chat spec §3.1), adopted or spawned AFTER reattach so the
   // chat tab records are already loaded, and before any transport serves.
-  // Best-effort for the same reason cliproxy is: a host failure must not block
-  // the daemon — every chat route then answers 503 HOST_UNAVAILABLE.
+  // Best-effort: a host failure must not block the daemon — every chat route
+  // then answers 503 HOST_UNAVAILABLE.
   await agentChat.init().catch((error) => console.error("Agent host init failed", error));
-  // Drive crash supervision: an owned-but-dead proxy is respawned with bounded
-  // backoff; after the cap it latches error. Unref'd so it never holds exit.
-  const cliproxyHealthTimer = setInterval(() => void cliproxy.checkHealth(), 15_000);
-  cliproxyHealthTimer.unref?.();
-  // The persistence-lost respawn window reopens once every dependent session has
-  // drained; re-evaluate whenever the live session set shrinks.
-  sessions.lifecycle.on("exited", () => cliproxy.handleSessionSetChanged());
-  sessions.lifecycle.on("closed", () => cliproxy.handleSessionSetChanged());
-
   // The static web build the HTTP transport optionally serves.
   const webDirEnv = options.webDir ?? env.ORQUESTER_WEB_DIR;
   const webDir = webDirEnv ? resolve(cwd, webDirEnv) : undefined;
@@ -1108,6 +1011,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     services.workflowEngine = engine;
   };
   attachWorkflowEngine(workflowDaemon.runtime.engine);
+  // Runs resume and missed schedules fire as the engine starts, and their account selection reads
+  // usage at once: let the first reading land first (the persisted one, usually no request at all).
+  await usage.whenFirstReading(15_000);
   await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
@@ -1155,12 +1061,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const stop = async () => {
     usage.stop();
+    clearTimeout(liveRecompute);
+    await usageState.flush();
     // Workflows first: the engine stops its timers, triggers and sweepers (never a sandbox child —
     // those are detached and survive, §5.8), then every workflow store's write chain is flushed.
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
-    clearInterval(cliproxyHealthTimer);
     agentAccounts.stopRefresher();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
@@ -1187,28 +1094,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
 }
 
-/**
- * Validate/resolve a per-launch `model` for the claudex/claudemix launchers.
- * Phase 1 wires a permissive default (resolve to the configured default model);
- * Task 7's CliProxyManager provides the real implementation (a fresh bounded
- * catalog probe) in Task 9. Returns the concrete catalog string to launch with.
- */
-export type ValidateModel = (
-  entryId: string,
-  model: string | undefined
-) => Promise<
-  { ok: true; effectiveModel: string; catalog?: string[] } | { ok: false; error: string }
->;
-
 /** One launch-env contribution: env vars, optional unsets, effective account. */
 type LaunchEnv = { env: Record<string, string>; unset?: string[]; accountId?: string };
 
 /**
- * Merge two launch-env contributions into one. `b` (the cliproxy contributor)
- * wins on any key collision; `unset` lists concatenate; the effective
- * `accountId` is taken from `a` (the managed-account resolution), falling back
- * to `b` (the cliproxy contributor's pinned account). Returns null when neither
- * contributes.
+ * Merge two launch-env contributions into one. `b` wins on any key collision;
+ * `unset` lists concatenate; the effective `accountId` is taken from `a`,
+ * falling back to `b`. Returns null when neither contributes.
  */
 export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): LaunchEnv | null {
   if (!a && !b) return null;
@@ -1220,693 +1112,31 @@ export function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): Launc
   return merged;
 }
 
-/** Best-effort read of the persisted cliproxy state (contributor-side: launch
- *  env must never throw). Null when absent/unreadable. */
-function readCliProxyState(daemonDir: string): CliProxyState | null {
-  try {
-    return parseCliProxyState(JSON.parse(readFileSync(cliproxyStateFile(daemonDir), "utf8")));
-  } catch {
-    return null;
-  }
-}
-
-/** True when the model must carry the account routing prefix: the picked account
- *  shares its provider with ANOTHER seeded account (disambiguation genuinely
- *  needed), the pick isn't seeded at all, or the state is unreadable — in the
- *  ambiguous cases the prefix is kept (safe routing pin, launch validation
- *  rejects a prefix the catalog doesn't serve). */
-function needsAccountPrefix(state: CliProxyState | null, accountId: string): boolean {
-  if (!state) return true;
-  const mine = state.seededAccounts.find((a) => a.accountId === accountId);
-  if (!mine) return true;
-  return state.seededAccounts.some((a) => a.provider === mine.provider && a.accountId !== accountId);
-}
-
 /**
- * Launch-env for the managed claudex/claudemix launchers: the proxy auth token
- * (read from the 0600 projection, kept off argv) and the entry's isolated Claude
- * config home, plus the per-launch model pin when one was chosen (the base URL
- * and default model ride the registry entry's env file). Null for every other
- * launcher.
- *
- * Per-launch account routing (spec §2): when the launch names a real managed
- * account (not the System sentinel / undefined), the effective model is prefixed
- * with that account's deterministic routing prefix (`<accountPrefix>/<model>`) so
- * the proxy routes it to exactly that seeded credential. The prefix is computed
- * identically at seed time ({@link accountPrefix}), so no stored map is needed. A
- * router-provider pick (any model served by a configured router provider) carries
- * no account and stays unprefixed.
- */
-export function cliproxyContributor(
-  entryId: string,
-  ctx: { accountId?: string; model?: string },
-  daemonDir: string
-): LaunchEnv | null {
-  if (entryId !== "claudex" && entryId !== "claudemix") return null;
-  const env: Record<string, string> = { CLAUDE_CONFIG_DIR: cliproxyHomeDir(daemonDir, entryId) };
-  try {
-    const token = readFileSync(cliproxyTokenFile(daemonDir), "utf8").trim();
-    if (token) env.ANTHROPIC_AUTH_TOKEN = token;
-  } catch {
-    // Proxy not provisioned yet — the launcher wrapper still injects the token
-    // from the same file at exec, so a missing projection is not fatal here.
-  }
-  const state = readCliProxyState(daemonDir);
-  let accountId: string | undefined;
-  let launchedModel: string | undefined;
-  if (ctx.model) {
-    // A router-provider model (OpenRouter/TokenRouter/custom) is served by that
-    // provider's own API key, never a seeded per-account credential — emit it BARE
-    // regardless of accountId (a per-account prefix would misroute it). Routing is
-    // decided by the persisted provider index, not by the model's name shape. The
-    // daemon enforces this at the wire so a stale account pick can't reattach a
-    // prefix (spec §2). An xAI OAuth (Grok) model is the same case for the same
-    // reason: CLIProxyAPI routes it to the linked xai credential internally, so a
-    // prefix could only misroute it (spec 2026-08-05 §B.3).
-    const routesToAccount =
-      Boolean(ctx.accountId) &&
-      ctx.accountId !== SYSTEM_ACCOUNT_ID &&
-      !resolveRouterModel(state?.routerProviders ?? [], ctx.model) &&
-      !resolveXaiModel(ctx.model);
-    // The acc<hex>/ prefix exists to pin ONE of several same-provider credentials;
-    // with a single seeded account it adds nothing but leaks into every visible
-    // model string inside the session (banner, /model). Emit bare when the pick
-    // is the sole seeded account of its provider — the proxy routes it to the
-    // only credential anyway.
-    const prefixed = routesToAccount && needsAccountPrefix(state, ctx.accountId as string);
-    const effectiveModel = prefixed ? `${accountPrefix(ctx.accountId)}/${ctx.model}` : ctx.model;
-    env.ANTHROPIC_MODEL = effectiveModel;
-    launchedModel = effectiveModel;
-    // A PREFIXED claude id is claude-family-classified just enough that Claude
-    // Code refuses CLAUDE_CODE_MAX_CONTEXT_TOKENS, yet its window detection
-    // still falls back to 200k — silently capping a 1M model (observed live on
-    // fable-5). The [1m] suffix is the documented per-model lever: Claude Code
-    // budgets the 1M window and strips the suffix before the request, so the
-    // proxy still sees the routable prefixed id (verified end-to-end). Skipped
-    // when a modelOverride declares the model 200k-class.
-    if (prefixed && ctx.model.startsWith("claude")) {
-      const overrideWindow = state?.modelOverrides?.[ctx.model]?.contextWindow;
-      if (overrideWindow === undefined || overrideWindow > 200_000) {
-        env.ANTHROPIC_MODEL = `${effectiveModel}[1m]`;
-      }
-    }
-    // Deliberately no CLAUDE_CODE_SUBAGENT_MODEL: subagents inherit the current
-    // main model, so an in-session /model switch applies to them too.
-    if (routesToAccount) accountId = ctx.accountId;
-  }
-  // Per-launch compact env (spec 2026-07-25-compact-parity-design.md §3.2):
-  // proactive auto-compaction is gated off behind a third-party base URL
-  // (claude-code #65585), so AUTO_COMPACT_WINDOW is mandatory arming for every
-  // launcher. Resolved from the EFFECTIVE model — a prefixed claude id is not
-  // recognized by Claude Code (200k fallback) and needs an explicit window,
-  // where the bare form would be natively recognized. A modelless claudemix
-  // launch is the Claude main loop; a modelless claudex launch runs the
-  // configured default.
-  const compactModel = launchedModel ?? (entryId === "claudemix" ? "claude" : state?.defaultModel);
-  if (compactModel) {
-    const compact = compactEnvForModel(compactModel, state?.modelOverrides, state?.routerProviders);
-    if (compact) {
-      if (compact.maxContextTokens !== undefined) {
-        env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(compact.maxContextTokens);
-      }
-      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(compact.autoCompactWindow);
-      if (compact.autoCompactPct !== undefined) {
-        env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(compact.autoCompactPct);
-      }
-    }
-  }
-  const result: LaunchEnv = { env };
-  if (accountId !== undefined) result.accountId = accountId;
-  return result;
-}
-
-/**
- * Compose the full launch env for one agent session from its three contributors.
+ * Compose the full launch env for one agent session from its contributors.
  * This is the whole body of the session manager's `resolveExtraEnv` seam, lifted
  * out as a pure function (the managed-account contribution is passed in already
- * resolved) so the composition — which contributor wins a key collision, and
- * which launchers get the Claude timeout env — is exercised by tests rather than
- * only by a live launch.
- *
- * Ordering contract: `cliproxyContributor` stays in the outermost `b` position
- * so it keeps winning every key collision per its documented contract, while
- * `accountEnv` stays in the outermost `a` position so the managed account keeps
- * supplying the effective `accountId`. The three timeout keys collide with
- * nothing.
+ * resolved) so the composition — which launchers get the Claude timeout env, and
+ * that the managed account keeps supplying the effective `accountId` — is
+ * exercised by tests rather than only by a live launch. The three timeout keys
+ * collide with nothing.
  */
 export function buildAgentLaunchEnv(
   entryId: string,
-  ctx: { accountId?: string; model?: string },
   claudeTimeoutMinutes: number,
-  accountEnv: LaunchEnv | null,
-  daemonDir: string
+  accountEnv: LaunchEnv | null
 ): LaunchEnv | null {
-  return composeExtraEnv(
-    composeExtraEnv(accountEnv, claudeTimeoutEnv(entryId, claudeTimeoutMinutes)),
-    cliproxyContributor(entryId, ctx, daemonDir)
-  );
+  return composeExtraEnv(accountEnv, claudeTimeoutEnv(entryId, claudeTimeoutMinutes));
 }
 
-/**
- * The seeded-account gate, shared by the terminal and agent-chat create paths.
- *
- * A proxy launch pinning a managed account requires that account to be SEEDED:
- * the `acc<hex>/` routing prefix resolves against the proxy's auth files, so an
- * unseeded pin can only 502 at runtime ("unknown provider for model acc…").
- * Router-provider and xAI OAuth models carry no account and are exempt —
- * decided by the persisted provider index / the curated xai list, the same
- * sources of truth the launch contributor uses.
- *
- * Returns the refusal body, or null when the launch may proceed.
- */
-export function seededAccountRefusal(
-  req: { refId: string; accountId?: string },
-  effectiveModel: string | undefined,
-  daemonDir: string
-): { code: string; message: string } | null {
-  const pinsManagedAccount =
-    (req.refId === "claudex" || req.refId === "claudemix") &&
-    Boolean(req.accountId) &&
-    req.accountId !== SYSTEM_ACCOUNT_ID;
-  if (!pinsManagedAccount) return null;
-  const launchState = readCliProxyState(daemonDir);
-  const accountlessModel = Boolean(
-    effectiveModel &&
-      (resolveRouterModel(launchState?.routerProviders ?? [], effectiveModel) ||
-        resolveXaiModel(effectiveModel))
-  );
-  if (accountlessModel) return null;
-  const seeded = launchState?.seededAccounts.some((a) => a.accountId === req.accountId) ?? false;
-  if (seeded) return null;
-  return {
-    code: "SESSION_UNAVAILABLE",
-    message:
-      "This account is not seeded into the model proxy. Seed it in Settings → Model proxy, or pick a seeded account."
-  };
-}
-
-/**
- * Gate the optional per-launch `model` on a create-session request. It is valid
- * ONLY for claudex/claudemix — there it is resolved/validated by the injected
- * seam (request pick wins over the configured default) and the CONCRETE effective
- * model is returned; for every other launcher a model is a client error.
- */
-export async function resolveLaunchModel(
-  refId: string,
-  model: string | undefined,
-  validateModel: ValidateModel
-): Promise<
-  | { ok: true; effectiveModel: string | undefined; catalog?: string[] }
-  | { ok: false; body: Record<string, unknown> }
-> {
-  if (refId === "claudex" || refId === "claudemix") {
-    const result = await validateModel(refId, model);
-    if (!result.ok) return { ok: false, body: { code: "SESSION_UNAVAILABLE", message: result.error } };
-    return { ok: true, effectiveModel: result.effectiveModel, catalog: result.catalog };
-  }
-  if (model !== undefined) {
-    return { ok: false, body: { error: "model is only valid for claudex/claudemix", entryId: refId } };
-  }
-  return { ok: true, effectiveModel: undefined };
-}
-
-/** Bounded HTTP probe of the local proxy's `/v1/models` — the manager's live
- *  reachability + key-acceptance + catalog signal. Connection refused (nothing
- *  on the port) resolves `reachable:false`; a non-200 means the port answered but
- *  our key was rejected (`reachable:true, ok:false`). */
-async function probeCliProxy(
-  port: number,
-  apiKey: string
-): Promise<{ ok: boolean; reachable?: boolean; models?: string[] }> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(2000)
-    });
-    if (res.status !== 200) return { ok: false, reachable: true };
-    const body = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
-    const models = Array.isArray(body?.data)
-      ? body.data.map((m) => m.id).filter((id): id is string => typeof id === "string")
-      : [];
-    return { ok: true, reachable: true, models };
-  } catch {
-    return { ok: false, reachable: false };
-  }
-}
-
-/** Verify a router provider's key: OpenRouter has a precise key-info endpoint,
- *  every other OpenAI-compatible gateway is probed with an authed GET /models.
- *  The endpoint choice comes from `routerKeyCheckUrl`, which only uses
- *  openrouter.ai when the provider's baseUrl really points there — `preset` is
- *  provenance and survives a baseUrl edit, so trusting it alone would ship a
- *  third-party gateway's key to openrouter.ai. Only an explicit 401/403 counts
- *  as rejection; anything else (5xx, network, timeout) is inconclusive so a
- *  flaky network can't block storing a good key. */
-async function verifyRouterKey(
-  provider: RouterProvider,
-  key: string
-): Promise<"ok" | "rejected" | "unknown"> {
-  const url = routerKeyCheckUrl(provider);
-  try {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(5000)
-    });
-    if (res.status === 200) return "ok";
-    if (res.status === 401 || res.status === 403) return "rejected";
-    return "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-/** Fetch a router provider's OpenAI-style `/models` catalog with its stored key —
- *  the "browse what this router offers" surface. Only model ids come back; the
- *  key never leaves the daemon. */
-async function fetchRouterModels(
-  provider: RouterProvider,
-  key: string
-): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
-  try {
-    const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/models`, {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (res.status !== 200) return { ok: false, error: `upstream responded ${res.status}` };
-    const body = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
-    const models = Array.isArray(body?.data)
-      ? body.data.map((m) => m.id).filter((id): id is string => typeof id === "string")
-      : [];
-    return { ok: true, models };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/** The subset of {@link CliProxyManager} the routes drive — structural so route
- *  tests can inject a fake without standing up the whole manager. */
-interface CliProxyRouteManager {
-  status(): CliProxyStatus;
-  enable(): Promise<void>;
-  disable(force: boolean): Promise<{ ok: boolean; affectedSessions?: number }>;
-  setConfig(
-    cfg: {
-      defaultModel?: string;
-      backgroundModel?: string;
-      claudeDefaultModel?: string;
-      modelOverrides?: CliProxyModelOverrides;
-    },
-    force: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number }>;
-  upsertRouterProvider(
-    input: {
-      id: string;
-      label: string;
-      baseUrl: string;
-      preset?: "openrouter" | "tokenrouter" | null;
-      models: RouterModel[];
-    },
-    force: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
-  deleteRouterProvider(
-    id: string,
-    force: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
-  setRouterKey(
-    id: string,
-    key: string,
-    force: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
-  clearRouterKey(
-    id: string,
-    force: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
-  fetchRouterCatalog(
-    id: string
-  ): Promise<{ ok: true; models: string[] } | { ok: false; code: "unknown" | "no-key" | "upstream"; error: string }>;
-  linkXai(): Promise<
-    { ok: true; link: CliProxyXaiLink } | { ok: false; code: "conflict" | "upstream"; error: string; status?: number }
-  >;
-  cancelOrUnlinkXai(opts: { force?: boolean }): Promise<{ ok: boolean; affectedSessions?: number; error?: string }>;
-  seedProvider(
-    req: { provider: "codex" | "claude" | "grok"; accountId: string; label?: string },
-    read: (provider: "codex" | "claude" | "grok", accountId: string) => Promise<unknown>
-  ): Promise<CliProxyProviderStatus>;
-  unseedProvider(req: { provider: "codex" | "claude" | "grok"; accountId: string }): Promise<CliProxyProviderStatus>;
-}
-
-/** The subset of {@link AgentAccountsService} the seed route drives — structural
- *  so route tests can inject a stand-in without the whole service. */
-interface CliProxyRouteAccounts {
-  homePath(agent: string, id: string): string;
-  markProxyOwned(id: string, owned: boolean): Promise<void>;
-  /** Human-facing label of a managed account (Claude credentials carry no email,
-   *  so without this the seeded entry displays the raw account UUID). */
-  accountLabel?(id: string): string | undefined;
-}
-
-/** On-disk credential filename per managed agent (the seed route's read source). */
+/** On-disk credential filename per managed agent. */
 const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
-
-/** Account ids are server-minted UUIDs; this charset rejects any path separator
- *  or dot before the id reaches homePath() / accountPrefix() (traversal guard). */
-const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/;
-
-/**
- * Register the `/api/cliproxy` surface (spec §3). Read routes (status, models)
- * are open on both transports; mutating routes (enable/disable/config) are
- * HTTP-transport-only — the socket-served instance registers the same paths but
- * refuses with 403 (the socket is unauthenticated and every agent session holds
- * its path). The OpenRouter-key flow delegates its persist → re-project → restart
- * cycle to the manager so disk and in-memory state stay in lockstep.
- */
-export function registerCliProxyRoutes(
-  app: FastifyInstance,
-  opts: {
-    manager: CliProxyRouteManager;
-    mode: "local" | "remote";
-    daemonDir: string;
-    agentAccounts: CliProxyRouteAccounts;
-  }
-): void {
-  const { manager, mode, daemonDir, agentAccounts } = opts;
-  // Returns true (and sends the 403) when a mutation is attempted over the
-  // unauthenticated unix socket.
-  const refusedOnSocket = (reply: FastifyReply): boolean => {
-    if (mode === "local") {
-      reply.code(403).send({ error: "cliproxy mutations require the authenticated HTTP transport" });
-      return true;
-    }
-    return false;
-  };
-
-  app.get("/api/cliproxy", async (): Promise<CliProxyStatus> => manager.status());
-
-  app.get("/api/cliproxy/models", async () => {
-    // Last-known catalog + asOf from persisted state (opportunistic refresh is a
-    // Phase-2 concern — it needs the proxy secret). A missing/partial file
-    // degrades to an empty catalog, never a crash.
-    try {
-      const state = parseCliProxyState(JSON.parse(await readFile(cliproxyStateFile(daemonDir), "utf8")));
-      return state.modelCatalog ?? { models: [], asOf: null };
-    } catch {
-      return { models: [], asOf: null };
-    }
-  });
-
-  app.post("/api/cliproxy/enable", async (_request, reply) => {
-    if (refusedOnSocket(reply)) return;
-    await manager.enable();
-    return manager.status();
-  });
-
-  app.post("/api/cliproxy/disable", async (request, reply) => {
-    if (refusedOnSocket(reply)) return;
-    const body = (request.body ?? {}) as { force?: boolean };
-    const res = await manager.disable(Boolean(body.force));
-    if (!res.ok) {
-      reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-      return;
-    }
-    return res;
-  });
-
-  app.put("/api/cliproxy/config", async (request, reply): Promise<CliProxyStatus | undefined> => {
-    if (refusedOnSocket(reply)) return;
-    const body = (request.body ?? {}) as {
-      defaultModel?: string;
-      backgroundModel?: string;
-      claudeDefaultModel?: string;
-      modelOverrides?: unknown;
-      force?: boolean;
-    };
-    for (const m of [body.defaultModel, body.backgroundModel, body.claudeDefaultModel]) {
-      if (m !== undefined && !MODEL_NAME_RE.test(m)) {
-        reply.code(400).send({ error: `invalid model name: ${JSON.stringify(m)}` });
-        return;
-      }
-    }
-    const cfg: {
-      defaultModel?: string;
-      backgroundModel?: string;
-      claudeDefaultModel?: string;
-      modelOverrides?: CliProxyModelOverrides;
-    } = {
-      defaultModel: body.defaultModel,
-      backgroundModel: body.backgroundModel,
-      claudeDefaultModel: body.claudeDefaultModel
-    };
-    if (body.modelOverrides !== undefined) {
-      const parsed = cliProxyModelOverridesSchema.safeParse(body.modelOverrides);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid modelOverrides" });
-        return;
-      }
-      cfg.modelOverrides = parsed.data;
-    }
-    // A model change re-projects config.yaml, which the proxy reads only at
-    // startup — so it is restart-gated like disable/openrouter: refused (409)
-    // while dependent sessions are live unless forced. On success the route
-    // resolves the full CliProxyStatus the wire contract (setCliProxyConfig)
-    // promises, not the internal {ok, affectedSessions} gate result.
-    const res = await manager.setConfig(cfg, Boolean(body.force));
-    if (!res.ok) {
-      reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-      return;
-    }
-    return manager.status();
-  });
-
-  // Seed a managed account's credential into the proxy by conversion (spec §4 —
-  // the sole credential path, no device-auth flow). The daemon reads that
-  // account's on-disk credential, hands it to the manager (which converts + writes
-  // the prefixed auth file), then marks the account proxy-owned so Orquester's
-  // refresher yields to the proxy (single-refresher owner rule). No secret
-  // material crosses the request.
-  app.post("/api/cliproxy/accounts/seed", async (request, reply) => {
-    if (refusedOnSocket(reply)) return;
-    const body = (request.body ?? {}) as Partial<CliProxySeedRequest>;
-    if (body.provider !== "codex" && body.provider !== "claude" && body.provider !== "grok") {
-      return reply.code(400).send({ error: "provider must be 'codex', 'claude' or 'grok'" });
-    }
-    if (typeof body.accountId !== "string" || !body.accountId || !ACCOUNT_ID_RE.test(body.accountId)) {
-      return reply.code(400).send({ error: "accountId is required" });
-    }
-    const provider = body.provider;
-    const accountId = body.accountId;
-    // Ownership only makes sense when the proxy is actually running: seeding flips
-    // proxyOwned=true, which yields Orquester's refresher to the proxy (single-
-    // refresher rule). If the proxy is down, that yield refreshes nobody — a
-    // zero-refresher hole. Refuse the seed unless the proxy is launchable (mirrors
-    // applyRegistryCoupling's `healthy || degraded` predicate in cliproxy.ts), so
-    // we never write an auth file or claim ownership when nothing can refresh it.
-    const proxyState = manager.status().state;
-    if (proxyState !== "healthy" && proxyState !== "degraded") {
-      return reply.code(409).send({ error: "cliproxy must be running to seed an account", state: proxyState });
-    }
-    const read = async (p: "codex" | "claude" | "grok", id: string): Promise<unknown> => {
-      const file = join(agentAccounts.homePath(p, id), MANAGED_CRED_FILENAME[p]);
-      try {
-        return JSON.parse(await readFile(file, "utf8"));
-      } catch (err) {
-        // A charset-valid accountId with no on-disk credential yields ENOENT here.
-        // Tag it precisely at the read path (not a broad catch around seedProvider)
-        // so an unrelated ENOENT deeper in seedProvider can't be misreported as 404.
-        if ((err as { code?: string }).code === "ENOENT") {
-          const missing = new Error("account credential not found") as Error & { code: string };
-          missing.code = "ORQ_CRED_MISSING";
-          throw missing;
-        }
-        throw err;
-      }
-    };
-    let status: CliProxyProviderStatus;
-    try {
-      const accountLabel = agentAccounts.accountLabel?.(accountId);
-      status = await manager.seedProvider(
-        { provider, accountId, ...(accountLabel !== undefined ? { label: accountLabel } : {}) },
-        read
-      );
-    } catch (err) {
-      if ((err as { code?: string }).code === "ORQ_CRED_MISSING") {
-        return reply.code(404).send({ error: "account credential not found", accountId });
-      }
-      throw err;
-    }
-    // Ownership is claimed only when the proxy is running (gated above) AND the
-    // credential actually landed — a stale/expired token is refused (not seeded),
-    // so the proxy owns nothing to refresh.
-    if (status.state === "ok") await agentAccounts.markProxyOwned(accountId, true);
-    return status;
-  });
-
-  // Un-seed: remove a seeded account's credential from the proxy and restore
-  // Orquester's single-refresher ownership (spec §4). The manager drops the auth
-  // file + seeded-account state; the route ALWAYS re-marks the account non-proxy-
-  // owned (markProxyOwned is idempotent) so ownership is restored even on a
-  // map/accounts-service mismatch. Intentionally UNgated on proxy health (unlike
-  // seed) — releasing ownership must always succeed so an account is never stranded
-  // proxy-owned after the proxy stops. No secret material crosses the response.
-  app.post("/api/cliproxy/accounts/unseed", async (request, reply) => {
-    if (refusedOnSocket(reply)) return;
-    const body = (request.body ?? {}) as Partial<CliProxyUnseedRequest>;
-    if (body.provider !== "codex" && body.provider !== "claude" && body.provider !== "grok") {
-      return reply.code(400).send({ error: "provider must be 'codex', 'claude' or 'grok'" });
-    }
-    if (typeof body.accountId !== "string" || !body.accountId || !ACCOUNT_ID_RE.test(body.accountId)) {
-      return reply.code(400).send({ error: "accountId is required" });
-    }
-    const provider = body.provider;
-    const accountId = body.accountId;
-    const status = await manager.unseedProvider({ provider, accountId });
-    await agentAccounts.markProxyOwned(accountId, false);
-    return status;
-  });
-
-  // Router providers (spec 2026-08-04 §2) — user-defined OpenAI-compatible
-  // gateways (OpenRouter, TokenRouter, anything else). Provider records and their
-  // API keys both land in the config.yaml projection, which the proxy reads only
-  // at startup, so every mutation here is restart-gated exactly like config/
-  // disable: refused (409) while dependent sessions are live unless forced. The
-  // whole persist → re-project → restart cycle is owned by the manager so disk and
-  // in-memory state stay in lockstep. Keys travel in but never back out.
-
-  // Create or replace a provider. The id is path-borne (it IS the record's
-  // identity); its charset is checked here so a bad id can't reach the store.
-  app.put<{ Params: { id: string } }>("/api/cliproxy/providers/:id", async (request, reply) => {
-    if (refusedOnSocket(reply)) return;
-    const id = request.params.id;
-    if (!ROUTER_PROVIDER_ID_RE.test(id)) {
-      return reply.code(400).send({ error: "invalid provider id" });
-    }
-    const body = (request.body ?? {}) as Partial<CliProxyRouterProviderRequest> & { force?: boolean };
-    if (typeof body.label !== "string" || typeof body.baseUrl !== "string" || !Array.isArray(body.models)) {
-      return reply.code(400).send({ error: "label, baseUrl and models are required" });
-    }
-    // Per-field validation (model charset, url scheme) belongs to the manager's
-    // schema parse — the route only guarantees the shape it forwards.
-    const res = await manager.upsertRouterProvider(
-      {
-        id,
-        label: body.label,
-        baseUrl: body.baseUrl,
-        preset: body.preset ?? null,
-        models: body.models as RouterModel[]
-      },
-      Boolean(body.force)
-    );
-    if (!res.ok) {
-      // A schema/invariant complaint is a caller error (400 with the reason); a
-      // live-session gate stays a 409 refusal the UI resolves with force.
-      if (res.error) return reply.code(400).send({ error: res.error });
-      return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-    }
-    return manager.status();
-  });
-
-  app.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
-    "/api/cliproxy/providers/:id",
-    async (request, reply) => {
-      if (refusedOnSocket(reply)) return;
-      const res = await manager.deleteRouterProvider(request.params.id, request.query.force === "true");
-      if (!res.ok) {
-        // The only error a delete can report is an unknown id → 404.
-        if (res.error) return reply.code(404).send({ error: res.error });
-        return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-      }
-      return manager.status();
-    }
-  );
-
-  app.post<{ Params: { id: string } }>("/api/cliproxy/providers/:id/key", async (request, reply) => {
-    if (refusedOnSocket(reply)) return;
-    const body = (request.body ?? {}) as { key?: string; force?: boolean };
-    const key = typeof body.key === "string" ? body.key.trim() : "";
-    if (!key) return reply.code(400).send({ error: "key is required" });
-    const res = await manager.setRouterKey(request.params.id, key, Boolean(body.force));
-    if (!res.ok) {
-      // Unknown id or a provider-rejected key — both caller errors.
-      if (res.error) return reply.code(400).send({ error: res.error });
-      return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-    }
-    return { ok: true, affectedSessions: res.affectedSessions ?? 0 };
-  });
-
-  app.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
-    "/api/cliproxy/providers/:id/key",
-    async (request, reply) => {
-      if (refusedOnSocket(reply)) return;
-      const res = await manager.clearRouterKey(request.params.id, request.query.force === "true");
-      if (!res.ok) {
-        if (res.error) return reply.code(404).send({ error: res.error });
-        return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-      }
-      return { ok: true, affectedSessions: res.affectedSessions ?? 0 };
-    }
-  );
-
-  // Catalog browse is read-only in daemon state, but unlike the other GETs it
-  // makes an OUTBOUND request carrying the stored key — so it follows the
-  // mutation transport rule (403 on the unauthenticated unix socket) rather
-  // than the read rule. Keys can only be set over HTTP anyway, so a
-  // socket-only client never has a working provider to browse.
-  app.get<{ Params: { id: string } }>("/api/cliproxy/providers/:id/catalog", async (request, reply) => {
-    if (refusedOnSocket(reply)) return;
-    const res = await manager.fetchRouterCatalog(request.params.id);
-    if (!res.ok) {
-      if (res.code === "unknown") return reply.code(404).send({ error: res.error });
-      // "no key yet" is a precondition failure, not an upstream fault.
-      if (res.code === "no-key") return reply.code(409).send({ error: res.error });
-      return reply.code(502).send({ error: res.error });
-    }
-    return { models: res.models };
-  });
-
-  // xAI OAuth (Grok) account (spec 2026-08-05 §B.2). The device-code flow is
-  // driven entirely through the proxy's loopback management API — the proxy owns
-  // the tokens and writes/refreshes `auth/xai-*.json` itself — so neither link nor
-  // unlink touches config.yaml or restarts the proxy (it hot-discovers the auth
-  // dir). Both are mutations, hence HTTP-transport-only like the rest of the
-  // surface. No token material crosses this boundary: link returns only the
-  // user-facing verification prompt.
-  app.post("/api/cliproxy/xai/link", async (_request, reply): Promise<CliProxyXaiLink | undefined> => {
-    if (refusedOnSocket(reply)) return;
-    const res = await manager.linkXai();
-    if (!res.ok) {
-      // "already linking/linked" and "proxy not running" are caller-resolvable
-      // preconditions (409); a management-API fault is upstream (502, carrying
-      // its status when there was one) — same contract as the catalog route.
-      if (res.code === "conflict") return reply.code(409).send({ error: res.error });
-      return reply.code(502).send({ error: res.error, ...(res.status !== undefined ? { status: res.status } : {}) });
-    }
-    return res.link;
-  });
-
-  // Cancel an in-flight device-code session, or unlink the account. Unlink pulls
-  // the credential out from under live Grok sessions, so it rides the same 409
-  // force-gate as every other cliproxy mutation; cancelling a pending link never
-  // gates (nothing is running on it yet).
-  app.delete<{ Querystring: { force?: string } }>(
-    "/api/cliproxy/xai/link",
-    async (request, reply): Promise<CliProxyStatus | undefined> => {
-      if (refusedOnSocket(reply)) return;
-      const res = await manager.cancelOrUnlinkXai({ force: request.query.force === "true" });
-      if (!res.ok) {
-        if (res.error) return reply.code(400).send({ error: res.error });
-        return reply.code(409).send({ ok: false, affectedSessions: res.affectedSessions });
-      }
-      return manager.status();
-    }
-  );
-}
 
 interface Services {
   registry: RegistryService;
   sessions: ISessionManager;
-  /** Resolve a per-launch model for claudex/claudemix (see {@link ValidateModel}). */
-  validateModel: ValidateModel;
-  /** The managed CLIProxyAPI lifecycle backing the claudex/claudemix launchers. */
-  cliproxy: CliProxyManager;
+  /** The Grok account's device-code link (Settings → Accounts). */
+  grokDeviceLink: GrokDeviceLinkService;
   accounts: AccountsService;
   git: GitService;
   /** Refcounted per-project git status poller behind `project.git.changed`. */
@@ -1962,7 +1192,7 @@ export function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, agentAccounts } = services;
+  const { registry, sessions, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -3718,18 +2948,12 @@ export function createServer(
     fsRoot: resolved.fsRoot,
     tmuxSocket: resolved.tmuxSocket,
     listSessionIds: () => new Set(sessions.list().map((session) => session.id)),
-    // On a tmux-less host the model proxy is a direct child of the daemon, so
-    // it sits in the very tree this route walks. It is infrastructure, not a
-    // user process: refuse it the way the tmux server is refused.
+    // The agent host is infrastructure, not a user process: refuse it the way
+    // the tmux server is refused (chat spec §3.1 "Kill guard"). Provider
+    // CHILDREN stay legal targets — see `extraRootPids` below, which is what
+    // actually makes them reachable on a tmux host.
     protectedPids: () => {
       const pids: Array<{ pid: number; label: string }> = [];
-      const pid = services.cliproxy?.directChildPid();
-      if (typeof pid === "number") {
-        pids.push({ pid, label: "the model proxy that backs claudex/claudemix sessions" });
-      }
-      // The agent host is infrastructure too (chat spec §3.1 "Kill guard").
-      // Provider CHILDREN stay legal targets — see `extraRootPids` below, which
-      // is what actually makes them reachable on a tmux host.
       for (const hostPid of services.agentChat?.protectedPids() ?? []) {
         pids.push({ pid: hostPid, label: "the agent host that runs your chat threads" });
       }
@@ -3780,7 +3004,7 @@ export function createServer(
         // launched with, which is the workspaces path as listed to the client.
         await assertInsideFsRoot(resolved.fsRoot, path);
         // daemonDir lets the scan reach the MANAGED agent homes
-        // (agent-accounts/<family>/<id>/home, cliproxy/claude-home-*), not just
+        // (agent-accounts/<family>/<id>/home), not just
         // the daemon's own HOME — most sessions here run under one of those.
         return {
           conversations: await listAgentConversations(resolve(path), { daemonDir: resolved.daemonDir })
@@ -3874,14 +3098,6 @@ export function createServer(
   app.delete("/api/agent-accounts/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
-      // A seeded account leaves a live credential copy in the proxy's auth/ dir;
-      // deleting only the managed home would strand it there (refreshed by the
-      // proxy, invisible in Accounts). Un-seed first — idempotent when not seeded.
-      const record = agentAccounts.getRecord(id);
-      if (record) {
-        await services.cliproxy.unseedProvider({ provider: record.agent, accountId: id }).catch(() => undefined);
-        await agentAccounts.markProxyOwned(id, false);
-      }
       await agentAccounts.removeAccount(id);
       return { ok: true };
     } catch (error) {
@@ -3889,6 +3105,20 @@ export function createServer(
       throw error;
     }
   });
+
+  // The Grok account's device-code link. Start answers the prompt to show the
+  // user and polls auth.x.ai in the background; the state moves on the
+  // agent-accounts channel (`grok-link.changed`), and a granted link becomes a
+  // managed account (`agent-accounts.changed`).
+  app.get("/api/agent-accounts/grok/link", async (): Promise<GrokDeviceLinkStatus> => services.grokDeviceLink.status());
+
+  app.post("/api/agent-accounts/grok/link", async (_request, reply): Promise<GrokDeviceLink | undefined> => {
+    const res = await services.grokDeviceLink.start();
+    if (!res.ok) return reply.code(res.code === "conflict" ? 409 : 502).send({ error: res.error });
+    return res.link;
+  });
+
+  app.delete("/api/agent-accounts/grok/link", async (): Promise<GrokDeviceLinkStatus> => services.grokDeviceLink.cancel());
 
   app.put("/api/agent-accounts/defaults", async (request, reply) => {
     const body = (request.body ?? {}) as SetAgentAccountDefaultsRequest;
@@ -3921,19 +3151,6 @@ export function createServer(
     return registry.openTarget(body.targetId, body.path);
   });
 
-  // The managed CLIProxyAPI surface (status/models/enable/disable/config +
-  // reserved Phase-2 login flows). Mutations are refused over the unix socket.
-  registerCliProxyRoutes(app, {
-    manager: services.cliproxy,
-    mode: options.mode,
-    daemonDir: resolved.daemonDir,
-    agentAccounts: {
-      homePath: (agent, id) => services.agentAccounts.homePath(agent, id),
-      markProxyOwned: (id, owned) => services.agentAccounts.markProxyOwned(id, owned),
-      accountLabel: (id) => services.agentAccounts.list().accounts.find((a) => a.id === id)?.label
-    }
-  });
-
   // Agent chat — every §6.2 command and §6.3 read, proxied to the agent host
   // over its unix socket. Registered on BOTH transports, inheriting their auth
   // unchanged (chat spec §6): bearer on HTTP, none on the socket. Declared
@@ -3963,25 +3180,12 @@ export function createServer(
       }
       body.owner = owner.owner;
     }
-    // A chat tab takes the §6.1 path: the same account/model validation as a
-    // terminal, then the tab record, then the host thread. It shares nothing
-    // with the PTY branch below but that validation, which runs first.
+    // A chat tab takes the §6.1 path: the tab record, then the host thread. It
+    // shares nothing with the PTY branch below.
     if (body.kind === "agent-chat") {
-      const chatModel = await resolveLaunchModel(body.refId, body.model, validateModel);
-      if (!chatModel.ok) {
-        return reply.code(400).send(chatModel.body);
-      }
-      const seededRefusal = seededAccountRefusal(
-        body,
-        chatModel.effectiveModel,
-        resolved.daemonDir
-      );
-      if (seededRefusal) {
-        return reply.code(400).send(seededRefusal);
-      }
       try {
         const summary = await services.agentChat.createSession(
-          { ...body, model: chatModel.effectiveModel } as CreateAgentChatRequest,
+          body as CreateAgentChatRequest,
           sessions.list(body.projectPath ?? "").reduce((max, s) => Math.max(max, s.order), -1) + 1
         );
         await markRecentProject(summary.projectPath);
@@ -4012,14 +3216,6 @@ export function createServer(
         });
       }
     }
-    // Per-launch `model` is valid ONLY for the claudex/claudemix launchers; for
-    // every other refId it is a client error. For the two managed launchers the
-    // pick (or an omitted default) is resolved/validated by the injected seam,
-    // and the CONCRETE effective model — not the raw request field — is launched.
-    const resolvedModel = await resolveLaunchModel(body.refId, body.model, validateModel);
-    if (!resolvedModel.ok) {
-      return reply.code(400).send(resolvedModel.body);
-    }
     // "Resume this conversation" must never degrade into "start a fresh one":
     // if the id is unusable (rejected shape, or an agent with no resume flags)
     // the launch is refused so the client can say so, instead of silently
@@ -4033,15 +3229,9 @@ export function createServer(
         });
       }
     }
-    const effectiveModel = resolvedModel.effectiveModel;
-    const modelCatalog = resolvedModel.catalog;
-    const seededRefusal = seededAccountRefusal(body, effectiveModel, resolved.daemonDir);
-    if (seededRefusal) {
-      return reply.code(400).send(seededRefusal);
-    }
     let summary: SessionSummary;
     try {
-      summary = await sessions.create({ ...body, model: effectiveModel });
+      summary = await sessions.create(body);
     } catch (error) {
       const message = error instanceof SessionError ? error.message : "Failed to create session.";
       return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message });
@@ -4050,27 +3240,6 @@ export function createServer(
     // the daemon sees, so it feeds the shared recent-projects list itself
     // rather than trusting each client to report it.
     await markRecentProject(summary.projectPath);
-    // Launch-time model pre-flight (spec §8.4): warn — never block — when a model
-    // this managed session references is absent from the live catalog. The MAIN
-    // model was already hard-validated by resolveLaunchModel; this snapshots the
-    // other configured models (the Sol/background models the canonical claudemix
-    // workflow routes subagents to) best-effort. Workflow `agent({model})` strings
-    // are dynamic, so this is an advisory catalog snapshot, not a hard gate. Runs
-    // after the launch so a missing model can only warn, never refuse it.
-    if (body.refId === "claudex" || body.refId === "claudemix") {
-      const status = cliproxy.status();
-      const referenced = [
-        ...new Set(
-          [effectiveModel, status.defaultModel, status.backgroundModel].filter(
-            (m): m is string => Boolean(m)
-          )
-        )
-      ];
-      const preflight = await cliproxy.preflightModels(referenced, modelCatalog);
-      if (preflight.missing.length > 0) {
-        summary = { ...summary, missingModels: preflight.missing };
-      }
-    }
     return summary;
   });
 

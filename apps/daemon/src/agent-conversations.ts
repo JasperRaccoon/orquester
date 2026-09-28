@@ -23,7 +23,6 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { AgentConversationHome, AgentConversationSummary } from "@orquester/api";
-import { cliproxyDir } from "@orquester/config";
 
 /** Max chars of any title/preview we hand back. */
 const MAX_TITLE = 80;
@@ -119,15 +118,13 @@ function dedupe(rows: AgentConversationSummary[]): AgentConversationSummary[] {
  * One history home, plus who owns it. Every row a lister emits is stamped with
  * its root's attribution: the same conversation id means nothing outside the
  * home that holds the transcript, so a client offering "resume" has to relaunch
- * under that home (a managed account, a proxy launcher, or the daemon's own).
+ * under that home (a managed account or the daemon's own).
  */
 interface AgentHomeRoot {
   dir: string;
   home: AgentConversationHome;
   /** Managed agent-account id — "account" homes only. */
   accountId?: string;
-  /** Launcher entry id (claudex/claudemix) — "cliproxy" homes only. */
-  proxyRefId?: string;
 }
 
 interface AgentHomeRoots {
@@ -137,11 +134,10 @@ interface AgentHomeRoots {
 }
 
 /** The attribution fields of a root, spreadable into a summary. */
-function attribution(root: AgentHomeRoot): Pick<AgentConversationSummary, "home" | "accountId" | "proxyRefId"> {
+function attribution(root: AgentHomeRoot): Pick<AgentConversationSummary, "home" | "accountId"> {
   return {
     home: root.home,
-    ...(root.accountId ? { accountId: root.accountId } : {}),
-    ...(root.proxyRefId ? { proxyRefId: root.proxyRefId } : {})
+    ...(root.accountId ? { accountId: root.accountId } : {})
   };
 }
 
@@ -151,9 +147,7 @@ function attribution(root: AgentHomeRoot): Pick<AgentConversationSummary, "home"
  * Scanning only the daemon's own HOME would hide most of it on this fork: a
  * session launched under a MANAGED ACCOUNT runs with a relocated home
  * (`CLAUDE_CONFIG_DIR`/`CODEX_HOME`/`GROK_HOME` →
- * `<daemonDir>/agent-accounts/<family>/<id>/home`, see `agent-accounts.ts`),
- * and the claudex/claudemix launchers run against
- * `<daemonDir>/cliproxy/claude-home-<entryId>` (see `cliproxy-files.ts`) —
+ * `<daemonDir>/agent-accounts/<family>/<id>/home`, see `agent-accounts.ts`) —
  * the same set `agent-hooks.ts` installs hooks into. Best-effort throughout:
  * an unreadable dir simply contributes no roots.
  */
@@ -176,18 +170,6 @@ async function agentHomeRoots(daemonDir?: string): Promise<AgentHomeRoots> {
       }
     })
   );
-  const proxyDir = cliproxyDir(daemonDir);
-  const CLAUDE_HOME_PREFIX = "claude-home-";
-  for (const name of await subdirNames(proxyDir)) {
-    if (name.startsWith(CLAUDE_HOME_PREFIX)) {
-      roots.claude.push({
-        dir: join(proxyDir, name),
-        home: "cliproxy",
-        // `claude-home-<entryId>` (cliproxy-files.ts) — the launcher that owns it.
-        proxyRefId: name.slice(CLAUDE_HOME_PREFIX.length)
-      });
-    }
-  }
   for (const family of families) {
     const seen = new Set<string>();
     roots[family] = roots[family].filter((root) => {
